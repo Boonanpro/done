@@ -75,6 +75,36 @@ async def process_wish(request: WishRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class ReviseRequest(BaseModel):
+    """訂正リクエスト"""
+    revision: str  # 訂正内容（例: "17時じゃなくて16時にして"）
+
+
+@router.post("/task/{id}/revise", response_model=WishResponse)
+async def revise_task(id: str, request: ReviseRequest):
+    """
+    タスクの提案を訂正
+    
+    既存のタスクに対して訂正リクエストを送り、新しい提案を生成します。
+    例: "17時じゃなくて16時にして", "グリーン車にして", "予算は30万円で"
+    """
+    task_id = id
+    try:
+        agent = get_agent()
+        result = await agent.revise_task(task_id, request.revision)
+        return WishResponse(
+            task_id=result["task_id"],
+            message=result["message"],
+            proposed_actions=result["proposed_actions"],
+            proposal_detail=result.get("proposal_detail"),
+            requires_confirmation=result["requires_confirmation"],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/task/{id}/confirm")
 async def confirm_task(id: str):
     """タスクの実行を確認・承認"""

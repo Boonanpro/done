@@ -61,6 +61,44 @@ class TestWishAPI:
             assert "【アクション】" in data["proposal_detail"]
 
 
+class TestReviseAPI:
+    """訂正API"""
+    
+    def test_revise_task(self, client):
+        """POST /api/v1/task/{id}/revise - タスクの訂正"""
+        # 1. まず願望を送る
+        wish_response = client.post(
+            "/api/v1/wish",
+            json={"wish": "12月28日の夕方に新大阪発博多着の新幹線のチケット取って"}
+        )
+        assert wish_response.status_code == 200
+        task_id = wish_response.json()["task_id"]
+        
+        # 2. 訂正リクエストを送る
+        revise_response = client.post(
+            f"/api/v1/task/{task_id}/revise",
+            json={"revision": "17時じゃなくて16時にして"}
+        )
+        assert revise_response.status_code == 200
+        data = revise_response.json()
+        
+        # 3. 訂正後のレスポンスを確認
+        assert data["task_id"] == task_id
+        assert "proposal_detail" in data
+        assert data["requires_confirmation"] == True
+        # 訂正が反映されていることを確認（16時が含まれている）
+        if data["proposal_detail"]:
+            assert "16" in data["proposal_detail"] or "16時" in data["proposal_detail"]
+    
+    def test_revise_task_not_found(self, client):
+        """POST /api/v1/task/{id}/revise - 存在しないタスクの訂正"""
+        response = client.post(
+            "/api/v1/task/nonexistent-id/revise",
+            json={"revision": "変更してください"}
+        )
+        assert response.status_code == 404
+
+
 class TestTaskAPI:
     """タスク関連API"""
     

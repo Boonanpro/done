@@ -402,6 +402,88 @@ Use the available tools to execute."""
         task["status"] = TaskStatus.COMPLETED
         return {"status": "completed", "task_id": task_id}
     
+    async def revise_task(self, task_id: str, revision: str) -> dict[str, Any]:
+        """
+        Revise an existing task based on user feedback
+        
+        Args:
+            task_id: The ID of the task to revise
+            revision: The revision request (e.g., "17時じゃなくて16時にして")
+        
+        Returns:
+            Updated task with new proposal
+        """
+        task = AISecretaryAgent._tasks.get(task_id)
+        if not task:
+            raise ValueError(f"Task {task_id} not found")
+        
+        original_wish = task["original_wish"]
+        previous_proposal = task.get("execution_result", {}).get("full_proposal", "")
+        
+        # Build revision prompt with context
+        revision_prompt = f"""以下のユーザーの願望に対して、訂正リクエストを反映した新しい提案をしてください。
+
+## 元の願望
+{original_wish}
+
+## 前回の提案
+{previous_proposal}
+
+## ユーザーからの訂正リクエスト
+{revision}
+
+重要なルール:
+- 訂正リクエストを正確に反映する
+- 訂正されていない部分は前回の提案を維持する
+- 絶対に質問で返さない
+- 仮定した部分は【補足】で明記する
+
+以下のフォーマットで回答してください：
+
+【アクション】
+（何をするか具体的に）
+
+【詳細】
+（具体的な内容：送信文面、予約詳細、購入商品など）
+
+【補足】
+（仮定した部分、訂正可能なポイント）"""
+        
+        messages = [
+            SystemMessage(content=self.SYSTEM_PROMPT),
+            HumanMessage(content=revision_prompt),
+        ]
+        response = await self.llm.ainvoke(messages)
+        
+        content = response.content
+        
+        # Extract action from response
+        actions = []
+        if "【アクション】" in content:
+            action_start = content.find("【アクション】") + len("【アクション】")
+            action_end = content.find("【", action_start)
+            if action_end == -1:
+                action_end = len(content)
+            action_text = content[action_start:action_end].strip()
+            actions = [action_text] if action_text else [content]
+        else:
+            actions = [content]
+        
+        # Update task with new proposal
+        task["proposed_actions"] = actions
+        task["execution_result"] = {"full_proposal": content}
+        task["status"] = TaskStatus.PROPOSED
+        
+        logger.info(f"Task revised: {task_id}")
+        
+        return {
+            "task_id": task_id,
+            "message": "Proposal revised based on your feedback. Please confirm to execute, or request further revisions.",
+            "proposed_actions": actions,
+            "proposal_detail": content,
+            "requires_confirmation": True,
+        }
+    
     async def get_task(self, task_id: str) -> Optional[TaskResponse]:
         """Get task"""
         task = AISecretaryAgent._tasks.get(task_id)
