@@ -5,6 +5,7 @@ from typing import TypedDict, Annotated, Sequence, Optional, Any
 from datetime import datetime
 import uuid
 import operator
+import logging
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
@@ -14,6 +15,8 @@ from langgraph.prebuilt import ToolNode
 from app.config import settings
 from app.models.schemas import TaskStatus, TaskType, TaskResponse
 from app.tools import get_tools, get_available_tool_names
+
+logger = logging.getLogger(__name__)
 
 
 class AgentState(TypedDict):
@@ -31,6 +34,9 @@ class AgentState(TypedDict):
 
 class AISecretaryAgent:
     """AI Secretary Agent"""
+    
+    # クラス変数としてタスクストレージを共有（すべてのインスタンス間で共有）
+    _tasks: dict[str, dict] = {}
     
     SYSTEM_PROMPT = """You are an excellent AI secretary. You understand user requests 
 and propose specific actions to help execute them.
@@ -84,9 +90,6 @@ Always respond in English."""
             self.llm_with_tools = self.llm
         
         self.graph = self._build_graph()
-        
-        # Task storage (use Supabase in production)
-        self._tasks: dict[str, dict] = {}
     
     def _build_graph(self) -> StateGraph:
         """Build LangGraph workflow"""
@@ -276,17 +279,23 @@ Use the available tools to execute."""
         # Execute graph
         final_state = await self.graph.ainvoke(initial_state)
         
-        # Save task
-        self._tasks[task_id] = {
-            "id": task_id,
-            "user_id": user_id,
-            "type": final_state["task_type"],
-            "status": final_state["status"],
-            "original_wish": wish,
-            "proposed_actions": final_state["proposed_actions"],
-            "execution_result": final_state["execution_result"],
-            "created_at": datetime.utcnow(),
-        }
+        # Save task (クラス変数に保存)
+        try:
+            AISecretaryAgent._tasks[task_id] = {
+                "id": task_id,
+                "user_id": user_id,
+                "type": final_state["task_type"],
+                "status": final_state["status"],
+                "original_wish": wish,
+                "proposed_actions": final_state["proposed_actions"],
+                "execution_result": final_state["execution_result"],
+                "created_at": datetime.utcnow(),
+            }
+            # デバッグ: タスクが保存されたことを確認
+            logger.info(f"Task saved: {task_id}, Total tasks: {len(AISecretaryAgent._tasks)}")
+        except Exception as e:
+            logger.error(f"Failed to save task {task_id}: {e}", exc_info=True)
+            raise
         
         # Generate response message
         if final_state["requires_confirmation"]:
@@ -303,7 +312,7 @@ Use the available tools to execute."""
     
     async def execute_task(self, task_id: str) -> dict[str, Any]:
         """Execute confirmed task"""
-        task = self._tasks.get(task_id)
+        task = AISecretaryAgent._tasks.get(task_id)
         if not task:
             raise ValueError(f"Task {task_id} not found")
         
@@ -317,7 +326,7 @@ Use the available tools to execute."""
     
     async def get_task(self, task_id: str) -> Optional[TaskResponse]:
         """Get task"""
-        task = self._tasks.get(task_id)
+        task = AISecretaryAgent._tasks.get(task_id)
         if not task:
             return None
         
@@ -338,7 +347,7 @@ Use the available tools to execute."""
         limit: int = 10,
     ) -> list[TaskResponse]:
         """Get task list"""
-        tasks = list(self._tasks.values())
+        tasks = list(AISecretaryAgent._tasks.values())
         
         if user_id:
             tasks = [t for t in tasks if t["user_id"] == user_id]

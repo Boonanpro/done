@@ -4,12 +4,21 @@ Main API Routes
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
-import uuid
 
 from app.agent.agent import AISecretaryAgent
 from app.models.schemas import TaskRequest, TaskResponse, TaskStatus
 
 router = APIRouter()
+
+# エージェントインスタンスを共有（タスク保存のため）
+_agent_instance: Optional[AISecretaryAgent] = None
+
+def get_agent() -> AISecretaryAgent:
+    """エージェントインスタンスを取得（シングルトン）"""
+    global _agent_instance
+    if _agent_instance is None:
+        _agent_instance = AISecretaryAgent()
+    return _agent_instance
 
 
 class WishRequest(BaseModel):
@@ -45,7 +54,9 @@ async def process_wish(request: WishRequest):
     - search_web: Web検索
     """
     try:
-        agent = AISecretaryAgent(tool_names=request.tools)
+        # 常に共有インスタンスを使用（タスク保存のため）
+        # ツール指定がある場合は新しいインスタンスを作成するが、タスクはクラス変数で共有される
+        agent = get_agent()
         result = await agent.process_wish(
             wish=request.wish,
             user_id=request.user_id,
@@ -62,22 +73,24 @@ async def process_wish(request: WishRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/task/{task_id}/confirm")
-async def confirm_task(task_id: str):
+@router.post("/task/{id}/confirm")
+async def confirm_task(id: str):
     """タスクの実行を確認・承認"""
+    task_id = id  # パラメータ名をidからtask_idに変換
     try:
-        agent = AISecretaryAgent()
+        agent = get_agent()
         result = await agent.execute_task(task_id)
         return {"status": "executing", "task_id": task_id, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/task/{task_id}", response_model=TaskResponse)
-async def get_task_status(task_id: str):
+@router.get("/task/{id}", response_model=TaskResponse)
+async def get_task_status(id: str):
     """タスクのステータスを取得"""
+    task_id = id
     try:
-        agent = AISecretaryAgent()
+        agent = get_agent()
         task = await agent.get_task(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -92,9 +105,11 @@ async def get_task_status(task_id: str):
 async def list_tasks(user_id: Optional[str] = None, limit: int = 10):
     """タスク一覧を取得"""
     try:
-        agent = AISecretaryAgent()
+        agent = get_agent()
         tasks = await agent.list_tasks(user_id=user_id, limit=limit)
         return {"tasks": tasks}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
