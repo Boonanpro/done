@@ -33,6 +33,7 @@ class WishResponse(BaseModel):
     task_id: str
     message: str
     proposed_actions: list[str]
+    proposal_detail: Optional[str] = None  # 【アクション】【詳細】【補足】の全内容
     requires_confirmation: bool
 
 
@@ -65,6 +66,7 @@ async def process_wish(request: WishRequest):
             task_id=result["task_id"],
             message=result["message"],
             proposed_actions=result["proposed_actions"],
+            proposal_detail=result.get("proposal_detail"),
             requires_confirmation=result["requires_confirmation"],
         )
     except ValueError as e:

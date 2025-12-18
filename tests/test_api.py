@@ -43,6 +43,22 @@ class TestWishAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["requires_confirmation"] == True
+    
+    def test_wish_japanese_action_first(self, client):
+        """POST /api/v1/wish - 日本語の願望でアクションファースト提案"""
+        response = client.post(
+            "/api/v1/wish",
+            json={"wish": "PCを新調したい"}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "task_id" in data
+        assert "proposal_detail" in data
+        # アクションファーストで提案が返ってくることを確認
+        assert data["requires_confirmation"] == True
+        # 提案詳細に【アクション】が含まれることを確認
+        if data["proposal_detail"]:
+            assert "【アクション】" in data["proposal_detail"]
 
 
 class TestTaskAPI:

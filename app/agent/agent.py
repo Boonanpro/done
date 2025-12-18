@@ -38,32 +38,82 @@ class AISecretaryAgent:
     # クラス変数としてタスクストレージを共有（すべてのインスタンス間で共有）
     _tasks: dict[str, dict] = {}
     
-    SYSTEM_PROMPT = """You are an excellent AI secretary. You understand user requests 
-and propose specific actions to help execute them.
+    SYSTEM_PROMPT = """あなたは優秀なAI秘書「Done」です。
+ユーザーの「○○したい」「○○して」という願望に対して、具体的なアクションを提案し実行します。
 
-Your main roles:
-1. Communication assistance via email and LINE
-2. Shopping support
-3. Bill and payment support
-4. Information research
+## 最重要原則：アクションファースト
 
-Guidelines:
-- Accurately understand user intent
-- Ask for clarification if information is missing
-- Always confirm with user for important decisions (large payments, etc.)
-- Propose concrete, executable actions
-- Prioritize privacy and security
+1. **絶対に質問で返さない**
+   - ❌「どんなPCが欲しいですか？」
+   - ❌「予算はいくらですか？」
+   - ❌「具体的に何時ですか？」
+   - ✅ 情報が不足していても仮説を立てて具体的なアクションを提案する
 
-Available tools:
-- send_email: Send emails
-- search_email: Search emails
-- send_line_message: Send LINE messages
-- browse_website: Browse websites and retrieve information
-- fill_form: Fill in forms
-- click_element: Click web elements
-- search_web: Web search
+2. **仮説を立てて提案する**
+   - 「夕方」→「17時」と仮定
+   - 「PC」→ ユーザーの過去の傾向や一般的な選択肢から仮定
+   - 「税理士」→ 一般的な条件で仮定
 
-Always respond in English."""
+3. **訂正ベースの対話**
+   - ユーザーは提案を見てから「17時じゃなくて16時にして」と訂正する方が楽
+   - 事前に質問攻めにするより、具体的な提案を見せてから調整する
+
+4. **認証情報は必要になったら要求**
+   - 最初から「ログイン情報をください」と言わない
+   - 実行時に必要になったら「実行にはログイン情報が必要です」と伝える
+
+## 提案のフォーマット
+
+必ず以下の形式で回答してください：
+
+【アクション】
+（何をするか具体的に。サービス名、連絡先、操作内容を明記）
+
+【詳細】
+（送信する文面、予約内容、購入する商品など具体的な内容）
+
+【補足】
+（仮定した部分や、訂正可能なポイントがあれば記載）
+
+## 実行可能なツール
+- send_email: メール送信
+- search_email: メール検索
+- read_email: メール読み取り
+- send_line_message: LINEメッセージ送信
+- browse_website: Webサイト閲覧・操作
+- fill_form: フォーム入力
+- click_element: Web要素クリック
+- search_web: Web検索
+
+## 回答例
+
+ユーザー: 「PCを新調したい」
+回答:
+【アクション】
+MDLmakeにLINEで相談メッセージを送信します。
+
+【詳細】
+「お世話になっております。PCの新調を検討しています。現在の用途は主に開発作業で、予算は20万円程度を想定しています。おすすめの構成があればご提案いただけますか？」
+
+【補足】
+予算や用途は仮定です。訂正があればお知らせください。
+
+---
+
+ユーザー: 「12月28の夕方に新大阪発博多着の新幹線のチケット取って」
+回答:
+【アクション】
+EX予約で12月28日17:00発の新幹線を予約します。
+
+【詳細】
+- 区間: 新大阪 → 博多
+- 日時: 12月28日 17:00発（のぞみ○号）
+- 座席: 普通車指定席・窓側
+
+【補足】
+17:00発は仮定です。「16時にして」「グリーン車にして」など訂正があればお知らせください。
+
+日本語で回答してください。"""
 
     def __init__(self, tool_names: Optional[list[str]] = None):
         """
@@ -133,19 +183,19 @@ Always respond in English."""
         wish = state["original_wish"]
         
         # Prompt for task type classification
-        analysis_prompt = f"""Analyze the following user request and determine the task type.
+        analysis_prompt = f"""以下のユーザーリクエストを分析し、タスクタイプを判定してください。
 
-Request: {wish}
+リクエスト: {wish}
 
-Task types:
-- email: Email related (send, search, reply, etc.)
-- line: LINE related (send messages, etc.)
-- purchase: Product purchase related
-- payment: Payment related
-- research: Information research related
-- other: Other
+タスクタイプ:
+- email: メール関連（送信、検索、返信など）
+- line: LINE関連（メッセージ送信など）
+- purchase: 商品購入関連
+- payment: 支払い・決済関連
+- research: 情報調査・リサーチ関連
+- other: その他
 
-Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
+JSON形式で回答: {{"task_type": "タイプ名", "summary": "要約"}}"""
         
         messages = [
             SystemMessage(content=self.SYSTEM_PROMPT),
@@ -156,15 +206,15 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
         
         # Extract task type (simple implementation)
         content = response.content.lower()
-        if "email" in content:
+        if "email" in content or "メール" in content:
             task_type = TaskType.EMAIL
         elif "line" in content:
             task_type = TaskType.LINE
-        elif "purchase" in content:
+        elif "purchase" in content or "購入" in content or "買" in content:
             task_type = TaskType.PURCHASE
-        elif "payment" in content:
+        elif "payment" in content or "支払" in content or "決済" in content:
             task_type = TaskType.PAYMENT
-        elif "research" in content:
+        elif "research" in content or "調査" in content or "検索" in content or "リサーチ" in content:
             task_type = TaskType.RESEARCH
         else:
             task_type = TaskType.OTHER
@@ -181,39 +231,61 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
         wish = state["original_wish"]
         task_type = state["task_type"]
         
-        proposal_prompt = f"""Propose specific actions for the following request.
+        proposal_prompt = f"""以下のユーザーの願望に対して、アクションファーストで具体的な提案をしてください。
 
-Request: {wish}
-Task type: {task_type}
+ユーザーの願望: {wish}
+タスクタイプ: {task_type}
 
-Respond with a list of proposed actions.
-Also determine if user confirmation is required.
+重要なルール:
+- 絶対に質問で返さない（「どんな○○が欲しいですか？」はNG）
+- 情報が不足していても仮説を立てて具体的なアクションを提案する
+- 仮定した部分は【補足】で明記し、ユーザーが訂正できるようにする
 
-Confirmation is required for large payments or important decisions."""
+以下のフォーマットで回答してください：
+
+【アクション】
+（何をするか具体的に）
+
+【詳細】
+（具体的な内容：送信文面、予約詳細、購入商品など）
+
+【補足】
+（仮定した部分、訂正可能なポイント）"""
         
-        messages = state["messages"] + [HumanMessage(content=proposal_prompt)]
+        messages = [
+            SystemMessage(content=self.SYSTEM_PROMPT),
+            HumanMessage(content=proposal_prompt),
+        ]
         response = await self.llm.ainvoke(messages)
         
-        # Extract actions (simple implementation)
+        # レスポンス全体をアクションとして保存
         content = response.content
-        actions = []
-        for line in content.split("\n"):
-            line = line.strip()
-            if line.startswith(("-", "*", "1", "2", "3", "4", "5")):
-                actions.append(line.lstrip("-*0123456789. "))
         
-        # Determine if confirmation is required
-        requires_confirmation = any(
-            keyword in state["original_wish"].lower()
-            for keyword in ["purchase", "pay", "transfer", "contract", "apply", "buy", "order"]
-        )
+        # アクション部分を抽出（【アクション】セクション）
+        actions = []
+        if "【アクション】" in content:
+            # 【アクション】から次の【までを抽出
+            action_start = content.find("【アクション】") + len("【アクション】")
+            action_end = content.find("【", action_start)
+            if action_end == -1:
+                action_end = len(content)
+            action_text = content[action_start:action_end].strip()
+            actions = [action_text] if action_text else [content]
+        else:
+            actions = [content]
+        
+        # 全ての願望に対して承認を必須にする（アクションファースト原則）
+        # ユーザーが提案を確認してから実行する
+        requires_confirmation = True
         
         return {
             **state,
-            "proposed_actions": actions if actions else [content],
+            "proposed_actions": actions,
             "requires_confirmation": requires_confirmation,
             "status": TaskStatus.PROPOSED,
             "messages": state["messages"] + [response],
+            # 詳細なレスポンスも保存
+            "execution_result": {"full_proposal": content},
         }
     
     def _should_execute(self, state: AgentState) -> str:
@@ -297,16 +369,22 @@ Use the available tools to execute."""
             logger.error(f"Failed to save task {task_id}: {e}", exc_info=True)
             raise
         
-        # Generate response message
+        # Generate response message (English for API, frontend handles i18n)
         if final_state["requires_confirmation"]:
-            message = "Proposed actions below. Do you want to execute?"
+            message = "Action proposed. Please confirm to execute, or request revisions."
         else:
             message = "Request processed successfully."
+        
+        # 提案の詳細を取得
+        proposal_detail = None
+        if final_state["execution_result"] and "full_proposal" in final_state["execution_result"]:
+            proposal_detail = final_state["execution_result"]["full_proposal"]
         
         return {
             "task_id": task_id,
             "message": message,
             "proposed_actions": final_state["proposed_actions"],
+            "proposal_detail": proposal_detail,
             "requires_confirmation": final_state["requires_confirmation"],
         }
     
