@@ -38,82 +38,82 @@ class AISecretaryAgent:
     # クラス変数としてタスクストレージを共有（すべてのインスタンス間で共有）
     _tasks: dict[str, dict] = {}
     
-    SYSTEM_PROMPT = """あなたは優秀なAI秘書「Done」です。
-ユーザーの「○○したい」「○○して」という願望に対して、具体的なアクションを提案し実行します。
+    SYSTEM_PROMPT = """You are an excellent AI secretary called "Done".
+You propose and execute specific actions for user requests like "I want to..." or "Please do...".
 
-## 最重要原則：アクションファースト
+## Core Principle: Action First
 
-1. **絶対に質問で返さない**
-   - ❌「どんなPCが欲しいですか？」
-   - ❌「予算はいくらですか？」
-   - ❌「具体的に何時ですか？」
-   - ✅ 情報が不足していても仮説を立てて具体的なアクションを提案する
+1. **Never respond with questions**
+   - BAD: "What kind of PC do you want?"
+   - BAD: "What's your budget?"
+   - BAD: "What time exactly?"
+   - GOOD: Propose a specific action even with incomplete information
 
-2. **仮説を立てて提案する**
-   - 「夕方」→「17時」と仮定
-   - 「PC」→ ユーザーの過去の傾向や一般的な選択肢から仮定
-   - 「税理士」→ 一般的な条件で仮定
+2. **Make assumptions and propose**
+   - "evening" -> assume "5pm"
+   - "PC" -> assume based on common choices
+   - "accountant" -> assume general requirements
 
-3. **訂正ベースの対話**
-   - ユーザーは提案を見てから「17時じゃなくて16時にして」と訂正する方が楽
-   - 事前に質問攻めにするより、具体的な提案を見せてから調整する
+3. **Correction-based dialogue**
+   - Users prefer to see a concrete proposal and then correct it
+   - "Change 5pm to 4pm" is easier than answering 10 questions upfront
 
-4. **認証情報は必要になったら要求**
-   - 最初から「ログイン情報をください」と言わない
-   - 実行時に必要になったら「実行にはログイン情報が必要です」と伝える
+4. **Request credentials only when needed**
+   - Don't ask for login info upfront
+   - Request it when actually needed during execution
 
-## 提案のフォーマット
+## Response Format
 
-必ず以下の形式で回答してください：
+Always respond in this format:
 
-【アクション】
-（何をするか具体的に。サービス名、連絡先、操作内容を明記）
+[ACTION]
+(What you will do - be specific with service names, contacts, operations)
 
-【詳細】
-（送信する文面、予約内容、購入する商品など具体的な内容）
+[DETAILS]
+(Specific content: message text, booking details, items to purchase)
 
-【補足】
-（仮定した部分や、訂正可能なポイントがあれば記載）
+[NOTES]
+(Assumptions made, points that can be corrected)
 
-## 実行可能なツール
-- send_email: メール送信
-- search_email: メール検索
-- read_email: メール読み取り
-- send_line_message: LINEメッセージ送信
-- browse_website: Webサイト閲覧・操作
-- fill_form: フォーム入力
-- click_element: Web要素クリック
-- search_web: Web検索
+## Available Tools
+- send_email: Send emails
+- search_email: Search emails
+- read_email: Read emails
+- send_line_message: Send LINE messages
+- browse_website: Browse and operate websites
+- fill_form: Fill in forms
+- click_element: Click web elements
+- search_web: Web search
 
-## 回答例
+## Examples
 
-ユーザー: 「PCを新調したい」
-回答:
-【アクション】
-MDLmakeにLINEで相談メッセージを送信します。
+User: "I want to buy a new PC"
+Response:
+[ACTION]
+Send a consultation message to MDLmake via LINE.
 
-【詳細】
-「お世話になっております。PCの新調を検討しています。現在の用途は主に開発作業で、予算は20万円程度を想定しています。おすすめの構成があればご提案いただけますか？」
+[DETAILS]
+"Hello, I'm considering getting a new PC. My primary use is development work, and my budget is around $1,500. Could you recommend a configuration?"
 
-【補足】
-予算や用途は仮定です。訂正があればお知らせください。
+[NOTES]
+Budget and usage are assumptions. Let me know if you'd like to correct them.
 
 ---
 
-ユーザー: 「12月28の夕方に新大阪発博多着の新幹線のチケット取って」
-回答:
-【アクション】
-EX予約で12月28日17:00発の新幹線を予約します。
+User: "Book a Shinkansen ticket from Shin-Osaka to Hakata on December 28th around 5pm"
+Response:
+[ACTION]
+Book a Shinkansen ticket departing 5:00 PM on December 28th via EX Reservation.
 
-【詳細】
-- 区間: 新大阪 → 博多
-- 日時: 12月28日 17:00発（のぞみ○号）
-- 座席: 普通車指定席・窓側
+[DETAILS]
+- Route: Shin-Osaka -> Hakata
+- Date/Time: December 28th, 5:00 PM (Nozomi)
+- Seat: Reserved, ordinary car, window side
 
-【補足】
-17:00発は仮定です。「16時にして」「グリーン車にして」など訂正があればお知らせください。
+[NOTES]
+5:00 PM is an assumption. Let me know if you want "4pm instead" or "Green car" etc.
 
-日本語で回答してください。"""
+Always respond in English."""
 
     def __init__(self, tool_names: Optional[list[str]] = None):
         """
@@ -183,19 +183,19 @@ EX予約で12月28日17:00発の新幹線を予約します。
         wish = state["original_wish"]
         
         # Prompt for task type classification
-        analysis_prompt = f"""以下のユーザーリクエストを分析し、タスクタイプを判定してください。
+        analysis_prompt = f"""Analyze the following user request and determine the task type.
 
-リクエスト: {wish}
+Request: {wish}
 
-タスクタイプ:
-- email: メール関連（送信、検索、返信など）
-- line: LINE関連（メッセージ送信など）
-- purchase: 商品購入関連
-- payment: 支払い・決済関連
-- research: 情報調査・リサーチ関連
-- other: その他
+Task types:
+- email: Email related (send, search, reply, etc.)
+- line: LINE messaging related
+- purchase: Product purchase related
+- payment: Payment/billing related
+- research: Information research related
+- other: Other
 
-JSON形式で回答: {{"task_type": "タイプ名", "summary": "要約"}}"""
+Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
         
         messages = [
             SystemMessage(content=self.SYSTEM_PROMPT),
@@ -206,15 +206,15 @@ JSON形式で回答: {{"task_type": "タイプ名", "summary": "要約"}}"""
         
         # Extract task type (simple implementation)
         content = response.content.lower()
-        if "email" in content or "メール" in content:
+        if "email" in content:
             task_type = TaskType.EMAIL
         elif "line" in content:
             task_type = TaskType.LINE
-        elif "purchase" in content or "購入" in content or "買" in content:
+        elif "purchase" in content or "buy" in content:
             task_type = TaskType.PURCHASE
-        elif "payment" in content or "支払" in content or "決済" in content:
+        elif "payment" in content or "pay" in content or "bill" in content:
             task_type = TaskType.PAYMENT
-        elif "research" in content or "調査" in content or "検索" in content or "リサーチ" in content:
+        elif "research" in content or "search" in content or "find" in content:
             task_type = TaskType.RESEARCH
         else:
             task_type = TaskType.OTHER
@@ -231,26 +231,26 @@ JSON形式で回答: {{"task_type": "タイプ名", "summary": "要約"}}"""
         wish = state["original_wish"]
         task_type = state["task_type"]
         
-        proposal_prompt = f"""以下のユーザーの願望に対して、アクションファーストで具体的な提案をしてください。
+        proposal_prompt = f"""Propose a specific action for the following user request using Action First principle.
 
-ユーザーの願望: {wish}
-タスクタイプ: {task_type}
+User request: {wish}
+Task type: {task_type}
 
-重要なルール:
-- 絶対に質問で返さない（「どんな○○が欲しいですか？」はNG）
-- 情報が不足していても仮説を立てて具体的なアクションを提案する
-- 仮定した部分は【補足】で明記し、ユーザーが訂正できるようにする
+Important rules:
+- Never respond with questions (e.g., "What kind of X do you want?" is NOT allowed)
+- Make assumptions and propose specific actions even with incomplete information
+- List assumptions in [NOTES] so user can correct them
 
-以下のフォーマットで回答してください：
+Respond in this format:
 
-【アクション】
-（何をするか具体的に）
+[ACTION]
+(What you will do specifically)
 
-【詳細】
-（具体的な内容：送信文面、予約詳細、購入商品など）
+[DETAILS]
+(Specific content: message text, booking details, items to purchase, etc.)
 
-【補足】
-（仮定した部分、訂正可能なポイント）"""
+[NOTES]
+(Assumptions made, points that can be corrected)"""
         
         messages = [
             SystemMessage(content=self.SYSTEM_PROMPT),
@@ -258,15 +258,14 @@ JSON形式で回答: {{"task_type": "タイプ名", "summary": "要約"}}"""
         ]
         response = await self.llm.ainvoke(messages)
         
-        # レスポンス全体をアクションとして保存
+        # Save full response
         content = response.content
         
-        # アクション部分を抽出（【アクション】セクション）
+        # Extract action section
         actions = []
-        if "【アクション】" in content:
-            # 【アクション】から次の【までを抽出
-            action_start = content.find("【アクション】") + len("【アクション】")
-            action_end = content.find("【", action_start)
+        if "[ACTION]" in content:
+            action_start = content.find("[ACTION]") + len("[ACTION]")
+            action_end = content.find("[", action_start)
             if action_end == -1:
                 action_end = len(content)
             action_text = content[action_start:action_end].strip()
@@ -421,33 +420,33 @@ Use the available tools to execute."""
         previous_proposal = task.get("execution_result", {}).get("full_proposal", "")
         
         # Build revision prompt with context
-        revision_prompt = f"""以下のユーザーの願望に対して、訂正リクエストを反映した新しい提案をしてください。
+        revision_prompt = f"""Revise the proposal based on the user's correction request.
 
-## 元の願望
+## Original Request
 {original_wish}
 
-## 前回の提案
+## Previous Proposal
 {previous_proposal}
 
-## ユーザーからの訂正リクエスト
+## User's Correction Request
 {revision}
 
-重要なルール:
-- 訂正リクエストを正確に反映する
-- 訂正されていない部分は前回の提案を維持する
-- 絶対に質問で返さない
-- 仮定した部分は【補足】で明記する
+Important rules:
+- Apply the correction request accurately
+- Keep unchanged parts from the previous proposal
+- Never respond with questions
+- List assumptions in [NOTES]
 
-以下のフォーマットで回答してください：
+Respond in this format:
 
-【アクション】
-（何をするか具体的に）
+[ACTION]
+(What you will do specifically)
 
-【詳細】
-（具体的な内容：送信文面、予約詳細、購入商品など）
+[DETAILS]
+(Specific content: message text, booking details, items to purchase, etc.)
 
-【補足】
-（仮定した部分、訂正可能なポイント）"""
+[NOTES]
+(Assumptions made, points that can be corrected)"""
         
         messages = [
             SystemMessage(content=self.SYSTEM_PROMPT),
@@ -459,9 +458,9 @@ Use the available tools to execute."""
         
         # Extract action from response
         actions = []
-        if "【アクション】" in content:
-            action_start = content.find("【アクション】") + len("【アクション】")
-            action_end = content.find("【", action_start)
+        if "[ACTION]" in content:
+            action_start = content.find("[ACTION]") + len("[ACTION]")
+            action_end = content.find("[", action_start)
             if action_end == -1:
                 action_end = len(content)
             action_text = content[action_start:action_end].strip()
