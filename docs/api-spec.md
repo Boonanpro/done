@@ -45,11 +45,105 @@ An AI secretary that responds to user wishes ("I want to..." / "Please do...") w
 
 | # | API/Tool | Description | Status |
 |---|----------|-------------|--------|
-| 7 | LINE Send | Send LINE message via Messaging API | ⏳ Code exists, needs config |
-| 8 | Email Send | Send email via Gmail API | ⏳ Code exists, needs config |
-| 9 | Web Browse | Browse/operate websites via Playwright | ⏳ Code exists, not connected |
-| 10 | Form Fill | Fill forms on websites | ⏳ Code exists, not connected |
-| 11 | Web Search | Search web for information | ⏳ Code exists, not connected |
+| 7 | Email Send | Send email via Gmail API | ⏳ Code exists, needs config |
+| 8 | Web Browse | Browse/operate websites via Playwright | ⏳ Code exists, not connected |
+| 9 | Form Fill | Fill forms on websites | ⏳ Code exists, not connected |
+| 10 | Web Search | Search web for information | ⏳ Code exists, not connected |
+
+### Phase 2A: LINE Proxy Communication (LINEコミュニケーション代行)
+
+AI秘書がユーザーの個人LINEアカウントを代行操作し、外部（店舗・個人）とのコミュニケーションを仲介する機能。
+
+#### 技術スタック
+- **Playwright**: Web版LINE（またはLINE PC版）の自動操作
+- **LangGraph**: 会話コンテキスト理解・自律判断
+- **Supabase**: 会話履歴・コンテキスト保存
+
+#### 機能一覧
+
+| # | 機能 | Description | Status |
+|---|------|-------------|--------|
+| 11 | LINE Login | PlaywrightでLINEにログイン（QRコードまたは認証情報） | ❌ Not implemented |
+| 12 | Friend Check | 送信先が友達追加されているか確認 | ❌ Not implemented |
+| 13 | Friend Add | 友達追加されていなければ追加 | ❌ Not implemented |
+| 14 | Send Message | 承認済みメッセージを送信 | ⏳ Code exists (API版) |
+| 15 | Receive Message | 相手からの返信を監視・受信 | ❌ Not implemented |
+| 16 | Summarize & Report | 受信内容を要約してユーザーに報告 | ❌ Not implemented |
+| 17 | Auto-Clarify | 相手の返信が不明確な場合、自律的に確認返信 | ❌ Not implemented |
+| 18 | Conversation Memory | 会話履歴・コンテキストを記憶 | ❌ Not implemented |
+
+#### API一覧
+
+| # | API | Method | Description | Status |
+|---|-----|--------|-------------|--------|
+| 19 | `/api/v1/line/login` | POST | LINEログイン開始（QRコード取得） | ❌ Not implemented |
+| 20 | `/api/v1/line/login/status` | GET | ログイン状態確認 | ❌ Not implemented |
+| 21 | `/api/v1/line/friends` | GET | 友達リスト取得 | ❌ Not implemented |
+| 22 | `/api/v1/line/friends/{id}` | POST | 友達追加 | ❌ Not implemented |
+| 23 | `/api/v1/line/conversations` | GET | 会話一覧取得 | ❌ Not implemented |
+| 24 | `/api/v1/line/conversations/{id}` | GET | 特定会話の履歴取得 | ❌ Not implemented |
+| 25 | `/api/v1/line/conversations/{id}/send` | POST | メッセージ送信（要承認） | ❌ Not implemented |
+| 26 | `/api/v1/line/conversations/{id}/messages` | GET | 新着メッセージ取得 | ❌ Not implemented |
+
+#### 動作フロー
+
+```
+【初回セットアップ】
+1. POST /api/v1/line/login → QRコード表示
+2. ユーザーがスマホでQRスキャン → ログイン完了
+3. GET /api/v1/line/login/status → ログイン済み確認
+
+【メッセージ送信フロー】
+1. ユーザー: 「MDLmakeにPCの相談をしたい」
+2. AI秘書: 提案生成（アクションファースト）
+3. ユーザー: 承認
+4. AI秘書: 友達追加確認 → 未追加なら追加
+5. AI秘書: メッセージ送信
+6. AI秘書: 会話履歴に保存
+
+【返信受信・報告フロー】
+1. AI秘書: 定期的に新着メッセージを監視（ポーリング or WebSocket）
+2. 相手から返信受信
+3. AI秘書: 内容を分析
+   - 報告すべき内容 → ユーザーに要約して報告
+   - 確認が必要な内容 → ユーザーに確認を求める
+   - 不明確な内容 → 自律的に相手に確認返信
+4. 会話履歴に保存（コンテキスト維持）
+
+【自律判断の例】
+相手: 「納期はいつがいいですか？」
+AI秘書の判断:
+  - ユーザーの元の要望に納期の情報がない
+  - → ユーザーに確認: 「MDLmakeから納期について質問がありました。希望納期を教えてください」
+
+相手: 「OK」
+AI秘書の判断:
+  - 何に対するOKか不明確
+  - → 自律的に確認: 「すみません、何についてのOKでしょうか？」
+```
+
+#### 会話コンテキスト管理
+
+```
+line_conversations テーブル:
+- id: UUID
+- user_id: UUID (AI秘書のユーザー)
+- line_contact_id: VARCHAR (相手のLINE識別子)
+- contact_name: VARCHAR (相手の表示名)
+- original_task_id: UUID (発端となったタスク)
+- context_summary: TEXT (AIによる会話要約)
+- status: VARCHAR (active, resolved, waiting_user, waiting_reply)
+- created_at, updated_at
+
+line_messages テーブル:
+- id: UUID
+- conversation_id: UUID
+- direction: VARCHAR (sent, received)
+- content: TEXT
+- ai_summary: TEXT (AIによる要約)
+- ai_action_taken: VARCHAR (reported, auto_replied, waiting)
+- created_at
+```
 
 ### Phase 3: Credential Management
 
@@ -213,17 +307,83 @@ User: Confirms → System operates website to post
 | Phase | APIs | Tested | Pending |
 |-------|------|--------|---------|
 | Phase 1 | 6 | 6 ✅ | 0 |
-| Phase 2 | 5 | 0 | 5 (needs config) |
+| Phase 2 | 4 | 0 | 4 (needs config) |
+| Phase 2A | 8 APIs + 8 機能 | 0 | 16 (not implemented) |
 | Phase 3 | 3 | 0 | 3 (not implemented) |
 | Phase 4 | 3 | 0 | 3 (not implemented) |
 | Phase 5 | 1 | 0 | 1 (needs config) |
-| **Total** | **18** | **6** | **12** |
+| **Total** | **25+** | **6** | **19+** |
 
 ---
 
 ## Next Steps
 
-1. **Phase 2**: Connect LINE/Email/Browser tools to actual services
-2. **Phase 3**: Implement credential management flow
-3. **Phase 4**: Implement user preference learning
-4. **Phase 5**: Configure LINE webhook
+1. **Phase 2A (優先)**: LINE代行コミュニケーション機能
+   - PlaywrightでLINE操作の技術調査
+   - 会話履歴テーブルの実装
+   - ログイン・送信・受信の基本機能
+   - 自律判断ロジックの実装
+2. **Phase 2**: Email/Browser/Search ツールの接続
+3. **Phase 3**: 資格情報管理フローの実装
+4. **Phase 4**: ユーザー設定学習の実装
+5. **Phase 5**: LINE Webhookの設定（公式アカウント経由の場合）
+
+---
+
+## Phase 2A 詳細設計
+
+### 技術調査が必要な項目
+
+1. **LINE操作方法の選定**
+   - LINE PC版アプリ + PyAutoGUI/画像認識
+   - LINE Web版（存在するか調査）
+   - LINE公式アカウント管理画面 (manager.line.biz)
+   - 他の方法
+
+2. **メッセージ監視方法**
+   - ポーリング（定期的に画面を確認）
+   - 通知フック（OS通知を監視）
+   - 他の方法
+
+3. **セッション維持**
+   - ログイン状態の永続化
+   - 再認証の自動化
+
+### 自律判断ロジック
+
+AI秘書が相手からの返信を受け取った際の判断フロー:
+
+```
+受信メッセージ
+    ↓
+[分析] メッセージの意図を理解
+    ↓
+┌─────────────────────────────────────────────┐
+│ 判断基準                                      │
+├─────────────────────────────────────────────┤
+│ 1. ユーザーに報告すべきか？                    │
+│    - 重要な情報（価格、納期、確認事項）         │
+│    - 決定が必要な内容                          │
+│    → YES: ユーザーに要約して報告               │
+│                                               │
+│ 2. ユーザーへの確認が必要か？                  │
+│    - 元の要望に含まれていない情報を求められた   │
+│    → YES: ユーザーに確認を求める               │
+│                                               │
+│ 3. 相手の返信が不明確か？                      │
+│    - 「OK」「了解」など文脈なしで意味不明       │
+│    - 質問の意図が不明確                        │
+│    → YES: 自律的に相手に確認返信               │
+│                                               │
+│ 4. 会話が完了したか？                          │
+│    - 目的達成（予約完了、情報取得完了）         │
+│    → YES: ユーザーに完了報告                   │
+└─────────────────────────────────────────────┘
+```
+
+### セキュリティ考慮事項
+
+- LINE認証情報は暗号化して保存
+- 送信前に必ずユーザー承認を取得（アクションファースト原則）
+- 自律返信はあらかじめ定義されたパターンのみ（確認質問など）
+- センシティブな情報（支払い、個人情報）は自律送信しない
