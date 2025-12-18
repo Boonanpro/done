@@ -14,6 +14,7 @@
 | お願いを実行する | `POST /api/v1/task/{id}/confirm` | ✅ 動作確認済み |
 | ヘルスチェック | `GET /` | ✅ 動作確認済み |
 | 日本語アクションファースト提案 | `POST /api/v1/wish` | ✅ 動作確認済み |
+| 提案の訂正 | `POST /api/v1/task/{id}/revise` | ✅ 動作確認済み |
 | LINE Webhook | `POST /webhook/line` | ⏸️ LINE設定後にテスト可能 |
 
 ### 🔧 現在の状態
@@ -142,8 +143,9 @@ celery -A app.tasks.celery_app worker --loglevel=info --pool=solo
 | エンドポイント | メソッド | 説明 |
 |--------------|--------|------|
 | `/` | GET | ヘルスチェック |
-| `/api/v1/wish` | POST | 願望を処理 |
-| `/api/v1/task/{id}` | GET | タスク状態を取得 |　
+| `/api/v1/wish` | POST | 願望を処理（アクションファースト提案） |
+| `/api/v1/task/{id}` | GET | タスク状態を取得 |
+| `/api/v1/task/{id}/revise` | POST | 提案を訂正（「16時にして」など） |
 | `/api/v1/task/{id}/confirm` | POST | タスクを実行 |
 | `/api/v1/tasks` | GET | タスク一覧を取得 |
 | `/webhook/line` | POST | LINE Webhook |
@@ -177,6 +179,18 @@ Invoke-RestMethod -Uri "http://localhost:8000/api/v1/wish" -Method POST -Content
 - AIは質問せずに仮説を立てて具体的なアクションを提案
 - ユーザーは提案を見てから「17時じゃなくて16時にして」と訂正可能
 - すべての願望に対して承認を待ってから実行
+
+```bash
+# 提案を訂正する (bash/curl)
+curl -X POST http://localhost:8000/api/v1/task/{task_id}/revise \
+  -H "Content-Type: application/json" \
+  -d '{"revision": "17時じゃなくて16時にして"}'
+```
+
+```powershell
+# 提案を訂正する (PowerShell)
+Invoke-RestMethod -Uri "http://localhost:8000/api/v1/task/{task_id}/revise" -Method POST -ContentType "application/json" -Body '{"revision": "17時じゃなくて16時にして"}'
+```
 
 ## プロジェクト構造
 
