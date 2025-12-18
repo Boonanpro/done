@@ -7,7 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.api.routes import router as api_router
-from app.api.line_webhook import router as line_router
+from app.api.line_webhook import router as line_webhook_router
+from app.api.line_routes import router as line_desktop_router
 
 app = FastAPI(
     title="AI Secretary System",
@@ -26,7 +27,8 @@ app.add_middleware(
 
 # ルーター登録
 app.include_router(api_router, prefix="/api/v1")
-app.include_router(line_router, prefix="/webhook")
+app.include_router(line_webhook_router, prefix="/webhook")
+app.include_router(line_desktop_router, prefix="/api/v1")
 
 
 @app.get("/")
