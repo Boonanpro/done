@@ -13,12 +13,17 @@
 | お願いの状況を確認 | `GET /api/v1/task/{id}` | ✅ 動作確認済み |
 | お願いを実行する | `POST /api/v1/task/{id}/confirm` | ✅ 動作確認済み |
 | ヘルスチェック | `GET /` | ✅ 動作確認済み |
+| 日本語アクションファースト提案 | `POST /api/v1/wish` | ✅ 動作確認済み |
 | LINE Webhook | `POST /webhook/line` | ⏸️ LINE設定後にテスト可能 |
 
 ### 🔧 現在の状態
 
+- **アクションファースト提案**: 完成 ✅
+  - 質問せずに仮説を立てて具体的なアクションを提案
+  - 【アクション】【詳細】【補足】のフォーマットで回答
+  - ユーザーは提案を見てから訂正する方式
 - **承認フローの土台**: 完成 ✅
-  - 「買いたい」「払いたい」などのリクエストは自動実行されず、ユーザー承認を待つ
+  - すべてのリクエストは自動実行されず、ユーザー承認を待つ
 - **実際の操作機能**: 未接続 🔧
   - Webサイト操作（Playwright）: コードはあるが未接続
   - メール送受信（Gmail API）: 設定が必要
@@ -149,23 +154,29 @@ celery -A app.tasks.celery_app worker --loglevel=info --pool=solo
 # 願望を送信 (bash/curl)
 curl -X POST http://localhost:8000/api/v1/wish \
   -H "Content-Type: application/json" \
-  -d '{"wish": "Check the weather forecast"}'
+  -d '{"wish": "PCを新調したい"}'
 ```
 
 ```powershell
 # 願望を送信 (PowerShell)
-Invoke-RestMethod -Uri "http://localhost:8000/api/v1/wish" -Method POST -ContentType "application/json" -Body '{"wish": "Check the weather forecast"}'
+Invoke-RestMethod -Uri "http://localhost:8000/api/v1/wish" -Method POST -ContentType "application/json" -Body '{"wish": "PCを新調したい"}'
 ```
 
 ```json
-// レスポンス例
+// レスポンス例（アクションファースト）
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
-  "message": "Processing your request.",
-  "proposed_actions": ["Search web for weather forecast"],
-  "requires_confirmation": false
+  "message": "Action proposed. Please confirm to execute, or request revisions.",
+  "proposed_actions": ["MDLmakeにLINEで相談メッセージを送信します。"],
+  "proposal_detail": "【アクション】\nMDLmakeにLINEで相談メッセージを送信します。\n\n【詳細】\n「お世話になっております。PCの新調を検討しています...」\n\n【補足】\n予算や用途は仮定です。訂正があればお知らせください。",
+  "requires_confirmation": true
 }
 ```
+
+**アクションファースト原則**:
+- AIは質問せずに仮説を立てて具体的なアクションを提案
+- ユーザーは提案を見てから「17時じゃなくて16時にして」と訂正可能
+- すべての願望に対して承認を待ってから実行
 
 ## プロジェクト構造
 
