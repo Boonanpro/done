@@ -19,6 +19,9 @@ anthropic>=0.18.0
 # Browser Automation
 playwright>=1.40.0
 
+# Desktop Automation (Windows)
+pywinauto>=0.6.8
+
 # Database
 supabase>=2.0.0
 

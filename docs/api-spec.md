@@ -54,19 +54,39 @@ An AI secretary that responds to user wishes ("I want to..." / "Please do...") w
 
 AI秘書がユーザーの個人LINEアカウントを代行操作し、外部（店舗・個人）とのコミュニケーションを仲介する機能。
 
+#### 技術調査結果（2024年12月）
+
+| 方法 | 可否 | 理由 |
+|------|------|------|
+| LINE Chrome拡張 | ❌ | 2025年9月終了 |
+| LINE Web版 | ❌ | 存在しない |
+| Playwright + LINE | ❌ | デスクトップアプリのため |
+| LINE Messaging API | ❌ | 公式→公式は送信不可 |
+| **pywinauto + LINE PC版** | ✅ | UI Automation方式で安定操作可能 |
+
 #### 技術スタック
-- **Playwright**: Web版LINE（またはLINE PC版）の自動操作
+- **pywinauto**: LINE PC版（Windows）のUI自動操作
 - **LangGraph**: 会話コンテキスト理解・自律判断
 - **Supabase**: 会話履歴・コンテキスト保存
+
+#### ⚠️ 利用規約に関する注意
+
+LINE利用規約では「ボット、チートツール、その他の技術的手段を使用してサービスを操作すること」が禁止されています。
+pywinautoによる操作は規約違反となる可能性があり、アカウント停止のリスクがあります。
+
+**リスク軽減策:**
+- 人間らしい操作間隔（ランダム遅延）
+- 大量送信の回避
+- 自己責任での利用
 
 #### 機能一覧
 
 | # | 機能 | Description | Status |
 |---|------|-------------|--------|
-| 11 | LINE Login | PlaywrightでLINEにログイン（QRコードまたは認証情報） | ❌ Not implemented |
+| 11 | LINE Connect | pywinautoでLINE PC版に接続 | ❌ Not implemented |
 | 12 | Friend Check | 送信先が友達追加されているか確認 | ❌ Not implemented |
-| 13 | Friend Add | 友達追加されていなければ追加 | ❌ Not implemented |
-| 14 | Send Message | 承認済みメッセージを送信 | ⏳ Code exists (API版) |
+| 13 | Friend Add | 友達追加されていなければ追加（ID検索） | ❌ Not implemented |
+| 14 | Send Message | 承認済みメッセージをpywinautoで送信 | ❌ Not implemented |
 | 15 | Receive Message | 相手からの返信を監視・受信 | ❌ Not implemented |
 | 16 | Summarize & Report | 受信内容を要約してユーザーに報告 | ❌ Not implemented |
 | 17 | Auto-Clarify | 相手の返信が不明確な場合、自律的に確認返信 | ❌ Not implemented |
@@ -76,10 +96,10 @@ AI秘書がユーザーの個人LINEアカウントを代行操作し、外部�
 
 | # | API | Method | Description | Status |
 |---|-----|--------|-------------|--------|
-| 19 | `/api/v1/line/login` | POST | LINEログイン開始（QRコード取得） | ❌ Not implemented |
-| 20 | `/api/v1/line/login/status` | GET | ログイン状態確認 | ❌ Not implemented |
+| 19 | `/api/v1/line/connect` | POST | LINE PC版への接続開始 | ❌ Not implemented |
+| 20 | `/api/v1/line/status` | GET | 接続状態確認 | ❌ Not implemented |
 | 21 | `/api/v1/line/friends` | GET | 友達リスト取得 | ❌ Not implemented |
-| 22 | `/api/v1/line/friends/{id}` | POST | 友達追加 | ❌ Not implemented |
+| 22 | `/api/v1/line/friends/search` | POST | ID検索して友達追加 | ❌ Not implemented |
 | 23 | `/api/v1/line/conversations` | GET | 会話一覧取得 | ❌ Not implemented |
 | 24 | `/api/v1/line/conversations/{id}` | GET | 特定会話の履歴取得 | ❌ Not implemented |
 | 25 | `/api/v1/line/conversations/{id}/send` | POST | メッセージ送信（要承認） | ❌ Not implemented |
@@ -88,10 +108,14 @@ AI秘書がユーザーの個人LINEアカウントを代行操作し、外部�
 #### 動作フロー
 
 ```
+【前提条件】
+- LINE PC版がインストール済み
+- ユーザーがLINE PC版にログイン済み
+- LINE PC版が起動している
+
 【初回セットアップ】
-1. POST /api/v1/line/login → QRコード表示
-2. ユーザーがスマホでQRスキャン → ログイン完了
-3. GET /api/v1/line/login/status → ログイン済み確認
+1. POST /api/v1/line/connect → pywinautoでLINE PC版に接続
+2. GET /api/v1/line/status → 接続状態確認
 
 【メッセージ送信フロー】
 1. ユーザー: 「MDLmakeにPCの相談をしたい」
