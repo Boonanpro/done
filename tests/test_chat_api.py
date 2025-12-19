@@ -5,6 +5,12 @@ Phase 2: AIネイティブチャット機能のテスト
 テスト実行: pytest tests/test_chat_api.py -v
 """
 import pytest
+import uuid
+
+
+def unique_email(prefix: str = "test") -> str:
+    """テスト用の一意なメールアドレスを生成"""
+    return f"{prefix}_{uuid.uuid4().hex[:8]}@example.com"
 
 
 class TestChatAuth:
@@ -12,10 +18,11 @@ class TestChatAuth:
     
     def test_register(self, client):
         """POST /api/v1/chat/register - ユーザー登録"""
+        email = unique_email("register")
         response = client.post(
             "/api/v1/chat/register",
             json={
-                "email": "test@example.com",
+                "email": email,
                 "password": "password123",
                 "display_name": "Test User"
             }
@@ -23,16 +30,17 @@ class TestChatAuth:
         assert response.status_code == 200
         data = response.json()
         assert "id" in data
-        assert data["email"] == "test@example.com"
+        assert data["email"] == email
         assert data["display_name"] == "Test User"
     
     def test_register_duplicate_email(self, client):
         """POST /api/v1/chat/register - 重複メール"""
+        email = unique_email("duplicate")
         # First registration
         client.post(
             "/api/v1/chat/register",
             json={
-                "email": "duplicate@example.com",
+                "email": email,
                 "password": "password123",
                 "display_name": "User 1"
             }
@@ -41,7 +49,7 @@ class TestChatAuth:
         response = client.post(
             "/api/v1/chat/register",
             json={
-                "email": "duplicate@example.com",
+                "email": email,
                 "password": "password456",
                 "display_name": "User 2"
             }
@@ -50,11 +58,12 @@ class TestChatAuth:
     
     def test_login(self, client):
         """POST /api/v1/chat/login - ログイン"""
+        email = unique_email("login")
         # Register first
         client.post(
             "/api/v1/chat/register",
             json={
-                "email": "login@example.com",
+                "email": email,
                 "password": "password123",
                 "display_name": "Login User"
             }
@@ -63,7 +72,7 @@ class TestChatAuth:
         response = client.post(
             "/api/v1/chat/login",
             json={
-                "email": "login@example.com",
+                "email": email,
                 "password": "password123"
             }
         )
@@ -74,11 +83,12 @@ class TestChatAuth:
     
     def test_login_invalid_password(self, client):
         """POST /api/v1/chat/login - 無効なパスワード"""
+        email = unique_email("invalid")
         # Register first
         client.post(
             "/api/v1/chat/register",
             json={
-                "email": "invalid@example.com",
+                "email": email,
                 "password": "password123",
                 "display_name": "Invalid User"
             }
@@ -87,7 +97,7 @@ class TestChatAuth:
         response = client.post(
             "/api/v1/chat/login",
             json={
-                "email": "invalid@example.com",
+                "email": email,
                 "password": "wrongpassword"
             }
         )
@@ -95,11 +105,12 @@ class TestChatAuth:
     
     def test_get_me(self, client):
         """GET /api/v1/chat/me - プロフィール取得"""
+        email = unique_email("me")
         # Register and login
         client.post(
             "/api/v1/chat/register",
             json={
-                "email": "me@example.com",
+                "email": email,
                 "password": "password123",
                 "display_name": "Me User"
             }
@@ -107,7 +118,7 @@ class TestChatAuth:
         login_response = client.post(
             "/api/v1/chat/login",
             json={
-                "email": "me@example.com",
+                "email": email,
                 "password": "password123"
             }
         )
@@ -120,7 +131,7 @@ class TestChatAuth:
         )
         assert response.status_code == 200
         data = response.json()
-        assert data["email"] == "me@example.com"
+        assert data["email"] == email
         assert data["display_name"] == "Me User"
     
     def test_get_me_unauthorized(self, client):
@@ -130,11 +141,12 @@ class TestChatAuth:
     
     def test_update_me(self, client):
         """PATCH /api/v1/chat/me - プロフィール更新"""
+        email = unique_email("update")
         # Register and login
         client.post(
             "/api/v1/chat/register",
             json={
-                "email": "update@example.com",
+                "email": email,
                 "password": "password123",
                 "display_name": "Original Name"
             }
@@ -142,7 +154,7 @@ class TestChatAuth:
         login_response = client.post(
             "/api/v1/chat/login",
             json={
-                "email": "update@example.com",
+                "email": email,
                 "password": "password123"
             }
         )
@@ -203,11 +215,12 @@ class TestChatInvite:
         )
         code = create_response.json()["code"]
         
-        # Register second user
+        # Register second user with unique email
+        friend_email = unique_email("friend")
         client.post(
             "/api/v1/chat/register",
             json={
-                "email": "friend@example.com",
+                "email": friend_email,
                 "password": "password123",
                 "display_name": "Friend User"
             }
@@ -215,7 +228,7 @@ class TestChatInvite:
         login_response = client.post(
             "/api/v1/chat/login",
             json={
-                "email": "friend@example.com",
+                "email": friend_email,
                 "password": "password123"
             }
         )
