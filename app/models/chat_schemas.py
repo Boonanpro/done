@@ -1,0 +1,227 @@
+"""
+Pydantic Schemas for Done Chat
+"""
+from pydantic import BaseModel, Field, EmailStr
+from typing import Optional
+from datetime import datetime
+from enum import Enum
+
+
+# ==================== Enums ====================
+
+class AIMode(str, Enum):
+    """AI Mode options"""
+    OFF = "off"
+    ASSIST = "assist"
+    AUTO = "auto"
+
+
+class RoomType(str, Enum):
+    """Room type"""
+    DIRECT = "direct"
+    GROUP = "group"
+
+
+class MemberRole(str, Enum):
+    """Member role in a room"""
+    OWNER = "owner"
+    ADMIN = "admin"
+    MEMBER = "member"
+
+
+class SenderType(str, Enum):
+    """Message sender type"""
+    HUMAN = "human"
+    AI = "ai"
+
+
+# ==================== Auth Schemas ====================
+
+class RegisterRequest(BaseModel):
+    """User registration request"""
+    email: EmailStr
+    password: str = Field(..., min_length=8)
+    display_name: str = Field(..., min_length=1, max_length=100)
+
+
+class LoginRequest(BaseModel):
+    """User login request"""
+    email: EmailStr
+    password: str
+
+
+class TokenResponse(BaseModel):
+    """JWT token response"""
+    access_token: str
+    token_type: str = "bearer"
+
+
+class UserResponse(BaseModel):
+    """User profile response"""
+    id: str
+    email: str
+    display_name: str
+    avatar_url: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
+class UserUpdateRequest(BaseModel):
+    """User profile update request"""
+    display_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    avatar_url: Optional[str] = None
+
+
+# ==================== Invite Schemas ====================
+
+class InviteCreateRequest(BaseModel):
+    """Create invite request"""
+    max_uses: int = Field(default=1, ge=1, le=100)
+    expires_in_hours: Optional[int] = Field(default=24, ge=1, le=720)  # Max 30 days
+
+
+class InviteResponse(BaseModel):
+    """Invite response"""
+    id: str
+    code: str
+    invite_url: str
+    max_uses: int
+    use_count: int
+    expires_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class InviteInfoResponse(BaseModel):
+    """Invite info response (for accept page)"""
+    code: str
+    creator_name: str
+    creator_avatar_url: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    is_valid: bool
+
+
+class InviteAcceptResponse(BaseModel):
+    """Invite accept response"""
+    friend_id: str
+    room_id: str
+    message: str = "Friend added successfully"
+
+
+# ==================== Friend Schemas ====================
+
+class FriendResponse(BaseModel):
+    """Friend response"""
+    id: str
+    display_name: str
+    avatar_url: Optional[str] = None
+    created_at: datetime
+
+
+class FriendsListResponse(BaseModel):
+    """Friends list response"""
+    friends: list[FriendResponse]
+
+
+# ==================== Room Schemas ====================
+
+class RoomCreateRequest(BaseModel):
+    """Create room request"""
+    name: str = Field(..., min_length=1, max_length=100)
+    member_ids: list[str] = Field(..., min_items=1)
+
+
+class RoomUpdateRequest(BaseModel):
+    """Update room request"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+
+
+class RoomResponse(BaseModel):
+    """Room response"""
+    id: str
+    name: Optional[str] = None
+    type: RoomType
+    my_role: Optional[MemberRole] = None
+    my_ai_mode: Optional[AIMode] = None
+    last_read_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
+class RoomsListResponse(BaseModel):
+    """Rooms list response"""
+    rooms: list[RoomResponse]
+
+
+class RoomMemberResponse(BaseModel):
+    """Room member response"""
+    user_id: str
+    display_name: str
+    avatar_url: Optional[str] = None
+    role: MemberRole
+    ai_mode: AIMode
+    joined_at: datetime
+
+
+class RoomMembersListResponse(BaseModel):
+    """Room members list response"""
+    members: list[RoomMemberResponse]
+
+
+class AddMemberRequest(BaseModel):
+    """Add member request"""
+    user_id: str
+
+
+# ==================== Message Schemas ====================
+
+class MessageSendRequest(BaseModel):
+    """Send message request"""
+    content: str = Field(..., min_length=1, max_length=10000)
+
+
+class MessageResponse(BaseModel):
+    """Message response"""
+    id: str
+    room_id: str
+    sender_id: Optional[str] = None
+    sender_name: str
+    sender_type: SenderType
+    content: str
+    created_at: datetime
+
+
+class MessagesListResponse(BaseModel):
+    """Messages list response"""
+    messages: list[MessageResponse]
+
+
+class ReadMarkResponse(BaseModel):
+    """Read mark response"""
+    success: bool
+    read_at: datetime
+
+
+# ==================== AI Settings Schemas ====================
+
+class AISettingsResponse(BaseModel):
+    """AI settings response"""
+    room_id: str
+    enabled: bool
+    mode: AIMode
+    personality: Optional[str] = None
+    auto_reply_delay_ms: int
+
+
+class AISettingsUpdateRequest(BaseModel):
+    """Update AI settings request"""
+    enabled: Optional[bool] = None
+    mode: Optional[AIMode] = None
+    personality: Optional[str] = None
+    auto_reply_delay_ms: Optional[int] = Field(None, ge=0, le=30000)
+
+
+class AISummaryResponse(BaseModel):
+    """AI summary response"""
+    summary: str
+    message_count: int
+    last_message_at: Optional[datetime] = None

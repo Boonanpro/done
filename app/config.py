@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     # Encryption
     ENCRYPTION_KEY: str = ""
     
+    # JWT Settings
+    JWT_SECRET_KEY: str = ""  # Falls back to APP_SECRET_KEY if empty
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
