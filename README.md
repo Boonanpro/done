@@ -22,8 +22,8 @@
 |-----|-----|------|
 | ユーザー登録 | `POST /api/v1/chat/register` | ✅ 動作確認済み |
 | ログイン | `POST /api/v1/chat/login` | ✅ 動作確認済み |
-| プロフィール取得 | `GET /api/v1/chat/me` | 🔧 実装済み・テスト待ち |
-| プロフィール更新 | `PATCH /api/v1/chat/me` | 🔧 実装済み・テスト待ち |
+| プロフィール取得 | `GET /api/v1/chat/me` | ✅ 動作確認済み |
+| プロフィール更新 | `PATCH /api/v1/chat/me` | ✅ 動作確認済み |
 | 招待リンク発行 | `POST /api/v1/chat/invite` | 🔧 実装済み・テスト待ち |
 | 招待情報取得 | `GET /api/v1/chat/invite/{code}` | 🔧 実装済み・テスト待ち |
 | 招待承諾 | `POST /api/v1/chat/invite/{code}/accept` | 🔧 実装済み・テスト待ち |
