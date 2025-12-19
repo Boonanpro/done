@@ -127,7 +127,7 @@ class FriendsListResponse(BaseModel):
 class RoomCreateRequest(BaseModel):
     """Create room request"""
     name: str = Field(..., min_length=1, max_length=100)
-    member_ids: list[str] = Field(..., min_items=1)
+    member_ids: list[str] = Field(..., min_length=1)
 
 
 class RoomUpdateRequest(BaseModel):
