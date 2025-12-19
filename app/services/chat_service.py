@@ -2,11 +2,30 @@
 Chat Service - Business Logic for Done Chat
 """
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import secrets
+import re
 
 from app.services.supabase_client import get_supabase_client
 from app.services.auth_service import get_password_hash, verify_password
+
+
+def parse_datetime(dt_str: str) -> datetime:
+    """Parse ISO format datetime string with variable microsecond precision"""
+    if not dt_str:
+        return None
+    # Replace Z with +00:00 for timezone
+    dt_str = dt_str.replace("Z", "+00:00")
+    # Normalize microseconds to 6 digits (Python requires exactly 6)
+    match = re.match(r"(.+\.\d{1,6})(\d*)(\+.*)?$", dt_str)
+    if match:
+        base, extra, tz = match.groups()
+        # Pad to 6 digits if needed
+        base_parts = base.rsplit(".", 1)
+        if len(base_parts) == 2:
+            microsec = base_parts[1].ljust(6, "0")[:6]
+            dt_str = f"{base_parts[0]}.{microsec}{tz or ''}"
+    return datetime.fromisoformat(dt_str)
 
 
 def generate_invite_code(length: int = 8) -> str:
@@ -131,7 +150,7 @@ class ChatService:
         
         # Check if expired
         if invite.get("expires_at"):
-            expires_at = datetime.fromisoformat(invite["expires_at"].replace("Z", "+00:00"))
+            expires_at = parse_datetime(invite["expires_at"])
             if datetime.utcnow().replace(tzinfo=expires_at.tzinfo) > expires_at:
                 raise ValueError("Invite has expired")
         

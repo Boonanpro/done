@@ -4,6 +4,26 @@ Chat API Routes for Done Chat
 from fastapi import APIRouter, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
+from datetime import datetime
+import re
+
+
+def parse_datetime(dt_str: str) -> datetime:
+    """Parse ISO format datetime string with variable microsecond precision"""
+    if not dt_str:
+        return None
+    # Replace Z with +00:00 for timezone
+    dt_str = dt_str.replace("Z", "+00:00")
+    # Normalize microseconds to 6 digits (Python requires exactly 6)
+    match = re.match(r"(.+\.\d{1,6})(\d*)(\+.*)?$", dt_str)
+    if match:
+        base, extra, tz = match.groups()
+        # Pad to 6 digits if needed
+        base_parts = base.rsplit(".", 1)
+        if len(base_parts) == 2:
+            microsec = base_parts[1].ljust(6, "0")[:6]
+            dt_str = f"{base_parts[0]}.{microsec}{tz or ''}"
+    return datetime.fromisoformat(dt_str)
 
 from app.services.auth_service import decode_access_token, create_access_token, TokenData
 from app.services.chat_service import ChatService
@@ -160,8 +180,7 @@ async def get_invite(
     # Check if valid
     is_valid = True
     if invite.get("expires_at"):
-        from datetime import datetime
-        expires_at = datetime.fromisoformat(invite["expires_at"].replace("Z", "+00:00"))
+        expires_at = parse_datetime(invite["expires_at"])
         if datetime.utcnow().replace(tzinfo=expires_at.tzinfo) > expires_at:
             is_valid = False
     if invite["use_count"] >= invite["max_uses"]:
