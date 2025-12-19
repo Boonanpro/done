@@ -105,7 +105,7 @@ def room_id(client, auth_token, friend_id):
 
 @pytest.fixture
 def another_friend_id(client, auth_token):
-    """追加メンバー用の友達ID"""
+    """追加メンバー用の友達ID（another_user自体のID）"""
     import uuid
     unique_email = f"another_{uuid.uuid4().hex[:8]}@example.com"
     
@@ -129,6 +129,13 @@ def another_friend_id(client, auth_token):
     )
     another_token = login_response.json()["access_token"]
     
+    # Get another_user's own ID via /chat/me
+    me_response = client.get(
+        "/api/v1/chat/me",
+        headers={"Authorization": f"Bearer {another_token}"}
+    )
+    another_user_id = me_response.json()["id"]
+    
     # Create invite from auth user
     invite_response = client.post(
         "/api/v1/chat/invite",
@@ -137,9 +144,11 @@ def another_friend_id(client, auth_token):
     )
     code = invite_response.json()["code"]
     
-    # Accept invite
-    accept_response = client.post(
+    # Accept invite (make them friends)
+    client.post(
         f"/api/v1/chat/invite/{code}/accept",
         headers={"Authorization": f"Bearer {another_token}"}
     )
-    return accept_response.json()["friend_id"]
+    
+    # Return another_user's ID
+    return another_user_id
