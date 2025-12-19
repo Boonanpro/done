@@ -4,8 +4,9 @@
 
 ## 開発状況
 
-### ✅ 動作確認済み（2024年12月18日）
+### ✅ 動作確認済み（2024年12月19日）
 
+#### Phase 1: Core Flow
 | 機能 | API | 状態 |
 |-----|-----|------|
 | タスク一覧を見る | `GET /api/v1/tasks` | ✅ 動作確認済み |
@@ -15,6 +16,32 @@
 | ヘルスチェック | `GET /` | ✅ 動作確認済み |
 | 日本語アクションファースト提案 | `POST /api/v1/wish` | ✅ 動作確認済み |
 | LINE Webhook | `POST /webhook/line` | ⏸️ LINE設定後にテスト可能 |
+
+#### Phase 2: Done Chat（AIネイティブチャット）
+| 機能 | API | 状態 |
+|-----|-----|------|
+| ユーザー登録 | `POST /api/v1/chat/register` | ✅ 動作確認済み |
+| ログイン | `POST /api/v1/chat/login` | ✅ 動作確認済み |
+| プロフィール取得 | `GET /api/v1/chat/me` | 🔧 実装済み・テスト待ち |
+| プロフィール更新 | `PATCH /api/v1/chat/me` | 🔧 実装済み・テスト待ち |
+| 招待リンク発行 | `POST /api/v1/chat/invite` | 🔧 実装済み・テスト待ち |
+| 招待情報取得 | `GET /api/v1/chat/invite/{code}` | 🔧 実装済み・テスト待ち |
+| 招待承諾 | `POST /api/v1/chat/invite/{code}/accept` | 🔧 実装済み・テスト待ち |
+| 友達一覧 | `GET /api/v1/chat/friends` | 🔧 実装済み・テスト待ち |
+| 友達削除 | `DELETE /api/v1/chat/friends/{id}` | 🔧 実装済み・テスト待ち |
+| ルーム一覧 | `GET /api/v1/chat/rooms` | 🔧 実装済み・テスト待ち |
+| ルーム作成 | `POST /api/v1/chat/rooms` | 🔧 実装済み・テスト待ち |
+| ルーム詳細 | `GET /api/v1/chat/rooms/{id}` | 🔧 実装済み・テスト待ち |
+| ルーム更新 | `PATCH /api/v1/chat/rooms/{id}` | 🔧 実装済み・テスト待ち |
+| メンバー一覧 | `GET /api/v1/chat/rooms/{id}/members` | 🔧 実装済み・テスト待ち |
+| メンバー追加 | `POST /api/v1/chat/rooms/{id}/members` | 🔧 実装済み・テスト待ち |
+| メッセージ送信 | `POST /api/v1/chat/rooms/{id}/messages` | 🔧 実装済み・テスト待ち |
+| メッセージ取得 | `GET /api/v1/chat/rooms/{id}/messages` | 🔧 実装済み・テスト待ち |
+| 既読マーク | `POST /api/v1/chat/rooms/{id}/read` | 🔧 実装済み・テスト待ち |
+| AI設定取得 | `GET /api/v1/chat/rooms/{id}/ai` | 🔧 実装済み・テスト待ち |
+| AI設定更新 | `PATCH /api/v1/chat/rooms/{id}/ai` | 🔧 実装済み・テスト待ち |
+| AI要約取得 | `GET /api/v1/chat/rooms/{id}/ai/summary` | 🔧 実装済み・テスト待ち |
+| WebSocket | `WS /ws/chat` | ❌ 未実装 |
 
 ### 🔧 現在の状態
 

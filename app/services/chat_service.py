@@ -18,7 +18,7 @@ class ChatService:
     """Done Chat business logic"""
     
     def __init__(self):
-        self.supabase = get_supabase_client()
+        self.supabase = get_supabase_client().client  # Use the underlying supabase client
     
     # ==================== User Management ====================
     
