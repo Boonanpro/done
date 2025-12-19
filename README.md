@@ -26,7 +26,7 @@
 | プロフィール更新 | `PATCH /api/v1/chat/me` | ✅ 動作確認済み |
 | 招待リンク発行 | `POST /api/v1/chat/invite` | ✅ 動作確認済み |
 | 招待情報取得 | `GET /api/v1/chat/invite/{code}` | ✅ 動作確認済み |
-| 招待承諾 | `POST /api/v1/chat/invite/{code}/accept` | 🔧 実装済み・テスト待ち |
+| 招待承諾 | `POST /api/v1/chat/invite/{code}/accept` | ✅ 動作確認済み |
 | 友達一覧 | `GET /api/v1/chat/friends` | 🔧 実装済み・テスト待ち |
 | 友達削除 | `DELETE /api/v1/chat/friends/{id}` | 🔧 実装済み・テスト待ち |
 | ルーム一覧 | `GET /api/v1/chat/rooms` | 🔧 実装済み・テスト待ち |
