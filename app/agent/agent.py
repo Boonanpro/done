@@ -13,8 +13,11 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 
 from app.config import settings
-from app.models.schemas import TaskStatus, TaskType, TaskResponse
+from app.models.schemas import TaskStatus, TaskType, TaskResponse, SearchResultCategory
 from app.tools import get_tools, get_available_tool_names
+from app.tools.tavily_search import tavily_search
+from app.tools.travel_search import search_train, search_bus, search_flight
+from app.tools.product_search import search_amazon, search_products
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,7 @@ class AgentState(TypedDict):
     requires_confirmation: bool
     execution_result: Optional[dict[str, Any]]
     status: TaskStatus
+    search_results: list[dict]  # Phase 3A: 検索結果を保存
 
 
 class AISecretaryAgent:
@@ -206,11 +210,18 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
         
         # Extract task type (simple implementation)
         content = response.content.lower()
+        wish_lower = state["original_wish"].lower()
+        
         if "email" in content:
             task_type = TaskType.EMAIL
         elif "line" in content:
             task_type = TaskType.LINE
-        elif "purchase" in content or "buy" in content:
+        elif "travel" in content or "train" in content or "shinkansen" in content or \
+             "新幹線" in wish_lower or "電車" in wish_lower or "飛行機" in wish_lower or \
+             "バス" in wish_lower or "予約" in wish_lower:
+            task_type = TaskType.TRAVEL
+        elif "purchase" in content or "buy" in content or \
+             "買いたい" in wish_lower or "欲しい" in wish_lower or "購入" in wish_lower:
             task_type = TaskType.PURCHASE
         elif "payment" in content or "pay" in content or "bill" in content:
             task_type = TaskType.PAYMENT
@@ -226,17 +237,104 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
             "messages": state["messages"] + [response],
         }
     
+    async def _search_for_proposal(self, wish: str, task_type: TaskType) -> list[dict]:
+        """
+        Phase 3A: タスクタイプに応じて実際の検索を行う
+        
+        Args:
+            wish: ユーザーの願望
+            task_type: タスクタイプ
+            
+        Returns:
+            検索結果のリスト（SearchResult形式）
+        """
+        search_results = []
+        
+        try:
+            # タスクタイプに応じて検索ツールを選択
+            if task_type == TaskType.TRAVEL:
+                # 交通関連: 駅名や日時を抽出して検索
+                # TODO: より高度な抽出ロジック
+                search_results = await search_train.ainvoke({
+                    "departure": "東京",  # 仮のデフォルト
+                    "arrival": "大阪",
+                })
+                
+            elif task_type == TaskType.PURCHASE:
+                # 購入関連: 商品名を抽出して検索
+                # 願望からキーワードを抽出（簡易実装）
+                keywords = wish.replace("買いたい", "").replace("欲しい", "").replace("購入", "").strip()
+                if keywords:
+                    search_results = await search_amazon.ainvoke({
+                        "query": keywords,
+                        "max_results": 5
+                    })
+                    
+            elif task_type == TaskType.RESEARCH:
+                # 調査関連: Tavily検索
+                search_results = await tavily_search.ainvoke({
+                    "query": wish,
+                    "max_results": 5
+                })
+                
+            else:
+                # その他: 汎用Web検索
+                search_results = await tavily_search.ainvoke({
+                    "query": wish,
+                    "max_results": 3
+                })
+                
+        except Exception as e:
+            logger.warning(f"Search failed: {e}")
+            # 検索失敗時は空のリストを返す（フォールバック）
+            search_results = []
+        
+        # エラー結果を除外
+        search_results = [r for r in search_results if not r.get("error")]
+        
+        return search_results
+    
+    def _format_search_results_for_prompt(self, search_results: list[dict]) -> str:
+        """検索結果をプロンプト用にフォーマット"""
+        if not search_results:
+            return "（検索結果なし - AIの推測で提案します）"
+        
+        formatted = []
+        for i, r in enumerate(search_results[:5], 1):
+            title = r.get("title", "不明")
+            price = r.get("price")
+            url = r.get("url", "")
+            details = r.get("details", {})
+            
+            line = f"{i}. {title}"
+            if price:
+                line += f" - ¥{price:,}"
+            if details.get("source"):
+                line += f" ({details['source']})"
+            formatted.append(line)
+        
+        return "\n".join(formatted)
+    
     async def _propose_actions(self, state: AgentState) -> AgentState:
         """Propose actions to execute"""
         wish = state["original_wish"]
         task_type = state["task_type"]
+        
+        # Phase 3A: 実際の検索を行う
+        search_results = await self._search_for_proposal(wish, task_type)
+        search_results_text = self._format_search_results_for_prompt(search_results)
         
         proposal_prompt = f"""Propose a specific action for the following user request using Action First principle.
 
 User request: {wish}
 Task type: {task_type}
 
+## Real Search Results (use these for your proposal)
+{search_results_text}
+
 Important rules:
+- **Use the search results above** to make specific proposals with real data
+- If search results are available, reference actual products/services/prices
 - Never respond with questions (e.g., "What kind of X do you want?" is NOT allowed)
 - Make assumptions and propose specific actions even with incomplete information
 - List assumptions in [NOTES] so user can correct them
@@ -247,7 +345,7 @@ Respond in this format:
 (What you will do specifically)
 
 [DETAILS]
-(Specific content: message text, booking details, items to purchase, etc.)
+(Specific content based on search results: actual products, real prices, real options)
 
 [NOTES]
 (Assumptions made, points that can be corrected)"""
@@ -283,6 +381,7 @@ Respond in this format:
             "requires_confirmation": requires_confirmation,
             "status": TaskStatus.PROPOSED,
             "messages": state["messages"] + [response],
+            "search_results": search_results,  # Phase 3A: 検索結果を保存
             # 詳細なレスポンスも保存
             "execution_result": {"full_proposal": content},
         }
@@ -345,6 +444,7 @@ Use the available tools to execute."""
             "requires_confirmation": False,
             "execution_result": None,
             "status": TaskStatus.PENDING,
+            "search_results": [],  # Phase 3A: 検索結果
         }
         
         # Execute graph
@@ -360,6 +460,7 @@ Use the available tools to execute."""
                 "original_wish": wish,
                 "proposed_actions": final_state["proposed_actions"],
                 "execution_result": final_state["execution_result"],
+                "search_results": final_state.get("search_results", []),  # Phase 3A
                 "created_at": datetime.utcnow(),
             }
             # デバッグ: タスクが保存されたことを確認
@@ -385,6 +486,7 @@ Use the available tools to execute."""
             "proposed_actions": final_state["proposed_actions"],
             "proposal_detail": proposal_detail,
             "requires_confirmation": final_state["requires_confirmation"],
+            "search_results": final_state.get("search_results", []),  # Phase 3A: 検索結果
         }
     
     async def execute_task(self, task_id: str) -> dict[str, Any]:
