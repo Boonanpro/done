@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # Encryption
     ENCRYPTION_KEY: str = ""
     
+    # Tavily API (Smart Search)
+    TAVILY_API_KEY: str = ""
+    
     # JWT Settings
     JWT_SECRET_KEY: str = ""  # Falls back to APP_SECRET_KEY if empty
     JWT_ALGORITHM: str = "HS256"

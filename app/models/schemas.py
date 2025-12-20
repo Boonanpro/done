@@ -27,7 +27,19 @@ class TaskType(str, Enum):
     PURCHASE = "purchase"
     PAYMENT = "payment"
     RESEARCH = "research"
+    TRAVEL = "travel"
     OTHER = "other"
+
+
+class SearchResultCategory(str, Enum):
+    """検索結果のカテゴリ"""
+    TRAIN = "train"
+    BUS = "bus"
+    FLIGHT = "flight"
+    PRODUCT = "product"
+    RESTAURANT = "restaurant"
+    PROFESSIONAL = "professional"
+    GENERAL = "general"
 
 
 class User(BaseModel):
@@ -123,4 +135,19 @@ class PaymentRequest(BaseModel):
     description: Optional[str] = None
     due_date: Optional[datetime] = None
     payment_method: Optional[str] = None
+
+
+class SearchResult(BaseModel):
+    """検索結果（Phase 3A: Smart Proposal用）"""
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    category: SearchResultCategory
+    title: str
+    url: Optional[str] = None
+    price: Optional[int] = None
+    status: Optional[str] = None  # "available", "limited", "sold_out"
+    details: dict[str, Any] = Field(default_factory=dict)
+    execution_params: dict[str, Any] = Field(default_factory=dict)
+    
+    class Config:
+        from_attributes = True
 

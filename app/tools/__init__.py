@@ -19,6 +19,10 @@ from app.tools.line_tool import (
 from app.tools.search import (
     search_web,
 )
+from app.tools.tavily_search import (
+    tavily_search,
+    search_with_tavily,
+)
 
 
 # ツール名とツールのマッピング
@@ -32,6 +36,7 @@ TOOL_REGISTRY = {
     "read_email": read_email,
     "send_line_message": send_line_message,
     "search_web": search_web,
+    "tavily_search": tavily_search,
 }
 
 
@@ -81,5 +86,7 @@ __all__ = [
     "read_email",
     "send_line_message",
     "search_web",
+    "tavily_search",
+    "search_with_tavily",
 ]
 
