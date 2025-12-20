@@ -28,6 +28,12 @@ from app.tools.travel_search import (
     search_bus,
     search_flight,
 )
+from app.tools.product_search import (
+    search_amazon,
+    search_rakuten,
+    search_kakaku,
+    search_products,
+)
 
 
 # ツール名とツールのマッピング
@@ -45,6 +51,10 @@ TOOL_REGISTRY = {
     "search_train": search_train,
     "search_bus": search_bus,
     "search_flight": search_flight,
+    "search_amazon": search_amazon,
+    "search_rakuten": search_rakuten,
+    "search_kakaku": search_kakaku,
+    "search_products": search_products,
 }
 
 
@@ -99,5 +109,9 @@ __all__ = [
     "search_train",
     "search_bus",
     "search_flight",
+    "search_amazon",
+    "search_rakuten",
+    "search_kakaku",
+    "search_products",
 ]
 
