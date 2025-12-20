@@ -23,6 +23,11 @@ from app.tools.tavily_search import (
     tavily_search,
     search_with_tavily,
 )
+from app.tools.travel_search import (
+    search_train,
+    search_bus,
+    search_flight,
+)
 
 
 # ツール名とツールのマッピング
@@ -37,6 +42,9 @@ TOOL_REGISTRY = {
     "send_line_message": send_line_message,
     "search_web": search_web,
     "tavily_search": tavily_search,
+    "search_train": search_train,
+    "search_bus": search_bus,
+    "search_flight": search_flight,
 }
 
 
@@ -88,5 +96,8 @@ __all__ = [
     "search_web",
     "tavily_search",
     "search_with_tavily",
+    "search_train",
+    "search_bus",
+    "search_flight",
 ]
 
