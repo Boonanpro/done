@@ -38,7 +38,7 @@
 | メッセージ送信 | `POST /api/v1/chat/rooms/{id}/messages` | ✅ 動作確認済み |
 | メッセージ取得 | `GET /api/v1/chat/rooms/{id}/messages` | ✅ 動作確認済み |
 | 既読マーク | `POST /api/v1/chat/rooms/{id}/read` | ✅ 動作確認済み |
-| AI設定取得 | `GET /api/v1/chat/rooms/{id}/ai` | 🔧 実装済み・テスト待ち |
+| AI設定取得 | `GET /api/v1/chat/rooms/{id}/ai` | ✅ 動作確認済み |
 | AI設定更新 | `PATCH /api/v1/chat/rooms/{id}/ai` | 🔧 実装済み・テスト待ち |
 | AI要約取得 | `GET /api/v1/chat/rooms/{id}/ai/summary` | 🔧 実装済み・テスト待ち |
 | WebSocket | `WS /ws/chat` | ❌ 未実装 |
