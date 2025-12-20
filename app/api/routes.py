@@ -35,6 +35,7 @@ class WishResponse(BaseModel):
     proposed_actions: list[str]
     proposal_detail: Optional[str] = None  # 【アクション】【詳細】【補足】の全内容
     requires_confirmation: bool
+    search_results: list[dict] = []  # Phase 3A: 検索結果（商品情報、交通情報など）
 
 
 @router.post("/wish", response_model=WishResponse)
@@ -68,6 +69,7 @@ async def process_wish(request: WishRequest):
             proposed_actions=result["proposed_actions"],
             proposal_detail=result.get("proposal_detail"),
             requires_confirmation=result["requires_confirmation"],
+            search_results=result.get("search_results", []),  # Phase 3A
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
