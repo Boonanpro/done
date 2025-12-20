@@ -1,11 +1,12 @@
 """
 Chat API Routes for Done Chat
 """
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 from datetime import datetime
 import re
+import json
 
 
 def parse_datetime(dt_str: str) -> datetime:
@@ -433,3 +434,181 @@ async def get_ai_summary(
         return AISummaryResponse(**summary)
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
+
+
+# ==================== WebSocket ====================
+
+class ConnectionManager:
+    """WebSocket接続マネージャー"""
+    
+    def __init__(self):
+        # room_id -> {user_id -> WebSocket}
+        self.active_connections: dict[str, dict[str, WebSocket]] = {}
+    
+    def add_connection(self, room_id: str, user_id: str, websocket: WebSocket):
+        """WebSocket接続を追加する"""
+        if room_id not in self.active_connections:
+            self.active_connections[room_id] = {}
+        self.active_connections[room_id][user_id] = websocket
+    
+    def disconnect(self, room_id: str, user_id: str):
+        """WebSocket接続を解除する"""
+        if room_id in self.active_connections:
+            self.active_connections[room_id].pop(user_id, None)
+            if not self.active_connections[room_id]:
+                del self.active_connections[room_id]
+    
+    async def send_personal_message(self, message: dict, websocket: WebSocket):
+        """特定のWebSocketにメッセージを送信"""
+        await websocket.send_json(message)
+    
+    async def broadcast_to_room(self, room_id: str, message: dict, exclude_user_id: str = None):
+        """ルーム内の全員にメッセージをブロードキャスト"""
+        if room_id in self.active_connections:
+            for user_id, connection in self.active_connections[room_id].items():
+                if exclude_user_id and user_id == exclude_user_id:
+                    continue
+                try:
+                    await connection.send_json(message)
+                except Exception:
+                    pass  # 接続が切れている場合は無視
+
+
+# グローバルな接続マネージャー
+manager = ConnectionManager()
+
+
+@router.websocket("/ws/chat")
+async def websocket_chat(websocket: WebSocket):
+    """
+    WebSocketチャットエンドポイント
+    
+    接続時: { "type": "auth", "token": "JWT_TOKEN" }
+    ルーム参加: { "type": "join", "room_id": "..." }
+    メッセージ送信: { "type": "message", "room_id": "...", "content": "..." }
+    退出: { "type": "leave", "room_id": "..." }
+    """
+    user_id = None
+    current_room_id = None
+    service = None
+    
+    try:
+        # まず接続を受け入れる
+        await websocket.accept()
+        
+        # サービスを初期化
+        service = ChatService()
+        
+        # 認証を待つ
+        auth_data = await websocket.receive_json()
+        if auth_data.get("type") != "auth" or "token" not in auth_data:
+            await websocket.send_json({"type": "error", "message": "Authentication required"})
+            await websocket.close()
+            return
+        
+        # トークン検証
+        token_data = decode_access_token(auth_data["token"])
+        if not token_data:
+            await websocket.send_json({"type": "error", "message": "Invalid or expired token"})
+            await websocket.close()
+            return
+        
+        user_id = token_data.user_id
+        await websocket.send_json({"type": "auth_success", "user_id": user_id})
+        
+        # メッセージループ
+        while True:
+            data = await websocket.receive_json()
+            msg_type = data.get("type")
+            
+            if msg_type == "join":
+                # ルームに参加
+                room_id = data.get("room_id")
+                if not room_id:
+                    await websocket.send_json({"type": "error", "message": "room_id required"})
+                    continue
+                
+                # ルームメンバーか確認
+                is_member = await service.is_room_member(room_id, user_id)
+                if not is_member:
+                    await websocket.send_json({"type": "error", "message": "Not a member of this room"})
+                    continue
+                
+                # 以前のルームから退出
+                if current_room_id:
+                    manager.disconnect(current_room_id, user_id)
+                
+                # 新しいルームに参加
+                current_room_id = room_id
+                manager.add_connection(room_id, user_id, websocket)
+                
+                await websocket.send_json({"type": "joined", "room_id": room_id})
+                
+                # 他のメンバーに通知
+                await manager.broadcast_to_room(
+                    room_id,
+                    {"type": "user_joined", "user_id": user_id, "room_id": room_id},
+                    exclude_user_id=user_id
+                )
+            
+            elif msg_type == "message":
+                # メッセージ送信
+                room_id = data.get("room_id") or current_room_id
+                content = data.get("content")
+                
+                if not room_id or not content:
+                    await websocket.send_json({"type": "error", "message": "room_id and content required"})
+                    continue
+                
+                # メッセージをDBに保存
+                try:
+                    message = await service.send_message(room_id, user_id, content)
+                    
+                    # ルーム内の全員にブロードキャスト
+                    await manager.broadcast_to_room(
+                        room_id,
+                        {
+                            "type": "new_message",
+                            "message": {
+                                "id": message["id"],
+                                "room_id": message["room_id"],
+                                "sender_id": message["sender_id"],
+                                "sender_name": message["sender_name"],
+                                "sender_type": message["sender_type"],
+                                "content": message["content"],
+                                "created_at": message["created_at"],
+                            }
+                        }
+                    )
+                except ValueError as e:
+                    await websocket.send_json({"type": "error", "message": str(e)})
+            
+            elif msg_type == "leave":
+                # ルームから退出
+                room_id = data.get("room_id") or current_room_id
+                if room_id:
+                    manager.disconnect(room_id, user_id)
+                    await manager.broadcast_to_room(
+                        room_id,
+                        {"type": "user_left", "user_id": user_id, "room_id": room_id}
+                    )
+                    if current_room_id == room_id:
+                        current_room_id = None
+                    await websocket.send_json({"type": "left", "room_id": room_id})
+            
+            elif msg_type == "ping":
+                # キープアライブ
+                await websocket.send_json({"type": "pong"})
+    
+    except WebSocketDisconnect:
+        # 接続切断時の処理
+        if current_room_id and user_id:
+            manager.disconnect(current_room_id, user_id)
+            await manager.broadcast_to_room(
+                current_room_id,
+                {"type": "user_left", "user_id": user_id, "room_id": current_room_id}
+            )
+    except Exception as e:
+        # エラー時の処理
+        if current_room_id and user_id:
+            manager.disconnect(current_room_id, user_id)

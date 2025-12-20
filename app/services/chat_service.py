@@ -513,6 +513,11 @@ class ChatService:
             "last_message_at": messages[0]["created_at"] if messages else None,
         }
 
+    async def is_room_member(self, room_id: str, user_id: str) -> bool:
+        """Check if user is a member of the room"""
+        member = self.supabase.table("chat_room_members").select("id").eq("room_id", room_id).eq("user_id", user_id).execute()
+        return bool(member.data)
+
 
 # Import timedelta for invite expiration
 from datetime import timedelta
