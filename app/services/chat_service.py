@@ -399,16 +399,22 @@ class ChatService:
         member = self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", sender_id).execute()
         if not member.data:
             raise ValueError("Not a member of this room")
-        
+
+        # Get sender info
+        sender = self.supabase.table("chat_users").select("display_name").eq("id", sender_id).execute()
+        sender_name = sender.data[0]["display_name"] if sender.data else "Unknown"
+
         result = self.supabase.table("chat_messages").insert({
             "room_id": room_id,
             "sender_id": sender_id,
             "sender_type": sender_type,
             "content": content,
         }).execute()
-        
+
         if result.data:
-            return result.data[0]
+            msg = result.data[0]
+            msg["sender_name"] = sender_name
+            return msg
         raise ValueError("Failed to send message")
     
     async def get_messages(self, room_id: str, user_id: str, limit: int = 50, before: Optional[str] = None) -> list[dict]:

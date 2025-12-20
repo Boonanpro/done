@@ -41,7 +41,7 @@
 | AI設定取得 | `GET /api/v1/chat/rooms/{id}/ai` | ✅ 動作確認済み |
 | AI設定更新 | `PATCH /api/v1/chat/rooms/{id}/ai` | ✅ 動作確認済み |
 | AI要約取得 | `GET /api/v1/chat/rooms/{id}/ai/summary` | ✅ 動作確認済み |
-| WebSocket | `WS /api/v1/ws/chat` | ✅ 実装済み |
+| WebSocket | `WS /api/v1/chat/ws/chat` | ✅ 動作確認済み |
 
 ### 🔧 現在の状態
 

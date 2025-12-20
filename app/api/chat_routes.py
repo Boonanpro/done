@@ -555,15 +555,15 @@ async def websocket_chat(websocket: WebSocket):
                 # メッセージ送信
                 room_id = data.get("room_id") or current_room_id
                 content = data.get("content")
-                
+
                 if not room_id or not content:
                     await websocket.send_json({"type": "error", "message": "room_id and content required"})
                     continue
-                
+
                 # メッセージをDBに保存
                 try:
                     message = await service.send_message(room_id, user_id, content)
-                    
+
                     # ルーム内の全員にブロードキャスト
                     await manager.broadcast_to_room(
                         room_id,
@@ -582,6 +582,8 @@ async def websocket_chat(websocket: WebSocket):
                     )
                 except ValueError as e:
                     await websocket.send_json({"type": "error", "message": str(e)})
+                except Exception as e:
+                    await websocket.send_json({"type": "error", "message": f"Server error: {str(e)}"})
             
             elif msg_type == "leave":
                 # ルームから退出
