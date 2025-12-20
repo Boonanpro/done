@@ -45,16 +45,52 @@ Done：便を検索して提案                    │
 
 ## Phase 3Aとの連携ポイント
 
+### 検索サイトと購入サイトの分離
+
+**重要**: 検索に使うサイトと実際に予約・購入するサイトは異なる場合がある。
+
+| カテゴリ | 検索サイト（Phase 3A） | 購入/予約サイト（Phase 3B） |
+|---------|----------------------|---------------------------|
+| 新幹線 | Yahoo!乗換案内 | EX予約、スマートEX、えきねっと |
+| 高速バス | 高速バスネット | 高速バスネット（同一） |
+| 航空券 | Skyscanner | 各航空会社サイト（JAL、ANA等） |
+| 商品 | 価格.com | Amazon、楽天（商品ページ直リンク） |
+| 商品 | Amazon/楽天 | Amazon/楽天（同一） |
+
+### 対応方針
+
+1. **検索結果のURLは「情報元」として保持**
+   - `url`: 検索結果の情報元URL（Yahoo!乗換案内など）
+   
+2. **購入先URLは`execution_params`で別途保持**
+   - `execution_params.booking_url`: 実際に予約・購入するURL
+   - `execution_params.service_name`: 使用するサービス名（"ex_reservation"等）
+
+3. **Phase 3B実行時のURL解決ロジック**
+   ```
+   if execution_params.booking_url exists:
+       → そのURLにアクセス
+   elif category == "train":
+       → EX予約/えきねっとのURLを生成（出発地・到着地・日時から）
+   elif category == "product" and url contains amazon/rakuten:
+       → そのままurlを使用（直接購入可能）
+   elif category == "product" and url contains kakaku:
+       → 最安ショップのURLを取得
+   else:
+       → urlにアクセス
+   ```
+
 ### 検索時に取得すべき情報（Phase 3Aで対応）
 
 Phase 3Bの実行に必要な情報を、Phase 3Aの検索段階で取得しておく：
 
 | カテゴリ | 検索時に取得 | 実行時に使用 |
 |---------|------------|-------------|
-| 新幹線 | 便名、時刻、予約URL | URLを開いて予約フォーム入力 |
+| 新幹線 | 便名、時刻、出発地、到着地、日付 | EX予約で検索・予約 |
 | 高速バス | 便名、時刻、予約URL、空席状況 | URLを開いて予約フォーム入力 |
-| 航空機 | 便名、時刻、予約URL、価格 | URLを開いて予約フォーム入力 |
-| 商品 | 商品名、価格、商品URL | URLを開いてカートに入れる |
+| 航空機 | 便名、時刻、航空会社、価格 | 航空会社サイトで予約 |
+| 商品（Amazon/楽天） | 商品名、価格、商品URL | URLを開いてカートに入れる |
+| 商品（価格.com） | 商品名、価格、最安ショップURL | ショップURLを開いてカートに入れる |
 | 専門家 | 事務所名、問い合わせURL | URLを開いてフォーム入力 |
 
 ### 共通データ構造
@@ -70,12 +106,12 @@ class SearchResult:
     details: dict              # カテゴリ固有の詳細情報
     execution_params: dict     # 実行時に必要なパラメータ ← 重要
 
-# 例: 新幹線の場合
+# 例: 新幹線の場合（Yahoo!乗換案内で検索 → EX予約で予約）
 {
     "id": "train_001",
     "category": "train",
     "title": "のぞみ47号 17:00発",
-    "url": "https://expy.jp/...",
+    "url": "https://transit.yahoo.co.jp/...",  # 情報元（Yahoo!乗換案内）
     "price": 14500,
     "details": {
         "departure": "新大阪",
@@ -85,9 +121,60 @@ class SearchResult:
         "train_name": "のぞみ47号"
     },
     "execution_params": {
-        "form_selectors": {...},  # フォーム入力用セレクタ
+        "service_name": "ex_reservation",  # 予約に使うサービス
+        "booking_url": null,               # EX予約は動的に生成するためnull
         "requires_login": true,
-        "service_name": "ex_reservation"
+        "booking_params": {                # 予約時に使用するパラメータ
+            "departure_station": "新大阪",
+            "arrival_station": "博多",
+            "date": "2024-12-28",
+            "time": "17:00",
+            "train_type": "のぞみ"
+        }
+    }
+}
+
+# 例: Amazon商品の場合（検索と購入が同一サイト）
+{
+    "id": "product_001",
+    "category": "product",
+    "title": "MacBook Air M3",
+    "url": "https://www.amazon.co.jp/dp/XXXXX",  # 商品ページ（直接購入可能）
+    "price": 164800,
+    "details": {
+        "seller": "Amazon.co.jp",
+        "rating": 4.5,
+        "review_count": 1234
+    },
+    "execution_params": {
+        "service_name": "amazon",
+        "booking_url": "https://www.amazon.co.jp/dp/XXXXX",  # urlと同じ
+        "requires_login": true,
+        "booking_params": {
+            "asin": "XXXXX",
+            "quantity": 1
+        }
+    }
+}
+
+# 例: 価格.comで検索した商品（購入は別サイト）
+{
+    "id": "product_002",
+    "category": "product",
+    "title": "MacBook Air M3",
+    "url": "https://kakaku.com/item/XXXXX",  # 価格.comの商品ページ
+    "price": 158000,
+    "details": {
+        "lowest_price_shop": "ビックカメラ.com",
+        "lowest_price_url": "https://www.biccamera.com/..."
+    },
+    "execution_params": {
+        "service_name": "external_shop",
+        "booking_url": "https://www.biccamera.com/...",  # 最安ショップのURL
+        "requires_login": true,
+        "booking_params": {
+            "shop_name": "ビックカメラ.com"
+        }
     }
 }
 ```
