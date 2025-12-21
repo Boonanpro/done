@@ -4,7 +4,7 @@
 
 ## 開発状況
 
-### ✅ 動作確認済み（2024年12月19日）
+### ✅ 動作確認済み（2024年12月21日）
 
 #### Phase 1: Core Flow
 | 機能 | API | 状態 |
@@ -42,6 +42,15 @@
 | AI設定更新 | `PATCH /api/v1/chat/rooms/{id}/ai` | ✅ 動作確認済み |
 | AI要約取得 | `GET /api/v1/chat/rooms/{id}/ai/summary` | ✅ 動作確認済み |
 | WebSocket | `WS /api/v1/chat/ws/chat` | ✅ 動作確認済み |
+
+#### Phase 3B: Execution Engine（実行エンジン）
+| 機能 | API | 説明 | 状態 |
+|-----|-----|------|------|
+| ログイン情報を保存 | `POST /api/v1/credentials` | Amazon、新幹線予約サイトなどのログイン情報を暗号化して保存。毎回入力不要に | ✅ 動作確認済み |
+| 保存済みサービス一覧 | `GET /api/v1/credentials` | どのサービスのログイン情報が保存されているか確認 | ✅ 動作確認済み |
+| ログイン情報を削除 | `DELETE /api/v1/credentials/{service}` | 不要になったサービスのログイン情報を削除 | ✅ 動作確認済み |
+| 実行中にログイン情報提供 | `POST /api/v1/task/{id}/provide-credentials` | 「ログインが必要です」と言われた時にログイン情報を渡す | ✅ 動作確認済み |
+| 実行状況をリアルタイム確認 | `GET /api/v1/task/{id}/execution-status` | 予約・購入の進捗（ログイン中、入力中など）を確認 | ✅ 動作確認済み |
 
 ### 🔧 現在の状態
 
@@ -170,9 +179,14 @@ celery -A app.tasks.celery_app worker --loglevel=info --pool=solo
 |--------------|--------|------|
 | `/` | GET | ヘルスチェック |
 | `/api/v1/wish` | POST | 願望を処理 |
-| `/api/v1/task/{id}` | GET | タスク状態を取得 |　
+| `/api/v1/task/{id}` | GET | タスク状態を取得 |
 | `/api/v1/task/{id}/confirm` | POST | タスクを実行 |
+| `/api/v1/task/{id}/execution-status` | GET | 実行状況をリアルタイム取得 |
+| `/api/v1/task/{id}/provide-credentials` | POST | 実行中に認証情報を提供 |
 | `/api/v1/tasks` | GET | タスク一覧を取得 |
+| `/api/v1/credentials` | POST | 認証情報を保存 |
+| `/api/v1/credentials` | GET | 保存済みサービス一覧 |
+| `/api/v1/credentials/{service}` | DELETE | 認証情報を削除 |
 | `/webhook/line` | POST | LINE Webhook |
 
 ### 使用例
@@ -228,7 +242,12 @@ D:\Doneダン\
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── encryption.py  # 暗号化サービス
+│   │   ├── credentials_service.py # 認証情報管理（Phase 3B）
+│   │   ├── execution_service.py # 実行エンジン（Phase 3B）
 │   │   └── supabase_client.py # DB操作
+│   ├── executors/           # Phase 3B: サービス別実行ロジック
+│   │   ├── __init__.py
+│   │   └── base.py          # 共通実行ロジック・ファクトリー
 │   ├── tasks/
 │   │   ├── __init__.py
 │   │   ├── celery_app.py  # Celery設定
