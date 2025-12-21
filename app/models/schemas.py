@@ -213,7 +213,8 @@ class ProvideCredentialsRequest(BaseModel):
     """タスク実行中の認証情報提供リクエスト"""
     service: str
     credentials: dict[str, str]
-    save_credentials: bool = False  # 認証情報を保存するか
+    save_credentials: bool = True  # 認証情報を保存するか（デフォルトTrue）
+    is_new_registration: bool = False  # True: 新規登録、False: ログイン
 
 
 class ProvideCredentialsResponse(BaseModel):
@@ -221,6 +222,33 @@ class ProvideCredentialsResponse(BaseModel):
     task_id: str
     status: str
     message: str
+
+
+class AuthFieldInfo(BaseModel):
+    """フロントエンド表示用の認証フィールド情報"""
+    name: str  # フィールド名（email, password等）
+    label: str  # 表示ラベル（メールアドレス、パスワード等）
+    type: str  # input type（email, password, text等）
+    required: bool = True
+    placeholder: Optional[str] = None
+    default_value: Optional[str] = None  # 自動生成値（新規登録時のパスワード等）
+
+
+class AuthOptions(BaseModel):
+    """認証オプション（ログイン or 新規登録）"""
+    service: str  # サービス名（willer, amazon等）
+    service_display_name: str  # 表示名（WILLER、Amazon等）
+    
+    # ログイン用フィールド
+    login_fields: list[AuthFieldInfo] = Field(default_factory=list)
+    login_url: Optional[str] = None
+    
+    # 新規登録用フィールド（自動生成値を含む）
+    registration_fields: list[AuthFieldInfo] = Field(default_factory=list)
+    registration_url: Optional[str] = None
+    
+    # 自動生成されたパスワード（新規登録時のデフォルト値）
+    generated_password: Optional[str] = None
 
 
 class ExecutionProgress(BaseModel):
@@ -237,6 +265,7 @@ class ExecutionStatusResponse(BaseModel):
     status: ExecutionStatus
     progress: Optional[ExecutionProgress] = None
     required_service: Optional[str] = None  # 認証が必要なサービス
+    auth_options: Optional[AuthOptions] = None  # 認証オプション（ログイン/新規登録フィールド情報）
     execution_result: Optional[dict[str, Any]] = None
     error_message: Optional[str] = None
 

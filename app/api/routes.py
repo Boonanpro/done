@@ -163,26 +163,31 @@ DEFAULT_USER_ID = "default-user"
 @router.post("/task/{id}/provide-credentials", response_model=ProvideCredentialsResponse)
 async def provide_credentials(id: str, request: ProvideCredentialsRequest, user_id: Optional[str] = None):
     """
-    タスク実行中に認証情報を提供（awaiting_credentials状態のタスク用）
+    タスク実行中に認証情報を提供（ログインまたは新規登録）
     
-    Request:
+    ユーザーフロー：
+    1. execution-statusで status="awaiting_credentials" の場合、auth_options が返される
+    2. auth_options.login_fields でログインフォームを表示
+    3. auth_options.registration_fields で新規登録フォームを表示（自動生成パスワード付き）
+    4. ユーザーが選択したフローに応じて is_new_registration を設定
+    
+    Request（ログインの場合）:
     ```json
     {
-      "service": "ex_reservation",
-      "credentials": {
-        "email": "user@example.com",
-        "password": "secret123"
-      },
-      "save_credentials": true
+      "service": "willer",
+      "credentials": {"email": "user@example.com", "password": "secret123"},
+      "save_credentials": true,
+      "is_new_registration": false
     }
     ```
     
-    Response:
+    Request（新規登録の場合）:
     ```json
     {
-      "task_id": "uuid",
-      "status": "executing",
-      "message": "認証情報を受け取りました。実行を再開します。"
+      "service": "willer",
+      "credentials": {"email": "new@example.com", "password": "AutoGenPass123"},
+      "save_credentials": true,
+      "is_new_registration": true
     }
     ```
     """
@@ -197,12 +202,19 @@ async def provide_credentials(id: str, request: ProvideCredentialsRequest, user_
             service=request.service,
             credentials=request.credentials,
             save_credentials=request.save_credentials,
+            is_new_registration=request.is_new_registration,
         )
+        
+        # メッセージを分岐
+        if request.is_new_registration:
+            message = "新規登録を開始します。"
+        else:
+            message = "ログイン情報を受け取りました。実行を再開します。"
         
         return ProvideCredentialsResponse(
             task_id=task_id,
             status=result.status.value,
-            message="認証情報を受け取りました。実行を再開します。",
+            message=message,
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
