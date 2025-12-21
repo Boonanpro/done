@@ -116,3 +116,4 @@ CREATE POLICY "Users can view own message_attachments"
             AND detected_messages.user_id = auth.uid()
         )
     );
+
