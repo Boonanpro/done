@@ -6,7 +6,15 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app.agent.agent import AISecretaryAgent
-from app.models.schemas import TaskRequest, TaskResponse, TaskStatus
+from app.models.schemas import (
+    TaskRequest,
+    TaskResponse,
+    TaskStatus,
+    ProvideCredentialsRequest,
+    ProvideCredentialsResponse,
+    ExecutionStatusResponse,
+)
+from app.services.execution_service import get_execution_service
 
 router = APIRouter()
 
@@ -142,6 +150,97 @@ async def list_tasks(user_id: Optional[str] = None, limit: int = 10):
         agent = get_agent()
         tasks = await agent.list_tasks(user_id=user_id, limit=limit)
         return {"tasks": tasks}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Phase 3B: Execution Engine APIs ====================
+
+# デフォルトユーザーID（認証未実装のため仮）
+DEFAULT_USER_ID = "default-user"
+
+
+@router.post("/task/{id}/provide-credentials", response_model=ProvideCredentialsResponse)
+async def provide_credentials(id: str, request: ProvideCredentialsRequest, user_id: Optional[str] = None):
+    """
+    タスク実行中に認証情報を提供（awaiting_credentials状態のタスク用）
+    
+    Request:
+    ```json
+    {
+      "service": "ex_reservation",
+      "credentials": {
+        "email": "user@example.com",
+        "password": "secret123"
+      },
+      "save_credentials": true
+    }
+    ```
+    
+    Response:
+    ```json
+    {
+      "task_id": "uuid",
+      "status": "executing",
+      "message": "認証情報を受け取りました。実行を再開します。"
+    }
+    ```
+    """
+    task_id = id
+    uid = user_id or DEFAULT_USER_ID
+    
+    try:
+        execution_service = get_execution_service()
+        result = await execution_service.provide_credentials(
+            task_id=task_id,
+            user_id=uid,
+            service=request.service,
+            credentials=request.credentials,
+            save_credentials=request.save_credentials,
+        )
+        
+        return ProvideCredentialsResponse(
+            task_id=task_id,
+            status=result.status.value,
+            message="認証情報を受け取りました。実行を再開します。",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/task/{id}/execution-status", response_model=ExecutionStatusResponse)
+async def get_execution_status(id: str):
+    """
+    実行状況をリアルタイム取得（ポーリング用）
+    
+    Response:
+    ```json
+    {
+      "task_id": "uuid",
+      "status": "executing",
+      "progress": {
+        "current_step": "logging_in",
+        "steps_completed": ["opened_url", "entered_credentials"],
+        "steps_remaining": ["submit_form", "confirm_booking"],
+        "screenshot_url": "/screenshots/task_xxx_step2.png"
+      }
+    }
+    ```
+    """
+    task_id = id
+    
+    try:
+        execution_service = get_execution_service()
+        result = await execution_service.get_execution_status(task_id=task_id)
+        
+        if not result:
+            raise HTTPException(status_code=404, detail="Execution state not found")
+        
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
