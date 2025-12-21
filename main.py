@@ -9,6 +9,7 @@ from app.config import settings
 from app.api.routes import router as api_router
 from app.api.line_webhook import router as line_webhook_router
 from app.api.chat_routes import router as chat_router
+from app.api.credentials_routes import router as credentials_router
 
 app = FastAPI(
     title="AI Secretary System",
@@ -28,6 +29,7 @@ app.add_middleware(
 # ルーター登録
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
+app.include_router(credentials_router, prefix="/api/v1")
 app.include_router(line_webhook_router, prefix="/webhook")
 
 

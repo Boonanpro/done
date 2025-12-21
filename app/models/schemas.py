@@ -151,3 +151,100 @@ class SearchResult(BaseModel):
     class Config:
         from_attributes = True
 
+
+# ==================== Phase 3B: Execution Engine ====================
+
+class ExecutionStatus(str, Enum):
+    """実行状態"""
+    PENDING = "pending"
+    EXECUTING = "executing"
+    AWAITING_CREDENTIALS = "awaiting_credentials"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ExecutionStep(str, Enum):
+    """実行ステップ"""
+    OPENED_URL = "opened_url"
+    LOGGED_IN = "logged_in"
+    ENTERED_DETAILS = "entered_details"
+    SELECTED_ITEM = "selected_item"
+    CONFIRMED = "confirmed"
+    COMPLETED = "completed"
+
+
+class ServiceType(str, Enum):
+    """サービス種別"""
+    EX_RESERVATION = "ex_reservation"  # EX予約/スマートEX
+    AMAZON = "amazon"
+    RAKUTEN = "rakuten"
+    HIGHWAY_BUS = "highway_bus"  # 高速バスネット
+    JAL = "jal"
+    ANA = "ana"
+    GENERIC = "generic"  # 汎用フォーム
+
+
+class CredentialRequest(BaseModel):
+    """認証情報保存リクエスト"""
+    service: str
+    credentials: dict[str, str]  # {"email": "xxx", "password": "xxx"}
+
+
+class CredentialResponse(BaseModel):
+    """認証情報レスポンス"""
+    success: bool
+    service: str
+    message: str
+
+
+class CredentialListItem(BaseModel):
+    """保存済み認証情報一覧の項目"""
+    service: str
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
+class CredentialListResponse(BaseModel):
+    """保存済み認証情報一覧レスポンス"""
+    services: list[CredentialListItem]
+
+
+class ProvideCredentialsRequest(BaseModel):
+    """タスク実行中の認証情報提供リクエスト"""
+    service: str
+    credentials: dict[str, str]
+    save_credentials: bool = False  # 認証情報を保存するか
+
+
+class ProvideCredentialsResponse(BaseModel):
+    """認証情報提供レスポンス"""
+    task_id: str
+    status: str
+    message: str
+
+
+class ExecutionProgress(BaseModel):
+    """実行進捗"""
+    current_step: Optional[str] = None
+    steps_completed: list[str] = Field(default_factory=list)
+    steps_remaining: list[str] = Field(default_factory=list)
+    screenshot_url: Optional[str] = None
+
+
+class ExecutionStatusResponse(BaseModel):
+    """実行状況レスポンス"""
+    task_id: str
+    status: ExecutionStatus
+    progress: Optional[ExecutionProgress] = None
+    required_service: Optional[str] = None  # 認証が必要なサービス
+    execution_result: Optional[dict[str, Any]] = None
+    error_message: Optional[str] = None
+
+
+class ExecutionResult(BaseModel):
+    """実行結果"""
+    success: bool
+    confirmation_number: Optional[str] = None  # 予約番号など
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
