@@ -248,3 +248,51 @@ class ExecutionResult(BaseModel):
     message: str
     details: dict[str, Any] = Field(default_factory=dict)
 
+
+# ==================== Phase 3B/3C: Dynamic Auth Service ====================
+
+class AuthFieldType(str, Enum):
+    """認証フィールドの種類"""
+    EMAIL = "email"
+    PASSWORD = "password"
+    PHONE = "phone"
+    NAME = "name"
+    NAME_KANA = "name_kana"  # フリガナ
+    BIRTHDATE = "birthdate"
+    GENDER = "gender"
+    ADDRESS = "address"
+    POSTAL_CODE = "postal_code"
+    PREFECTURE = "prefecture"
+    OCCUPATION = "occupation"  # 職業
+    CHECKBOX = "checkbox"
+    RADIO = "radio"
+    OTHER = "other"
+
+
+class AuthField(BaseModel):
+    """認証/登録フォームのフィールド"""
+    field_type: AuthFieldType
+    selector: str
+    name: str  # フィールド名（表示用）
+    required: bool = False
+    options: Optional[list[str]] = None  # ラジオボタン/セレクトの選択肢
+    validation_pattern: Optional[str] = None  # バリデーションパターン
+
+
+class RegistrationConfig(BaseModel):
+    """サービスごとの登録設定"""
+    service_name: str
+    registration_url: str
+    login_url: str
+    fields: list[AuthField] = Field(default_factory=list)
+    submit_selector: str
+    password_requirements: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuthResult(BaseModel):
+    """認証/登録結果"""
+    success: bool
+    message: str
+    credentials: Optional[dict[str, str]] = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
