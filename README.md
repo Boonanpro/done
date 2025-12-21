@@ -57,7 +57,7 @@
 |---------|------|------|
 | Amazon | 商品をカートに追加（Playwrightによる自動操作） | ✅ 動作確認済み |
 | 楽天 | 商品をカートに追加（Playwrightによる自動操作） | ✅ 動作確認済み |
-| EX予約 | 新幹線チケット予約 | 🔧 実装予定 |
+| EX予約 | 新幹線チケット予約（Playwrightによる自動操作） | ✅ 動作確認済み |
 | 高速バス | バスチケット予約 | 🔧 実装予定 |
 
 ### 🔧 現在の状態
@@ -257,7 +257,8 @@ D:\Doneダン\
 │   │   ├── __init__.py
 │   │   ├── base.py          # 共通実行ロジック・ファクトリー
 │   │   ├── amazon_executor.py # Amazon購入（カート追加）
-│   │   └── rakuten_executor.py # 楽天購入（カート追加）
+│   │   ├── rakuten_executor.py # 楽天購入（カート追加）
+│   │   └── ex_reservation_executor.py # EX予約（新幹線予約）
 │   ├── tasks/
 │   │   ├── __init__.py
 │   │   ├── celery_app.py  # Celery設定

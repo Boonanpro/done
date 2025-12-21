@@ -334,7 +334,8 @@ class ExecutorFactory:
             適切なExecutor
         """
         if category == "train":
-            return TrainExecutor()
+            from app.executors.ex_reservation_executor import EXReservationExecutor
+            return EXReservationExecutor()
         elif category == "bus":
             # 将来的にBusExecutorを実装
             return GenericExecutor()
