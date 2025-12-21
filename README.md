@@ -56,7 +56,7 @@
 | サービス | 機能 | 状態 |
 |---------|------|------|
 | Amazon | 商品をカートに追加（Playwrightによる自動操作） | ✅ 動作確認済み |
-| 楽天 | 商品をカートに追加 | 🔧 実装予定 |
+| 楽天 | 商品をカートに追加（Playwrightによる自動操作） | ✅ 動作確認済み |
 | EX予約 | 新幹線チケット予約 | 🔧 実装予定 |
 | 高速バス | バスチケット予約 | 🔧 実装予定 |
 
@@ -256,7 +256,8 @@ D:\Doneダン\
 │   ├── executors/           # Phase 3B: サービス別実行ロジック
 │   │   ├── __init__.py
 │   │   ├── base.py          # 共通実行ロジック・ファクトリー
-│   │   └── amazon_executor.py # Amazon購入（カート追加）
+│   │   ├── amazon_executor.py # Amazon購入（カート追加）
+│   │   └── rakuten_executor.py # 楽天購入（カート追加）
 │   ├── tasks/
 │   │   ├── __init__.py
 │   │   ├── celery_app.py  # Celery設定

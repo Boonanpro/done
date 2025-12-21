@@ -347,8 +347,8 @@ class ExecutorFactory:
                 from app.executors.amazon_executor import AmazonExecutor
                 return AmazonExecutor()
             elif service_name == "rakuten":
-                # 将来的にRakutenExecutorを実装
-                return ProductExecutor(service_name="rakuten")
+                from app.executors.rakuten_executor import RakutenExecutor
+                return RakutenExecutor()
             else:
                 return ProductExecutor(service_name=service_name or "amazon")
         else:
