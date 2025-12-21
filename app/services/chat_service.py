@@ -401,8 +401,9 @@ class ChatService:
             raise ValueError("Not a member of this room")
 
         # Get sender info
-        sender = self.supabase.table("chat_users").select("display_name").eq("id", sender_id).execute()
+        sender = self.supabase.table("chat_users").select("display_name, done_user_id").eq("id", sender_id).execute()
         sender_name = sender.data[0]["display_name"] if sender.data else "Unknown"
+        done_user_id = sender.data[0].get("done_user_id") if sender.data else None
 
         result = self.supabase.table("chat_messages").insert({
             "room_id": room_id,
@@ -414,8 +415,73 @@ class ChatService:
         if result.data:
             msg = result.data[0]
             msg["sender_name"] = sender_name
+            
+            # Phase 5A: メッセージ検知フック（AI有効ルームのみ）
+            if sender_type == "human":
+                await self._trigger_message_detection(
+                    room_id=room_id,
+                    message_id=msg["id"],
+                    sender_id=sender_id,
+                    done_user_id=done_user_id,
+                    content=content,
+                    sender_name=sender_name,
+                )
+            
             return msg
         raise ValueError("Failed to send message")
+    
+    async def _trigger_message_detection(
+        self,
+        room_id: str,
+        message_id: str,
+        sender_id: str,
+        done_user_id: Optional[str],
+        content: str,
+        sender_name: str,
+    ) -> None:
+        """
+        メッセージ検知をトリガー（Phase 5A）
+        AI設定が有効なルームのみ検知
+        """
+        try:
+            # AI設定を確認
+            ai_settings = self.supabase.table("chat_ai_settings").select("*").eq("room_id", room_id).execute()
+            
+            if not ai_settings.data:
+                return
+            
+            settings = ai_settings.data[0]
+            if not settings.get("enabled", False):
+                return
+            
+            # done_user_idがなければ、検知対象外（Doneアカウントと連携していない）
+            if not done_user_id:
+                return
+            
+            # メッセージ検知サービスを呼び出し
+            from app.services.message_detection import get_detection_service
+            from app.models.detection_schemas import MessageSource
+            
+            detection_service = get_detection_service()
+            await detection_service.detect_message(
+                user_id=done_user_id,
+                source=MessageSource.DONE_CHAT,
+                content=content,
+                source_id=message_id,
+                sender_info={
+                    "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    "room_id": room_id,
+                },
+                metadata={
+                    "room_id": room_id,
+                    "ai_mode": settings.get("mode", "assist"),
+                },
+            )
+        except Exception as e:
+            # 検知失敗してもメッセージ送信は成功させる
+            import logging
+            logging.getLogger(__name__).warning(f"Message detection failed: {e}")
     
     async def get_messages(self, room_id: str, user_id: str, limit: int = 50, before: Optional[str] = None) -> list[dict]:
         """Get messages from a room"""

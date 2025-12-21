@@ -23,9 +23,15 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
     
-    # Gmail API
+    # Gmail API (Phase 5B)
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
+    GMAIL_REDIRECT_URI: str = "http://localhost:8000/api/v1/gmail/callback"
+    GMAIL_POLL_INTERVAL_SECONDS: int = 300  # 5分
+    
+    # Attachment Storage (Phase 5C)
+    ATTACHMENT_STORAGE_PATH: str = "./data/attachments"
+    ATTACHMENT_MAX_SIZE_MB: int = 10
     
     # LINE Messaging API
     LINE_CHANNEL_ACCESS_TOKEN: str = ""
@@ -41,6 +47,19 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = ""  # Falls back to APP_SECRET_KEY if empty
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+    
+    # Properties for Gmail settings
+    @property
+    def gmail_client_id(self) -> str:
+        return self.GOOGLE_CLIENT_ID
+    
+    @property
+    def gmail_client_secret(self) -> str:
+        return self.GOOGLE_CLIENT_SECRET
+    
+    @property
+    def gmail_redirect_uri(self) -> str:
+        return self.GMAIL_REDIRECT_URI
     
     class Config:
         env_file = ".env"

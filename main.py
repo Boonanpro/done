@@ -10,6 +10,8 @@ from app.api.routes import router as api_router
 from app.api.line_webhook import router as line_webhook_router
 from app.api.chat_routes import router as chat_router
 from app.api.credentials_routes import router as credentials_router
+from app.api.gmail_routes import router as gmail_router
+from app.api.detection_routes import router as detection_router
 
 app = FastAPI(
     title="AI Secretary System",
@@ -30,6 +32,8 @@ app.add_middleware(
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(credentials_router, prefix="/api/v1")
+app.include_router(gmail_router, prefix="/api/v1")
+app.include_router(detection_router, prefix="/api/v1")
 app.include_router(line_webhook_router, prefix="/webhook")
 
 

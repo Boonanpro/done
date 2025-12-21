@@ -146,3 +146,33 @@ def get_encryption_service() -> EncryptionService:
         _encryption_service = EncryptionService()
     return _encryption_service
 
+
+# 便利なヘルパー関数
+def encrypt_data(data: str) -> str:
+    """
+    文字列を暗号化してbase64文字列として返す
+    
+    Args:
+        data: 暗号化する文字列
+        
+    Returns:
+        base64エンコードされた暗号化文字列
+    """
+    service = get_encryption_service()
+    encrypted_bytes = service.encrypt(data)
+    return encrypted_bytes.decode('utf-8')
+
+
+def decrypt_data(encrypted_data: str) -> str:
+    """
+    base64暗号化文字列を復号
+    
+    Args:
+        encrypted_data: base64エンコードされた暗号化文字列
+        
+    Returns:
+        復号された文字列
+    """
+    service = get_encryption_service()
+    return service.decrypt(encrypted_data.encode('utf-8'))
+
