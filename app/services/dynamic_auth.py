@@ -120,7 +120,7 @@ class DynamicAuthService:
         
         return True, ""
     
-    async def register_new_account(
+    async def prepare_registration(
         self,
         page: Page,
         config: RegistrationConfig,
@@ -128,7 +128,10 @@ class DynamicAuthService:
         auto_generate_password: bool = True,
     ) -> AuthResult:
         """
-        新規アカウント登録を実行
+        登録フォームに自動入力してプレビュー表示（送信はしない）
+        
+        ユーザーに「この情報で登録しますか？」と確認を取るため、
+        フォームに入力だけして送信ボタンは押さない。
         
         Args:
             page: Playwrightページ
@@ -137,7 +140,7 @@ class DynamicAuthService:
             auto_generate_password: パスワードを自動生成するか
             
         Returns:
-            登録結果
+            プレビュー結果（credentials に自動生成値を含む）
         """
         try:
             # 登録ページに遷移
@@ -152,7 +155,7 @@ class DynamicAuthService:
                 )
                 user_data["password"] = password
             
-            # 各フィールドに入力
+            # 各フィールドに入力（プレビュー用）
             for field in config.fields:
                 try:
                     await self._fill_field(page, field, user_data)
@@ -162,15 +165,8 @@ class DynamicAuthService:
                         message=f"フィールド '{field.name}' の入力に失敗しました: {str(e)}",
                     )
             
-            # 送信ボタンをクリック
-            submit_button = await page.query_selector(config.submit_selector)
-            if submit_button:
-                await submit_button.click()
-                await page.wait_for_load_state("domcontentloaded")
-                await page.wait_for_timeout(3000)
-            
-            # 登録結果を確認
-            # 成功したかどうかはサービスごとに異なるため、呼び出し側で確認
+            # ★ 送信ボタンはクリックしない ★
+            # ユーザーに確認を取ってから confirm_registration で送信
             
             credentials = {
                 "email": user_data.get("email", ""),
@@ -179,11 +175,72 @@ class DynamicAuthService:
             
             return AuthResult(
                 success=True,
-                message="登録処理が完了しました",
+                message="登録情報を入力しました。この内容で登録しますか？",
                 credentials=credentials,
+                requires_confirmation=True,  # 確認が必要
                 details={
                     "service": config.service_name,
                     "email": user_data.get("email", ""),
+                    "generated_password": password,
+                    "preview": True,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+            
+        except Exception as e:
+            return AuthResult(
+                success=False,
+                message=f"登録フォームの入力中にエラーが発生しました: {str(e)}",
+            )
+    
+    async def confirm_registration(
+        self,
+        page: Page,
+        config: RegistrationConfig,
+        user_data: Optional[dict[str, Any]] = None,
+    ) -> AuthResult:
+        """
+        プレビュー後、ユーザー確認を経て登録を確定
+        
+        prepare_registration でフォーム入力済みの状態で呼び出す。
+        user_data が渡された場合は、その値で上書きしてから送信。
+        
+        Args:
+            page: Playwrightページ（フォーム入力済み）
+            config: 登録設定
+            user_data: ユーザーが編集したデータ（任意）
+            
+        Returns:
+            登録結果
+        """
+        try:
+            # ユーザーが編集した場合は再入力
+            if user_data:
+                for field in config.fields:
+                    try:
+                        await self._fill_field(page, field, user_data)
+                    except Exception:
+                        pass  # 編集分のみ更新、失敗は無視
+            
+            # 送信ボタンをクリック
+            submit_button = await page.query_selector(config.submit_selector)
+            if submit_button:
+                await submit_button.click()
+                await page.wait_for_load_state("domcontentloaded")
+                await page.wait_for_timeout(3000)
+            
+            credentials = {
+                "email": user_data.get("email", "") if user_data else "",
+                "password": user_data.get("password", "") if user_data else "",
+            }
+            
+            return AuthResult(
+                success=True,
+                message="登録が完了しました",
+                credentials=credentials,
+                requires_confirmation=False,
+                details={
+                    "service": config.service_name,
                     "timestamp": datetime.now().isoformat(),
                 },
             )
@@ -193,6 +250,45 @@ class DynamicAuthService:
                 success=False,
                 message=f"登録処理中にエラーが発生しました: {str(e)}",
             )
+    
+    async def register_new_account(
+        self,
+        page: Page,
+        config: RegistrationConfig,
+        user_data: dict[str, Any],
+        auto_generate_password: bool = True,
+        skip_confirmation: bool = False,
+    ) -> AuthResult:
+        """
+        新規アカウント登録を実行（互換性維持用）
+        
+        デフォルトでは prepare_registration のみ実行し、確認を待つ。
+        skip_confirmation=True の場合のみ即時登録。
+        
+        Args:
+            page: Playwrightページ
+            config: 登録設定
+            user_data: ユーザーデータ（メール、名前等）
+            auto_generate_password: パスワードを自動生成するか
+            skip_confirmation: 確認をスキップして即時登録するか（デフォルトFalse）
+            
+        Returns:
+            登録結果
+        """
+        # まずプレビュー（フォーム入力のみ）
+        preview_result = await self.prepare_registration(
+            page, config, user_data, auto_generate_password
+        )
+        
+        if not preview_result.success:
+            return preview_result
+        
+        # skip_confirmation=False（デフォルト）なら確認を待つ
+        if not skip_confirmation:
+            return preview_result  # requires_confirmation=True の状態で返す
+        
+        # skip_confirmation=True なら即時登録
+        return await self.confirm_registration(page, config, user_data)
     
     async def _fill_field(
         self,

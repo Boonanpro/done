@@ -294,5 +294,6 @@ class AuthResult(BaseModel):
     success: bool
     message: str
     credentials: Optional[dict[str, str]] = None
+    requires_confirmation: bool = False  # True: ユーザー確認待ち、False: 完了済み
     details: dict[str, Any] = Field(default_factory=dict)
 
