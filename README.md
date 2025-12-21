@@ -58,7 +58,7 @@
 | Amazon | 商品をカートに追加（Playwrightによる自動操作） | ✅ 動作確認済み |
 | 楽天 | 商品をカートに追加（Playwrightによる自動操作） | ✅ 動作確認済み |
 | EX予約 | 新幹線チケット予約（SmartEX実サイト調査済み・OTP認証対応） | ✅ 動作確認済み |
-| 高速バス | バスチケット予約 | 🔧 実装予定 |
+| 高速バス（WILLER） | バス予約（実サイト調査済み・新規登録対応） | ✅ 実装完了 |
 
 ### 🔧 現在の状態
 
@@ -252,13 +252,15 @@ D:\Doneダン\
 │   │   ├── encryption.py  # 暗号化サービス
 │   │   ├── credentials_service.py # 認証情報管理（Phase 3B）
 │   │   ├── execution_service.py # 実行エンジン（Phase 3B）
+│   │   ├── dynamic_auth.py  # 動的認証/新規登録サービス（Phase 3C）
 │   │   └── supabase_client.py # DB操作
 │   ├── executors/           # Phase 3B: サービス別実行ロジック
 │   │   ├── __init__.py
 │   │   ├── base.py          # 共通実行ロジック・ファクトリー
 │   │   ├── amazon_executor.py # Amazon購入（カート追加）
 │   │   ├── rakuten_executor.py # 楽天購入（カート追加）
-│   │   └── ex_reservation_executor.py # EX予約（新幹線予約）
+│   │   ├── ex_reservation_executor.py # EX予約（新幹線予約）
+│   │   └── highway_bus_executor.py # WILLER高速バス予約
 │   ├── tasks/
 │   │   ├── __init__.py
 │   │   ├── celery_app.py  # Celery設定
