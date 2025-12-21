@@ -337,8 +337,8 @@ class ExecutorFactory:
             from app.executors.ex_reservation_executor import EXReservationExecutor
             return EXReservationExecutor()
         elif category == "bus":
-            # 将来的にBusExecutorを実装
-            return GenericExecutor()
+            from app.executors.highway_bus_executor import HighwayBusExecutor
+            return HighwayBusExecutor()
         elif category == "flight":
             # 将来的にFlightExecutorを実装
             return GenericExecutor()
