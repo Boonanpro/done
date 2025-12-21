@@ -29,21 +29,22 @@ class TestEXReservationExecutor:
         assert executor._requires_login() is True
     
     def test_ex_executor_has_selectors(self):
-        """セレクタが定義されている"""
+        """セレクタが定義されている（実サイト調査済み）"""
         executor = EXReservationExecutor()
         assert "login_button" in executor.SELECTORS
         assert "member_id_input" in executor.SELECTORS
         assert "password_input" in executor.SELECTORS
         assert "departure_station" in executor.SELECTORS
         assert "arrival_station" in executor.SELECTORS
-        assert "search_button" in executor.SELECTORS
+        assert "continue_button" in executor.SELECTORS  # 検索ボタン
+        assert "otp_input" in executor.SELECTORS  # ワンタイムパスワード
     
     def test_ex_executor_has_urls(self):
-        """URLが定義されている"""
+        """URLが定義されている（SmartEX実サイト調査済み）"""
         executor = EXReservationExecutor()
         assert "login" in executor.URLS
-        assert "reservation" in executor.URLS
-        assert "expy.jp" in executor.URLS["login"]
+        assert "my_page" in executor.URLS
+        assert "smart" in executor.URLS["login"]  # SmartEXのURL
 
 
 class TestEXReservationExecutorWithMock:
@@ -132,14 +133,15 @@ class TestEXReservationExecutorWithMock:
     
     @pytest.mark.asyncio
     async def test_enter_reservation_details(self, mock_page):
-        """予約情報の入力"""
+        """予約情報の入力（SmartEX用）"""
         executor = EXReservationExecutor()
         
-        # フォーム要素のモック
-        mock_input = AsyncMock()
-        mock_input.evaluate = AsyncMock(return_value="input")
-        mock_input.fill = AsyncMock()
-        mock_page.query_selector = AsyncMock(return_value=mock_input)
+        # 「列車を検索」ボタンと駅選択comboboxのモック
+        mock_element = AsyncMock()
+        mock_element.click = AsyncMock()
+        mock_element.select_option = AsyncMock()
+        mock_page.query_selector = AsyncMock(return_value=mock_element)
+        mock_page.query_selector_all = AsyncMock(return_value=[mock_element] * 5)
         
         result = await executor._enter_reservation_details(
             mock_page, "東京", "新大阪", "2025-01-15", "10:00"
@@ -153,9 +155,9 @@ class TestEXReservationExecutorWithMock:
         """列車が見つからない場合"""
         executor = EXReservationExecutor()
         
-        # 検索ボタンあり、列車リストなし
+        # 「予約を続ける」ボタンあり、候補なし
         async def query_side_effect(selector):
-            if "search" in selector.lower():
+            if "予約を続ける" in selector:
                 return AsyncMock()
             return None
         

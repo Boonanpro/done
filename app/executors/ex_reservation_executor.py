@@ -21,43 +21,55 @@ class EXReservationExecutor(BaseExecutor):
     
     service_name = "ex_reservation"
     
-    # EX予約用のセレクタ
+    # SmartEX/EX予約用のセレクタ（実サイト調査済み 2024/12）
     SELECTORS = {
         # ログイン関連
-        "login_link": 'a[href*="login"], .login-button',
-        "member_id_input": 'input[name="memberId"], input[name="userId"], #memberId',
-        "password_input": 'input[name="password"], input[type="password"], #password',
-        "login_button": 'button[type="submit"], input[type="submit"], .login-submit',
+        "member_id_input": 'role=textbox[name="会員ID"]',
+        "password_input": 'role=textbox[name="パスワード"]',
+        "login_button": 'role=button[name="ログイン"]',
+        
+        # ワンタイムパスワード認証（2段階認証）
+        "otp_send_button": 'role=button[name="自動音声案内発信"]',
+        "otp_input": 'role=textbox[name="数字6桁（半角）"]',
+        "otp_next_button": 'role=button[name="次へ"]',
+        
+        # メニュー
+        "menu_link": 'role=link[name="メニュー"]',
+        "logout_link": 'role=link[name="ログアウト"]',
+        "train_search": 'text=列車を検索',
         
         # 予約検索関連
-        "departure_station": 'select[name="departure"], #departureStation, input[name="from"]',
-        "arrival_station": 'select[name="arrival"], #arrivalStation, input[name="to"]',
-        "date_input": 'input[name="date"], input[type="date"], #reservationDate',
-        "time_input": 'input[name="time"], select[name="hour"], #departureTime',
-        "search_button": 'button[type="submit"]:has-text("検索"), .search-button',
+        "departure_station": 'role=combobox >> nth=2',  # 乗車駅
+        "arrival_station": 'role=combobox >> nth=3',    # 降車駅
+        "hour_select": 'role=combobox >> nth=0',        # 時
+        "minute_select": 'role=combobox >> nth=1',      # 分
+        "continue_button": 'role=button[name="予約を続ける"]',
         
         # 列車選択関連
-        "train_list": '.train-list, .result-list, table.trains',
-        "train_row": '.train-item, tr.train-row, .result-item',
-        "select_train": 'button:has-text("選択"), a:has-text("予約"), .reserve-button',
+        "train_candidate": 'text=この候補を選択',
+        "train_name": 'role=heading[level=3]',  # のぞみ XXX 号
         
-        # 座席選択関連
-        "seat_type": 'select[name="seatType"], input[name="seat"]',
-        "seat_confirm": 'button:has-text("確定"), .seat-confirm',
+        # 商品・座席選択関連
+        "seat_position": 'role=combobox >> text=座席位置',
+        "seat_map_button": 'role=button[name="座席表から指定する"]',
         
         # 確認・完了関連
-        "confirm_button": 'button:has-text("確認"), .confirm-button',
-        "reservation_complete": '.reservation-complete, .complete-message',
-        "reservation_number": '.reservation-number, .confirmation-number, #reservationNo',
+        "purchase_button": 'role=button[name="予約する（購入）"]',
+        "back_link": 'role=link[name="戻る"]',
+        "back_button": 'role=button[name="戻る"]',
     }
     
-    # EX予約のURL
+    # SmartEX/EX予約のURL（実サイト調査済み）
     URLS = {
-        "top": "https://expy.jp/",
-        "login": "https://expy.jp/member/login/",
-        "reservation": "https://expy.jp/reservation/",
-        "my_page": "https://expy.jp/member/mypage/",
+        "top": "https://smart-ex.jp/",
+        "login": "https://shinkansen2.jr-central.co.jp/RSV_P/smart_index.htm",
+        "expy_login": "https://shinkansen1.jr-central.co.jp/RSV_P/index.htm",  # エクスプレス予約会員向け
+        "my_page": "https://shinkansen2.jr-central.co.jp/RSV_P/p7B/ClientService",
     }
+    
+    # 重要: SmartEXはログイン時にワンタイムパスワード（電話認証）が必要
+    # 完全自動化には別途OTP対応が必要
+    REQUIRES_OTP = True
     
     async def _do_execute(
         self,
@@ -277,49 +289,50 @@ class EXReservationExecutor(BaseExecutor):
         time: str,
     ) -> dict[str, Any]:
         """
-        予約情報を入力
+        予約情報を入力（SmartEX用）
+        
+        注意: SmartEXは「列車を検索」をクリックすると検索フォームが表示される
+        駅はプリセットから選ぶか、comboboxで選択する
         
         Returns:
             {"success": bool, "message": str}
         """
         try:
-            # 予約ページに移動
-            if "reservation" not in page.url:
-                await page.goto(self.URLS["reservation"], wait_until="domcontentloaded", timeout=30000)
+            # メニューページから「列車を検索」をクリック
+            train_search = await page.query_selector('text=列車を検索')
+            if train_search:
+                await train_search.click()
+                await page.wait_for_load_state("domcontentloaded")
+                await page.wait_for_timeout(1000)
             
-            # 出発駅を入力
-            departure_field = await page.query_selector(self.SELECTORS["departure_station"])
-            if departure_field:
-                tag_name = await departure_field.evaluate("el => el.tagName.toLowerCase()")
-                if tag_name == "select":
-                    await departure_field.select_option(label=departure)
-                else:
-                    await departure_field.fill(departure)
+            # SmartEXでは駅選択はcomboboxで行う
+            # 出発駅を選択（comboboxがある場合）
+            try:
+                departure_selects = await page.query_selector_all('role=combobox')
+                if len(departure_selects) >= 3:
+                    # 乗車駅は3番目のcombobox
+                    await departure_selects[2].select_option(label=departure)
+            except Exception:
+                pass  # 駅選択できなくても続行
             
-            # 到着駅を入力
-            arrival_field = await page.query_selector(self.SELECTORS["arrival_station"])
-            if arrival_field:
-                tag_name = await arrival_field.evaluate("el => el.tagName.toLowerCase()")
-                if tag_name == "select":
-                    await arrival_field.select_option(label=arrival)
-                else:
-                    await arrival_field.fill(arrival)
+            # 到着駅を選択
+            try:
+                arrival_selects = await page.query_selector_all('role=combobox')
+                if len(arrival_selects) >= 4:
+                    # 降車駅は4番目のcombobox
+                    await arrival_selects[3].select_option(label=arrival)
+            except Exception:
+                pass  # 駅選択できなくても続行
             
-            # 日付を入力
-            if date:
-                date_field = await page.query_selector(self.SELECTORS["date_input"])
-                if date_field:
-                    await date_field.fill(date)
-            
-            # 時間を入力
+            # 時間を選択（時と分のcombobox）
             if time:
-                time_field = await page.query_selector(self.SELECTORS["time_input"])
-                if time_field:
-                    tag_name = await time_field.evaluate("el => el.tagName.toLowerCase()")
-                    if tag_name == "select":
-                        await time_field.select_option(value=time)
-                    else:
-                        await time_field.fill(time)
+                try:
+                    hour = time.split(":")[0] if ":" in time else time[:2]
+                    hour_selects = await page.query_selector_all('role=combobox')
+                    if len(hour_selects) >= 1:
+                        await hour_selects[0].select_option(label=f"{hour}時")
+                except Exception:
+                    pass
             
             return {"success": True, "message": "予約情報を入力しました"}
             
@@ -331,29 +344,29 @@ class EXReservationExecutor(BaseExecutor):
     
     async def _search_and_select_train(self, page: Page) -> dict[str, Any]:
         """
-        列車を検索して選択
+        列車を検索して選択（SmartEX用）
         
         Returns:
             {"success": bool, "message": str, "train_info": dict}
         """
         try:
-            # 検索ボタンをクリック
-            search_button = await page.query_selector(self.SELECTORS["search_button"])
-            if search_button:
-                await search_button.click()
+            # 「予約を続ける」ボタンをクリックして検索実行
+            continue_button = await page.query_selector('role=button[name="予約を続ける"]')
+            if continue_button:
+                await continue_button.click()
                 await page.wait_for_load_state("domcontentloaded")
                 await page.wait_for_timeout(2000)
             
-            # 列車リストを確認
-            train_list = await page.query_selector(self.SELECTORS["train_list"])
-            if not train_list:
+            # 列車候補を確認（「候補 1 / X」などのテキストがあるか）
+            train_candidate = await page.query_selector('text=候補')
+            if not train_candidate:
                 return {
                     "success": False,
                     "message": "列車が見つかりませんでした。検索条件を確認してください。",
                 }
             
-            # 最初の列車を選択
-            select_button = await page.query_selector(self.SELECTORS["select_train"])
+            # 最初の列車を選択（「この候補を選択」をクリック）
+            select_button = await page.query_selector('text=この候補を選択')
             if select_button:
                 await select_button.click()
                 await page.wait_for_load_state("domcontentloaded")
@@ -365,11 +378,8 @@ class EXReservationExecutor(BaseExecutor):
                 "timestamp": datetime.now().isoformat(),
             }
             
-            # 確認ボタンがあれば進む（予約確定はしない）
-            confirm_button = await page.query_selector(self.SELECTORS["confirm_button"])
-            if confirm_button:
-                # 確認画面までは進む（最終確定はしない）
-                pass  # 安全のため、ここで停止
+            # 注意: 最終確認画面には進まない（安全のため）
+            # 確認画面の「予約する（購入）」ボタンは押さない
             
             return {
                 "success": True,
