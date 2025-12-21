@@ -490,18 +490,132 @@ Use the available tools to execute."""
         }
     
     async def execute_task(self, task_id: str) -> dict[str, Any]:
-        """Execute confirmed task"""
+        """Execute confirmed task using appropriate Executor"""
         task = AISecretaryAgent._tasks.get(task_id)
         if not task:
             raise ValueError(f"Task {task_id} not found")
         
-        # Execute task (resume graph in actual implementation)
         task["status"] = TaskStatus.EXECUTING
+        logger.info(f"Executing task: {task_id}, type: {task.get('type')}")
         
-        # TODO: Actual execution logic
-        
-        task["status"] = TaskStatus.COMPLETED
-        return {"status": "completed", "task_id": task_id}
+        try:
+            # タスクタイプに応じてExecutorを選択
+            task_type = task.get("type")
+            search_results = task.get("search_results", [])
+            
+            # 検索結果からSearchResultオブジェクトを作成
+            from app.models.schemas import SearchResult
+            from app.executors.base import ExecutorFactory
+            
+            execution_result = None
+            
+            if task_type == TaskType.TRAVEL:
+                # 交通関連: バス/電車のExecutorを使用
+                # 検索結果からカテゴリを判定
+                category = "bus"  # デフォルトはバス
+                service_name = "willer"
+                
+                for sr in search_results:
+                    if sr.get("category") == "train":
+                        category = "train"
+                        service_name = "ex_reservation"
+                        break
+                    elif sr.get("category") == "bus":
+                        category = "bus"
+                        service_name = "willer"
+                        break
+                
+                # Executorを取得
+                executor = ExecutorFactory.get_executor(category, service_name)
+                
+                # 最初の検索結果を使用（または願望から詳細を抽出）
+                if search_results:
+                    first_result = search_results[0]
+                    search_result_obj = SearchResult(
+                        id=first_result.get("id", task_id),
+                        service_name=service_name,
+                        category=category,
+                        title=first_result.get("title", task["original_wish"]),
+                        url=first_result.get("url"),
+                        details=first_result.get("details", {}),
+                    )
+                else:
+                    # 検索結果がない場合は願望から推測
+                    search_result_obj = SearchResult(
+                        id=task_id,
+                        service_name=service_name,
+                        category=category,
+                        title=task["original_wish"],
+                        details={"raw_wish": task["original_wish"]},
+                    )
+                
+                # 実行（認証情報なしで開始、必要に応じて要求される）
+                execution_result = await executor.execute(
+                    task_id=task_id,
+                    user_id=task.get("user_id") or "default-user",
+                    search_result=search_result_obj,
+                    credentials=None,
+                )
+                
+            elif task_type == TaskType.PURCHASE:
+                # 購入関連: Amazon/楽天のExecutorを使用
+                executor = ExecutorFactory.get_executor("product", "amazon")
+                
+                if search_results:
+                    first_result = search_results[0]
+                    search_result_obj = SearchResult(
+                        id=first_result.get("id", task_id),
+                        service_name="amazon",
+                        category="product",
+                        title=first_result.get("title", ""),
+                        url=first_result.get("url"),
+                        price=first_result.get("price"),
+                        details=first_result.get("details", {}),
+                    )
+                    
+                    execution_result = await executor.execute(
+                        task_id=task_id,
+                        user_id=task.get("user_id") or "default-user",
+                        search_result=search_result_obj,
+                        credentials=None,
+                    )
+            
+            # 実行結果を保存
+            if execution_result:
+                task["execution_result"] = {
+                    "success": execution_result.success,
+                    "message": execution_result.message,
+                    "confirmation_number": execution_result.confirmation_number,
+                    "details": execution_result.details,
+                }
+                task["status"] = TaskStatus.COMPLETED if execution_result.success else TaskStatus.FAILED
+                logger.info(f"Task {task_id} execution result: {execution_result.success}")
+            else:
+                # Executorが対応していないタスクタイプ
+                task["execution_result"] = {
+                    "success": False,
+                    "message": f"タスクタイプ '{task_type}' の自動実行はまだサポートされていません",
+                }
+                task["status"] = TaskStatus.COMPLETED
+            
+            return {
+                "status": task["status"].value,
+                "task_id": task_id,
+                "result": task["execution_result"],
+            }
+            
+        except Exception as e:
+            logger.error(f"Task execution failed: {task_id}, error: {e}", exc_info=True)
+            task["status"] = TaskStatus.FAILED
+            task["execution_result"] = {
+                "success": False,
+                "message": f"実行中にエラーが発生しました: {str(e)}",
+            }
+            return {
+                "status": "failed",
+                "task_id": task_id,
+                "error": str(e),
+            }
     
     async def revise_task(self, task_id: str, revision: str) -> dict[str, Any]:
         """

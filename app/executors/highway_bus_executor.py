@@ -254,18 +254,72 @@ class HighwayBusExecutor(BaseExecutor):
         Returns:
             検索URL
         """
-        # 都市名から英語表記へのマッピング
+        # 都市名・都道府県名から英語表記へのマッピング
+        # 注意: 将来的にはAIが動的に判断するか、WILLERのAPIを使用する方が良い
         city_map = {
+            # 関東
             "東京": "tokyo",
+            "新宿": "tokyo",
+            "池袋": "tokyo",
+            "横浜": "kanagawa/yokohama",
+            "神奈川": "kanagawa",
+            "千葉": "chiba",
+            "埼玉": "saitama",
+            "大宮": "saitama/omiya",
+            # 関西
             "大阪": "osaka",
+            "梅田": "osaka",  # 大阪梅田
+            "難波": "osaka",
+            "京都": "kyoto",
+            "神戸": "hyogo/kobe",
+            "兵庫": "hyogo",
+            "奈良": "nara",
+            # 中部
             "名古屋": "aichi/nagoya",
             "愛知": "aichi",
-            "京都": "kyoto",
-            "福岡": "fukuoka",
+            "静岡": "shizuoka",
+            "長野": "nagano",
+            "新潟": "niigata",
+            "金沢": "ishikawa/kanazawa",
+            "石川": "ishikawa",
+            "富山": "toyama",
+            # 東北
             "仙台": "miyagi/sendai",
             "宮城": "miyagi",
-            "新潟": "niigata",
+            "福島": "fukushima",
+            "山形": "yamagata",
+            "青森": "aomori",
+            "秋田": "akita",
+            "盛岡": "iwate/morioka",
+            "岩手": "iwate",
+            # 中国・四国
             "広島": "hiroshima",
+            "岡山": "okayama",
+            "鳥取": "tottori",
+            "米子": "tottori",  # 米子は鳥取県
+            "島根": "shimane",
+            "松江": "shimane/matsue",
+            "出雲": "shimane",
+            "山口": "yamaguchi",
+            "高松": "kagawa/takamatsu",
+            "香川": "kagawa",
+            "松山": "ehime/matsuyama",
+            "愛媛": "ehime",
+            "高知": "kochi",
+            "徳島": "tokushima",
+            # 九州
+            "福岡": "fukuoka",
+            "博多": "fukuoka",
+            "北九州": "fukuoka/kitakyushu",
+            "熊本": "kumamoto",
+            "長崎": "nagasaki",
+            "大分": "oita",
+            "鹿児島": "kagoshima",
+            "宮崎": "miyazaki",
+            "佐賀": "saga",
+            # 北海道
+            "札幌": "hokkaido/sapporo",
+            "北海道": "hokkaido",
         }
         
         dep_code = city_map.get(departure, "tokyo")
