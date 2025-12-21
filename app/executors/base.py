@@ -342,6 +342,14 @@ class ExecutorFactory:
             # 将来的にFlightExecutorを実装
             return GenericExecutor()
         elif category == "product":
-            return ProductExecutor(service_name=service_name or "amazon")
+            # サービスに応じたExecutorを返す
+            if service_name == "amazon":
+                from app.executors.amazon_executor import AmazonExecutor
+                return AmazonExecutor()
+            elif service_name == "rakuten":
+                # 将来的にRakutenExecutorを実装
+                return ProductExecutor(service_name="rakuten")
+            else:
+                return ProductExecutor(service_name=service_name or "amazon")
         else:
             return GenericExecutor()
