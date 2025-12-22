@@ -236,17 +236,77 @@ class TestContentSchemas:
         assert result.confidence_score == 0.95
 
 
-# ==================== API Tests (Fixtures Required) ====================
+# ==================== 手動テスト確認済みシナリオ ====================
+# 以下は手動テスト(2024-12-22)で動作確認したシナリオを自動テスト化
 
-class TestContentAPI:
-    """Content Intelligence APIのテスト"""
+class TestManualVerifiedScenarios:
+    """手動テストで動作確認済みのシナリオ"""
     
-    def test_classify_endpoint(self):
-        """分類APIエンドポイントのテスト - フィクスチャ不要版"""
-        # APIテストはconftest.pyのclient/auth_tokenフィクスチャが必要
-        # ここではスキップ
-        pass
+    @pytest.mark.asyncio
+    async def test_6c_url_extract_example_com(self):
+        """
+        6C: URL先取得API - example.comからテキスト取得
+        手動テスト結果: success=True, title="Example Domain"
+        """
+        result = await URLExtractor.extract("https://example.com")
+        
+        assert result.success is True
+        assert result.method == ExtractionMethod.URL_REQUESTS
+        assert result.title == "Example Domain"
+        assert "example" in result.text.lower()
     
-    def test_extract_url_endpoint(self):
-        """URL抽出APIエンドポイントのテスト - フィクスチャ不要版"""
-        pass
+    @pytest.mark.asyncio
+    async def test_6a_pdf_extract_error_handling(self):
+        """
+        6A: PDF解析API - 無効なPDFに適切なエラーを返す
+        手動テスト結果: success=False, error="No /Root object!"
+        """
+        result = await PDFExtractor.extract(b"not a pdf", "test.pdf")
+        
+        assert result.success is False
+        assert result.error is not None
+        assert "pdf" in result.error.lower() or "root" in result.error.lower()
+    
+    @pytest.mark.asyncio
+    async def test_6b_ocr_extract_error_handling(self):
+        """
+        6B: 画像OCR API - 無効な画像に適切なエラーを返す
+        手動テスト結果: success=False, error="cannot identify image file"
+        """
+        extractor = OCRExtractor()
+        result = await extractor.extract(b"not an image")
+        
+        assert result.success is False
+        assert result.error is not None
+        assert "image" in result.error.lower() or "identify" in result.error.lower()
+    
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not pytest.importorskip("anthropic", reason="anthropic not installed"),
+        reason="Requires anthropic SDK and API key"
+    )
+    async def test_6d_classify_invoice_real(self):
+        """
+        6D: コンテンツ分類API - 請求書テキストをinvoiceに分類
+        手動テスト結果: category="invoice", confidence_score=0.98
+        
+        注意: このテストは実際のClaude APIを呼び出すため、
+        ANTHROPIC_API_KEYが設定されていない場合はスキップされます
+        """
+        import os
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            pytest.skip("ANTHROPIC_API_KEY not set")
+        
+        result = await ContentClassifier.classify(
+            text="""請求書
+株式会社テスト
+請求金額: ¥50,000
+支払期日: 2024年1月31日
+振込先: みずほ銀行 本店 普通 1234567""",
+            subject="1月分請求書のお送り",
+            sender="billing@test.co.jp"
+        )
+        
+        assert result.category == ContentCategory.INVOICE
+        assert result.confidence_score >= 0.9
+        assert result.extracted_data is not None
