@@ -8,6 +8,7 @@ import logging
 from app.models.invoice_schemas import (
     InvoiceCreateRequest,
     InvoiceResponse,
+    InvoiceListResponse,
     InvoiceStatus,
 )
 from app.services.invoice_service import get_invoice_service
@@ -94,5 +95,72 @@ async def create_invoice(
         
     except Exception as e:
         logger.error(f"Failed to create invoice: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("", response_model=InvoiceListResponse)
+async def list_invoices(
+    status: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    請求書一覧を取得
+    
+    - **status**: ステータスでフィルタ（pending/approved/paid等）
+    - **page**: ページ番号（デフォルト: 1）
+    - **page_size**: 1ページあたりの件数（デフォルト: 20）
+    """
+    try:
+        service = get_invoice_service()
+        user_id = current_user.user_id if hasattr(current_user, 'user_id') else "default"
+        
+        invoices, total = await service.list_invoices(
+            user_id=user_id,
+            status=status,
+            page=page,
+            page_size=page_size,
+        )
+        
+        # レスポンスを構築
+        invoice_responses = []
+        for inv in invoices:
+            invoice_responses.append(InvoiceResponse(
+                id=inv["id"],
+                user_id=inv["user_id"],
+                sender_name=inv["sender_name"],
+                sender_contact_type=inv.get("sender_contact_type"),
+                sender_contact_id=inv.get("sender_contact_id"),
+                amount=inv["amount"],
+                due_date=inv["due_date"],
+                invoice_number=inv.get("invoice_number"),
+                invoice_month=inv.get("invoice_month"),
+                source=inv["source"],
+                source_channel=inv["source_channel"],
+                source_url=inv.get("source_url"),
+                bank_info=inv.get("bank_info"),
+                status=InvoiceStatus(inv["status"]),
+                scheduled_payment_time=inv.get("scheduled_payment_time"),
+                approved_at=inv.get("approved_at"),
+                approved_by=inv.get("approved_by"),
+                paid_at=inv.get("paid_at"),
+                transaction_id=inv.get("transaction_id"),
+                error_message=inv.get("error_message"),
+                is_duplicate=False,
+                notification_id=inv.get("notification_id"),
+                created_at=inv["created_at"],
+                updated_at=inv.get("updated_at"),
+            ))
+        
+        return InvoiceListResponse(
+            invoices=invoice_responses,
+            total=total,
+            page=page,
+            page_size=page_size,
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to list invoices: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

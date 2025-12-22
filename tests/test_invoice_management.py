@@ -398,3 +398,81 @@ class TestInvoiceCreateAPI:
         assert response.status_code == 401
 
 
+class TestInvoiceListAPI:
+    """7C-2: GET /invoices 請求書一覧APIテスト"""
+    
+    def test_list_invoices_empty(self, client, auth_token):
+        """空の一覧が取得できる"""
+        response = client.get(
+            "/api/v1/invoices",
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert "invoices" in data
+        assert "total" in data
+        assert "page" in data
+        assert "page_size" in data
+    
+    def test_list_invoices_with_data(self, client, auth_token):
+        """作成した請求書が一覧に表示される"""
+        # まず請求書を作成
+        client.post(
+            "/api/v1/invoices",
+            json={
+                "sender_name": "一覧テスト社",
+                "amount": 25000,
+                "due_date": "2024-03-15T00:00:00Z",
+                "source": "manual",
+                "source_channel": "manual"
+            },
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        # 一覧を取得
+        response = client.get(
+            "/api/v1/invoices",
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] >= 1
+        
+        # 作成した請求書が含まれているか
+        sender_names = [inv["sender_name"] for inv in data["invoices"]]
+        assert "一覧テスト社" in sender_names
+    
+    def test_list_invoices_with_status_filter(self, client, auth_token):
+        """ステータスでフィルタできる"""
+        response = client.get(
+            "/api/v1/invoices?status=pending",
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        # 全てpendingステータス
+        for inv in data["invoices"]:
+            assert inv["status"] == "pending"
+    
+    def test_list_invoices_pagination(self, client, auth_token):
+        """ページネーションが動作する"""
+        response = client.get(
+            "/api/v1/invoices?page=1&page_size=5",
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["page"] == 1
+        assert data["page_size"] == 5
+        assert len(data["invoices"]) <= 5
+    
+    def test_list_invoices_without_auth(self, client):
+        """認証なしでは失敗する"""
+        response = client.get("/api/v1/invoices")
+        assert response.status_code == 401
+
+

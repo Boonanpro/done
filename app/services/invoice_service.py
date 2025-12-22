@@ -523,6 +523,36 @@ class InvoiceService:
         if result.data and len(result.data) > 0:
             return result.data[0]
         return None
+    
+    async def list_invoices(
+        self,
+        user_id: str = "default",
+        status: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[Dict[str, Any]], int]:
+        """
+        請求書一覧を取得
+        
+        Returns:
+            (invoices, total_count)
+        """
+        query = self.db.table("invoices").select("*", count="exact")
+        
+        # フィルタ
+        query = query.eq("user_id", user_id)
+        if status:
+            query = query.eq("status", status)
+        
+        # ソート・ページネーション
+        offset = (page - 1) * page_size
+        query = query.order("created_at", desc=True).range(offset, offset + page_size - 1)
+        
+        result = query.execute()
+        
+        total = result.count if hasattr(result, 'count') and result.count else len(result.data or [])
+        
+        return result.data or [], total
 
 
 # シングルトンインスタンス
