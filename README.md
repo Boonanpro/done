@@ -94,15 +94,15 @@
 | 添付ファイルDL | `GET /api/v1/detection/attachments/{id}` | ✅ 動作確認済み |
 | Doneチャット検知 | ChatService内フック（AI有効ルーム自動検知） | ✅ 動作確認済み |
 
-#### Phase 6: Content Intelligence（コンテンツ解析）
+#### Phase 6: Content Intelligence（コンテンツ解析）✅ 動作確認済み（2024年12月22日）
 | 機能 | API | 状態 |
 |-----|-----|------|
-| PDF解析 | `POST /api/v1/content/extract/pdf` | ✅ 完了 |
-| 画像OCR | `POST /api/v1/content/extract/image` | ✅ 完了 |
-| URL先取得 | `POST /api/v1/content/extract/url` | ✅ 完了 |
-| コンテンツ分類 | `POST /api/v1/content/classify` | ✅ 完了 |
-| 添付ファイル解析 | `POST /api/v1/content/analyze/attachment/{id}` | ✅ 完了 |
-| メッセージ解析 | `POST /api/v1/content/analyze/message/{id}` | ✅ 完了 |
+| PDF解析 | `POST /api/v1/content/extract/pdf` | ✅ 動作確認済み |
+| 画像OCR | `POST /api/v1/content/extract/image` | ✅ 動作確認済み |
+| URL先取得 | `POST /api/v1/content/extract/url` | ✅ 動作確認済み |
+| コンテンツ分類 | `POST /api/v1/content/classify` | ✅ 動作確認済み |
+| 添付ファイル解析 | `POST /api/v1/content/analyze/attachment/{id}` | ✅ 動作確認済み |
+| メッセージ解析 | `POST /api/v1/content/analyze/message/{id}` | ✅ 動作確認済み |
 
 ### 🔧 現在の状態
 

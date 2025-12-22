@@ -1,5 +1,5 @@
 """
-Application Configuration
+Application Configuration - Phase 6 updated
 """
 from pydantic_settings import BaseSettings
 from functools import lru_cache
@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     
     # Tavily API (Smart Search)
     TAVILY_API_KEY: str = ""
+    
+    # Phase 6: Content Intelligence - OCR Settings
+    OCR_PROVIDER: str = "tesseract"  # "tesseract" or "google_vision"
+    TESSERACT_CMD: str = ""  # Path to tesseract executable (optional)
     
     # JWT Settings
     JWT_SECRET_KEY: str = ""  # Falls back to APP_SECRET_KEY if empty

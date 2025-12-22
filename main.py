@@ -1,5 +1,5 @@
 """
-AI Secretary System - Main Entry Point
+AI Secretary System - Main Entry Point (Phase 6 reload)
 """
 import uvicorn
 from fastapi import FastAPI

@@ -14,6 +14,7 @@ class ExtractionMethod(str, Enum):
     OCR_GOOGLE_VISION = "ocr_google_vision"
     OCR_TESSERACT = "ocr_tesseract"
     URL_PLAYWRIGHT = "url_playwright"
+    URL_REQUESTS = "url_requests"
     DIRECT_TEXT = "direct_text"
 
 

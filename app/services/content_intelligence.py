@@ -131,8 +131,12 @@ class OCRExtractor:
             from PIL import Image
             
             # Tesseractコマンドのパス設定（必要な場合）
-            if settings.TESSERACT_CMD:
-                pytesseract.pytesseract.tesseract_cmd = settings.TESSERACT_CMD
+            try:
+                tesseract_cmd = settings.TESSERACT_CMD
+            except AttributeError:
+                tesseract_cmd = ''
+            if tesseract_cmd:
+                pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
             
             # 画像を開く
             image = Image.open(BytesIO(file_data))
@@ -278,7 +282,13 @@ class OCRExtractor:
         """
         設定に基づいてOCRプロバイダを選択して実行
         """
-        if settings.OCR_PROVIDER == "google_vision":
+        # デフォルトでtesseractを使用
+        try:
+            ocr_provider = settings.OCR_PROVIDER
+        except AttributeError:
+            ocr_provider = "tesseract"
+        
+        if ocr_provider == "google_vision":
             return await self.extract_with_google_vision(file_data)
         else:
             return await self.extract_with_tesseract(file_data, language)
@@ -288,10 +298,84 @@ class URLExtractor:
     """6C: URL先コンテンツ取得 - URLにアクセスしてページ内容を取得"""
     
     @staticmethod
+    async def extract_with_requests(url: str, timeout_ms: int = 30000) -> URLExtractionResult:
+        """
+        requestsを使ったシンプルなURL取得（JavaScript不要なページ向け）
+        """
+        import requests
+        from bs4 import BeautifulSoup
+        
+        start_time = time.time()
+        
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            response = requests.get(url, headers=headers, timeout=timeout_ms / 1000)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # スクリプト・スタイルを削除
+            for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
+                tag.decompose()
+            
+            # タイトル取得
+            title = soup.title.string if soup.title else None
+            
+            # メインコンテンツを探す
+            content = None
+            for selector in ['article', 'main', '[role="main"]', '.content', '#content']:
+                element = soup.select_one(selector)
+                if element and len(element.get_text(strip=True)) > 100:
+                    content = element.get_text(separator='\n', strip=True)
+                    break
+            
+            # フォールバック: body全体
+            if not content:
+                body = soup.body
+                if body:
+                    content = body.get_text(separator='\n', strip=True)
+                else:
+                    content = soup.get_text(separator='\n', strip=True)
+            
+            # 不要な空白を整理
+            content = re.sub(r'\n{3,}', '\n\n', content)
+            content = content.strip()
+            
+            processing_time = int((time.time() - start_time) * 1000)
+            
+            return URLExtractionResult(
+                success=True,
+                text=content[:50000],
+                method=ExtractionMethod.URL_REQUESTS,
+                title=title,
+                url=url,
+                final_url=response.url if response.url != url else None,
+                confidence=0.85,
+                processing_time_ms=processing_time,
+                metadata={
+                    "content_length": len(content),
+                    "status_code": response.status_code,
+                }
+            )
+            
+        except Exception as e:
+            logger.error(f"Requests URL extraction failed: {e}")
+            return URLExtractionResult(
+                success=False,
+                method=ExtractionMethod.URL_REQUESTS,
+                url=url,
+                error=str(e),
+                processing_time_ms=int((time.time() - start_time) * 1000)
+            )
+    
+    @staticmethod
     async def extract(
         url: str,
         wait_for_selector: Optional[str] = None,
-        timeout_ms: int = 30000
+        timeout_ms: int = 30000,
+        use_playwright: bool = False
     ) -> URLExtractionResult:
         """
         URLにアクセスしてテキストコンテンツを取得
@@ -300,10 +384,19 @@ class URLExtractor:
             url: 取得するURL
             wait_for_selector: 待機するCSSセレクタ（オプション）
             timeout_ms: タイムアウト（ミリ秒）
+            use_playwright: Playwrightを使用するか（デフォルト: False）
         
         Returns:
             URLExtractionResult
         """
+        # デフォルトはrequestsを使用（軽量・高速）
+        if not use_playwright and not wait_for_selector:
+            result = await URLExtractor.extract_with_requests(url, timeout_ms)
+            if result.success:
+                return result
+            # 失敗した場合、Playwrightにフォールバック
+            logger.info(f"Requests failed, falling back to Playwright: {result.error}")
+        
         start_time = time.time()
         
         try:
