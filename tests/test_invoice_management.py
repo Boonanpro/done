@@ -329,3 +329,72 @@ class TestScheduleCalculator:
         assert isinstance(calc1, ScheduleCalculator)
 
 
+class TestInvoiceCreateAPI:
+    """7C-1: POST /invoices 請求書作成APIテスト"""
+    
+    def test_create_invoice_success(self, client, auth_token):
+        """請求書作成が成功する"""
+        response = client.post(
+            "/api/v1/invoices",
+            json={
+                "sender_name": "株式会社テスト",
+                "amount": 50000,
+                "due_date": "2024-01-31T00:00:00Z",
+                "invoice_number": "INV-TEST-001",
+                "invoice_month": "2024-01",
+                "source": "manual",
+                "source_channel": "manual",
+                "bank_info": {
+                    "bank_name": "みずほ銀行",
+                    "branch_name": "本店",
+                    "account_type": "普通",
+                    "account_number": "1234567"
+                }
+            },
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["sender_name"] == "株式会社テスト"
+        assert data["amount"] == 50000
+        assert data["status"] == "pending"
+        assert data["invoice_number"] == "INV-TEST-001"
+        assert "scheduled_payment_time" in data
+        assert data["bank_info"]["bank_name"] == "みずほ銀行"
+    
+    def test_create_invoice_minimal(self, client, auth_token):
+        """最小限のフィールドで請求書作成"""
+        response = client.post(
+            "/api/v1/invoices",
+            json={
+                "sender_name": "最小テスト社",
+                "amount": 10000,
+                "due_date": "2024-02-15T00:00:00Z",
+                "source": "email",
+                "source_channel": "gmail"
+            },
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["sender_name"] == "最小テスト社"
+        assert data["amount"] == 10000
+    
+    def test_create_invoice_without_auth(self, client):
+        """認証なしでは失敗する"""
+        response = client.post(
+            "/api/v1/invoices",
+            json={
+                "sender_name": "テスト",
+                "amount": 1000,
+                "due_date": "2024-01-31T00:00:00Z",
+                "source": "manual",
+                "source_channel": "manual"
+            }
+        )
+        
+        assert response.status_code == 401
+
+

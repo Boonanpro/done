@@ -13,6 +13,7 @@ from app.api.credentials_routes import router as credentials_router
 from app.api.gmail_routes import router as gmail_router
 from app.api.detection_routes import router as detection_router
 from app.api.content_routes import router as content_router
+from app.api.invoice_routes import router as invoice_router
 
 app = FastAPI(
     title="AI Secretary System",
@@ -36,6 +37,7 @@ app.include_router(credentials_router, prefix="/api/v1")
 app.include_router(gmail_router, prefix="/api/v1")
 app.include_router(detection_router, prefix="/api/v1")
 app.include_router(content_router, prefix="/api/v1")
+app.include_router(invoice_router, prefix="/api/v1")
 app.include_router(line_webhook_router, prefix="/webhook")
 
 

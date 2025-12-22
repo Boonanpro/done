@@ -387,3 +387,153 @@ def get_schedule_calculator() -> ScheduleCalculator:
     return _schedule_calculator
 
 
+class InvoiceService:
+    """7C: 請求書管理サービス - DB操作"""
+    
+    def __init__(self):
+        from app.services.supabase_client import get_supabase_client
+        supabase_client = get_supabase_client()
+        self.db = supabase_client.client  # Supabase Client インスタンス
+    
+    def _generate_duplicate_hash(
+        self,
+        sender_name: str,
+        amount: int,
+        due_date: datetime
+    ) -> str:
+        """重複チェック用ハッシュを生成"""
+        hash_input = f"{sender_name}|{amount}|{due_date.strftime('%Y-%m-%d')}"
+        return hashlib.sha256(hash_input.encode()).hexdigest()[:32]
+    
+    async def check_duplicate(
+        self,
+        sender_name: str,
+        amount: int,
+        due_date: datetime,
+        days_back: int = 30
+    ) -> tuple[bool, Optional[str]]:
+        """
+        重複チェック
+        
+        Returns:
+            (is_duplicate, duplicate_invoice_id)
+        """
+        duplicate_hash = self._generate_duplicate_hash(sender_name, amount, due_date)
+        
+        # 過去N日以内の同じハッシュを検索
+        from datetime import timedelta
+        check_from = datetime.now() - timedelta(days=days_back)
+        
+        result = self.db.table("invoices").select("id").eq(
+            "duplicate_check_hash", duplicate_hash
+        ).gte("created_at", check_from.isoformat()).execute()
+        
+        if result.data and len(result.data) > 0:
+            return True, result.data[0]["id"]
+        
+        return False, None
+    
+    async def create_invoice(
+        self,
+        sender_name: str,
+        amount: int,
+        due_date: datetime,
+        source: str,
+        source_channel: str,
+        user_id: str = "default",
+        invoice_number: Optional[str] = None,
+        invoice_month: Optional[str] = None,
+        bank_info: Optional[Dict[str, Any]] = None,
+        source_url: Optional[str] = None,
+        raw_content: Optional[str] = None,
+        sender_contact_type: Optional[str] = None,
+        sender_contact_id: Optional[str] = None,
+        pdf_data: Optional[str] = None,
+        screenshot: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        請求書を作成
+        
+        Returns:
+            作成された請求書データ
+        """
+        # 重複チェック
+        is_duplicate, duplicate_id = await self.check_duplicate(
+            sender_name, amount, due_date
+        )
+        
+        # 重複ハッシュを生成
+        duplicate_hash = self._generate_duplicate_hash(sender_name, amount, due_date)
+        
+        # 支払いスケジュールを計算
+        schedule = ScheduleCalculator.calculate_payment_schedule(due_date)
+        
+        # データを構築
+        invoice_data = {
+            "user_id": user_id,
+            "sender_name": sender_name,
+            "amount": amount,
+            "due_date": due_date.isoformat(),
+            "source": source,
+            "source_channel": source_channel,
+            "status": "pending",
+            "duplicate_check_hash": duplicate_hash,
+            "scheduled_payment_time": schedule.scheduled_payment_time.isoformat(),
+        }
+        
+        # オプションフィールド
+        if invoice_number:
+            invoice_data["invoice_number"] = invoice_number
+        if invoice_month:
+            invoice_data["invoice_month"] = invoice_month
+        if bank_info:
+            invoice_data["bank_info"] = bank_info
+        if source_url:
+            invoice_data["source_url"] = source_url
+        if raw_content:
+            invoice_data["raw_content"] = raw_content
+        if sender_contact_type:
+            invoice_data["sender_contact_type"] = sender_contact_type
+        if sender_contact_id:
+            invoice_data["sender_contact_id"] = sender_contact_id
+        if pdf_data:
+            invoice_data["pdf_data"] = pdf_data
+        if screenshot:
+            invoice_data["screenshot"] = screenshot
+        
+        # DBに保存
+        result = self.db.table("invoices").insert(invoice_data).execute()
+        
+        if not result.data or len(result.data) == 0:
+            raise Exception("Failed to create invoice")
+        
+        created = result.data[0]
+        created["is_duplicate"] = is_duplicate
+        if is_duplicate:
+            created["duplicate_of"] = duplicate_id
+        
+        return created
+    
+    async def get_invoice(self, invoice_id: str) -> Optional[Dict[str, Any]]:
+        """請求書を取得"""
+        result = self.db.table("invoices").select("*").eq(
+            "id", invoice_id
+        ).execute()
+        
+        if result.data and len(result.data) > 0:
+            return result.data[0]
+        return None
+
+
+# シングルトンインスタンス
+_invoice_service: Optional[InvoiceService] = None
+
+
+def get_invoice_service() -> InvoiceService:
+    """InvoiceServiceのインスタンスを取得"""
+    global _invoice_service
+    if _invoice_service is None:
+        _invoice_service = InvoiceService()
+    return _invoice_service
+
+
