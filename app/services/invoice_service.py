@@ -1,17 +1,19 @@
 """
-Invoice Management Service - Phase 7A: 請求書情報抽出
+Invoice Management Service - Phase 7A/7B: 請求書情報抽出・スケジュール計算
 """
 import logging
 import hashlib
 import json
 import re
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.models.invoice_schemas import (
     InvoiceExtractionResult,
     BankInfo,
+    ScheduleCalculationResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -209,8 +211,164 @@ JSONのみを出力してください。"""
             )
 
 
+class ScheduleCalculator:
+    """7B: スケジュール計算 - 支払日時を算出"""
+    
+    # デフォルト支払い時刻（JST 18:00）
+    DEFAULT_PAYMENT_HOUR = 18
+    JST = ZoneInfo("Asia/Tokyo")
+    
+    @staticmethod
+    def calculate_payment_schedule(
+        due_date: datetime,
+        invoice_month: Optional[str] = None,
+        consider_holidays: bool = False,
+    ) -> ScheduleCalculationResponse:
+        """
+        支払い日時を計算
+        
+        ロジック:
+        1. 期日ベース: 期日の前日18:00（JST）
+        2. 翌月末ベース: invoice_monthが指定された場合、その翌月末の前日18:00
+        
+        Args:
+            due_date: 支払期日
+            invoice_month: 請求対象月（YYYY-MM形式、オプション）
+            consider_holidays: 休日を考慮するか（オプション）
+        
+        Returns:
+            ScheduleCalculationResponse
+        """
+        # タイムゾーンを確認・設定
+        if due_date.tzinfo is None:
+            due_date = due_date.replace(tzinfo=ScheduleCalculator.JST)
+        
+        # 期日の前日18:00を計算
+        payment_date = due_date - timedelta(days=1)
+        payment_time = payment_date.replace(
+            hour=ScheduleCalculator.DEFAULT_PAYMENT_HOUR,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+        
+        # 休日考慮（オプション）
+        is_holiday_adjusted = False
+        if consider_holidays:
+            payment_time, is_holiday_adjusted = ScheduleCalculator._adjust_for_holidays(payment_time)
+        
+        # 支払いまでの日数を計算
+        now = datetime.now(ScheduleCalculator.JST)
+        days_until = (payment_time.date() - now.date()).days
+        
+        return ScheduleCalculationResponse(
+            scheduled_payment_time=payment_time,
+            due_date=due_date,
+            days_until_payment=max(0, days_until),
+            is_holiday_adjusted=is_holiday_adjusted
+        )
+    
+    @staticmethod
+    def calculate_from_invoice_month(
+        invoice_month: str,
+        consider_holidays: bool = False,
+    ) -> ScheduleCalculationResponse:
+        """
+        請求対象月から支払い日時を計算（翌月末の前日18:00）
+        
+        Args:
+            invoice_month: 請求対象月（YYYY-MM形式）
+            consider_holidays: 休日を考慮するか
+        
+        Returns:
+            ScheduleCalculationResponse
+        """
+        # YYYY-MM形式をパース
+        year, month = map(int, invoice_month.split("-"))
+        
+        # 翌月を計算
+        if month == 12:
+            next_year = year + 1
+            next_month = 1
+        else:
+            next_year = year
+            next_month = month + 1
+        
+        # 翌月末日を計算
+        if next_month == 12:
+            last_day = 31
+        elif next_month in [4, 6, 9, 11]:
+            last_day = 30
+        elif next_month == 2:
+            # うるう年判定
+            if (next_year % 4 == 0 and next_year % 100 != 0) or (next_year % 400 == 0):
+                last_day = 29
+            else:
+                last_day = 28
+        else:
+            last_day = 31
+        
+        due_date = datetime(next_year, next_month, last_day, tzinfo=ScheduleCalculator.JST)
+        
+        return ScheduleCalculator.calculate_payment_schedule(
+            due_date=due_date,
+            invoice_month=invoice_month,
+            consider_holidays=consider_holidays
+        )
+    
+    @staticmethod
+    def _adjust_for_holidays(payment_time: datetime) -> tuple[datetime, bool]:
+        """
+        休日の場合は前営業日にシフト
+        
+        Args:
+            payment_time: 支払い予定日時
+        
+        Returns:
+            (調整後の日時, 調整されたかどうか)
+        """
+        adjusted = False
+        
+        # 土日チェック
+        while payment_time.weekday() >= 5:  # 5=土曜, 6=日曜
+            payment_time = payment_time - timedelta(days=1)
+            adjusted = True
+        
+        # 祝日チェック（jpholidayがインストールされている場合）
+        try:
+            import jpholiday
+            while jpholiday.is_holiday(payment_time.date()):
+                payment_time = payment_time - timedelta(days=1)
+                adjusted = True
+                # 土日に戻った場合は再度チェック
+                while payment_time.weekday() >= 5:
+                    payment_time = payment_time - timedelta(days=1)
+        except ImportError:
+            # jpholidayがない場合は土日のみ考慮
+            pass
+        
+        return payment_time, adjusted
+    
+    @staticmethod
+    def is_payment_due(scheduled_time: datetime) -> bool:
+        """
+        支払い時刻が到来しているかチェック
+        
+        Args:
+            scheduled_time: スケジュールされた支払い日時
+        
+        Returns:
+            True if 支払い時刻が到来している
+        """
+        now = datetime.now(ScheduleCalculator.JST)
+        if scheduled_time.tzinfo is None:
+            scheduled_time = scheduled_time.replace(tzinfo=ScheduleCalculator.JST)
+        return now >= scheduled_time
+
+
 # シングルトンインスタンス
 _invoice_extractor: Optional[InvoiceExtractor] = None
+_schedule_calculator: Optional[ScheduleCalculator] = None
 
 
 def get_invoice_extractor() -> InvoiceExtractor:
@@ -219,4 +377,13 @@ def get_invoice_extractor() -> InvoiceExtractor:
     if _invoice_extractor is None:
         _invoice_extractor = InvoiceExtractor()
     return _invoice_extractor
+
+
+def get_schedule_calculator() -> ScheduleCalculator:
+    """ScheduleCalculatorのインスタンスを取得"""
+    global _schedule_calculator
+    if _schedule_calculator is None:
+        _schedule_calculator = ScheduleCalculator()
+    return _schedule_calculator
+
 

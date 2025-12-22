@@ -108,7 +108,7 @@
 | 機能 | API/サービス | 状態 |
 |-----|-------------|------|
 | 請求書情報抽出 | `InvoiceExtractor` (7A) | ✅ 動作確認済み（2024年12月23日） |
-| スケジュール計算 | `ScheduleCalculator` (7B) | 🔜 実装予定 |
+| スケジュール計算 | `ScheduleCalculator` (7B) | ✅ 動作確認済み（2024年12月23日） |
 | 請求書作成API | `POST /api/v1/invoices` (7C) | 🔜 実装予定 |
 | 請求書一覧API | `GET /api/v1/invoices` (7C) | 🔜 実装予定 |
 | 請求書承認API | `POST /api/v1/invoices/{id}/approve` (7C) | 🔜 実装予定 |

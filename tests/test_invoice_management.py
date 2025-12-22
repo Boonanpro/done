@@ -2,15 +2,22 @@
 Invoice Management Tests - Phase 7
 """
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from unittest.mock import AsyncMock, patch, MagicMock
 
 from app.models.invoice_schemas import (
     InvoiceExtractionResult,
     BankInfo,
     InvoiceStatus,
+    ScheduleCalculationResponse,
 )
-from app.services.invoice_service import InvoiceExtractor, get_invoice_extractor
+from app.services.invoice_service import (
+    InvoiceExtractor,
+    ScheduleCalculator,
+    get_invoice_extractor,
+    get_schedule_calculator,
+)
 
 
 class TestInvoiceExtractor:
@@ -206,5 +213,119 @@ class TestInvoiceExtractor:
         
         assert extractor1 is extractor2
         assert isinstance(extractor1, InvoiceExtractor)
+
+
+class TestScheduleCalculator:
+    """7B: スケジュール計算テスト"""
+    
+    JST = ZoneInfo("Asia/Tokyo")
+    
+    def test_calculate_payment_schedule_basic(self):
+        """基本的なスケジュール計算（期日の前日18:00）"""
+        due_date = datetime(2024, 1, 31, 0, 0, 0, tzinfo=self.JST)
+        
+        result = ScheduleCalculator.calculate_payment_schedule(due_date)
+        
+        assert result.scheduled_payment_time.year == 2024
+        assert result.scheduled_payment_time.month == 1
+        assert result.scheduled_payment_time.day == 30  # 前日
+        assert result.scheduled_payment_time.hour == 18
+        assert result.due_date == due_date
+        assert result.is_holiday_adjusted is False
+    
+    def test_calculate_payment_schedule_february(self):
+        """2月末の期日テスト"""
+        due_date = datetime(2024, 2, 29, 0, 0, 0, tzinfo=self.JST)  # うるう年
+        
+        result = ScheduleCalculator.calculate_payment_schedule(due_date)
+        
+        assert result.scheduled_payment_time.day == 28
+        assert result.scheduled_payment_time.month == 2
+    
+    def test_calculate_payment_schedule_without_timezone(self):
+        """タイムゾーンなしの日時でも動作する"""
+        due_date = datetime(2024, 3, 15)  # タイムゾーンなし
+        
+        result = ScheduleCalculator.calculate_payment_schedule(due_date)
+        
+        assert result.scheduled_payment_time.day == 14
+        assert result.scheduled_payment_time.hour == 18
+    
+    def test_calculate_from_invoice_month_basic(self):
+        """請求対象月からの計算（翌月末の前日）"""
+        # 12月分 → 1月末の前日（1月30日）
+        result = ScheduleCalculator.calculate_from_invoice_month("2023-12")
+        
+        assert result.scheduled_payment_time.year == 2024
+        assert result.scheduled_payment_time.month == 1
+        assert result.scheduled_payment_time.day == 30  # 1月31日の前日
+        assert result.scheduled_payment_time.hour == 18
+    
+    def test_calculate_from_invoice_month_february(self):
+        """1月分 → 2月末の前日（うるう年考慮）"""
+        # 2024年はうるう年なので2月は29日まで
+        result = ScheduleCalculator.calculate_from_invoice_month("2024-01")
+        
+        assert result.scheduled_payment_time.month == 2
+        assert result.scheduled_payment_time.day == 28  # 2月29日の前日
+    
+    def test_calculate_from_invoice_month_april(self):
+        """3月分 → 4月末の前日（30日の月）"""
+        result = ScheduleCalculator.calculate_from_invoice_month("2024-03")
+        
+        assert result.scheduled_payment_time.month == 4
+        assert result.scheduled_payment_time.day == 29  # 4月30日の前日
+    
+    def test_adjust_for_holidays_saturday(self):
+        """土曜日は金曜日にシフト"""
+        # 2024年1月27日は土曜日
+        saturday = datetime(2024, 1, 27, 18, 0, 0, tzinfo=self.JST)
+        
+        adjusted, was_adjusted = ScheduleCalculator._adjust_for_holidays(saturday)
+        
+        assert was_adjusted is True
+        assert adjusted.weekday() == 4  # 金曜日
+        assert adjusted.day == 26
+    
+    def test_adjust_for_holidays_sunday(self):
+        """日曜日は金曜日にシフト"""
+        # 2024年1月28日は日曜日
+        sunday = datetime(2024, 1, 28, 18, 0, 0, tzinfo=self.JST)
+        
+        adjusted, was_adjusted = ScheduleCalculator._adjust_for_holidays(sunday)
+        
+        assert was_adjusted is True
+        assert adjusted.weekday() == 4  # 金曜日
+        assert adjusted.day == 26
+    
+    def test_adjust_for_holidays_weekday(self):
+        """平日はそのまま"""
+        # 2024年1月29日は月曜日
+        monday = datetime(2024, 1, 29, 18, 0, 0, tzinfo=self.JST)
+        
+        adjusted, was_adjusted = ScheduleCalculator._adjust_for_holidays(monday)
+        
+        assert was_adjusted is False
+        assert adjusted == monday
+    
+    def test_is_payment_due_past(self):
+        """過去の日時は支払い時刻到来"""
+        past = datetime.now(self.JST) - timedelta(hours=1)
+        
+        assert ScheduleCalculator.is_payment_due(past) is True
+    
+    def test_is_payment_due_future(self):
+        """未来の日時は支払い時刻未到来"""
+        future = datetime.now(self.JST) + timedelta(hours=1)
+        
+        assert ScheduleCalculator.is_payment_due(future) is False
+    
+    def test_get_schedule_calculator_singleton(self):
+        """シングルトンインスタンスが返される"""
+        calc1 = get_schedule_calculator()
+        calc2 = get_schedule_calculator()
+        
+        assert calc1 is calc2
+        assert isinstance(calc1, ScheduleCalculator)
 
 
