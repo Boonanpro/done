@@ -73,3 +73,4 @@ async def test_browser_automation():
 
 if __name__ == "__main__":
     asyncio.run(test_browser_automation())
+

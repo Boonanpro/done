@@ -727,3 +727,4 @@ def get_content_intelligence_service() -> ContentIntelligenceService:
     if _content_intelligence_service is None:
         _content_intelligence_service = ContentIntelligenceService()
     return _content_intelligence_service
+

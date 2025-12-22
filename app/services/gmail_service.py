@@ -411,3 +411,4 @@ def get_gmail_service() -> GmailService:
         _gmail_service = GmailService()
     return _gmail_service
 
+

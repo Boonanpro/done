@@ -233,3 +233,4 @@ class TestRegistrationConfig:
         
         assert len(config.fields) == 2
         assert config.password_requirements == {"min_length": 8}
+

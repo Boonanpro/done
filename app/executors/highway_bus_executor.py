@@ -698,3 +698,4 @@ class HighwayBusExecutor(BaseExecutor):
             submit_selector='button:has-text("次へ")',
             password_requirements=self.PASSWORD_REQUIREMENTS,
         )
+

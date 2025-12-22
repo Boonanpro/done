@@ -425,3 +425,4 @@ class TestContentAPI:
         """URL抽出APIエンドポイントのテスト"""
         # Note: 実際のテストではPlaywrightモックが必要
         pass
+

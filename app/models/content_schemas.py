@@ -188,3 +188,4 @@ class BatchAnalyzeResponse(BaseModel):
     processed: int
     failed: int
     results: List[Dict[str, Any]]
+

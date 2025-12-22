@@ -162,3 +162,4 @@ class TestExecutorFactory:
         
         assert hasattr(executor, "dynamic_auth")
         assert executor.dynamic_auth is not None
+
