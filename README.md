@@ -104,6 +104,17 @@
 | 添付ファイル解析 | `POST /api/v1/content/analyze/attachment/{id}` | ✅ 動作確認済み |
 | メッセージ解析 | `POST /api/v1/content/analyze/message/{id}` | ✅ 動作確認済み |
 
+#### Phase 7: Invoice Management（請求書管理）🚧 実装中
+| 機能 | API/サービス | 状態 |
+|-----|-------------|------|
+| 請求書情報抽出 | `InvoiceExtractor` (7A) | ✅ 動作確認済み（2024年12月23日） |
+| スケジュール計算 | `ScheduleCalculator` (7B) | 🔜 実装予定 |
+| 請求書作成API | `POST /api/v1/invoices` (7C) | 🔜 実装予定 |
+| 請求書一覧API | `GET /api/v1/invoices` (7C) | 🔜 実装予定 |
+| 請求書承認API | `POST /api/v1/invoices/{id}/approve` (7C) | 🔜 実装予定 |
+| 請求書却下API | `POST /api/v1/invoices/{id}/reject` (7C) | 🔜 実装予定 |
+| 支払いスケジューラ | Celery Beat (7D) | 🔜 実装予定 |
+
 ### 🔧 現在の状態
 
 - **アクションファースト提案**: 完成 ✅
