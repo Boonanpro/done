@@ -28,7 +28,7 @@ router = APIRouter(prefix="/content", tags=["content-intelligence"])
 @router.post("/extract/pdf", response_model=AnalyzeContentResponse)
 async def extract_text_from_pdf(
     file: UploadFile = File(...),
-    classify: bool = Form(default=True),
+    classify: str = Form(default="true"),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -37,6 +37,8 @@ async def extract_text_from_pdf(
     - **file**: PDFファイル
     - **classify**: 分類も行うかどうか（デフォルト: True）
     """
+    # 文字列からboolに変換
+    classify_bool = classify.lower() in ("true", "1", "yes")
     start_time = time.time()
     
     if not file.content_type == "application/pdf":
@@ -50,7 +52,7 @@ async def extract_text_from_pdf(
             file_data=file_data,
             mime_type="application/pdf",
             filename=file.filename or "uploaded.pdf",
-            classify=classify,
+            classify=classify_bool,
         )
         
         processing_time = int((time.time() - start_time) * 1000)
@@ -72,7 +74,7 @@ async def extract_text_from_pdf(
 async def extract_text_from_image(
     file: UploadFile = File(...),
     language: str = Form(default="jpn+eng"),
-    classify: bool = Form(default=True),
+    classify: str = Form(default="true"),
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -82,6 +84,8 @@ async def extract_text_from_image(
     - **language**: OCR言語（デフォルト: jpn+eng）
     - **classify**: 分類も行うかどうか（デフォルト: True）
     """
+    # 文字列からboolに変換
+    classify_bool = classify.lower() in ("true", "1", "yes")
     start_time = time.time()
     
     allowed_types = ["image/png", "image/jpeg", "image/jpg", "image/gif"]
@@ -98,7 +102,7 @@ async def extract_text_from_image(
         extraction_result = await service.extract_text_from_image(file_data, language)
         
         classification_result = None
-        if classify and extraction_result.success and extraction_result.text:
+        if classify_bool and extraction_result.success and extraction_result.text:
             classification_result = await service.classify_content(extraction_result.text)
         
         processing_time = int((time.time() - start_time) * 1000)
@@ -300,6 +304,7 @@ async def batch_analyze_messages(
         failed=failed,
         results=results,
     )
+
 
 
 
