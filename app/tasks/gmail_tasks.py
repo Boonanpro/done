@@ -204,3 +204,4 @@ celery_app.conf.beat_schedule.update({
         'args': (30,),  # 30日以上古いファイルを削除
     },
 })
+

@@ -19,6 +19,12 @@ anthropic>=0.18.0
 # Browser Automation
 playwright>=1.40.0
 
+# Phase 6: Content Intelligence
+pdfplumber>=0.11.0
+pytesseract>=0.3.10
+Pillow>=10.0.0
+google-cloud-vision>=3.5.0  # Optional: for Google Vision OCR
+
 # Database
 supabase>=2.0.0
 

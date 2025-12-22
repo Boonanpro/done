@@ -33,11 +33,12 @@ An AI secretary that responds to user wishes ("I want to..." / "Please do...") w
 | Phase | Name | Description | Status |
 |-------|------|-------------|--------|
 | 1 | Core Flow | 基本的な提案・確認フロー | ✅ 完了 |
-| 2 | Done Chat | AIネイティブチャット | 🚧 実装中 |
-| 3 | Execution Tools | Email/Browser/Search実行 | ⏳ 待機 |
-| 4 | Credential Management | 資格情報管理 | ⏳ 待機 |
+| 2 | Done Chat | AIネイティブチャット | ✅ 完了 |
+| 3A | Smart Proposal | リアルタイム検索提案 | ✅ 完了 |
+| 3B | Execution Engine | 承認後の自動実行 | ✅ 完了 |
+| 4 | Credential Management | 資格情報管理 | ✅ 完了 |
 | 5 | User Preference | ユーザー設定学習 | ⏳ 待機 |
-| 6 | External Integrations | 外部サービス連携 | ⏳ 待機 |
+| 6 | External Integrations | 外部サービス連携 | 🔧 設定待ち |
 
 ---
 
@@ -373,24 +374,45 @@ BのAIモードがOFFに
 
 ---
 
-### Phase 3: Execution Tools ⏳
+### Phase 3A: Smart Proposal（リアルタイム検索提案）✅
+
+| # | ツール | Description | Status |
+|---|--------|-------------|--------|
+| 1 | `tavily_search` | Tavily API汎用Web検索 | ✅ 実装済み |
+| 2 | `search_train` | 電車・新幹線検索（Yahoo!乗換案内） | ✅ 実装済み |
+| 3 | `search_bus` | 高速バス検索（高速バスネット） | ✅ 実装済み |
+| 4 | `search_flight` | 航空機検索（スカイスキャナー） | ✅ 実装済み |
+| 5 | `search_amazon` | Amazon商品検索 | ✅ 実装済み |
+| 6 | `search_rakuten` | 楽天商品検索 | ✅ 実装済み |
+| 7 | `search_kakaku` | 価格.com商品検索 | ✅ 実装済み |
+
+### Phase 3B: Execution Engine（自動実行）✅
 
 | # | API/Tool | Description | Status |
 |---|----------|-------------|--------|
-| 1 | Email Send | Send email via Gmail API | ⏳ Code exists, needs config |
-| 2 | Web Browse | Browse/operate websites via Playwright | ⏳ Code exists, not connected |
-| 3 | Form Fill | Fill forms on websites | ⏳ Code exists, not connected |
-| 4 | Web Search | Search web for information | ⏳ Code exists, not connected |
+| 1 | Amazon Executor | 商品をカートに追加 | ✅ 実装済み |
+| 2 | 楽天 Executor | 商品をカートに追加 | ✅ 実装済み |
+| 3 | EX予約 Executor | 新幹線予約 | ✅ 実装済み |
+| 4 | WILLER Executor | 高速バス予約 | ✅ 実装済み |
+
+### External Tools（設定待ち）🔧
+
+| # | API/Tool | Description | Status |
+|---|----------|-------------|--------|
+| 1 | Email Send | Send email via Gmail API | 🔧 設定待ち |
+| 2 | LINE Send | Send LINE message | 🔧 設定待ち |
 
 ---
 
-### Phase 4: Credential Management ⏳
+### Phase 4: Credential Management ✅
 
 | # | API | Method | Description | Status |
 |---|-----|--------|-------------|--------|
-| 1 | `/api/v1/credentials` | POST | Store encrypted credentials | ❌ Not implemented |
-| 2 | `/api/v1/credentials/{service}` | GET | Get credentials for service | ❌ Not implemented |
-| 3 | `/api/v1/task/{id}/provide-credentials` | POST | Provide credentials for blocked task | ❌ Not implemented |
+| 1 | `/api/v1/credentials` | POST | Store encrypted credentials | ✅ 実装済み |
+| 2 | `/api/v1/credentials` | GET | List saved services | ✅ 実装済み |
+| 3 | `/api/v1/credentials/{service}` | DELETE | Delete credentials | ✅ 実装済み |
+| 4 | `/api/v1/task/{id}/provide-credentials` | POST | Provide credentials for task | ✅ 実装済み |
+| 5 | `/api/v1/task/{id}/execution-status` | GET | Get execution status | ✅ 実装済み |
 
 ---
 
@@ -547,25 +569,32 @@ User: Confirms → System operates website to post
 
 ## Test Status Summary
 
-| Phase | Name | APIs | Tested | Pending |
-|-------|------|------|--------|---------|
+| Phase | Name | APIs/Tools | Tested | Pending |
+|-------|------|------------|--------|---------|
 | Phase 1 | Core Flow | 6 | 6 ✅ | 0 |
-| Phase 2 | Done Chat | 22 | 0 | 22 |
-| Phase 3 | Execution Tools | 4 | 0 | 4 |
-| Phase 4 | Credential Management | 3 | 0 | 3 |
+| Phase 2 | Done Chat | 22 | 22 ✅ | 0 |
+| Phase 3A | Smart Proposal | 7 | 7 ✅ | 0 |
+| Phase 3B | Execution Engine | 4 | 4 ✅ | 0 |
+| Phase 4 | Credential Management | 5 | 5 ✅ | 0 |
 | Phase 5 | User Preference | 3 | 0 | 3 |
-| Phase 6 | External Integrations | 1 | 0 | 1 |
-| **Total** | | **39** | **6** | **33** |
+| Phase 6 | External Integrations | 2 | 0 | 2 (設定待ち) |
+| **Total** | | **49** | **44** | **5** |
 
 ---
 
+## 完了済み（2024年12月21日時点）
+
+- ✅ Phase 1: Core Flow
+- ✅ Phase 2: Done Chat
+- ✅ Phase 3A: Smart Proposal（リアルタイム検索提案）
+- ✅ Phase 3B: Execution Engine（自動実行）
+- ✅ Phase 4: Credential Management
+
 ## Next Steps
 
-1. **Phase 2**: Done Chat実装
-   - データベースマイグレーション作成
-   - 認証API実装
-   - WebSocket実装
-   - AI応答機能実装
-2. **Phase 3**: Execution Tools接続
-3. **Phase 4**: Credential Management実装
-4. **Phase 5**: User Preference Learning実装
+1. **Phase 5**: User Preference Learning実装
+   - ユーザー設定の保存・取得
+   - タスク実行後のフィードバック機能
+2. **Phase 6**: External Integrations設定
+   - Gmail API設定
+   - LINE Messaging API設定

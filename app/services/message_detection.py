@@ -172,3 +172,4 @@ def get_detection_service() -> MessageDetectionService:
     if _detection_service is None:
         _detection_service = MessageDetectionService()
     return _detection_service
+

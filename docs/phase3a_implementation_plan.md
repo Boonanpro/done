@@ -13,7 +13,7 @@ Phase 3Aでは新規APIは追加せず、既存APIのレスポンスを拡張す
 
 | # | API | Method | 変更内容 | Status |
 |---|-----|--------|---------|--------|
-| 1 | `/api/v1/wish` | POST | `search_results` フィールドを追加 | ❌ Not implemented |
+| 1 | `/api/v1/wish` | POST | `search_results` フィールドを追加 | ✅ 実装済み |
 
 ### レスポンス形式（拡張後）
 
@@ -94,75 +94,75 @@ class SearchResult(BaseModel):
 
 | # | タスク | 説明 | Status |
 |---|--------|------|--------|
-| 0-1 | Tavily APIキー取得 | https://tavily.com でアカウント作成 | ❌ |
-| 0-2 | 環境変数追加 | `.env` に `TAVILY_API_KEY` 追加 | ❌ |
-| 0-3 | 設定クラス更新 | `app/config.py` に設定追加 | ❌ |
-| 0-4 | SearchResultスキーマ追加 | `app/models/schemas.py` | ❌ |
+| 0-1 | Tavily APIキー取得 | https://tavily.com でアカウント作成 | ✅ |
+| 0-2 | 環境変数追加 | `.env` に `TAVILY_API_KEY` 追加 | ✅ |
+| 0-3 | 設定クラス更新 | `app/config.py` に設定追加 | ✅ |
+| 0-4 | SearchResultスキーマ追加 | `app/models/schemas.py` | ✅ |
 
 ### Step 1: Tavily検索ツール
 
 | # | タスク | 説明 | Status |
 |---|--------|------|--------|
-| 1-1 | `tavily_search.py` 作成 | Tavily API連携 | ❌ |
-| 1-2 | ツール登録 | `__init__.py` に追加 | ❌ |
-| 1-3 | 単体テスト | `test_tavily_search.py` | ❌ |
-| 1-4 | 動作確認 | 手動テスト | ❌ |
+| 1-1 | `tavily_search.py` 作成 | Tavily API連携 | ✅ |
+| 1-2 | ツール登録 | `__init__.py` に追加 | ✅ |
+| 1-3 | 単体テスト | `test_tavily_search.py` | ✅ |
+| 1-4 | 動作確認 | 手動テスト | ✅ |
 
 ### Step 2: 交通検索ツール（電車・新幹線）
 
 | # | タスク | 説明 | Status |
 |---|--------|------|--------|
-| 2-1 | `travel_search.py` 作成 | Yahoo!乗換案内スクレイピング | ❌ |
-| 2-2 | `search_train` 実装 | 電車・新幹線検索 | ❌ |
-| 2-3 | ツール登録 | `__init__.py` に追加 | ❌ |
-| 2-4 | 単体テスト | `test_travel_search.py` | ❌ |
-| 2-5 | 動作確認 | 手動テスト | ❌ |
+| 2-1 | `travel_search.py` 作成 | Yahoo!乗換案内スクレイピング | ✅ |
+| 2-2 | `search_train` 実装 | 電車・新幹線検索 | ✅ |
+| 2-3 | ツール登録 | `__init__.py` に追加 | ✅ |
+| 2-4 | 単体テスト | `test_travel_search.py` | ✅ |
+| 2-5 | 動作確認 | 手動テスト | ✅ |
 
 ### Step 3: 交通検索ツール（高速バス）
 
 | # | タスク | 説明 | Status |
 |---|--------|------|--------|
-| 3-1 | `search_bus` 実装 | 高速バスネットスクレイピング | ❌ |
-| 3-2 | 単体テスト追加 | `test_travel_search.py` | ❌ |
-| 3-3 | 動作確認 | 手動テスト | ❌ |
+| 3-1 | `search_bus` 実装 | 高速バスネットスクレイピング | ✅ |
+| 3-2 | 単体テスト追加 | `test_travel_search.py` | ✅ |
+| 3-3 | 動作確認 | 手動テスト | ✅ |
 
 ### Step 4: 交通検索ツール（航空機）
 
 | # | タスク | 説明 | Status |
 |---|--------|------|--------|
-| 4-1 | `search_flight` 実装 | スカイスキャナースクレイピング | ❌ |
-| 4-2 | 単体テスト追加 | `test_travel_search.py` | ❌ |
-| 4-3 | 動作確認 | 手動テスト | ❌ |
+| 4-1 | `search_flight` 実装 | スカイスキャナースクレイピング | ✅ |
+| 4-2 | 単体テスト追加 | `test_travel_search.py` | ✅ |
+| 4-3 | 動作確認 | 手動テスト | ✅ |
 
 ### Step 5: 商品検索ツール
 
 | # | タスク | 説明 | Status |
 |---|--------|------|--------|
-| 5-1 | `product_search.py` 作成 | EC検索ツール | ❌ |
-| 5-2 | `search_product_kakaku` 実装 | 価格.com検索 | ❌ |
-| 5-3 | `search_product_amazon` 実装 | Amazon検索 | ❌ |
-| 5-4 | `search_product_rakuten` 実装 | 楽天検索 | ❌ |
-| 5-5 | ツール登録 | `__init__.py` に追加 | ❌ |
-| 5-6 | 単体テスト | `test_product_search.py` | ❌ |
-| 5-7 | 動作確認 | 手動テスト | ❌ |
+| 5-1 | `product_search.py` 作成 | EC検索ツール | ✅ |
+| 5-2 | `search_product_kakaku` 実装 | 価格.com検索 | ✅ |
+| 5-3 | `search_product_amazon` 実装 | Amazon検索 | ✅ |
+| 5-4 | `search_product_rakuten` 実装 | 楽天検索 | ✅ |
+| 5-5 | ツール登録 | `__init__.py` に追加 | ✅ |
+| 5-6 | 単体テスト | `test_product_search.py` | ✅ |
+| 5-7 | 動作確認 | 手動テスト | ✅ |
 
 ### Step 6: エージェント改修
 
 | # | タスク | 説明 | Status |
 |---|--------|------|--------|
-| 6-1 | 提案時ツール有効化 | `_propose_actions` でツール呼び出し | ❌ |
-| 6-2 | 検索結果の構造化 | `search_results` を返す | ❌ |
-| 6-3 | プロンプト改善 | 検索結果を使った提案 | ❌ |
-| 6-4 | 統合テスト | エージェント経由のテスト | ❌ |
+| 6-1 | 提案時ツール有効化 | `_propose_actions` でツール呼び出し | ✅ |
+| 6-2 | 検索結果の構造化 | `search_results` を返す | ✅ |
+| 6-3 | プロンプト改善 | 検索結果を使った提案 | ✅ |
+| 6-4 | 統合テスト | エージェント経由のテスト | ✅ |
 
 ### Step 7: API拡張
 
 | # | タスク | 説明 | Status |
 |---|--------|------|--------|
-| 7-1 | レスポンス形式更新 | `search_results` フィールド追加 | ❌ |
-| 7-2 | エラーハンドリング | 検索失敗時のフォールバック | ❌ |
-| 7-3 | 統合テスト | `test_api.py` 更新 | ❌ |
-| 7-4 | 手動テスト | 全ユースケース確認 | ❌ |
+| 7-1 | レスポンス形式更新 | `search_results` フィールド追加 | ✅ |
+| 7-2 | エラーハンドリング | 検索失敗時のフォールバック | ✅ |
+| 7-3 | 統合テスト | `test_api.py` 更新 | ✅ |
+| 7-4 | 手動テスト | 全ユースケース確認 | ✅ |
 
 ---
 
@@ -247,19 +247,29 @@ flowchart TD
 
 ---
 
-## 開始前チェックリスト
+## 完了チェックリスト
 
-- [ ] Tavily APIキーを取得済み
-- [ ] サーバーが起動できる状態
-- [ ] 既存テストがパスする
+- [x] Tavily APIキーを取得済み
+- [x] サーバーが起動できる状態
+- [x] 既存テストがパスする
+- [x] 全ステップ実装完了
 
 ---
 
-## 次のアクション
+## 完了日
 
-Step 0から順番に実装を開始：
+**2024年12月21日** - Phase 3A 全機能実装完了
 
-1. **Step 0-1**: Tavily APIキー取得
-2. **Step 0-2**: 環境変数追加
-3. **Step 0-3**: 設定クラス更新
-4. **Step 0-4**: SearchResultスキーマ追加
+### 実装済み機能
+
+| 機能 | ファイル | 状態 |
+|------|---------|------|
+| Tavily汎用検索 | `app/tools/tavily_search.py` | ✅ |
+| 電車・新幹線検索 | `app/tools/travel_search.py` | ✅ |
+| 高速バス検索 | `app/tools/travel_search.py` | ✅ |
+| 航空機検索 | `app/tools/travel_search.py` | ✅ |
+| Amazon商品検索 | `app/tools/product_search.py` | ✅ |
+| 楽天商品検索 | `app/tools/product_search.py` | ✅ |
+| 価格.com検索 | `app/tools/product_search.py` | ✅ |
+| エージェント統合 | `app/agent/agent.py` | ✅ |
+| APIレスポンス拡張 | `app/api/routes.py` | ✅ |

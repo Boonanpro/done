@@ -10,8 +10,20 @@ from app.models.schemas import (
     Credential,
     Message,
 )
+from app.models.detection_schemas import (
+    MessageSource,
+    DetectionStatus,
+    ContentType,
+    StorageType,
+)
+from app.models.content_schemas import (
+    ExtractionMethod,
+    ContentCategory,
+    ContentConfidence,
+)
 
 __all__ = [
+    # Core schemas
     "TaskRequest",
     "TaskResponse", 
     "TaskStatus",
@@ -19,5 +31,14 @@ __all__ = [
     "User",
     "Credential",
     "Message",
+    # Detection schemas
+    "MessageSource",
+    "DetectionStatus",
+    "ContentType",
+    "StorageType",
+    # Content schemas
+    "ExtractionMethod",
+    "ContentCategory",
+    "ContentConfidence",
 ]
 

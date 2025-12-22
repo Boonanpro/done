@@ -498,3 +498,4 @@ class TestGmailRoutes:
             data = response.json()
             assert "auth_url" in data
             assert data["auth_url"].startswith("https://accounts.google.com")
+

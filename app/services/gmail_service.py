@@ -410,3 +410,4 @@ def get_gmail_service() -> GmailService:
     if _gmail_service is None:
         _gmail_service = GmailService()
     return _gmail_service
+
