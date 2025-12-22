@@ -7,6 +7,8 @@ import logging
 
 from app.models.invoice_schemas import (
     InvoiceCreateRequest,
+    InvoiceApproveRequest,
+    InvoiceRejectRequest,
     InvoiceResponse,
     InvoiceListResponse,
     InvoiceStatus,
@@ -162,5 +164,143 @@ async def list_invoices(
         
     except Exception as e:
         logger.error(f"Failed to list invoices: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{invoice_id}/approve", response_model=InvoiceResponse)
+async def approve_invoice(
+    invoice_id: str,
+    request: InvoiceApproveRequest = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    請求書を承認
+    
+    - **invoice_id**: 請求書ID
+    - **payment_type**: 支払い方法タイプ（bank_transfer/credit_card/convenience）
+    - **payment_method_id**: 支払い方法ID（オプション）
+    - **scheduled_time_override**: スケジュール上書き（オプション）
+    """
+    try:
+        service = get_invoice_service()
+        user_id = current_user.user_id if hasattr(current_user, 'user_id') else "default"
+        
+        # リクエストボディがない場合はデフォルト値を使用
+        payment_type = "bank_transfer"
+        payment_method_id = None
+        scheduled_time_override = None
+        
+        if request:
+            payment_type = request.payment_type.value if request.payment_type else "bank_transfer"
+            payment_method_id = request.payment_method_id
+            scheduled_time_override = request.scheduled_time_override
+        
+        invoice = await service.approve_invoice(
+            invoice_id=invoice_id,
+            user_id=user_id,
+            payment_type=payment_type,
+            payment_method_id=payment_method_id,
+            scheduled_time_override=scheduled_time_override,
+        )
+        
+        if not invoice:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        
+        return InvoiceResponse(
+            id=invoice["id"],
+            user_id=invoice["user_id"],
+            sender_name=invoice["sender_name"],
+            sender_contact_type=invoice.get("sender_contact_type"),
+            sender_contact_id=invoice.get("sender_contact_id"),
+            amount=invoice["amount"],
+            due_date=invoice["due_date"],
+            invoice_number=invoice.get("invoice_number"),
+            invoice_month=invoice.get("invoice_month"),
+            source=invoice["source"],
+            source_channel=invoice["source_channel"],
+            source_url=invoice.get("source_url"),
+            bank_info=invoice.get("bank_info"),
+            status=InvoiceStatus(invoice["status"]),
+            scheduled_payment_time=invoice.get("scheduled_payment_time"),
+            approved_at=invoice.get("approved_at"),
+            approved_by=invoice.get("approved_by"),
+            paid_at=invoice.get("paid_at"),
+            transaction_id=invoice.get("transaction_id"),
+            error_message=invoice.get("error_message"),
+            is_duplicate=False,
+            notification_id=invoice.get("notification_id"),
+            created_at=invoice["created_at"],
+            updated_at=invoice.get("updated_at"),
+        )
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to approve invoice: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{invoice_id}/reject", response_model=InvoiceResponse)
+async def reject_invoice(
+    invoice_id: str,
+    request: InvoiceRejectRequest = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    請求書を却下
+    
+    - **invoice_id**: 請求書ID
+    - **reason**: 却下理由（オプション）
+    """
+    try:
+        service = get_invoice_service()
+        user_id = current_user.user_id if hasattr(current_user, 'user_id') else "default"
+        
+        reason = request.reason if request else None
+        
+        invoice = await service.reject_invoice(
+            invoice_id=invoice_id,
+            user_id=user_id,
+            reason=reason,
+        )
+        
+        if not invoice:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        
+        return InvoiceResponse(
+            id=invoice["id"],
+            user_id=invoice["user_id"],
+            sender_name=invoice["sender_name"],
+            sender_contact_type=invoice.get("sender_contact_type"),
+            sender_contact_id=invoice.get("sender_contact_id"),
+            amount=invoice["amount"],
+            due_date=invoice["due_date"],
+            invoice_number=invoice.get("invoice_number"),
+            invoice_month=invoice.get("invoice_month"),
+            source=invoice["source"],
+            source_channel=invoice["source_channel"],
+            source_url=invoice.get("source_url"),
+            bank_info=invoice.get("bank_info"),
+            status=InvoiceStatus(invoice["status"]),
+            scheduled_payment_time=invoice.get("scheduled_payment_time"),
+            approved_at=invoice.get("approved_at"),
+            approved_by=invoice.get("approved_by"),
+            paid_at=invoice.get("paid_at"),
+            transaction_id=invoice.get("transaction_id"),
+            error_message=invoice.get("error_message"),
+            is_duplicate=False,
+            notification_id=invoice.get("notification_id"),
+            created_at=invoice["created_at"],
+            updated_at=invoice.get("updated_at"),
+        )
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to reject invoice: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

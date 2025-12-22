@@ -476,3 +476,110 @@ class TestInvoiceListAPI:
         assert response.status_code == 401
 
 
+class TestInvoiceApproveRejectAPI:
+    """7C-3/4: 請求書承認・却下APIテスト"""
+    
+    def _create_test_invoice(self, client, auth_token):
+        """テスト用請求書を作成"""
+        response = client.post(
+            "/api/v1/invoices",
+            json={
+                "sender_name": "承認テスト社",
+                "amount": 30000,
+                "due_date": "2024-04-30T00:00:00Z",
+                "source": "manual",
+                "source_channel": "manual"
+            },
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        return response.json()["id"]
+    
+    def test_approve_invoice_success(self, client, auth_token):
+        """請求書承認が成功する"""
+        invoice_id = self._create_test_invoice(client, auth_token)
+        
+        response = client.post(
+            f"/api/v1/invoices/{invoice_id}/approve",
+            json={"payment_type": "bank_transfer"},
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "approved"
+        assert data["approved_at"] is not None
+    
+    def test_approve_invoice_without_body(self, client, auth_token):
+        """リクエストボディなしでも承認できる"""
+        invoice_id = self._create_test_invoice(client, auth_token)
+        
+        response = client.post(
+            f"/api/v1/invoices/{invoice_id}/approve",
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "approved"
+    
+    def test_approve_invoice_not_found(self, client, auth_token):
+        """存在しない請求書は404"""
+        response = client.post(
+            "/api/v1/invoices/00000000-0000-0000-0000-000000000000/approve",
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 404
+    
+    def test_reject_invoice_success(self, client, auth_token):
+        """請求書却下が成功する"""
+        invoice_id = self._create_test_invoice(client, auth_token)
+        
+        response = client.post(
+            f"/api/v1/invoices/{invoice_id}/reject",
+            json={"reason": "金額が違う"},
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "rejected"
+        assert "金額が違う" in data["error_message"]
+    
+    def test_reject_invoice_without_reason(self, client, auth_token):
+        """理由なしでも却下できる"""
+        invoice_id = self._create_test_invoice(client, auth_token)
+        
+        response = client.post(
+            f"/api/v1/invoices/{invoice_id}/reject",
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "rejected"
+    
+    def test_cannot_approve_rejected_invoice(self, client, auth_token):
+        """却下済み請求書は承認できない"""
+        invoice_id = self._create_test_invoice(client, auth_token)
+        
+        # まず却下
+        client.post(
+            f"/api/v1/invoices/{invoice_id}/reject",
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        # 承認を試みる
+        response = client.post(
+            f"/api/v1/invoices/{invoice_id}/approve",
+            headers={"Authorization": f"Bearer {auth_token}"}
+        )
+        
+        assert response.status_code == 400
+    
+    def test_approve_without_auth(self, client):
+        """認証なしでは失敗する"""
+        response = client.post("/api/v1/invoices/test-id/approve")
+        assert response.status_code == 401
+
+

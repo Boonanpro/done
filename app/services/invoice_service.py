@@ -553,6 +553,102 @@ class InvoiceService:
         total = result.count if hasattr(result, 'count') and result.count else len(result.data or [])
         
         return result.data or [], total
+    
+    async def approve_invoice(
+        self,
+        invoice_id: str,
+        user_id: str,
+        payment_type: str = "bank_transfer",
+        payment_method_id: Optional[str] = None,
+        scheduled_time_override: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        請求書を承認
+        
+        Args:
+            invoice_id: 請求書ID
+            user_id: 承認者ID
+            payment_type: 支払い方法タイプ
+            payment_method_id: 支払い方法ID（オプション）
+            scheduled_time_override: スケジュール上書き（オプション）
+        
+        Returns:
+            更新された請求書データ
+        """
+        # 請求書を取得
+        invoice = await self.get_invoice(invoice_id)
+        if not invoice:
+            return None
+        
+        # 既にapproved以降なら何もしない
+        if invoice["status"] not in ["pending"]:
+            raise ValueError(f"Cannot approve invoice with status: {invoice['status']}")
+        
+        # 更新データを構築
+        now = datetime.now(ZoneInfo("Asia/Tokyo"))
+        updates = {
+            "status": "approved",
+            "approved_at": now.isoformat(),
+            "approved_by": user_id,
+            "selected_payment_type": payment_type,
+            "updated_at": now.isoformat(),
+        }
+        
+        if payment_method_id:
+            updates["selected_payment_method_id"] = payment_method_id
+        
+        if scheduled_time_override:
+            updates["scheduled_payment_time"] = scheduled_time_override.isoformat()
+        
+        # DBを更新
+        result = self.db.table("invoices").update(updates).eq("id", invoice_id).execute()
+        
+        if result.data and len(result.data) > 0:
+            return result.data[0]
+        return None
+    
+    async def reject_invoice(
+        self,
+        invoice_id: str,
+        user_id: str,
+        reason: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        請求書を却下
+        
+        Args:
+            invoice_id: 請求書ID
+            user_id: 却下者ID
+            reason: 却下理由（オプション）
+        
+        Returns:
+            更新された請求書データ
+        """
+        # 請求書を取得
+        invoice = await self.get_invoice(invoice_id)
+        if not invoice:
+            return None
+        
+        # 既にrejected/paid以降なら何もしない
+        if invoice["status"] not in ["pending", "approved"]:
+            raise ValueError(f"Cannot reject invoice with status: {invoice['status']}")
+        
+        # 更新データを構築
+        now = datetime.now(ZoneInfo("Asia/Tokyo"))
+        updates = {
+            "status": "rejected",
+            "updated_at": now.isoformat(),
+        }
+        
+        if reason:
+            updates["error_message"] = f"Rejected: {reason}"
+        
+        # DBを更新
+        result = self.db.table("invoices").update(updates).eq("id", invoice_id).execute()
+        
+        if result.data and len(result.data) > 0:
+            return result.data[0]
+        return None
 
 
 # シングルトンインスタンス
