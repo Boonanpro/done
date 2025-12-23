@@ -140,6 +140,129 @@ class BaseExecutor(ABC):
             status="success",
             details=details,
         )
+    
+    async def _handle_otp_challenge(
+        self,
+        page,
+        task_id: str,
+        user_id: str,
+        service: str,
+        otp_source: str = "email",
+        timeout_seconds: int = 60,
+    ) -> Optional[str]:
+        """
+        OTP入力が必要な場合の処理
+        
+        1. OTP入力フィールドを検知
+        2. OTPServiceからコードを取得
+        3. フィールドに入力
+        
+        Args:
+            page: Playwrightページ
+            task_id: タスクID
+            user_id: ユーザーID
+            service: サービス名（amazon, ex_reservation等）
+            otp_source: OTPソース（email/sms）
+            timeout_seconds: タイムアウト秒数
+            
+        Returns:
+            OTPコード、取得できなかった場合はNone
+        """
+        from app.services.otp_service import get_otp_service
+        from app.models.otp_schemas import OTP_FIELD_SELECTORS, OTP_PAGE_INDICATORS
+        
+        # OTP入力画面かどうか確認
+        page_text = await page.inner_text("body")
+        is_otp_page = any(indicator in page_text for indicator in OTP_PAGE_INDICATORS)
+        
+        if not is_otp_page:
+            return None
+        
+        # OTP入力フィールドを検索
+        otp_field = None
+        for selector in OTP_FIELD_SELECTORS:
+            try:
+                otp_field = await page.wait_for_selector(selector, timeout=3000)
+                if otp_field:
+                    break
+            except Exception:
+                continue
+        
+        if not otp_field:
+            return None
+        
+        await self._update_progress(
+            task_id=task_id,
+            step="otp_required",
+            details={"source": otp_source, "service": service},
+        )
+        
+        # OTPを待機・取得
+        otp_service = get_otp_service()
+        otp_code = await otp_service.wait_for_otp(
+            user_id=user_id,
+            service=service,
+            source=otp_source,
+            timeout_seconds=timeout_seconds,
+        )
+        
+        if otp_code:
+            await self._update_progress(
+                task_id=task_id,
+                step="otp_received",
+                details={"source": otp_source},
+            )
+            
+            # OTPを入力
+            await otp_field.fill(otp_code)
+            
+            return otp_code
+        
+        await self._update_progress(
+            task_id=task_id,
+            step="otp_timeout",
+            details={"message": "OTP取得がタイムアウトしました"},
+        )
+        return None
+    
+    async def _detect_otp_page(self, page) -> bool:
+        """
+        現在のページがOTP入力画面かどうかを検知
+        
+        Args:
+            page: Playwrightページ
+            
+        Returns:
+            OTP入力画面の場合True
+        """
+        from app.models.otp_schemas import OTP_PAGE_INDICATORS
+        
+        try:
+            page_text = await page.inner_text("body")
+            return any(indicator in page_text for indicator in OTP_PAGE_INDICATORS)
+        except Exception:
+            return False
+    
+    async def _find_otp_field(self, page):
+        """
+        OTP入力フィールドを検索
+        
+        Args:
+            page: Playwrightページ
+            
+        Returns:
+            OTP入力フィールド（見つからない場合はNone）
+        """
+        from app.models.otp_schemas import OTP_FIELD_SELECTORS
+        
+        for selector in OTP_FIELD_SELECTORS:
+            try:
+                field = await page.wait_for_selector(selector, timeout=2000)
+                if field:
+                    return field
+            except Exception:
+                continue
+        return None
 
 
 class GenericExecutor(BaseExecutor):

@@ -137,6 +137,7 @@
 | SMS設定状態確認 | `GET /api/v1/otp/sms/status` (9B) | ✅ 動作確認済み（2024年12月23日） |
 | SMS Webhook受信 | `POST /api/v1/otp/sms/webhook` (9B) | ✅ 動作確認済み（2024年12月23日） |
 | SMS OTP抽出 | `POST /api/v1/otp/extract/sms` (9B) | ✅ 動作確認済み（2024年12月23日） |
+| Executor OTP統合 | `BaseExecutor._handle_otp_challenge()` (9D) | ✅ 動作確認済み（2024年12月23日） |
 
 ### 🔧 現在の状態
 

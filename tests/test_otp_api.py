@@ -304,3 +304,48 @@ class TestOTPRoutes:
             assert response.status_code == 200
             assert "xml" in response.headers.get("content-type", "")
 
+
+class TestBaseExecutorOTP:
+    """BaseExecutorのOTP統合テスト"""
+    
+    @pytest.fixture
+    def mock_supabase(self):
+        """Supabaseモック"""
+        mock = MagicMock()
+        mock.table.return_value = mock
+        mock.select.return_value = mock
+        mock.insert.return_value = mock
+        mock.update.return_value = mock
+        mock.eq.return_value = mock
+        mock.gt.return_value = mock
+        mock.gte.return_value = mock
+        mock.order.return_value = mock
+        mock.limit.return_value = mock
+        mock.execute.return_value = MagicMock(data=[], count=0)
+        return mock
+    
+    def test_otp_page_indicators_defined(self):
+        """OTPページ検知パターンが定義されていること"""
+        from app.models.otp_schemas import OTP_PAGE_INDICATORS
+        
+        assert len(OTP_PAGE_INDICATORS) > 0
+        assert "認証コード" in OTP_PAGE_INDICATORS
+        assert "確認コード" in OTP_PAGE_INDICATORS
+    
+    def test_otp_field_selectors_defined(self):
+        """OTPフィールドセレクタが定義されていること"""
+        from app.models.otp_schemas import OTP_FIELD_SELECTORS
+        
+        assert len(OTP_FIELD_SELECTORS) > 0
+        assert any("otp" in s for s in OTP_FIELD_SELECTORS)
+        assert any("verification" in s for s in OTP_FIELD_SELECTORS)
+    
+    def test_base_executor_has_otp_methods(self):
+        """BaseExecutorにOTPメソッドが定義されていること"""
+        from app.executors.base import BaseExecutor
+        
+        # OTP関連メソッドの存在確認
+        assert hasattr(BaseExecutor, '_handle_otp_challenge')
+        assert hasattr(BaseExecutor, '_detect_otp_page')
+        assert hasattr(BaseExecutor, '_find_otp_field')
+
