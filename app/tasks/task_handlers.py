@@ -167,11 +167,12 @@ def cleanup_old_tasks() -> dict[str, Any]:
     return {"status": "success", "message": "Cleanup completed"}
 
 
-# Celery Beatスケジュール（定期タスク）
-celery_app.conf.beat_schedule = {
+# Celery Beatスケジュール（定期タスク）を追加
+celery_app.conf.beat_schedule = celery_app.conf.beat_schedule or {}
+celery_app.conf.beat_schedule.update({
     "cleanup-old-tasks-daily": {
         "task": "app.tasks.task_handlers.cleanup_old_tasks",
         "schedule": 86400.0,  # 24時間ごと
     },
-}
+})
 

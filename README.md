@@ -113,7 +113,7 @@
 | 請求書一覧API | `GET /api/v1/invoices` (7C) | ✅ 動作確認済み（2024年12月23日） |
 | 請求書承認API | `POST /api/v1/invoices/{id}/approve` (7C) | ✅ 動作確認済み（2024年12月23日） |
 | 請求書却下API | `POST /api/v1/invoices/{id}/reject` (7C) | ✅ 動作確認済み（2024年12月23日） |
-| 支払いスケジューラ | Celery Beat (7D) | 🔜 実装予定 |
+| 支払いスケジューラ | Celery Beat (7D) | ✅ 動作確認済み（2024年12月23日） |
 
 #### Phase 8: Payment Execution（支払い実行）✅ 動作確認済み
 | 機能 | API | 状態 |
