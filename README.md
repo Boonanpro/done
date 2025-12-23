@@ -127,6 +127,17 @@
 | 支払い実行API | `POST /api/v1/invoices/{id}/pay` (8A) | ✅ 動作確認済み（2024年12月23日） |
 | 支払い状況確認API | `GET /api/v1/invoices/{id}/payment-status` (8A) | ✅ 動作確認済み（2024年12月23日） |
 
+#### Phase 9: OTP Automation（OTP自動化）✅ 動作確認済み
+| 機能 | API | 状態 |
+|-----|-----|------|
+| メールOTP抽出 | `POST /api/v1/otp/extract/email` (9A) | ✅ 動作確認済み（2024年12月23日） |
+| 最新OTP取得 | `GET /api/v1/otp/latest` (9A) | ✅ 動作確認済み（2024年12月23日） |
+| OTP使用済みマーク | `POST /api/v1/otp/{id}/mark-used` (9A) | ✅ 動作確認済み（2024年12月23日） |
+| OTP履歴取得 | `GET /api/v1/otp/history` (9A) | ✅ 動作確認済み（2024年12月23日） |
+| SMS設定状態確認 | `GET /api/v1/otp/sms/status` (9B) | ✅ 動作確認済み（2024年12月23日） |
+| SMS Webhook受信 | `POST /api/v1/otp/sms/webhook` (9B) | ✅ 動作確認済み（2024年12月23日） |
+| SMS OTP抽出 | `POST /api/v1/otp/extract/sms` (9B) | ✅ 動作確認済み（2024年12月23日） |
+
 ### 🔧 現在の状態
 
 - **アクションファースト提案**: 完成 ✅
@@ -192,11 +203,6 @@ pip install -r requirements.txt
 
 # Playwrightブラウザをインストール
 playwright install chromium
-
-# (オプション) OCR機能を使用する場合: Tesseract OCRをインストール
-# Windows: https://github.com/UB-Mannheim/tesseract/wiki からインストーラをダウンロード
-# macOS: brew install tesseract
-# Linux: sudo apt install tesseract-ocr tesseract-ocr-jpn
 ```
 
 ### 2. 環境変数の設定
@@ -380,21 +386,16 @@ run_tests.bat
 ```
 1. API実装
     ↓
-2. 必要なパッケージをrequirements.txtに追加 & pip install
+2. 手動でAPIをテスト（ターミナルでcurl/Invoke-RestMethod）
     ↓
-3. 手動でAPIをテスト（ターミナルでcurl/Invoke-RestMethod）
+3. 成功したら → 自動テストが通るか確認（pytest）
     ↓
-4. 成功したら → 自動テストが通るか確認（pytest）
+4. 自動テストが通ったら → README.mdを更新
     ↓
-5. 自動テストが通ったら → README.mdを更新
-    ↓
-6. コミット（1 API = 1 コミット）
+5. コミット（1 API = 1 コミット）
 ```
 
 **重要なポイント：**
-- **本番環境動作確認必須**: モックテストだけでなく、実際に外部API・サービスと連携する本番環境での動作確認を行う
-- **パッケージ管理**: 新機能で外部パッケージを使用する場合は、必ず requirements.txt に追加し、pip install で実際にインストールする
-- **システムレベル依存関係**: Playwright (`playwright install`)、Tesseract OCR など、システムレベルのインストールが必要なものは、READMEに手順を明記する
 - 手動で成功したテストは必ず自動テストに組み込む
 - 自動テストが通らないとコミットしない
 - README.mdは常に最新の状態を保つ

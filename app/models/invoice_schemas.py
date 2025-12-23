@@ -213,3 +213,5 @@ class InvoiceNotificationData(BaseModel):
     status: InvoiceStatus
     scheduled_payment_time: Optional[datetime] = None
 
+
+

@@ -310,3 +310,6 @@ class TestManualVerifiedScenarios:
         assert result.category == ContentCategory.INVOICE
         assert result.confidence_score >= 0.9
         assert result.extracted_data is not None
+
+
+
