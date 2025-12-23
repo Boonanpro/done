@@ -192,6 +192,11 @@ pip install -r requirements.txt
 
 # Playwrightブラウザをインストール
 playwright install chromium
+
+# (オプション) OCR機能を使用する場合: Tesseract OCRをインストール
+# Windows: https://github.com/UB-Mannheim/tesseract/wiki からインストーラをダウンロード
+# macOS: brew install tesseract
+# Linux: sudo apt install tesseract-ocr tesseract-ocr-jpn
 ```
 
 ### 2. 環境変数の設定
@@ -375,16 +380,21 @@ run_tests.bat
 ```
 1. API実装
     ↓
-2. 手動でAPIをテスト（ターミナルでcurl/Invoke-RestMethod）
+2. 必要なパッケージをrequirements.txtに追加 & pip install
     ↓
-3. 成功したら → 自動テストが通るか確認（pytest）
+3. 手動でAPIをテスト（ターミナルでcurl/Invoke-RestMethod）
     ↓
-4. 自動テストが通ったら → README.mdを更新
+4. 成功したら → 自動テストが通るか確認（pytest）
     ↓
-5. コミット（1 API = 1 コミット）
+5. 自動テストが通ったら → README.mdを更新
+    ↓
+6. コミット（1 API = 1 コミット）
 ```
 
 **重要なポイント：**
+- **本番環境動作確認必須**: モックテストだけでなく、実際に外部API・サービスと連携する本番環境での動作確認を行う
+- **パッケージ管理**: 新機能で外部パッケージを使用する場合は、必ず requirements.txt に追加し、pip install で実際にインストールする
+- **システムレベル依存関係**: Playwright (`playwright install`)、Tesseract OCR など、システムレベルのインストールが必要なものは、READMEに手順を明記する
 - 手動で成功したテストは必ず自動テストに組み込む
 - 自動テストが通らないとコミットしない
 - README.mdは常に最新の状態を保つ

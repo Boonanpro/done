@@ -308,13 +308,35 @@ class URLExtractor:
         start_time = time.time()
         
         try:
+            # freee等のサービスはUser-Agentをチェックするため、完全なブラウザヘッダーを設定
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
             }
-            response = requests.get(url, headers=headers, timeout=timeout_ms / 1000)
+            response = requests.get(url, headers=headers, timeout=timeout_ms / 1000, allow_redirects=True)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.text, 'html.parser')
+            raw_html = response.text
+            
+            # SPA（JavaScript必須ページ）の検出
+            is_spa = False
+            spa_indicators = [
+                soup.select_one('#root'),  # React
+                soup.select_one('#app'),   # Vue
+                soup.select_one('[ng-app]'),  # Angular
+                soup.select_one('[data-reactroot]'),  # React
+            ]
+            if any(spa_indicators):
+                # SPAのルート要素が空または非常に短い場合
+                for indicator in spa_indicators:
+                    if indicator and len(indicator.get_text(strip=True)) < 50:
+                        is_spa = True
+                        break
             
             # スクリプト・スタイルを削除
             for tag in soup(['script', 'style', 'nav', 'footer', 'header']):
@@ -343,6 +365,10 @@ class URLExtractor:
             content = re.sub(r'\n{3,}', '\n\n', content)
             content = content.strip()
             
+            # コンテンツが非常に少ない場合もSPAと判断
+            if len(content) < 200:
+                is_spa = True
+            
             processing_time = int((time.time() - start_time) * 1000)
             
             return URLExtractionResult(
@@ -352,14 +378,26 @@ class URLExtractor:
                 title=title,
                 url=url,
                 final_url=response.url if response.url != url else None,
-                confidence=0.85,
+                confidence=0.85 if not is_spa else 0.3,  # SPAの場合は低い信頼度
                 processing_time_ms=processing_time,
                 metadata={
                     "content_length": len(content),
                     "status_code": response.status_code,
+                    "needs_javascript": is_spa,  # Playwrightが必要かどうか
                 }
             )
             
+        except requests.exceptions.HTTPError as e:
+            # HTTPエラー（404, 403等）は再試行しても無駄なのでフォールバックしない
+            logger.error(f"Requests URL extraction failed (HTTP Error): {e}")
+            return URLExtractionResult(
+                success=False,
+                method=ExtractionMethod.URL_REQUESTS,
+                url=url,
+                error=str(e),
+                processing_time_ms=int((time.time() - start_time) * 1000),
+                metadata={"http_error": True, "status_code": e.response.status_code if e.response else None}
+            )
         except Exception as e:
             logger.error(f"Requests URL extraction failed: {e}")
             return URLExtractionResult(
@@ -392,87 +430,96 @@ class URLExtractor:
         # デフォルトはrequestsを使用（軽量・高速）
         if not use_playwright and not wait_for_selector:
             result = await URLExtractor.extract_with_requests(url, timeout_ms)
+            
             if result.success:
-                return result
-            # 失敗した場合、Playwrightにフォールバック
-            logger.info(f"Requests failed, falling back to Playwright: {result.error}")
+                # SPAなど、JavaScriptが必要なページは自動でPlaywrightにフォールバック
+                if result.metadata and result.metadata.get("needs_javascript"):
+                    logger.info(f"SPA detected (content too short or JS framework found), falling back to Playwright")
+                else:
+                    return result
+            else:
+                # HTTPエラー（404等）の場合はPlaywrightでも同じ結果になるのでフォールバックしない
+                if result.metadata and result.metadata.get("http_error"):
+                    logger.info(f"HTTP error occurred, not falling back to Playwright: {result.error}")
+                    return result
+                # 接続エラー等の場合のみPlaywrightにフォールバック
+                logger.info(f"Requests failed, falling back to Playwright: {result.error}")
         
         start_time = time.time()
         
-        try:
-            from playwright.async_api import async_playwright
+        # Windows上でのasyncio問題を回避するため、同期APIを別スレッドで実行
+        import asyncio
+        
+        def _extract_with_playwright_sync(target_url: str, selector: Optional[str], timeout: int) -> dict:
+            """Playwrightの同期APIでURL取得（別スレッドで実行）"""
+            from playwright.sync_api import sync_playwright
+            import time as time_module
             
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
                     viewport={"width": 1280, "height": 720},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 )
-                page = await context.new_page()
+                page = context.new_page()
                 
                 try:
-                    # ページにアクセス
-                    await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    # ページ読み込み
+                    page.goto(target_url, wait_until="domcontentloaded", timeout=timeout)
                     
-                    # 追加の待機（必要な場合）
-                    if wait_for_selector:
-                        await page.wait_for_selector(wait_for_selector, timeout=timeout_ms)
+                    # SPAの場合、ネットワークが落ち着くまで待機
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=15000)
+                    except Exception:
+                        pass  # タイムアウトしても続行
                     
-                    # タイトル取得
-                    title = await page.title()
+                    # 追加待機（SPAがレンダリングを完了するため）
+                    time_module.sleep(2)
                     
-                    # 最終URL（リダイレクト後）
+                    if selector:
+                        page.wait_for_selector(selector, timeout=timeout)
+                    
+                    title = page.title()
                     final_url = page.url
                     
-                    # メインコンテンツのテキストを取得
-                    content = await page.evaluate("""
-                        () => {
-                            // メインコンテンツを探す
-                            const selectors = [
-                                'article',
-                                'main',
-                                '[role="main"]',
-                                '.content',
-                                '#content',
-                                '.main-content',
-                                '#main-content',
-                            ];
-                            
-                            for (const selector of selectors) {
-                                const el = document.querySelector(selector);
-                                if (el && el.innerText.trim().length > 100) {
-                                    return el.innerText;
-                                }
-                            }
-                            
-                            // フォールバック: body全体
-                            return document.body.innerText;
-                        }
-                    """)
+                    # テキスト取得
+                    content = page.evaluate("() => document.body.innerText")
                     
-                    # 不要な空白を整理
-                    content = re.sub(r'\n{3,}', '\n\n', content)
-                    content = content.strip()
-                    
-                    processing_time = int((time.time() - start_time) * 1000)
-                    
-                    return URLExtractionResult(
-                        success=True,
-                        text=content[:50000],  # 最大50KB
-                        method=ExtractionMethod.URL_PLAYWRIGHT,
-                        title=title,
-                        url=url,
-                        final_url=final_url if final_url != url else None,
-                        confidence=0.9,
-                        processing_time_ms=processing_time,
-                        metadata={
-                            "content_length": len(content),
-                            "redirected": final_url != url,
-                        }
-                    )
-                    
+                    return {
+                        "success": True,
+                        "title": title,
+                        "final_url": final_url,
+                        "content": content
+                    }
                 finally:
-                    await browser.close()
+                    browser.close()
+        
+        try:
+            # 別スレッドで同期APIを実行
+            result = await asyncio.to_thread(
+                _extract_with_playwright_sync, url, wait_for_selector, timeout_ms
+            )
+            
+            content = result["content"]
+            content = re.sub(r'\n{3,}', '\n\n', content)
+            content = content.strip()
+            
+            processing_time = int((time.time() - start_time) * 1000)
+            
+            return URLExtractionResult(
+                success=True,
+                text=content[:50000],
+                method=ExtractionMethod.URL_PLAYWRIGHT,
+                title=result["title"],
+                url=url,
+                final_url=result["final_url"] if result["final_url"] != url else None,
+                confidence=0.9,
+                processing_time_ms=processing_time,
+                metadata={
+                    "content_length": len(content),
+                    "redirected": result["final_url"] != url,
+                }
+            )
                     
         except ImportError:
             logger.error("playwright not installed")
@@ -820,6 +867,10 @@ def get_content_intelligence_service() -> ContentIntelligenceService:
     if _content_intelligence_service is None:
         _content_intelligence_service = ContentIntelligenceService()
     return _content_intelligence_service
+
+
+
+
 
 
 
