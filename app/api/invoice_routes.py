@@ -1,5 +1,5 @@
 """
-Invoice Management API Routes - Phase 7C
+Invoice Management API Routes - Phase 7C + Phase 8A Payment
 """
 from fastapi import APIRouter, HTTPException, Depends
 from typing import Optional
@@ -13,7 +13,14 @@ from app.models.invoice_schemas import (
     InvoiceListResponse,
     InvoiceStatus,
 )
+from app.models.payment_schemas import (
+    PaymentExecuteRequest,
+    PaymentExecuteResponse,
+    PaymentStatusResponse,
+    PaymentExecutionStatus,
+)
 from app.services.invoice_service import get_invoice_service
+from app.executors.bank_transfer_executor import get_bank_transfer_executor
 from app.api.chat_routes import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -302,5 +309,135 @@ async def reject_invoice(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to reject invoice: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{invoice_id}/pay", response_model=PaymentExecuteResponse)
+async def execute_payment(
+    invoice_id: str,
+    request: PaymentExecuteRequest = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    請求書の支払いを実行
+    
+    - **invoice_id**: 請求書ID
+    - **bank_type**: 銀行タイプ（simulation/sbi等、デフォルト: simulation）
+    - **saved_recipient_id**: 保存済み振込先ID（オプション）
+    """
+    try:
+        executor = get_bank_transfer_executor()
+        user_id = current_user.user_id if hasattr(current_user, 'user_id') else "default"
+        
+        # リクエストパラメータ
+        bank_type = "simulation"
+        if request and request.bank_type:
+            bank_type = request.bank_type.value
+        
+        # 振込を実行
+        result = await executor.execute(
+            invoice_id=invoice_id,
+            user_id=user_id,
+            bank_type=bank_type,
+        )
+        
+        # 実行状況を取得
+        status = await executor.get_execution_status(invoice_id, user_id)
+        execution_id = status.get("execution_id") if status else None
+        
+        return PaymentExecuteResponse(
+            invoice_id=invoice_id,
+            execution_id=execution_id or "",
+            status=PaymentExecutionStatus.COMPLETED if result.success else PaymentExecutionStatus.FAILED,
+            message=result.message,
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to execute payment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{invoice_id}/payment-status", response_model=PaymentStatusResponse)
+async def get_payment_status(
+    invoice_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    支払い実行状況を取得
+    
+    - **invoice_id**: 請求書ID
+    """
+    try:
+        executor = get_bank_transfer_executor()
+        user_id = current_user.user_id if hasattr(current_user, 'user_id') else "default"
+        
+        status = await executor.get_execution_status(invoice_id, user_id)
+        
+        if not status:
+            # 実行ログがない場合は請求書のステータスを確認
+            service = get_invoice_service()
+            invoices, _ = await service.list_invoices(
+                user_id=user_id,
+                page=1,
+                page_size=1,
+            )
+            
+            # invoice_idで検索
+            invoice = None
+            for inv in invoices:
+                if inv["id"] == invoice_id:
+                    invoice = inv
+                    break
+            
+            if not invoice:
+                raise HTTPException(status_code=404, detail="Invoice not found")
+            
+            # ステータスを変換
+            inv_status = invoice.get("status", "pending")
+            if inv_status == "paid":
+                exec_status = PaymentExecutionStatus.COMPLETED
+            elif inv_status == "failed":
+                exec_status = PaymentExecutionStatus.FAILED
+            elif inv_status == "approved":
+                exec_status = PaymentExecutionStatus.PENDING
+            else:
+                exec_status = PaymentExecutionStatus.PENDING
+            
+            return PaymentStatusResponse(
+                invoice_id=invoice_id,
+                status=exec_status,
+            )
+        
+        # 実行ステータスを変換
+        status_str = status.get("status", "pending")
+        if status_str == "completed":
+            exec_status = PaymentExecutionStatus.COMPLETED
+        elif status_str == "failed":
+            exec_status = PaymentExecutionStatus.FAILED
+        elif status_str == "executing":
+            exec_status = PaymentExecutionStatus.EXECUTING
+        elif status_str == "awaiting_otp":
+            exec_status = PaymentExecutionStatus.AWAITING_OTP
+        else:
+            exec_status = PaymentExecutionStatus.PENDING
+        
+        return PaymentStatusResponse(
+            invoice_id=invoice_id,
+            execution_id=status.get("execution_id"),
+            status=exec_status,
+            current_step=status.get("current_step"),
+            steps_completed=status.get("steps_completed", []),
+            steps_remaining=status.get("steps_remaining", []),
+            requires_otp=status.get("requires_otp", False),
+            transaction_id=status.get("transaction_id"),
+            error_message=status.get("error_message"),
+            started_at=status.get("started_at"),
+            completed_at=status.get("completed_at"),
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get payment status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

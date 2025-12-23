@@ -115,7 +115,7 @@
 | 請求書却下API | `POST /api/v1/invoices/{id}/reject` (7C) | ✅ 動作確認済み（2024年12月23日） |
 | 支払いスケジューラ | Celery Beat (7D) | 🔜 実装予定 |
 
-#### Phase 8: Payment Execution（支払い実行）🚧 実装中
+#### Phase 8: Payment Execution（支払い実行）✅ 動作確認済み
 | 機能 | API | 状態 |
 |-----|-----|------|
 | 振込先作成 | `POST /api/v1/bank-accounts` (8B) | ✅ 動作確認済み（2024年12月23日） |
@@ -123,9 +123,9 @@
 | 振込先詳細取得 | `GET /api/v1/bank-accounts/{id}` (8B) | ✅ 動作確認済み（2024年12月23日） |
 | 振込先削除 | `DELETE /api/v1/bank-accounts/{id}` (8B) | ✅ 動作確認済み（2024年12月23日） |
 | 振込先検証 | `POST /api/v1/bank-accounts/{id}/verify` (8B) | ✅ 動作確認済み（2024年12月23日） |
-| 銀行振込Executor | `BankTransferExecutor` (8A) | 🔜 実装予定 |
-| 支払い実行API | `POST /api/v1/invoices/{id}/pay` (8A) | 🔜 実装予定 |
-| 支払い状況確認API | `GET /api/v1/invoices/{id}/payment-status` (8A) | 🔜 実装予定 |
+| 銀行振込Executor | `BankTransferExecutor` (8A) | ✅ 動作確認済み（2024年12月23日） |
+| 支払い実行API | `POST /api/v1/invoices/{id}/pay` (8A) | ✅ 動作確認済み（2024年12月23日） |
+| 支払い状況確認API | `GET /api/v1/invoices/{id}/payment-status` (8A) | ✅ 動作確認済み（2024年12月23日） |
 
 ### 🔧 現在の状態
 
