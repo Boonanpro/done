@@ -139,6 +139,24 @@
 | SMS OTP抽出 | `POST /api/v1/otp/extract/sms` (9B) | ✅ 動作確認済み（2024年12月23日） |
 | Executor OTP統合 | `BaseExecutor._handle_otp_challenge()` (9D) | ✅ 動作確認済み（2024年12月23日） |
 
+#### Phase 10: Voice Communication（音声通話）🚧 開発中
+| 機能 | API | 状態 |
+|-----|-----|------|
+| 音声設定取得 | `GET /api/v1/voice/settings` (10A) | ✅ 動作確認済み（2024年12月24日） |
+| 音声設定更新 | `PATCH /api/v1/voice/settings` (10A) | ✅ 動作確認済み（2024年12月24日） |
+| 受電オン/オフ | `PATCH /api/v1/voice/inbound` (10A) | ✅ 動作確認済み（2024年12月24日） |
+| 電話番号ルール一覧 | `GET /api/v1/voice/rules` (10D) | ✅ 動作確認済み（2024年12月24日） |
+| 電話番号ルール追加 | `POST /api/v1/voice/rules` (10D) | ✅ 動作確認済み（2024年12月24日） |
+| 電話番号ルール削除 | `DELETE /api/v1/voice/rules/{id}` (10D) | ✅ 動作確認済み（2024年12月24日） |
+| 通話履歴取得 | `GET /api/v1/voice/calls` (10B) | ✅ 動作確認済み（2024年12月24日） |
+| 通話詳細取得 | `GET /api/v1/voice/call/{id}` (10B) | ✅ 動作確認済み（2024年12月24日） |
+| 架電開始 | `POST /api/v1/voice/call` (10B) | 🔧 実装予定 |
+| 通話終了 | `POST /api/v1/voice/call/{id}/end` (10B) | 🔧 実装予定 |
+| 受電Webhook | `POST /api/v1/voice/webhook/incoming` (10C) | 🔧 実装予定 |
+| 通話状態Webhook | `POST /api/v1/voice/webhook/status` (10B) | 🔧 実装予定 |
+
+**技術スタック**: Twilio Voice + ElevenLabs Conversational AI + Claude
+
 ### 🔧 現在の状態
 
 - **アクションファースト提案**: 完成 ✅

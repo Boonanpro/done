@@ -52,6 +52,21 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     
+    # Phase 10: Voice Communication - Twilio
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    TWILIO_PHONE_NUMBER: str = ""
+    
+    # Phase 10: Voice Communication - ElevenLabs
+    ELEVENLABS_API_KEY: str = ""
+    ELEVENLABS_VOICE_ID: str = ""
+    ELEVENLABS_MODEL_ID: str = "eleven_turbo_v2_5"
+    
+    # Phase 10: Voice Communication - General
+    VOICE_MAX_CALL_DURATION_MINUTES: int = 30
+    VOICE_DEFAULT_LANGUAGE: str = "ja"
+    VOICE_WEBHOOK_BASE_URL: str = ""
+    
     # Properties for Gmail settings
     @property
     def gmail_client_id(self) -> str:
