@@ -3,14 +3,15 @@ Phase 10: Voice Communication API Routes
 音声通話関連のAPIエンドポイント
 """
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Form, Request, Response
 
 from app.services.voice_service import get_voice_service
 from app.models.voice_schemas import (
-    PhoneRuleType, CallDirection, CallStatus,
-    VoiceSettingsUpdate, VoiceSettingsResponse,
+    CallPurpose, PhoneRuleType, CallDirection, CallStatus,
+    VoiceCallCreate, VoiceSettingsUpdate, VoiceSettingsResponse,
     PhoneNumberRuleCreate, PhoneNumberRuleResponse, PhoneNumberRuleListResponse,
     VoiceCallResponse, VoiceCallListResponse,
+    VoiceCallStartResponse, VoiceCallEndResponse,
     InboundToggleRequest, InboundToggleResponse,
 )
 
@@ -143,12 +144,183 @@ async def get_call(call_id: str):
 
 
 # ========================================
-# Placeholder for future implementation
+# Outbound Call API (10B)
 # ========================================
 
-# POST /api/v1/voice/call - 架電開始 (10B)
-# POST /api/v1/voice/call/{id}/end - 通話終了 (10B)
-# POST /api/v1/voice/webhook/incoming - 着信Webhook (10C)
-# POST /api/v1/voice/webhook/status - 通話状態Webhook (10B)
-# WS /api/v1/voice/stream - Media Streams WebSocket (10A)
+@router.post("/call", response_model=VoiceCallStartResponse, status_code=201)
+async def initiate_call(request: VoiceCallCreate):
+    """
+    架電を開始
+    
+    指定した電話番号に発信します。
+    AIが会話を処理します。
+    
+    - **to_number**: 発信先電話番号（E.164形式、例: +819012345678）
+    - **purpose**: 通話目的（reservation, inquiry, otp_verification, confirmation, cancellation, other）
+    - **context**: 会話コンテキスト（予約詳細など）
+    - **task_id**: 関連タスクID
+    """
+    service = get_voice_service()
+    
+    try:
+        call = await service.initiate_call(
+            user_id=DEFAULT_USER_ID,
+            to_number=request.to_number,
+            purpose=request.purpose,
+            context=request.context,
+            task_id=request.task_id,
+        )
+        return VoiceCallStartResponse(success=True, call=call)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to initiate call: {str(e)}")
+
+
+@router.post("/call/{call_id}/end", response_model=VoiceCallEndResponse)
+async def end_call(call_id: str):
+    """
+    通話を終了
+    
+    進行中の通話を終了します。
+    """
+    service = get_voice_service()
+    
+    try:
+        call = await service.end_call(call_id)
+        if not call:
+            raise HTTPException(status_code=404, detail="Call not found")
+        return VoiceCallEndResponse(success=True, call=call)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to end call: {str(e)}")
+
+
+# ========================================
+# Twilio Webhooks (10B/10C)
+# ========================================
+
+@router.post("/webhook/status")
+async def twilio_status_callback(
+    CallSid: str = Form(...),
+    CallStatus: str = Form(...),
+    CallDuration: Optional[str] = Form(None),
+):
+    """
+    Twilio通話状態Webhook
+    
+    Twilioからの通話状態コールバックを処理します。
+    通話の状態（開始、呼び出し中、通話中、終了など）を更新します。
+    """
+    service = get_voice_service()
+    
+    try:
+        duration = int(CallDuration) if CallDuration else None
+        await service.handle_status_callback(
+            call_sid=CallSid,
+            call_status=CallStatus,
+            call_duration=duration,
+        )
+        return {"success": True}
+    except Exception as e:
+        # Webhookはエラーでも200を返す（リトライ防止）
+        return {"success": False, "error": str(e)}
+
+
+@router.post("/webhook/outbound")
+async def twilio_outbound_webhook(
+    CallSid: str = Form(...),
+):
+    """
+    架電用TwiML Webhook
+    
+    架電開始時にTwilioから呼ばれ、
+    ElevenLabsとの接続指示（TwiML）を返します。
+    """
+    service = get_voice_service()
+    
+    try:
+        twiml = service.generate_outbound_twiml(CallSid)
+        return Response(content=twiml, media_type="application/xml")
+    except Exception as e:
+        # エラー時は音声でエラーを伝える
+        error_twiml = '''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="ja-JP">申し訳ありません。システムエラーが発生しました。後ほどお電話ください。</Say>
+    <Hangup/>
+</Response>'''
+        return Response(content=error_twiml, media_type="application/xml")
+
+
+@router.post("/webhook/incoming")
+async def twilio_incoming_webhook(
+    CallSid: str = Form(...),
+    From: str = Form(...),
+    To: str = Form(...),
+    CallerName: Optional[str] = Form(None),
+):
+    """
+    受電用TwiML Webhook
+    
+    着信時にTwilioから呼ばれ、
+    AIによる応答を開始します。
+    """
+    service = get_voice_service()
+    
+    try:
+        # ユーザーの音声設定を確認
+        voice_settings = await service.get_voice_settings(DEFAULT_USER_ID)
+        
+        if not voice_settings.inbound_enabled:
+            # 受電無効の場合は留守電メッセージ
+            twiml = '''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="ja-JP">お電話ありがとうございます。ただいま電話に出ることができません。後ほどおかけ直しください。</Say>
+    <Hangup/>
+</Response>'''
+            return Response(content=twiml, media_type="application/xml")
+        
+        # 電話番号ルールを確認
+        rule = await service.check_phone_rule(DEFAULT_USER_ID, From)
+        
+        if rule and rule.rule_type == PhoneRuleType.BLACKLIST:
+            # ブラックリストの場合は即座に切断
+            twiml = '''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Hangup/>
+</Response>'''
+            return Response(content=twiml, media_type="application/xml")
+        
+        # 通話レコードを作成
+        from app.models.voice_schemas import CallDirection, CallPurpose
+        call_record = await service.create_call_record(
+            user_id=DEFAULT_USER_ID,
+            call_sid=CallSid,
+            direction=CallDirection.INBOUND,
+            from_number=From,
+            to_number=To,
+            purpose=CallPurpose.INQUIRY,
+            metadata={"caller_name": CallerName},
+        )
+        
+        # TwiMLを生成
+        twiml = service.generate_inbound_twiml(CallSid, From)
+        return Response(content=twiml, media_type="application/xml")
+        
+    except Exception as e:
+        # エラー時は音声でエラーを伝える
+        error_twiml = '''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="ja-JP">申し訳ありません。システムエラーが発生しました。後ほどお電話ください。</Say>
+    <Hangup/>
+</Response>'''
+        return Response(content=error_twiml, media_type="application/xml")
+
+
+# ========================================
+# Future: Media Streams WebSocket (10E)
+# ========================================
+# WS /api/v1/voice/stream/{call_sid} - ElevenLabs連携WebSocket
+# これはFastAPIのWebSocketで実装し、ElevenLabsとTwilioのMedia Streamsを橋渡しする
 

@@ -150,12 +150,21 @@
 | 電話番号ルール削除 | `DELETE /api/v1/voice/rules/{id}` (10D) | ✅ 動作確認済み（2024年12月24日） |
 | 通話履歴取得 | `GET /api/v1/voice/calls` (10B) | ✅ 動作確認済み（2024年12月24日） |
 | 通話詳細取得 | `GET /api/v1/voice/call/{id}` (10B) | ✅ 動作確認済み（2024年12月24日） |
-| 架電開始 | `POST /api/v1/voice/call` (10B) | 🔧 実装予定 |
-| 通話終了 | `POST /api/v1/voice/call/{id}/end` (10B) | 🔧 実装予定 |
-| 受電Webhook | `POST /api/v1/voice/webhook/incoming` (10C) | 🔧 実装予定 |
-| 通話状態Webhook | `POST /api/v1/voice/webhook/status` (10B) | 🔧 実装予定 |
+| 架電開始 | `POST /api/v1/voice/call` (10B) | ✅ 実装完了（2024年12月24日） |
+| 通話終了 | `POST /api/v1/voice/call/{id}/end` (10B) | ✅ 実装完了（2024年12月24日） |
+| 受電Webhook | `POST /api/v1/voice/webhook/incoming` (10C) | ✅ 実装完了（2024年12月24日） |
+| 通話状態Webhook | `POST /api/v1/voice/webhook/status` (10B) | ✅ 実装完了（2024年12月24日） |
+| 架電TwiML Webhook | `POST /api/v1/voice/webhook/outbound` (10B) | ✅ 実装完了（2024年12月24日） |
+| Media Streams WebSocket | `WS /api/v1/voice/stream/{call_sid}` (10E) | 🔧 実装予定 |
 
 **技術スタック**: Twilio Voice + ElevenLabs Conversational AI + Claude
+
+**必要な設定**:
+- `TWILIO_ACCOUNT_SID`: TwilioアカウントSID
+- `TWILIO_AUTH_TOKEN`: Twilio認証トークン
+- `TWILIO_PHONE_NUMBER`: Twilio電話番号（050-xxxx-xxxx形式）
+- `ELEVENLABS_API_KEY`: ElevenLabs APIキー
+- `VOICE_WEBHOOK_BASE_URL`: Webhook受信URL（ngrok等）
 
 ### 🔧 現在の状態
 

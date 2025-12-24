@@ -475,6 +475,210 @@ class VoiceService:
         except Exception as e:
             logger.error(f"Failed to get call messages: {e}")
             raise
+    
+    # ========================================
+    # Twilio Voice Integration (10B)
+    # ========================================
+    
+    def _get_twilio_client(self):
+        """Twilioクライアントを取得"""
+        if not self.twilio_account_sid or not self.twilio_auth_token:
+            raise ValueError("Twilio credentials are not configured")
+        
+        try:
+            from twilio.rest import Client
+            return Client(self.twilio_account_sid, self.twilio_auth_token)
+        except ImportError:
+            raise ImportError("twilio package is not installed. Run: pip install twilio")
+    
+    async def initiate_call(
+        self,
+        user_id: str,
+        to_number: str,
+        purpose: CallPurpose = CallPurpose.OTHER,
+        context: Optional[dict] = None,
+        task_id: Optional[str] = None,
+    ) -> VoiceCallResponse:
+        """
+        架電を開始
+        
+        Twilioを使用して指定の電話番号に発信し、
+        ElevenLabs Conversational AIで会話を処理します。
+        """
+        if not self.twilio_phone_number:
+            raise ValueError("Twilio phone number is not configured")
+        
+        try:
+            client = self._get_twilio_client()
+            
+            # Webhook URLを構築
+            webhook_base = getattr(settings, 'VOICE_WEBHOOK_BASE_URL', '')
+            if not webhook_base:
+                raise ValueError("VOICE_WEBHOOK_BASE_URL is not configured")
+            
+            # TwiMLを返すWebhookを設定
+            # 通話開始時にこのURLが呼ばれ、ElevenLabsとの接続指示を返す
+            twiml_url = f"{webhook_base}/api/v1/voice/webhook/outbound"
+            status_callback = f"{webhook_base}/api/v1/voice/webhook/status"
+            
+            # メタデータにコンテキストを含める
+            metadata = {
+                "purpose": purpose.value,
+                "context": context or {},
+            }
+            
+            # Twilio APIで発信
+            call = client.calls.create(
+                to=to_number,
+                from_=self.twilio_phone_number,
+                url=twiml_url,
+                status_callback=status_callback,
+                status_callback_event=['initiated', 'ringing', 'answered', 'completed'],
+                status_callback_method='POST',
+            )
+            
+            # DBに通話レコードを作成
+            call_record = await self.create_call_record(
+                user_id=user_id,
+                call_sid=call.sid,
+                direction=CallDirection.OUTBOUND,
+                from_number=self.twilio_phone_number,
+                to_number=to_number,
+                purpose=purpose,
+                task_id=task_id,
+                metadata=metadata,
+            )
+            
+            logger.info(f"Initiated outbound call: {call.sid} to {to_number}")
+            return call_record
+            
+        except Exception as e:
+            logger.error(f"Failed to initiate call: {e}")
+            raise
+    
+    async def end_call(self, call_id: str) -> Optional[VoiceCallResponse]:
+        """
+        通話を終了
+        
+        Twilio APIを使用して進行中の通話を終了します。
+        """
+        try:
+            # DBから通話情報を取得
+            call = await self.get_call(call_id)
+            if not call:
+                raise ValueError(f"Call not found: {call_id}")
+            
+            if call.status in [CallStatus.COMPLETED, CallStatus.FAILED, CallStatus.CANCELED]:
+                logger.warning(f"Call {call_id} is already ended with status: {call.status}")
+                return call
+            
+            client = self._get_twilio_client()
+            
+            # Twilio APIで通話を終了
+            client.calls(call.call_sid).update(status='completed')
+            
+            # DBの状態を更新
+            updated_call = await self.update_call_status(
+                call_id=call_id,
+                status=CallStatus.COMPLETED,
+            )
+            
+            logger.info(f"Ended call: {call.call_sid}")
+            return updated_call
+            
+        except Exception as e:
+            logger.error(f"Failed to end call: {e}")
+            raise
+    
+    async def handle_status_callback(
+        self,
+        call_sid: str,
+        call_status: str,
+        call_duration: Optional[int] = None,
+    ) -> Optional[VoiceCallResponse]:
+        """
+        Twilioからの通話状態コールバックを処理
+        """
+        try:
+            # Call SIDから通話を検索
+            call = await self.get_call_by_sid(call_sid)
+            if not call:
+                logger.warning(f"Call not found for SID: {call_sid}")
+                return None
+            
+            # Twilioのステータスを内部ステータスにマッピング
+            status_mapping = {
+                'queued': CallStatus.INITIATED,
+                'initiated': CallStatus.INITIATED,
+                'ringing': CallStatus.RINGING,
+                'in-progress': CallStatus.IN_PROGRESS,
+                'completed': CallStatus.COMPLETED,
+                'busy': CallStatus.BUSY,
+                'no-answer': CallStatus.NO_ANSWER,
+                'failed': CallStatus.FAILED,
+                'canceled': CallStatus.CANCELED,
+            }
+            
+            new_status = status_mapping.get(call_status.lower(), CallStatus.FAILED)
+            
+            # 状態を更新
+            updated_call = await self.update_call_status(
+                call_id=call.id,
+                status=new_status,
+                duration_seconds=call_duration,
+            )
+            
+            logger.info(f"Updated call {call_sid} status to {new_status.value}")
+            return updated_call
+            
+        except Exception as e:
+            logger.error(f"Failed to handle status callback: {e}")
+            raise
+    
+    def generate_outbound_twiml(self, call_sid: str) -> str:
+        """
+        架電用のTwiMLを生成
+        
+        ElevenLabs Conversational AIとの接続を設定します。
+        """
+        webhook_base = getattr(settings, 'VOICE_WEBHOOK_BASE_URL', '')
+        
+        # Media Streams WebSocketエンドポイント
+        # wss:// に変換（httpsの場合）
+        ws_url = webhook_base.replace('https://', 'wss://').replace('http://', 'ws://')
+        stream_url = f"{ws_url}/api/v1/voice/stream/{call_sid}"
+        
+        # TwiML: 挨拶後にMedia Streamsで接続
+        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="{stream_url}">
+            <Parameter name="call_sid" value="{call_sid}" />
+        </Stream>
+    </Connect>
+</Response>'''
+        
+        return twiml
+    
+    def generate_inbound_twiml(self, call_sid: str, caller: str) -> str:
+        """
+        受電用のTwiMLを生成
+        """
+        webhook_base = getattr(settings, 'VOICE_WEBHOOK_BASE_URL', '')
+        ws_url = webhook_base.replace('https://', 'wss://').replace('http://', 'ws://')
+        stream_url = f"{ws_url}/api/v1/voice/stream/{call_sid}"
+        
+        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="{stream_url}">
+            <Parameter name="call_sid" value="{call_sid}" />
+            <Parameter name="caller" value="{caller}" />
+        </Stream>
+    </Connect>
+</Response>'''
+        
+        return twiml
 
 
 # シングルトンインスタンス

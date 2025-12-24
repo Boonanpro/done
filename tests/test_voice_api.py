@@ -260,3 +260,205 @@ class TestVoiceCallsAPI:
         data = response.json()
         assert data["detail"] == "Call not found"
 
+
+class TestOutboundCallAPI:
+    """架電APIのテスト"""
+    
+    def test_initiate_call(self, client, mock_voice_service):
+        """架電開始のテスト"""
+        mock_voice_service.initiate_call = AsyncMock(return_value=VoiceCallResponse(
+            id="new-call-id",
+            call_sid="CA789012",
+            direction=CallDirection.OUTBOUND,
+            status=CallStatus.INITIATED,
+            from_number="+815012345678",
+            to_number="+819099999999",
+            started_at=datetime.now(),
+            answered_at=None,
+            ended_at=None,
+            duration_seconds=None,
+            transcription=None,
+            summary=None,
+            purpose=CallPurpose.RESERVATION,
+            task_id=None,
+        ))
+        
+        response = client.post("/api/v1/voice/call", json={
+            "to_number": "+819099999999",
+            "purpose": "reservation",
+            "context": {"restaurant": "Test Restaurant"},
+        })
+        
+        assert response.status_code == 201
+        data = response.json()
+        assert data["success"] == True
+        assert data["call"]["call_sid"] == "CA789012"
+        assert data["call"]["direction"] == "outbound"
+        assert data["call"]["status"] == "initiated"
+    
+    def test_initiate_call_error(self, client, mock_voice_service):
+        """架電開始エラーのテスト"""
+        mock_voice_service.initiate_call = AsyncMock(
+            side_effect=ValueError("Twilio credentials are not configured")
+        )
+        
+        response = client.post("/api/v1/voice/call", json={
+            "to_number": "+819099999999",
+        })
+        
+        assert response.status_code == 400
+        data = response.json()
+        assert "Twilio credentials" in data["detail"]
+    
+    def test_end_call(self, client, mock_voice_service):
+        """通話終了のテスト"""
+        mock_voice_service.end_call = AsyncMock(return_value=VoiceCallResponse(
+            id="call-1",
+            call_sid="CA123456",
+            direction=CallDirection.OUTBOUND,
+            status=CallStatus.COMPLETED,
+            from_number="+815012345678",
+            to_number="+819012345678",
+            started_at=datetime.now(),
+            answered_at=datetime.now(),
+            ended_at=datetime.now(),
+            duration_seconds=120,
+            transcription=None,
+            summary=None,
+            purpose=CallPurpose.RESERVATION,
+            task_id=None,
+        ))
+        
+        response = client.post("/api/v1/voice/call/call-1/end")
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] == True
+        assert data["call"]["status"] == "completed"
+    
+    def test_end_call_not_found(self, client, mock_voice_service):
+        """通話終了（存在しない場合）のテスト"""
+        mock_voice_service.end_call = AsyncMock(
+            side_effect=ValueError("Call not found: nonexistent-id")
+        )
+        
+        response = client.post("/api/v1/voice/call/nonexistent-id/end")
+        
+        assert response.status_code == 400
+
+
+class TestTwilioWebhooks:
+    """Twilio Webhookのテスト"""
+    
+    def test_status_callback(self, client, mock_voice_service):
+        """通話状態コールバックのテスト"""
+        mock_voice_service.handle_status_callback = AsyncMock(return_value=VoiceCallResponse(
+            id="call-1",
+            call_sid="CA123456",
+            direction=CallDirection.OUTBOUND,
+            status=CallStatus.IN_PROGRESS,
+            from_number="+815012345678",
+            to_number="+819012345678",
+            started_at=datetime.now(),
+            answered_at=datetime.now(),
+            ended_at=None,
+            duration_seconds=None,
+            transcription=None,
+            summary=None,
+            purpose=None,
+            task_id=None,
+        ))
+        
+        response = client.post("/api/v1/voice/webhook/status", data={
+            "CallSid": "CA123456",
+            "CallStatus": "in-progress",
+        })
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] == True
+    
+    def test_outbound_webhook(self, client, mock_voice_service):
+        """架電用TwiML Webhookのテスト"""
+        mock_voice_service.generate_outbound_twiml = MagicMock(
+            return_value='<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://example.com/stream"/></Connect></Response>'
+        )
+        
+        response = client.post("/api/v1/voice/webhook/outbound", data={
+            "CallSid": "CA123456",
+        })
+        
+        assert response.status_code == 200
+        assert "application/xml" in response.headers["content-type"]
+        assert "<Response>" in response.text
+    
+    def test_incoming_webhook_enabled(self, client, mock_voice_service):
+        """受電Webhook（受電有効時）のテスト"""
+        mock_voice_service.get_voice_settings = AsyncMock(return_value=VoiceSettingsResponse(
+            id="settings-1",
+            user_id="user-1",
+            inbound_enabled=True,
+            default_greeting="こんにちは",
+            auto_answer_whitelist=False,
+            record_calls=False,
+            notify_via_chat=True,
+            elevenlabs_voice_id=None,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        ))
+        mock_voice_service.check_phone_rule = AsyncMock(return_value=None)
+        mock_voice_service.create_call_record = AsyncMock(return_value=VoiceCallResponse(
+            id="call-1",
+            call_sid="CA123456",
+            direction=CallDirection.INBOUND,
+            status=CallStatus.INITIATED,
+            from_number="+819012345678",
+            to_number="+815012345678",
+            started_at=datetime.now(),
+            answered_at=None,
+            ended_at=None,
+            duration_seconds=None,
+            transcription=None,
+            summary=None,
+            purpose=CallPurpose.INQUIRY,
+            task_id=None,
+        ))
+        mock_voice_service.generate_inbound_twiml = MagicMock(
+            return_value='<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://example.com/stream"/></Connect></Response>'
+        )
+        
+        response = client.post("/api/v1/voice/webhook/incoming", data={
+            "CallSid": "CA123456",
+            "From": "+819012345678",
+            "To": "+815012345678",
+        })
+        
+        assert response.status_code == 200
+        assert "application/xml" in response.headers["content-type"]
+        assert "<Response>" in response.text
+    
+    def test_incoming_webhook_disabled(self, client, mock_voice_service):
+        """受電Webhook（受電無効時）のテスト"""
+        mock_voice_service.get_voice_settings = AsyncMock(return_value=VoiceSettingsResponse(
+            id="settings-1",
+            user_id="user-1",
+            inbound_enabled=False,
+            default_greeting="こんにちは",
+            auto_answer_whitelist=False,
+            record_calls=False,
+            notify_via_chat=True,
+            elevenlabs_voice_id=None,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        ))
+        
+        response = client.post("/api/v1/voice/webhook/incoming", data={
+            "CallSid": "CA123456",
+            "From": "+819012345678",
+            "To": "+815012345678",
+        })
+        
+        assert response.status_code == 200
+        assert "application/xml" in response.headers["content-type"]
+        assert "出ることができません" in response.text or "<Hangup/>" in response.text
+
