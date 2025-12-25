@@ -222,3 +222,61 @@ async def extract_otp_from_sms(
         )
 
 
+# ==================== Voice OTP (9C) ====================
+
+from pydantic import BaseModel
+
+
+class VoiceOTPExtractionRequest(BaseModel):
+    """音声OTP抽出リクエスト"""
+    call_id: Optional[str] = None  # 特定の通話IDから抽出
+    service: Optional[str] = None  # 対象サービス
+    max_age_minutes: Optional[int] = None  # 最大経過時間
+
+
+@router.post("/extract/voice", response_model=OTPExtractionResponse)
+async def extract_otp_from_voice(
+    request: VoiceOTPExtractionRequest,
+    x_user_id: Optional[str] = Header(None),
+):
+    """
+    音声通話からOTPを抽出
+    
+    電話認証で通知されたOTPを音声の文字起こしから抽出します。
+    call_idが指定された場合はその通話から、
+    指定されない場合は最新の着信から抽出を試みます。
+    """
+    user_id = get_user_id(x_user_id)
+    otp_service = get_otp_service()
+    
+    try:
+        if request.call_id:
+            # 特定の通話から抽出
+            otp_result = await otp_service.extract_otp_from_voice(
+                user_id=user_id,
+                call_id=request.call_id,
+                service=request.service,
+                max_age_minutes=request.max_age_minutes,
+            )
+        else:
+            # 最新の通話から抽出
+            otp_result = await otp_service.extract_otp_from_latest_voice_call(
+                user_id=user_id,
+                service=request.service,
+                max_age_minutes=request.max_age_minutes,
+            )
+        
+        if otp_result:
+            return OTPExtractionResponse(
+                success=True,
+                otp=otp_result,
+            )
+        else:
+            return OTPExtractionResponse(
+                success=False,
+                message="No OTP found in voice calls",
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+

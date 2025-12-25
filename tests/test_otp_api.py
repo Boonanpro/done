@@ -349,3 +349,75 @@ class TestBaseExecutorOTP:
         assert hasattr(BaseExecutor, '_detect_otp_page')
         assert hasattr(BaseExecutor, '_find_otp_field')
 
+
+class TestVoiceOTPAPI:
+    """音声OTP抽出API（Phase 9C）のテスト"""
+    
+    def test_extract_voice_otp_endpoint_exists(self, client):
+        """音声OTP抽出エンドポイントが存在すること"""
+        response = client.post("/api/v1/otp/extract/voice", json={})
+        # 404ではなく正常なレスポンス（OTPが見つからない場合でもsuccess=false）
+        assert response.status_code == 200
+    
+    def test_extract_voice_otp_no_call(self, client):
+        """通話がない場合のレスポンス"""
+        response = client.post("/api/v1/otp/extract/voice", json={
+            "service": "test_bank"
+        })
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["success"] is False
+        assert "No OTP found" in data["message"]
+    
+    def test_extract_voice_otp_with_call_id(self, client):
+        """通話IDを指定した場合"""
+        response = client.post("/api/v1/otp/extract/voice", json={
+            "call_id": "00000000-0000-0000-0000-000000000099",
+            "service": "mizuho"
+        })
+        
+        assert response.status_code == 200
+        data = response.json()
+        # 存在しない通話IDなのでOTPは見つからない
+        assert data["success"] is False
+
+
+class TestVoiceOTPService:
+    """音声OTPサービスのテスト"""
+    
+    def test_otp_service_has_voice_methods(self):
+        """OTPServiceに音声関連メソッドが存在すること"""
+        from app.services.otp_service import OTPService
+        
+        assert hasattr(OTPService, 'extract_otp_from_voice')
+        assert hasattr(OTPService, 'extract_otp_from_latest_voice_call')
+    
+    def test_extract_otp_from_transcription(self):
+        """文字起こしからOTP抽出のテスト"""
+        from app.services.otp_service import OTPService
+        
+        service = OTPService()
+        
+        # 認証コードを含む文字起こし
+        test_cases = [
+            ("こちらは銀行です。認証コードは123456です。", "123456"),
+            ("確認コード: 789012 を入力してください。", "789012"),
+            ("あなたの確認番号は 456789 です", "456789"),
+            ("ワンタイムパスワード 654321 をご入力ください", "654321"),
+            ("コードは 1234 です。", "1234"),  # 4桁
+            ("認証コードは12345678です", "12345678"),  # 8桁
+            ("こんにちは。良い天気ですね。", None),  # OTPなし
+        ]
+        
+        for text, expected in test_cases:
+            result = service._extract_otp_from_text(text)
+            assert result == expected, f"Failed for: {text}"
+    
+    def test_otp_source_voice_defined(self):
+        """OTPSourceにVOICEが定義されていること"""
+        from app.models.otp_schemas import OTPSource
+        
+        assert hasattr(OTPSource, 'VOICE')
+        assert OTPSource.VOICE.value == "voice"
+

@@ -238,6 +238,152 @@ class OTPService:
         
         return None
     
+    async def extract_otp_from_voice(
+        self,
+        user_id: str,
+        call_id: str,
+        service: Optional[str] = None,
+        max_age_minutes: Optional[int] = None,
+    ) -> Optional[OTPResult]:
+        """
+        音声通話からOTPを抽出
+        
+        Args:
+            user_id: ユーザーID
+            call_id: 通話ID
+            service: 対象サービス
+            max_age_minutes: 最大経過時間
+            
+        Returns:
+            抽出されたOTP情報
+        """
+        from app.services.voice_service import get_voice_service
+        
+        if max_age_minutes is None:
+            max_age_minutes = self.max_age_minutes
+        
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        
+        # 1. 通話情報を取得
+        voice_service = get_voice_service()
+        call = await voice_service.get_call(call_id)
+        
+        if not call:
+            logger.warning(f"Call not found: {call_id}")
+            return None
+        
+        # 2. 通話の文字起こしを確認
+        if not call.transcription:
+            logger.warning(f"No transcription for call: {call_id}")
+            return None
+        
+        # 3. 既存のOTPをチェック（重複防止）
+        existing = self.supabase.table("otp_extractions").select("*").eq(
+            "source_id", call_id
+        ).execute()
+        
+        if existing.data:
+            otp_data = existing.data[0]
+            return OTPResult(
+                id=otp_data["id"],
+                code=otp_data["otp_code"],
+                source=OTPSource.VOICE,
+                sender=otp_data.get("sender"),
+                service=otp_data.get("service"),
+                extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
+                expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                is_used=otp_data.get("is_used", False),
+            )
+        
+        # 4. 文字起こしからOTPを抽出
+        otp_code = self._extract_otp_from_text(call.transcription)
+        
+        if not otp_code:
+            logger.debug(f"No OTP found in transcription for call: {call_id}")
+            return None
+        
+        # 5. 新規OTPを保存
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=self.otp_expiry_minutes)
+        
+        insert_data = {
+            "user_id": user_id,
+            "source": OTPSource.VOICE.value,
+            "source_id": call_id,
+            "service": service,
+            "sender": call.from_number,
+            "otp_code": otp_code,
+            "expires_at": expires_at.isoformat(),
+        }
+        
+        insert_result = self.supabase.table("otp_extractions").insert(insert_data).execute()
+        
+        if insert_result.data:
+            otp_data = insert_result.data[0]
+            logger.info(f"OTP extracted from voice for user {user_id}: {otp_code[:2]}****")
+            return OTPResult(
+                id=otp_data["id"],
+                code=otp_data["otp_code"],
+                source=OTPSource.VOICE,
+                sender=otp_data.get("sender"),
+                service=otp_data.get("service"),
+                extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
+                expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                is_used=otp_data.get("is_used", False),
+            )
+        
+        return None
+    
+    async def extract_otp_from_latest_voice_call(
+        self,
+        user_id: str,
+        service: Optional[str] = None,
+        max_age_minutes: Optional[int] = None,
+    ) -> Optional[OTPResult]:
+        """
+        最新の音声通話からOTPを抽出
+        
+        Args:
+            user_id: ユーザーID
+            service: 対象サービス
+            max_age_minutes: 最大経過時間
+            
+        Returns:
+            抽出されたOTP情報
+        """
+        from app.services.voice_service import get_voice_service
+        from app.models.voice_schemas import CallDirection
+        
+        if max_age_minutes is None:
+            max_age_minutes = self.max_age_minutes
+        
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        
+        # 最新の着信を取得
+        voice_service = get_voice_service()
+        calls = await voice_service.get_call_history(
+            user_id=user_id,
+            direction=CallDirection.INBOUND,
+            limit=5,
+        )
+        
+        for call in calls:
+            # 最大経過時間を超えた通話はスキップ
+            if call.started_at and call.started_at < cutoff_time:
+                continue
+            
+            # 文字起こしがあればOTP抽出を試行
+            if call.transcription:
+                result = await self.extract_otp_from_voice(
+                    user_id=user_id,
+                    call_id=call.id,
+                    service=service,
+                    max_age_minutes=max_age_minutes,
+                )
+                if result:
+                    return result
+        
+        return None
+    
     async def get_latest_otp(
         self,
         user_id: str,
