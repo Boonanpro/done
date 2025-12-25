@@ -156,14 +156,21 @@
 | 通話状態Webhook | `POST /api/v1/voice/webhook/status` (10B) | ✅ 動作確認済み |
 | 架電TwiML Webhook | `POST /api/v1/voice/webhook/outbound` (10B) | ✅ 動作確認済み |
 | **Media Streams WebSocket** | `WS /api/v1/voice/stream/{call_sid}` (10E) | ✅ **動作確認済み** |
-| **双方向AI音声会話** | ElevenLabs STT/TTS連携 (10E) | 🔧 **実装中** |
+| **音声フォーマット変換** | μ-law ↔ PCM, リサンプリング (10E) | ✅ **動作確認済み** |
+| **ElevenLabs STT連携** | 音声→テキスト変換 (10E) | ✅ **動作確認済み** |
+| **ElevenLabs TTS連携** | テキスト→音声変換 (10E) | ✅ **動作確認済み** |
+| **Claude応答生成** | AI会話応答 (10E) | ✅ **動作確認済み** |
+| **双方向AI音声会話** | STT→Claude→TTSパイプライン (10E) | ✅ **動作確認済み** |
 
 **技術スタック**: Twilio Voice + Twilio Media Streams + ElevenLabs + Claude
 
 **実現した機能**:
 - 📞 Twilioを使った電話発信・着信
-- 🔌 Media Streams WebSocketによるリアルタイム音声ストリーム（基盤完成）
-- 🗣️ ElevenLabsによる日本語音声会話（STT/TTS連携実装中）
+- 🔌 Media Streams WebSocketによるリアルタイム音声ストリーム
+- 🎤 ElevenLabs STT（日本語音声認識）
+- 🔊 ElevenLabs TTS（日本語音声合成、μ-law変換対応）
+- 🤖 Claude応答生成（音声会話用簡潔応答）
+- 🗣️ 双方向AI音声会話（無音検知、会話履歴、要約）
 - 🤖 AIエージェント「ダン」が日本語で応答
 - 🔄 今後の改良: 音声の自然さ向上、レスポンス速度改善
 

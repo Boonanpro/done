@@ -334,6 +334,12 @@ logger = logging.getLogger(__name__)
 class MediaStreamHandler:
     """Twilio Media Streams処理ハンドラー"""
     
+    # 無音検知設定
+    SILENCE_THRESHOLD = 10  # 無音とみなす音量閾値
+    SILENCE_DURATION_MS = 800  # 発話終了とみなす無音時間（ミリ秒）
+    MIN_SPEECH_DURATION_MS = 500  # 最小発話時間（ミリ秒）
+    SAMPLE_RATE = 8000  # Twilioのサンプルレート
+    
     def __init__(self, call_sid: str, websocket: WebSocket):
         self.call_sid = call_sid
         self.websocket = websocket
@@ -341,6 +347,11 @@ class MediaStreamHandler:
         self.audio_buffer: bytes = b""
         self.is_connected: bool = False
         self.conversation_history: list = []
+        self.is_speaking: bool = False
+        self.silence_samples: int = 0
+        self.speech_start_time: float = 0
+        self.is_processing: bool = False  # 処理中フラグ
+        self.context: dict = {}  # 通話コンテキスト
     
     async def handle_message(self, message: dict) -> None:
         """Media Streamsメッセージを処理"""
@@ -356,7 +367,7 @@ class MediaStreamHandler:
             await self._handle_stop(message)
         elif event == "mark":
             # マーカーイベント（TTS再生完了等）
-            pass
+            logger.debug(f"Mark event received: {message.get('mark', {}).get('name')}")
     
     async def _handle_connected(self, message: dict) -> None:
         """接続確立"""
@@ -365,52 +376,178 @@ class MediaStreamHandler:
     
     async def _handle_start(self, message: dict) -> None:
         """ストリーム開始"""
+        import time
+        
         start_data = message.get("start", {})
         self.stream_sid = start_data.get("streamSid")
-        logger.info(f"Media Stream started: {self.stream_sid}")
+        
+        # パラメータからコンテキストを取得
+        custom_params = start_data.get("customParameters", {})
+        self.context = {
+            "direction": custom_params.get("direction", "unknown"),
+            "purpose": custom_params.get("purpose", ""),
+        }
+        
+        logger.info(f"Media Stream started: {self.stream_sid}, context: {self.context}")
+        
+        self.speech_start_time = time.time()
         
         # 初期挨拶を送信
         await self._send_greeting()
     
     async def _handle_media(self, message: dict) -> None:
         """音声データ受信"""
+        import time
+        
+        if self.is_processing:
+            # 処理中は音声を無視（割り込み防止）
+            return
+        
         media_data = message.get("media", {})
         payload = media_data.get("payload", "")
         
         if payload:
             # Base64デコードしてバッファに追加
             audio_data = base64.b64decode(payload)
-            self.audio_buffer += audio_data
             
-            # バッファが一定サイズに達したら処理
-            # (Phase 10E Step 3で無音検知を実装)
-            if len(self.audio_buffer) >= 16000:  # 約1秒分
-                await self._process_audio_buffer()
+            # 音量レベルをチェック（無音検知）
+            volume = self._calculate_volume(audio_data)
+            
+            if volume > self.SILENCE_THRESHOLD:
+                # 発話中
+                if not self.is_speaking:
+                    self.is_speaking = True
+                    self.speech_start_time = time.time()
+                    logger.debug("Speech started")
+                
+                self.silence_samples = 0
+                self.audio_buffer += audio_data
+            else:
+                # 無音
+                if self.is_speaking:
+                    self.silence_samples += len(audio_data)
+                    self.audio_buffer += audio_data  # 無音も一旦バッファに
+                    
+                    # 無音が一定時間続いたら発話終了
+                    silence_duration_ms = (self.silence_samples / self.SAMPLE_RATE) * 1000
+                    
+                    if silence_duration_ms >= self.SILENCE_DURATION_MS:
+                        speech_duration_ms = (time.time() - self.speech_start_time) * 1000
+                        
+                        if speech_duration_ms >= self.MIN_SPEECH_DURATION_MS:
+                            logger.debug(f"Speech ended, duration: {speech_duration_ms:.0f}ms")
+                            await self._process_audio_buffer()
+                        else:
+                            # 短すぎる発話は無視
+                            self.audio_buffer = b""
+                        
+                        self.is_speaking = False
+                        self.silence_samples = 0
+    
+    def _calculate_volume(self, audio_data: bytes) -> float:
+        """μ-law音声データの音量を計算"""
+        if not audio_data:
+            return 0
+        
+        # μ-lawデータの平均絶対値を計算
+        total = sum(abs(b - 128) for b in audio_data)
+        return total / len(audio_data)
     
     async def _handle_stop(self, message: dict) -> None:
         """ストリーム終了"""
         logger.info(f"Media Stream stopped: {self.stream_sid}")
         self.is_connected = False
         
+        # 残っているバッファがあれば処理
+        if len(self.audio_buffer) > 1000:
+            await self._process_audio_buffer()
+        
         # 通話記録を更新
         await self._finalize_call()
     
     async def _send_greeting(self) -> None:
         """初期挨拶を送信"""
-        # Phase 10E Step 5で実装予定
-        # 現在はログのみ
-        logger.info(f"Greeting would be sent for call: {self.call_sid}")
+        service = get_voice_service()
+        
+        greeting = "お電話ありがとうございます。AIアシスタントのダンです。ご用件をお伺いします。"
+        
+        # 会話履歴に追加
+        self.conversation_history.append({
+            "role": "assistant",
+            "content": greeting
+        })
+        
+        # TTSで音声生成してTwilioに送信
+        try:
+            audio_data = await service.text_to_speech_ulaw(greeting)
+            if audio_data:
+                await self.send_audio(audio_data)
+                logger.info(f"Greeting sent for call: {self.call_sid}")
+            else:
+                logger.warning("Failed to generate greeting audio")
+        except Exception as e:
+            logger.error(f"Failed to send greeting: {e}")
     
     async def _process_audio_buffer(self) -> None:
-        """音声バッファを処理"""
-        # Phase 10E Step 3-5で実装予定
-        # STT → Claude → TTS のパイプライン
-        logger.debug(f"Processing audio buffer: {len(self.audio_buffer)} bytes")
-        self.audio_buffer = b""  # バッファをクリア
+        """音声バッファを処理（STT → Claude → TTS パイプライン）"""
+        if not self.audio_buffer or self.is_processing:
+            return
+        
+        self.is_processing = True
+        service = get_voice_service()
+        
+        try:
+            # 1. μ-law → PCM変換
+            pcm_8k = service.ulaw_to_pcm(self.audio_buffer)
+            
+            # 2. 8kHz → 16kHz リサンプリング（STT用）
+            pcm_16k = service.resample_audio(pcm_8k, 8000, 16000, 2)
+            
+            # 3. STT: 音声 → テキスト
+            user_text = await service.speech_to_text(pcm_16k)
+            
+            if user_text and user_text.strip():
+                logger.info(f"User said: {user_text}")
+                
+                # 会話履歴に追加
+                self.conversation_history.append({
+                    "role": "user",
+                    "content": user_text
+                })
+                
+                # 4. Claude: 応答生成
+                response_text = await service.generate_response(
+                    user_text,
+                    self.conversation_history,
+                    self.context
+                )
+                
+                logger.info(f"AI response: {response_text}")
+                
+                # 会話履歴に追加
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": response_text
+                })
+                
+                # 5. TTS: テキスト → 音声（μ-law形式）
+                audio_response = await service.text_to_speech_ulaw(response_text)
+                
+                if audio_response:
+                    await self.send_audio(audio_response)
+                else:
+                    logger.warning("Failed to generate response audio")
+            else:
+                logger.debug("No speech recognized")
+                
+        except Exception as e:
+            logger.error(f"Error processing audio: {e}")
+        finally:
+            self.audio_buffer = b""
+            self.is_processing = False
     
     async def _finalize_call(self) -> None:
         """通話終了処理"""
-        # 通話記録を更新
         service = get_voice_service()
         try:
             call = await service.get_call_by_sid(self.call_sid)
@@ -421,32 +558,87 @@ class MediaStreamHandler:
                     for msg in self.conversation_history
                 )
                 
+                # AI要約を生成
+                summary = None
+                if len(self.conversation_history) > 1:
+                    try:
+                        summary = await self._generate_summary()
+                    except Exception as e:
+                        logger.warning(f"Failed to generate summary: {e}")
+                
                 await service.update_call_status(
                     call_id=call.id,
                     status=CallStatus.COMPLETED,
                     transcription=transcription if transcription else None,
+                    summary=summary,
                 )
                 logger.info(f"Call finalized: {self.call_sid}")
         except Exception as e:
             logger.error(f"Failed to finalize call: {e}")
     
+    async def _generate_summary(self) -> Optional[str]:
+        """通話の要約を生成"""
+        if not self.conversation_history:
+            return None
+        
+        try:
+            from langchain_anthropic import ChatAnthropic
+            from langchain_core.messages import HumanMessage, SystemMessage
+            from app.config import settings
+            
+            llm = ChatAnthropic(
+                model="claude-sonnet-4-20250514",
+                api_key=settings.ANTHROPIC_API_KEY,
+                max_tokens=200,
+            )
+            
+            conversation_text = "\n".join(
+                f"{'相手' if msg['role'] == 'user' else 'AI'}: {msg['content']}"
+                for msg in self.conversation_history
+            )
+            
+            messages = [
+                SystemMessage(content="以下の電話会話を1-2文で要約してください。重要なポイント（予約内容、問い合わせ内容、決定事項など）を含めてください。"),
+                HumanMessage(content=conversation_text)
+            ]
+            
+            response = await llm.ainvoke(messages)
+            return response.content
+            
+        except Exception as e:
+            logger.error(f"Failed to generate summary: {e}")
+            return None
+    
     async def send_audio(self, audio_data: bytes) -> None:
-        """音声データを送信"""
+        """音声データをチャンクで送信"""
         if not self.is_connected or not self.stream_sid:
             return
         
-        # Base64エンコード
-        payload = base64.b64encode(audio_data).decode("utf-8")
+        # Twilioは160バイト（20ms）単位で送信を推奨
+        CHUNK_SIZE = 160
         
-        message = {
-            "event": "media",
-            "streamSid": self.stream_sid,
-            "media": {
-                "payload": payload
+        for i in range(0, len(audio_data), CHUNK_SIZE):
+            chunk = audio_data[i:i + CHUNK_SIZE]
+            
+            # Base64エンコード
+            payload = base64.b64encode(chunk).decode("utf-8")
+            
+            message = {
+                "event": "media",
+                "streamSid": self.stream_sid,
+                "media": {
+                    "payload": payload
+                }
             }
-        }
-        
-        await self.websocket.send_json(message)
+            
+            try:
+                await self.websocket.send_json(message)
+            except Exception as e:
+                logger.error(f"Failed to send audio chunk: {e}")
+                break
+            
+            # 20ms間隔で送信（リアルタイム再生のため）
+            await asyncio.sleep(0.02)
 
 
 @router.websocket("/stream/{call_sid}")

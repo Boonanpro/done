@@ -3,9 +3,13 @@ Phase 10: Voice Communication Service
 音声通話サービス（ElevenLabs + Claude統合）
 """
 import logging
-from typing import Optional, List
+import audioop
+import struct
+import io
+from typing import Optional, List, Tuple
 from datetime import datetime
 import uuid
+import aiohttp
 
 from app.config import settings
 from app.services.supabase_client import get_supabase_client
@@ -700,6 +704,346 @@ class VoiceService:
 </Response>'''
         
         return twiml
+    
+    # ========================================
+    # Audio Format Conversion (10E)
+    # ========================================
+    
+    def ulaw_to_pcm(self, ulaw_data: bytes) -> bytes:
+        """
+        μ-law (8kHz) → PCM (16-bit, 8kHz) 変換
+        
+        Args:
+            ulaw_data: μ-law形式の音声データ
+            
+        Returns:
+            PCM形式の音声データ (16-bit signed, 8kHz)
+        """
+        try:
+            # μ-law → PCM (16-bit)
+            pcm_data = audioop.ulaw2lin(ulaw_data, 2)  # 2 = 16-bit
+            return pcm_data
+        except Exception as e:
+            logger.error(f"ulaw_to_pcm conversion failed: {e}")
+            return b""
+    
+    def pcm_to_ulaw(self, pcm_data: bytes) -> bytes:
+        """
+        PCM (16-bit, 8kHz) → μ-law (8kHz) 変換
+        
+        Args:
+            pcm_data: PCM形式の音声データ (16-bit signed)
+            
+        Returns:
+            μ-law形式の音声データ
+        """
+        try:
+            # PCM → μ-law
+            ulaw_data = audioop.lin2ulaw(pcm_data, 2)  # 2 = 16-bit
+            return ulaw_data
+        except Exception as e:
+            logger.error(f"pcm_to_ulaw conversion failed: {e}")
+            return b""
+    
+    def resample_audio(
+        self, 
+        audio_data: bytes, 
+        from_rate: int, 
+        to_rate: int, 
+        sample_width: int = 2
+    ) -> bytes:
+        """
+        サンプルレート変換
+        
+        Args:
+            audio_data: 音声データ
+            from_rate: 元のサンプルレート
+            to_rate: 変換先のサンプルレート
+            sample_width: サンプル幅（バイト数、2=16-bit）
+            
+        Returns:
+            リサンプリングされた音声データ
+        """
+        try:
+            # audioop.ratecvを使用してリサンプリング
+            converted, _ = audioop.ratecv(
+                audio_data, 
+                sample_width, 
+                1,  # nchannels
+                from_rate, 
+                to_rate, 
+                None  # state
+            )
+            return converted
+        except Exception as e:
+            logger.error(f"resample_audio failed: {e}")
+            return audio_data
+    
+    # ========================================
+    # ElevenLabs STT/TTS (10E)
+    # ========================================
+    
+    async def speech_to_text(self, audio_data: bytes) -> Optional[str]:
+        """
+        ElevenLabs STTで音声をテキストに変換
+        
+        Args:
+            audio_data: PCM音声データ（16kHz推奨）
+            
+        Returns:
+            認識されたテキスト
+        """
+        if not self.elevenlabs_api_key:
+            logger.warning("ElevenLabs API key not configured")
+            return None
+        
+        try:
+            # 音声データをWAV形式に変換
+            wav_data = self._pcm_to_wav(audio_data, sample_rate=16000)
+            
+            async with aiohttp.ClientSession() as session:
+                # ElevenLabs Speech-to-Text API
+                url = "https://api.elevenlabs.io/v1/speech-to-text"
+                
+                headers = {
+                    "xi-api-key": self.elevenlabs_api_key,
+                }
+                
+                form_data = aiohttp.FormData()
+                form_data.add_field(
+                    "audio",
+                    wav_data,
+                    filename="audio.wav",
+                    content_type="audio/wav"
+                )
+                form_data.add_field("model_id", "scribe_v1")  # Whisper-based model
+                form_data.add_field("language_code", "ja")  # Japanese
+                
+                async with session.post(url, headers=headers, data=form_data) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        text = result.get("text", "")
+                        logger.debug(f"STT result: {text[:50]}..." if len(text) > 50 else f"STT result: {text}")
+                        return text
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"ElevenLabs STT error: {response.status} - {error_text}")
+                        return None
+                        
+        except Exception as e:
+            logger.error(f"speech_to_text failed: {e}")
+            return None
+    
+    async def text_to_speech(
+        self, 
+        text: str, 
+        voice_id: Optional[str] = None
+    ) -> Optional[bytes]:
+        """
+        ElevenLabs TTSでテキストを音声に変換
+        
+        Args:
+            text: 音声に変換するテキスト
+            voice_id: 使用する音声ID（省略時はデフォルト）
+            
+        Returns:
+            MP3形式の音声データ
+        """
+        if not self.elevenlabs_api_key:
+            logger.warning("ElevenLabs API key not configured")
+            return None
+        
+        voice_id = voice_id or self.elevenlabs_voice_id or "pNInz6obpgDQGcFmaJgB"  # デフォルト: Adam
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # ElevenLabs Text-to-Speech API
+                url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+                
+                headers = {
+                    "xi-api-key": self.elevenlabs_api_key,
+                    "Content-Type": "application/json",
+                }
+                
+                payload = {
+                    "text": text,
+                    "model_id": self.elevenlabs_model_id,
+                    "voice_settings": {
+                        "stability": 0.5,
+                        "similarity_boost": 0.75,
+                    }
+                }
+                
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status == 200:
+                        audio_data = await response.read()
+                        logger.debug(f"TTS generated {len(audio_data)} bytes")
+                        return audio_data
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"ElevenLabs TTS error: {response.status} - {error_text}")
+                        return None
+                        
+        except Exception as e:
+            logger.error(f"text_to_speech failed: {e}")
+            return None
+    
+    async def text_to_speech_ulaw(
+        self, 
+        text: str, 
+        voice_id: Optional[str] = None
+    ) -> Optional[bytes]:
+        """
+        TTSで生成した音声をμ-law 8kHz形式に変換
+        Twilio Media Streamsで使用するため
+        
+        Args:
+            text: 音声に変換するテキスト
+            voice_id: 使用する音声ID
+            
+        Returns:
+            μ-law 8kHz形式の音声データ
+        """
+        if not self.elevenlabs_api_key:
+            logger.warning("ElevenLabs API key not configured")
+            return None
+        
+        voice_id = voice_id or self.elevenlabs_voice_id or "pNInz6obpgDQGcFmaJgB"
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # PCM形式で取得（μ-law変換用）
+                url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+                
+                headers = {
+                    "xi-api-key": self.elevenlabs_api_key,
+                    "Content-Type": "application/json",
+                    "Accept": "audio/wav",  # WAV形式でリクエスト
+                }
+                
+                payload = {
+                    "text": text,
+                    "model_id": self.elevenlabs_model_id,
+                    "voice_settings": {
+                        "stability": 0.5,
+                        "similarity_boost": 0.75,
+                    },
+                    "output_format": "pcm_16000"  # 16kHz PCM
+                }
+                
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status == 200:
+                        pcm_data = await response.read()
+                        
+                        # 16kHz → 8kHz リサンプリング
+                        pcm_8k = self.resample_audio(pcm_data, 16000, 8000, 2)
+                        
+                        # PCM → μ-law
+                        ulaw_data = self.pcm_to_ulaw(pcm_8k)
+                        
+                        logger.debug(f"TTS+μ-law generated {len(ulaw_data)} bytes")
+                        return ulaw_data
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"ElevenLabs TTS error: {response.status} - {error_text}")
+                        return None
+                        
+        except Exception as e:
+            logger.error(f"text_to_speech_ulaw failed: {e}")
+            return None
+    
+    def _pcm_to_wav(self, pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, sample_width: int = 2) -> bytes:
+        """
+        PCMデータをWAV形式に変換
+        
+        Args:
+            pcm_data: PCM音声データ
+            sample_rate: サンプルレート
+            channels: チャンネル数
+            sample_width: サンプル幅（バイト数）
+            
+        Returns:
+            WAV形式の音声データ
+        """
+        import wave
+        
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as wav_file:
+            wav_file.setnchannels(channels)
+            wav_file.setsampwidth(sample_width)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm_data)
+        
+        buffer.seek(0)
+        return buffer.read()
+    
+    # ========================================
+    # Claude Response Generation (10E)
+    # ========================================
+    
+    async def generate_response(
+        self, 
+        user_message: str, 
+        conversation_history: List[dict],
+        context: Optional[dict] = None
+    ) -> str:
+        """
+        Claudeで音声会話の応答を生成
+        
+        Args:
+            user_message: ユーザーの発話
+            conversation_history: 会話履歴 [{"role": "user/assistant", "content": "..."}]
+            context: 追加のコンテキスト（予約目的など）
+            
+        Returns:
+            AI応答テキスト
+        """
+        try:
+            from langchain_anthropic import ChatAnthropic
+            from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+            
+            llm = ChatAnthropic(
+                model="claude-sonnet-4-20250514",
+                api_key=settings.ANTHROPIC_API_KEY,
+                max_tokens=500,  # 音声会話は短い応答
+            )
+            
+            # システムプロンプト
+            system_prompt = """あなたはAI秘書「ダン」です。電話で相手と会話しています。
+
+ルール:
+- 簡潔に応答する（1〜2文程度）
+- 質問には直接答える
+- 予約や問い合わせの要件を聞き取る
+- 必要な情報を確認する
+- 敬語を使う
+"""
+            
+            if context:
+                purpose = context.get("purpose", "")
+                if purpose:
+                    system_prompt += f"\n現在の通話目的: {purpose}"
+            
+            messages = [SystemMessage(content=system_prompt)]
+            
+            # 会話履歴を追加
+            for msg in conversation_history[-10:]:  # 最新10件まで
+                if msg["role"] == "user":
+                    messages.append(HumanMessage(content=msg["content"]))
+                else:
+                    messages.append(AIMessage(content=msg["content"]))
+            
+            # 現在のユーザーメッセージ
+            messages.append(HumanMessage(content=user_message))
+            
+            # 応答を生成
+            response = await llm.ainvoke(messages)
+            
+            return response.content
+            
+        except Exception as e:
+            logger.error(f"generate_response failed: {e}")
+            return "申し訳ありません。少々お待ちください。"
 
 
 # シングルトンインスタンス

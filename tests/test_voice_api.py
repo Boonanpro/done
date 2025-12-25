@@ -537,3 +537,87 @@ class TestMediaStreamsWebSocket:
                 "streamSid": "MZ_TEST_STREAM_2"
             })
 
+
+class TestAudioConversion:
+    """音声変換機能（10E Step 2）のテスト"""
+    
+    def test_ulaw_to_pcm_conversion(self):
+        """μ-law → PCM変換のテスト"""
+        from app.services.voice_service import VoiceService
+        
+        service = VoiceService()
+        
+        # ダミーのμ-lawデータ（無音に近い値）
+        ulaw_data = bytes([0xFF] * 160)  # 0xFF = μ-law silence
+        
+        pcm_data = service.ulaw_to_pcm(ulaw_data)
+        
+        # PCMデータは2バイト/サンプルなので2倍のサイズ
+        assert len(pcm_data) == len(ulaw_data) * 2
+        assert isinstance(pcm_data, bytes)
+    
+    def test_pcm_to_ulaw_conversion(self):
+        """PCM → μ-law変換のテスト"""
+        from app.services.voice_service import VoiceService
+        
+        service = VoiceService()
+        
+        # ダミーのPCMデータ（16-bit, 無音に近い値）
+        pcm_data = bytes([0x00, 0x00] * 160)
+        
+        ulaw_data = service.pcm_to_ulaw(pcm_data)
+        
+        # μ-lawデータは1バイト/サンプルなので半分のサイズ
+        assert len(ulaw_data) == len(pcm_data) // 2
+        assert isinstance(ulaw_data, bytes)
+    
+    def test_roundtrip_conversion(self):
+        """往復変換のテスト（μ-law → PCM → μ-law）"""
+        from app.services.voice_service import VoiceService
+        
+        service = VoiceService()
+        
+        # 元のμ-lawデータ
+        original_ulaw = bytes([0x80, 0x90, 0xA0, 0xB0] * 40)
+        
+        # μ-law → PCM
+        pcm_data = service.ulaw_to_pcm(original_ulaw)
+        
+        # PCM → μ-law
+        converted_ulaw = service.pcm_to_ulaw(pcm_data)
+        
+        # サイズが同じであることを確認
+        assert len(converted_ulaw) == len(original_ulaw)
+    
+    def test_resample_audio(self):
+        """リサンプリングのテスト"""
+        from app.services.voice_service import VoiceService
+        
+        service = VoiceService()
+        
+        # 8kHz PCMデータ
+        pcm_8k = bytes([0x00, 0x80] * 8000)  # 1秒分
+        
+        # 8kHz → 16kHz
+        pcm_16k = service.resample_audio(pcm_8k, 8000, 16000, 2)
+        
+        # 16kHzは約2倍のサイズ
+        assert len(pcm_16k) >= len(pcm_8k) * 1.9
+        assert len(pcm_16k) <= len(pcm_8k) * 2.1
+    
+    def test_pcm_to_wav(self):
+        """PCM → WAV変換のテスト"""
+        from app.services.voice_service import VoiceService
+        
+        service = VoiceService()
+        
+        # ダミーのPCMデータ
+        pcm_data = bytes([0x00, 0x00] * 100)
+        
+        wav_data = service._pcm_to_wav(pcm_data, sample_rate=16000)
+        
+        # WAVヘッダーを確認
+        assert wav_data[:4] == b"RIFF"
+        assert b"WAVE" in wav_data[:12]
+        assert len(wav_data) > len(pcm_data)
+
