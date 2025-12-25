@@ -566,13 +566,24 @@ class MediaStreamHandler:
                     except Exception as e:
                         logger.warning(f"Failed to generate summary: {e}")
                 
-                await service.update_call_status(
+                # 通話記録を更新
+                updated_call = await service.update_call_status(
                     call_id=call.id,
                     status=CallStatus.COMPLETED,
                     transcription=transcription if transcription else None,
                     summary=summary,
                 )
                 logger.info(f"Call finalized: {self.call_sid}")
+                
+                # チャット通知を送信
+                if updated_call:
+                    try:
+                        await service.notify_chat(
+                            user_id=call.user_id,
+                            call=updated_call,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to send chat notification: {e}")
         except Exception as e:
             logger.error(f"Failed to finalize call: {e}")
     

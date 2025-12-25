@@ -621,3 +621,19 @@ class TestAudioConversion:
         assert b"WAVE" in wav_data[:12]
         assert len(wav_data) > len(pcm_data)
 
+
+class TestChatNotification:
+    """チャット通知（10F）のテスト"""
+    
+    def test_voice_service_has_notify_chat_method(self):
+        """VoiceServiceにnotify_chatメソッドが存在すること"""
+        from app.services.voice_service import VoiceService
+        
+        assert hasattr(VoiceService, 'notify_chat')
+    
+    def test_chat_service_has_send_system_message(self):
+        """ChatServiceにsend_system_messageメソッドが存在すること"""
+        from app.services.chat_service import ChatService
+        
+        assert hasattr(ChatService, 'send_system_message')
+

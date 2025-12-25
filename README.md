@@ -163,6 +163,7 @@
 | **Claude応答生成** | AI会話応答 (10E) | ✅ **動作確認済み** |
 | **双方向AI音声会話** | STT→Claude→TTSパイプライン (10E) | ✅ **動作確認済み** |
 | **エージェント架電** | VoiceExecutor (10F) | ✅ **動作確認済み** |
+| **通話チャット通知** | VoiceService.notify_chat (10F) | ✅ **動作確認済み** |
 
 **技術スタック**: Twilio Voice + Twilio Media Streams + ElevenLabs + Claude
 

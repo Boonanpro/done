@@ -1044,6 +1044,70 @@ class VoiceService:
         except Exception as e:
             logger.error(f"generate_response failed: {e}")
             return "申し訳ありません。少々お待ちください。"
+    
+    # ========================================
+    # Chat Notification (10F)
+    # ========================================
+    
+    async def notify_chat(
+        self,
+        user_id: str,
+        call: VoiceCallResponse,
+    ) -> bool:
+        """
+        通話内容をチャットに通知
+        
+        Args:
+            user_id: ユーザーID
+            call: 通話情報
+            
+        Returns:
+            通知成功の場合True
+        """
+        try:
+            # 1. 設定確認
+            settings = await self.get_voice_settings(user_id)
+            if not settings or not settings.notify_via_chat:
+                logger.debug(f"Chat notification disabled for user: {user_id}")
+                return False
+            
+            # 2. 通知メッセージを構築
+            direction_text = "着信" if call.direction == CallDirection.INBOUND else "発信"
+            
+            other_number = call.from_number if call.direction == CallDirection.INBOUND else call.to_number
+            
+            duration_text = f"{call.duration_seconds}秒" if call.duration_seconds else "不明"
+            purpose_text = call.purpose.value if call.purpose else "不明"
+            
+            message = f"""📞 **{direction_text}通話が終了しました**
+
+相手: {other_number}
+時間: {duration_text}
+目的: {purpose_text}
+
+**要約:**
+{call.summary or "（要約なし）"}
+"""
+            
+            # 3. チャットサービスに送信
+            from app.services.chat_service import get_chat_service
+            chat_service = get_chat_service()
+            
+            result = await chat_service.send_system_message(
+                user_id=user_id,
+                message=message,
+            )
+            
+            if result:
+                logger.info(f"Chat notification sent for call: {call.call_sid}")
+                return True
+            else:
+                logger.warning(f"Failed to send chat notification for call: {call.call_sid}")
+                return False
+            
+        except Exception as e:
+            logger.error(f"notify_chat failed: {e}")
+            return False
 
 
 # シングルトンインスタンス

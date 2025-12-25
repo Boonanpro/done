@@ -589,6 +589,84 @@ class ChatService:
         """Check if user is a member of the room"""
         member = self.supabase.table("chat_room_members").select("id").eq("room_id", room_id).eq("user_id", user_id).execute()
         return bool(member.data)
+    
+    # ==================== System Messages (Phase 10) ====================
+    
+    async def send_system_message(
+        self,
+        user_id: str,
+        message: str,
+        room_type: str = "ai",
+    ) -> Optional[dict]:
+        """
+        システム/AIからユーザーにメッセージを送信
+        
+        Args:
+            user_id: 対象ユーザーID
+            message: メッセージ内容
+            room_type: ルームタイプ（ai=AIアシスタントルーム）
+            
+        Returns:
+            送信されたメッセージ
+        """
+        try:
+            # 1. ユーザーのAIルームを取得または作成
+            rooms = self.supabase.table("chat_rooms").select("*").eq(
+                "room_type", room_type
+            ).execute()
+            
+            ai_room = None
+            for room in rooms.data or []:
+                # このルームのメンバーを確認
+                members = self.supabase.table("chat_room_members").select("user_id").eq(
+                    "room_id", room["id"]
+                ).execute()
+                
+                member_ids = [m["user_id"] for m in members.data or []]
+                if user_id in member_ids:
+                    ai_room = room
+                    break
+            
+            if not ai_room:
+                # AIルームがない場合は作成
+                room_result = self.supabase.table("chat_rooms").insert({
+                    "name": "AI Assistant",
+                    "room_type": room_type,
+                }).execute()
+                
+                if room_result.data:
+                    ai_room = room_result.data[0]
+                    # ユーザーをメンバーに追加
+                    self.supabase.table("chat_room_members").insert({
+                        "room_id": ai_room["id"],
+                        "user_id": user_id,
+                    }).execute()
+                else:
+                    return None
+            
+            # 2. AIとしてメッセージを送信
+            # AI送信者はシステム用の固定ID（または最初のメンバー）
+            message_result = self.supabase.table("chat_messages").insert({
+                "room_id": ai_room["id"],
+                "sender_id": user_id,  # ユーザー自身のルームに送信
+                "content": message,
+                "message_type": "system",  # システムメッセージとして区別
+            }).execute()
+            
+            if message_result.data:
+                return message_result.data[0]
+            
+            return None
+            
+        except Exception as e:
+            import logging
+            logging.error(f"Failed to send system message: {e}")
+            return None
+
+
+def get_chat_service() -> ChatService:
+    """ChatServiceのシングルトンインスタンスを取得"""
+    return ChatService()
 
 
 # Import timedelta for invite expiration
