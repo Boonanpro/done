@@ -31,3 +31,4 @@ for call in calls:
     print(f'End Time: {call.end_time}')
     print(f'Direction: {call.direction}')
 
+

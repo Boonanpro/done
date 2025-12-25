@@ -41,3 +41,4 @@ for call in calls:
     except Exception as e:
         print(f"  Could not fetch notifications: {e}")
 
+

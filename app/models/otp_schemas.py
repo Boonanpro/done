@@ -146,3 +146,4 @@ OTP_PAGE_INDICATORS = [
     "メール認証",
 ]
 
+

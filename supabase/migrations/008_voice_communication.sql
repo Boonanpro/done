@@ -146,3 +146,4 @@ COMMENT ON COLUMN voice_settings.inbound_enabled IS '受電を受けるかどう
 COMMENT ON COLUMN voice_settings.auto_answer_whitelist IS 'ホワイトリストの番号は自動応答するか';
 COMMENT ON COLUMN voice_settings.elevenlabs_voice_id IS 'ElevenLabsの音声ID（カスタム音声）';
 
+

@@ -319,8 +319,164 @@ async def twilio_incoming_webhook(
 
 
 # ========================================
-# Future: Media Streams WebSocket (10E)
+# Media Streams WebSocket (10E)
 # ========================================
-# WS /api/v1/voice/stream/{call_sid} - ElevenLabs連携WebSocket
-# これはFastAPIのWebSocketで実装し、ElevenLabsとTwilioのMedia Streamsを橋渡しする
+
+from fastapi import WebSocket, WebSocketDisconnect
+import json
+import base64
+import asyncio
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class MediaStreamHandler:
+    """Twilio Media Streams処理ハンドラー"""
+    
+    def __init__(self, call_sid: str, websocket: WebSocket):
+        self.call_sid = call_sid
+        self.websocket = websocket
+        self.stream_sid: Optional[str] = None
+        self.audio_buffer: bytes = b""
+        self.is_connected: bool = False
+        self.conversation_history: list = []
+    
+    async def handle_message(self, message: dict) -> None:
+        """Media Streamsメッセージを処理"""
+        event = message.get("event")
+        
+        if event == "connected":
+            await self._handle_connected(message)
+        elif event == "start":
+            await self._handle_start(message)
+        elif event == "media":
+            await self._handle_media(message)
+        elif event == "stop":
+            await self._handle_stop(message)
+        elif event == "mark":
+            # マーカーイベント（TTS再生完了等）
+            pass
+    
+    async def _handle_connected(self, message: dict) -> None:
+        """接続確立"""
+        logger.info(f"Media Stream connected for call: {self.call_sid}")
+        self.is_connected = True
+    
+    async def _handle_start(self, message: dict) -> None:
+        """ストリーム開始"""
+        start_data = message.get("start", {})
+        self.stream_sid = start_data.get("streamSid")
+        logger.info(f"Media Stream started: {self.stream_sid}")
+        
+        # 初期挨拶を送信
+        await self._send_greeting()
+    
+    async def _handle_media(self, message: dict) -> None:
+        """音声データ受信"""
+        media_data = message.get("media", {})
+        payload = media_data.get("payload", "")
+        
+        if payload:
+            # Base64デコードしてバッファに追加
+            audio_data = base64.b64decode(payload)
+            self.audio_buffer += audio_data
+            
+            # バッファが一定サイズに達したら処理
+            # (Phase 10E Step 3で無音検知を実装)
+            if len(self.audio_buffer) >= 16000:  # 約1秒分
+                await self._process_audio_buffer()
+    
+    async def _handle_stop(self, message: dict) -> None:
+        """ストリーム終了"""
+        logger.info(f"Media Stream stopped: {self.stream_sid}")
+        self.is_connected = False
+        
+        # 通話記録を更新
+        await self._finalize_call()
+    
+    async def _send_greeting(self) -> None:
+        """初期挨拶を送信"""
+        # Phase 10E Step 5で実装予定
+        # 現在はログのみ
+        logger.info(f"Greeting would be sent for call: {self.call_sid}")
+    
+    async def _process_audio_buffer(self) -> None:
+        """音声バッファを処理"""
+        # Phase 10E Step 3-5で実装予定
+        # STT → Claude → TTS のパイプライン
+        logger.debug(f"Processing audio buffer: {len(self.audio_buffer)} bytes")
+        self.audio_buffer = b""  # バッファをクリア
+    
+    async def _finalize_call(self) -> None:
+        """通話終了処理"""
+        # 通話記録を更新
+        service = get_voice_service()
+        try:
+            call = await service.get_call_by_sid(self.call_sid)
+            if call:
+                # 会話履歴から文字起こしを作成
+                transcription = "\n".join(
+                    f"{'相手' if msg['role'] == 'user' else 'AI'}: {msg['content']}"
+                    for msg in self.conversation_history
+                )
+                
+                await service.update_call_status(
+                    call_id=call.id,
+                    status=CallStatus.COMPLETED,
+                    transcription=transcription if transcription else None,
+                )
+                logger.info(f"Call finalized: {self.call_sid}")
+        except Exception as e:
+            logger.error(f"Failed to finalize call: {e}")
+    
+    async def send_audio(self, audio_data: bytes) -> None:
+        """音声データを送信"""
+        if not self.is_connected or not self.stream_sid:
+            return
+        
+        # Base64エンコード
+        payload = base64.b64encode(audio_data).decode("utf-8")
+        
+        message = {
+            "event": "media",
+            "streamSid": self.stream_sid,
+            "media": {
+                "payload": payload
+            }
+        }
+        
+        await self.websocket.send_json(message)
+
+
+@router.websocket("/stream/{call_sid}")
+async def media_stream_websocket(websocket: WebSocket, call_sid: str):
+    """
+    Twilio Media Streams WebSocket
+    
+    Twilioからの音声ストリームを受信し、
+    ElevenLabsでSTT/TTS処理を行い、
+    AIとの双方向会話を実現する。
+    """
+    await websocket.accept()
+    logger.info(f"WebSocket connection accepted for call: {call_sid}")
+    
+    handler = MediaStreamHandler(call_sid, websocket)
+    
+    try:
+        while True:
+            # Twilioからのメッセージを受信
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            
+            await handler.handle_message(message)
+            
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for call: {call_sid}")
+    except Exception as e:
+        logger.error(f"WebSocket error for call {call_sid}: {e}")
+    finally:
+        # クリーンアップ
+        if handler.is_connected:
+            await handler._finalize_call()
 

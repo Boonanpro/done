@@ -564,3 +564,4 @@ def get_otp_service() -> OTPService:
         _otp_service = OTPService()
     return _otp_service
 
+

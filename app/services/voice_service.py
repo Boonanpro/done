@@ -511,9 +511,10 @@ class VoiceService:
         try:
             client = self._get_twilio_client()
             
-            # Webhook URLを構築（ステータスコールバック用）
+            # Webhook URLを構築
             webhook_base = getattr(settings, 'VOICE_WEBHOOK_BASE_URL', '')
             status_callback = f"{webhook_base}/api/v1/voice/webhook/status" if webhook_base else None
+            outbound_url = f"{webhook_base}/api/v1/voice/webhook/outbound" if webhook_base else None
             
             # メタデータにコンテキストを含める
             metadata = {
@@ -521,23 +522,26 @@ class VoiceService:
                 "context": context or {},
             }
             
-            # TwiMLを直接生成（ngrokを経由しない）
-            twiml_content = '''<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Say language="ja-JP">こんにちは。AIアシスタントのダンです。ご用件をお伺いします。</Say>
-    <Pause length="2"/>
-    <Say language="ja-JP">申し訳ありません。現在、音声会話機能は準備中です。後ほどおかけ直しください。</Say>
-    <Hangup/>
-</Response>'''
-            
-            # Twilio APIで発信（twimlパラメータを使用）
+            # Twilio APIで発信
             call_params = {
                 "to": to_number,
                 "from_": self.twilio_phone_number,
-                "twiml": twiml_content,
             }
             
-            # ステータスコールバックを設定（webhook_baseがある場合のみ）
+            # Webhook URLがある場合はURL方式、ない場合はTwiML直接指定
+            if outbound_url:
+                call_params["url"] = outbound_url
+                call_params["method"] = "POST"
+            else:
+                # フォールバック: 固定TwiML
+                call_params["twiml"] = '''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="ja-JP">こんにちは。AIアシスタントのダンです。</Say>
+    <Say language="ja-JP">音声会話の設定が完了していません。</Say>
+    <Hangup/>
+</Response>'''
+            
+            # ステータスコールバックを設定
             if status_callback:
                 call_params["status_callback"] = status_callback
                 call_params["status_callback_event"] = ['initiated', 'ringing', 'answered', 'completed']
@@ -647,22 +651,31 @@ class VoiceService:
         """
         架電用のTwiMLを生成
         
-        ElevenLabs Conversational AIとの接続を設定します。
-        Phase 10E完了後はMedia Streamsで接続しますが、
-        現在は日本語挨拶を流すシンプルな実装です。
+        Media Streams WebSocketを使用して双方向音声会話を実現。
         """
         webhook_base = getattr(settings, 'VOICE_WEBHOOK_BASE_URL', '')
         
-        # TODO: Phase 10E完了後にMedia Streams WebSocket連携を有効化
-        # ws_url = webhook_base.replace('https://', 'wss://').replace('http://', 'ws://')
-        # stream_url = f"{ws_url}/api/v1/voice/stream/{call_sid}"
-        
-        # 現在は日本語の挨拶を流す（テスト用）
-        twiml = f'''<?xml version="1.0" encoding="UTF-8"?>
+        if webhook_base:
+            # Media Streams WebSocketを使用
+            ws_url = webhook_base.replace('https://', 'wss://').replace('http://', 'ws://')
+            stream_url = f"{ws_url}/api/v1/voice/stream/{call_sid}"
+            
+            twiml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say language="ja-JP">こんにちは。AIアシスタントのダンです。ご用件をお伺いします。</Say>
-    <Pause length="2"/>
-    <Say language="ja-JP">申し訳ありません。現在、音声会話機能は準備中です。後ほどおかけ直しください。</Say>
+    <Connect>
+        <Stream url="{stream_url}">
+            <Parameter name="call_sid" value="{call_sid}" />
+            <Parameter name="direction" value="outbound" />
+        </Stream>
+    </Connect>
+</Response>'''
+        else:
+            # Webhook URLが設定されていない場合はフォールバック
+            twiml = '''<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say language="ja-JP">こんにちは。AIアシスタントのダンです。</Say>
+    <Pause length="1"/>
+    <Say language="ja-JP">申し訳ありません。音声会話の設定が完了していません。</Say>
     <Hangup/>
 </Response>'''
         

@@ -458,3 +458,4 @@ OTP_WAIT_TIMEOUT_SECONDS=60
 2. **TOTP対応** - Google Authenticator等のTOTPアプリからのコード取得
 3. **Push通知OTP** - モバイルアプリのPush通知認証に対応
 
+

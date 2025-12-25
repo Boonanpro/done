@@ -155,13 +155,15 @@
 | 受電Webhook | `POST /api/v1/voice/webhook/incoming` (10C) | ✅ 動作確認済み |
 | 通話状態Webhook | `POST /api/v1/voice/webhook/status` (10B) | ✅ 動作確認済み |
 | 架電TwiML Webhook | `POST /api/v1/voice/webhook/outbound` (10B) | ✅ 動作確認済み |
-| **双方向AI音声会話** | ElevenLabs Conversational AI (10E) | ✅ **動作確認済み** |
+| **Media Streams WebSocket** | `WS /api/v1/voice/stream/{call_sid}` (10E) | ✅ **動作確認済み** |
+| **双方向AI音声会話** | ElevenLabs STT/TTS連携 (10E) | 🔧 **実装中** |
 
-**技術スタック**: Twilio Voice + ElevenLabs Conversational AI + Claude
+**技術スタック**: Twilio Voice + Twilio Media Streams + ElevenLabs + Claude
 
 **実現した機能**:
 - 📞 Twilioを使った電話発信・着信
-- 🗣️ ElevenLabsによる日本語音声会話（双方向リアルタイム）
+- 🔌 Media Streams WebSocketによるリアルタイム音声ストリーム（基盤完成）
+- 🗣️ ElevenLabsによる日本語音声会話（STT/TTS連携実装中）
 - 🤖 AIエージェント「ダン」が日本語で応答
 - 🔄 今後の改良: 音声の自然さ向上、レスポンス速度改善
 

@@ -462,3 +462,78 @@ class TestTwilioWebhooks:
         assert "application/xml" in response.headers["content-type"]
         assert "出ることができません" in response.text or "<Hangup/>" in response.text
 
+
+class TestMediaStreamsWebSocket:
+    """Media Streams WebSocket (10E) のテスト"""
+    
+    def test_websocket_connection(self, client):
+        """WebSocket接続のテスト"""
+        # FastAPIのTestClientはWebSocketをサポート
+        with client.websocket_connect("/api/v1/voice/stream/CA_TEST_123") as websocket:
+            # Twilio Media Streams形式のconnectedイベントを送信
+            websocket.send_json({
+                "event": "connected",
+                "protocol": "Call",
+                "version": "1.0.0"
+            })
+            
+            # startイベントを送信
+            websocket.send_json({
+                "event": "start",
+                "sequenceNumber": "1",
+                "start": {
+                    "streamSid": "MZ_TEST_STREAM",
+                    "accountSid": "AC_TEST",
+                    "callSid": "CA_TEST_123",
+                    "tracks": ["inbound"],
+                    "mediaFormat": {
+                        "encoding": "audio/x-mulaw",
+                        "sampleRate": 8000,
+                        "channels": 1
+                    }
+                },
+                "streamSid": "MZ_TEST_STREAM"
+            })
+            
+            # stopイベントを送信して正常終了
+            websocket.send_json({
+                "event": "stop",
+                "sequenceNumber": "100",
+                "streamSid": "MZ_TEST_STREAM"
+            })
+    
+    def test_websocket_media_handling(self, client):
+        """音声データ受信のテスト"""
+        import base64
+        
+        with client.websocket_connect("/api/v1/voice/stream/CA_TEST_456") as websocket:
+            # 接続イベント
+            websocket.send_json({"event": "connected", "protocol": "Call"})
+            
+            # 開始イベント
+            websocket.send_json({
+                "event": "start",
+                "start": {"streamSid": "MZ_TEST_STREAM_2", "callSid": "CA_TEST_456"},
+                "streamSid": "MZ_TEST_STREAM_2"
+            })
+            
+            # 音声データ（μ-law形式のダミーデータ）
+            dummy_audio = base64.b64encode(b"\x7f" * 160).decode("utf-8")  # 20ms of silence
+            websocket.send_json({
+                "event": "media",
+                "sequenceNumber": "2",
+                "media": {
+                    "track": "inbound",
+                    "chunk": "1",
+                    "timestamp": "0",
+                    "payload": dummy_audio
+                },
+                "streamSid": "MZ_TEST_STREAM_2"
+            })
+            
+            # 終了
+            websocket.send_json({
+                "event": "stop",
+                "streamSid": "MZ_TEST_STREAM_2"
+            })
+
