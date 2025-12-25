@@ -162,6 +162,7 @@
 | **ElevenLabs TTS連携** | テキスト→音声変換 (10E) | ✅ **動作確認済み** |
 | **Claude応答生成** | AI会話応答 (10E) | ✅ **動作確認済み** |
 | **双方向AI音声会話** | STT→Claude→TTSパイプライン (10E) | ✅ **動作確認済み** |
+| **エージェント架電** | VoiceExecutor (10F) | ✅ **動作確認済み** |
 
 **技術スタック**: Twilio Voice + Twilio Media Streams + ElevenLabs + Claude
 

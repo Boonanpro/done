@@ -475,5 +475,9 @@ class ExecutorFactory:
                 return RakutenExecutor()
             else:
                 return ProductExecutor(service_name=service_name or "amazon")
+        elif category in ("voice", "phone", "call"):
+            # 電話タスク用Executor
+            from app.executors.voice_executor import VoiceExecutor
+            return VoiceExecutor()
         else:
             return GenericExecutor()

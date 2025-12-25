@@ -28,6 +28,7 @@ class TaskType(str, Enum):
     PAYMENT = "payment"
     RESEARCH = "research"
     TRAVEL = "travel"
+    PHONE = "phone"  # 電話タスク（Phase 10）
     OTHER = "other"
 
 
@@ -39,6 +40,7 @@ class SearchResultCategory(str, Enum):
     PRODUCT = "product"
     RESTAURANT = "restaurant"
     PROFESSIONAL = "professional"
+    PHONE = "phone"  # 電話タスク（Phase 10）
     GENERAL = "general"
 
 
