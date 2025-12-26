@@ -627,6 +627,68 @@ Phase 3A                      Phase 3B
 
 ---
 
+## Travel Fallback（代替提案機能）
+
+**追加日**: 2024年12月26日
+
+### 概要
+
+バスや電車が見つからない場合に、自動的に代替手段を検索して提案する機能。
+
+### フロー
+
+```
+ユーザー：「12月30日に大阪から米子行きのバスを予約して」
+        ↓
+Done：WILLERでバス検索
+        ↓
+    [バスが見つからない]
+        ↓
+Done：代替手段を自動検索
+  - 電車（Yahoo!乗換案内）
+  - 飛行機（スカイスキャナー）
+        ↓
+Done：「バスは見つかりませんでしたが、以下の代替手段があります：
+        🚃 Train: 大阪→岡山→特急→米子 約3時間 ¥12,000
+        ✈️ Flight: 伊丹→米子 約1時間 ¥15,000」
+```
+
+### 実装場所
+
+- `app/agent/agent.py` の `_search_travel_alternatives()` メソッド
+- `execute_task()` 内で実行失敗時に自動呼び出し
+
+### テスト
+
+```bash
+pytest tests/test_execution_engine.py::TestTravelFallback -v
+```
+
+---
+
+## 実機テスト記録
+
+### WILLER高速バス予約（2024年12月26日）
+
+| 項目 | 内容 |
+|-----|------|
+| ルート | 梅田 → 米子 |
+| 日付 | 2025年1月5日 |
+| 結果 | ✅ 予約確認画面まで到達 |
+| 確認番号 | WILLER-TEMP-20251226231905 |
+| 所要時間 | 約30秒 |
+
+**成功ログ**:
+```json
+{
+  "success": true,
+  "message": "Reached confirmation screen. Please complete the reservation manually on WILLER TRAVEL website.",
+  "confirmation_number": "WILLER-TEMP-20251226231905"
+}
+```
+
+---
+
 ## 次のステップ
 
 Phase 3AとPhase 3Bの仕様が完成したので、以下の順で実装：
