@@ -304,18 +304,22 @@ class TestExecutorFactory:
     
     def test_get_train_executor(self):
         """TrainExecutor取得"""
-        from app.executors.base import ExecutorFactory, TrainExecutor
+        from app.executors.base import ExecutorFactory, BaseExecutor
+        from app.executors.ex_reservation_executor import EXReservationExecutor
         
         executor = ExecutorFactory.get_executor("train")
-        assert isinstance(executor, TrainExecutor)
+        assert isinstance(executor, BaseExecutor)
+        assert isinstance(executor, EXReservationExecutor)
         assert executor.service_name == "ex_reservation"
     
     def test_get_product_executor(self):
         """ProductExecutor取得"""
-        from app.executors.base import ExecutorFactory, ProductExecutor
+        from app.executors.base import ExecutorFactory, BaseExecutor
+        from app.executors.amazon_executor import AmazonExecutor
         
         executor = ExecutorFactory.get_executor("product", "amazon")
-        assert isinstance(executor, ProductExecutor)
+        assert isinstance(executor, BaseExecutor)
+        assert isinstance(executor, AmazonExecutor)
         assert executor.service_name == "amazon"
     
     def test_get_generic_executor(self):
