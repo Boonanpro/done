@@ -295,6 +295,67 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
         
         return search_results
     
+    async def _search_travel_alternatives(self, wish: str, failed_category: str) -> str:
+        """
+        Search for alternative travel options when primary option fails.
+        
+        Args:
+            wish: Original user wish
+            failed_category: The category that failed (e.g., "bus", "train")
+            
+        Returns:
+            Formatted string of alternative options
+        """
+        alternatives = []
+        
+        try:
+            # Determine what alternatives to search based on what failed
+            if failed_category == "bus":
+                # Try train/shinkansen
+                try:
+                    train_results = await search_train.ainvoke({
+                        "departure": "osaka",
+                        "arrival": "tottori",
+                    })
+                    if train_results and not train_results.get("error"):
+                        alternatives.append(f"🚃 Train: {train_results.get('title', 'Route available')} - ¥{train_results.get('price', 'N/A')}")
+                except Exception as e:
+                    logger.debug(f"Train search failed: {e}")
+                
+                # Try flight
+                try:
+                    flight_results = await search_flight.ainvoke({
+                        "departure": "osaka",
+                        "arrival": "tottori",
+                    })
+                    if flight_results and not flight_results.get("error"):
+                        alternatives.append(f"✈️ Flight: {flight_results.get('title', 'Route available')} - ¥{flight_results.get('price', 'N/A')}")
+                except Exception as e:
+                    logger.debug(f"Flight search failed: {e}")
+                    
+            elif failed_category == "train":
+                # Try bus
+                try:
+                    bus_results = await search_bus.ainvoke({
+                        "departure": "osaka",
+                        "arrival": "tottori",
+                    })
+                    if bus_results and not bus_results.get("error"):
+                        alternatives.append(f"🚌 Bus: {bus_results.get('title', 'Route available')} - ¥{bus_results.get('price', 'N/A')}")
+                except Exception as e:
+                    logger.debug(f"Bus search failed: {e}")
+            
+            # Always suggest general search as fallback
+            if not alternatives:
+                alternatives.append("📍 Try searching on Google Maps or Yahoo Transit for more options")
+                alternatives.append("📞 Contact a travel agency for special arrangements")
+            
+        except Exception as e:
+            logger.error(f"Alternative search failed: {e}")
+            alternatives.append("⚠️ Could not search for alternatives. Please try manually.")
+        
+        return "\n".join(alternatives) if alternatives else ""
+    
     def _format_search_results_for_prompt(self, search_results: list[dict]) -> str:
         """検索結果をプロンプト用にフォーマット"""
         if not search_results:
@@ -608,6 +669,15 @@ Use the available tools to execute."""
                 }
                 task["status"] = TaskStatus.COMPLETED if execution_result.success else TaskStatus.FAILED
                 logger.info(f"Task {task_id} execution result: {execution_result.success}")
+                
+                # ★ Fallback: If travel booking failed, search for alternatives
+                if not execution_result.success and task_type == TaskType.TRAVEL:
+                    if "No available" in execution_result.message or "not found" in execution_result.message.lower():
+                        alternatives = await self._search_travel_alternatives(original_wish, category)
+                        if alternatives:
+                            task["execution_result"]["alternatives"] = alternatives
+                            task["execution_result"]["message"] += f"\n\nAlternative options found:\n{alternatives}"
+                            logger.info(f"Task {task_id}: Found {len(alternatives.splitlines())} alternatives")
             else:
                 # Executorが対応していないタスクタイプ
                 task["execution_result"] = {

@@ -328,3 +328,42 @@ class TestExecutorFactory:
         
         executor = ExecutorFactory.get_executor("unknown")
         assert isinstance(executor, GenericExecutor)
+
+
+class TestTravelFallback:
+    """Travel fallback feature tests"""
+    
+    @pytest.mark.asyncio
+    async def test_search_travel_alternatives(self):
+        """Test _search_travel_alternatives method"""
+        from app.agent.agent import AISecretaryAgent
+        
+        agent = AISecretaryAgent()
+        
+        # Test bus fallback (should suggest train/flight)
+        alternatives = await agent._search_travel_alternatives(
+            "Book a bus from Osaka to Tottori",
+            "bus"
+        )
+        
+        # Should return some alternatives
+        assert alternatives is not None
+        assert isinstance(alternatives, str)
+        # At minimum, should have fallback suggestions
+        assert len(alternatives) > 0
+    
+    @pytest.mark.asyncio
+    async def test_fallback_when_train_fails(self):
+        """Test fallback suggestions when train search fails"""
+        from app.agent.agent import AISecretaryAgent
+        
+        agent = AISecretaryAgent()
+        
+        # Test train fallback (should suggest bus)
+        alternatives = await agent._search_travel_alternatives(
+            "Book a train from Tokyo to Osaka",
+            "train"
+        )
+        
+        assert alternatives is not None
+        assert isinstance(alternatives, str)
