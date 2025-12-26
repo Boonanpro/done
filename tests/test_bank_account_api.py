@@ -2,11 +2,12 @@
 Tests for Phase 8B: Bank Account Management API
 """
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from main import app
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def async_client():
     """非同期HTTPクライアントを作成"""
     transport = ASGITransport(app=app)
@@ -14,7 +15,7 @@ async def async_client():
         yield client
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def auth_token(async_client: AsyncClient):
     """テスト用認証トークンを取得"""
     import uuid
