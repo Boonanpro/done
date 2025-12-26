@@ -56,9 +56,9 @@ Done システムの中核となるチャット機能。ユーザーはAIアシ�
 | 2B | 友達管理 | 招待リンク発行・承諾・友達一覧 | ✅ 実装済み |
 | 2C | チャットルーム | ルーム作成・メンバー管理・1対1/グループ | ✅ 実装済み |
 | 2D | メッセージング | メッセージ送受信・既読管理 | ✅ 実装済み |
-| 2E | ダンページ | ユーザーとダンの1対1会話（司令塔） | 🆕 今後実装 |
+| 2E | ダンページ | ユーザーとダンの1対1会話（司令塔） | ✅ 実装済み |
 | 2F | チャットwithダン | 友達とのチャット＋ダン仲介 | ✅ 基盤完了 |
-| 2G | ダン連携 | ダンページ↔チャットwithダン間の通知・提案 | 🆕 今後実装 |
+| 2G | ダン連携 | ダンページ↔チャットwithダン間の通知・提案 | ✅ 実装済み |
 
 ---
 
@@ -208,14 +208,127 @@ users (
 
 ---
 
-## 今後の実装予定
+## 2E: ダンページ（実装完了）
 
-### 2E: ダンページ
-- ユーザーとダンの1対1会話UI
-- 通知・提案の受け取り
-- 承認・却下機能
+### 概要
 
-### 2G: ダン連携
-- チャットwithダン↔ダンページ間の通知
-- 返信案の生成
-- カレンダー・タスク連携
+各ユーザーに専属のダン（AIアシスタント）との1対1会話ルーム。ユーザー登録時に自動作成される。
+
+### ルームタイプ
+
+| タイプ | 説明 | 自動作成 |
+|-------|------|---------|
+| `dan` | ユーザーとダンの1対1 | ✅ ユーザー登録時 |
+
+### APIエンドポイント
+
+| メソッド | パス | 説明 |
+|---------|------|------|
+| GET | `/api/v1/chat/dan` | ダンルーム情報取得 |
+| GET | `/api/v1/chat/dan/messages` | メッセージ一覧取得 |
+| POST | `/api/v1/chat/dan/messages` | ダンにメッセージ送信 |
+| POST | `/api/v1/chat/dan/read` | 既読マーク |
+
+### レスポンス例
+
+```json
+{
+  "id": "uuid",
+  "name": "ダン",
+  "type": "dan",
+  "unread_count": 3,
+  "pending_proposals_count": 1,
+  "last_message_at": "2025-12-26T10:00:00Z",
+  "created_at": "2025-12-26T09:00:00Z"
+}
+```
+
+---
+
+## 2G: ダン連携（実装完了）
+
+### 概要
+
+ダンがチャットwithダンの会話を分析し、ダンページに提案を送る仕組み。
+
+### 提案タイプ
+
+| タイプ | 説明 | 例 |
+|-------|------|-----|
+| `reply` | 返信案 | 「15時で大丈夫です！」 |
+| `action` | アクション提案 | 商品購入、予約など |
+| `schedule` | スケジュール登録 | カレンダーに予定追加 |
+| `reminder` | リマインダー | 締め切り通知 |
+
+### 提案ステータス
+
+| ステータス | 説明 |
+|-----------|------|
+| `pending` | 保留中（ユーザーの対応待ち） |
+| `approved` | 承認済み（実行完了） |
+| `rejected` | 却下済み |
+| `expired` | 期限切れ |
+
+### APIエンドポイント
+
+| メソッド | パス | 説明 |
+|---------|------|------|
+| GET | `/api/v1/chat/proposals` | 提案一覧取得 |
+| GET | `/api/v1/chat/proposals/{id}` | 提案詳細取得 |
+| POST | `/api/v1/chat/proposals/{id}/respond` | 提案に対応（承認/却下/編集） |
+
+### 提案レスポンス例
+
+```json
+{
+  "id": "uuid",
+  "user_id": "uuid",
+  "type": "reply",
+  "status": "pending",
+  "title": "友達Bさんへの返信案",
+  "content": "15時で大丈夫です！",
+  "source_room_id": "uuid",
+  "source_room_name": "友達B",
+  "created_at": "2025-12-26T10:00:00Z"
+}
+```
+
+### 提案アクションリクエスト
+
+```json
+{
+  "action": "approve"  // or "reject" or "edit"
+  "edited_content": "15時OKです！楽しみにしてる"  // action=editの場合
+}
+```
+
+---
+
+## DBテーブル
+
+### dan_proposals（提案テーブル）
+
+```sql
+dan_proposals (
+    id UUID PRIMARY KEY,
+    user_id UUID REFERENCES users(id),
+    dan_room_id UUID REFERENCES chat_rooms(id),
+    type VARCHAR(50),  -- reply, action, schedule, reminder
+    status VARCHAR(50) DEFAULT 'pending',
+    title VARCHAR(255),
+    content TEXT,
+    source_room_id UUID,  -- 元のチャットルーム
+    source_message_id UUID,  -- 元のメッセージ
+    action_data JSONB,  -- アクション実行データ
+    expires_at TIMESTAMPTZ,
+    responded_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ
+)
+```
+
+### users追加カラム
+
+```sql
+ALTER TABLE users ADD COLUMN dan_room_id UUID REFERENCES chat_rooms(id);
+```

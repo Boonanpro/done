@@ -42,6 +42,8 @@ from app.models.chat_schemas import (
     MessageSendRequest, MessageResponse, MessagesListResponse, ReadMarkResponse,
     # AI
     AISettingsResponse, AISettingsUpdateRequest, AISummaryResponse,
+    # Dan Page & Proposals (2E & 2G)
+    DanRoomResponse, ProposalResponse, ProposalsListResponse, ProposalActionRequest,
 )
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -434,6 +436,144 @@ async def get_ai_summary(
         return AISummaryResponse(**summary)
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
+
+
+# ==================== Dan Page Routes (2E) ====================
+
+@router.get("/dan", response_model=DanRoomResponse)
+async def get_dan_room(
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """
+    ダンページ（ユーザーとダンの1対1ルーム）を取得
+    
+    - ルームが存在しない場合は自動作成
+    - 未読メッセージ数と保留中の提案数も返す
+    """
+    try:
+        dan_room = await service.get_or_create_dan_room(current_user.user_id)
+        return DanRoomResponse(**dan_room)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/dan/messages", response_model=MessagesListResponse)
+async def get_dan_messages(
+    limit: int = 50,
+    before: Optional[str] = None,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """ダンページのメッセージを取得"""
+    try:
+        dan_room = await service.get_or_create_dan_room(current_user.user_id)
+        messages = await service.get_messages(dan_room["id"], current_user.user_id, limit=limit, before=before)
+        return MessagesListResponse(messages=[MessageResponse(**m) for m in messages])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/dan/messages", response_model=MessageResponse)
+async def send_dan_message(
+    request: MessageSendRequest,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """ダンにメッセージを送信"""
+    try:
+        message = await service.send_dan_message(current_user.user_id, request.content)
+        user = await service.get_user_by_id(current_user.user_id)
+        return MessageResponse(
+            id=message["id"],
+            room_id=message["room_id"],
+            sender_id=message["sender_id"],
+            sender_name=user["display_name"] if user else "You",
+            sender_type=message["sender_type"],
+            content=message["content"],
+            created_at=message["created_at"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/dan/read", response_model=ReadMarkResponse)
+async def mark_dan_as_read(
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """ダンページを既読にする"""
+    try:
+        dan_room = await service.get_or_create_dan_room(current_user.user_id)
+        success = await service.mark_as_read(dan_room["id"], current_user.user_id)
+        return ReadMarkResponse(success=success, read_at=datetime.utcnow())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Proposal Routes (2G) ====================
+
+@router.get("/proposals", response_model=ProposalsListResponse)
+async def get_proposals(
+    status: Optional[str] = None,
+    limit: int = 50,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """
+    ダンからの提案一覧を取得
+    
+    - status: フィルター（pending, approved, rejected, expired）
+    - limit: 取得件数（デフォルト50）
+    """
+    try:
+        proposals = await service.get_proposals(current_user.user_id, status=status, limit=limit)
+        pending_count = await service.get_pending_proposals_count(current_user.user_id)
+        return ProposalsListResponse(
+            proposals=[ProposalResponse(**p) for p in proposals],
+            total_count=len(proposals),
+            pending_count=pending_count,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/proposals/{proposal_id}", response_model=ProposalResponse)
+async def get_proposal(
+    proposal_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """提案の詳細を取得"""
+    proposal = await service.get_proposal(proposal_id, current_user.user_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    return ProposalResponse(**proposal)
+
+
+@router.post("/proposals/{proposal_id}/respond", response_model=ProposalResponse)
+async def respond_to_proposal(
+    proposal_id: str,
+    request: ProposalActionRequest,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """
+    提案に対応する
+    
+    - action: approve（承認）, reject（却下）, edit（編集して承認）
+    - edited_content: action=editの場合、編集後の内容
+    """
+    try:
+        proposal = await service.respond_to_proposal(
+            proposal_id,
+            current_user.user_id,
+            request.action,
+            request.edited_content,
+        )
+        return ProposalResponse(**proposal)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # ==================== WebSocket ====================

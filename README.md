@@ -48,6 +48,13 @@
 | AI設定更新 | `PATCH /api/v1/chat/rooms/{id}/ai` | ✅ 動作確認済み |
 | AI要約取得 | `GET /api/v1/chat/rooms/{id}/ai/summary` | ✅ 動作確認済み |
 | WebSocket | `WS /api/v1/chat/ws/chat` | ✅ 動作確認済み |
+| **ダンルーム取得** | `GET /api/v1/chat/dan` | ✅ **実装済み（2024年12月26日）** |
+| **ダンメッセージ取得** | `GET /api/v1/chat/dan/messages` | ✅ **実装済み** |
+| **ダンにメッセージ送信** | `POST /api/v1/chat/dan/messages` | ✅ **実装済み** |
+| **ダン既読マーク** | `POST /api/v1/chat/dan/read` | ✅ **実装済み** |
+| **提案一覧取得** | `GET /api/v1/chat/proposals` | ✅ **実装済み** |
+| **提案詳細取得** | `GET /api/v1/chat/proposals/{id}` | ✅ **実装済み** |
+| **提案に対応** | `POST /api/v1/chat/proposals/{id}/respond` | ✅ **実装済み** |
 
 #### Phase 3A: Smart Proposal（リアルタイム検索提案）
 | 機能 | ツール | 状態 |

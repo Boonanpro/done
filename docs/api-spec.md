@@ -101,53 +101,70 @@ AIアシスト機能のオン/オフも可能。
 
 | # | API | Method | Description | Status |
 |---|-----|--------|-------------|--------|
-| 1 | `/api/v1/chat/register` | POST | ユーザー登録 | ❌ Not implemented |
-| 2 | `/api/v1/chat/login` | POST | ログイン（JWT発行） | ❌ Not implemented |
-| 3 | `/api/v1/chat/me` | GET | 自分のプロフィール取得 | ❌ Not implemented |
-| 4 | `/api/v1/chat/me` | PATCH | プロフィール更新 | ❌ Not implemented |
+| 1 | `/api/v1/chat/register` | POST | ユーザー登録 | ✅ 実装済み |
+| 2 | `/api/v1/chat/login` | POST | ログイン（JWT発行） | ✅ 実装済み |
+| 3 | `/api/v1/chat/me` | GET | 自分のプロフィール取得 | ✅ 実装済み |
+| 4 | `/api/v1/chat/me` | PATCH | プロフィール更新 | ✅ 実装済み |
 
 ##### 友達管理
 
 | # | API | Method | Description | Status |
 |---|-----|--------|-------------|--------|
-| 5 | `/api/v1/chat/invite` | POST | 招待リンク発行 | ❌ Not implemented |
-| 6 | `/api/v1/chat/invite/{code}` | GET | 招待リンク情報取得 | ❌ Not implemented |
-| 7 | `/api/v1/chat/invite/{code}/accept` | POST | 招待を承諾（友達追加） | ❌ Not implemented |
-| 8 | `/api/v1/chat/friends` | GET | 友達一覧取得 | ❌ Not implemented |
-| 9 | `/api/v1/chat/friends/{id}` | DELETE | 友達削除 | ❌ Not implemented |
+| 5 | `/api/v1/chat/invite` | POST | 招待リンク発行 | ✅ 実装済み |
+| 6 | `/api/v1/chat/invite/{code}` | GET | 招待リンク情報取得 | ✅ 実装済み |
+| 7 | `/api/v1/chat/invite/{code}/accept` | POST | 招待を承諾（友達追加） | ✅ 実装済み |
+| 8 | `/api/v1/chat/friends` | GET | 友達一覧取得 | ✅ 実装済み |
+| 9 | `/api/v1/chat/friends/{id}` | DELETE | 友達削除 | ✅ 実装済み |
 
 ##### チャットルーム
 
 | # | API | Method | Description | Status |
 |---|-----|--------|-------------|--------|
-| 10 | `/api/v1/chat/rooms` | GET | ルーム一覧取得 | ❌ Not implemented |
-| 11 | `/api/v1/chat/rooms` | POST | ルーム作成（1対1 or グループ） | ❌ Not implemented |
-| 12 | `/api/v1/chat/rooms/{id}` | GET | ルーム詳細取得 | ❌ Not implemented |
-| 13 | `/api/v1/chat/rooms/{id}` | PATCH | ルーム設定更新 | ❌ Not implemented |
-| 14 | `/api/v1/chat/rooms/{id}/members` | GET | メンバー一覧 | ❌ Not implemented |
-| 15 | `/api/v1/chat/rooms/{id}/members` | POST | メンバー追加 | ❌ Not implemented |
+| 10 | `/api/v1/chat/rooms` | GET | ルーム一覧取得 | ✅ 実装済み |
+| 11 | `/api/v1/chat/rooms` | POST | ルーム作成（1対1 or グループ） | ✅ 実装済み |
+| 12 | `/api/v1/chat/rooms/{id}` | GET | ルーム詳細取得 | ✅ 実装済み |
+| 13 | `/api/v1/chat/rooms/{id}` | PATCH | ルーム設定更新 | ✅ 実装済み |
+| 14 | `/api/v1/chat/rooms/{id}/members` | GET | メンバー一覧 | ✅ 実装済み |
+| 15 | `/api/v1/chat/rooms/{id}/members` | POST | メンバー追加 | ✅ 実装済み |
 
 ##### メッセージ（REST）
 
 | # | API | Method | Description | Status |
 |---|-----|--------|-------------|--------|
-| 16 | `/api/v1/chat/rooms/{id}/messages` | GET | メッセージ履歴取得 | ❌ Not implemented |
-| 17 | `/api/v1/chat/rooms/{id}/messages` | POST | メッセージ送信（HTTP経由） | ❌ Not implemented |
-| 18 | `/api/v1/chat/rooms/{id}/read` | POST | 既読マーク | ❌ Not implemented |
+| 16 | `/api/v1/chat/rooms/{id}/messages` | GET | メッセージ履歴取得 | ✅ 実装済み |
+| 17 | `/api/v1/chat/rooms/{id}/messages` | POST | メッセージ送信（HTTP経由） | ✅ 実装済み |
+| 18 | `/api/v1/chat/rooms/{id}/read` | POST | 既読マーク | ✅ 実装済み |
 
 ##### AI設定
 
 | # | API | Method | Description | Status |
 |---|-----|--------|-------------|--------|
-| 19 | `/api/v1/chat/rooms/{id}/ai` | GET | AI設定取得 | ❌ Not implemented |
-| 20 | `/api/v1/chat/rooms/{id}/ai` | PATCH | AI設定更新（オン/オフ等） | ❌ Not implemented |
-| 21 | `/api/v1/chat/rooms/{id}/ai/summary` | GET | AI要約取得 | ❌ Not implemented |
+| 19 | `/api/v1/chat/rooms/{id}/ai` | GET | AI設定取得 | ✅ 実装済み |
+| 20 | `/api/v1/chat/rooms/{id}/ai` | PATCH | AI設定更新（オン/オフ等） | ✅ 実装済み |
+| 21 | `/api/v1/chat/rooms/{id}/ai/summary` | GET | AI要約取得 | ✅ 実装済み |
+
+##### ダンページ（2E）
+
+| # | API | Method | Description | Status |
+|---|-----|--------|-------------|--------|
+| 23 | `/api/v1/chat/dan` | GET | ダンルーム取得（自動作成） | ✅ 実装済み |
+| 24 | `/api/v1/chat/dan/messages` | GET | ダンページメッセージ取得 | ✅ 実装済み |
+| 25 | `/api/v1/chat/dan/messages` | POST | ダンにメッセージ送信 | ✅ 実装済み |
+| 26 | `/api/v1/chat/dan/read` | POST | ダン既読マーク | ✅ 実装済み |
+
+##### 提案システム（2G）
+
+| # | API | Method | Description | Status |
+|---|-----|--------|-------------|--------|
+| 27 | `/api/v1/chat/proposals` | GET | 提案一覧取得 | ✅ 実装済み |
+| 28 | `/api/v1/chat/proposals/{id}` | GET | 提案詳細取得 | ✅ 実装済み |
+| 29 | `/api/v1/chat/proposals/{id}/respond` | POST | 提案に対応（承認/却下/編集） | ✅ 実装済み |
 
 ##### WebSocket
 
 | # | API | Protocol | Description | Status |
 |---|-----|----------|-------------|--------|
-| 22 | `/ws/chat` | WebSocket | リアルタイムメッセージング | ❌ Not implemented |
+| 22 | `/ws/chat` | WebSocket | リアルタイムメッセージング | ✅ 実装済み |
 
 #### WebSocket仕様
 
@@ -306,6 +323,29 @@ CREATE TABLE chat_ai_settings (
 CREATE INDEX idx_messages_room_created ON chat_messages(room_id, created_at DESC);
 CREATE INDEX idx_room_members_user ON chat_room_members(user_id);
 CREATE INDEX idx_friendships_user ON chat_friendships(user_id);
+
+-- ダン提案（Phase 2G）
+CREATE TABLE dan_proposals (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) NOT NULL,
+  dan_room_id UUID REFERENCES chat_rooms(id),
+  type VARCHAR(50) NOT NULL,  -- reply, action, schedule, reminder
+  status VARCHAR(50) DEFAULT 'pending',  -- pending, approved, rejected, expired
+  title VARCHAR(255) NOT NULL,
+  content TEXT NOT NULL,
+  source_room_id UUID REFERENCES chat_rooms(id),
+  source_message_id UUID REFERENCES chat_messages(id),
+  action_data JSONB,
+  expires_at TIMESTAMPTZ,
+  responded_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_dan_proposals_user_status ON dan_proposals(user_id, status);
+
+-- usersテーブルにダンルームID追加
+ALTER TABLE users ADD COLUMN dan_room_id UUID REFERENCES chat_rooms(id);
 ```
 
 #### AIモード詳細
@@ -572,20 +612,27 @@ User: Confirms → System operates website to post
 | Phase | Name | APIs/Tools | Tested | Pending |
 |-------|------|------------|--------|---------|
 | Phase 1 | Core Flow | 6 | 6 ✅ | 0 |
-| Phase 2 | Done Chat | 22 | 22 ✅ | 0 |
+| Phase 2 | Done Chat | 29 | 29 ✅ | 0 |
 | Phase 3A | Smart Proposal | 7 | 7 ✅ | 0 |
 | Phase 3B | Execution Engine | 4 | 4 ✅ | 0 |
 | Phase 4 | Credential Management | 5 | 5 ✅ | 0 |
 | Phase 5 | User Preference | 3 | 0 | 3 |
 | Phase 6 | External Integrations | 2 | 0 | 2 (設定待ち) |
-| **Total** | | **49** | **44** | **5** |
+| **Total** | | **56** | **51** | **5** |
 
 ---
 
-## 完了済み（2024年12月21日時点）
+## 完了済み（2024年12月26日時点）
 
 - ✅ Phase 1: Core Flow
 - ✅ Phase 2: Done Chat
+  - ✅ 2A: ユーザー認証
+  - ✅ 2B: 友達管理
+  - ✅ 2C: チャットルーム
+  - ✅ 2D: メッセージング
+  - ✅ 2E: ダンページ（ユーザーとダンの1対1会話）
+  - ✅ 2F: チャットwithダン
+  - ✅ 2G: ダン連携（提案システム）
 - ✅ Phase 3A: Smart Proposal（リアルタイム検索提案）
 - ✅ Phase 3B: Execution Engine（自動実行）
 - ✅ Phase 4: Credential Management

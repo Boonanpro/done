@@ -662,6 +662,333 @@ class ChatService:
             return None
 
 
+    # ==================== Dan Page (Phase 2E) ====================
+    
+    async def get_or_create_dan_room(self, user_id: str) -> dict:
+        """
+        ユーザーのダンルームを取得または作成
+        
+        Args:
+            user_id: ユーザーID
+            
+        Returns:
+            ダンルーム情報
+        """
+        # 1. まずユーザーのdan_room_idを確認
+        user = self.supabase.table("users").select("dan_room_id").eq("id", user_id).execute()
+        
+        if user.data and user.data[0].get("dan_room_id"):
+            room_id = user.data[0]["dan_room_id"]
+            room = self.supabase.table("chat_rooms").select("*").eq("id", room_id).execute()
+            if room.data:
+                return await self._enrich_dan_room(room.data[0], user_id)
+        
+        # 2. dan_room_idがない場合、danタイプのルームを検索
+        rooms = await self.get_rooms(user_id)
+        for room in rooms:
+            if room.get("type") == "dan":
+                # 見つかった場合、dan_room_idを更新
+                self.supabase.table("users").update({"dan_room_id": room["id"]}).eq("id", user_id).execute()
+                return await self._enrich_dan_room(room, user_id)
+        
+        # 3. ダンルームがない場合、作成
+        room = await self._create_dan_room(user_id)
+        return await self._enrich_dan_room(room, user_id)
+    
+    async def _create_dan_room(self, user_id: str) -> dict:
+        """ダンルームを作成（内部用）"""
+        # ルーム作成
+        room_result = self.supabase.table("chat_rooms").insert({
+            "name": "ダン",
+            "type": "dan",
+        }).execute()
+        
+        if not room_result.data:
+            raise ValueError("Failed to create Dan room")
+        
+        room = room_result.data[0]
+        
+        # メンバー追加
+        self.supabase.table("chat_room_members").insert({
+            "room_id": room["id"],
+            "user_id": user_id,
+            "role": "owner",
+            "ai_mode": "auto",
+        }).execute()
+        
+        # AI設定（ダンルームはデフォルトで有効）
+        self.supabase.table("chat_ai_settings").insert({
+            "room_id": room["id"],
+            "enabled": True,
+            "mode": "auto",
+            "personality": "あなたはダン（Dan）、ユーザーの専属AIアシスタントです。丁寧で親しみやすい口調で話します。",
+        }).execute()
+        
+        # ユーザーのdan_room_id更新
+        self.supabase.table("users").update({"dan_room_id": room["id"]}).eq("id", user_id).execute()
+        
+        return room
+    
+    async def _enrich_dan_room(self, room: dict, user_id: str) -> dict:
+        """ダンルーム情報を拡充"""
+        room_id = room["id"]
+        
+        # 未読メッセージ数を取得
+        member = self.supabase.table("chat_room_members").select("last_read_at").eq("room_id", room_id).eq("user_id", user_id).execute()
+        last_read_at = member.data[0]["last_read_at"] if member.data else None
+        
+        unread_count = 0
+        if last_read_at:
+            unread = self.supabase.table("chat_messages").select("id", count="exact").eq("room_id", room_id).gt("created_at", last_read_at).execute()
+            unread_count = unread.count or 0
+        else:
+            unread = self.supabase.table("chat_messages").select("id", count="exact").eq("room_id", room_id).execute()
+            unread_count = unread.count or 0
+        
+        # 保留中の提案数を取得
+        pending = self.supabase.table("dan_proposals").select("id", count="exact").eq("user_id", user_id).eq("status", "pending").execute()
+        pending_count = pending.count or 0
+        
+        # 最後のメッセージ日時
+        last_msg = self.supabase.table("chat_messages").select("created_at").eq("room_id", room_id).order("created_at", desc=True).limit(1).execute()
+        last_message_at = last_msg.data[0]["created_at"] if last_msg.data else None
+        
+        return {
+            "id": room_id,
+            "name": room.get("name", "ダン"),
+            "type": "dan",
+            "unread_count": unread_count,
+            "pending_proposals_count": pending_count,
+            "last_message_at": last_message_at,
+            "created_at": room["created_at"],
+        }
+    
+    async def send_dan_message(self, user_id: str, content: str) -> dict:
+        """
+        ダンルームにメッセージを送信
+        
+        Args:
+            user_id: ユーザーID
+            content: メッセージ内容
+            
+        Returns:
+            送信されたメッセージ
+        """
+        dan_room = await self.get_or_create_dan_room(user_id)
+        return await self.send_message(dan_room["id"], user_id, content, sender_type="human")
+    
+    async def send_dan_ai_message(self, user_id: str, content: str) -> dict:
+        """
+        ダンからユーザーにメッセージを送信（AI側）
+        
+        Args:
+            user_id: 対象ユーザーID
+            content: メッセージ内容
+            
+        Returns:
+            送信されたメッセージ
+        """
+        dan_room = await self.get_or_create_dan_room(user_id)
+        
+        # AIからのメッセージとして送信
+        result = self.supabase.table("chat_messages").insert({
+            "room_id": dan_room["id"],
+            "sender_id": None,  # AIなのでsender_idはnull
+            "sender_type": "ai",
+            "content": content,
+        }).execute()
+        
+        if result.data:
+            msg = result.data[0]
+            msg["sender_name"] = "ダン"
+            return msg
+        raise ValueError("Failed to send AI message")
+    
+    # ==================== Proposals (Phase 2G) ====================
+    
+    async def create_proposal(
+        self,
+        user_id: str,
+        proposal_type: str,
+        title: str,
+        content: str,
+        source_room_id: Optional[str] = None,
+        source_message_id: Optional[str] = None,
+        action_data: Optional[dict] = None,
+        expires_at: Optional[datetime] = None,
+    ) -> dict:
+        """
+        ダンからユーザーへの提案を作成
+        
+        Args:
+            user_id: 対象ユーザーID
+            proposal_type: 提案タイプ（reply, action, schedule, reminder）
+            title: タイトル
+            content: 提案内容
+            source_room_id: 元のチャットルームID
+            source_message_id: 元のメッセージID
+            action_data: アクション実行データ
+            expires_at: 有効期限
+            
+        Returns:
+            作成された提案
+        """
+        dan_room = await self.get_or_create_dan_room(user_id)
+        
+        result = self.supabase.table("dan_proposals").insert({
+            "user_id": user_id,
+            "dan_room_id": dan_room["id"],
+            "type": proposal_type,
+            "title": title,
+            "content": content,
+            "source_room_id": source_room_id,
+            "source_message_id": source_message_id,
+            "action_data": action_data,
+            "expires_at": expires_at.isoformat() if expires_at else None,
+        }).execute()
+        
+        if result.data:
+            proposal = result.data[0]
+            
+            # ダンページに通知メッセージを送信
+            notification_msg = f"📋 新しい提案があります\n\n**{title}**\n{content[:100]}{'...' if len(content) > 100 else ''}"
+            await self.send_dan_ai_message(user_id, notification_msg)
+            
+            return await self._enrich_proposal(proposal)
+        
+        raise ValueError("Failed to create proposal")
+    
+    async def get_proposals(
+        self,
+        user_id: str,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """
+        ユーザーの提案一覧を取得
+        
+        Args:
+            user_id: ユーザーID
+            status: フィルターするステータス（None=全て）
+            limit: 取得件数
+            
+        Returns:
+            提案リスト
+        """
+        query = self.supabase.table("dan_proposals").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(limit)
+        
+        if status:
+            query = query.eq("status", status)
+        
+        result = query.execute()
+        
+        proposals = []
+        for p in result.data or []:
+            proposals.append(await self._enrich_proposal(p))
+        
+        return proposals
+    
+    async def get_proposal(self, proposal_id: str, user_id: str) -> Optional[dict]:
+        """提案を取得"""
+        result = self.supabase.table("dan_proposals").select("*").eq("id", proposal_id).eq("user_id", user_id).execute()
+        
+        if result.data:
+            return await self._enrich_proposal(result.data[0])
+        return None
+    
+    async def _enrich_proposal(self, proposal: dict) -> dict:
+        """提案情報を拡充"""
+        # 元のルーム名を取得
+        source_room_name = None
+        if proposal.get("source_room_id"):
+            room = self.supabase.table("chat_rooms").select("name").eq("id", proposal["source_room_id"]).execute()
+            if room.data:
+                source_room_name = room.data[0].get("name")
+        
+        return {
+            "id": proposal["id"],
+            "user_id": proposal["user_id"],
+            "type": proposal["type"],
+            "status": proposal["status"],
+            "title": proposal["title"],
+            "content": proposal["content"],
+            "source_room_id": proposal.get("source_room_id"),
+            "source_room_name": source_room_name,
+            "source_message_id": proposal.get("source_message_id"),
+            "action_data": proposal.get("action_data"),
+            "expires_at": proposal.get("expires_at"),
+            "created_at": proposal["created_at"],
+            "responded_at": proposal.get("responded_at"),
+        }
+    
+    async def respond_to_proposal(
+        self,
+        proposal_id: str,
+        user_id: str,
+        action: str,
+        edited_content: Optional[str] = None,
+    ) -> dict:
+        """
+        提案に対応（承認/却下/編集）
+        
+        Args:
+            proposal_id: 提案ID
+            user_id: ユーザーID
+            action: アクション（approve, reject, edit）
+            edited_content: 編集後の内容（action=editの場合）
+            
+        Returns:
+            更新された提案
+        """
+        # 提案を取得
+        proposal = await self.get_proposal(proposal_id, user_id)
+        if not proposal:
+            raise ValueError("Proposal not found")
+        
+        if proposal["status"] != "pending":
+            raise ValueError("Proposal is not pending")
+        
+        # ステータス更新
+        new_status = "approved" if action in ["approve", "edit"] else "rejected"
+        update_data = {
+            "status": new_status,
+            "responded_at": datetime.utcnow().isoformat(),
+        }
+        
+        if action == "edit" and edited_content:
+            update_data["content"] = edited_content
+        
+        result = self.supabase.table("dan_proposals").update(update_data).eq("id", proposal_id).execute()
+        
+        if not result.data:
+            raise ValueError("Failed to update proposal")
+        
+        updated_proposal = await self.get_proposal(proposal_id, user_id)
+        
+        # 承認された場合、アクションを実行
+        if new_status == "approved" and proposal.get("type") == "reply":
+            await self._execute_reply_proposal(proposal, edited_content or proposal["content"])
+        
+        return updated_proposal
+    
+    async def _execute_reply_proposal(self, proposal: dict, content: str) -> None:
+        """返信提案を実行"""
+        source_room_id = proposal.get("source_room_id")
+        user_id = proposal["user_id"]
+        
+        if source_room_id:
+            try:
+                await self.send_message(source_room_id, user_id, content, sender_type="human")
+            except Exception as e:
+                import logging
+                logging.error(f"Failed to execute reply proposal: {e}")
+    
+    async def get_pending_proposals_count(self, user_id: str) -> int:
+        """保留中の提案数を取得"""
+        result = self.supabase.table("dan_proposals").select("id", count="exact").eq("user_id", user_id).eq("status", "pending").execute()
+        return result.count or 0
+
+
 def get_chat_service() -> ChatService:
     """ChatServiceのシングルトンインスタンスを取得"""
     return ChatService()

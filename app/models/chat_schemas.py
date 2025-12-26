@@ -20,6 +20,7 @@ class RoomType(str, Enum):
     """Room type"""
     DIRECT = "direct"
     GROUP = "group"
+    DAN = "dan"  # ダンページ（ユーザーとダンの1対1会話）
 
 
 class MemberRole(str, Enum):
@@ -225,3 +226,75 @@ class AISummaryResponse(BaseModel):
     summary: str
     message_count: int
     last_message_at: Optional[datetime] = None
+
+
+# ==================== Dan Page Schemas (2E) ====================
+
+class DanRoomResponse(BaseModel):
+    """ダンページルーム情報"""
+    id: str
+    name: str = "ダン"
+    type: RoomType = RoomType.DAN
+    unread_count: int = 0
+    pending_proposals_count: int = 0
+    last_message_at: Optional[datetime] = None
+    created_at: datetime
+
+
+# ==================== Proposal Schemas (2G) ====================
+
+class ProposalStatus(str, Enum):
+    """提案ステータス"""
+    PENDING = "pending"      # 保留中
+    APPROVED = "approved"    # 承認済み
+    REJECTED = "rejected"    # 却下済み
+    EXPIRED = "expired"      # 期限切れ
+
+
+class ProposalType(str, Enum):
+    """提案タイプ"""
+    REPLY = "reply"          # 返信案
+    ACTION = "action"        # アクション提案
+    SCHEDULE = "schedule"    # スケジュール登録
+    REMINDER = "reminder"    # リマインダー
+
+
+class ProposalCreateRequest(BaseModel):
+    """提案作成リクエスト（内部用）"""
+    type: ProposalType
+    title: str = Field(..., max_length=200)
+    content: str = Field(..., max_length=5000)
+    source_room_id: Optional[str] = None  # 元のチャットルームID
+    source_message_id: Optional[str] = None  # 元のメッセージID
+    action_data: Optional[dict] = None  # アクション実行に必要なデータ
+    expires_at: Optional[datetime] = None
+
+
+class ProposalResponse(BaseModel):
+    """提案レスポンス"""
+    id: str
+    user_id: str
+    type: ProposalType
+    status: ProposalStatus
+    title: str
+    content: str
+    source_room_id: Optional[str] = None
+    source_room_name: Optional[str] = None
+    source_message_id: Optional[str] = None
+    action_data: Optional[dict] = None
+    expires_at: Optional[datetime] = None
+    created_at: datetime
+    responded_at: Optional[datetime] = None
+
+
+class ProposalsListResponse(BaseModel):
+    """提案一覧レスポンス"""
+    proposals: list[ProposalResponse]
+    total_count: int
+    pending_count: int
+
+
+class ProposalActionRequest(BaseModel):
+    """提案アクションリクエスト"""
+    action: str = Field(..., pattern="^(approve|reject|edit)$")
+    edited_content: Optional[str] = None  # action="edit"の場合に使用
