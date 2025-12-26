@@ -272,3 +272,4 @@ class OTPSource(str, Enum):
 - `app/services/voice_service.py` - VoiceService
 - `tests/test_otp_api.py` - テスト
 
+

@@ -92,3 +92,4 @@ class TestSearchResultCategory:
         assert hasattr(SearchResultCategory, 'PHONE')
         assert SearchResultCategory.PHONE.value == "phone"
 
+

@@ -4,7 +4,7 @@
 
 ## 開発状況
 
-### ✅ 動作確認済み（2024年12月21日）
+### ✅ 動作確認済み（2024年12月26日）
 
 #### Phase 1: Core Flow
 | 機能 | API | 状態 |
@@ -18,6 +18,12 @@
 | LINE Webhook | `POST /webhook/line` | ⏸️ LINE設定後にテスト可能 |
 
 #### Phase 2: Done Chat（AIネイティブチャット）
+
+**🔄 ユーザーテーブル統合完了（2024年12月26日）**
+- `chat_users` テーブルを `users` テーブルに統合
+- 全チャットユーザー = Doneユーザー
+- 詳細: `docs/phase2_chat_system.md`
+
 | 機能 | API | 状態 |
 |-----|-----|------|
 | ユーザー登録 | `POST /api/v1/chat/register` | ✅ 動作確認済み |

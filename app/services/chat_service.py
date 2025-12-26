@@ -45,7 +45,7 @@ class ChatService:
         """Create a new chat user"""
         password_hash = get_password_hash(password)
         
-        result = self.supabase.table("chat_users").insert({
+        result = self.supabase.table("users").insert({
             "email": email,
             "password_hash": password_hash,
             "display_name": display_name,
@@ -65,12 +65,12 @@ class ChatService:
     
     async def get_user_by_email(self, email: str) -> Optional[dict]:
         """Get user by email (includes password_hash for authentication)"""
-        result = self.supabase.table("chat_users").select("*").eq("email", email).execute()
+        result = self.supabase.table("users").select("*").eq("email", email).execute()
         return result.data[0] if result.data else None
     
     async def get_user_by_id(self, user_id: str) -> Optional[dict]:
         """Get user by ID (excludes password_hash)"""
-        result = self.supabase.table("chat_users").select(
+        result = self.supabase.table("users").select(
             "id, email, display_name, avatar_url, created_at, updated_at"
         ).eq("id", user_id).execute()
         return result.data[0] if result.data else None
@@ -86,7 +86,7 @@ class ChatService:
         if not update_data:
             return await self.get_user_by_id(user_id)
         
-        result = self.supabase.table("chat_users").update(update_data).eq("id", user_id).execute()
+        result = self.supabase.table("users").update(update_data).eq("id", user_id).execute()
         if result.data:
             user = result.data[0]
             return {
@@ -138,7 +138,7 @@ class ChatService:
     async def get_invite_by_code(self, code: str) -> Optional[dict]:
         """Get invite by code"""
         result = self.supabase.table("chat_invites").select(
-            "*, creator:chat_users!creator_id(id, display_name, avatar_url)"
+            "*, creator:users!creator_id(id, display_name, avatar_url)"
         ).eq("code", code).execute()
         return result.data[0] if result.data else None
     
@@ -243,7 +243,7 @@ class ChatService:
     async def get_friends(self, user_id: str) -> list[dict]:
         """Get user's friends list"""
         result = self.supabase.table("chat_friendships").select(
-            "*, friend:chat_users!friend_id(id, display_name, avatar_url)"
+            "*, friend:users!friend_id(id, display_name, avatar_url)"
         ).eq("user_id", user_id).eq("status", "active").execute()
         
         return [
@@ -355,7 +355,7 @@ class ChatService:
             raise ValueError("Not a member of this room")
         
         result = self.supabase.table("chat_room_members").select(
-            "*, user:chat_users!user_id(id, display_name, avatar_url)"
+            "*, user:users!user_id(id, display_name, avatar_url)"
         ).eq("room_id", room_id).execute()
         
         return [
@@ -401,9 +401,9 @@ class ChatService:
             raise ValueError("Not a member of this room")
 
         # Get sender info
-        sender = self.supabase.table("chat_users").select("display_name, done_user_id").eq("id", sender_id).execute()
+        sender = self.supabase.table("users").select("display_name").eq("id", sender_id).execute()
         sender_name = sender.data[0]["display_name"] if sender.data else "Unknown"
-        done_user_id = sender.data[0].get("done_user_id") if sender.data else None
+        # 統合後: sender_id = users.id（done_user_idは不要）
 
         result = self.supabase.table("chat_messages").insert({
             "room_id": room_id,
@@ -422,7 +422,7 @@ class ChatService:
                     room_id=room_id,
                     message_id=msg["id"],
                     sender_id=sender_id,
-                    done_user_id=done_user_id,
+                    user_id=sender_id,  # 統合後: sender_id = users.id
                     content=content,
                     sender_name=sender_name,
                 )
@@ -435,7 +435,7 @@ class ChatService:
         room_id: str,
         message_id: str,
         sender_id: str,
-        done_user_id: Optional[str],
+        user_id: str,  # 統合後: sender_id = users.id
         content: str,
         sender_name: str,
     ) -> None:
@@ -454,9 +454,7 @@ class ChatService:
             if not settings.get("enabled", False):
                 return
             
-            # done_user_idがなければ、検知対象外（Doneアカウントと連携していない）
-            if not done_user_id:
-                return
+            # 統合後: 全チャットユーザーはDoneユーザーなのでチェック不要
             
             # メッセージ検知サービスを呼び出し
             from app.services.message_detection import get_detection_service
@@ -464,7 +462,7 @@ class ChatService:
             
             detection_service = get_detection_service()
             await detection_service.detect_message(
-                user_id=done_user_id,
+                user_id=user_id,
                 source=MessageSource.DONE_CHAT,
                 content=content,
                 source_id=message_id,
@@ -491,7 +489,7 @@ class ChatService:
             raise ValueError("Not a member of this room")
         
         query = self.supabase.table("chat_messages").select(
-            "*, sender:chat_users!sender_id(id, display_name, avatar_url)"
+            "*, sender:users!sender_id(id, display_name, avatar_url)"
         ).eq("room_id", room_id).order("created_at", desc=True).limit(limit)
         
         if before:

@@ -290,3 +290,4 @@ VOICE_MAX_BUFFER_SIZE=32000  # 音声バッファの最大サイズ
 - `app/models/voice_schemas.py` - スキーマ
 - `tests/test_voice_api.py` - テスト
 
+

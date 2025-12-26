@@ -74,3 +74,4 @@ COMMENT ON TABLE sms_connections IS 'Phase 9: SMS受信設定';
 COMMENT ON COLUMN sms_connections.phone_number IS 'Twilioの電話番号';
 
 
+

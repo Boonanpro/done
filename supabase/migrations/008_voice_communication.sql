@@ -147,3 +147,4 @@ COMMENT ON COLUMN voice_settings.auto_answer_whitelist IS 'ホワイトリスト
 COMMENT ON COLUMN voice_settings.elevenlabs_voice_id IS 'ElevenLabsの音声ID（カスタム音声）';
 
 
+
