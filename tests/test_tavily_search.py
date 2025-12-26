@@ -4,6 +4,7 @@ Tests for Tavily Search Tool
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
+from app.config import settings
 from app.tools.tavily_search import tavily_search, search_with_tavily
 from app.models.schemas import SearchResult, SearchResultCategory
 
@@ -32,9 +33,7 @@ class TestTavilySearch:
             ]
         }
         
-        with patch("app.tools.tavily_search.settings") as mock_settings:
-            mock_settings.TAVILY_API_KEY = "test-api-key"
-            
+        with patch.object(settings, 'TAVILY_API_KEY', 'test-api-key'):
             with patch("httpx.AsyncClient") as mock_client:
                 mock_response_obj = MagicMock()
                 mock_response_obj.status_code = 200
@@ -65,9 +64,7 @@ class TestTavilySearch:
     @pytest.mark.asyncio
     async def test_tavily_search_without_api_key(self):
         """APIキーがない場合のエラーハンドリング"""
-        with patch("app.tools.tavily_search.settings") as mock_settings:
-            mock_settings.TAVILY_API_KEY = ""
-            
+        with patch.object(settings, 'TAVILY_API_KEY', ''):
             results = await tavily_search.ainvoke({
                 "query": "test query"
             })
@@ -79,9 +76,7 @@ class TestTavilySearch:
     @pytest.mark.asyncio
     async def test_tavily_search_api_error(self):
         """APIエラー時のハンドリング"""
-        with patch("app.tools.tavily_search.settings") as mock_settings:
-            mock_settings.TAVILY_API_KEY = "test-api-key"
-            
+        with patch.object(settings, 'TAVILY_API_KEY', 'test-api-key'):
             with patch("httpx.AsyncClient") as mock_client:
                 mock_response_obj = MagicMock()
                 mock_response_obj.status_code = 500
@@ -117,9 +112,7 @@ class TestSearchWithTavily:
             ]
         }
         
-        with patch("app.tools.tavily_search.settings") as mock_settings:
-            mock_settings.TAVILY_API_KEY = "test-api-key"
-            
+        with patch.object(settings, 'TAVILY_API_KEY', 'test-api-key'):
             with patch("httpx.AsyncClient") as mock_client:
                 mock_response_obj = MagicMock()
                 mock_response_obj.status_code = 200
@@ -139,9 +132,7 @@ class TestSearchWithTavily:
     @pytest.mark.asyncio
     async def test_returns_empty_list_on_error(self):
         """エラー時に空リストが返ることをテスト"""
-        with patch("app.tools.tavily_search.settings") as mock_settings:
-            mock_settings.TAVILY_API_KEY = ""
-            
+        with patch.object(settings, 'TAVILY_API_KEY', ''):
             results = await search_with_tavily("test query")
             
             assert results == []
