@@ -60,7 +60,7 @@ class CredentialsService:
         return {
             "success": True,
             "service": service,
-            "message": "認証情報を保存しました",
+            "message": "Credentials saved",
         }
     
     async def get_credential(
@@ -139,7 +139,7 @@ class CredentialsService:
             return {
                 "success": False,
                 "service": service,
-                "message": "認証情報が見つかりません",
+                "message": "Credentials not found",
             }
         
         del self._credentials_store[key]
@@ -147,7 +147,7 @@ class CredentialsService:
         return {
             "success": True,
             "service": service,
-            "message": "認証情報を削除しました",
+            "message": "Credentials deleted",
         }
     
     async def has_credential(

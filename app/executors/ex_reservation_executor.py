@@ -164,7 +164,7 @@ class EXReservationExecutor(BaseExecutor):
             return ExecutionResult(
                 success=True,
                 confirmation_number=temp_reservation_id,
-                message="予約確認画面まで進みました。予約を確定するにはEX予約サイトで手動で操作してください。",
+                message="Reached confirmation screen. Please complete the reservation manually on EX reservation website.",
                 details={
                     "departure": departure,
                     "arrival": arrival,
@@ -181,7 +181,7 @@ class EXReservationExecutor(BaseExecutor):
             
             return ExecutionResult(
                 success=False,
-                message=f"タイムアウトエラー: ページの読み込みに失敗しました - {str(e)}",
+                message=f"Timeout error: Failed to load page - {str(e)}",
                 details={"screenshot": screenshot_path},
             )
         except Exception as e:
@@ -193,7 +193,7 @@ class EXReservationExecutor(BaseExecutor):
             
             return ExecutionResult(
                 success=False,
-                message=f"実行エラー: {str(e)}",
+                message=f"Execution error: {str(e)}",
                 details={"screenshot": screenshot_path},
             )
     
@@ -213,12 +213,12 @@ class EXReservationExecutor(BaseExecutor):
             # マイページへのリンクがあるか確認
             mypage_link = await page.query_selector('a[href*="mypage"], .mypage-link')
             if mypage_link:
-                return {"success": True, "message": "既にログイン済み"}
+                return {"success": True, "message": "Already logged in"}
             
             # ログアウトボタンがあるか確認
             logout_button = await page.query_selector('a:has-text("ログアウト"), button:has-text("ログアウト")')
             if logout_button:
-                return {"success": True, "message": "既にログイン済み"}
+                return {"success": True, "message": "Already logged in"}
         except Exception:
             pass
         
@@ -226,7 +226,7 @@ class EXReservationExecutor(BaseExecutor):
         if not credentials:
             return {
                 "success": False,
-                "message": "EX予約のログイン情報が必要です",
+                "message": "EX reservation login credentials required",
             }
         
         member_id = credentials.get("email", credentials.get("member_id", ""))
@@ -235,7 +235,7 @@ class EXReservationExecutor(BaseExecutor):
         if not member_id or not password:
             return {
                 "success": False,
-                "message": "会員IDまたはパスワードが不足しています",
+                "message": "Member ID or password is missing",
             }
         
         try:
@@ -264,20 +264,20 @@ class EXReservationExecutor(BaseExecutor):
             if "login" in page.url.lower() or "error" in page.url.lower():
                 return {
                     "success": False,
-                    "message": "ログインに失敗しました。会員IDまたはパスワードを確認してください。",
+                    "message": "Login failed. Please check your member ID and password.",
                 }
             
-            return {"success": True, "message": "ログイン成功"}
+            return {"success": True, "message": "Login successful"}
             
         except PlaywrightTimeout:
             return {
                 "success": False,
-                "message": "ログインページの読み込みがタイムアウトしました",
+                "message": "Login page loading timed out",
             }
         except Exception as e:
             return {
                 "success": False,
-                "message": f"ログイン中にエラーが発生しました: {str(e)}",
+                "message": f"Error during login: {str(e)}",
             }
     
     async def _enter_reservation_details(
@@ -334,12 +334,12 @@ class EXReservationExecutor(BaseExecutor):
                 except Exception:
                     pass
             
-            return {"success": True, "message": "予約情報を入力しました"}
+            return {"success": True, "message": "Reservation details entered"}
             
         except Exception as e:
             return {
                 "success": False,
-                "message": f"予約情報の入力中にエラーが発生しました: {str(e)}",
+                "message": f"Error entering reservation details: {str(e)}",
             }
     
     async def _search_and_select_train(self, page: Page) -> dict[str, Any]:
@@ -362,7 +362,7 @@ class EXReservationExecutor(BaseExecutor):
             if not train_candidate:
                 return {
                     "success": False,
-                    "message": "列車が見つかりませんでした。検索条件を確認してください。",
+                    "message": "No trains found. Please check your search criteria.",
                 }
             
             # 最初の列車を選択（「この候補を選択」をクリック）
@@ -383,12 +383,12 @@ class EXReservationExecutor(BaseExecutor):
             
             return {
                 "success": True,
-                "message": "列車を選択しました",
+                "message": "Train selected",
                 "train_info": train_info,
             }
             
         except Exception as e:
             return {
                 "success": False,
-                "message": f"列車の検索・選択中にエラーが発生しました: {str(e)}",
+                "message": f"Error during train search/selection: {str(e)}",
             }

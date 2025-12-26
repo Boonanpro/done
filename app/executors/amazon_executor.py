@@ -73,7 +73,7 @@ class AmazonExecutor(BaseExecutor):
             if not product_url:
                 return ExecutionResult(
                     success=False,
-                    message="商品URLが指定されていません",
+                    message="Product URL not specified",
                 )
             
             await page.goto(product_url, wait_until="domcontentloaded", timeout=30000)
@@ -135,7 +135,7 @@ class AmazonExecutor(BaseExecutor):
             return ExecutionResult(
                 success=True,
                 confirmation_number=cart_id,
-                message="商品をカートに追加しました。購入を完了するにはAmazonで手動で決済してください。",
+                message="Product added to cart. Please complete the purchase manually on Amazon.",
                 details={
                     "product_name": search_result.title,
                     "price": search_result.price,
@@ -151,7 +151,7 @@ class AmazonExecutor(BaseExecutor):
             
             return ExecutionResult(
                 success=False,
-                message=f"タイムアウトエラー: ページの読み込みに失敗しました - {str(e)}",
+                message=f"Timeout error: Failed to load page - {str(e)}",
                 details={"screenshot": screenshot_path},
             )
         except Exception as e:
@@ -164,7 +164,7 @@ class AmazonExecutor(BaseExecutor):
             
             return ExecutionResult(
                 success=False,
-                message=f"実行エラー: {str(e)}",
+                message=f"Execution error: {str(e)}",
                 details={"screenshot": screenshot_path},
             )
     
@@ -186,7 +186,7 @@ class AmazonExecutor(BaseExecutor):
             if account_element:
                 account_text = await account_element.inner_text()
                 if "ログイン" not in account_text and "こんにちは" in account_text:
-                    return {"success": True, "message": "既にログイン済み"}
+                    return {"success": True, "message": "Already logged in"}
         except Exception:
             pass
         
@@ -194,7 +194,7 @@ class AmazonExecutor(BaseExecutor):
         if not credentials:
             return {
                 "success": False,
-                "message": "Amazonのログイン情報が必要です",
+                "message": "Amazon login credentials required",
             }
         
         email = credentials.get("email", "")
@@ -203,7 +203,7 @@ class AmazonExecutor(BaseExecutor):
         if not email or not password:
             return {
                 "success": False,
-                "message": "メールアドレスまたはパスワードが不足しています",
+                "message": "Email or password is missing",
             }
         
         try:
@@ -234,20 +234,20 @@ class AmazonExecutor(BaseExecutor):
                 # 2FA等が必要な可能性
                 return {
                     "success": False,
-                    "message": "追加の認証が必要です。Amazonサイトで手動でログインしてください。",
+                    "message": "Additional authentication required. Please log in manually on Amazon.",
                 }
             
-            return {"success": True, "message": "ログイン成功"}
+            return {"success": True, "message": "Login successful"}
             
         except PlaywrightTimeout:
             return {
                 "success": False,
-                "message": "ログインページの読み込みがタイムアウトしました",
+                "message": "Login page loading timed out",
             }
         except Exception as e:
             return {
                 "success": False,
-                "message": f"ログイン中にエラーが発生しました: {str(e)}",
+                "message": f"Error during login: {str(e)}",
             }
     
     async def _add_to_cart(self, page: Page) -> dict[str, Any]:
@@ -265,7 +265,7 @@ class AmazonExecutor(BaseExecutor):
                 # 商品ページでない可能性、または在庫切れ
                 return {
                     "success": False,
-                    "message": "「カートに入れる」ボタンが見つかりません。商品が在庫切れの可能性があります。",
+                    "message": "Add to cart button not found. Product may be out of stock.",
                 }
             
             # カートに追加
@@ -278,7 +278,7 @@ class AmazonExecutor(BaseExecutor):
             # カートに追加されたことを確認（URLまたはカート数で判断）
             current_url = page.url
             if "cart" in current_url or "gp/cart" in current_url or "smart-wagon" in current_url:
-                return {"success": True, "message": "カートに追加しました"}
+                return {"success": True, "message": "Added to cart"}
             
             # カート数を確認
             try:
@@ -286,20 +286,20 @@ class AmazonExecutor(BaseExecutor):
                 if cart_count:
                     count_text = await cart_count.inner_text()
                     if count_text and int(count_text) > 0:
-                        return {"success": True, "message": f"カートに追加しました（カート内: {count_text}点）"}
+                        return {"success": True, "message": f"Added to cart ({count_text} items in cart)"}
             except Exception:
                 pass
             
             # 確認ダイアログが表示されている可能性
-            return {"success": True, "message": "カートへの追加をリクエストしました"}
+            return {"success": True, "message": "Add to cart requested"}
             
         except PlaywrightTimeout:
             return {
                 "success": False,
-                "message": "カート追加がタイムアウトしました",
+                "message": "Add to cart timed out",
             }
         except Exception as e:
             return {
                 "success": False,
-                "message": f"カート追加中にエラーが発生しました: {str(e)}",
+                "message": f"Error adding to cart: {str(e)}",
             }

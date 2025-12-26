@@ -207,9 +207,9 @@ async def provide_credentials(id: str, request: ProvideCredentialsRequest, user_
         
         # メッセージを分岐
         if request.is_new_registration:
-            message = "新規登録を開始します。"
+            message = "Starting new registration."
         else:
-            message = "ログイン情報を受け取りました。実行を再開します。"
+            message = "Login credentials received. Resuming execution."
         
         return ProvideCredentialsResponse(
             task_id=task_id,

@@ -212,16 +212,17 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
         content = response.content.lower()
         wish_lower = state["original_wish"].lower()
         
-        if "email" in content:
-            task_type = TaskType.EMAIL
-        elif "line" in content:
-            task_type = TaskType.LINE
-        elif "travel" in content or "train" in content or "shinkansen" in content or \
-             "新幹線" in wish_lower or "電車" in wish_lower or "飛行機" in wish_lower or \
-             "バス" in wish_lower or "予約" in wish_lower:
+        # TRAVEL must be checked first (before LINE) because "Bus Lines" contains "line"
+        if "travel" in content or "train" in content or "shinkansen" in content or \
+             "bus" in content or "bus" in wish_lower or "highway" in wish_lower or \
+             "flight" in content or "book" in wish_lower or "yonago" in wish_lower or \
+             "umeda" in wish_lower or "willer" in content or "reservation" in wish_lower:
             task_type = TaskType.TRAVEL
-        elif "purchase" in content or "buy" in content or \
-             "買いたい" in wish_lower or "欲しい" in wish_lower or "購入" in wish_lower:
+        elif "email" in content:
+            task_type = TaskType.EMAIL
+        elif "line message" in content or "send line" in content:
+            task_type = TaskType.LINE
+        elif "purchase" in content or "buy" in content:
             task_type = TaskType.PURCHASE
         elif "payment" in content or "pay" in content or "bill" in content:
             task_type = TaskType.PAYMENT
@@ -511,33 +512,50 @@ Use the available tools to execute."""
             
             if task_type == TaskType.TRAVEL:
                 # 交通関連: バス/電車のExecutorを使用
-                # 検索結果からカテゴリを判定
-                category = "bus"  # デフォルトはバス
-                service_name = "willer"
+                # 願望からカテゴリを判定（検索結果よりも優先）
+                original_wish = task.get("original_wish", "").lower()
                 
-                for sr in search_results:
-                    if sr.get("category") == "train":
-                        category = "train"
-                        service_name = "ex_reservation"
-                        break
-                    elif sr.get("category") == "bus":
-                        category = "bus"
-                        service_name = "willer"
-                        break
+                if "bus" in original_wish or "バス" in original_wish:
+                    category = "bus"
+                    service_name = "willer"
+                elif "train" in original_wish or "新幹線" in original_wish or "電車" in original_wish:
+                    category = "train"
+                    service_name = "ex_reservation"
+                else:
+                    # 検索結果からカテゴリを判定
+                    category = "bus"  # デフォルトはバス
+                    service_name = "willer"
+                    
+                    for sr in search_results:
+                        if sr.get("category") == "train":
+                            category = "train"
+                            service_name = "ex_reservation"
+                            break
+                        elif sr.get("category") == "bus":
+                            category = "bus"
+                            service_name = "willer"
+                            break
+                
+                print(f"[AGENT DEBUG] Travel category: {category}, service: {service_name}")
                 
                 # Executorを取得
                 executor = ExecutorFactory.get_executor(category, service_name)
                 
                 # 最初の検索結果を使用（または願望から詳細を抽出）
+                original_wish = task["original_wish"]
                 if search_results:
                     first_result = search_results[0]
+                    # 元のwishをdetailsに追加して渡す
+                    result_details = first_result.get("details", {}).copy() if first_result.get("details") else {}
+                    result_details["raw_wish"] = original_wish
+                    
                     search_result_obj = SearchResult(
                         id=first_result.get("id", task_id),
                         service_name=service_name,
                         category=category,
-                        title=first_result.get("title", task["original_wish"]),
+                        title=original_wish,  # 常に元のwishを使用
                         url=first_result.get("url"),
-                        details=first_result.get("details", {}),
+                        details=result_details,
                     )
                 else:
                     # 検索結果がない場合は願望から推測
@@ -545,8 +563,8 @@ Use the available tools to execute."""
                         id=task_id,
                         service_name=service_name,
                         category=category,
-                        title=task["original_wish"],
-                        details={"raw_wish": task["original_wish"]},
+                        title=original_wish,
+                        details={"raw_wish": original_wish},
                     )
                 
                 # 実行（認証情報なしで開始、必要に応じて要求される）
@@ -594,7 +612,7 @@ Use the available tools to execute."""
                 # Executorが対応していないタスクタイプ
                 task["execution_result"] = {
                     "success": False,
-                    "message": f"タスクタイプ '{task_type}' の自動実行はまだサポートされていません",
+                    "message": f"Automatic execution for task type '{task_type}' is not yet supported",
                 }
                 task["status"] = TaskStatus.COMPLETED
             
@@ -605,16 +623,21 @@ Use the available tools to execute."""
             }
             
         except Exception as e:
+            import traceback
+            error_trace = traceback.format_exc()
+            print(f"[AGENT ERROR] Task {task_id} failed:\n{error_trace}")
             logger.error(f"Task execution failed: {task_id}, error: {e}", exc_info=True)
             task["status"] = TaskStatus.FAILED
             task["execution_result"] = {
                 "success": False,
-                "message": f"実行中にエラーが発生しました: {str(e)}",
+                "message": f"Execution error: {str(e)}",
+                "traceback": error_trace,
             }
             return {
                 "status": "failed",
                 "task_id": task_id,
                 "error": str(e),
+                "traceback": error_trace,
             }
     
     async def revise_task(self, task_id: str, revision: str) -> dict[str, Any]:

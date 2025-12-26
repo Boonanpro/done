@@ -203,7 +203,7 @@ async def delete_bank_account(
         if not success:
             raise HTTPException(status_code=404, detail="Bank account not found")
         
-        return {"success": True, "message": "振込先を削除しました"}
+        return {"success": True, "message": "Transfer destination deleted"}
         
     except HTTPException:
         raise

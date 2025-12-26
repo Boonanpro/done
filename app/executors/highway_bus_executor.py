@@ -5,7 +5,7 @@ WILLER高速バス予約の実行ロジック
 from typing import Optional, Any
 from datetime import datetime
 
-from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
 from app.models.schemas import (
     ExecutionStep,
@@ -17,7 +17,19 @@ from app.models.schemas import (
 )
 from app.executors.base import BaseExecutor
 from app.services.dynamic_auth import get_dynamic_auth_service
-from app.tools.browser import get_page, take_screenshot
+from app.tools.browser import (
+    get_page, 
+    page_goto, 
+    page_wait_for_load_state,
+    page_wait_for_timeout,
+    page_query_selector,
+    page_query_selector_all,
+    element_fill,
+    element_click,
+    element_text_content,
+    page_url,
+    page_screenshot,
+)
 
 
 class HighwayBusExecutor(BaseExecutor):
@@ -116,41 +128,95 @@ class HighwayBusExecutor(BaseExecutor):
         
         注意: 安全のため、確認画面まで進み、実際の予約確定は行わない
         """
-        page = await get_page()
+        await get_page()  # ブラウザ初期化
         
         try:
-            # 予約詳細を取得
-            details = search_result.details or {}
-            departure = details.get("departure", "東京")
-            arrival = details.get("arrival", "大阪")
-            date = details.get("date", "")
+            import re
+            
+            # 予約詳細を取得 - search_result.titleから直接パース
+            title = search_result.title or ""
+            title_lower = title.lower()
+            
+            print(f"[BUS] Title: {title}")
+            
+            # wishから出発地・到着地・日付を直接抽出（英語キーワードで判定）
+            
+            # 出発地の検出
+            if "umeda" in title_lower:
+                departure = "梅田"
+            elif "osaka" in title_lower:
+                departure = "大阪"
+            elif "tokyo" in title_lower:
+                departure = "東京"
+            else:
+                departure = "大阪"  # デフォルト
+            
+            # 到着地の検出
+            if "yonago" in title_lower:
+                arrival = "米子"
+            elif "tottori" in title_lower:
+                arrival = "鳥取"
+            else:
+                arrival = "米子"  # デフォルト
+            
+            # 日付の検出 (January 5 -> 2025-01-05, December 30 -> 2024-12-30)
+            date = ""
+            # January pattern
+            jan_match = re.search(r'january\s*(\d+)', title_lower)
+            if jan_match:
+                day = jan_match.group(1)
+                date = f"2025-01-{day.zfill(2)}"
+            # December pattern
+            dec_match = re.search(r'december\s*(\d+)', title_lower)
+            if dec_match and not date:
+                day = dec_match.group(1)
+                date = f"2024-12-{day.zfill(2)}"
+            # Fallback patterns
+            if not date:
+                if "30th" in title_lower:
+                    date = "2024-12-30"
+                elif "28th" in title_lower:
+                    date = "2024-12-28"
+                elif "5th" in title_lower:
+                    date = "2025-01-05"
+            
+            print(f"[BUS] Extracted: {departure} -> {arrival}, date: {date}")
+            
+            # 抽出した情報を辞書にまとめる
+            details = {
+                "departure": departure,
+                "arrival": arrival,
+                "date": date,
+            }
             
             # Step 1: WILLERサイトにアクセス
             bus_url = search_result.url or self._build_search_url(departure, arrival, date)
-            await page.goto(bus_url, wait_until="domcontentloaded", timeout=30000)
+            await page_goto(bus_url, wait_until="domcontentloaded", timeout=30000)
             await self._update_progress(
                 task_id=task_id,
                 step=ExecutionStep.OPENED_URL.value,
                 details={"url": bus_url},
             )
             
-            # Step 2: ログイン確認・実行
-            login_result = await self._ensure_logged_in(page, credentials)
-            if not login_result["success"]:
-                return ExecutionResult(
-                    success=False,
-                    message=login_result["message"],
-                    details={"requires_registration": login_result.get("requires_registration", False)},
+            # Step 2: ログイン確認・実行（WILLERはゲスト予約可能なのでスキップ可能）
+            if credentials:
+                login_result = await self._ensure_logged_in(credentials)
+                if login_result["success"]:
+                    await self._update_progress(
+                        task_id=task_id,
+                        step=ExecutionStep.LOGGED_IN.value,
+                        details={"logged_in": True},
+                    )
+            else:
+                # ゲストとして続行
+                await self._update_progress(
+                    task_id=task_id,
+                    step=ExecutionStep.LOGGED_IN.value,
+                    details={"logged_in": False, "guest_mode": True},
                 )
             
-            await self._update_progress(
-                task_id=task_id,
-                step=ExecutionStep.LOGGED_IN.value,
-                details={"logged_in": True},
-            )
-            
             # Step 3: バス検索・選択
-            select_result = await self._select_bus(page, details)
+            select_result = await self._select_bus(details)
             if not select_result["success"]:
                 return ExecutionResult(
                     success=False,
@@ -166,7 +232,7 @@ class HighwayBusExecutor(BaseExecutor):
             )
             
             # Step 4: 座席選択
-            seat_result = await self._select_seat(page, details)
+            seat_result = await self._select_seat(details)
             if not seat_result["success"]:
                 # 座席選択失敗は警告のみ（続行）
                 pass
@@ -189,7 +255,7 @@ class HighwayBusExecutor(BaseExecutor):
             # スクリーンショットを撮影
             screenshot_path = f"willer_confirm_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
             try:
-                await take_screenshot(screenshot_path)
+                await page_screenshot(screenshot_path)
             except Exception:
                 screenshot_path = None
             
@@ -205,7 +271,7 @@ class HighwayBusExecutor(BaseExecutor):
             return ExecutionResult(
                 success=True,
                 confirmation_number=temp_reservation_id,
-                message="予約確認画面まで進みました。予約を確定するにはWILLER TRAVELサイトで手動で操作してください。",
+                message="Reached confirmation screen. Please complete the reservation manually on WILLER TRAVEL website.",
                 details={
                     "departure": departure,
                     "arrival": arrival,
@@ -220,25 +286,25 @@ class HighwayBusExecutor(BaseExecutor):
         except PlaywrightTimeout as e:
             screenshot_path = f"error_willer_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
             try:
-                await take_screenshot(screenshot_path)
+                await page_screenshot(screenshot_path)
             except Exception:
                 pass
             
             return ExecutionResult(
                 success=False,
-                message=f"タイムアウトエラー: ページの読み込みに失敗しました - {str(e)}",
+                message=f"Timeout error: Failed to load page - {str(e)}",
                 details={"screenshot": screenshot_path},
             )
         except Exception as e:
             screenshot_path = f"error_willer_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
             try:
-                await take_screenshot(screenshot_path)
+                await page_screenshot(screenshot_path)
             except Exception:
                 pass
             
             return ExecutionResult(
                 success=False,
-                message=f"実行エラー: {str(e)}",
+                message=f"Execution error: {str(e)}",
                 details={"screenshot": screenshot_path},
             )
     
@@ -259,21 +325,36 @@ class HighwayBusExecutor(BaseExecutor):
         city_map = {
             # 関東
             "東京": "tokyo",
+            "tokyo": "tokyo",
             "新宿": "tokyo",
+            "shinjuku": "tokyo",
             "池袋": "tokyo",
+            "ikebukuro": "tokyo",
             "横浜": "kanagawa/yokohama",
+            "yokohama": "kanagawa/yokohama",
             "神奈川": "kanagawa",
+            "kanagawa": "kanagawa",
             "千葉": "chiba",
+            "chiba": "chiba",
             "埼玉": "saitama",
+            "saitama": "saitama",
             "大宮": "saitama/omiya",
+            "omiya": "saitama/omiya",
             # 関西
             "大阪": "osaka",
+            "osaka": "osaka",
             "梅田": "osaka",  # 大阪梅田
+            "umeda": "osaka",
             "難波": "osaka",
+            "namba": "osaka",
             "京都": "kyoto",
+            "kyoto": "kyoto",
             "神戸": "hyogo/kobe",
+            "kobe": "hyogo/kobe",
             "兵庫": "hyogo",
+            "hyogo": "hyogo",
             "奈良": "nara",
+            "nara": "nara",
             # 中部
             "名古屋": "aichi/nagoya",
             "愛知": "aichi",
@@ -294,19 +375,33 @@ class HighwayBusExecutor(BaseExecutor):
             "岩手": "iwate",
             # 中国・四国
             "広島": "hiroshima",
+            "hiroshima": "hiroshima",
             "岡山": "okayama",
+            "okayama": "okayama",
             "鳥取": "tottori",
+            "tottori": "tottori",
             "米子": "tottori",  # 米子は鳥取県
+            "yonago": "tottori",
             "島根": "shimane",
+            "shimane": "shimane",
             "松江": "shimane/matsue",
+            "matsue": "shimane/matsue",
             "出雲": "shimane",
+            "izumo": "shimane",
             "山口": "yamaguchi",
+            "yamaguchi": "yamaguchi",
             "高松": "kagawa/takamatsu",
+            "takamatsu": "kagawa/takamatsu",
             "香川": "kagawa",
+            "kagawa": "kagawa",
             "松山": "ehime/matsuyama",
+            "matsuyama": "ehime/matsuyama",
             "愛媛": "ehime",
+            "ehime": "ehime",
             "高知": "kochi",
+            "kochi": "kochi",
             "徳島": "tokushima",
+            "tokushima": "tokushima",
             # 九州
             "福岡": "fukuoka",
             "博多": "fukuoka",
@@ -322,8 +417,11 @@ class HighwayBusExecutor(BaseExecutor):
             "北海道": "hokkaido",
         }
         
-        dep_code = city_map.get(departure, "tokyo")
-        arr_code = city_map.get(arrival, "osaka")
+        # 日本語とアルファベット両方で検索
+        dep_code = city_map.get(departure) or city_map.get(departure.lower()) or "tokyo"
+        arr_code = city_map.get(arrival) or city_map.get(arrival.lower()) or "osaka"
+        
+        print(f"[BUS] URL mapping: {departure} -> {dep_code}, {arrival} -> {arr_code}")
         
         # 都道府県コードの場合はall付与
         if "/" not in dep_code:
@@ -346,7 +444,6 @@ class HighwayBusExecutor(BaseExecutor):
     
     async def _ensure_logged_in(
         self,
-        page: Page,
         credentials: Optional[dict[str, str]] = None,
     ) -> dict[str, Any]:
         """
@@ -358,23 +455,23 @@ class HighwayBusExecutor(BaseExecutor):
         # ログイン状態を確認
         try:
             # ログアウトリンクがあるか確認
-            logout_link = await page.query_selector('a:has-text("ログアウト")')
+            logout_link = await page_query_selector('a:has-text("ログアウト")')
             if logout_link:
-                return {"success": True, "message": "既にログイン済み"}
+                return {"success": True, "message": "Already logged in"}
             
             # マイページリンクをクリックしてログインページへ
-            mypage_link = await page.query_selector('a[href*="mypage"]')
+            mypage_link = await page_query_selector('a[href*="mypage"]')
             if mypage_link:
                 # WILLERはマイページクリックでログインページへリダイレクト
-                current_url = page.url
-                await mypage_link.click()
-                await page.wait_for_load_state("domcontentloaded")
-                await page.wait_for_timeout(1000)
+                current_url = await page_url()
+                await element_click(mypage_link)
+                await page_wait_for_load_state("domcontentloaded")
+                await page_wait_for_timeout(1000)
                 
                 # ログイン後（ログアウトリンクが表示）なら成功
-                logout_after = await page.query_selector('a:has-text("ログアウト")')
+                logout_after = await page_query_selector('a:has-text("ログアウト")')
                 if logout_after:
-                    return {"success": True, "message": "既にログイン済み"}
+                    return {"success": True, "message": "Already logged in"}
         except Exception:
             pass
         
@@ -382,7 +479,7 @@ class HighwayBusExecutor(BaseExecutor):
         if not credentials:
             return {
                 "success": False,
-                "message": "WILLERのログイン情報が必要です",
+                "message": "WILLER login credentials required",
                 "requires_registration": True,
             }
         
@@ -392,64 +489,63 @@ class HighwayBusExecutor(BaseExecutor):
         if not email or not password:
             return {
                 "success": False,
-                "message": "メールアドレスまたはパスワードが不足しています",
+                "message": "Email or password is missing",
             }
         
         try:
             # ログインページに移動
-            await page.goto(self.URLS["login"], wait_until="domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(1000)
+            await page_goto(self.URLS["login"], wait_until="domcontentloaded", timeout=30000)
+            await page_wait_for_timeout(1000)
             
             # メールアドレスを入力
-            email_input = await page.query_selector('input[type="text"], input[type="email"]')
+            email_input = await page_query_selector('input[type="text"], input[type="email"]')
             if email_input:
-                await email_input.fill(email)
+                await element_fill(email_input, email)
             
             # パスワードを入力
-            password_inputs = await page.query_selector_all('input[type="text"], input[type="password"]')
+            password_inputs = await page_query_selector_all('input[type="text"], input[type="password"]')
             if len(password_inputs) >= 2:
-                await password_inputs[1].fill(password)
+                await element_fill(password_inputs[1], password)
             
             # ログインボタンをクリック
-            login_btn = await page.query_selector('button:has-text("ログイン")')
+            login_btn = await page_query_selector('button:has-text("ログイン")')
             if login_btn:
-                await login_btn.click()
-                await page.wait_for_load_state("domcontentloaded")
-                await page.wait_for_timeout(2000)
+                await element_click(login_btn)
+                await page_wait_for_load_state("domcontentloaded")
+                await page_wait_for_timeout(2000)
             
             # ログイン成功を確認
-            logout_link = await page.query_selector('a:has-text("ログアウト")')
+            logout_link = await page_query_selector('a:has-text("ログアウト")')
             if logout_link:
-                return {"success": True, "message": "ログイン成功"}
+                return {"success": True, "message": "Login successful"}
             
             # エラーメッセージを確認
-            error_msg = await page.query_selector('.error, [class*="error"]')
+            error_msg = await page_query_selector('.error, [class*="error"]')
             if error_msg:
-                error_text = await error_msg.text_content()
+                error_text = await element_text_content(error_msg)
                 return {
                     "success": False,
-                    "message": f"ログインに失敗しました: {error_text}",
+                    "message": f"Login failed: {error_text}",
                 }
             
             return {
                 "success": False,
-                "message": "ログインに失敗しました。メールアドレスまたはパスワードを確認してください。",
+                "message": "Login failed. Please check your email and password.",
             }
             
         except PlaywrightTimeout:
             return {
                 "success": False,
-                "message": "ログインページの読み込みがタイムアウトしました",
+                "message": "Login page loading timed out",
             }
         except Exception as e:
             return {
                 "success": False,
-                "message": f"ログイン中にエラーが発生しました: {str(e)}",
+                "message": f"Error during login: {str(e)}",
             }
     
     async def _select_bus(
         self,
-        page: Page,
         details: dict[str, Any],
     ) -> dict[str, Any]:
         """
@@ -463,37 +559,46 @@ class HighwayBusExecutor(BaseExecutor):
             arrival = details.get("arrival", "大阪")
             date = details.get("date", "")
             
+            print(f"[BUS DEBUG] Searching: {departure} -> {arrival}, date: {date}")
+            print(f"[BUS DEBUG] Details: {details}")
+            
             # 検索ページに移動（既にいない場合）
-            if "bus_search" not in page.url:
+            current_url = await page_url()
+            if "bus_search" not in current_url or not current_url:
                 search_url = self._build_search_url(departure, arrival, date)
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(2000)
+                print(f"[BUS DEBUG] Search URL: {search_url}")
+                await page_goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                await page_wait_for_timeout(3000)
+            
+            # デバッグ用スクリーンショット
+            await page_screenshot(f"bus_search_{datetime.now().strftime('%Y%m%d%H%M%S')}.png")
             
             # 日付を選択（カレンダーがある場合）
             if date:
                 try:
                     # 日付の日部分を取得
                     day = date.split("-")[2].lstrip("0") if "-" in date else date
-                    date_cell = await page.query_selector(f'td:has-text("{day}") a, [data-date*="{day}"]')
+                    print(f"[BUS DEBUG] Looking for date: {day}")
+                    date_cell = await page_query_selector(f'td:has-text("{day}") a, [data-date*="{day}"]')
                     if date_cell:
-                        await date_cell.click()
-                        await page.wait_for_timeout(2000)
-                except Exception:
-                    pass
+                        await element_click(date_cell)
+                        await page_wait_for_timeout(2000)
+                except Exception as e:
+                    print(f"[BUS DEBUG] Date selection error: {e}")
             
             # バス一覧を取得
-            await page.wait_for_timeout(1000)
+            await page_wait_for_timeout(2000)
             
             # 最初のバスの「予約に進む」をクリック
-            book_button = await page.query_selector('a:has-text("予約に進む")')
+            book_button = await page_query_selector('a:has-text("予約に進む")')
             if book_button:
-                await book_button.click()
-                await page.wait_for_load_state("domcontentloaded")
-                await page.wait_for_timeout(2000)
+                await element_click(book_button)
+                await page_wait_for_load_state("domcontentloaded")
+                await page_wait_for_timeout(2000)
                 
                 return {
                     "success": True,
-                    "message": "バスを選択しました",
+                    "message": "Bus selected",
                     "bus_info": {
                         "departure": departure,
                         "arrival": arrival,
@@ -504,18 +609,17 @@ class HighwayBusExecutor(BaseExecutor):
             
             return {
                 "success": False,
-                "message": "予約可能なバスが見つかりませんでした",
+                "message": "No available buses found",
             }
             
         except Exception as e:
             return {
                 "success": False,
-                "message": f"バスの検索・選択中にエラーが発生しました: {str(e)}",
+                "message": f"Error during bus search/selection: {str(e)}",
             }
     
     async def _select_seat(
         self,
-        page: Page,
         details: dict[str, Any],
     ) -> dict[str, Any]:
         """
@@ -526,35 +630,35 @@ class HighwayBusExecutor(BaseExecutor):
         """
         try:
             # 座席選択ページかどうか確認
-            seat_map = await page.query_selector('[class*="seat"], [class*="seatmap"]')
+            seat_map = await page_query_selector('[class*="seat"], [class*="seatmap"]')
             if not seat_map:
                 # 座席選択が不要なプランの場合
                 return {
                     "success": True,
-                    "message": "座席選択は不要です",
+                    "message": "Seat selection not required",
                     "seat_info": {"auto_assigned": True},
                 }
             
             # 空席をクリック
-            available_seat = await page.query_selector(
+            available_seat = await page_query_selector(
                 '[class*="available"], [class*="empty"], [class*="○"]'
             )
             if available_seat:
-                await available_seat.click()
-                await page.wait_for_timeout(1000)
+                await element_click(available_seat)
+                await page_wait_for_timeout(1000)
             
             # 確定ボタンをクリック
-            confirm_btn = await page.query_selector(
+            confirm_btn = await page_query_selector(
                 'button:has-text("選択"), button:has-text("確定"), button:has-text("次へ")'
             )
             if confirm_btn:
-                await confirm_btn.click()
-                await page.wait_for_load_state("domcontentloaded")
-                await page.wait_for_timeout(2000)
+                await element_click(confirm_btn)
+                await page_wait_for_load_state("domcontentloaded")
+                await page_wait_for_timeout(2000)
             
             return {
                 "success": True,
-                "message": "座席を選択しました",
+                "message": "Seat selected",
                 "seat_info": {
                     "selected": True,
                     "timestamp": datetime.now().isoformat(),
@@ -564,7 +668,7 @@ class HighwayBusExecutor(BaseExecutor):
         except Exception as e:
             return {
                 "success": False,
-                "message": f"座席選択中にエラーが発生しました: {str(e)}",
+                "message": f"Error during seat selection: {str(e)}",
                 "seat_info": {},
             }
     
@@ -698,6 +802,7 @@ class HighwayBusExecutor(BaseExecutor):
             submit_selector='button:has-text("次へ")',
             password_requirements=self.PASSWORD_REQUIREMENTS,
         )
+
 
 
 

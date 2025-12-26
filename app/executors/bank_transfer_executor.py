@@ -105,7 +105,7 @@ class SimulationBankHandler(BaseBankHandler):
             
             return BankTransferResult(
                 success=True,
-                message="シミュレーション振込が完了しました",
+                message="Simulation transfer completed",
                 transaction_id=transaction_id,
                 details={
                     "bank_type": self.bank_type,
@@ -119,7 +119,7 @@ class SimulationBankHandler(BaseBankHandler):
             logger.error(f"Simulation transfer failed: {e}")
             return BankTransferResult(
                 success=False,
-                message=f"シミュレーション振込に失敗しました: {str(e)}",
+                message=f"Simulation transfer failed: {str(e)}",
                 error_code="SIMULATION_ERROR",
             )
 
@@ -139,7 +139,7 @@ class SBIBankHandler(BaseBankHandler):
         # TODO: Playwrightを使用して実際の銀行サイトを操作
         return BankTransferResult(
             success=False,
-            message="SBI銀行振込は未実装です",
+            message="SBI bank transfer not implemented",
             error_code="NOT_IMPLEMENTED",
         )
 
@@ -205,7 +205,7 @@ class BankTransferExecutor:
             if not invoice:
                 return BankTransferResult(
                     success=False,
-                    message="請求書が見つかりません",
+                    message="Invoice not found",
                     error_code="INVOICE_NOT_FOUND",
                 )
             
@@ -213,7 +213,7 @@ class BankTransferExecutor:
             if invoice.get("status") != "approved":
                 return BankTransferResult(
                     success=False,
-                    message=f"請求書のステータスが承認済みではありません: {invoice.get('status')}",
+                    message=f"Invoice status is not approved: {invoice.get('status')}",
                     error_code="INVALID_STATUS",
                 )
             
@@ -263,7 +263,7 @@ class BankTransferExecutor:
             
             return BankTransferResult(
                 success=False,
-                message=f"振込実行中にエラーが発生しました: {str(e)}",
+                message=f"Error during transfer execution: {str(e)}",
                 error_code="EXECUTION_ERROR",
             )
     

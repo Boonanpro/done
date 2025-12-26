@@ -145,7 +145,7 @@ async def search_amazon(
                     "price": None,
                     "status": None,
                     "details": {
-                        "message": "商品情報の取得に失敗しました。URLを直接確認してください。",
+                        "message": "Failed to retrieve product info. Please check the URL directly.",
                         "source": "Amazon",
                     },
                     "execution_params": {
@@ -256,7 +256,7 @@ async def search_rakuten(
                     "price": None,
                     "status": None,
                     "details": {
-                        "message": "商品情報の取得に失敗しました。URLを直接確認してください。",
+                        "message": "Failed to retrieve product info. Please check the URL directly.",
                         "source": "楽天市場",
                     },
                     "execution_params": {
@@ -367,7 +367,7 @@ async def search_kakaku(
                     "price": None,
                     "status": None,
                     "details": {
-                        "message": "商品情報の取得に失敗しました。URLを直接確認してください。",
+                        "message": "Failed to retrieve product info. Please check the URL directly.",
                         "source": "価格.com",
                     },
                     "execution_params": {
@@ -445,7 +445,7 @@ async def search_products(
         "price": None,
         "status": None,
         "details": {
-            "message": "商品情報の取得に失敗しました。",
+            "message": "Failed to retrieve product info.",
         },
         "execution_params": {}
     }]

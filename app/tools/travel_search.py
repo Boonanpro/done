@@ -191,7 +191,7 @@ async def search_train(
                 "price": None,
                 "status": None,
                 "details": {
-                    "message": "経路情報の取得に失敗しました。URLを直接確認してください。",
+                    "message": "Failed to retrieve route info. Please check the URL directly.",
                     "departure": departure,
                     "arrival": arrival,
                 },
@@ -317,7 +317,7 @@ async def search_bus(
                     "price": None,
                     "status": None,
                     "details": {
-                        "message": "バス情報の取得に失敗しました。URLを直接確認してください。",
+                        "message": "Failed to retrieve bus info. Please check the URL directly.",
                         "departure": departure,
                         "arrival": arrival,
                     },
@@ -448,7 +448,7 @@ async def search_flight(
                     "price": None,
                     "status": None,
                     "details": {
-                        "message": "フライト情報の取得に失敗しました。URLを直接確認してください。",
+                        "message": "Failed to retrieve flight info. Please check the URL directly.",
                         "departure": departure,
                         "arrival": arrival,
                     },

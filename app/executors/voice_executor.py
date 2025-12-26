@@ -88,7 +88,7 @@ class VoiceExecutor(BaseExecutor):
         if not phone_number:
             return ExecutionResult(
                 success=False,
-                message="電話番号が指定されていません。電話番号を含めて再度お試しください。",
+                message="Phone number not specified. Please include a phone number and try again.",
             )
         
         # 電話番号を正規化
@@ -123,13 +123,13 @@ class VoiceExecutor(BaseExecutor):
             
             await self._update_progress(
                 task_id=task_id,
-                message=f"電話を発信中: {phone_number}",
+                message=f"Initiating call: {phone_number}",
                 progress=50,
             )
             
             return ExecutionResult(
                 success=True,
-                message=f"電話を発信しました。通話ID: {call.call_sid}",
+                message=f"Call initiated. Call ID: {call.call_sid}",
                 details={
                     "call_id": call.id,
                     "call_sid": call.call_sid,
@@ -142,7 +142,7 @@ class VoiceExecutor(BaseExecutor):
             logger.error(f"VoiceExecutor: Failed to initiate call: {e}")
             return ExecutionResult(
                 success=False,
-                message=f"電話の発信に失敗しました: {str(e)}",
+                message=f"Failed to initiate call: {str(e)}",
             )
     
     def _requires_login(self) -> bool:
@@ -165,6 +165,6 @@ class VoiceExecutor(BaseExecutor):
         """
         return ExecutionResult(
             success=True,
-            message="電話タスクにブラウザ操作は不要です",
+            message="Browser operations not required for phone tasks",
         )
 

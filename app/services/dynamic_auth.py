@@ -162,7 +162,7 @@ class DynamicAuthService:
                 except Exception as e:
                     return AuthResult(
                         success=False,
-                        message=f"フィールド '{field.name}' の入力に失敗しました: {str(e)}",
+                        message=f"Failed to fill field '{field.name}': {str(e)}",
                     )
             
             # ★ 送信ボタンはクリックしない ★
@@ -175,7 +175,7 @@ class DynamicAuthService:
             
             return AuthResult(
                 success=True,
-                message="登録情報を入力しました。この内容で登録しますか？",
+                message="Registration info entered. Proceed with registration?",
                 credentials=credentials,
                 requires_confirmation=True,  # 確認が必要
                 details={
@@ -190,7 +190,7 @@ class DynamicAuthService:
         except Exception as e:
             return AuthResult(
                 success=False,
-                message=f"登録フォームの入力中にエラーが発生しました: {str(e)}",
+                message=f"Error filling registration form: {str(e)}",
             )
     
     async def confirm_registration(
@@ -236,7 +236,7 @@ class DynamicAuthService:
             
             return AuthResult(
                 success=True,
-                message="登録が完了しました",
+                message="Registration completed",
                 credentials=credentials,
                 requires_confirmation=False,
                 details={
@@ -248,7 +248,7 @@ class DynamicAuthService:
         except Exception as e:
             return AuthResult(
                 success=False,
-                message=f"登録処理中にエラーが発生しました: {str(e)}",
+                message=f"Error during registration: {str(e)}",
             )
     
     async def register_new_account(
@@ -465,7 +465,7 @@ class DynamicAuthService:
         if existing:
             return AuthResult(
                 success=True,
-                message="既存の認証情報を使用します",
+                message="Using existing credentials",
                 credentials={
                     "email": existing.get("email", ""),
                     "password": existing.get("password", ""),
@@ -492,6 +492,7 @@ def get_dynamic_auth_service() -> DynamicAuthService:
     if _dynamic_auth_service is None:
         _dynamic_auth_service = DynamicAuthService()
     return _dynamic_auth_service
+
 
 
 

@@ -1,6 +1,13 @@
 """
 AI Secretary System - Main Entry Point (Phase 6 reload)
 """
+import sys
+import asyncio
+
+# Windows用のイベントループポリシー設定（Playwright対応）
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

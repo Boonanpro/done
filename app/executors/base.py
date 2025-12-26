@@ -92,10 +92,15 @@ class BaseExecutor(ABC):
             return result
             
         except Exception as e:
-            # エラーを記録
+            # エラーを記録（詳細なトレースバック付き）
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"[EXECUTOR ERROR] {task_id}: {str(e)}\n{error_details}")
+            
             error_result = ExecutionResult(
                 success=False,
-                message=f"実行中にエラーが発生しました: {str(e)}",
+                message=f"Execution error: {str(e)}",
+                details={"traceback": error_details},
             )
             await self.execution_service.complete_execution(
                 task_id=task_id,
@@ -221,7 +226,7 @@ class BaseExecutor(ABC):
         await self._update_progress(
             task_id=task_id,
             step="otp_timeout",
-            details={"message": "OTP取得がタイムアウトしました"},
+            details={"message": "OTP retrieval timed out"},
         )
         return None
     
@@ -295,7 +300,7 @@ class GenericExecutor(BaseExecutor):
         
         return ExecutionResult(
             success=True,
-            message="実行が完了しました",
+            message="Execution completed",
             details={
                 "url": search_result.url,
                 "title": search_result.title,
@@ -366,7 +371,7 @@ class TrainExecutor(BaseExecutor):
         return ExecutionResult(
             success=True,
             confirmation_number=confirmation_number,
-            message=f"予約が完了しました。予約番号: {confirmation_number}",
+            message=f"Reservation completed. Confirmation number: {confirmation_number}",
             details={
                 "train_name": details.get("train_name"),
                 "departure": details.get("departure"),
@@ -432,7 +437,7 @@ class ProductExecutor(BaseExecutor):
         return ExecutionResult(
             success=True,
             confirmation_number=order_number,
-            message=f"購入が完了しました。注文番号: {order_number}",
+            message=f"Purchase completed. Order number: {order_number}",
             details={
                 "product_name": search_result.title,
                 "price": search_result.price,
