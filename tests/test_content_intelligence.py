@@ -247,11 +247,12 @@ class TestManualVerifiedScenarios:
         """
         6C: URL先取得API - example.comからテキスト取得
         手動テスト結果: success=True, title="Example Domain"
+        注: 実装がPlaywrightベースに変更されたため、メソッドはURL_PLAYWRIGHTまたはURL_REQUESTSのいずれか
         """
         result = await URLExtractor.extract("https://example.com")
         
         assert result.success is True
-        assert result.method == ExtractionMethod.URL_REQUESTS
+        assert result.method in (ExtractionMethod.URL_REQUESTS, ExtractionMethod.URL_PLAYWRIGHT)
         assert result.title == "Example Domain"
         assert "example" in result.text.lower()
     
@@ -310,6 +311,7 @@ class TestManualVerifiedScenarios:
         assert result.category == ContentCategory.INVOICE
         assert result.confidence_score >= 0.9
         assert result.extracted_data is not None
+
 
 
 
