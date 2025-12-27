@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **ドキュメント更新ルール** - ADR/CHANGELOG更新タイミングを`.cursor/rules`に明記
+  - Commits: `65a168d`, `4f441a7`
+  - ADR作成トリガーの明確化（設計判断時に確認を促す）
+
 ## [1.3.0] - 2024-12-27
 
 ### Summary
