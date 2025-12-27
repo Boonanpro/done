@@ -330,40 +330,48 @@ class TestExecutorFactory:
         assert isinstance(executor, GenericExecutor)
 
 
-class TestTravelFallback:
-    """Travel fallback feature tests"""
+class TestSmartFallback:
+    """Smart fallback feature tests - LLM-powered alternative proposals"""
     
     @pytest.mark.asyncio
-    async def test_search_travel_alternatives(self):
-        """Test _search_travel_alternatives method"""
+    async def test_generate_fallback_travel(self):
+        """Test _generate_fallback_proposals for travel tasks"""
         from app.agent.agent import AISecretaryAgent
+        from app.models.schemas import TaskType
         
         agent = AISecretaryAgent()
         
-        # Test bus fallback (should suggest train/flight)
-        alternatives = await agent._search_travel_alternatives(
-            "Book a bus from Osaka to Tottori",
-            "bus"
+        # Test travel fallback (should suggest distance-appropriate options)
+        alternatives = await agent._generate_fallback_proposals(
+            wish="Book a bus from Osaka to Tottori on December 30th",
+            task_type=TaskType.TRAVEL,
+            failed_action="WILLER bus booking",
+            error_message="No available buses found for this route"
         )
         
-        # Should return some alternatives
+        # Should return ranked alternatives
         assert alternatives is not None
         assert isinstance(alternatives, str)
-        # At minimum, should have fallback suggestions
         assert len(alternatives) > 0
+        # Should contain recommendation markers
+        assert "おすすめ" in alternatives or "🥇" in alternatives
     
     @pytest.mark.asyncio
-    async def test_fallback_when_train_fails(self):
-        """Test fallback suggestions when train search fails"""
+    async def test_generate_fallback_purchase(self):
+        """Test _generate_fallback_proposals for purchase tasks"""
         from app.agent.agent import AISecretaryAgent
+        from app.models.schemas import TaskType
         
         agent = AISecretaryAgent()
         
-        # Test train fallback (should suggest bus)
-        alternatives = await agent._search_travel_alternatives(
-            "Book a train from Tokyo to Osaka",
-            "train"
+        # Test purchase fallback
+        alternatives = await agent._generate_fallback_proposals(
+            wish="Buy a laptop on Amazon",
+            task_type=TaskType.PURCHASE,
+            failed_action="Amazon cart addition",
+            error_message="Product out of stock"
         )
         
         assert alternatives is not None
         assert isinstance(alternatives, str)
+        assert len(alternatives) > 0

@@ -295,66 +295,82 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
         
         return search_results
     
-    async def _search_travel_alternatives(self, wish: str, failed_category: str) -> str:
+    async def _generate_fallback_proposals(
+        self, 
+        wish: str, 
+        task_type: TaskType,
+        failed_action: str,
+        error_message: str
+    ) -> str:
         """
-        Search for alternative travel options when primary option fails.
+        Generate smart fallback proposals using LLM.
+        
+        Uses AI to suggest best alternatives based on:
+        - Task type (travel, purchase, etc.)
+        - Distance/context for travel tasks
+        - What failed and why
         
         Args:
             wish: Original user wish
-            failed_category: The category that failed (e.g., "bus", "train")
+            task_type: Type of task (TRAVEL, PURCHASE, etc.)
+            failed_action: What action failed
+            error_message: Error message from the failed attempt
             
         Returns:
-            Formatted string of alternative options
+            Formatted string of ranked alternative options
         """
-        alternatives = []
-        
         try:
-            # Determine what alternatives to search based on what failed
-            if failed_category == "bus":
-                # Try train/shinkansen
-                try:
-                    train_results = await search_train.ainvoke({
-                        "departure": "osaka",
-                        "arrival": "tottori",
-                    })
-                    if train_results and not train_results.get("error"):
-                        alternatives.append(f"🚃 Train: {train_results.get('title', 'Route available')} - ¥{train_results.get('price', 'N/A')}")
-                except Exception as e:
-                    logger.debug(f"Train search failed: {e}")
-                
-                # Try flight
-                try:
-                    flight_results = await search_flight.ainvoke({
-                        "departure": "osaka",
-                        "arrival": "tottori",
-                    })
-                    if flight_results and not flight_results.get("error"):
-                        alternatives.append(f"✈️ Flight: {flight_results.get('title', 'Route available')} - ¥{flight_results.get('price', 'N/A')}")
-                except Exception as e:
-                    logger.debug(f"Flight search failed: {e}")
-                    
-            elif failed_category == "train":
-                # Try bus
-                try:
-                    bus_results = await search_bus.ainvoke({
-                        "departure": "osaka",
-                        "arrival": "tottori",
-                    })
-                    if bus_results and not bus_results.get("error"):
-                        alternatives.append(f"🚌 Bus: {bus_results.get('title', 'Route available')} - ¥{bus_results.get('price', 'N/A')}")
-                except Exception as e:
-                    logger.debug(f"Bus search failed: {e}")
+            # Build context-aware prompt for LLM
+            fallback_prompt = f"""The user's request failed. Suggest alternative solutions.
+
+## Original Request
+{wish}
+
+## Task Type
+{task_type.value if task_type else "unknown"}
+
+## What Failed
+{failed_action}
+
+## Error
+{error_message}
+
+## Your Task
+Suggest 2-3 alternative solutions, ranked by recommendation.
+Consider:
+- For travel: distance, time, cost, convenience (e.g., short distance → taxi/train, long distance → shinkansen/flight)
+- For purchases: alternative stores, similar products, different delivery options
+- For other tasks: creative alternatives to achieve the same goal
+
+## Response Format (Japanese)
+🥇 **おすすめ**: [Best alternative with brief reason]
+🥈 **次点**: [Second best alternative]
+🥉 **その他**: [Other options if any]
+
+Keep each option to 1-2 lines. Be specific and actionable."""
+
+            response = await self.llm.ainvoke([
+                SystemMessage(content="You are a helpful assistant suggesting alternatives when the primary option fails. Respond in Japanese."),
+                HumanMessage(content=fallback_prompt)
+            ])
             
-            # Always suggest general search as fallback
-            if not alternatives:
-                alternatives.append("📍 Try searching on Google Maps or Yahoo Transit for more options")
-                alternatives.append("📞 Contact a travel agency for special arrangements")
+            return response.content
             
         except Exception as e:
-            logger.error(f"Alternative search failed: {e}")
-            alternatives.append("⚠️ Could not search for alternatives. Please try manually.")
-        
-        return "\n".join(alternatives) if alternatives else ""
+            logger.error(f"Fallback generation failed: {e}")
+            # Simple fallback if LLM fails
+            if task_type == TaskType.TRAVEL:
+                return """🥇 **おすすめ**: Yahoo!乗換案内やGoogle Mapsで他のルートを検索
+🥈 **次点**: 旅行代理店に相談（JTB、HISなど）
+🥉 **その他**: 日程を変更して再検索"""
+            elif task_type == TaskType.PURCHASE:
+                return """🥇 **おすすめ**: 別のECサイト（楽天、Yahoo!ショッピング）で検索
+🥈 **次点**: 類似商品を検索
+🥉 **その他**: 実店舗での購入を検討"""
+            else:
+                return """🥇 **おすすめ**: 別のアプローチを試す
+🥈 **次点**: 専門家に相談
+🥉 **その他**: 目的を見直して再検討"""
     
     def _format_search_results_for_prompt(self, search_results: list[dict]) -> str:
         """検索結果をプロンプト用にフォーマット"""
@@ -670,14 +686,19 @@ Use the available tools to execute."""
                 task["status"] = TaskStatus.COMPLETED if execution_result.success else TaskStatus.FAILED
                 logger.info(f"Task {task_id} execution result: {execution_result.success}")
                 
-                # ★ Fallback: If travel booking failed, search for alternatives
-                if not execution_result.success and task_type == TaskType.TRAVEL:
-                    if "No available" in execution_result.message or "not found" in execution_result.message.lower():
-                        alternatives = await self._search_travel_alternatives(original_wish, category)
-                        if alternatives:
-                            task["execution_result"]["alternatives"] = alternatives
-                            task["execution_result"]["message"] += f"\n\nAlternative options found:\n{alternatives}"
-                            logger.info(f"Task {task_id}: Found {len(alternatives.splitlines())} alternatives")
+                # ★ Smart Fallback: Generate alternatives for any failed task
+                if not execution_result.success:
+                    failed_action = task.get("proposed_actions", ["Unknown action"])[0] if task.get("proposed_actions") else "Unknown action"
+                    alternatives = await self._generate_fallback_proposals(
+                        wish=original_wish,
+                        task_type=task_type,
+                        failed_action=failed_action,
+                        error_message=execution_result.message
+                    )
+                    if alternatives:
+                        task["execution_result"]["alternatives"] = alternatives
+                        task["execution_result"]["message"] += f"\n\n📋 **代替案**:\n{alternatives}"
+                        logger.info(f"Task {task_id}: Generated fallback proposals")
             else:
                 # Executorが対応していないタスクタイプ
                 task["execution_result"] = {
