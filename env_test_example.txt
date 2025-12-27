@@ -1,0 +1,36 @@
+# =============================================================================
+# Test Environment Configuration
+# =============================================================================
+# Rename this file to .env.test and fill in your test values.
+# IMPORTANT: Use a SEPARATE Supabase project for testing to avoid data pollution.
+# =============================================================================
+
+# Application
+APP_ENV=test
+
+# Supabase (TEST PROJECT - different from production!)
+# Create a separate Supabase project for testing at https://supabase.com
+SUPABASE_URL=https://your-test-project.supabase.co
+SUPABASE_KEY=your-test-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-test-service-role-key
+
+# Anthropic (Claude) - Same API key, but consider usage limits
+ANTHROPIC_API_KEY=your-anthropic-api-key
+
+# Encryption (can be same as production for testing, or generate new)
+ENCRYPTION_KEY=test-32-byte-encryption-key-here
+
+# Tavily API (for search tests)
+TAVILY_API_KEY=your-tavily-api-key
+
+# JWT Settings
+JWT_SECRET_KEY=test-jwt-secret-key
+
+# Optional: Twilio for voice tests
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_PHONE_NUMBER=
+
+# Optional: ElevenLabs for voice tests
+ELEVENLABS_API_KEY=
+
