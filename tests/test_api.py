@@ -97,6 +97,31 @@ class TestReviseAPI:
             json={"revision": "Change something"}
         )
         assert response.status_code == 404
+    
+    def test_revise_task_with_destination_change(self, client):
+        """POST /api/v1/task/{id}/revise - Revise with destination change triggers re-search"""
+        # 1. Create initial task
+        wish_response = client.post(
+            "/api/v1/wish",
+            json={"wish": "Book a bus from Osaka to Yonago on January 5th"}
+        )
+        assert wish_response.status_code == 200
+        task_id = wish_response.json()["task_id"]
+        
+        # 2. Revise with destination change
+        revise_response = client.post(
+            f"/api/v1/task/{task_id}/revise",
+            json={"revision": "Change destination to Tottori City, bus or train is fine"}
+        )
+        assert revise_response.status_code == 200
+        data = revise_response.json()
+        
+        # 3. Verify re-search was performed
+        assert data["task_id"] == task_id
+        assert "proposal_detail" in data
+        assert data["requires_confirmation"] == True
+        # New response should include search_results from re-search
+        assert "search_results" in data or "Tottori" in data.get("proposal_detail", "")
 
 
 class TestTaskAPI:

@@ -18,6 +18,7 @@ from app.tools import get_tools, get_available_tool_names
 from app.tools.tavily_search import tavily_search
 from app.tools.travel_search import search_train, search_bus, search_flight
 from app.tools.product_search import search_amazon, search_products
+from app.services.supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +40,8 @@ class AgentState(TypedDict):
 class AISecretaryAgent:
     """AI Secretary Agent"""
     
-    # クラス変数としてタスクストレージを共有（すべてのインスタンス間で共有）
-    _tasks: dict[str, dict] = {}
+    # キャッシュ用のメモリストレージ（高速アクセス用、DBと同期）
+    _tasks_cache: dict[str, dict] = {}
     
     SYSTEM_PROMPT = """You are an excellent AI secretary called "Done".
 You propose and execute specific actions for user requests like "I want to..." or "Please do...".
@@ -182,6 +183,76 @@ Always respond in English."""
         
         return workflow.compile()
     
+    async def _get_task(self, task_id: str) -> Optional[dict]:
+        """
+        Get task from cache or DB.
+        
+        Args:
+            task_id: Task ID
+            
+        Returns:
+            Task data or None if not found
+        """
+        # Check cache first
+        if task_id in AISecretaryAgent._tasks_cache:
+            return AISecretaryAgent._tasks_cache[task_id]
+        
+        # Fallback to DB
+        try:
+            db = get_supabase_client()
+            task = await db.get_task(task_id)
+            if task:
+                # Convert DB format to internal format
+                task_data = {
+                    "id": task["id"],
+                    "user_id": task.get("user_id"),
+                    "type": TaskType(task.get("type", "other")),
+                    "status": TaskStatus(task.get("status", "pending")),
+                    "original_wish": task.get("original_wish", ""),
+                    "proposed_actions": task.get("proposed_actions", []),
+                    "execution_result": task.get("execution_result"),
+                    "search_results": task.get("search_results", []),
+                    "created_at": task.get("created_at"),
+                }
+                # Cache it
+                AISecretaryAgent._tasks_cache[task_id] = task_data
+                return task_data
+        except Exception as e:
+            logger.error(f"Failed to get task from DB: {task_id}, error: {e}")
+        
+        return None
+    
+    async def _update_task(self, task_id: str, **updates) -> bool:
+        """
+        Update task in cache and DB.
+        
+        Args:
+            task_id: Task ID
+            **updates: Fields to update
+            
+        Returns:
+            True if successful
+        """
+        # Update cache
+        if task_id in AISecretaryAgent._tasks_cache:
+            AISecretaryAgent._tasks_cache[task_id].update(updates)
+        
+        # Update DB
+        try:
+            db = get_supabase_client()
+            # Convert enum values to strings for DB
+            db_updates = {}
+            for key, value in updates.items():
+                if hasattr(value, 'value'):  # Enum
+                    db_updates[key] = value.value
+                else:
+                    db_updates[key] = value
+            await db.update_task(task_id, **db_updates)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update task in DB: {task_id}, error: {e}")
+            return False
+    
     async def _analyze_wish(self, state: AgentState) -> AgentState:
         """Analyze the wish and determine task type"""
         wish = state["original_wish"]
@@ -290,8 +361,15 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
             # 検索失敗時は空のリストを返す（フォールバック）
             search_results = []
         
+        # Ensure search_results is a list
+        if not isinstance(search_results, list):
+            if isinstance(search_results, dict):
+                search_results = [search_results] if not search_results.get("error") else []
+            else:
+                search_results = []
+        
         # エラー結果を除外
-        search_results = [r for r in search_results if not r.get("error")]
+        search_results = [r for r in search_results if isinstance(r, dict) and not r.get("error")]
         
         return search_results
     
@@ -528,24 +606,39 @@ Use the available tools to execute."""
         # Execute graph
         final_state = await self.graph.ainvoke(initial_state)
         
-        # Save task (クラス変数に保存)
+        # Save task to Supabase DB (with cache)
+        task_data = {
+            "id": task_id,
+            "user_id": user_id,
+            "type": final_state["task_type"].value if final_state["task_type"] else "other",
+            "status": final_state["status"].value if final_state["status"] else "pending",
+            "original_wish": wish,
+            "proposed_actions": final_state["proposed_actions"],
+            "execution_result": final_state["execution_result"],
+            "search_results": final_state.get("search_results", []),
+            "created_at": datetime.utcnow(),
+        }
+        
         try:
-            AISecretaryAgent._tasks[task_id] = {
+            # Save to Supabase (直接挿入)
+            db = get_supabase_client()
+            db_data = {
                 "id": task_id,
                 "user_id": user_id,
-                "type": final_state["task_type"],
-                "status": final_state["status"],
+                "type": task_data["type"],
+                "status": task_data["status"],
                 "original_wish": wish,
-                "proposed_actions": final_state["proposed_actions"],
-                "execution_result": final_state["execution_result"],
-                "search_results": final_state.get("search_results", []),  # Phase 3A
-                "created_at": datetime.utcnow(),
+                "proposed_actions": task_data["proposed_actions"],
+                "execution_result": task_data["execution_result"],
             }
-            # デバッグ: タスクが保存されたことを確認
-            logger.info(f"Task saved: {task_id}, Total tasks: {len(AISecretaryAgent._tasks)}")
+            db.client.table("tasks").insert(db_data).execute()
+            logger.info(f"Task saved to DB: {task_id}")
         except Exception as e:
-            logger.error(f"Failed to save task {task_id}: {e}", exc_info=True)
-            raise
+            logger.error(f"Failed to save task to DB {task_id}: {e}", exc_info=True)
+            logger.warning(f"Task {task_id} will be saved to memory only")
+        
+        # Always cache in memory for fast access
+        AISecretaryAgent._tasks_cache[task_id] = task_data
         
         # Generate response message (English for API, frontend handles i18n)
         if final_state["requires_confirmation"]:
@@ -569,11 +662,12 @@ Use the available tools to execute."""
     
     async def execute_task(self, task_id: str) -> dict[str, Any]:
         """Execute confirmed task using appropriate Executor"""
-        task = AISecretaryAgent._tasks.get(task_id)
+        task = await self._get_task(task_id)
         if not task:
             raise ValueError(f"Task {task_id} not found")
         
         task["status"] = TaskStatus.EXECUTING
+        await self._update_task(task_id, status=TaskStatus.EXECUTING)
         logger.info(f"Executing task: {task_id}, type: {task.get('type')}")
         
         try:
@@ -677,13 +771,15 @@ Use the available tools to execute."""
             
             # 実行結果を保存
             if execution_result:
-                task["execution_result"] = {
+                exec_result_data = {
                     "success": execution_result.success,
                     "message": execution_result.message,
                     "confirmation_number": execution_result.confirmation_number,
                     "details": execution_result.details,
                 }
-                task["status"] = TaskStatus.COMPLETED if execution_result.success else TaskStatus.FAILED
+                new_status = TaskStatus.COMPLETED if execution_result.success else TaskStatus.FAILED
+                task["execution_result"] = exec_result_data
+                task["status"] = new_status
                 logger.info(f"Task {task_id} execution result: {execution_result.success}")
                 
                 # ★ Smart Fallback: Generate alternatives for any failed task
@@ -698,7 +794,11 @@ Use the available tools to execute."""
                     if alternatives:
                         task["execution_result"]["alternatives"] = alternatives
                         task["execution_result"]["message"] += f"\n\n📋 **代替案**:\n{alternatives}"
+                        exec_result_data = task["execution_result"]
                         logger.info(f"Task {task_id}: Generated fallback proposals")
+                
+                # Save to DB
+                await self._update_task(task_id, status=new_status, execution_result=exec_result_data)
             else:
                 # Executorが対応していないタスクタイプ
                 task["execution_result"] = {
@@ -733,37 +833,74 @@ Use the available tools to execute."""
     
     async def revise_task(self, task_id: str, revision: str) -> dict[str, Any]:
         """
-        Revise an existing task based on user feedback
+        Revise an existing task based on user feedback.
+        
+        This method:
+        1. Merges original wish with revision to create a new wish
+        2. Re-analyzes task type
+        3. Re-searches with new parameters
+        4. Generates new proposal based on fresh search results
         
         Args:
             task_id: The ID of the task to revise
-            revision: The revision request (e.g., "17時じゃなくて16時にして")
+            revision: The revision request (e.g., "鳥取市までで良いからバスか電車で探して")
         
         Returns:
-            Updated task with new proposal
+            Updated task with new proposal based on real search results
         """
-        task = AISecretaryAgent._tasks.get(task_id)
+        task = await self._get_task(task_id)
         if not task:
             raise ValueError(f"Task {task_id} not found")
         
         original_wish = task["original_wish"]
         previous_proposal = task.get("execution_result", {}).get("full_proposal", "")
         
-        # Build revision prompt with context
-        revision_prompt = f"""Revise the proposal based on the user's correction request.
+        # Step 1: Generate a merged wish that incorporates the revision
+        merge_prompt = f"""Combine the original request with the user's correction to create a single, clear request.
+
+Original request: {original_wish}
+User's correction: {revision}
+
+Output ONLY the merged request as a single sentence. No explanation needed.
+Example: "Book a bus from Osaka to Tottori City on December 30th"
+"""
+        merge_response = await self.llm.ainvoke([
+            HumanMessage(content=merge_prompt)
+        ])
+        merged_wish = merge_response.content.strip()
+        logger.info(f"Merged wish: {merged_wish}")
+        
+        # Step 2: Re-analyze task type
+        task_type = await self._analyze_wish(merged_wish)
+        task["type"] = task_type
+        task["original_wish"] = merged_wish  # Update with merged wish
+        logger.info(f"Re-analyzed task type: {task_type}")
+        
+        # Step 3: Re-search with new parameters
+        search_results = await self._search_for_proposal(merged_wish, task_type)
+        search_results_text = self._format_search_results_for_prompt(search_results)
+        task["search_results"] = search_results
+        logger.info(f"Re-search completed: {len(search_results)} results")
+        
+        # Step 4: Generate new proposal based on fresh search results
+        proposal_prompt = f"""Propose a specific action for the revised user request using Action First principle.
+
+## Revised Request (after user correction)
+{merged_wish}
 
 ## Original Request
 {original_wish}
 
-## Previous Proposal
-{previous_proposal}
-
-## User's Correction Request
+## User's Correction
 {revision}
 
+## Real Search Results (use these for your proposal)
+{search_results_text}
+
 Important rules:
-- Apply the correction request accurately
-- Keep unchanged parts from the previous proposal
+- **Use the search results above** to make specific proposals with real data
+- If search results are available, reference actual products/services/prices
+- The user corrected their request, so prioritize their new requirements
 - Never respond with questions
 - List assumptions in [NOTES]
 
@@ -773,14 +910,14 @@ Respond in this format:
 (What you will do specifically)
 
 [DETAILS]
-(Specific content: message text, booking details, items to purchase, etc.)
+(Specific content based on search results: actual options, real prices)
 
 [NOTES]
 (Assumptions made, points that can be corrected)"""
         
         messages = [
             SystemMessage(content=self.SYSTEM_PROMPT),
-            HumanMessage(content=revision_prompt),
+            HumanMessage(content=proposal_prompt),
         ]
         response = await self.llm.ainvoke(messages)
         
@@ -802,28 +939,48 @@ Respond in this format:
         task["proposed_actions"] = actions
         task["execution_result"] = {"full_proposal": content}
         task["status"] = TaskStatus.PROPOSED
+        task["search_results"] = search_results
         
-        logger.info(f"Task revised: {task_id}")
+        # Save to DB
+        await self._update_task(
+            task_id,
+            proposed_actions=actions,
+            execution_result={"full_proposal": content},
+            status=TaskStatus.PROPOSED,
+            original_wish=merged_wish,
+            type=task_type,
+        )
+        
+        logger.info(f"Task revised with re-search: {task_id}")
         
         return {
             "task_id": task_id,
-            "message": "Proposal revised based on your feedback. Please confirm to execute, or request further revisions.",
+            "message": "Proposal revised based on your feedback with fresh search results. Please confirm to execute, or request further revisions.",
             "proposed_actions": actions,
             "proposal_detail": content,
             "requires_confirmation": True,
+            "search_results": search_results,
         }
     
     async def get_task(self, task_id: str) -> Optional[TaskResponse]:
-        """Get task"""
-        task = AISecretaryAgent._tasks.get(task_id)
+        """Get task from cache or DB"""
+        task = await self._get_task(task_id)
         if not task:
             return None
+        
+        task_type = task["type"]
+        if isinstance(task_type, str):
+            task_type = TaskType(task_type) if task_type else TaskType.OTHER
+        
+        task_status = task["status"]
+        if isinstance(task_status, str):
+            task_status = TaskStatus(task_status) if task_status else TaskStatus.PENDING
         
         return TaskResponse(
             id=task["id"],
             user_id=task["user_id"],
-            type=task["type"] or TaskType.OTHER,
-            status=task["status"],
+            type=task_type or TaskType.OTHER,
+            status=task_status,
             original_wish=task["original_wish"],
             proposed_actions=task["proposed_actions"],
             execution_result=task["execution_result"],
@@ -835,24 +992,37 @@ Respond in this format:
         user_id: Optional[str] = None,
         limit: int = 10,
     ) -> list[TaskResponse]:
-        """Get task list"""
-        tasks = list(AISecretaryAgent._tasks.values())
+        """Get task list from DB"""
+        try:
+            db = get_supabase_client()
+            tasks = await db.list_tasks(user_id=user_id, limit=limit)
+        except Exception as e:
+            logger.error(f"Failed to list tasks from DB: {e}")
+            # Fallback to cache
+            tasks = list(AISecretaryAgent._tasks_cache.values())
+            if user_id:
+                tasks = [t for t in tasks if t.get("user_id") == user_id]
+            tasks = sorted(tasks, key=lambda t: t.get("created_at", datetime.min), reverse=True)[:limit]
         
-        if user_id:
-            tasks = [t for t in tasks if t["user_id"] == user_id]
-        
-        tasks = sorted(tasks, key=lambda t: t["created_at"], reverse=True)[:limit]
-        
-        return [
-            TaskResponse(
+        result = []
+        for t in tasks:
+            task_type = t.get("type", "other")
+            if isinstance(task_type, str):
+                task_type = TaskType(task_type) if task_type else TaskType.OTHER
+            
+            task_status = t.get("status", "pending")
+            if isinstance(task_status, str):
+                task_status = TaskStatus(task_status) if task_status else TaskStatus.PENDING
+            
+            result.append(TaskResponse(
                 id=t["id"],
-                user_id=t["user_id"],
-                type=t["type"] or TaskType.OTHER,
-                status=t["status"],
-                original_wish=t["original_wish"],
-                proposed_actions=t["proposed_actions"],
-                execution_result=t["execution_result"],
-                created_at=t["created_at"],
-            )
-            for t in tasks
-        ]
+                user_id=t.get("user_id"),
+                type=task_type or TaskType.OTHER,
+                status=task_status,
+                original_wish=t.get("original_wish", ""),
+                proposed_actions=t.get("proposed_actions", []),
+                execution_result=t.get("execution_result"),
+                created_at=t.get("created_at"),
+            ))
+        
+        return result
