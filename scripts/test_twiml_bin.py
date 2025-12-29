@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """Create TwiML Bin and Test Call"""
+import os
+from dotenv import load_dotenv
 import requests
 from twilio.rest import Client
 
-account_sid = 'AC8d0e1a1e20e2c3925a5077c926735290'
-auth_token = '451e4ae0bf1e7a2a6d11d7e8ade9c95c'
+load_dotenv()
+
+account_sid = os.getenv('TWILIO_ACCOUNT_SID')
+auth_token = os.getenv('TWILIO_AUTH_TOKEN')
 
 # TwiML content
 twiml_content = '''<?xml version="1.0" encoding="UTF-8"?>

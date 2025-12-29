@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """Check Twilio Verified Numbers"""
+import os
+from dotenv import load_dotenv
 from twilio.rest import Client
 
-c = Client('AC8d0e1a1e20e2c3925a5077c926735290', '451e4ae0bf1e7a2a6d11d7e8ade9c95c')
+load_dotenv()
+
+c = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
 
 print("=== Verified Caller IDs ===")
 try:

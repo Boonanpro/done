@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """Twilio TwiML Direct Test - using twiml parameter"""
+import os
+from dotenv import load_dotenv
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse
+
+load_dotenv()
 
 # Create TwiML
 response = VoiceResponse()
@@ -16,7 +20,7 @@ print(twiml_str)
 print()
 
 # Make call with TWIML parameter (not URL)
-c = Client('AC8d0e1a1e20e2c3925a5077c926735290', '451e4ae0bf1e7a2a6d11d7e8ade9c95c')
+c = Client(os.getenv('TWILIO_ACCOUNT_SID'), os.getenv('TWILIO_AUTH_TOKEN'))
 
 print("Making call with twiml parameter...")
 call = c.calls.create(
