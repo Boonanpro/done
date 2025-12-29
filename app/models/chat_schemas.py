@@ -49,12 +49,26 @@ class LoginRequest(BaseModel):
     """User login request"""
     email: EmailStr
     password: str
+    remember_me: bool = False  # ログイン状態を保持するか
 
 
 class TokenResponse(BaseModel):
-    """JWT token response"""
+    """JWT token response (Bearer token - for backwards compatibility)"""
     access_token: str
     token_type: str = "bearer"
+
+
+class TokenPairResponse(BaseModel):
+    """JWT token pair response (for cookie-based auth)"""
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds until access token expires
+
+
+class RefreshTokenRequest(BaseModel):
+    """Refresh token request (when not using cookies)"""
+    refresh_token: str
 
 
 class UserResponse(BaseModel):

@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = ""  # Falls back to APP_SECRET_KEY if empty
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 30  # 30 days
+    
+    # Cookie Settings (Frontend)
+    COOKIE_DOMAIN: str = ""  # Empty for localhost
+    COOKIE_SECURE: bool = False  # True in production (HTTPS)
+    COOKIE_SAMESITE: str = "lax"  # "strict", "lax", or "none"
     
     # Phase 10: Voice Communication - Twilio
     TWILIO_ACCOUNT_SID: str = ""

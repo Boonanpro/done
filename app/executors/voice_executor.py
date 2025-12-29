@@ -105,7 +105,7 @@ class VoiceExecutor(BaseExecutor):
         # コンテキストにタスク情報を追加
         context.update({
             "task_id": task_id,
-            "task_description": search_result.description,
+            "task_description": search_result.title,  # Use title instead of description
             "source_url": search_result.url,
         })
         

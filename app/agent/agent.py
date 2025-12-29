@@ -89,6 +89,18 @@ Always respond in this format:
 - fill_form: Fill in forms
 - click_element: Click web elements
 - search_web: Web search
+- make_phone_call: Make phone calls (AI will have the conversation on behalf of the user)
+
+## Phone Call Capability
+You can make phone calls on behalf of the user. When a user requests something that requires a phone call (e.g., "call the restaurant to make a reservation"), you can execute it. The AI will:
+1. Call the specified number
+2. Have the conversation (reservation, inquiry, etc.)
+3. Report the results back to the user
+
+Use phone calls when:
+- User explicitly requests it ("電話して", "call them", etc.)
+- Web booking is not available and phone is the only option
+- User preference is for phone contact
 
 ## Examples
 
@@ -263,6 +275,8 @@ Always respond in English."""
 Request: {wish}
 
 Task types:
+- phone: Phone call related (call someone, make reservation by phone, etc.)
+- travel: Travel/transportation related (train, bus, flight reservations)
 - email: Email related (send, search, reply, etc.)
 - line: LINE messaging related
 - purchase: Product purchase related
@@ -283,8 +297,13 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
         content = response.content.lower()
         wish_lower = state["original_wish"].lower()
         
-        # TRAVEL must be checked first (before LINE) because "Bus Lines" contains "line"
-        if "travel" in content or "train" in content or "shinkansen" in content or \
+        # PHONE must be checked first (user explicitly wants phone call)
+        phone_keywords = ["電話して", "電話で", "電話をかけて", "架電", "コールして", 
+                         "call ", "phone ", "call the", "phone the", "電話予約"]
+        if any(kw in wish_lower for kw in phone_keywords) or "phone" in content:
+            task_type = TaskType.PHONE
+        # TRAVEL must be checked before LINE because "Bus Lines" contains "line"
+        elif "travel" in content or "train" in content or "shinkansen" in content or \
              "bus" in content or "bus" in wish_lower or "highway" in wish_lower or \
              "flight" in content or "book" in wish_lower or "yonago" in wish_lower or \
              "umeda" in wish_lower or "willer" in content or "reservation" in wish_lower:
@@ -324,7 +343,29 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
         
         try:
             # タスクタイプに応じて検索ツールを選択
-            if task_type == TaskType.TRAVEL:
+            if task_type == TaskType.PHONE:
+                # 電話関連: 電話番号と目的を抽出
+                from app.executors.voice_executor import extract_phone_number
+                
+                phone_number = extract_phone_number(wish)
+                
+                # AIで電話の目的と相手を抽出
+                phone_context = await self._extract_phone_context(wish)
+                
+                search_results = [{
+                    "id": str(uuid.uuid4()),
+                    "category": "phone",
+                    "title": phone_context.get("target", "電話をかける"),
+                    "description": wish,
+                    "details": {
+                        "phone_number": phone_number,
+                        "purpose": phone_context.get("purpose", "inquiry"),
+                        "target_name": phone_context.get("target", ""),
+                        "context": phone_context,
+                    }
+                }]
+                
+            elif task_type == TaskType.TRAVEL:
                 # 交通関連: 駅名や日時を抽出して検索
                 # TODO: より高度な抽出ロジック
                 search_results = await search_train.ainvoke({
@@ -405,7 +446,7 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
 {wish}
 
 ## Task Type
-{task_type.value if task_type else "unknown"}
+{task_type.value if hasattr(task_type, 'value') else (task_type or "unknown")}
 
 ## What Failed
 {failed_action}
@@ -418,7 +459,9 @@ Suggest 2-3 alternative solutions, ranked by recommendation.
 Consider:
 - For travel: distance, time, cost, convenience (e.g., short distance → taxi/train, long distance → shinkansen/flight)
 - For purchases: alternative stores, similar products, different delivery options
+- For reservations: phone call as an alternative (user can say "電話で予約して" to have AI call)
 - For other tasks: creative alternatives to achieve the same goal
+- Phone calls are available: AI can make calls on behalf of user for reservations/inquiries
 
 ## Response Format (Japanese)
 🥇 **おすすめ**: [Best alternative with brief reason]
@@ -439,16 +482,66 @@ Keep each option to 1-2 lines. Be specific and actionable."""
             # Simple fallback if LLM fails
             if task_type == TaskType.TRAVEL:
                 return """🥇 **おすすめ**: Yahoo!乗換案内やGoogle Mapsで他のルートを検索
-🥈 **次点**: 旅行代理店に相談（JTB、HISなど）
+🥈 **次点**: 電話で直接予約（「電話で予約して」と言ってください）
 🥉 **その他**: 日程を変更して再検索"""
             elif task_type == TaskType.PURCHASE:
                 return """🥇 **おすすめ**: 別のECサイト（楽天、Yahoo!ショッピング）で検索
 🥈 **次点**: 類似商品を検索
 🥉 **その他**: 実店舗での購入を検討"""
+            elif task_type == TaskType.PHONE:
+                return """🥇 **おすすめ**: 電話番号を確認して再度お試しください
+🥈 **次点**: Webサイトから予約・問い合わせ
+🥉 **その他**: メールでお問い合わせ"""
             else:
                 return """🥇 **おすすめ**: 別のアプローチを試す
-🥈 **次点**: 専門家に相談
+🥈 **次点**: 電話でお問い合わせ（「電話して」と言ってください）
 🥉 **その他**: 目的を見直して再検討"""
+    
+    async def _extract_phone_context(self, wish: str) -> dict:
+        """
+        電話タスクのコンテキストを抽出
+        
+        Args:
+            wish: ユーザーの願望
+            
+        Returns:
+            電話の目的、相手、詳細情報
+        """
+        try:
+            extract_prompt = f"""Analyze the following request and extract phone call information.
+
+Request: {wish}
+
+Extract:
+1. target: Who to call (restaurant name, company, clinic, etc.)
+2. purpose: Purpose of call (reservation, inquiry, cancellation, confirmation, other)
+3. details: Any specific details (date, time, number of people, etc.)
+
+Respond in JSON format only:
+{{"target": "...", "purpose": "reservation|inquiry|cancellation|confirmation|other", "details": {{...}}}}"""
+
+            response = await self.llm.ainvoke([
+                SystemMessage(content="You are an assistant that extracts phone call information. Respond only in valid JSON."),
+                HumanMessage(content=extract_prompt)
+            ])
+            
+            import json
+            content = response.content.strip()
+            # JSON部分を抽出
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+            
+            return json.loads(content)
+            
+        except Exception as e:
+            logger.warning(f"Failed to extract phone context: {e}")
+            return {
+                "target": "",
+                "purpose": "inquiry",
+                "details": {}
+            }
     
     def _format_search_results_for_prompt(self, search_results: list[dict]) -> str:
         """検索結果をプロンプト用にフォーマット"""
@@ -680,16 +773,45 @@ Use the available tools to execute."""
             from app.executors.base import ExecutorFactory
             
             execution_result = None
+            original_wish = task.get("original_wish", "")
             
-            if task_type == TaskType.TRAVEL:
+            if task_type == TaskType.PHONE:
+                # 電話関連: VoiceExecutorを使用
+                executor = ExecutorFactory.get_executor("phone")
+                
+                # 検索結果から電話情報を取得
+                phone_details = {}
+                if search_results:
+                    first_result = search_results[0]
+                    phone_details = first_result.get("details", {})
+                
+                search_result_obj = SearchResult(
+                    id=task_id,
+                    category="phone",
+                    title=phone_details.get("target_name") or original_wish,
+                    details={
+                        **phone_details,
+                        "user_id": task.get("user_id") or "default-user",
+                        "raw_wish": original_wish,
+                    },
+                )
+                
+                execution_result = await executor.execute(
+                    task_id=task_id,
+                    user_id=task.get("user_id") or "default-user",
+                    search_result=search_result_obj,
+                    credentials=None,
+                )
+                
+            elif task_type == TaskType.TRAVEL:
                 # 交通関連: バス/電車のExecutorを使用
                 # 願望からカテゴリを判定（検索結果よりも優先）
-                original_wish = task.get("original_wish", "").lower()
+                original_wish_lower = original_wish.lower()
                 
-                if "bus" in original_wish or "バス" in original_wish:
+                if "bus" in original_wish_lower or "バス" in original_wish_lower:
                     category = "bus"
                     service_name = "willer"
-                elif "train" in original_wish or "新幹線" in original_wish or "電車" in original_wish:
+                elif "train" in original_wish_lower or "新幹線" in original_wish_lower or "電車" in original_wish_lower:
                     category = "train"
                     service_name = "ex_reservation"
                 else:
@@ -713,7 +835,6 @@ Use the available tools to execute."""
                 executor = ExecutorFactory.get_executor(category, service_name)
                 
                 # 最初の検索結果を使用（または願望から詳細を抽出）
-                original_wish = task["original_wish"]
                 if search_results:
                     first_result = search_results[0]
                     # 元のwishをdetailsに追加して渡す

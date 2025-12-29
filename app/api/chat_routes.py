@@ -1,12 +1,15 @@
 """
 Chat API Routes for Done Chat
+Supports both Bearer token and HttpOnly Cookie authentication
 """
-from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Response, Request, Cookie
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 from datetime import datetime
 import re
 import json
+
+from app.config import settings
 
 
 def parse_datetime(dt_str: str) -> datetime:
@@ -26,11 +29,16 @@ def parse_datetime(dt_str: str) -> datetime:
             dt_str = f"{base_parts[0]}.{microsec}{tz or ''}"
     return datetime.fromisoformat(dt_str)
 
-from app.services.auth_service import decode_access_token, create_access_token, TokenData
+from app.services.auth_service import (
+    decode_access_token, decode_refresh_token, 
+    create_access_token, create_token_pair, refresh_tokens,
+    TokenData
+)
 from app.services.chat_service import ChatService
 from app.models.chat_schemas import (
     # Auth
-    RegisterRequest, LoginRequest, TokenResponse, UserResponse, UserUpdateRequest,
+    RegisterRequest, LoginRequest, TokenResponse, TokenPairResponse, RefreshTokenRequest,
+    UserResponse, UserUpdateRequest,
     # Invite
     InviteCreateRequest, InviteResponse, InviteInfoResponse, InviteAcceptResponse,
     # Friends
@@ -48,6 +56,50 @@ from app.models.chat_schemas import (
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 security = HTTPBearer(auto_error=False)
+
+# Cookie names
+ACCESS_TOKEN_COOKIE = "done_access_token"
+REFRESH_TOKEN_COOKIE = "done_refresh_token"
+
+
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str, remember_me: bool = False):
+    """Set HttpOnly cookies for authentication"""
+    # Access token cookie (shorter lived)
+    response.set_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        value=access_token,
+        httponly=True,
+        secure=settings.COOKIE_SECURE,
+        samesite=settings.COOKIE_SAMESITE,
+        domain=settings.COOKIE_DOMAIN or None,
+        max_age=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+    
+    # Refresh token cookie (longer lived)
+    refresh_max_age = settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60 if remember_me else 24 * 60 * 60
+    response.set_cookie(
+        key=REFRESH_TOKEN_COOKIE,
+        value=refresh_token,
+        httponly=True,
+        secure=settings.COOKIE_SECURE,
+        samesite=settings.COOKIE_SAMESITE,
+        domain=settings.COOKIE_DOMAIN or None,
+        max_age=refresh_max_age,
+        path="/api/v1/chat/refresh",  # Only sent to refresh endpoint
+    )
+
+
+def clear_auth_cookies(response: Response):
+    """Clear authentication cookies"""
+    response.delete_cookie(
+        key=ACCESS_TOKEN_COOKIE,
+        domain=settings.COOKIE_DOMAIN or None,
+    )
+    response.delete_cookie(
+        key=REFRESH_TOKEN_COOKIE,
+        domain=settings.COOKIE_DOMAIN or None,
+        path="/api/v1/chat/refresh",
+    )
 
 # Base URL for invite links (should be configured in settings)
 INVITE_BASE_URL = "https://done.app/i/"
