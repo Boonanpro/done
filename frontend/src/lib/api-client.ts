@@ -107,6 +107,13 @@ export interface SessionActivateResponse {
   session_id: string;
 }
 
+export interface SessionSwitchResponse {
+  success: boolean;
+  session_id: string;
+  room: DanRoomResponse;
+  messages: MessagesListResponse;
+}
+
 // ==================== API Error Class ====================
 
 export class ApiError extends Error {
@@ -266,6 +273,24 @@ export const api = {
         `/chat/dan/sessions/${sessionId}/activate`,
         {
           method: 'POST',
+        }
+      ),
+
+    // Optimized session switch - returns room and messages in one call
+    switchSession: (sessionId: string, limit: number = 50) =>
+      request<SessionSwitchResponse>(
+        `/chat/dan/sessions/${sessionId}/switch?limit=${limit}`,
+        {
+          method: 'POST',
+        }
+      ),
+
+    // Delete session
+    deleteSession: (sessionId: string) =>
+      request<{ message: string; new_active_session_id: string | null }>(
+        `/chat/dan/sessions/${sessionId}`,
+        {
+          method: 'DELETE',
         }
       ),
   },

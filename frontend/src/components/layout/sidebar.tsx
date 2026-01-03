@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Loader2,
   MessageCircle,
+  X,
 } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -32,7 +33,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useAuth } from '@/hooks/use-auth';
-import { api, SessionResponse } from '@/lib/api-client';
+import { api, SessionResponse, ApiError } from '@/lib/api-client';
 
 interface SidebarProps {
   className?: string;
@@ -100,18 +101,55 @@ export function Sidebar({ className }: SidebarProps) {
     },
   });
 
-  // Activate session
-  const activateSessionMutation = useMutation({
-    mutationFn: (sessionId: string) => api.dan.activateSession(sessionId),
-    onSuccess: () => {
-      // Refresh messages for the new active session
-      queryClient.invalidateQueries({ queryKey: ['dan-sessions'] });
-      queryClient.invalidateQueries({ queryKey: ['dan-messages'] });
-      queryClient.invalidateQueries({ queryKey: ['dan-room'] });
+  // Switch session (optimized - returns all data in one call)
+  const switchSessionMutation = useMutation({
+    mutationFn: (sessionId: string) => api.dan.switchSession(sessionId, 50),
+    onSuccess: (data) => {
+      // Directly update cache with returned data - no need for separate API calls
+      queryClient.setQueryData(['dan-room'], data.room);
+      queryClient.setQueryData(['dan-messages'], data.messages);
+      // Update sessions list to reflect new current session
+      queryClient.setQueryData(['dan-sessions'], (old: typeof sessionsData) => ({
+        sessions: old?.sessions || [],
+        current_session_id: data.session_id,
+      }));
       router.push('/chat');
     },
     onError: () => {
       toast.error('セッションの切り替えに失敗しました');
+    },
+  });
+
+  // Delete session
+  const deleteSessionMutation = useMutation({
+    mutationFn: (sessionId: string) => api.dan.deleteSession(sessionId),
+    onSuccess: (data, sessionId) => {
+      const wasActive = sessionId === sessionsData?.current_session_id;
+      const newActiveId = data.new_active_session_id;
+      
+      // Remove from cache and update current session if needed
+      queryClient.setQueryData(['dan-sessions'], (old: typeof sessionsData) => ({
+        sessions: old?.sessions?.filter((s) => s.id !== sessionId) || [],
+        current_session_id: newActiveId || old?.current_session_id,
+      }));
+      
+      // If the deleted session was active, switch to new session
+      if (wasActive && newActiveId) {
+        // Fetch new session data
+        api.dan.switchSession(newActiveId, 50).then((switchData) => {
+          queryClient.setQueryData(['dan-room'], switchData.room);
+          queryClient.setQueryData(['dan-messages'], switchData.messages);
+        });
+      }
+      
+      toast.success('会話を削除しました');
+    },
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 400) {
+        toast.error('会話の削除に失敗しました');
+      } else {
+        toast.error('会話の削除に失敗しました');
+      }
     },
   });
 
@@ -125,8 +163,13 @@ export function Sidebar({ className }: SidebarProps) {
       router.push('/chat');
       return;
     }
-    // Otherwise, activate the session
-    activateSessionMutation.mutate(session.id);
+    // Otherwise, switch to the session (optimized)
+    switchSessionMutation.mutate(session.id);
+  };
+
+  const handleDeleteSession = (e: React.MouseEvent, sessionId: string) => {
+    e.stopPropagation(); // Prevent session click
+    deleteSessionMutation.mutate(sessionId);
   };
 
   const handleLogout = async () => {
@@ -272,39 +315,55 @@ export function Sidebar({ className }: SidebarProps) {
             ) : (
               filteredSessions.map((session) => {
                 const isActive = session.id === sessionsData?.current_session_id;
-                const isActivating = activateSessionMutation.isPending && 
-                  activateSessionMutation.variables === session.id;
+                const isSwitching = switchSessionMutation.isPending && 
+                  switchSessionMutation.variables === session.id;
+                const isDeleting = deleteSessionMutation.isPending &&
+                  deleteSessionMutation.variables === session.id;
 
                 return (
                   <Tooltip key={session.id}>
                     <TooltipTrigger asChild>
-                      <motion.button
+                      <motion.div
                         whileHover={{ scale: 1.01 }}
                         whileTap={{ scale: 0.99 }}
-                        onClick={() => handleSessionClick(session)}
-                        disabled={isActivating}
                         className={cn(
-                          'w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left',
+                          'group w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors text-left cursor-pointer',
                           isActive
                             ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                             : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
                           isCollapsed && 'justify-center px-0'
                         )}
+                        onClick={() => !isDeleting && handleSessionClick(session)}
                       >
-                        {isActivating ? (
+                        {isSwitching ? (
                           <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                         ) : (
                           <MessageCircle className="h-4 w-4 shrink-0" />
                         )}
                         {!isCollapsed && (
-                          <div className="flex-1 min-w-0">
-                            <p className="truncate font-medium">{session.title}</p>
-                            <p className="text-xs text-muted-foreground truncate">
-                              {formatRelativeTime(session.last_message_at)}
-                            </p>
-                          </div>
+                          <>
+                            <div className="flex-1 min-w-0">
+                              <p className="truncate font-medium">{session.title}</p>
+                              <p className="text-xs text-muted-foreground truncate">
+                                {formatRelativeTime(session.last_message_at)}
+                              </p>
+                            </div>
+                            {/* Delete button */}
+                            <button
+                              onClick={(e) => handleDeleteSession(e, session.id)}
+                              disabled={isDeleting}
+                              className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-destructive/20 hover:text-destructive transition-all"
+                              title="会話を削除"
+                            >
+                              {isDeleting ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <X className="h-3.5 w-3.5" />
+                              )}
+                            </button>
+                          </>
                         )}
-                      </motion.button>
+                      </motion.div>
                     </TooltipTrigger>
                     {isCollapsed && (
                       <TooltipContent side="right">

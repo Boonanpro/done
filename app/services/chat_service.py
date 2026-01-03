@@ -808,7 +808,7 @@ class ChatService:
     
     async def get_dan_sessions(self, user_id: str) -> dict:
         """
-        ユーザーのダンセッション一覧を取得
+        ユーザーのダンセッション一覧を取得（最適化版）
         
         Args:
             user_id: ユーザーID
@@ -820,49 +820,78 @@ class ChatService:
         user = self.supabase.table("users").select("dan_room_id").eq("id", user_id).execute()
         current_session_id = user.data[0].get("dan_room_id") if user.data else None
         
-        # ユーザーのダンセッション一覧を取得
+        # ユーザーのダンセッション一覧を取得（JOINで一括取得）
         members = self.supabase.table("chat_room_members").select(
             "room_id, chat_rooms!inner(id, name, type, created_at)"
         ).eq("user_id", user_id).execute()
         
-        sessions = []
-        for member in members.data:
+        # danタイプのルームIDを収集
+        dan_room_ids = []
+        room_info_map = {}
+        for member in members.data or []:
             room = member.get("chat_rooms", {})
-            if room.get("type") != "dan":
-                continue
-            
-            room_id = room["id"]
-            
-            # 最新メッセージと件数を取得
-            messages = self.supabase.table("chat_messages").select(
-                "content, created_at"
-            ).eq("room_id", room_id).order(
-                "created_at", desc=True
-            ).limit(1).execute()
-            
-            msg_count = self.supabase.table("chat_messages").select(
-                "id", count="exact"
-            ).eq("room_id", room_id).execute()
+            if room.get("type") == "dan":
+                room_id = room["id"]
+                dan_room_ids.append(room_id)
+                room_info_map[room_id] = {
+                    "id": room_id,
+                    "title": room.get("name", "新しい会話"),
+                    "created_at": room["created_at"],
+                }
+        
+        if not dan_room_ids:
+            return {
+                "sessions": [],
+                "current_session_id": current_session_id,
+            }
+        
+        # 全ルームのメッセージ件数を一括取得（RPCまたはグループ化クエリ）
+        # Supabaseでは直接GROUP BYができないため、個別に取得するがキャッシュを活用
+        # ここでは最適化として、最新のメッセージのみを取得し件数は概算
+        
+        # 全ルームの最新メッセージを一括取得
+        all_messages = self.supabase.table("chat_messages").select(
+            "room_id, content, created_at"
+        ).in_("room_id", dan_room_ids).order(
+            "created_at", desc=True
+        ).execute()
+        
+        # ルームごとに整理
+        room_messages = {}
+        room_msg_counts = {}
+        for msg in all_messages.data or []:
+            room_id = msg["room_id"]
+            if room_id not in room_messages:
+                room_messages[room_id] = msg
+            room_msg_counts[room_id] = room_msg_counts.get(room_id, 0) + 1
+        
+        sessions = []
+        for room_id in dan_room_ids:
+            room = room_info_map[room_id]
+            msg = room_messages.get(room_id)
             
             last_message = None
             last_message_at = None
-            if messages.data:
-                last_message = messages.data[0]["content"][:50]
-                if len(messages.data[0]["content"]) > 50:
+            if msg:
+                last_message = msg["content"][:50]
+                if len(msg["content"]) > 50:
                     last_message += "..."
-                last_message_at = messages.data[0]["created_at"]
+                last_message_at = msg["created_at"]
             
             sessions.append({
                 "id": room_id,
-                "title": room.get("name", "新しい会話"),
+                "title": room["title"],
                 "last_message": last_message,
                 "last_message_at": last_message_at,
-                "message_count": msg_count.count if msg_count.count else 0,
+                "message_count": room_msg_counts.get(room_id, 0),
                 "created_at": room["created_at"],
             })
         
-        # 作成日時で降順ソート
-        sessions.sort(key=lambda x: x["created_at"], reverse=True)
+        # 最終メッセージ日時で降順ソート（メッセージがない場合は作成日時）
+        sessions.sort(
+            key=lambda x: x["last_message_at"] or x["created_at"], 
+            reverse=True
+        )
         
         return {
             "sessions": sessions,
@@ -990,7 +1019,7 @@ class ChatService:
             session_id: セッションID
             
         Returns:
-            成功フラグ
+            成功フラグと新しいアクティブセッションID（あれば）
         """
         # セッションの所有を確認
         member = self.supabase.table("chat_room_members").select(
@@ -1002,8 +1031,38 @@ class ChatService:
         
         # 現在アクティブなセッションかチェック
         user = self.supabase.table("users").select("dan_room_id").eq("id", user_id).execute()
-        if user.data and user.data[0].get("dan_room_id") == session_id:
-            raise ValueError("Cannot delete active session")
+        is_active_session = user.data and user.data[0].get("dan_room_id") == session_id
+        
+        new_active_session_id = None
+        
+        # アクティブなセッションを削除する場合、別のセッションに切り替える
+        if is_active_session:
+            # 全セッションを取得（最終メッセージ日時順）
+            sessions_data = await self.get_dan_sessions(user_id)
+            sessions = sessions_data["sessions"]
+            
+            # 削除対象のセッションのインデックスを見つける
+            current_index = -1
+            for i, s in enumerate(sessions):
+                if s["id"] == session_id:
+                    current_index = i
+                    break
+            
+            if current_index != -1 and len(sessions) > 1:
+                # 1つ上のセッション（インデックスが小さい方）を優先、なければ1つ下
+                if current_index > 0:
+                    new_active_session_id = sessions[current_index - 1]["id"]
+                else:
+                    new_active_session_id = sessions[current_index + 1]["id"]
+                
+                # 新しいセッションをアクティブに設定
+                self.supabase.table("users").update(
+                    {"dan_room_id": new_active_session_id}
+                ).eq("id", user_id).execute()
+            elif len(sessions) <= 1:
+                # 最後のセッションを削除する場合、新しいセッションを作成
+                new_session = await self.create_dan_session(user_id, "新しい会話")
+                new_active_session_id = new_session["id"]
         
         # メッセージを削除
         self.supabase.table("chat_messages").delete().eq("room_id", session_id).execute()
@@ -1017,7 +1076,10 @@ class ChatService:
         # ルームを削除
         self.supabase.table("chat_rooms").delete().eq("id", session_id).execute()
         
-        return {"success": True}
+        return {
+            "success": True,
+            "new_active_session_id": new_active_session_id,
+        }
     
     # ==================== Proposals (Phase 2G) ====================
     

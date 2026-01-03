@@ -25,6 +25,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 「新しい会話」ボタンで新規セッション作成
   - 過去のセッションをクリックで切り替え
 
+### Performance (チャット最適化)
+- **セッション切り替え高速化** - 3回のAPIコールを1回に統合
+  - `POST /api/v1/chat/dan/sessions/{id}/switch` - セッション切り替え＋データ一括取得
+  - N+1クエリ問題を解消（`get_dan_sessions`の最適化）
+- **フロントエンドキャッシュ最適化** - invalidateQueriesからsetQueryDataへ変更
+
+### Added (チャット履歴削除機能)
+- **サイドバー** - チャット履歴の×ボタン削除機能
+  - ホバー時に×ボタンを表示
+  - アクティブなセッションも削除可能（1つ上/下に自動切り替え）
+  - 最後のセッション削除時は新規セッションを自動作成
+
 ### Previously Added
 - **ドキュメント更新ルール** - ADR/CHANGELOG更新タイミングを`.cursor/rules`に明記
   - Commits: `65a168d`, `4f441a7`

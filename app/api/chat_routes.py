@@ -745,6 +745,51 @@ async def activate_dan_session(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ==================== Optimized Session Switch Route ====================
+
+class SessionSwitchResponse(SessionActivateResponse):
+    """セッション切り替えレスポンス（メッセージ含む）"""
+    room: Optional[DanRoomResponse] = None
+    messages: Optional[MessagesListResponse] = None
+
+
+@router.post("/dan/sessions/{session_id}/switch")
+async def switch_dan_session(
+    session_id: str,
+    limit: int = 50,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """
+    セッションを切り替え、ルーム情報とメッセージを一度に取得（最適化版）
+    
+    - セッションをアクティブに設定
+    - ルーム情報を取得
+    - メッセージを取得
+    - 1回のAPIコールで全データを返す
+    """
+    try:
+        # セッションをアクティブ化
+        result = await service.activate_dan_session(current_user.user_id, session_id)
+        
+        # ルーム情報を取得
+        dan_room = await service.get_or_create_dan_room(current_user.user_id)
+        
+        # メッセージを取得
+        messages = await service.get_messages(dan_room["id"], current_user.user_id, limit=limit)
+        
+        return {
+            "success": result["success"],
+            "session_id": result["session_id"],
+            "room": dan_room,
+            "messages": {"messages": [MessageResponse(**m) for m in messages]},
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.patch("/dan/sessions/{session_id}", response_model=SessionResponse)
 async def update_dan_session(
     session_id: str,
@@ -785,15 +830,16 @@ async def delete_dan_session(
     """
     セッションを削除
     
-    - 現在アクティブなセッションは削除不可
+    - アクティブなセッションを削除した場合、別のセッションに自動切り替え
     - 関連するメッセージも全て削除される
     """
     try:
-        await service.delete_dan_session(current_user.user_id, session_id)
-        return {"message": "Session deleted successfully"}
+        result = await service.delete_dan_session(current_user.user_id, session_id)
+        return {
+            "message": "Session deleted successfully",
+            "new_active_session_id": result.get("new_active_session_id"),
+        }
     except ValueError as e:
-        if "active" in str(e).lower():
-            raise HTTPException(status_code=400, detail=str(e))
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
