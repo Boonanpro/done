@@ -62,6 +62,15 @@ export function useAuth() {
         // Set token immediately for subsequent requests
         setImmediateToken(newToken);
         setToken(newToken);
+        // Also write directly to localStorage for immediate availability
+        const currentState = localStorage.getItem('done-auth');
+        if (currentState) {
+          const parsed = JSON.parse(currentState);
+          parsed.state.token = newToken;
+          localStorage.setItem('done-auth', JSON.stringify(parsed));
+        } else {
+          localStorage.setItem('done-auth', JSON.stringify({ state: { token: newToken } }));
+        }
         const userData = await api.auth.me();
         setUser(userData);
         router.push('/chat');
@@ -89,6 +98,15 @@ export function useAuth() {
         // Set token immediately for subsequent requests
         setImmediateToken(newToken);
         setToken(newToken);
+        // Also write directly to localStorage for immediate availability
+        const currentState = localStorage.getItem('done-auth');
+        if (currentState) {
+          const parsed = JSON.parse(currentState);
+          parsed.state.token = newToken;
+          localStorage.setItem('done-auth', JSON.stringify(parsed));
+        } else {
+          localStorage.setItem('done-auth', JSON.stringify({ state: { token: newToken } }));
+        }
         const userData = await api.auth.me();
         setUser(userData);
         router.push('/chat');
