@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -35,6 +35,18 @@ import {
 import { useAuth } from '@/hooks/use-auth';
 import { api, SessionResponse, ApiError } from '@/lib/api-client';
 
+// Hook to safely check localStorage after hydration
+function useHasToken() {
+  return useSyncExternalStore(
+    // Subscribe function - localStorage doesn't have events, so we just return a no-op
+    () => () => {},
+    // Client snapshot
+    () => !!localStorage.getItem('done-token'),
+    // Server snapshot - always false on server
+    () => false
+  );
+}
+
 interface SidebarProps {
   className?: string;
 }
@@ -61,15 +73,8 @@ export function Sidebar({ className }: SidebarProps) {
   const { user, logout, isLoggingOut } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [hasMounted, setHasMounted] = useState(false);
-
-  // Wait for client-side mount to avoid hydration mismatch
-  useEffect(() => {
-    setHasMounted(true);
-  }, []);
-
-  // Check if token exists in localStorage (only after mount)
-  const hasToken = hasMounted && !!localStorage.getItem('done-token');
+  // Check if token exists in localStorage (safe for SSR)
+  const hasToken = useHasToken();
 
   // Fetch sessions
   const { data: sessionsData, isLoading: isLoadingSessions } = useQuery({
@@ -87,7 +92,7 @@ export function Sidebar({ className }: SidebarProps) {
   // Create new session
   const createSessionMutation = useMutation({
     mutationFn: api.dan.createSession,
-    onSuccess: (newSession) => {
+    onSuccess: () => {
       // Invalidate queries to refresh the session list
       queryClient.invalidateQueries({ queryKey: ['dan-sessions'] });
       queryClient.invalidateQueries({ queryKey: ['dan-messages'] });

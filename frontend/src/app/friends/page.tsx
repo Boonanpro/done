@@ -156,9 +156,9 @@ export default function FriendsPage() {
 
   const handleSelectFriend = (friendId: string) => {
     setSelectedFriendId(friendId);
-    // Find the room for this friend (direct room)
-    // Try to find room from rooms list where type is 'direct'
-    const room = rooms.find((r) => r.type === 'direct');
+    // Find the room for this friend (dm room)
+    // 'dm' is the type for direct messages between two users
+    const room = rooms.find((r) => r.type === 'dm');
     if (room) {
       setSelectedRoomId(room.id);
     }

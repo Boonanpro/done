@@ -114,6 +114,50 @@ export interface SessionSwitchResponse {
   messages: MessagesListResponse;
 }
 
+// Proposal types
+export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'expired';
+export type ProposalType = 'reply' | 'action' | 'schedule' | 'reminder';
+
+export interface ProposalResponse {
+  id: string;
+  user_id: string;
+  type: ProposalType;
+  status: ProposalStatus;
+  title: string;
+  content: string;
+  source_room_id?: string | null;
+  source_message_id?: string | null;
+  action_data?: Record<string, unknown> | null;
+  expires_at?: string | null;
+  responded_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProposalsListResponse {
+  proposals: ProposalResponse[];
+  total_count: number;
+  pending_count: number;
+}
+
+// AI Settings types
+export type AIMode = 'off' | 'assist' | 'auto';
+
+export interface AISettingsResponse {
+  room_id: string;
+  enabled: boolean;
+  mode: AIMode;
+  personality?: string | null;
+  auto_reply_delay_ms: number;
+}
+
+export interface AISettingsUpdateRequest {
+  enabled?: boolean | null;
+  mode?: AIMode | null;
+  personality?: string | null;
+  auto_reply_delay_ms?: number | null;
+}
+
 // ==================== API Error Class ====================
 
 export class ApiError extends Error {
@@ -337,9 +381,19 @@ export const api = {
           method: 'POST',
         }
       ),
+
+    // AI Settings
+    getAiSettings: (roomId: string) =>
+      request<AISettingsResponse>(`/chat/rooms/${roomId}/ai`),
+
+    updateAiSettings: (roomId: string, data: AISettingsUpdateRequest) =>
+      request<AISettingsResponse>(`/chat/rooms/${roomId}/ai`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
   },
 
-  // Invite endpoints
+  // Invite endpoints (also available as 'invites' for compatibility)
   invite: {
     create: (params?: { max_uses?: number; expires_in_hours?: number }) =>
       request<{
@@ -372,6 +426,49 @@ export const api = {
       }>(`/chat/invite/${code}/accept`, {
         method: 'POST',
       }),
+  },
+
+  // Proposals endpoints
+  proposals: {
+    list: (params?: { status?: ProposalStatus; limit?: number }) => {
+      const query = new URLSearchParams();
+      if (params?.status) query.set('status', params.status);
+      if (params?.limit) query.set('limit', params.limit.toString());
+      const queryString = query.toString();
+      return request<ProposalsListResponse>(
+        `/chat/proposals${queryString ? `?${queryString}` : ''}`
+      );
+    },
+
+    get: (proposalId: string) =>
+      request<ProposalResponse>(`/chat/proposals/${proposalId}`),
+
+    respond: (
+      proposalId: string,
+      action: 'approve' | 'reject' | 'edit',
+      editedContent?: string
+    ) =>
+      request<ProposalResponse>(`/chat/proposals/${proposalId}/respond`, {
+        method: 'POST',
+        body: JSON.stringify({
+          action,
+          edited_content: editedContent,
+        }),
+      }),
+  },
+
+  // User endpoints
+  user: {
+    update: (data: { display_name?: string; avatar_url?: string }) =>
+      request<UserResponse>('/chat/me', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+  },
+
+  // Alias: invites points to invite for compatibility
+  get invites() {
+    return this.invite;
   },
 };
 
