@@ -45,6 +45,18 @@ export interface MessagesListResponse {
   messages: MessageResponse[];
 }
 
+export interface ProcessStep {
+  id: string;
+  label: string;
+  status: 'pending' | 'running' | 'completed' | 'error';
+}
+
+export interface DanMessageResponse {
+  user_message: MessageResponse;
+  ai_message: MessageResponse;
+  process_steps: ProcessStep[];
+}
+
 export interface DanRoomResponse {
   id: string;
   user_id: string;
@@ -354,7 +366,7 @@ export const api = {
     },
 
     sendMessage: (content: string) =>
-      request<MessageResponse>('/chat/dan/messages', {
+      request<DanMessageResponse>('/chat/dan/messages', {
         method: 'POST',
         body: JSON.stringify({ content }),
       }),

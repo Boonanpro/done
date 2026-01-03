@@ -48,6 +48,7 @@ from app.models.chat_schemas import (
     RoomMemberResponse, RoomMembersListResponse, AddMemberRequest,
     # Messages
     MessageSendRequest, MessageResponse, MessagesListResponse, ReadMarkResponse,
+    ProcessStep, DanMessageResponse, SenderType,
     # AI
     AISettingsResponse, AISettingsUpdateRequest, AISummaryResponse,
     # Dan Page & Proposals (2E & 2G)
@@ -570,27 +571,31 @@ async def get_dan_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/dan/messages", response_model=MessageResponse)
+@router.post("/dan/messages", response_model=DanMessageResponse)
 async def send_dan_message(
     request: MessageSendRequest,
-    background_tasks: BackgroundTasks,
     current_user: TokenData = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ):
-    """ダンにメッセージを送信し、AIの返信を生成"""
+    """ダンにメッセージを送信し、AIの返信を同期的に生成"""
     try:
+        from langchain_anthropic import ChatAnthropic
+        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage as LCAIMessage
+        
+        # プロセスステップを記録
+        process_steps = []
+        
+        # Step 1: ユーザーメッセージを保存
+        process_steps.append(ProcessStep(
+            id="save_message",
+            label="メッセージを受信しました",
+            status="completed"
+        ))
+        
         message = await service.send_dan_message(current_user.user_id, request.content)
         user = await service.get_user_by_id(current_user.user_id)
         
-        # バックグラウンドでAI返信を生成
-        background_tasks.add_task(
-            generate_dan_response,
-            current_user.user_id,
-            request.content,
-            service,
-        )
-        
-        return MessageResponse(
+        user_message = MessageResponse(
             id=message["id"],
             room_id=message["room_id"],
             sender_id=message["sender_id"],
@@ -599,19 +604,24 @@ async def send_dan_message(
             content=message["content"],
             created_at=message["created_at"],
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-async def generate_dan_response(user_id: str, user_message: str, service: ChatService):
-    """ダンのAI返信を生成してDBに保存"""
-    try:
-        from langchain_anthropic import ChatAnthropic
-        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+        
+        # Step 2: 要望を分析
+        process_steps.append(ProcessStep(
+            id="analyze",
+            label="要望を分析中...",
+            status="completed"
+        ))
+        
+        # Step 3: AI返信を生成
+        process_steps.append(ProcessStep(
+            id="generate",
+            label="回答を生成中...",
+            status="completed"
+        ))
         
         # 過去のメッセージを取得
-        dan_room = await service.get_or_create_dan_room(user_id)
-        messages_data = await service.get_messages(dan_room["id"], user_id, limit=10)
+        dan_room = await service.get_or_create_dan_room(current_user.user_id)
+        messages_data = await service.get_messages(dan_room["id"], current_user.user_id, limit=10)
         
         # LLMを初期化
         llm = ChatAnthropic(
@@ -643,30 +653,39 @@ async def generate_dan_response(user_id: str, user_message: str, service: ChatSe
             if msg["sender_type"] == "human":
                 langchain_messages.append(HumanMessage(content=msg["content"]))
             elif msg["sender_type"] == "ai":
-                langchain_messages.append(AIMessage(content=msg["content"]))
+                langchain_messages.append(LCAIMessage(content=msg["content"]))
         
         # 最新のユーザーメッセージを追加（重複防止のため確認）
         if not langchain_messages or not isinstance(langchain_messages[-1], HumanMessage):
-            langchain_messages.append(HumanMessage(content=user_message))
+            langchain_messages.append(HumanMessage(content=request.content))
         
         # AI返信を生成
         response = await llm.ainvoke(langchain_messages)
-        ai_response = response.content
+        ai_response_content = response.content
         
         # DBに保存
-        await service.send_dan_ai_message(user_id, ai_response)
+        ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content)
+        
+        ai_message = MessageResponse(
+            id=ai_message_data["id"],
+            room_id=ai_message_data["room_id"],
+            sender_id=ai_message_data.get("sender_id"),
+            sender_name="ダン",
+            sender_type=SenderType.AI,
+            content=ai_message_data["content"],
+            created_at=ai_message_data["created_at"],
+        )
+        
+        return DanMessageResponse(
+            user_message=user_message,
+            ai_message=ai_message,
+            process_steps=process_steps,
+        )
         
     except Exception as e:
         import logging
-        logging.error(f"Failed to generate Dan response: {e}")
-        # エラー時はフォールバックメッセージを保存
-        try:
-            await service.send_dan_ai_message(
-                user_id, 
-                "申し訳ありません、一時的なエラーが発生しました。もう一度お試しください。"
-            )
-        except Exception:
-            pass
+        logging.error(f"Failed to send dan message: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/dan/read", response_model=ReadMarkResponse)

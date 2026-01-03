@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw } from 'lucide-react';
+import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -11,9 +11,94 @@ import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
-import { api, type MessageResponse, ApiError } from '@/lib/api-client';
+import { api, type MessageResponse, type ProcessStep, ApiError } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth-store';
 import { cn } from '@/lib/utils';
+
+// プロセスステップの表示コンポーネント
+interface ProcessDisplayProps {
+  steps: ProcessStep[];
+  isProcessing: boolean;
+  isCollapsed: boolean;
+  onToggle: () => void;
+}
+
+function ProcessDisplay({ steps, isProcessing, isCollapsed, onToggle }: ProcessDisplayProps) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, height: 0 }}
+      animate={{ opacity: 1, height: 'auto' }}
+      exit={{ opacity: 0, height: 0 }}
+      className="mt-2 ml-[52px]"
+    >
+      <button
+        onClick={onToggle}
+        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors mb-1"
+      >
+        {isCollapsed ? (
+          <ChevronDown className="h-3 w-3" />
+        ) : (
+          <ChevronUp className="h-3 w-3" />
+        )}
+        <span>処理プロセス</span>
+      </button>
+      
+      <AnimatePresence>
+        {!isCollapsed && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="pl-2 border-l-2 border-muted space-y-1"
+          >
+            {steps.map((step, index) => (
+              <motion.div
+                key={step.id}
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: index * 0.1 }}
+                className="flex items-center gap-2 text-xs"
+              >
+                {step.status === 'completed' ? (
+                  <Check className="h-3 w-3 text-green-500" />
+                ) : step.status === 'running' || step.status === 'pending' ? (
+                  <Loader2 className="h-3 w-3 text-primary animate-spin" />
+                ) : (
+                  <span className="h-3 w-3 rounded-full bg-muted-foreground/30" />
+                )}
+                <span className={cn(
+                  step.status === 'completed' ? 'text-green-600 dark:text-green-400' :
+                  step.status === 'running' ? 'text-foreground' :
+                  'text-muted-foreground'
+                )}>
+                  {step.label}
+                </span>
+              </motion.div>
+            ))}
+            
+            {isProcessing && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="flex items-center gap-2 text-xs text-muted-foreground"
+              >
+                <Loader2 className="h-3 w-3 animate-spin" />
+                <span>処理中...</span>
+              </motion.div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </motion.div>
+  );
+}
+
+// 処理中の仮プロセスステップ
+const pendingSteps: ProcessStep[] = [
+  { id: 'receive', label: 'メッセージを受信中...', status: 'running' },
+  { id: 'analyze', label: '要望を分析中...', status: 'pending' },
+  { id: 'generate', label: '回答を生成中...', status: 'pending' },
+];
 
 export default function ChatPage() {
   const router = useRouter();
@@ -22,7 +107,13 @@ export default function ChatPage() {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   const isLoading = useAuthStore((state) => state.isLoading);
   const [message, setMessage] = useState('');
-  const [isTyping, setIsTyping] = useState(false);
+  const [currentProcess, setCurrentProcess] = useState<{
+    steps: ProcessStep[];
+    isProcessing: boolean;
+    isCollapsed: boolean;
+    messageId?: string;
+  } | null>(null);
+  const [completedProcesses, setCompletedProcesses] = useState<Map<string, { steps: ProcessStep[]; isCollapsed: boolean }>>(new Map());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -47,10 +138,10 @@ export default function ChatPage() {
     queryFn: () => api.dan.getRoom(),
     retry: 2,
     retryDelay: 1000,
-    staleTime: 30 * 1000, // Cache for 30 seconds
+    staleTime: 30 * 1000,
   });
 
-  // Fetch messages
+  // Fetch messages (ポーリング削除 - リアルタイム対応)
   const {
     data: messagesData,
     isLoading: isLoadingMessages,
@@ -60,15 +151,14 @@ export default function ChatPage() {
     queryKey: ['dan-messages'],
     queryFn: () => api.dan.getMessages({ limit: 50 }),
     enabled: !!danRoom,
-    refetchInterval: 10000, // Poll every 10 seconds (reduced frequency)
-    staleTime: 5 * 1000, // Consider fresh for 5 seconds
+    staleTime: 5 * 1000,
     retry: 2,
   });
 
   const messages = messagesData?.messages || [];
   const hasError = roomError || messagesError;
 
-  // Send message mutation
+  // Send message mutation - 同期処理に対応
   const sendMessageMutation = useMutation({
     mutationFn: (content: string) => api.dan.sendMessage(content),
     onMutate: async (content) => {
@@ -78,11 +168,10 @@ export default function ChatPage() {
       // Snapshot previous value
       const previousMessages = queryClient.getQueryData(['dan-messages']);
 
-      // Optimistic update
-      // Note: Backend returns messages in DESC order (newest first)
-      // So we add the new message at the BEGINNING to maintain order
+      // Optimistic update - ユーザーメッセージを先に表示
+      const tempMessageId = `temp-${Date.now()}`;
       const optimisticMessage: MessageResponse = {
-        id: `temp-${Date.now()}`,
+        id: tempMessageId,
         room_id: danRoom?.id || '',
         sender_id: user?.id || '',
         sender_name: user?.display_name || 'You',
@@ -95,14 +184,23 @@ export default function ChatPage() {
         messages: [optimisticMessage, ...(old?.messages || [])],
       }));
 
-      setIsTyping(true);
+      // プロセス表示を開始
+      setCurrentProcess({
+        steps: pendingSteps.map((s, i) => ({
+          ...s,
+          status: i === 0 ? 'running' : 'pending',
+        })),
+        isProcessing: true,
+        isCollapsed: false,
+        messageId: tempMessageId,
+      });
 
-      return { previousMessages };
+      return { previousMessages, tempMessageId };
     },
     onError: (err, _content, context) => {
       // Rollback on error
       queryClient.setQueryData(['dan-messages'], context?.previousMessages);
-      setIsTyping(false);
+      setCurrentProcess(null);
 
       // Show error message
       if (err instanceof ApiError) {
@@ -115,19 +213,42 @@ export default function ChatPage() {
         toast.error('ネットワークエラーが発生しました');
       }
     },
-    onSuccess: () => {
-      // Refetch to get AI response
-      setTimeout(() => {
-        queryClient.invalidateQueries({ queryKey: ['dan-messages'] });
-        setIsTyping(false);
-      }, 1000);
+    onSuccess: (response, _content, context) => {
+      // レスポンスには user_message と ai_message が両方含まれる
+      // キャッシュを更新して両方のメッセージを追加
+      queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => {
+        const existingMessages = old?.messages || [];
+        // temp メッセージを削除して、実際のメッセージを追加
+        const filtered = existingMessages.filter(m => m.id !== context?.tempMessageId);
+        return {
+          messages: [response.ai_message, response.user_message, ...filtered],
+        };
+      });
+
+      // プロセスを完了状態に更新
+      const completedSteps = response.process_steps.map(s => ({
+        ...s,
+        status: 'completed' as const,
+      }));
+
+      // 完了したプロセスを保存（AI返信メッセージIDに紐づけ）
+      setCompletedProcesses(prev => {
+        const newMap = new Map(prev);
+        newMap.set(response.ai_message.id, {
+          steps: completedSteps,
+          isCollapsed: true, // デフォルトで折りたたみ
+        });
+        return newMap;
+      });
+
+      setCurrentProcess(null);
     },
   });
 
   // Scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isTyping]);
+  }, [messages, currentProcess]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -157,6 +278,17 @@ export default function ChatPage() {
     if (messagesError) {
       refetchMessages();
     }
+  };
+
+  const toggleProcessCollapse = (messageId: string) => {
+    setCompletedProcesses(prev => {
+      const newMap = new Map(prev);
+      const existing = newMap.get(messageId);
+      if (existing) {
+        newMap.set(messageId, { ...existing, isCollapsed: !existing.isCollapsed });
+      }
+      return newMap;
+    });
   };
 
   // Error state
@@ -217,7 +349,7 @@ export default function ChatPage() {
                   </div>
                 </div>
               ))
-            ) : messages.length === 0 ? (
+            ) : messages.length === 0 && !currentProcess ? (
               // Empty state
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
@@ -239,62 +371,74 @@ export default function ChatPage() {
               <AnimatePresence mode="popLayout">
                 {[...messages].reverse().map((msg, index) => {
                   const isUser = msg.sender_type === 'human';
+                  const processData = completedProcesses.get(msg.id);
 
                   return (
-                    <motion.div
-                      key={msg.id}
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0 }}
-                      transition={{ delay: index * 0.05 }}
-                      className={cn('flex gap-3', isUser && 'justify-end')}
-                    >
-                      {!isUser && (
-                        <Avatar className="h-10 w-10 shrink-0">
-                          <AvatarFallback className="bg-primary/10">
-                            <Bot className="h-5 w-5 text-primary" />
-                          </AvatarFallback>
-                        </Avatar>
-                      )}
-
-                      <div
-                        className={cn(
-                          'max-w-[70%] space-y-1',
-                          isUser && 'items-end text-right'
-                        )}
+                    <div key={msg.id}>
+                      <motion.div
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ delay: index * 0.02 }}
+                        className={cn('flex gap-3', isUser && 'justify-end')}
                       >
-                        <p className="text-xs text-muted-foreground">
-                          {isUser ? 'あなた' : 'ダン'}
-                        </p>
+                        {!isUser && (
+                          <Avatar className="h-10 w-10 shrink-0">
+                            <AvatarFallback className="bg-primary/10">
+                              <Bot className="h-5 w-5 text-primary" />
+                            </AvatarFallback>
+                          </Avatar>
+                        )}
+
                         <div
                           className={cn(
-                            'px-4 py-3 rounded-2xl text-sm leading-relaxed',
-                            isUser
-                              ? 'bg-primary text-primary-foreground rounded-br-md'
-                              : 'bg-muted rounded-bl-md'
+                            'max-w-[70%] space-y-1',
+                            isUser && 'items-end text-right'
                           )}
                         >
-                          {msg.content}
+                          <p className="text-xs text-muted-foreground">
+                            {isUser ? 'あなた' : 'ダン'}
+                          </p>
+                          <div
+                            className={cn(
+                              'px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap',
+                              isUser
+                                ? 'bg-primary text-primary-foreground rounded-br-md'
+                                : 'bg-muted rounded-bl-md'
+                            )}
+                          >
+                            {msg.content}
+                          </div>
                         </div>
-                      </div>
 
-                      {isUser && (
-                        <Avatar className="h-10 w-10 shrink-0">
-                          <AvatarImage src={user?.avatar_url || undefined} />
-                          <AvatarFallback className="bg-secondary text-secondary-foreground">
-                            {user?.display_name?.charAt(0) || 'U'}
-                          </AvatarFallback>
-                        </Avatar>
+                        {isUser && (
+                          <Avatar className="h-10 w-10 shrink-0">
+                            <AvatarImage src={user?.avatar_url || undefined} />
+                            <AvatarFallback className="bg-secondary text-secondary-foreground">
+                              {user?.display_name?.charAt(0) || 'U'}
+                            </AvatarFallback>
+                          </Avatar>
+                        )}
+                      </motion.div>
+
+                      {/* プロセス表示（AIメッセージの下に表示） */}
+                      {!isUser && processData && (
+                        <ProcessDisplay
+                          steps={processData.steps}
+                          isProcessing={false}
+                          isCollapsed={processData.isCollapsed}
+                          onToggle={() => toggleProcessCollapse(msg.id)}
+                        />
                       )}
-                    </motion.div>
+                    </div>
                   );
                 })}
               </AnimatePresence>
             )}
 
-            {/* Typing indicator */}
+            {/* 処理中のプロセス表示 */}
             <AnimatePresence>
-              {isTyping && (
+              {currentProcess && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -306,25 +450,34 @@ export default function ChatPage() {
                       <Bot className="h-5 w-5 text-primary" />
                     </AvatarFallback>
                   </Avatar>
-                  <div className="space-y-1">
-                    <p className="text-xs text-muted-foreground">ダン</p>
+                  <div className="flex-1">
+                    <p className="text-xs text-muted-foreground mb-1">ダン</p>
                     <div className="px-4 py-3 rounded-2xl rounded-bl-md bg-muted">
-                      <div className="flex gap-1">
-                        <motion.span
-                          animate={{ opacity: [0.4, 1, 0.4] }}
-                          transition={{ duration: 1.5, repeat: Number.POSITIVE_INFINITY, delay: 0 }}
-                          className="w-2 h-2 rounded-full bg-muted-foreground"
-                        />
-                        <motion.span
-                          animate={{ opacity: [0.4, 1, 0.4] }}
-                          transition={{ duration: 1.5, repeat: Number.POSITIVE_INFINITY, delay: 0.2 }}
-                          className="w-2 h-2 rounded-full bg-muted-foreground"
-                        />
-                        <motion.span
-                          animate={{ opacity: [0.4, 1, 0.4] }}
-                          transition={{ duration: 1.5, repeat: Number.POSITIVE_INFINITY, delay: 0.4 }}
-                          className="w-2 h-2 rounded-full bg-muted-foreground"
-                        />
+                      <div className="space-y-2">
+                        {currentProcess.steps.map((step, index) => (
+                          <motion.div
+                            key={step.id}
+                            initial={{ opacity: 0, x: -10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ delay: index * 0.15 }}
+                            className="flex items-center gap-2 text-sm"
+                          >
+                            {step.status === 'completed' ? (
+                              <Check className="h-4 w-4 text-green-500" />
+                            ) : step.status === 'running' ? (
+                              <Loader2 className="h-4 w-4 text-primary animate-spin" />
+                            ) : (
+                              <span className="h-4 w-4 rounded-full border border-muted-foreground/30" />
+                            )}
+                            <span className={cn(
+                              step.status === 'completed' ? 'text-green-600 dark:text-green-400' :
+                              step.status === 'running' ? 'text-foreground' :
+                              'text-muted-foreground'
+                            )}>
+                              {step.label}
+                            </span>
+                          </motion.div>
+                        ))}
                       </div>
                     </div>
                   </div>

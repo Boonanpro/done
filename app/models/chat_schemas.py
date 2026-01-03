@@ -210,6 +210,20 @@ class MessagesListResponse(BaseModel):
     messages: list[MessageResponse]
 
 
+class ProcessStep(BaseModel):
+    """プロセスステップ"""
+    id: str
+    label: str
+    status: str  # "pending" | "running" | "completed" | "error"
+
+
+class DanMessageResponse(BaseModel):
+    """ダンへのメッセージ送信レスポンス（ユーザーメッセージ + AI返信）"""
+    user_message: MessageResponse
+    ai_message: MessageResponse
+    process_steps: list[ProcessStep] = []
+
+
 class ReadMarkResponse(BaseModel):
     """Read mark response"""
     success: bool
