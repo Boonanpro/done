@@ -31,55 +31,60 @@ function ProcessDisplay({ steps, isCollapsed, onToggle }: ProcessDisplayProps) {
     <motion.div
       initial={{ opacity: 0, height: 0 }}
       animate={{ opacity: 1, height: 'auto' }}
-      className="mt-2 ml-[52px]"
+      className="flex gap-3 mb-2"
     >
-      <button
-        onClick={onToggle}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors mb-1"
-      >
-        {isCollapsed ? (
-          <ChevronDown className="h-3 w-3" />
-        ) : (
-          <ChevronUp className="h-3 w-3" />
-        )}
-        <span>処理プロセス ({completedCount}ステップ完了)</span>
-      </button>
+      {/* アバタースペース（ダンのアバターと揃える） */}
+      <div className="w-10 shrink-0" />
       
-      <AnimatePresence>
-        {!isCollapsed && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="pl-2 border-l-2 border-muted space-y-1"
-          >
-            {steps.map((step, index) => (
-              <motion.div
-                key={step.id + '-' + index}
-                initial={{ opacity: 0, x: -10 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: index * 0.05 }}
-                className="flex items-center gap-2 text-xs"
-              >
-                {step.status === 'completed' ? (
-                  <Check className="h-3 w-3 text-green-500" />
-                ) : step.status === 'running' ? (
-                  <Loader2 className="h-3 w-3 text-primary animate-spin" />
-                ) : (
-                  <span className="h-3 w-3 rounded-full bg-muted-foreground/30" />
-                )}
-                <span className={cn(
-                  step.status === 'completed' ? 'text-green-600 dark:text-green-400' :
-                  step.status === 'running' ? 'text-foreground' :
-                  'text-muted-foreground'
-                )}>
-                  {step.label}
-                </span>
-              </motion.div>
-            ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <div className="flex-1 px-4 py-2 rounded-xl bg-muted/50 border border-border">
+        <button
+          onClick={onToggle}
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors w-full"
+        >
+          {isCollapsed ? (
+            <ChevronDown className="h-3 w-3" />
+          ) : (
+            <ChevronUp className="h-3 w-3" />
+          )}
+          <span>プロセス ({completedCount}ステップ完了)</span>
+        </button>
+        
+        <AnimatePresence>
+          {!isCollapsed && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mt-2 pl-2 border-l-2 border-primary/30 space-y-1"
+            >
+              {steps.map((step, index) => (
+                <motion.div
+                  key={step.id + '-' + index}
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: index * 0.05 }}
+                  className="flex items-center gap-2 text-xs"
+                >
+                  {step.status === 'completed' ? (
+                    <Check className="h-3 w-3 text-green-500" />
+                  ) : step.status === 'running' ? (
+                    <Loader2 className="h-3 w-3 text-primary animate-spin" />
+                  ) : (
+                    <span className="h-3 w-3 rounded-full bg-muted-foreground/30" />
+                  )}
+                  <span className={cn(
+                    step.status === 'completed' ? 'text-green-600 dark:text-green-400' :
+                    step.status === 'running' ? 'text-foreground' :
+                    'text-muted-foreground'
+                  )}>
+                    {step.label}
+                  </span>
+                </motion.div>
+              ))}
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
     </motion.div>
   );
 }
@@ -203,7 +208,7 @@ export default function ChatPage() {
               const newMap = new Map(prev);
               newMap.set(aiMessageId!, {
                 steps: [...processSteps],
-                isCollapsed: true,
+                isCollapsed: false, // デフォルトでオープン
               });
               return newMap;
             });
@@ -351,12 +356,21 @@ export default function ChatPage() {
 
                   return (
                     <div key={msg.id}>
+                      {/* プロセス表示（AIメッセージの上に表示） */}
+                      {!isUser && processData && (
+                        <ProcessDisplay
+                          steps={processData.steps}
+                          isCollapsed={processData.isCollapsed}
+                          onToggle={() => toggleProcessCollapse(msg.id)}
+                        />
+                      )}
+                      
                       <motion.div
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0 }}
                         transition={{ delay: index * 0.02 }}
-                        className={cn('flex gap-3', isUser && 'justify-end')}
+                        className={cn('flex gap-3', isUser && 'justify-end', !isUser && processData && 'mt-2')}
                       >
                         {!isUser && (
                           <Avatar className="h-10 w-10 shrink-0">
@@ -396,15 +410,6 @@ export default function ChatPage() {
                           </Avatar>
                         )}
                       </motion.div>
-
-                      {/* プロセス表示（AIメッセージの下に表示） */}
-                      {!isUser && processData && (
-                        <ProcessDisplay
-                          steps={processData.steps}
-                          isCollapsed={processData.isCollapsed}
-                          onToggle={() => toggleProcessCollapse(msg.id)}
-                        />
-                      )}
                     </div>
                   );
                 })}
