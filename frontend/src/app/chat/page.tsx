@@ -79,6 +79,8 @@ export default function ChatPage() {
       const previousMessages = queryClient.getQueryData(['dan-messages']);
 
       // Optimistic update
+      // Note: Backend returns messages in DESC order (newest first)
+      // So we add the new message at the BEGINNING to maintain order
       const optimisticMessage: MessageResponse = {
         id: `temp-${Date.now()}`,
         room_id: danRoom?.id || '',
@@ -90,7 +92,7 @@ export default function ChatPage() {
       };
 
       queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
-        messages: [...(old?.messages || []), optimisticMessage],
+        messages: [optimisticMessage, ...(old?.messages || [])],
       }));
 
       setIsTyping(true);
