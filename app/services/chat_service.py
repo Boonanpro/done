@@ -804,6 +804,221 @@ class ChatService:
             return msg
         raise ValueError("Failed to send AI message")
     
+    # ==================== Chat Sessions ====================
+    
+    async def get_dan_sessions(self, user_id: str) -> dict:
+        """
+        ユーザーのダンセッション一覧を取得
+        
+        Args:
+            user_id: ユーザーID
+            
+        Returns:
+            セッション一覧と現在のセッションID
+        """
+        # ユーザーの現在のセッションIDを取得
+        user = self.supabase.table("users").select("dan_room_id").eq("id", user_id).execute()
+        current_session_id = user.data[0].get("dan_room_id") if user.data else None
+        
+        # ユーザーのダンセッション一覧を取得
+        members = self.supabase.table("chat_room_members").select(
+            "room_id, chat_rooms!inner(id, name, type, created_at)"
+        ).eq("user_id", user_id).execute()
+        
+        sessions = []
+        for member in members.data:
+            room = member.get("chat_rooms", {})
+            if room.get("type") != "dan":
+                continue
+            
+            room_id = room["id"]
+            
+            # 最新メッセージと件数を取得
+            messages = self.supabase.table("chat_messages").select(
+                "content, created_at"
+            ).eq("room_id", room_id).order(
+                "created_at", desc=True
+            ).limit(1).execute()
+            
+            msg_count = self.supabase.table("chat_messages").select(
+                "id", count="exact"
+            ).eq("room_id", room_id).execute()
+            
+            last_message = None
+            last_message_at = None
+            if messages.data:
+                last_message = messages.data[0]["content"][:50]
+                if len(messages.data[0]["content"]) > 50:
+                    last_message += "..."
+                last_message_at = messages.data[0]["created_at"]
+            
+            sessions.append({
+                "id": room_id,
+                "title": room.get("name", "新しい会話"),
+                "last_message": last_message,
+                "last_message_at": last_message_at,
+                "message_count": msg_count.count if msg_count.count else 0,
+                "created_at": room["created_at"],
+            })
+        
+        # 作成日時で降順ソート
+        sessions.sort(key=lambda x: x["created_at"], reverse=True)
+        
+        return {
+            "sessions": sessions,
+            "current_session_id": current_session_id,
+        }
+    
+    async def create_dan_session(self, user_id: str, title: str = "新しい会話") -> dict:
+        """
+        新しいダンセッションを作成
+        
+        Args:
+            user_id: ユーザーID
+            title: セッションタイトル
+            
+        Returns:
+            作成されたセッション情報
+        """
+        # 新しいダンルームを作成
+        room_result = self.supabase.table("chat_rooms").insert({
+            "name": title,
+            "type": "dan",
+        }).execute()
+        
+        if not room_result.data:
+            raise ValueError("Failed to create session")
+        
+        room = room_result.data[0]
+        
+        # メンバー追加
+        self.supabase.table("chat_room_members").insert({
+            "room_id": room["id"],
+            "user_id": user_id,
+            "role": "owner",
+            "ai_mode": "auto",
+        }).execute()
+        
+        # AI設定
+        self.supabase.table("chat_ai_settings").insert({
+            "room_id": room["id"],
+            "enabled": True,
+            "mode": "auto",
+            "personality": "あなたはダン（Dan）、ユーザーの専属AIアシスタントです。丁寧で親しみやすい口調で話します。",
+        }).execute()
+        
+        # ユーザーのdan_room_idを更新（新しいセッションをアクティブに）
+        self.supabase.table("users").update({"dan_room_id": room["id"]}).eq("id", user_id).execute()
+        
+        return {
+            "id": room["id"],
+            "title": room["name"],
+            "created_at": room["created_at"],
+        }
+    
+    async def activate_dan_session(self, user_id: str, session_id: str) -> dict:
+        """
+        ダンセッションをアクティブにする
+        
+        Args:
+            user_id: ユーザーID
+            session_id: セッションID
+            
+        Returns:
+            成功フラグとセッションID
+        """
+        # セッションの存在とユーザーの所有を確認
+        member = self.supabase.table("chat_room_members").select(
+            "room_id"
+        ).eq("room_id", session_id).eq("user_id", user_id).execute()
+        
+        if not member.data:
+            raise ValueError("Session not found or access denied")
+        
+        # ルームタイプがdanであることを確認
+        room = self.supabase.table("chat_rooms").select("type").eq("id", session_id).execute()
+        if not room.data or room.data[0].get("type") != "dan":
+            raise ValueError("Invalid session type")
+        
+        # ユーザーのdan_room_idを更新
+        self.supabase.table("users").update({"dan_room_id": session_id}).eq("id", user_id).execute()
+        
+        return {
+            "success": True,
+            "session_id": session_id,
+        }
+    
+    async def update_dan_session_title(self, user_id: str, session_id: str, title: str) -> dict:
+        """
+        セッションタイトルを更新
+        
+        Args:
+            user_id: ユーザーID
+            session_id: セッションID
+            title: 新しいタイトル
+            
+        Returns:
+            更新されたセッション情報
+        """
+        # セッションの所有を確認
+        member = self.supabase.table("chat_room_members").select(
+            "room_id"
+        ).eq("room_id", session_id).eq("user_id", user_id).execute()
+        
+        if not member.data:
+            raise ValueError("Session not found or access denied")
+        
+        # タイトル更新
+        result = self.supabase.table("chat_rooms").update({
+            "name": title
+        }).eq("id", session_id).execute()
+        
+        if not result.data:
+            raise ValueError("Failed to update session title")
+        
+        return {
+            "id": session_id,
+            "title": title,
+        }
+    
+    async def delete_dan_session(self, user_id: str, session_id: str) -> dict:
+        """
+        ダンセッションを削除
+        
+        Args:
+            user_id: ユーザーID
+            session_id: セッションID
+            
+        Returns:
+            成功フラグ
+        """
+        # セッションの所有を確認
+        member = self.supabase.table("chat_room_members").select(
+            "room_id"
+        ).eq("room_id", session_id).eq("user_id", user_id).execute()
+        
+        if not member.data:
+            raise ValueError("Session not found or access denied")
+        
+        # 現在アクティブなセッションかチェック
+        user = self.supabase.table("users").select("dan_room_id").eq("id", user_id).execute()
+        if user.data and user.data[0].get("dan_room_id") == session_id:
+            raise ValueError("Cannot delete active session")
+        
+        # メッセージを削除
+        self.supabase.table("chat_messages").delete().eq("room_id", session_id).execute()
+        
+        # AI設定を削除
+        self.supabase.table("chat_ai_settings").delete().eq("room_id", session_id).execute()
+        
+        # メンバーを削除
+        self.supabase.table("chat_room_members").delete().eq("room_id", session_id).execute()
+        
+        # ルームを削除
+        self.supabase.table("chat_rooms").delete().eq("id", session_id).execute()
+        
+        return {"success": True}
+    
     # ==================== Proposals (Phase 2G) ====================
     
     async def create_proposal(

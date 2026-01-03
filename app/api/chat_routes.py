@@ -52,6 +52,9 @@ from app.models.chat_schemas import (
     AISettingsResponse, AISettingsUpdateRequest, AISummaryResponse,
     # Dan Page & Proposals (2E & 2G)
     DanRoomResponse, ProposalResponse, ProposalsListResponse, ProposalActionRequest,
+    # Sessions
+    SessionResponse, SessionsListResponse, SessionCreateResponse, 
+    SessionActivateResponse, SessionUpdateRequest,
 )
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -676,6 +679,122 @@ async def mark_dan_as_read(
         dan_room = await service.get_or_create_dan_room(current_user.user_id)
         success = await service.mark_as_read(dan_room["id"], current_user.user_id)
         return ReadMarkResponse(success=success, read_at=datetime.utcnow())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Session Routes ====================
+
+@router.get("/dan/sessions", response_model=SessionsListResponse)
+async def get_dan_sessions(
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """
+    ダンのセッション一覧を取得
+    
+    - 全てのセッション（チャット履歴）を返す
+    - 現在アクティブなセッションIDも含む
+    """
+    try:
+        result = await service.get_dan_sessions(current_user.user_id)
+        return SessionsListResponse(
+            sessions=[SessionResponse(**s) for s in result["sessions"]],
+            current_session_id=result["current_session_id"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/dan/sessions", response_model=SessionCreateResponse)
+async def create_dan_session(
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """
+    新しいダンセッションを作成
+    
+    - 新規セッションを作成し、アクティブに設定
+    - 既存のセッションは保持される
+    """
+    try:
+        session = await service.create_dan_session(current_user.user_id)
+        return SessionCreateResponse(**session)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/dan/sessions/{session_id}/activate", response_model=SessionActivateResponse)
+async def activate_dan_session(
+    session_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """
+    セッションをアクティブにする（切り替え）
+    
+    - 指定したセッションをアクティブに設定
+    - 次回の /dan/messages はこのセッションのメッセージを返す
+    """
+    try:
+        result = await service.activate_dan_session(current_user.user_id, session_id)
+        return SessionActivateResponse(**result)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/dan/sessions/{session_id}", response_model=SessionResponse)
+async def update_dan_session(
+    session_id: str,
+    request: SessionUpdateRequest,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """セッションのタイトルを更新"""
+    try:
+        result = await service.update_dan_session_title(
+            current_user.user_id, 
+            session_id, 
+            request.title
+        )
+        # 完全なセッション情報を返すために再取得
+        sessions = await service.get_dan_sessions(current_user.user_id)
+        for s in sessions["sessions"]:
+            if s["id"] == session_id:
+                return SessionResponse(**s)
+        return SessionResponse(
+            id=result["id"],
+            title=result["title"],
+            message_count=0,
+            created_at=datetime.utcnow(),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/dan/sessions/{session_id}")
+async def delete_dan_session(
+    session_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """
+    セッションを削除
+    
+    - 現在アクティブなセッションは削除不可
+    - 関連するメッセージも全て削除される
+    """
+    try:
+        await service.delete_dan_session(current_user.user_id, session_id)
+        return {"message": "Session deleted successfully"}
+    except ValueError as e:
+        if "active" in str(e).lower():
+            raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

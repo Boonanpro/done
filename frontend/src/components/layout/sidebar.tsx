@@ -14,8 +14,9 @@ import {
   ChevronLeft,
   ChevronRight,
   Loader2,
+  MessageCircle,
 } from 'lucide-react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
@@ -31,19 +32,13 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useAuth } from '@/hooks/use-auth';
-import { api } from '@/lib/api-client';
+import { api, SessionResponse } from '@/lib/api-client';
 
 interface SidebarProps {
   className?: string;
 }
 
 const navItems = [
-  {
-    title: 'ダン',
-    href: '/chat',
-    icon: MessageSquare,
-    description: 'AI秘書との会話',
-  },
   {
     title: '友達',
     href: '/friends',
@@ -62,20 +57,31 @@ export function Sidebar({ className }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { user, logout, isLoggingOut } = useAuth();
+  const { user, logout, isLoggingOut, isAuthenticated } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Create new conversation (clears chat and navigates to chat page)
-  const newConversationMutation = useMutation({
-    mutationFn: async () => {
-      // Mark Dan messages as read to clear the conversation context
-      await api.dan.markAsRead();
-      // Invalidate queries to refresh the chat
-      await queryClient.invalidateQueries({ queryKey: ['dan-messages'] });
-      await queryClient.invalidateQueries({ queryKey: ['dan-room'] });
-    },
-    onSuccess: () => {
+  // Fetch sessions
+  const { data: sessionsData, isLoading: isLoadingSessions } = useQuery({
+    queryKey: ['dan-sessions'],
+    queryFn: api.dan.getSessions,
+    enabled: isAuthenticated,
+    staleTime: 30 * 1000, // 30 seconds
+  });
+
+  // Filter sessions by search query
+  const filteredSessions = sessionsData?.sessions?.filter((session) =>
+    session.title.toLowerCase().includes(searchQuery.toLowerCase())
+  ) ?? [];
+
+  // Create new session
+  const createSessionMutation = useMutation({
+    mutationFn: api.dan.createSession,
+    onSuccess: (newSession) => {
+      // Invalidate queries to refresh the session list
+      queryClient.invalidateQueries({ queryKey: ['dan-sessions'] });
+      queryClient.invalidateQueries({ queryKey: ['dan-messages'] });
+      queryClient.invalidateQueries({ queryKey: ['dan-room'] });
       // Navigate to chat page
       router.push('/chat');
       toast.success('新しい会話を開始しました');
@@ -85,8 +91,33 @@ export function Sidebar({ className }: SidebarProps) {
     },
   });
 
+  // Activate session
+  const activateSessionMutation = useMutation({
+    mutationFn: (sessionId: string) => api.dan.activateSession(sessionId),
+    onSuccess: () => {
+      // Refresh messages for the new active session
+      queryClient.invalidateQueries({ queryKey: ['dan-sessions'] });
+      queryClient.invalidateQueries({ queryKey: ['dan-messages'] });
+      queryClient.invalidateQueries({ queryKey: ['dan-room'] });
+      router.push('/chat');
+    },
+    onError: () => {
+      toast.error('セッションの切り替えに失敗しました');
+    },
+  });
+
   const handleNewConversation = () => {
-    newConversationMutation.mutate();
+    createSessionMutation.mutate();
+  };
+
+  const handleSessionClick = (session: SessionResponse) => {
+    // If already the current session, just navigate to chat
+    if (session.id === sessionsData?.current_session_id) {
+      router.push('/chat');
+      return;
+    }
+    // Otherwise, activate the session
+    activateSessionMutation.mutate(session.id);
   };
 
   const handleLogout = async () => {
@@ -96,6 +127,23 @@ export function Sidebar({ className }: SidebarProps) {
     } catch {
       toast.error('ログアウトに失敗しました');
     }
+  };
+
+  // Format relative time
+  const formatRelativeTime = (dateString: string | undefined) => {
+    if (!dateString) return '';
+    const date = new Date(dateString);
+    const now = new Date();
+    const diff = now.getTime() - date.getTime();
+    const minutes = Math.floor(diff / (1000 * 60));
+    const hours = Math.floor(diff / (1000 * 60 * 60));
+    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+
+    if (minutes < 1) return '今';
+    if (minutes < 60) return `${minutes}分前`;
+    if (hours < 24) return `${hours}時間前`;
+    if (days < 7) return `${days}日前`;
+    return date.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
   };
 
   return (
@@ -152,9 +200,9 @@ export function Sidebar({ className }: SidebarProps) {
                   isCollapsed && 'justify-center px-0'
                 )}
                 onClick={handleNewConversation}
-                disabled={newConversationMutation.isPending}
+                disabled={createSessionMutation.isPending}
               >
-                {newConversationMutation.isPending ? (
+                {createSessionMutation.isPending ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
                   <Plus className="h-4 w-4" />
@@ -190,8 +238,82 @@ export function Sidebar({ className }: SidebarProps) {
 
         <Separator className="bg-sidebar-border" />
 
-        {/* Navigation */}
+        {/* Chat Sessions */}
         <ScrollArea className="flex-1 px-3 py-2">
+          {/* Dan section header */}
+          {!isCollapsed && (
+            <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground font-medium">
+              <MessageSquare className="h-3 w-3" />
+              <span>ダンとの会話</span>
+            </div>
+          )}
+
+          {/* Sessions list */}
+          <nav className="space-y-1">
+            {isLoadingSessions ? (
+              <div className="flex items-center justify-center py-4">
+                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+              </div>
+            ) : filteredSessions.length === 0 ? (
+              !isCollapsed && (
+                <p className="text-xs text-muted-foreground text-center py-4">
+                  会話履歴がありません
+                </p>
+              )
+            ) : (
+              filteredSessions.map((session) => {
+                const isActive = session.id === sessionsData?.current_session_id;
+                const isActivating = activateSessionMutation.isPending && 
+                  activateSessionMutation.variables === session.id;
+
+                return (
+                  <Tooltip key={session.id}>
+                    <TooltipTrigger asChild>
+                      <motion.button
+                        whileHover={{ scale: 1.01 }}
+                        whileTap={{ scale: 0.99 }}
+                        onClick={() => handleSessionClick(session)}
+                        disabled={isActivating}
+                        className={cn(
+                          'w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left',
+                          isActive
+                            ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                            : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
+                          isCollapsed && 'justify-center px-0'
+                        )}
+                      >
+                        {isActivating ? (
+                          <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                        ) : (
+                          <MessageCircle className="h-4 w-4 shrink-0" />
+                        )}
+                        {!isCollapsed && (
+                          <div className="flex-1 min-w-0">
+                            <p className="truncate font-medium">{session.title}</p>
+                            <p className="text-xs text-muted-foreground truncate">
+                              {formatRelativeTime(session.last_message_at)}
+                            </p>
+                          </div>
+                        )}
+                      </motion.button>
+                    </TooltipTrigger>
+                    {isCollapsed && (
+                      <TooltipContent side="right">
+                        <p className="font-medium">{session.title}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {formatRelativeTime(session.last_message_at)}
+                        </p>
+                      </TooltipContent>
+                    )}
+                  </Tooltip>
+                );
+              })
+            )}
+          </nav>
+
+          <Separator className="my-3 bg-sidebar-border" />
+
+          {/* Other navigation items */}
           <nav className="space-y-1">
             {navItems.map((item) => {
               const isActive = pathname.startsWith(item.href);

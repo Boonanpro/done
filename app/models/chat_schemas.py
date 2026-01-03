@@ -255,6 +255,42 @@ class DanRoomResponse(BaseModel):
     created_at: datetime
 
 
+# ==================== Chat Session Schemas ====================
+
+class SessionResponse(BaseModel):
+    """チャットセッション情報"""
+    id: str
+    title: str
+    last_message: Optional[str] = None
+    last_message_at: Optional[datetime] = None
+    message_count: int = 0
+    created_at: datetime
+
+
+class SessionsListResponse(BaseModel):
+    """セッション一覧レスポンス"""
+    sessions: list[SessionResponse]
+    current_session_id: Optional[str] = None
+
+
+class SessionCreateResponse(BaseModel):
+    """新規セッション作成レスポンス"""
+    id: str
+    title: str
+    created_at: datetime
+
+
+class SessionActivateResponse(BaseModel):
+    """セッション切り替えレスポンス"""
+    success: bool
+    session_id: str
+
+
+class SessionUpdateRequest(BaseModel):
+    """セッションタイトル更新リクエスト"""
+    title: str = Field(..., min_length=1, max_length=100)
+
+
 # ==================== Proposal Schemas (2G) ====================
 
 class ProposalStatus(str, Enum):

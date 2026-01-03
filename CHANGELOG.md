@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - チャットメッセージの表示順を修正（古いメッセージが上、新しいメッセージが下）
 - チャット画面のスクロールを修正（過去のメッセージを遡れるように）
 
+### Added (チャットセッション機能)
+- **バックエンドAPI** - セッション一覧・作成・切り替えAPI
+  - `GET /api/v1/chat/dan/sessions` - セッション一覧取得
+  - `POST /api/v1/chat/dan/sessions` - 新規セッション作成
+  - `POST /api/v1/chat/dan/sessions/{id}/activate` - セッション切り替え
+- **フロントエンド** - サイドバーにセッション履歴表示
+  - 「新しい会話」ボタンで新規セッション作成
+  - 過去のセッションをクリックで切り替え
+
 ### Previously Added
 - **ドキュメント更新ルール** - ADR/CHANGELOG更新タイミングを`.cursor/rules`に明記
   - Commits: `65a168d`, `4f441a7`
