@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **フロントエンド実装** - Done Chat UI（Next.js 16 + React 19）
   - ログイン/登録画面、チャット画面、サイドバー
   - バックエンドAPI連携（`lib/api-client.ts`）
+- **プロセスモニター** - タスク実行状況をリアルタイム表示
+  - 実行中タスクの進捗ステップ表示（完了/実行中/待機）
+  - 展開/折りたたみ可能なUI
+  - 2秒ごとの自動更新（実行中タスク）
 
 ### Fixed
 - チャットメッセージの表示順を修正（古いメッセージが上、新しいメッセージが下）

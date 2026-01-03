@@ -158,6 +158,66 @@ export interface AISettingsUpdateRequest {
   auto_reply_delay_ms?: number | null;
 }
 
+// Task types
+export type TaskStatus =
+  | 'pending'
+  | 'analyzing'
+  | 'proposed'
+  | 'confirmed'
+  | 'executing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export type TaskType =
+  | 'email'
+  | 'line'
+  | 'purchase'
+  | 'payment'
+  | 'research'
+  | 'travel'
+  | 'phone'
+  | 'other';
+
+export type ExecutionStatus =
+  | 'pending'
+  | 'executing'
+  | 'awaiting_credentials'
+  | 'completed'
+  | 'failed';
+
+export interface TaskResponse {
+  id: string;
+  user_id: string | null;
+  type: TaskType;
+  status: TaskStatus;
+  original_wish: string;
+  proposed_actions: string[];
+  execution_result?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+export interface TasksListResponse {
+  tasks: TaskResponse[];
+}
+
+export interface ExecutionProgress {
+  current_step?: string | null;
+  steps_completed?: string[];
+  steps_remaining?: string[];
+  screenshot_url?: string | null;
+}
+
+export interface ExecutionStatusResponse {
+  task_id: string;
+  status: ExecutionStatus;
+  progress?: ExecutionProgress | null;
+  required_service?: string | null;
+  execution_result?: Record<string, unknown> | null;
+  error_message?: string | null;
+}
+
 // ==================== API Error Class ====================
 
 export class ApiError extends Error {
@@ -463,6 +523,35 @@ export const api = {
       request<UserResponse>('/chat/me', {
         method: 'PATCH',
         body: JSON.stringify(data),
+      }),
+  },
+
+  // Task endpoints
+  tasks: {
+    list: (params?: { user_id?: string; limit?: number }) => {
+      const query = new URLSearchParams();
+      if (params?.user_id) query.set('user_id', params.user_id);
+      if (params?.limit) query.set('limit', params.limit.toString());
+      const queryString = query.toString();
+      return request<TasksListResponse>(
+        `/tasks${queryString ? `?${queryString}` : ''}`
+      );
+    },
+
+    get: (taskId: string) => request<TaskResponse>(`/task/${taskId}`),
+
+    getExecutionStatus: (taskId: string) =>
+      request<ExecutionStatusResponse>(`/task/${taskId}/execution-status`),
+
+    confirm: (taskId: string) =>
+      request<TaskResponse>(`/task/${taskId}/confirm`, {
+        method: 'POST',
+      }),
+
+    revise: (taskId: string, revision: string) =>
+      request<TaskResponse>(`/task/${taskId}/revise`, {
+        method: 'POST',
+        body: JSON.stringify({ revision }),
       }),
   },
 
