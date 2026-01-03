@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -15,12 +16,25 @@ import { useAuthStore } from '@/stores/auth-store';
 import { cn } from '@/lib/utils';
 
 export default function ChatPage() {
+  const router = useRouter();
   const queryClient = useQueryClient();
   const user = useAuthStore((state) => state.user);
+  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const isLoading = useAuthStore((state) => state.isLoading);
   const [message, setMessage] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Check if token exists in localStorage
+  const hasToken = typeof window !== 'undefined' && !!localStorage.getItem('done-token');
+
+  // Redirect to login if not authenticated
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated && !hasToken) {
+      router.push('/login');
+    }
+  }, [isLoading, isAuthenticated, hasToken, router]);
 
   // Fetch Dan room
   const {

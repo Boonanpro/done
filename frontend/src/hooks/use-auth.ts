@@ -65,7 +65,8 @@ export function useAuth() {
         setToken(newToken);
         const userData = await api.auth.me();
         setUser(userData);
-        router.push('/chat');
+        // Force navigation with window.location for reliability
+        window.location.href = '/chat';
         return { success: true };
       } catch (error) {
         setLoading(false);
@@ -77,7 +78,7 @@ export function useAuth() {
         throw error;
       }
     },
-    [router, setUser, setToken, setLoading]
+    [setUser, setToken, setLoading]
   );
 
   const register = useCallback(
@@ -94,7 +95,8 @@ export function useAuth() {
         setToken(newToken);
         const userData = await api.auth.me();
         setUser(userData);
-        router.push('/chat');
+        // Force navigation with window.location for reliability
+        window.location.href = '/chat';
         return { success: true };
       } catch (error) {
         setLoading(false);
@@ -106,7 +108,7 @@ export function useAuth() {
         throw error;
       }
     },
-    [router, setUser, setToken, setLoading]
+    [setUser, setToken, setLoading]
   );
 
   const logout = useCallback(async () => {
