@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - チャットメッセージの表示順を修正（古いメッセージが上、新しいメッセージが下）
 - チャット画面のスクロールを修正（過去のメッセージを遡れるように）
+- **APIクライアント不足メソッド追加** - 未定義だったAPIメソッドを追加
+  - `api.proposals` - 提案一覧・詳細取得・応答（通知パネルで使用）
+  - `api.invites` - 招待リンク作成（友達チャット画面で使用）
+  - `api.rooms.getAiSettings` / `updateAiSettings` - AI設定取得・更新（友達チャット画面で使用）
+  - `api.user.update` - ユーザー情報更新（設定画面で使用）
+- サイドバーのハイドレーション問題を`useSyncExternalStore`で修正
 
 ### Added (チャットセッション機能)
 - **バックエンドAPI** - セッション一覧・作成・切り替えAPI
