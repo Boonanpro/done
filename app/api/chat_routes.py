@@ -571,26 +571,136 @@ async def get_dan_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/dan/messages/stream")
+async def send_dan_message_stream(
+    request: MessageSendRequest,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """ダンにメッセージを送信し、プロセスをSSEでストリーミング"""
+    from starlette.responses import StreamingResponse
+    import asyncio
+    
+    async def generate_stream():
+        try:
+            from langchain_anthropic import ChatAnthropic
+            from langchain_core.messages import SystemMessage, HumanMessage, AIMessage as LCAIMessage
+            
+            # Step 1: ユーザーメッセージを保存
+            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'receive', 'label': '考え中...', 'status': 'running'}})}\n\n"
+            
+            message = await service.send_dan_message(current_user.user_id, request.content)
+            user = await service.get_user_by_id(current_user.user_id)
+            
+            user_message = {
+                "id": message["id"],
+                "room_id": message["room_id"],
+                "sender_id": message["sender_id"],
+                "sender_name": user["display_name"] if user else "You",
+                "sender_type": message["sender_type"],
+                "content": message["content"],
+                "created_at": message["created_at"].isoformat() if hasattr(message["created_at"], 'isoformat') else str(message["created_at"]),
+            }
+            
+            # ユーザーメッセージを送信
+            yield f"data: {json.dumps({'type': 'user_message', 'message': user_message})}\n\n"
+            
+            # Step 2: 要望を分析中
+            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'receive', 'label': 'メッセージを受信しました', 'status': 'completed'}})}\n\n"
+            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'analyze', 'label': '要望を分析中...', 'status': 'running'}})}\n\n"
+            
+            # 過去のメッセージを取得
+            dan_room = await service.get_or_create_dan_room(current_user.user_id)
+            messages_data = await service.get_messages(dan_room["id"], current_user.user_id, limit=10)
+            
+            # LLMを初期化
+            llm = ChatAnthropic(
+                model="claude-sonnet-4-20250514",
+                api_key=settings.ANTHROPIC_API_KEY,
+                temperature=0.7,
+                max_tokens=1024,
+            )
+            
+            # システムプロンプト
+            system_prompt = """あなたは「ダン」という名前のAI秘書です。
+ユーザーの依頼に対して、具体的で実用的な提案をします。
+
+## 基本方針
+- 質問で返さず、具体的な提案をする
+- 足りない情報は適切に推測する
+- 日本語で簡潔に返答する
+- 親しみやすくプロフェッショナルなトーン
+
+## 返答形式
+- 挨拶への返答は短く自然に
+- タスク依頼には具体的なアクションを提案
+- 必要に応じて確認事項を添える"""
+            
+            # メッセージを構築
+            langchain_messages = [SystemMessage(content=system_prompt)]
+            
+            for msg in messages_data:
+                if msg["sender_type"] == "human":
+                    langchain_messages.append(HumanMessage(content=msg["content"]))
+                elif msg["sender_type"] == "ai":
+                    langchain_messages.append(LCAIMessage(content=msg["content"]))
+            
+            # 最新のユーザーメッセージを追加（重複防止のため確認）
+            if not langchain_messages or not isinstance(langchain_messages[-1], HumanMessage):
+                langchain_messages.append(HumanMessage(content=request.content))
+            
+            # Step 3: 回答を生成中
+            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'analyze', 'label': '要望を分析しました', 'status': 'completed'}})}\n\n"
+            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'generate', 'label': '回答を生成中...', 'status': 'running'}})}\n\n"
+            
+            # AI返信を生成
+            response = await llm.ainvoke(langchain_messages)
+            ai_response_content = response.content
+            
+            # DBに保存
+            ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content)
+            
+            ai_message = {
+                "id": ai_message_data["id"],
+                "room_id": ai_message_data["room_id"],
+                "sender_id": ai_message_data.get("sender_id"),
+                "sender_name": "ダン",
+                "sender_type": "ai",
+                "content": ai_message_data["content"],
+                "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
+            }
+            
+            # 完了
+            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'generate', 'label': '回答を生成しました', 'status': 'completed'}})}\n\n"
+            yield f"data: {json.dumps({'type': 'ai_message', 'message': ai_message})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            
+        except Exception as e:
+            import logging
+            logging.error(f"Failed to stream dan message: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+    
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
 @router.post("/dan/messages", response_model=DanMessageResponse)
 async def send_dan_message(
     request: MessageSendRequest,
     current_user: TokenData = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ):
-    """ダンにメッセージを送信し、AIの返信を同期的に生成"""
+    """ダンにメッセージを送信（非ストリーミング版、互換性のため保持）"""
     try:
         from langchain_anthropic import ChatAnthropic
         from langchain_core.messages import SystemMessage, HumanMessage, AIMessage as LCAIMessage
-        
-        # プロセスステップを記録
-        process_steps = []
-        
-        # Step 1: ユーザーメッセージを保存
-        process_steps.append(ProcessStep(
-            id="save_message",
-            label="メッセージを受信しました",
-            status="completed"
-        ))
         
         message = await service.send_dan_message(current_user.user_id, request.content)
         user = await service.get_user_by_id(current_user.user_id)
@@ -604,20 +714,6 @@ async def send_dan_message(
             content=message["content"],
             created_at=message["created_at"],
         )
-        
-        # Step 2: 要望を分析
-        process_steps.append(ProcessStep(
-            id="analyze",
-            label="要望を分析中...",
-            status="completed"
-        ))
-        
-        # Step 3: AI返信を生成
-        process_steps.append(ProcessStep(
-            id="generate",
-            label="回答を生成中...",
-            status="completed"
-        ))
         
         # 過去のメッセージを取得
         dan_room = await service.get_or_create_dan_room(current_user.user_id)
@@ -655,7 +751,7 @@ async def send_dan_message(
             elif msg["sender_type"] == "ai":
                 langchain_messages.append(LCAIMessage(content=msg["content"]))
         
-        # 最新のユーザーメッセージを追加（重複防止のため確認）
+        # 最新のユーザーメッセージを追加
         if not langchain_messages or not isinstance(langchain_messages[-1], HumanMessage):
             langchain_messages.append(HumanMessage(content=request.content))
         
@@ -679,7 +775,11 @@ async def send_dan_message(
         return DanMessageResponse(
             user_message=user_message,
             ai_message=ai_message,
-            process_steps=process_steps,
+            process_steps=[
+                ProcessStep(id="receive", label="メッセージを受信しました", status="completed"),
+                ProcessStep(id="analyze", label="要望を分析しました", status="completed"),
+                ProcessStep(id="generate", label="回答を生成しました", status="completed"),
+            ],
         )
         
     except Exception as e:

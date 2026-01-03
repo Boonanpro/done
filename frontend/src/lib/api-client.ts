@@ -371,6 +371,76 @@ export const api = {
         body: JSON.stringify({ content }),
       }),
 
+    // SSEストリーミング版メッセージ送信
+    sendMessageStream: async (
+      content: string,
+      onProcess: (step: ProcessStep) => void,
+      onUserMessage: (message: MessageResponse) => void,
+      onAiMessage: (message: MessageResponse) => void,
+      onError: (error: string) => void,
+      onDone: () => void
+    ) => {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
+      
+      const response = await fetch(`${API_BASE_URL}/api/v1/chat/dan/messages/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        credentials: 'include',
+        body: JSON.stringify({ content }),
+      });
+
+      if (!response.ok) {
+        throw new ApiError(response.status, response.statusText, null);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('No reader available');
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              switch (data.type) {
+                case 'process':
+                  onProcess(data.step);
+                  break;
+                case 'user_message':
+                  onUserMessage(data.message);
+                  break;
+                case 'ai_message':
+                  onAiMessage(data.message);
+                  break;
+                case 'error':
+                  onError(data.message);
+                  break;
+                case 'done':
+                  onDone();
+                  break;
+              }
+            } catch {
+              // Skip malformed JSON
+            }
+          }
+        }
+      }
+    },
+
     markAsRead: () =>
       request<{ success: boolean; read_at: string }>('/chat/dan/read', {
         method: 'POST',
