@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -57,16 +57,25 @@ export function Sidebar({ className }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { user, logout, isLoggingOut, isAuthenticated } = useAuth();
+  const { user, logout, isLoggingOut } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [hasMounted, setHasMounted] = useState(false);
+
+  // Wait for client-side mount to avoid hydration mismatch
+  useEffect(() => {
+    setHasMounted(true);
+  }, []);
+
+  // Check if token exists in localStorage (only after mount)
+  const hasToken = hasMounted && !!localStorage.getItem('done-token');
 
   // Fetch sessions
   const { data: sessionsData, isLoading: isLoadingSessions } = useQuery({
     queryKey: ['dan-sessions'],
     queryFn: api.dan.getSessions,
-    enabled: isAuthenticated,
-    staleTime: 30 * 1000, // 30 seconds
+    enabled: hasToken,
+    staleTime: 60 * 1000, // 1 minute - cache longer
   });
 
   // Filter sessions by search query

@@ -47,6 +47,7 @@ export default function ChatPage() {
     queryFn: () => api.dan.getRoom(),
     retry: 2,
     retryDelay: 1000,
+    staleTime: 30 * 1000, // Cache for 30 seconds
   });
 
   // Fetch messages
@@ -59,7 +60,8 @@ export default function ChatPage() {
     queryKey: ['dan-messages'],
     queryFn: () => api.dan.getMessages({ limit: 50 }),
     enabled: !!danRoom,
-    refetchInterval: 5000, // Poll every 5 seconds
+    refetchInterval: 10000, // Poll every 10 seconds (reduced frequency)
+    staleTime: 5 * 1000, // Consider fresh for 5 seconds
     retry: 2,
   });
 
