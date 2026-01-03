@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/stores/auth-store';
-import { api, ApiError, setImmediateToken, type LoginRequest, type RegisterRequest } from '@/lib/api-client';
+import { api, ApiError, setImmediateToken, setStoredToken, type LoginRequest, type RegisterRequest } from '@/lib/api-client';
 
 export function useAuth() {
   const router = useRouter();
@@ -59,18 +59,10 @@ export function useAuth() {
       try {
         const tokenResponse = await api.auth.login(data);
         const newToken = tokenResponse.access_token;
-        // Set token immediately for subsequent requests
+        // Save token to localStorage and memory
+        setStoredToken(newToken);
         setImmediateToken(newToken);
         setToken(newToken);
-        // Also write directly to localStorage for immediate availability
-        const currentState = localStorage.getItem('done-auth');
-        if (currentState) {
-          const parsed = JSON.parse(currentState);
-          parsed.state.token = newToken;
-          localStorage.setItem('done-auth', JSON.stringify(parsed));
-        } else {
-          localStorage.setItem('done-auth', JSON.stringify({ state: { token: newToken } }));
-        }
         const userData = await api.auth.me();
         setUser(userData);
         router.push('/chat');
@@ -78,6 +70,7 @@ export function useAuth() {
       } catch (error) {
         setLoading(false);
         setImmediateToken(null);
+        setStoredToken(null);
         if (error instanceof ApiError) {
           return { success: false, error: error.data };
         }
@@ -95,18 +88,10 @@ export function useAuth() {
         // Auto-login after registration
         const tokenResponse = await api.auth.login({ email: data.email, password: data.password });
         const newToken = tokenResponse.access_token;
-        // Set token immediately for subsequent requests
+        // Save token to localStorage and memory
+        setStoredToken(newToken);
         setImmediateToken(newToken);
         setToken(newToken);
-        // Also write directly to localStorage for immediate availability
-        const currentState = localStorage.getItem('done-auth');
-        if (currentState) {
-          const parsed = JSON.parse(currentState);
-          parsed.state.token = newToken;
-          localStorage.setItem('done-auth', JSON.stringify(parsed));
-        } else {
-          localStorage.setItem('done-auth', JSON.stringify({ state: { token: newToken } }));
-        }
         const userData = await api.auth.me();
         setUser(userData);
         router.push('/chat');
@@ -114,6 +99,7 @@ export function useAuth() {
       } catch (error) {
         setLoading(false);
         setImmediateToken(null);
+        setStoredToken(null);
         if (error instanceof ApiError) {
           return { success: false, error: error.data };
         }
@@ -125,7 +111,9 @@ export function useAuth() {
 
   const logout = useCallback(async () => {
     setIsLoggingOut(true);
-    // Clear auth state locally (no backend logout endpoint)
+    // Clear auth state locally
+    setStoredToken(null);
+    setImmediateToken(null);
     clearAuth();
     setIsLoggingOut(false);
     router.push('/login');

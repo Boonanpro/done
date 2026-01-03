@@ -125,19 +125,23 @@ export class ApiError extends Error {
 
 // ==================== Token Management ====================
 
-// Get token from localStorage (Zustand persisted state)
+// Simple token storage key
+const TOKEN_KEY = 'done-token';
+
+// Get token from localStorage
 function getStoredToken(): string | null {
   if (typeof window === 'undefined') return null;
-  try {
-    const stored = localStorage.getItem('done-auth');
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      return parsed.state?.token || null;
-    }
-  } catch {
-    // Ignore parse errors
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+// Set token in localStorage
+export function setStoredToken(token: string | null) {
+  if (typeof window === 'undefined') return;
+  if (token) {
+    localStorage.setItem(TOKEN_KEY, token);
+  } else {
+    localStorage.removeItem(TOKEN_KEY);
   }
-  return null;
 }
 
 // ==================== HTTP Client ====================
