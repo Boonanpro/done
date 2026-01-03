@@ -99,15 +99,10 @@ export function useAuth() {
 
   const logout = useCallback(async () => {
     setIsLoggingOut(true);
-    try {
-      await api.auth.logout();
-    } catch {
-      // Ignore logout errors
-    } finally {
-      clearAuth();
-      setIsLoggingOut(false);
-      router.push('/login');
-    }
+    // Clear auth state locally (no backend logout endpoint)
+    clearAuth();
+    setIsLoggingOut(false);
+    router.push('/login');
   }, [clearAuth, router]);
 
   return {
