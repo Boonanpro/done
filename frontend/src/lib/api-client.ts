@@ -161,6 +161,7 @@ async function request<T>(
 
   // Use immediate token if available, otherwise get from localStorage
   const token = immediateToken || getStoredToken();
+
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),

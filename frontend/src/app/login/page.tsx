@@ -40,16 +40,14 @@ export default function LoginPage() {
 
     try {
       const result = await login(data);
-      console.log('[Login] result:', result);
 
       if (!result.success) {
         setError('メールアドレスまたはパスワードが正しくありません');
         setIsSubmitting(false);
       }
-      // If success, router.push('/chat') is called in login()
+      // If success, window.location.href is used in login()
       // Page will navigate, so no need to reset isSubmitting
-    } catch (err) {
-      console.error('[Login] error:', err);
+    } catch {
       setError('ログインに失敗しました');
       setIsSubmitting(false);
     }
