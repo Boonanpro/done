@@ -219,9 +219,9 @@ export default function ChatPage() {
                 </p>
               </motion.div>
             ) : (
-              // Messages
+              // Messages (reverse to show oldest first, newest at bottom)
               <AnimatePresence mode="popLayout">
-                {messages.map((msg, index) => {
+                {[...messages].reverse().map((msg, index) => {
                   const isUser = msg.sender_type === 'human';
 
                   return (

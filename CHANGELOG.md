@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **フロントエンド実装** - Done Chat UI（Next.js 16 + React 19）
+  - ログイン/登録画面、チャット画面、サイドバー
+  - バックエンドAPI連携（`lib/api-client.ts`）
+
+### Fixed
+- チャットメッセージの表示順を修正（古いメッセージが上、新しいメッセージが下）
+
+### Previously Added
 - **ドキュメント更新ルール** - ADR/CHANGELOG更新タイミングを`.cursor/rules`に明記
   - Commits: `65a168d`, `4f441a7`
   - ADR作成トリガーの明確化（設計判断時に確認を促す）
