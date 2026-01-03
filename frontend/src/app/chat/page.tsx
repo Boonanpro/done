@@ -175,7 +175,6 @@ export default function ChatPage() {
         {/* Header */}
         <div className="shrink-0 flex items-center gap-3 px-6 py-4 border-b border-border">
           <Avatar className="h-10 w-10">
-            <AvatarImage src="/dan-avatar.png" />
             <AvatarFallback className="bg-primary/10">
               <Bot className="h-5 w-5 text-primary" />
             </AvatarFallback>
@@ -234,7 +233,6 @@ export default function ChatPage() {
                     >
                       {!isUser && (
                         <Avatar className="h-10 w-10 shrink-0">
-                          <AvatarImage src="/dan-avatar.png" />
                           <AvatarFallback className="bg-primary/10">
                             <Bot className="h-5 w-5 text-primary" />
                           </AvatarFallback>
