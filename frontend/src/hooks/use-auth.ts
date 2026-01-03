@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/stores/auth-store';
-import { api, ApiError, type LoginRequest, type RegisterRequest } from '@/lib/api-client';
+import { api, ApiError, setImmediateToken, type LoginRequest, type RegisterRequest } from '@/lib/api-client';
 
 export function useAuth() {
   const router = useRouter();
@@ -58,13 +58,17 @@ export function useAuth() {
       setLoading(true);
       try {
         const tokenResponse = await api.auth.login(data);
-        setToken(tokenResponse.access_token);
+        const newToken = tokenResponse.access_token;
+        // Set token immediately for subsequent requests
+        setImmediateToken(newToken);
+        setToken(newToken);
         const userData = await api.auth.me();
         setUser(userData);
         router.push('/chat');
         return { success: true };
       } catch (error) {
         setLoading(false);
+        setImmediateToken(null);
         if (error instanceof ApiError) {
           return { success: false, error: error.data };
         }
@@ -81,13 +85,17 @@ export function useAuth() {
         await api.auth.register(data);
         // Auto-login after registration
         const tokenResponse = await api.auth.login({ email: data.email, password: data.password });
-        setToken(tokenResponse.access_token);
+        const newToken = tokenResponse.access_token;
+        // Set token immediately for subsequent requests
+        setImmediateToken(newToken);
+        setToken(newToken);
         const userData = await api.auth.me();
         setUser(userData);
         router.push('/chat');
         return { success: true };
       } catch (error) {
         setLoading(false);
+        setImmediateToken(null);
         if (error instanceof ApiError) {
           return { success: false, error: error.data };
         }

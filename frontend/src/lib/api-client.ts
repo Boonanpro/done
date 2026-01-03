@@ -142,13 +142,21 @@ function getStoredToken(): string | null {
 
 // ==================== HTTP Client ====================
 
+// Temporary token storage for immediate use after login
+let immediateToken: string | null = null;
+
+export function setImmediateToken(token: string | null) {
+  immediateToken = token;
+}
+
 async function request<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
   const url = `${API_BASE_URL}/api/v1${endpoint}`;
 
-  const token = getStoredToken();
+  // Use immediate token if available, otherwise get from localStorage
+  const token = immediateToken || getStoredToken();
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
