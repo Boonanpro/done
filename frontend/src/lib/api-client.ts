@@ -123,6 +123,23 @@ export class ApiError extends Error {
   }
 }
 
+// ==================== Token Management ====================
+
+// Get token from localStorage (Zustand persisted state)
+function getStoredToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const stored = localStorage.getItem('done-auth');
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      return parsed.state?.token || null;
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  return null;
+}
+
 // ==================== HTTP Client ====================
 
 async function request<T>(
@@ -131,15 +148,16 @@ async function request<T>(
 ): Promise<T> {
   const url = `${API_BASE_URL}/api/v1${endpoint}`;
 
+  const token = getStoredToken();
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...options.headers,
   };
 
   const response = await fetch(url, {
     ...options,
     headers,
-    credentials: 'include', // Include cookies for authentication
   });
 
   if (!response.ok) {

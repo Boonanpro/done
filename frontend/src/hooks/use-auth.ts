@@ -11,41 +11,54 @@ import { api, ApiError, type LoginRequest, type RegisterRequest } from '@/lib/ap
 
 export function useAuth() {
   const router = useRouter();
-  const { user, isAuthenticated, isLoading, setUser, setLoading, logout: clearAuth } = useAuthStore();
+  const { user, token, isAuthenticated, isLoading, setUser, setToken, setLoading, logout: clearAuth } = useAuthStore();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
   // Check authentication on mount
   useEffect(() => {
     const checkAuth = async () => {
-      try {
-        const userData = await api.auth.me();
-        setUser(userData);
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 401) {
-          // Try to refresh token
-          try {
-            await api.auth.refresh();
-            const userData = await api.auth.me();
-            setUser(userData);
-          } catch {
+      // If we have a stored token, try to use it
+      if (token) {
+        try {
+          const userData = await api.auth.me();
+          setUser(userData);
+          return;
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 401) {
+            // Token expired, try to refresh
+            try {
+              const refreshResponse = await api.auth.refresh();
+              setToken(refreshResponse.access_token);
+              const userData = await api.auth.me();
+              setUser(userData);
+              return;
+            } catch {
+              // Refresh failed, clear auth
+              setUser(null);
+              setToken(null);
+            }
+          } else {
             setUser(null);
+            setToken(null);
           }
-        } else {
-          setUser(null);
         }
+      } else {
+        setUser(null);
+        setLoading(false);
       }
     };
 
     if (isLoading) {
       checkAuth();
     }
-  }, [isLoading, setUser]);
+  }, [isLoading, setUser, setToken, setLoading, token]);
 
   const login = useCallback(
     async (data: LoginRequest) => {
       setLoading(true);
       try {
-        await api.auth.login(data);
+        const tokenResponse = await api.auth.login(data);
+        setToken(tokenResponse.access_token);
         const userData = await api.auth.me();
         setUser(userData);
         router.push('/chat');
@@ -58,7 +71,7 @@ export function useAuth() {
         throw error;
       }
     },
-    [router, setUser, setLoading]
+    [router, setUser, setToken, setLoading]
   );
 
   const register = useCallback(
@@ -67,7 +80,8 @@ export function useAuth() {
       try {
         await api.auth.register(data);
         // Auto-login after registration
-        await api.auth.login({ email: data.email, password: data.password });
+        const tokenResponse = await api.auth.login({ email: data.email, password: data.password });
+        setToken(tokenResponse.access_token);
         const userData = await api.auth.me();
         setUser(userData);
         router.push('/chat');
@@ -80,7 +94,7 @@ export function useAuth() {
         throw error;
       }
     },
-    [router, setUser, setLoading]
+    [router, setUser, setToken, setLoading]
   );
 
   const logout = useCallback(async () => {
@@ -98,6 +112,7 @@ export function useAuth() {
 
   return {
     user,
+    token,
     isAuthenticated,
     isLoading,
     isLoggingOut,
