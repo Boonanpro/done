@@ -8,7 +8,6 @@ import { toast } from 'sonner';
 
 import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api, type MessageResponse, ApiError } from '@/lib/api-client';
@@ -172,7 +171,7 @@ export default function ChatPage() {
 
   return (
     <MainLayout>
-      <div className="flex flex-col h-full">
+      <div className="flex flex-col h-full overflow-hidden">
         {/* Header */}
         <div className="shrink-0 flex items-center gap-3 px-6 py-4 border-b border-border">
           <Avatar className="h-10 w-10">
@@ -188,7 +187,7 @@ export default function ChatPage() {
         </div>
 
         {/* Messages Area */}
-        <ScrollArea className="flex-1 px-6">
+        <div className="flex-1 min-h-0 overflow-y-auto px-6">
           <div className="max-w-3xl mx-auto py-6 space-y-6">
             {isLoadingRoom || isLoadingMessages ? (
               // Loading skeletons
@@ -319,7 +318,7 @@ export default function ChatPage() {
 
             <div ref={messagesEndRef} />
           </div>
-        </ScrollArea>
+        </div>
 
         {/* Input Area */}
         <div className="shrink-0 border-t border-border p-4">

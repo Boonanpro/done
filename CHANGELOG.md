@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - チャットメッセージの表示順を修正（古いメッセージが上、新しいメッセージが下）
+- チャット画面のスクロールを修正（過去のメッセージを遡れるように）
 
 ### Previously Added
 - **ドキュメント更新ルール** - ADR/CHANGELOG更新タイミングを`.cursor/rules`に明記
