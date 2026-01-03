@@ -23,174 +23,164 @@ flowchart TD
 
 ---
 
-## Phase 1: 設計
+## Phase 1: 設計 ✅ 完了
 
-### 1.1 要件仕様書作成
+### 1.1 要件仕様書作成 ✅
 
 | 項目 | 詳細 |
 |------|------|
 | **担当** | ユーザー |
 | **成果物** | `docs/frontend_requirements.md` |
-| **目安時間** | 1〜2時間 |
-
-**作業内容:**
-- 画面一覧の洗い出し
-- 各画面の機能要件定義
-- 優先度設定（MVP / Phase 2 / 将来）
-- デザイン方針の決定
-
-**テンプレート:** [`docs/frontend_requirements_template.md`](./frontend_requirements_template.md)
+| **ステータス** | ✅ 完了 |
 
 ---
 
-### 1.2 技術スタック選定
+### 1.2 技術スタック選定 ✅
 
 | 項目 | 詳細 |
 |------|------|
 | **担当** | ユーザー + AI（共同） |
 | **成果物** | 技術スタック決定 |
-| **目安時間** | 30分〜1時間 |
+| **ステータス** | ✅ 完了（2025年12月31日） |
 
-**検討項目:**
+**確定した技術スタック:**
 
-| カテゴリ | 候補 | 備考 |
-|----------|------|------|
-| フレームワーク | Next.js 14+ (App Router) | React Server Components対応 |
-| 言語 | TypeScript | 型安全性確保 |
-| スタイリング | Tailwind CSS | ユーティリティファースト |
-| UIライブラリ | shadcn/ui or Radix UI | アクセシビリティ対応 |
-| 状態管理 | Zustand + TanStack Query | シンプル + サーバー状態管理 |
-| フォーム | React Hook Form + Zod | バリデーション統合 |
-| リアルタイム | Native WebSocket | チャット用 |
+| カテゴリ | 技術 | バージョン |
+|----------|------|-----------|
+| フレームワーク | Next.js (App Router + Turbopack) | 16.1.1 |
+| 言語 | TypeScript | 5.x |
+| UIフレームワーク | React | 19.2.3 |
+| スタイリング | Tailwind CSS | 4.x |
+| UIライブラリ | shadcn/ui (Radix UI) | 最新 |
+| 状態管理 | Zustand | 5.x |
+| サーバー状態 | TanStack Query | 5.x |
+| フォーム | React Hook Form + Zod | 7.x / 4.x |
+| アニメーション | Framer Motion | 12.x |
+| アイコン | Lucide React | 最新 |
+| 多言語対応 | next-intl | 4.x |
+| 型生成 | openapi-typescript | 7.x |
+| リンター | ESLint + Biome | 最新 |
 
 ---
 
-## Phase 2: 基盤準備
+## Phase 2: 基盤準備 ✅ 完了
 
-### 2.1 バックエンド調整
+### 2.1 バックエンド調整 ✅
 
 | 項目 | 詳細 |
 |------|------|
-| **担当** | AI |
-| **成果物** | Cookie認証 + リフレッシュトークン対応 |
-| **目安時間** | 2〜3時間 |
+| **ステータス** | ✅ 既存実装済み |
 
-**作業内容:**
-
-1. **Cookie認証への変更**
-   - ログインAPIでHttpOnly Cookieを発行
-   - 既存のBearer認証との互換性維持（オプション）
-
-2. **リフレッシュトークン実装**
-   - リフレッシュトークン生成・保存
-   - `/api/v1/chat/refresh` エンドポイント追加
-   - トークンローテーション対応
-
-3. **セキュリティ対策**
-   - CSRF対策（SameSite設定）
-   - Secure属性（本番環境）
+バックエンドは既にCookie認証とリフレッシュトークンに対応済み:
+- `set_auth_cookies()` / `clear_auth_cookies()` 実装済み
+- `/api/v1/chat/refresh` エンドポイント実装済み
+- SameSite Cookie設定済み
 
 ---
 
-### 2.2 フロントエンド基盤構築
+### 2.2 フロントエンド基盤構築 ✅
 
 | 項目 | 詳細 |
 |------|------|
 | **担当** | AI |
 | **成果物** | フロントエンドプロジェクト初期構成 |
-| **目安時間** | 2〜3時間 |
+| **ステータス** | ✅ 完了 |
 
-**作業内容:**
+**作成したファイル構成:**
 
-1. **プロジェクト初期化**
-   ```
-   frontend/
-   ├── src/
-   │   ├── app/           # Next.js App Router
-   │   ├── components/    # 共通コンポーネント
-   │   ├── features/      # 機能別モジュール
-   │   ├── lib/           # ユーティリティ
-   │   └── types/         # 型定義
-   ├── package.json
-   └── ...
-   ```
+```
+frontend/
+├── src/
+│   ├── app/
+│   │   ├── layout.tsx           # ルートレイアウト
+│   │   ├── globals.css          # ダークモードCSS
+│   │   ├── login/page.tsx       # ログイン画面
+│   │   ├── register/page.tsx    # 新規登録画面
+│   │   ├── chat/page.tsx        # ダンとのチャット画面
+│   │   ├── friends/page.tsx     # 友達チャット画面
+│   │   └── settings/page.tsx    # 設定画面
+│   ├── components/
+│   │   ├── ui/                  # shadcn/uiコンポーネント
+│   │   ├── layout/              # レイアウトコンポーネント
+│   │   │   ├── main-layout.tsx
+│   │   │   └── sidebar.tsx
+│   │   ├── notification/        # 通知コンポーネント
+│   │   │   └── notification-panel.tsx
+│   │   └── providers.tsx        # アプリプロバイダー
+│   ├── hooks/
+│   │   └── use-auth.ts          # 認証フック
+│   ├── lib/
+│   │   ├── api-client.ts        # 型安全APIクライアント
+│   │   ├── query-client.ts      # TanStack Query設定
+│   │   └── utils.ts             # ユーティリティ
+│   ├── stores/
+│   │   └── auth-store.ts        # 認証状態管理
+│   ├── types/
+│   │   └── api.ts               # OpenAPI生成型
+│   └── i18n/
+│       ├── ja.json              # 日本語翻訳
+│       └── en.json              # 英語翻訳
+├── middleware.ts                 # ルート保護
+├── biome.json                   # Biome設定
+├── package.json
+└── tsconfig.json
+```
 
-2. **OpenAPIから型生成**
-   - `openapi.json` から TypeScript 型を自動生成
-   - 型安全なAPIクライアント作成
+**実装済み機能:**
 
-3. **認証フロー実装**
-   - ログイン/ログアウト処理
-   - セッション状態管理
-   - 保護ルート実装
-
-4. **共通コンポーネント**
-   - レイアウト（ヘッダー、ナビゲーション）
-   - ローディング/エラー表示
-   - 共通UI部品
+1. ✅ OpenAPIから型生成（`npm run generate:api`）
+2. ✅ 型安全なAPIクライアント
+3. ✅ Cookie認証対応
+4. ✅ ルート保護ミドルウェア
+5. ✅ 認証状態管理（Zustand）
+6. ✅ ダークモード専用UI
+7. ✅ 共通レイアウト（サイドバー）
+8. ✅ 通知コンポーネント
+9. ✅ 多言語対応基盤
 
 ---
 
-## Phase 3: 実装
+## Phase 3: 実装 🚧 進行中
 
 ### 3.1 MVP画面実装
 
-| 項目 | 詳細 |
-|------|------|
-| **担当** | AI |
-| **目安時間** | 要件仕様書の内容次第 |
-
-**想定される優先画面:**
-
-| 画面 | 説明 | 複雑度 |
+| 画面 | 説明 | ステータス |
 |------|------|--------|
-| ログイン/登録 | 認証画面 | 低 |
-| ダンページ | AI秘書との1対1チャット | 高 |
-| タスク実行状況 | リアルタイム進捗表示 | 中 |
-| 設定 | プロフィール編集など | 低 |
+| ログイン | 認証画面 | ✅ 完了 |
+| 新規登録 | アカウント作成画面 | ✅ 完了 |
+| ダンとのチャット | AI秘書との1対1チャット | ✅ 基本実装完了 |
+| 友達チャット | 友達とのチャット画面 | ✅ 基本実装完了 |
+| 設定 | プロフィール編集など | ✅ 基本実装完了 |
+| 通知コンポーネント | 右下の展開可能な通知エリア | ✅ 完了 |
+| プロセスモニター | タスク実行状況のリアルタイム表示 | ⬜ 未実装 |
 
 ---
 
 ### 3.2 追加機能実装
 
-MVP完成後、要件仕様書のPhase 2以降の機能を順次実装。
+MVP完成後、以下の機能を順次実装:
 
----
-
-## マイルストーン
-
-```mermaid
-gantt
-    title フロントエンド開発スケジュール（目安）
-    dateFormat  YYYY-MM-DD
-    
-    section Phase 1
-    要件仕様書作成    :a1, 2024-12-28, 2d
-    技術スタック選定  :a2, after a1, 1d
-    
-    section Phase 2
-    バックエンド調整  :b1, after a2, 1d
-    基盤構築         :b2, after b1, 1d
-    
-    section Phase 3
-    MVP実装          :c1, after b2, 5d
-    追加機能         :c2, after c1, 5d
-```
+- [ ] WebSocketリアルタイム通信
+- [ ] ファイル・画像添付機能
+- [ ] メッセージ編集・削除機能
+- [ ] チャット履歴検索
+- [ ] ブラウザプッシュ通知
+- [ ] プロセスモニター
 
 ---
 
 ## チェックリスト
 
 ### Phase 1 完了条件
-- [ ] 要件仕様書が完成している
-- [ ] 技術スタックが決定している
+- [x] 要件仕様書が完成している
+- [x] 技術スタックが決定している
 
 ### Phase 2 完了条件
-- [ ] Cookie認証が動作する
-- [ ] リフレッシュトークンが機能する
-- [ ] フロントエンドプロジェクトが初期化されている
-- [ ] OpenAPIから型が生成されている
-- [ ] 認証フローが実装されている
+- [x] Cookie認証が動作する（バックエンド既存）
+- [x] リフレッシュトークンが機能する（バックエンド既存）
+- [x] フロントエンドプロジェクトが初期化されている
+- [x] OpenAPIから型が生成されている
+- [x] 認証フローが実装されている
 
 ### Phase 3 完了条件
 - [ ] MVP画面がすべて実装されている
@@ -199,9 +189,32 @@ gantt
 
 ---
 
+## 開発コマンド
+
+```bash
+# 開発サーバー起動
+cd frontend && npm run dev
+
+# ビルド
+npm run build
+
+# 型チェック
+npm run typecheck
+
+# リント
+npm run lint
+
+# OpenAPI型生成
+npm run generate:api
+```
+
+---
+
 ## 次のステップ
 
-1. **今すぐ:** [`frontend_requirements_template.md`](./frontend_requirements_template.md) を複製して `frontend_requirements.md` を作成
-2. **記入:** テンプレートの各項目を埋める
-3. **共有:** 完成したらAIに共有して技術スタック選定へ
-
+1. **バックエンド起動** - `uvicorn main:app --reload`
+2. **フロントエンド起動** - `cd frontend && npm run dev`
+3. **動作確認** - http://localhost:3000 にアクセス
+4. **残りのMVP機能を実装**
+   - プロセスモニター
+   - WebSocketリアルタイム通信

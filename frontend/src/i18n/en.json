@@ -1,0 +1,66 @@
+{
+  "common": {
+    "loading": "Loading...",
+    "error": "An error occurred",
+    "retry": "Retry",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "confirm": "Confirm",
+    "close": "Close"
+  },
+  "auth": {
+    "login": "Login",
+    "logout": "Logout",
+    "register": "Register",
+    "email": "Email",
+    "password": "Password",
+    "confirmPassword": "Confirm Password",
+    "displayName": "Display Name",
+    "welcomeBack": "Welcome Back",
+    "createAccount": "Create Account",
+    "loginToYourAccount": "Login to Done",
+    "startNewExperience": "Start a new experience with Done",
+    "invalidCredentials": "Invalid email or password",
+    "registrationFailed": "Registration failed. Please try a different email.",
+    "noAccount": "Don't have an account?",
+    "hasAccount": "Already have an account?"
+  },
+  "chat": {
+    "dan": "Dan",
+    "aiSecretary": "AI Secretary",
+    "newConversation": "New Conversation",
+    "searchChats": "Search chats...",
+    "typeMessage": "Type a message...",
+    "you": "You",
+    "greeting": "Hello!",
+    "introduction": "I'm Dan, your AI secretary. How can I help you today?"
+  },
+  "friends": {
+    "title": "Friends",
+    "noFriends": "No friends yet",
+    "inviteFriend": "Invite Friend",
+    "aiEnabled": "AI Enabled",
+    "aiDisabled": "AI Disabled"
+  },
+  "settings": {
+    "title": "Settings",
+    "profile": "Profile",
+    "security": "Security",
+    "payment": "Payment",
+    "language": "Language",
+    "changePassword": "Change Password",
+    "deleteAccount": "Delete Account"
+  },
+  "notifications": {
+    "title": "Notifications",
+    "noNotifications": "No notifications",
+    "invoice": "Invoice",
+    "newMail": "New Mail",
+    "taskConfirm": "Task Confirmation",
+    "approve": "Approve",
+    "askDan": "You can ask Dan about this"
+  }
+}
+

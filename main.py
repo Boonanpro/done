@@ -32,9 +32,17 @@ app = FastAPI(
 )
 
 # CORS設定
+# credentials: 'include' を使用する場合、allow_origins に * は使用不可
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",      # フロントエンド開発サーバー
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",      # Swagger UI
+    "http://127.0.0.1:8000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 本番環境では適切に設定
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

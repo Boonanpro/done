@@ -2,7 +2,7 @@
 Chat API Routes for Done Chat
 Supports both Bearer token and HttpOnly Cookie authentication
 """
-from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Response, Request, Cookie
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Response, Request, Cookie, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 from datetime import datetime
@@ -111,13 +111,23 @@ def get_chat_service() -> ChatService:
 
 
 async def get_current_user(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> TokenData:
-    """Get current authenticated user from JWT token"""
-    if not credentials:
+    """Get current authenticated user from JWT token (Cookie or Bearer header)"""
+    token = None
+    
+    # First, try to get token from cookie
+    token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    
+    # If no cookie, try Bearer header
+    if not token and credentials:
+        token = credentials.credentials
+    
+    if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     
-    token_data = decode_access_token(credentials.credentials)
+    token_data = decode_access_token(token)
     if not token_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
@@ -125,12 +135,22 @@ async def get_current_user(
 
 
 async def get_optional_user(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> Optional[TokenData]:
     """Get current user if authenticated, None otherwise"""
-    if not credentials:
+    token = None
+    
+    # First, try to get token from cookie
+    token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    
+    # If no cookie, try Bearer header
+    if not token and credentials:
+        token = credentials.credentials
+    
+    if not token:
         return None
-    return decode_access_token(credentials.credentials)
+    return decode_access_token(token)
 
 
 # ==================== Auth Routes ====================
@@ -157,6 +177,7 @@ async def register(
 @router.post("/login", response_model=TokenResponse)
 async def login(
     request: LoginRequest,
+    response: Response,
     service: ChatService = Depends(get_chat_service),
 ):
     """Login and get JWT token"""
@@ -164,8 +185,28 @@ async def login(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
     
-    access_token = create_access_token(user_id=user["id"], email=user["email"])
-    return TokenResponse(access_token=access_token)
+    token_pair = create_token_pair(user_id=user["id"], email=user["email"])
+    set_auth_cookies(response, token_pair.access_token, token_pair.refresh_token)
+    return TokenResponse(access_token=token_pair.access_token)
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_token_endpoint(
+    request: Request,
+    response: Response,
+):
+    """Refresh access token using refresh token from cookie"""
+    refresh_token_value = request.cookies.get(REFRESH_TOKEN_COOKIE)
+    if not refresh_token_value:
+        raise HTTPException(status_code=401, detail="Refresh token not found")
+    
+    token_pair = refresh_tokens(refresh_token_value)
+    if not token_pair:
+        clear_auth_cookies(response)
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    
+    set_auth_cookies(response, token_pair.access_token, token_pair.refresh_token)
+    return TokenResponse(access_token=token_pair.access_token)
 
 
 @router.get("/me", response_model=UserResponse)
@@ -529,13 +570,23 @@ async def get_dan_messages(
 @router.post("/dan/messages", response_model=MessageResponse)
 async def send_dan_message(
     request: MessageSendRequest,
+    background_tasks: BackgroundTasks,
     current_user: TokenData = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ):
-    """ダンにメッセージを送信"""
+    """ダンにメッセージを送信し、AIの返信を生成"""
     try:
         message = await service.send_dan_message(current_user.user_id, request.content)
         user = await service.get_user_by_id(current_user.user_id)
+        
+        # バックグラウンドでAI返信を生成
+        background_tasks.add_task(
+            generate_dan_response,
+            current_user.user_id,
+            request.content,
+            service,
+        )
+        
         return MessageResponse(
             id=message["id"],
             room_id=message["room_id"],
@@ -547,6 +598,72 @@ async def send_dan_message(
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def generate_dan_response(user_id: str, user_message: str, service: ChatService):
+    """ダンのAI返信を生成してDBに保存"""
+    try:
+        from langchain_anthropic import ChatAnthropic
+        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+        
+        # 過去のメッセージを取得
+        dan_room = await service.get_or_create_dan_room(user_id)
+        messages_data = await service.get_messages(dan_room["id"], user_id, limit=10)
+        
+        # LLMを初期化
+        llm = ChatAnthropic(
+            model="claude-sonnet-4-20250514",
+            api_key=settings.ANTHROPIC_API_KEY,
+            temperature=0.7,
+            max_tokens=1024,
+        )
+        
+        # システムプロンプト
+        system_prompt = """あなたは「ダン」という名前のAI秘書です。
+ユーザーの依頼に対して、具体的で実用的な提案をします。
+
+## 基本方針
+- 質問で返さず、具体的な提案をする
+- 足りない情報は適切に推測する
+- 日本語で簡潔に返答する
+- 親しみやすくプロフェッショナルなトーン
+
+## 返答形式
+- 挨拶への返答は短く自然に
+- タスク依頼には具体的なアクションを提案
+- 必要に応じて確認事項を添える"""
+        
+        # メッセージを構築
+        langchain_messages = [SystemMessage(content=system_prompt)]
+        
+        for msg in messages_data:
+            if msg["sender_type"] == "human":
+                langchain_messages.append(HumanMessage(content=msg["content"]))
+            elif msg["sender_type"] == "ai":
+                langchain_messages.append(AIMessage(content=msg["content"]))
+        
+        # 最新のユーザーメッセージを追加（重複防止のため確認）
+        if not langchain_messages or not isinstance(langchain_messages[-1], HumanMessage):
+            langchain_messages.append(HumanMessage(content=user_message))
+        
+        # AI返信を生成
+        response = await llm.ainvoke(langchain_messages)
+        ai_response = response.content
+        
+        # DBに保存
+        await service.send_dan_ai_message(user_id, ai_response)
+        
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to generate Dan response: {e}")
+        # エラー時はフォールバックメッセージを保存
+        try:
+            await service.send_dan_ai_message(
+                user_id, 
+                "申し訳ありません、一時的なエラーが発生しました。もう一度お試しください。"
+            )
+        except Exception:
+            pass
 
 
 @router.post("/dan/read", response_model=ReadMarkResponse)
