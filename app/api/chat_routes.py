@@ -577,15 +577,12 @@ async def send_dan_message_stream(
     current_user: TokenData = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ):
-    """ダンにメッセージを送信し、プロセスをSSEでストリーミング"""
+    """ダンにメッセージを送信し、AISecretaryAgentでプロセスをSSEストリーミング"""
     from starlette.responses import StreamingResponse
-    import asyncio
+    from app.agent.agent import AISecretaryAgent
     
     async def generate_stream():
         try:
-            from langchain_anthropic import ChatAnthropic
-            from langchain_core.messages import SystemMessage, HumanMessage, AIMessage as LCAIMessage
-            
             # Step 1: ユーザーメッセージを保存
             yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'receive', 'label': '考え中...', 'status': 'running'}})}\n\n"
             
@@ -604,58 +601,70 @@ async def send_dan_message_stream(
             
             # ユーザーメッセージを送信
             yield f"data: {json.dumps({'type': 'user_message', 'message': user_message})}\n\n"
-            
-            # Step 2: 要望を分析中
             yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'receive', 'label': 'メッセージを受信しました', 'status': 'completed'}})}\n\n"
-            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'analyze', 'label': '要望を分析中...', 'status': 'running'}})}\n\n"
             
-            # 過去のメッセージを取得
-            dan_room = await service.get_or_create_dan_room(current_user.user_id)
-            messages_data = await service.get_messages(dan_room["id"], current_user.user_id, limit=10)
+            # Step 2: AISecretaryAgentで処理
+            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'analyze', 'label': 'タスクタイプを判定中...', 'status': 'running'}})}\n\n"
             
-            # LLMを初期化
-            llm = ChatAnthropic(
-                model="claude-sonnet-4-20250514",
-                api_key=settings.ANTHROPIC_API_KEY,
-                temperature=0.7,
-                max_tokens=1024,
-            )
+            # Agentを初期化（検索ツールを有効化）
+            agent = AISecretaryAgent(tool_names=["search_web"])
             
-            # システムプロンプト
-            system_prompt = """あなたは「ダン」という名前のAI秘書です。
-ユーザーの依頼に対して、具体的で実用的な提案をします。
-
-## 基本方針
-- 質問で返さず、具体的な提案をする
-- 足りない情報は適切に推測する
-- 日本語で簡潔に返答する
-- 親しみやすくプロフェッショナルなトーン
-
-## 返答形式
-- 挨拶への返答は短く自然に
-- タスク依頼には具体的なアクションを提案
-- 必要に応じて確認事項を添える"""
+            # タスクタイプを分析
+            from langchain_core.messages import HumanMessage as LCHumanMessage
+            initial_state = {
+                "messages": [LCHumanMessage(content=request.content)],
+                "task_id": "",
+                "user_id": current_user.user_id,
+                "original_wish": request.content,
+                "task_type": None,
+                "proposed_actions": [],
+                "requires_confirmation": False,
+                "execution_result": None,
+                "status": None,
+                "search_results": [],
+            }
             
-            # メッセージを構築
-            langchain_messages = [SystemMessage(content=system_prompt)]
+            # 分析ステップを実行
+            analyzed_state = await agent._analyze_wish(initial_state)
+            task_type = analyzed_state.get("task_type")
+            task_type_label = task_type.value if task_type else "other"
             
-            for msg in messages_data:
-                if msg["sender_type"] == "human":
-                    langchain_messages.append(HumanMessage(content=msg["content"]))
-                elif msg["sender_type"] == "ai":
-                    langchain_messages.append(LCAIMessage(content=msg["content"]))
+            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'analyze', 'label': f'タスクタイプ: {task_type_label}', 'status': 'completed'}})}\n\n"
             
-            # 最新のユーザーメッセージを追加（重複防止のため確認）
-            if not langchain_messages or not isinstance(langchain_messages[-1], HumanMessage):
-                langchain_messages.append(HumanMessage(content=request.content))
+            # Step 3: 検索（タスクタイプに応じて）
+            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'search', 'label': '情報を検索中...', 'status': 'running'}})}\n\n"
             
-            # Step 3: 回答を生成中
-            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'analyze', 'label': '要望を分析しました', 'status': 'completed'}})}\n\n"
-            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'generate', 'label': '回答を生成中...', 'status': 'running'}})}\n\n"
+            search_results = await agent._search_for_proposal(request.content, task_type)
+            search_count = len(search_results) if search_results else 0
             
-            # AI返信を生成
-            response = await llm.ainvoke(langchain_messages)
-            ai_response_content = response.content
+            if search_count > 0:
+                yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'search', 'label': f'{search_count}件の情報を取得しました', 'status': 'completed'}})}\n\n"
+            else:
+                yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'search', 'label': '検索完了（AIの知識で回答します）', 'status': 'completed'}})}\n\n"
+            
+            # Step 4: Agentの提案生成（Action First原則を適用）
+            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'propose', 'label': '提案を生成中...', 'status': 'running'}})}\n\n"
+            
+            # Agentの_propose_actionsを使用（検索結果を含めた状態で）
+            proposal_state = {
+                "messages": [LCHumanMessage(content=request.content)],
+                "task_id": "",
+                "user_id": current_user.user_id,
+                "original_wish": request.content,
+                "task_type": task_type,
+                "proposed_actions": [],
+                "requires_confirmation": False,
+                "execution_result": None,
+                "status": None,
+                "search_results": search_results,
+            }
+            
+            proposed_state = await agent._propose_actions(proposal_state)
+            
+            # 提案内容を取得（Action Firstフォーマット）
+            # SYSTEM_PROMPTが言語自動切り替え対応済みなので、そのまま使用
+            full_proposal = proposed_state.get("execution_result", {}).get("full_proposal", "")
+            ai_response_content = full_proposal
             
             # DBに保存
             ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content)
@@ -671,13 +680,14 @@ async def send_dan_message_stream(
             }
             
             # 完了
-            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'generate', 'label': '回答を生成しました', 'status': 'completed'}})}\n\n"
+            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'propose', 'label': '回答を生成しました', 'status': 'completed'}})}\n\n"
             yield f"data: {json.dumps({'type': 'ai_message', 'message': ai_message})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             
         except Exception as e:
             import logging
-            logging.error(f"Failed to stream dan message: {e}")
+            import traceback
+            logging.error(f"Failed to stream dan message: {e}\n{traceback.format_exc()}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
     
     return StreamingResponse(
@@ -697,11 +707,12 @@ async def send_dan_message(
     current_user: TokenData = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ):
-    """ダンにメッセージを送信（非ストリーミング版、互換性のため保持）"""
+    """ダンにメッセージを送信（非ストリーミング版）- AISecretaryAgentを使用"""
     try:
-        from langchain_anthropic import ChatAnthropic
-        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage as LCAIMessage
+        from langchain_core.messages import HumanMessage as LCHumanMessage
+        from app.agent.agent import AISecretaryAgent
         
+        # ユーザーメッセージを保存
         message = await service.send_dan_message(current_user.user_id, request.content)
         user = await service.get_user_by_id(current_user.user_id)
         
@@ -715,49 +726,49 @@ async def send_dan_message(
             created_at=message["created_at"],
         )
         
-        # 過去のメッセージを取得
-        dan_room = await service.get_or_create_dan_room(current_user.user_id)
-        messages_data = await service.get_messages(dan_room["id"], current_user.user_id, limit=10)
+        # AISecretaryAgentで処理（ストリーミング版と同じ）
+        agent = AISecretaryAgent(tool_names=["search_web"])
         
-        # LLMを初期化
-        llm = ChatAnthropic(
-            model="claude-sonnet-4-20250514",
-            api_key=settings.ANTHROPIC_API_KEY,
-            temperature=0.7,
-            max_tokens=1024,
-        )
+        # タスクタイプを分析
+        initial_state = {
+            "messages": [LCHumanMessage(content=request.content)],
+            "task_id": "",
+            "user_id": current_user.user_id,
+            "original_wish": request.content,
+            "task_type": None,
+            "proposed_actions": [],
+            "requires_confirmation": False,
+            "execution_result": None,
+            "status": None,
+            "search_results": [],
+        }
         
-        # システムプロンプト
-        system_prompt = """あなたは「ダン」という名前のAI秘書です。
-ユーザーの依頼に対して、具体的で実用的な提案をします。
-
-## 基本方針
-- 質問で返さず、具体的な提案をする
-- 足りない情報は適切に推測する
-- 日本語で簡潔に返答する
-- 親しみやすくプロフェッショナルなトーン
-
-## 返答形式
-- 挨拶への返答は短く自然に
-- タスク依頼には具体的なアクションを提案
-- 必要に応じて確認事項を添える"""
+        # 分析ステップ
+        analyzed_state = await agent._analyze_wish(initial_state)
+        task_type = analyzed_state.get("task_type")
         
-        # メッセージを構築
-        langchain_messages = [SystemMessage(content=system_prompt)]
+        # 検索（タスクタイプに応じて）
+        search_results = await agent._search_for_proposal(request.content, task_type)
         
-        for msg in messages_data:
-            if msg["sender_type"] == "human":
-                langchain_messages.append(HumanMessage(content=msg["content"]))
-            elif msg["sender_type"] == "ai":
-                langchain_messages.append(LCAIMessage(content=msg["content"]))
+        # 提案生成
+        proposal_state = {
+            "messages": [LCHumanMessage(content=request.content)],
+            "task_id": "",
+            "user_id": current_user.user_id,
+            "original_wish": request.content,
+            "task_type": task_type,
+            "proposed_actions": [],
+            "requires_confirmation": False,
+            "execution_result": None,
+            "status": None,
+            "search_results": search_results,
+        }
         
-        # 最新のユーザーメッセージを追加
-        if not langchain_messages or not isinstance(langchain_messages[-1], HumanMessage):
-            langchain_messages.append(HumanMessage(content=request.content))
+        proposed_state = await agent._propose_actions(proposal_state)
         
-        # AI返信を生成
-        response = await llm.ainvoke(langchain_messages)
-        ai_response_content = response.content
+        # 提案内容を取得（Action Firstフォーマット）
+        full_proposal = proposed_state.get("execution_result", {}).get("full_proposal", "")
+        ai_response_content = full_proposal
         
         # DBに保存
         ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content)
@@ -772,19 +783,24 @@ async def send_dan_message(
             created_at=ai_message_data["created_at"],
         )
         
+        task_type_label = task_type.value if task_type else "other"
+        search_count = len(search_results) if search_results else 0
+        
         return DanMessageResponse(
             user_message=user_message,
             ai_message=ai_message,
             process_steps=[
                 ProcessStep(id="receive", label="メッセージを受信しました", status="completed"),
-                ProcessStep(id="analyze", label="要望を分析しました", status="completed"),
+                ProcessStep(id="analyze", label=f"タスクタイプ: {task_type_label}", status="completed"),
+                ProcessStep(id="search", label=f"{search_count}件の情報を取得" if search_count > 0 else "AIの知識で回答", status="completed"),
                 ProcessStep(id="generate", label="回答を生成しました", status="completed"),
             ],
         )
         
     except Exception as e:
         import logging
-        logging.error(f"Failed to send dan message: {e}")
+        import traceback
+        logging.error(f"Failed to send dan message: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

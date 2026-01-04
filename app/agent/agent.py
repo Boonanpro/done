@@ -130,7 +130,8 @@ Book a Shinkansen ticket departing 5:00 PM on December 28th via EX Reservation.
 [NOTES]
 5:00 PM is an assumption. Let me know if you want "4pm instead" or "Green car" etc.
 
-Always respond in English."""
+Always respond in the same language as the user's message.
+Keep [ACTION], [DETAILS], [NOTES] tags in English for parsing."""
 
     def __init__(self, tool_names: Optional[list[str]] = None):
         """
@@ -303,20 +304,24 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
         if any(kw in wish_lower for kw in phone_keywords) or "phone" in content:
             task_type = TaskType.PHONE
         # TRAVEL must be checked before LINE because "Bus Lines" contains "line"
-        elif "travel" in content or "train" in content or "shinkansen" in content or \
-             "bus" in content or "bus" in wish_lower or "highway" in wish_lower or \
-             "flight" in content or "book" in wish_lower or "yonago" in wish_lower or \
-             "umeda" in wish_lower or "willer" in content or "reservation" in wish_lower:
+        # 日本語キーワードも含む
+        travel_keywords_ja = ["新幹線", "電車", "特急", "飛行機", "航空", "バス", "高速バス", 
+                              "予約", "チケット", "乗車券", "切符", "行きたい", "移動"]
+        travel_keywords_en = ["travel", "train", "shinkansen", "bus", "highway", 
+                              "flight", "book", "reservation", "willer"]
+        if any(kw in wish_lower for kw in travel_keywords_ja) or \
+           any(kw in content for kw in travel_keywords_en):
             task_type = TaskType.TRAVEL
-        elif "email" in content:
+        elif "email" in content or "メール" in wish_lower:
             task_type = TaskType.EMAIL
-        elif "line message" in content or "send line" in content:
+        elif "line message" in content or "send line" in content or "line送" in wish_lower:
             task_type = TaskType.LINE
-        elif "purchase" in content or "buy" in content:
+        elif "purchase" in content or "buy" in content or "買" in wish_lower or "購入" in wish_lower:
             task_type = TaskType.PURCHASE
-        elif "payment" in content or "pay" in content or "bill" in content:
+        elif "payment" in content or "pay" in content or "bill" in content or "支払" in wish_lower:
             task_type = TaskType.PAYMENT
-        elif "research" in content or "search" in content or "find" in content:
+        elif "research" in content or "search" in content or "find" in content or \
+             "調べ" in wish_lower or "検索" in wish_lower:
             task_type = TaskType.RESEARCH
         else:
             task_type = TaskType.OTHER
@@ -366,12 +371,46 @@ Respond in JSON format: {{"task_type": "type_name", "summary": "summary"}}"""
                 }]
                 
             elif task_type == TaskType.TRAVEL:
-                # 交通関連: 駅名や日時を抽出して検索
-                # TODO: より高度な抽出ロジック
-                search_results = await search_train.ainvoke({
-                    "departure": "東京",  # 仮のデフォルト
-                    "arrival": "大阪",
-                })
+                # 交通関連: LLMで駅名や日時を抽出して検索
+                travel_params = await self._extract_travel_params(wish)
+                logger.info(f"Extracted travel params: {travel_params}")
+                
+                departure = travel_params.get("departure", "")
+                arrival = travel_params.get("arrival", "")
+                
+                if departure and arrival:
+                    transport_type = travel_params.get("transport_type", "shinkansen")
+                    
+                    if transport_type in ["shinkansen", "train"]:
+                        search_results = await search_train.ainvoke({
+                            "departure": departure,
+                            "arrival": arrival,
+                        })
+                    elif transport_type == "bus":
+                        search_results = await search_bus.ainvoke({
+                            "departure": departure,
+                            "arrival": arrival,
+                        })
+                    elif transport_type == "flight":
+                        search_results = await search_flight.ainvoke({
+                            "departure": departure,
+                            "arrival": arrival,
+                        })
+                    else:
+                        search_results = await search_train.ainvoke({
+                            "departure": departure,
+                            "arrival": arrival,
+                        })
+                    
+                    logger.info(f"Raw search results: {search_results}")
+                    
+                    # 抽出したパラメータを検索結果に追加
+                    if search_results:
+                        for r in search_results:
+                            if isinstance(r, dict):
+                                r["extracted_params"] = travel_params
+                else:
+                    logger.warning(f"Could not extract departure/arrival from: {wish}")
                 
             elif task_type == TaskType.PURCHASE:
                 # 購入関連: 商品名を抽出して検索
@@ -496,6 +535,64 @@ Keep each option to 1-2 lines. Be specific and actionable."""
                 return """🥇 **おすすめ**: 別のアプローチを試す
 🥈 **次点**: 電話でお問い合わせ（「電話して」と言ってください）
 🥉 **その他**: 目的を見直して再検討"""
+    
+    async def _extract_travel_params(self, wish: str) -> dict:
+        """
+        旅行タスクのパラメータを抽出
+        
+        Args:
+            wish: ユーザーの願望
+            
+        Returns:
+            出発地、到着地、日時などの情報
+        """
+        try:
+            from datetime import datetime, timedelta
+            today = datetime.now().strftime("%Y-%m-%d")
+            tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            
+            extract_prompt = f"""Analyze the following travel request and extract booking parameters.
+
+Request: {wish}
+
+Today's date: {today}
+
+Extract:
+1. departure: Departure station/location (in Japanese, e.g., "新大阪", "東京")
+2. arrival: Arrival station/location (in Japanese, e.g., "広島", "博多")
+3. date: Travel date in YYYY-MM-DD format (use {today} for "今日", {tomorrow} for "明日")
+4. time: Preferred departure time (e.g., "10:00", "morning" -> "09:00", "evening" -> "17:00")
+5. seat_class: Seat class ("ordinary" for 普通車/指定席, "green" for グリーン車)
+6. transport_type: Type of transport ("shinkansen", "train", "bus", "flight")
+
+Respond in JSON format only:
+{{"departure": "...", "arrival": "...", "date": "YYYY-MM-DD", "time": "HH:MM", "seat_class": "ordinary|green", "transport_type": "shinkansen|train|bus|flight"}}"""
+
+            response = await self.llm.ainvoke([
+                SystemMessage(content="You are an assistant that extracts travel booking parameters. Respond only in valid JSON."),
+                HumanMessage(content=extract_prompt)
+            ])
+            
+            import json
+            content = response.content.strip()
+            # JSON部分を抽出
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+            
+            return json.loads(content)
+            
+        except Exception as e:
+            logger.warning(f"Failed to extract travel params: {e}")
+            return {
+                "departure": "",
+                "arrival": "",
+                "date": "",
+                "time": "",
+                "seat_class": "ordinary",
+                "transport_type": "shinkansen"
+            }
     
     async def _extract_phone_context(self, wish: str) -> dict:
         """
