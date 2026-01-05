@@ -1309,27 +1309,50 @@ Respond in this format:
                 transport_type = params.get("transport_type", "")
                 date = params.get("date", "")
                 time = params.get("time", "")
+                seat_class = params.get("seat_class", "ordinary")
                 
-                # 根拠付きメッセージ
-                reasoning_msg = f"{departure}→{arrival}の移動 → {service_name}で予約します"
+                # 交通手段の日本語
+                transport_ja = {
+                    "shinkansen": "新幹線",
+                    "train": "電車",
+                    "bus": "高速バス",
+                    "flight": "飛行機"
+                }.get(transport_type, "交通機関")
+                
+                # 根拠付きメッセージ（ユーザーの意図を読み取った表現）
+                reasoning_msg = f"{transport_ja}で{departure}から{arrival}まで行きたいようなので、{service_name}で予約します"
                 if request_id:
                     await notify_progress(request_id, "reasoning", reasoning_msg, "completed")
                 
-                # 時間の仮定を表示
+                # 時間の仮定を表示（理由付き）
                 if not time:
-                    time_msg = "時間の指定がないので17時台で探します"
+                    time_msg = "時間の指定が無いのでとりあえず17時台で探します"
+                    if request_id:
+                        await notify_progress(request_id, "assumption_time", time_msg, "completed")
+                else:
+                    time_msg = f"{time}頃の便を探します"
                     if request_id:
                         await notify_progress(request_id, "assumption_time", time_msg, "completed")
                 
-                # 座席の仮定を表示
-                seat_msg = "普通車・指定席で検索します（デフォルト）"
+                # 座席の仮定を表示（理由付き）
+                if seat_class == "green":
+                    seat_msg = "グリーン車を希望されているのでグリーン車で探します"
+                else:
+                    seat_msg = "座席の指定が無いですが、普通車の指定席を使われることが多いので今回も指定席で探します"
                 if request_id:
                     await notify_progress(request_id, "assumption_seat", seat_msg, "completed")
+            
+            elif research.get("task_type") == "purchase":
+                query = params.get("query", "")
+                reasoning_msg = f"「{query}」を購入したいようなので、{service_name}で検索します"
+                if request_id:
+                    await notify_progress(request_id, "reasoning", reasoning_msg, "completed")
+            
             else:
                 if request_id:
                     await notify_progress(
                         request_id, "reasoning",
-                        f"{service_name}で検索します",
+                        f"{service_name}で対応します",
                         "completed"
                     )
             
@@ -1389,16 +1412,32 @@ Respond in this format:
             
             if request_id:
                 # 検索結果の表示（根拠付き）
-                await notify_progress(
-                    request_id, "search_result",
-                    f"予約可能な候補が{option_count}件見つかりました",
-                    "completed"
-                )
+                if research.get("task_type") == "travel":
+                    time_range = params.get("time", "17時")
+                    if not time_range:
+                        time_range = "17時"
+                    await notify_progress(
+                        request_id, "search_result",
+                        f"{time_range}台で予約可能な便が{option_count}件見つかりました",
+                        "completed"
+                    )
+                else:
+                    await notify_progress(
+                        request_id, "search_result",
+                        f"候補が{option_count}件見つかりました",
+                        "completed"
+                    )
                 
-                # 選択理由を表示
-                selection_reason = f"「{best_option.title}」を選択します"
-                if best_option.price:
-                    selection_reason += f"（¥{best_option.price:,}）"
+                # 選択理由を表示（なぜこれを選んだかの根拠）
+                if research.get("task_type") == "travel":
+                    selection_reason = f"特に指定が無いので最初の候補「{best_option.title}」を予約します"
+                    if best_option.price:
+                        selection_reason = f"特に指定が無いのでひとまず「{best_option.title}」（¥{best_option.price:,}）を予約します"
+                else:
+                    selection_reason = f"「{best_option.title}」を選択します"
+                    if best_option.price:
+                        selection_reason += f"（¥{best_option.price:,}）"
+                
                 await notify_progress(
                     request_id, "selection",
                     selection_reason,
