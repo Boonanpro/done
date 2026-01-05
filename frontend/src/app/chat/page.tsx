@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -20,19 +20,14 @@ interface ProcessDisplayProps {
   steps: ProcessStep[];
   isCollapsed: boolean;
   onToggle: () => void;
+  isProcessing?: boolean;
 }
 
-function ProcessDisplay({ steps, isCollapsed, onToggle }: ProcessDisplayProps) {
-  if (steps.length === 0) return null;
-  
-  const completedCount = steps.filter(s => s.status === 'completed').length;
+function ProcessDisplay({ steps, isCollapsed, onToggle, isProcessing = false }: ProcessDisplayProps) {
+  const hasSteps = steps.length > 0;
   
   return (
-    <motion.div
-      initial={{ opacity: 0, height: 0 }}
-      animate={{ opacity: 1, height: 'auto' }}
-      className="flex gap-3 mb-2"
-    >
+    <div className="flex gap-3 mb-2">
       {/* アバタースペース（ダンのアバターと揃える） */}
       <div className="w-10 shrink-0" />
       
@@ -46,48 +41,46 @@ function ProcessDisplay({ steps, isCollapsed, onToggle }: ProcessDisplayProps) {
           ) : (
             <ChevronUp className="h-3 w-3" />
           )}
-          <span>プロセス ({completedCount}ステップ完了)</span>
+          <span>プロセス</span>
         </button>
         
-        <AnimatePresence>
-          {!isCollapsed && (
-            <motion.div
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
-              exit={{ opacity: 0, height: 0 }}
-              className="mt-2 pl-2 border-l-2 border-primary/30 space-y-1"
-            >
-              {steps.map((step, index) => (
-                <motion.div
-                  key={step.id + '-' + index}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: index * 0.05 }}
-                  className="flex items-center gap-2 text-xs"
-                >
-                  {step.status === 'completed' ? (
-                    <Check className="h-3 w-3 text-green-500" />
-                  ) : step.status === 'running' ? (
-                    <Loader2 className="h-3 w-3 text-primary animate-spin" />
-                  ) : (
-                    <span className="h-3 w-3 rounded-full bg-muted-foreground/30" />
-                  )}
-                  <span className={cn(
-                    step.status === 'completed' ? 'text-green-600 dark:text-green-400' :
-                    step.status === 'running' ? 'text-foreground' :
-                    'text-muted-foreground'
-                  )}>
-                    {step.label}
-                  </span>
-                </motion.div>
-              ))}
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {!isCollapsed && (
+          <div className="mt-2 pl-2 border-l-2 border-primary/30 space-y-1">
+            {/* 「考え中...」表示（ステップがない場合） */}
+            {isProcessing && !hasSteps && (
+              <div className="flex items-center gap-2 text-xs">
+                <Loader2 className="h-3 w-3 text-primary animate-spin" />
+                <span>考え中...</span>
+              </div>
+            )}
+            
+            {/* プロセスステップ */}
+            {steps.map((step) => (
+              <div
+                key={step.id}
+                className="flex items-center gap-2 text-xs"
+              >
+                {step.status === 'completed' ? (
+                  <Check className="h-3 w-3 text-muted-foreground" />
+                ) : step.status === 'running' ? (
+                  <Loader2 className="h-3 w-3 text-primary animate-spin" />
+                ) : (
+                  <span className="h-3 w-3 rounded-full bg-muted-foreground/30" />
+                )}
+                <span className="text-muted-foreground">
+                  {step.label}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
-    </motion.div>
+    </div>
   );
 }
+
+// ペンディング中のプロセスを管理するための特別なID
+const PENDING_PROCESS_ID = '__pending__';
 
 export default function ChatPage() {
   const router = useRouter();
@@ -97,11 +90,14 @@ export default function ChatPage() {
   const isLoading = useAuthStore((state) => state.isLoading);
   const [message, setMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const [currentProcess, setCurrentProcess] = useState<{
-    steps: ProcessStep[];
+  
+  // すべてのプロセスを統一管理（処理中も完了後も同じ）
+  const [processes, setProcesses] = useState<Map<string, { 
+    steps: ProcessStep[]; 
     isCollapsed: boolean;
-  } | null>(null);
-  const [completedProcesses, setCompletedProcesses] = useState<Map<string, { steps: ProcessStep[]; isCollapsed: boolean }>>(new Map());
+    isProcessing: boolean;
+  }>>(new Map());
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -154,12 +150,34 @@ export default function ChatPage() {
     setMessage('');
     setIsSending(true);
     
-    // プロセス表示を開始（最初は「考え中...」のみ）
-    setCurrentProcess({
-      steps: [],
-      isCollapsed: false,
+    // 1. 楽観的更新：ユーザーメッセージを即座に表示
+    const tempUserMessageId = `temp-user-${Date.now()}`;
+    const optimisticUserMessage: MessageResponse = {
+      id: tempUserMessageId,
+      room_id: danRoom?.id || '',
+      sender_id: user?.id || '',
+      sender_name: user?.display_name || 'You',
+      sender_type: 'human',
+      content,
+      created_at: new Date().toISOString(),
+    };
+    
+    queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
+      messages: [optimisticUserMessage, ...(old?.messages || [])],
+    }));
+    
+    // 2. プロセス表示を開始（ペンディングIDで）
+    setProcesses(prev => {
+      const newMap = new Map(prev);
+      newMap.set(PENDING_PROCESS_ID, {
+        steps: [],
+        isCollapsed: false,
+        isProcessing: true,
+      });
+      return newMap;
     });
     
+    let realUserMessageId: string | null = null;
     let aiMessageId: string | null = null;
     const processSteps: ProcessStep[] = [];
     
@@ -175,22 +193,30 @@ export default function ChatPage() {
           } else {
             processSteps.push(step);
           }
-          setCurrentProcess({
-            steps: [...processSteps],
-            isCollapsed: false,
+          setProcesses(prev => {
+            const newMap = new Map(prev);
+            newMap.set(PENDING_PROCESS_ID, {
+              steps: [...processSteps],
+              isCollapsed: false,
+              isProcessing: true,
+            });
+            return newMap;
           });
         },
         // onUserMessage
         (userMsg) => {
-          // キャッシュを更新
-          queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
-            messages: [userMsg, ...(old?.messages || [])],
-          }));
+          realUserMessageId = userMsg.id;
+          // 楽観的に追加したメッセージを実際のメッセージに置き換え
+          queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => {
+            const existingMessages = old?.messages || [];
+            const filtered = existingMessages.filter(m => m.id !== tempUserMessageId);
+            return { messages: [userMsg, ...filtered] };
+          });
         },
         // onAiMessage
         (aiMsg) => {
           aiMessageId = aiMsg.id;
-          // キャッシュを更新
+          // AI返信をキャッシュに追加
           queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
             messages: [aiMsg, ...(old?.messages || [])],
           }));
@@ -198,22 +224,35 @@ export default function ChatPage() {
         // onError
         (error) => {
           toast.error(`エラー: ${error}`);
-          setCurrentProcess(null);
+          // プロセスをエラー状態で保持（削除しない）
+          setProcesses(prev => {
+            const newMap = new Map(prev);
+            newMap.delete(PENDING_PROCESS_ID);
+            return newMap;
+          });
         },
         // onDone
         () => {
-          // 完了したプロセスを保存
+          // ペンディングプロセスをAIメッセージIDに紐づけて確定
           if (aiMessageId) {
-            setCompletedProcesses(prev => {
+            setProcesses(prev => {
               const newMap = new Map(prev);
+              newMap.delete(PENDING_PROCESS_ID);
               newMap.set(aiMessageId!, {
                 steps: [...processSteps],
-                isCollapsed: false, // デフォルトでオープン
+                isCollapsed: false,
+                isProcessing: false,
               });
               return newMap;
             });
+          } else {
+            // AI返信がなかった場合はプロセスを削除
+            setProcesses(prev => {
+              const newMap = new Map(prev);
+              newMap.delete(PENDING_PROCESS_ID);
+              return newMap;
+            });
           }
-          setCurrentProcess(null);
         }
       );
     } catch (error) {
@@ -226,16 +265,21 @@ export default function ChatPage() {
       } else {
         toast.error('ネットワークエラーが発生しました');
       }
-      setCurrentProcess(null);
+      // エラー時はプロセスを削除
+      setProcesses(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(PENDING_PROCESS_ID);
+        return newMap;
+      });
     } finally {
       setIsSending(false);
     }
-  }, [message, isSending, queryClient, messagesData]);
+  }, [message, isSending, queryClient, messagesData, danRoom?.id, user?.id, user?.display_name]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, currentProcess]);
+  }, [messages, processes]);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -261,16 +305,19 @@ export default function ChatPage() {
     }
   };
 
-  const toggleProcessCollapse = (messageId: string) => {
-    setCompletedProcesses(prev => {
+  const toggleProcessCollapse = (processId: string) => {
+    setProcesses(prev => {
       const newMap = new Map(prev);
-      const existing = newMap.get(messageId);
+      const existing = newMap.get(processId);
       if (existing) {
-        newMap.set(messageId, { ...existing, isCollapsed: !existing.isCollapsed });
+        newMap.set(processId, { ...existing, isCollapsed: !existing.isCollapsed });
       }
       return newMap;
     });
   };
+
+  // ペンディングプロセスがあるか
+  const pendingProcess = processes.get(PENDING_PROCESS_ID);
 
   // Error state
   if (hasError && !isLoadingRoom && !isLoadingMessages) {
@@ -318,7 +365,7 @@ export default function ChatPage() {
 
         {/* Messages Area */}
         <div className="flex-1 min-h-0 overflow-y-auto px-6">
-          <div className="max-w-3xl mx-auto py-6 space-y-6">
+          <div className="max-w-3xl mx-auto py-6 space-y-4">
             {isLoadingRoom || isLoadingMessages ? (
               // Loading skeletons
               Array.from({ length: 3 }).map((_, i) => (
@@ -330,7 +377,7 @@ export default function ChatPage() {
                   </div>
                 </div>
               ))
-            ) : messages.length === 0 && !currentProcess ? (
+            ) : messages.length === 0 && !pendingProcess ? (
               // Empty state
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
@@ -349,10 +396,10 @@ export default function ChatPage() {
               </motion.div>
             ) : (
               // Messages (reverse to show oldest first, newest at bottom)
-              <AnimatePresence mode="popLayout">
-                {[...messages].reverse().map((msg, index) => {
+              <>
+                {[...messages].reverse().map((msg) => {
                   const isUser = msg.sender_type === 'human';
-                  const processData = completedProcesses.get(msg.id);
+                  const processData = processes.get(msg.id);
 
                   return (
                     <div key={msg.id}>
@@ -362,15 +409,13 @@ export default function ChatPage() {
                           steps={processData.steps}
                           isCollapsed={processData.isCollapsed}
                           onToggle={() => toggleProcessCollapse(msg.id)}
+                          isProcessing={processData.isProcessing}
                         />
                       )}
                       
-                      <motion.div
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0 }}
-                        transition={{ delay: index * 0.02 }}
-                        className={cn('flex gap-3', isUser && 'justify-end', !isUser && processData && 'mt-2')}
+                      {/* メッセージ本体 */}
+                      <div
+                        className={cn('flex gap-3', isUser && 'justify-end')}
                       >
                         {!isUser && (
                           <Avatar className="h-10 w-10 shrink-0">
@@ -409,74 +454,22 @@ export default function ChatPage() {
                             </AvatarFallback>
                           </Avatar>
                         )}
-                      </motion.div>
+                      </div>
                     </div>
                   );
                 })}
-              </AnimatePresence>
-            )}
 
-            {/* 処理中のプロセス表示 */}
-            <AnimatePresence>
-              {currentProcess && (
-                <motion.div
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  className="flex gap-3"
-                >
-                  <Avatar className="h-10 w-10">
-                    <AvatarFallback className="bg-primary/10">
-                      <Bot className="h-5 w-5 text-primary" />
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="flex-1">
-                    <p className="text-xs text-muted-foreground mb-1">ダン</p>
-                    <div className="px-4 py-3 rounded-2xl rounded-bl-md bg-muted">
-                      <div className="space-y-2">
-                        {currentProcess.steps.length === 0 ? (
-                          // まだプロセスがない場合は「考え中...」
-                          <motion.div
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            className="flex items-center gap-2 text-sm"
-                          >
-                            <Loader2 className="h-4 w-4 text-primary animate-spin" />
-                            <span>考え中...</span>
-                          </motion.div>
-                        ) : (
-                          // プロセスを1つずつ表示
-                          currentProcess.steps.map((step, index) => (
-                            <motion.div
-                              key={step.id + '-' + index}
-                              initial={{ opacity: 0, x: -10 }}
-                              animate={{ opacity: 1, x: 0 }}
-                              transition={{ delay: 0.1 }}
-                              className="flex items-center gap-2 text-sm"
-                            >
-                              {step.status === 'completed' ? (
-                                <Check className="h-4 w-4 text-green-500" />
-                              ) : step.status === 'running' ? (
-                                <Loader2 className="h-4 w-4 text-primary animate-spin" />
-                              ) : (
-                                <span className="h-4 w-4 rounded-full border border-muted-foreground/30" />
-                              )}
-                              <span className={cn(
-                                step.status === 'completed' ? 'text-green-600 dark:text-green-400' :
-                                step.status === 'running' ? 'text-foreground' :
-                                'text-muted-foreground'
-                              )}>
-                                {step.label}
-                              </span>
-                            </motion.div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
+                {/* ペンディング中のプロセス表示（AI返信待ち） */}
+                {pendingProcess && (
+                  <ProcessDisplay
+                    steps={pendingProcess.steps}
+                    isCollapsed={pendingProcess.isCollapsed}
+                    onToggle={() => toggleProcessCollapse(PENDING_PROCESS_ID)}
+                    isProcessing={pendingProcess.isProcessing}
+                  />
+                )}
+              </>
+            )}
 
             <div ref={messagesEndRef} />
           </div>

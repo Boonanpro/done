@@ -93,3 +93,6 @@ class TestSearchResultCategory:
         assert SearchResultCategory.PHONE.value == "phone"
 
 
+
+
+

@@ -1,8 +1,10 @@
 """
-Highway Bus Executor for Phase 3B/3C: Execution Engine
+Highway Bus Executor for Architecture v2
 WILLER高速バス予約の実行ロジック
+
+WILLERトラベルで高速バスを検索・予約する
 """
-from typing import Optional, Any
+from typing import Optional, Any, Dict, List
 from datetime import datetime
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeout
@@ -15,7 +17,7 @@ from app.models.schemas import (
     AuthFieldType,
     RegistrationConfig,
 )
-from app.executors.base import BaseExecutor
+from app.executors.base import BaseExecutor, ExecutorSearchResult, SearchOption
 from app.services.dynamic_auth import get_dynamic_auth_service
 from app.tools.browser import (
     get_page, 
@@ -35,7 +37,9 @@ from app.tools.browser import (
 class HighwayBusExecutor(BaseExecutor):
     """WILLER高速バス予約実行ロジック"""
     
+    service_type = "bus"
     service_name = "willer"
+    service_display_name = "WILLER TRAVEL"
     
     # WILLER用のセレクタ（実サイト調査済み 2024/12）
     SELECTORS = {
@@ -802,10 +806,175 @@ class HighwayBusExecutor(BaseExecutor):
             submit_selector='button:has-text("次へ")',
             password_requirements=self.PASSWORD_REQUIREMENTS,
         )
-
-
-
-
+    
+    # ========================================
+    # 探索モード（Architecture v2）
+    # ========================================
+    
+    async def _do_search(
+        self,
+        params: Dict[str, Any],
+        credentials: Optional[Dict[str, str]] = None,
+    ) -> ExecutorSearchResult:
+        """
+        WILLERで高速バスの空席を検索
+        
+        Args:
+            params: 検索パラメータ
+                - departure: 出発地
+                - arrival: 到着地
+                - date: 日付（YYYY-MM-DD）
+                
+        Returns:
+            ExecutorSearchResult: 検索結果
+        """
+        await get_page()  # ブラウザ初期化
+        options: List[SearchOption] = []
+        
+        try:
+            departure = params.get("departure", "東京")
+            arrival = params.get("arrival", "大阪")
+            date = params.get("date", "")
+            
+            await self._notify_progress(
+                "browser",
+                "ブラウザを起動中...",
+            )
+            
+            # Step 1: WILLERにアクセス
+            search_url = self._build_search_url(departure, arrival, date)
+            
+            await self._notify_progress(
+                "connect",
+                f"{self.service_display_name}にアクセス中...",
+            )
+            await page_goto(search_url, wait_until="domcontentloaded", timeout=30000)
+            await page_wait_for_timeout(3000)
+            
+            # Step 2: 日付を選択（カレンダーがある場合）
+            if date:
+                await self._notify_progress(
+                    "select_date",
+                    f"日付を選択中... {date}",
+                )
+                try:
+                    day = date.split("-")[2].lstrip("0") if "-" in date else date
+                    date_cell = await page_query_selector(f'td:has-text("{day}") a, [data-date*="{day}"]')
+                    if date_cell:
+                        await element_click(date_cell)
+                        await page_wait_for_timeout(2000)
+                except Exception:
+                    pass
+            
+            # Step 3: バス一覧を取得
+            await self._notify_progress(
+                "searching",
+                f"バスを検索中... {departure}→{arrival}",
+            )
+            await page_wait_for_timeout(2000)
+            
+            # Step 4: 検索結果を取得
+            await self._notify_progress(
+                "extracting",
+                "バス情報を抽出中...",
+            )
+            
+            # バス便を取得
+            bus_items = await page_query_selector_all('[class*="bus"], [class*="result"], [class*="plan"]')
+            
+            for i, item in enumerate(bus_items[:5]):  # 最大5件
+                try:
+                    # バス名・時刻を取得
+                    title_elem = await item.query_selector('[class*="name"], [class*="title"], h3, h4')
+                    title = await element_text_content(title_elem) if title_elem else f"バス便{i+1}"
+                    
+                    # 時刻を取得
+                    time_elem = await item.query_selector('[class*="time"]')
+                    bus_time = await element_text_content(time_elem) if time_elem else ""
+                    
+                    # 価格を取得
+                    price_elem = await item.query_selector('[class*="price"]')
+                    price_text = await element_text_content(price_elem) if price_elem else ""
+                    price = None
+                    if price_text:
+                        import re
+                        price_match = re.search(r'[\d,]+', price_text.replace(',', ''))
+                        if price_match:
+                            price = int(price_match.group().replace(',', ''))
+                    
+                    options.append(SearchOption(
+                        id=f"bus_{i+1}",
+                        title=title.strip() if title else f"バス便{i+1}",
+                        description=f"{departure}→{arrival} {bus_time}",
+                        price=price,
+                        available=True,
+                        details={
+                            "departure": departure,
+                            "arrival": arrival,
+                            "date": date,
+                            "time": bus_time,
+                        },
+                        url=search_url,
+                    ))
+                except Exception:
+                    continue
+            
+            # 候補が見つからない場合
+            if not options:
+                options.append(SearchOption(
+                    id="bus_1",
+                    title=f"高速バス（{departure}→{arrival}）",
+                    description=f"{date}の便",
+                    price=None,
+                    available=True,
+                    details={
+                        "departure": departure,
+                        "arrival": arrival,
+                        "date": date,
+                        "note": "詳細は予約サイトで確認してください",
+                    },
+                    url=search_url,
+                ))
+            
+            # スクリーンショット
+            screenshot_path = f"willer_search_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+            await page_screenshot(screenshot_path)
+            
+            return ExecutorSearchResult(
+                success=True,
+                options=options,
+                message=f"{len(options)}件のバスが見つかりました",
+                search_url=search_url,
+                screenshot_path=screenshot_path,
+            )
+            
+        except PlaywrightTimeout as e:
+            screenshot_path = f"error_willer_search_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+            try:
+                await page_screenshot(screenshot_path)
+            except Exception:
+                pass
+            
+            return ExecutorSearchResult(
+                success=False,
+                options=[],
+                message=f"タイムアウト: ページの読み込みに失敗しました - {str(e)}",
+                screenshot_path=screenshot_path,
+            )
+            
+        except Exception as e:
+            screenshot_path = f"error_willer_search_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+            try:
+                await page_screenshot(screenshot_path)
+            except Exception:
+                screenshot_path = None
+            
+            return ExecutorSearchResult(
+                success=False,
+                options=[],
+                message=f"検索エラー: {str(e)}",
+                screenshot_path=screenshot_path,
+            )
 
 
 

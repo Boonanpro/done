@@ -1,10 +1,18 @@
 """
-Base Executor for Phase 3B: Execution Engine
+Base Executor for Architecture v2: 推論ファースト・Executor実行フロー
 共通実行ロジックの基底クラス
+
+新アーキテクチャでは以下のフローで動作：
+1. 推論 + Web検索で最適解を導出
+2. ExecutorRegistryで最適解を実現できるExecutorを探す
+3. Executor.search() で予約可能かを確認
+4. 予約可能なら提案を生成、ユーザー承認を待つ
+5. Executor.execute() で実際に予約を確定
 """
 from abc import ABC, abstractmethod
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 from datetime import datetime
+from dataclasses import dataclass
 import asyncio
 
 from app.models.schemas import (
@@ -17,11 +25,61 @@ from app.services.execution_service import get_execution_service
 from app.services.credentials_service import get_credentials_service
 
 
+@dataclass
+class SearchOption:
+    """検索結果の1つの選択肢"""
+    id: str
+    title: str
+    description: str
+    price: Optional[int] = None
+    price_currency: str = "JPY"
+    available: bool = True
+    details: Optional[Dict[str, Any]] = None
+    url: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "title": self.title,
+            "description": self.description,
+            "price": self.price,
+            "price_currency": self.price_currency,
+            "available": self.available,
+            "details": self.details or {},
+            "url": self.url,
+        }
+
+
+@dataclass
+class ExecutorSearchResult:
+    """Executor検索結果"""
+    success: bool
+    options: List[SearchOption]
+    message: str = ""
+    service_name: str = ""
+    service_display_name: str = ""
+    search_url: Optional[str] = None
+    screenshot_path: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "success": self.success,
+            "options": [opt.to_dict() for opt in self.options],
+            "message": self.message,
+            "service_name": self.service_name,
+            "service_display_name": self.service_display_name,
+            "search_url": self.search_url,
+            "screenshot_path": self.screenshot_path,
+        }
+
+
 class BaseExecutor(ABC):
     """実行ロジックの基底クラス"""
     
-    # サービス名（サブクラスでオーバーライド）
-    service_name: str = "generic"
+    # サービス情報（サブクラスでオーバーライド）
+    service_type: str = "generic"  # airline, train, bus, hotel, product, voice
+    service_name: str = "generic"  # jal, ex_reservation, willer, amazon等
+    service_display_name: str = "汎用"  # 表示名（日本語）
     
     # 必要なステップ（サブクラスでオーバーライド可能）
     required_steps: list[str] = [
@@ -32,10 +90,133 @@ class BaseExecutor(ABC):
         ExecutionStep.COMPLETED.value,
     ]
     
+    # プログレスコールバック用
+    _request_id: Optional[str] = None
+    
     def __init__(self):
         """実行エンジンを初期化"""
         self.execution_service = get_execution_service()
         self.credentials_service = get_credentials_service()
+    
+    def set_request_id(self, request_id: str) -> None:
+        """プログレス通知用のrequest_idを設定"""
+        self._request_id = request_id
+    
+    async def _notify_progress(self, step_id: str, label: str, status: str = "running") -> None:
+        """プログレスを通知"""
+        if self._request_id:
+            from app.services.progress_callback import notify_progress
+            await notify_progress(self._request_id, step_id, label, status)
+    
+    # ========================================
+    # 探索モード（search）
+    # ========================================
+    
+    async def search(
+        self,
+        params: Dict[str, Any],
+        credentials: Optional[Dict[str, str]] = None,
+    ) -> ExecutorSearchResult:
+        """
+        探索モード: 予約可能な選択肢を検索
+        
+        実際のサイトにPlaywrightでアクセスし、
+        空席・在庫・価格を確認して予約可能なものだけ返す。
+        
+        Args:
+            params: 検索パラメータ（出発地、到着地、日時など）
+            credentials: 認証情報（オプション）
+            
+        Returns:
+            ExecutorSearchResult: 検索結果
+        """
+        try:
+            await self._notify_progress(
+                "executor_start",
+                f"{self.service_display_name}で検索を開始します...",
+            )
+            
+            # サブクラスの実装を呼び出し
+            result = await self._do_search(params, credentials)
+            
+            # サービス情報を付加
+            result.service_name = self.service_name
+            result.service_display_name = self.service_display_name
+            
+            if result.success and result.options:
+                await self._notify_progress(
+                    "executor_complete",
+                    f"{self.service_display_name}から{len(result.options)}件取得しました",
+                    "completed",
+                )
+            else:
+                await self._notify_progress(
+                    "executor_no_results",
+                    f"{self.service_display_name}で該当なし",
+                    "completed",
+                )
+            
+            return result
+            
+        except Exception as e:
+            await self._notify_progress(
+                "executor_error",
+                f"{self.service_display_name}でエラー: {str(e)}",
+                "error",
+            )
+            return ExecutorSearchResult(
+                success=False,
+                options=[],
+                message=f"検索エラー: {str(e)}",
+                service_name=self.service_name,
+                service_display_name=self.service_display_name,
+            )
+    
+    async def _do_search(
+        self,
+        params: Dict[str, Any],
+        credentials: Optional[Dict[str, str]] = None,
+    ) -> ExecutorSearchResult:
+        """
+        実際の検索ロジック（サブクラスで実装）
+        
+        デフォルト実装は検索非対応を返す。
+        search機能を持つExecutorはこのメソッドをオーバーライドする。
+        """
+        return ExecutorSearchResult(
+            success=False,
+            options=[],
+            message=f"{self.service_display_name}は検索機能に対応していません",
+        )
+    
+    # ========================================
+    # 検証モード（validate）
+    # ========================================
+    
+    async def validate(
+        self,
+        selection: Dict[str, Any],
+        credentials: Optional[Dict[str, str]] = None,
+    ) -> ExecutorSearchResult:
+        """
+        検証モード: 選択した便/商品がまだ予約可能か再確認
+        
+        提案から時間が経っている場合に使用。
+        デフォルトはsearch()を再実行。
+        
+        Args:
+            selection: 選択された選択肢
+            credentials: 認証情報
+            
+        Returns:
+            ExecutorSearchResult: 検証結果
+        """
+        # デフォルトは同じパラメータで再検索
+        return await self.search(selection, credentials)
+    
+    # ========================================
+    # 実行モード（execute）
+    # ========================================
     
     async def execute(
         self,
@@ -45,7 +226,9 @@ class BaseExecutor(ABC):
         credentials: Optional[dict[str, str]] = None,
     ) -> ExecutionResult:
         """
-        タスクを実行
+        実行モード: 実際に予約/購入を確定
+        
+        ユーザーが承認した後に呼び出される。
         
         Args:
             task_id: タスクID

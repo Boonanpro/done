@@ -1244,3 +1244,395 @@ Respond in this format:
             ))
         
         return result
+    
+    # ========================================
+    # Architecture v2: 推論ファースト・Executor実行フロー
+    # ========================================
+    
+    async def process_wish_v2(
+        self,
+        wish: str,
+        user_id: str,
+        request_id: Optional[str] = None,
+    ) -> dict:
+        """
+        Architecture v2: 推論ファースト・Executor実行フロー
+        
+        1. 推論 + Web検索で最適解を導出
+        2. ExecutorRegistryで最適解を実現できるExecutorを探す
+        3. Executor.search() で予約可能かを確認
+        4. 予約可能なら提案を生成
+        
+        Args:
+            wish: ユーザーの願望
+            user_id: ユーザーID
+            request_id: プログレス通知用ID
+            
+        Returns:
+            処理結果
+        """
+        from app.executors.registry import ExecutorRegistry, register_all_executors
+        from app.services.progress_callback import notify_progress
+        
+        # Executorを登録
+        register_all_executors()
+        
+        result = {
+            "success": False,
+            "phase": "research",
+            "research_result": None,
+            "executor_found": False,
+            "search_result": None,
+            "proposal": None,
+            "message": "",
+        }
+        
+        try:
+            # ========================================
+            # Step 1: 推論 + Web検索で最適解を導出
+            # ========================================
+            if request_id:
+                await notify_progress(
+                    request_id, "research", "最適な手段を検索中...", "running"
+                )
+            
+            research = await self._research_optimal_solution(wish)
+            result["research_result"] = research
+            
+            if request_id:
+                await notify_progress(
+                    request_id, "research_complete",
+                    f"「{research.get('service_display_name', '最適な手段')}」で検索します",
+                    "completed"
+                )
+            
+            # ========================================
+            # Step 2: Executorを探す
+            # ========================================
+            if request_id:
+                await notify_progress(
+                    request_id, "find_executor", "実行エンジンを準備中...", "running"
+                )
+            
+            executor = ExecutorRegistry.get_executor_for_solution(research)
+            
+            if not executor:
+                # Executorが見つからない場合
+                result["phase"] = "no_executor"
+                result["message"] = f"自動予約機能はまだ対応していません。手動で予約をお願いします。"
+                
+                if request_id:
+                    await notify_progress(
+                        request_id, "no_executor",
+                        "自動予約機能は未対応です",
+                        "completed"
+                    )
+                
+                # 提案だけは生成
+                proposal = await self._generate_manual_proposal(wish, research)
+                result["proposal"] = proposal
+                result["success"] = True
+                return result
+            
+            result["executor_found"] = True
+            
+            # ========================================
+            # Step 3: Executor.search() で予約可能かを確認
+            # ========================================
+            if request_id:
+                executor.set_request_id(request_id)
+            
+            params = research.get("params", {})
+            search_result = await executor.search(params)
+            result["search_result"] = search_result.to_dict()
+            
+            if not search_result.success or not search_result.options:
+                # 検索失敗または結果なし
+                result["phase"] = "search_failed"
+                result["message"] = search_result.message or "検索結果が見つかりませんでした"
+                
+                if request_id:
+                    await notify_progress(
+                        request_id, "search_failed",
+                        result["message"],
+                        "error"
+                    )
+                
+                return result
+            
+            # ========================================
+            # Step 4: 提案を生成
+            # ========================================
+            if request_id:
+                await notify_progress(
+                    request_id, "propose", "提案を作成しています...", "running"
+                )
+            
+            proposal = await self._generate_proposal_from_search(
+                wish=wish,
+                research=research,
+                search_result=search_result,
+                executor=executor,
+            )
+            result["proposal"] = proposal
+            result["phase"] = "proposed"
+            result["success"] = True
+            
+            if request_id:
+                await notify_progress(
+                    request_id, "propose_complete", "提案を作成しました", "completed"
+                )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"process_wish_v2 error: {e}")
+            result["message"] = f"エラーが発生しました: {str(e)}"
+            
+            if request_id:
+                await notify_progress(
+                    request_id, "error", result["message"], "error"
+                )
+            
+            return result
+    
+    async def _research_optimal_solution(self, wish: str) -> dict:
+        """
+        推論 + Web検索で最適解を導出
+        
+        Args:
+            wish: ユーザーの願望
+            
+        Returns:
+            最適解の情報
+        """
+        # まずタスクタイプを分析
+        task_type = await self._determine_task_type(wish)
+        
+        # タスクタイプに応じてパラメータを抽出
+        if task_type == TaskType.TRAVEL:
+            params = await self._extract_travel_params(wish)
+            transport_type = params.get("transport_type", "train")
+            
+            # サービスタイプとサービス名を決定
+            if transport_type == "flight":
+                service_type = "airline"
+                service_name = None  # まだ特定のサービスは決めない
+                service_display_name = "航空券検索"
+            elif transport_type == "bus":
+                service_type = "bus"
+                service_name = "willer"
+                service_display_name = "WILLER TRAVEL"
+            else:  # train, shinkansen
+                service_type = "train"
+                service_name = "ex_reservation"
+                service_display_name = "EX予約"
+            
+            return {
+                "task_type": task_type.value,
+                "service_type": service_type,
+                "service_name": service_name,
+                "service_display_name": service_display_name,
+                "params": params,
+                "original_wish": wish,
+            }
+        
+        elif task_type == TaskType.PURCHASE:
+            # 商品購入の場合
+            keywords = wish.replace("買いたい", "").replace("欲しい", "").replace("購入", "").strip()
+            
+            return {
+                "task_type": task_type.value,
+                "service_type": "product",
+                "service_name": "amazon",
+                "service_display_name": "Amazon",
+                "params": {
+                    "query": keywords,
+                },
+                "original_wish": wish,
+            }
+        
+        elif task_type == TaskType.PHONE:
+            # 電話の場合
+            phone_context = await self._extract_phone_context(wish)
+            
+            return {
+                "task_type": task_type.value,
+                "service_type": "voice",
+                "service_name": "phone",
+                "service_display_name": "電話発信",
+                "params": phone_context,
+                "original_wish": wish,
+            }
+        
+        else:
+            # その他
+            return {
+                "task_type": task_type.value,
+                "service_type": "generic",
+                "service_name": None,
+                "service_display_name": "汎用",
+                "params": {},
+                "original_wish": wish,
+            }
+    
+    async def _determine_task_type(self, wish: str) -> TaskType:
+        """タスクタイプを判定"""
+        wish_lower = wish.lower()
+        
+        # 電話
+        phone_keywords = ["電話して", "電話で", "電話をかけて", "架電", "コールして", 
+                         "call ", "phone ", "call the", "phone the", "電話予約"]
+        if any(kw in wish_lower for kw in phone_keywords):
+            return TaskType.PHONE
+        
+        # 旅行
+        travel_keywords_ja = ["新幹線", "電車", "特急", "飛行機", "航空", "バス", "高速バス", 
+                              "予約", "チケット", "乗車券", "切符", "行きたい", "移動", "便"]
+        travel_keywords_en = ["travel", "train", "shinkansen", "bus", "highway", 
+                              "flight", "book", "reservation", "willer"]
+        if any(kw in wish_lower for kw in travel_keywords_ja) or \
+           any(kw in wish_lower for kw in travel_keywords_en):
+            return TaskType.TRAVEL
+        
+        # 購入
+        if "買" in wish_lower or "購入" in wish_lower or "欲しい" in wish_lower:
+            return TaskType.PURCHASE
+        
+        # メール
+        if "メール" in wish_lower or "email" in wish_lower:
+            return TaskType.EMAIL
+        
+        return TaskType.OTHER
+    
+    async def _generate_proposal_from_search(
+        self,
+        wish: str,
+        research: dict,
+        search_result,  # ExecutorSearchResult
+        executor,  # BaseExecutor
+    ) -> dict:
+        """
+        検索結果から提案を生成
+        
+        Args:
+            wish: ユーザーの願望
+            research: 推論結果
+            search_result: Executor検索結果
+            executor: 使用したExecutor
+            
+        Returns:
+            提案情報
+        """
+        # 最良の選択肢を選択
+        best_option = search_result.options[0] if search_result.options else None
+        
+        if not best_option:
+            return {
+                "action": "検索しましたが、該当する結果が見つかりませんでした",
+                "details": "",
+                "notes": "条件を変更してお試しください",
+                "options": [],
+                "executor_name": executor.service_name,
+                "can_execute": False,
+            }
+        
+        # LLMで提案文を生成
+        proposal_prompt = f"""以下の情報を元に、ユーザーへの提案を作成してください。
+
+ユーザーのリクエスト: {wish}
+
+検索結果:
+- サービス: {search_result.service_display_name}
+- 見つかった選択肢: {len(search_result.options)}件
+- 最良の選択肢: {best_option.title}
+- 説明: {best_option.description}
+- 価格: {best_option.price}円 (確認済み)
+
+以下の形式で回答してください:
+
+[ACTION]
+（何をするか - 具体的に）
+
+[DETAILS]
+（詳細情報）
+
+[NOTES]
+（仮定した点、変更可能な点）"""
+
+        response = await self.llm.ainvoke([
+            SystemMessage(content=self.SYSTEM_PROMPT),
+            HumanMessage(content=proposal_prompt)
+        ])
+        
+        # レスポンスをパース
+        content = response.content
+        action = ""
+        details = ""
+        notes = ""
+        
+        if "[ACTION]" in content:
+            parts = content.split("[ACTION]")[1]
+            if "[DETAILS]" in parts:
+                action = parts.split("[DETAILS]")[0].strip()
+                parts = parts.split("[DETAILS]")[1]
+            if "[NOTES]" in parts:
+                details = parts.split("[NOTES]")[0].strip()
+                notes = parts.split("[NOTES]")[1].strip()
+            else:
+                details = parts.strip()
+        
+        return {
+            "action": action or f"{search_result.service_display_name}で予約します",
+            "details": details or best_option.description,
+            "notes": notes or "実際のサイトで空席を確認済みです",
+            "options": [opt.to_dict() for opt in search_result.options],
+            "selected_option": best_option.to_dict(),
+            "executor_name": executor.service_name,
+            "executor_display_name": executor.service_display_name,
+            "can_execute": True,
+            "full_proposal": content,
+        }
+    
+    async def _generate_manual_proposal(
+        self,
+        wish: str,
+        research: dict,
+    ) -> dict:
+        """
+        Executorがない場合の手動提案を生成
+        """
+        proposal_prompt = f"""以下のリクエストに対して、手動での対応方法を提案してください。
+
+ユーザーのリクエスト: {wish}
+
+調査結果:
+- 推奨サービス: {research.get('service_display_name', '不明')}
+- サービスタイプ: {research.get('service_type', '不明')}
+
+自動予約機能はまだ対応していないため、手動での対応方法を提案してください。
+
+以下の形式で回答してください:
+
+[ACTION]
+（手動で行う操作を説明）
+
+[DETAILS]
+（詳細情報、URLなど）
+
+[NOTES]
+（注意点）"""
+
+        response = await self.llm.ainvoke([
+            SystemMessage(content=self.SYSTEM_PROMPT),
+            HumanMessage(content=proposal_prompt)
+        ])
+        
+        return {
+            "action": "手動での対応をお願いします",
+            "details": "",
+            "notes": "",
+            "options": [],
+            "can_execute": False,
+            "full_proposal": response.content,
+        }

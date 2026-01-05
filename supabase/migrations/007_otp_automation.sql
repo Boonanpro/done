@@ -75,3 +75,6 @@ COMMENT ON COLUMN sms_connections.phone_number IS 'Twilioの電話番号';
 
 
 
+
+
+
