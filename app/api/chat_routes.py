@@ -805,107 +805,66 @@ async def send_dan_message(
         if is_greeting:
             # 挨拶の場合は検索をスキップ
             process_steps.append(ProcessStep(id="receive", label="挨拶に応答します", status="completed"))
-            task_type = TaskType.OTHER
-            search_results = []
+            
+            # 提案生成（挨拶用）
+            proposal_state = {
+                "messages": [LCHumanMessage(content=request.content)],
+                "task_id": "",
+                "user_id": current_user.user_id,
+                "original_wish": request.content,
+                "task_type": TaskType.OTHER,
+                "proposed_actions": [],
+                "requires_confirmation": False,
+                "execution_result": None,
+                "status": None,
+                "search_results": [],
+            }
+            
+            proposed_state = await agent._propose_actions(proposal_state)
+            full_proposal = proposed_state.get("execution_result", {}).get("full_proposal", "")
+            process_steps.append(ProcessStep(id="propose", label="回答を作成しました", status="completed"))
         else:
-            # 分析ステップ
-            analyzed_state = await agent._analyze_wish(initial_state)
-            task_type = analyzed_state.get("task_type")
+            # ========================================
+            # Architecture v2: 推論ファースト・Executor実行フロー
+            # ========================================
             
-            # タスクタイプに応じた自然言語メッセージを生成（アクションにつなげる）
-            service_name = "検索サイト"  # デフォルト
-            if task_type == TaskType.TRAVEL:
-                travel_params = await agent._extract_travel_params(request.content)
-                departure = travel_params.get("departure", "")
-                arrival = travel_params.get("arrival", "")
-                transport_type = travel_params.get("transport_type", "shinkansen")
-                
-                # 交通手段とサービス名の対応
-                transport_info = {
-                    "shinkansen": {"ja": "新幹線", "service": "Yahoo!乗換案内"},
-                    "train": {"ja": "電車", "service": "Yahoo!乗換案内"},
-                    "bus": {"ja": "高速バス", "service": "高速バスネット"},
-                    "flight": {"ja": "飛行機", "service": "スカイスキャナー"}
-                }.get(transport_type, {"ja": "交通手段", "service": "検索サイト"})
-                
-                transport_ja = transport_info["ja"]
-                service_name = transport_info["service"]
-                
-                if departure and arrival:
-                    intent_label = f"{transport_ja}での移動を希望 → {service_name}で検索します"
-                else:
-                    intent_label = f"{transport_ja}の情報を探しています → 検索を開始します"
-            elif task_type == TaskType.PURCHASE:
-                intent_label = "商品購入を希望 → Amazonで検索します"
-                service_name = "Amazon"
-            elif task_type == TaskType.PHONE:
-                intent_label = "電話での問い合わせを希望 → 電話番号を確認します"
-                service_name = "電話"
-            elif task_type == TaskType.RESEARCH:
-                intent_label = "情報収集を希望 → Web検索を実行します"
-                service_name = "Web検索"
+            process_steps.append(ProcessStep(id="receive", label="リクエストを分析しています", status="completed"))
+            
+            # process_wish_v2を実行
+            result = await agent.process_wish_v2(
+                wish=request.content,
+                user_id=current_user.user_id,
+                request_id=None,  # 非ストリーム版はプログレス通知なし
+            )
+            
+            # 結果からプロセスステップを生成
+            research = result.get("research_result", {})
+            service_display_name = research.get("service_display_name", "検索")
+            
+            if result.get("executor_found"):
+                process_steps.append(ProcessStep(
+                    id="search", 
+                    label=f"{service_display_name}で検索しました", 
+                    status="completed"
+                ))
             else:
-                intent_label = "リクエストを分析完了 → 最適な方法を検討します"
-                service_name = "検索"
+                process_steps.append(ProcessStep(
+                    id="search", 
+                    label=f"最適な方法を検討しました", 
+                    status="completed"
+                ))
             
-            process_steps.append(ProcessStep(id="intent", label=intent_label, status="completed"))
+            # 提案を取得
+            proposal = result.get("proposal", {})
+            full_proposal = proposal.get("full_proposal", "")
             
-            # 検索
-            search_results = await agent._search_for_proposal(request.content, task_type)
-            search_count = len(search_results) if search_results else 0
+            if not full_proposal:
+                full_proposal = result.get("message", "申し訳ありません。処理中にエラーが発生しました。")
             
-            if search_count > 0:
-                if task_type == TaskType.TRAVEL and search_results:
-                    first_result = search_results[0]
-                    title = first_result.get("title", "")
-                    exec_params = first_result.get("execution_params", {})
-                    service = exec_params.get("service", "")
-                    
-                    # サービス名を日本語化
-                    service_ja = {
-                        "yahoo_transit": "Yahoo!乗換案内",
-                        "kousokubus": "高速バスネット",
-                        "skyscanner": "スカイスキャナー"
-                    }.get(service, service_name)
-                    
-                    if title:
-                        search_complete_label = f"{service_ja}から{search_count}件取得 → {title}"
-                    else:
-                        search_complete_label = f"{service_ja}から{search_count}件の候補を取得しました"
-                elif task_type == TaskType.PURCHASE and search_results:
-                    first_result = search_results[0]
-                    title = first_result.get("title", "商品")[:20]
-                    search_complete_label = f"Amazonから{search_count}件取得 → {title}..."
-                else:
-                    search_complete_label = f"{search_count}件の情報を取得しました"
-            else:
-                # 「AIの知識で回答します」を使わない
-                search_complete_label = "検索完了 → 最適な提案を作成します"
-            
-            process_steps.append(ProcessStep(id="search", label=search_complete_label, status="completed"))
-        
-        # 提案生成
-        proposal_state = {
-            "messages": [LCHumanMessage(content=request.content)],
-            "task_id": "",
-            "user_id": current_user.user_id,
-            "original_wish": request.content,
-            "task_type": task_type,
-            "proposed_actions": [],
-            "requires_confirmation": False,
-            "execution_result": None,
-            "status": None,
-            "search_results": search_results if not is_greeting else [],
-        }
-        
-        proposed_state = await agent._propose_actions(proposal_state)
-        
-        # 提案内容を取得（Action Firstフォーマット）
-        full_proposal = proposed_state.get("execution_result", {}).get("full_proposal", "")
-        ai_response_content = full_proposal
+            process_steps.append(ProcessStep(id="propose", label="回答を作成しました", status="completed"))
         
         # DBに保存
-        ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content)
+        ai_message_data = await service.send_dan_ai_message(current_user.user_id, full_proposal)
         
         ai_message = MessageResponse(
             id=ai_message_data["id"],
@@ -916,8 +875,6 @@ async def send_dan_message(
             content=ai_message_data["content"],
             created_at=ai_message_data["created_at"],
         )
-        
-        process_steps.append(ProcessStep(id="propose", label="回答を作成しました", status="completed"))
         
         return DanMessageResponse(
             user_message=user_message,
