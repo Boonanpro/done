@@ -577,16 +577,28 @@ async def send_dan_message_stream(
     current_user: TokenData = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ):
-    """ダンにメッセージを送信し、AISecretaryAgentでプロセスをSSEストリーミング（自然言語版）"""
+    """ダンにメッセージを送信し、AISecretaryAgentでプロセスをSSEストリーミング（自然言語版 + コールバック）"""
     from starlette.responses import StreamingResponse
     from app.agent.agent import AISecretaryAgent
     from app.models.schemas import TaskType
+    from app.services.progress_callback import (
+        ProgressCallbackRegistry, 
+        set_current_request_id,
+        ProgressUpdate
+    )
+    import uuid
+    import asyncio
     
     # 挨拶キーワード
     GREETING_KEYWORDS = ["おはよう", "こんにちは", "こんばんは", "ありがとう", "おやすみ",
                          "hello", "hi", "thanks", "thank you", "good morning", "good night"]
     
     async def generate_stream():
+        # リクエストIDを生成（プログレスコールバック用）
+        request_id = str(uuid.uuid4())
+        progress_queue = ProgressCallbackRegistry.create_queue(request_id)
+        set_current_request_id(request_id)
+        
         try:
             # Step 1: ユーザーメッセージを保存
             yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'receive', 'label': '考え中...', 'status': 'running'}})}\n\n"
@@ -704,10 +716,38 @@ async def send_dan_message_stream(
                 
                 yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'intent', 'label': intent_label, 'status': 'completed'}})}\n\n"
                 
-                # Step 3: 検索（タスクタイプに応じて）
+                # Step 3: 検索（タスクタイプに応じて）+ リアルタイムプログレス
                 yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'search', 'label': search_label, 'status': 'running'}})}\n\n"
                 
-                search_results = await agent._search_for_proposal(request.content, task_type)
+                # 検索をバックグラウンドタスクで実行し、プログレスをリアルタイムで表示
+                search_task = asyncio.create_task(
+                    agent._search_for_proposal(request.content, task_type)
+                )
+                
+                # 検索が完了するまでプログレスキューを監視
+                while not search_task.done():
+                    try:
+                        # プログレスキューからメッセージを取得（タイムアウト付き）
+                        progress_update = await asyncio.wait_for(
+                            progress_queue.get(), 
+                            timeout=0.1
+                        )
+                        # プログレスをSSEで送信
+                        yield f"data: {json.dumps({'type': 'process', 'step': {'id': progress_update.step, 'label': progress_update.label, 'status': progress_update.status}})}\n\n"
+                    except asyncio.TimeoutError:
+                        # タイムアウトした場合は検索タスクの状態を確認
+                        continue
+                
+                # 残りのプログレスメッセージを送信
+                while not progress_queue.empty():
+                    try:
+                        progress_update = progress_queue.get_nowait()
+                        yield f"data: {json.dumps({'type': 'process', 'step': {'id': progress_update.step, 'label': progress_update.label, 'status': progress_update.status}})}\n\n"
+                    except asyncio.QueueEmpty:
+                        break
+                
+                # 検索結果を取得
+                search_results = await search_task
                 search_count = len(search_results) if search_results else 0
                 
                 # 検索結果の自然言語表示（サービス名を含む）
@@ -788,6 +828,10 @@ async def send_dan_message_stream(
             import traceback
             logging.error(f"Failed to stream dan message: {e}\n{traceback.format_exc()}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        finally:
+            # クリーンアップ: リクエストIDとコールバックを解除
+            ProgressCallbackRegistry.unregister(request_id)
+            set_current_request_id(None)
     
     return StreamingResponse(
         generate_stream(),

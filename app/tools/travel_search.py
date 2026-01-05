@@ -10,6 +10,7 @@ import asyncio
 import re
 
 from app.models.schemas import SearchResult, SearchResultCategory
+from app.services.progress_callback import notify_progress
 
 
 # ブラウザインスタンス管理（travel_search専用）
@@ -78,11 +79,17 @@ async def search_train(
             f"&type=1&ticket=ic&expkind=1&userpass=1&ws=3&s=0"
         )
         
+        # プログレス通知: ブラウザ起動
+        await notify_progress("browser", "ブラウザを起動中...", "running")
         page = await _create_page()
         
         try:
+            # プログレス通知: サイトにアクセス
+            await notify_progress("connect", f"Yahoo!乗換案内にアクセス中...", "running")
             await page.goto(url, wait_until="networkidle", timeout=30000)
             
+            # プログレス通知: ページ読み込み
+            await notify_progress("loading", f"経路情報を読み込み中... {departure}→{arrival}", "running")
             # ページ読み込み待機（動的コンテンツのため）
             await asyncio.sleep(2)
             
@@ -150,6 +157,9 @@ async def search_train(
                     return routes;
                 }
             """)
+            
+            # プログレス通知: データ抽出完了
+            await notify_progress("extracting", f"経路情報を抽出中... {len(results)}件検出", "running")
             
             # SearchResult形式に変換
             search_results = []
@@ -242,11 +252,17 @@ async def search_bus(
         # 高速バスネットの検索URL（簡易版）
         url = f"https://www.kousokubus.net/JpnBus/search?dep={departure}&arr={arrival}&date={dt.strftime('%Y%m%d')}"
         
+        # プログレス通知: ブラウザ起動
+        await notify_progress("browser", "ブラウザを起動中...", "running")
         page = await _create_page()
         
         try:
+            # プログレス通知: サイトにアクセス
+            await notify_progress("connect", "高速バスネットにアクセス中...", "running")
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             
+            # プログレス通知: ページ読み込み
+            await notify_progress("loading", f"バス情報を読み込み中... {departure}→{arrival}", "running")
             # ページ読み込み待機
             await asyncio.sleep(3)
             
@@ -372,11 +388,17 @@ async def search_flight(
         date_str = dt.strftime("%y%m%d")
         url = f"https://www.skyscanner.jp/transport/flights/{departure}/{arrival}/{date_str}/"
         
+        # プログレス通知: ブラウザ起動
+        await notify_progress("browser", "ブラウザを起動中...", "running")
         page = await _create_page()
         
         try:
+            # プログレス通知: サイトにアクセス
+            await notify_progress("connect", "スカイスキャナーにアクセス中...", "running")
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             
+            # プログレス通知: ページ読み込み
+            await notify_progress("loading", f"フライト情報を読み込み中... {departure}→{arrival}", "running")
             # ページ読み込み待機（動的コンテンツのため長めに）
             await asyncio.sleep(5)
             
@@ -409,6 +431,9 @@ async def search_flight(
                     return flights;
                 }
             """)
+            
+            # プログレス通知: データ抽出
+            await notify_progress("extracting", f"フライト情報を抽出中... {len(results)}件検出", "running")
             
             search_results = []
             for i, flight in enumerate(results[:5]):
