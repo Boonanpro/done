@@ -1293,27 +1293,49 @@ Respond in this format:
             # ========================================
             if request_id:
                 await notify_progress(
-                    request_id, "research", "最適な手段を検索中...", "running"
+                    request_id, "thinking", "考え中...", "running"
                 )
             
             research = await self._research_optimal_solution(wish)
             result["research_result"] = research
             
-            if request_id:
-                await notify_progress(
-                    request_id, "research_complete",
-                    f"「{research.get('service_display_name', '最適な手段')}」で検索します",
-                    "completed"
-                )
+            # 根拠を含んだプログレスメッセージを生成
+            params = research.get("params", {})
+            service_name = research.get("service_display_name", "")
+            
+            if research.get("task_type") == "travel":
+                departure = params.get("departure", "")
+                arrival = params.get("arrival", "")
+                transport_type = params.get("transport_type", "")
+                date = params.get("date", "")
+                time = params.get("time", "")
+                
+                # 根拠付きメッセージ
+                reasoning_msg = f"{departure}→{arrival}の移動 → {service_name}で予約します"
+                if request_id:
+                    await notify_progress(request_id, "reasoning", reasoning_msg, "completed")
+                
+                # 時間の仮定を表示
+                if not time:
+                    time_msg = "時間の指定がないので17時台で探します"
+                    if request_id:
+                        await notify_progress(request_id, "assumption_time", time_msg, "completed")
+                
+                # 座席の仮定を表示
+                seat_msg = "普通車・指定席で検索します（デフォルト）"
+                if request_id:
+                    await notify_progress(request_id, "assumption_seat", seat_msg, "completed")
+            else:
+                if request_id:
+                    await notify_progress(
+                        request_id, "reasoning",
+                        f"{service_name}で検索します",
+                        "completed"
+                    )
             
             # ========================================
             # Step 2: Executorを探す
             # ========================================
-            if request_id:
-                await notify_progress(
-                    request_id, "find_executor", "実行エンジンを準備中...", "running"
-                )
-            
             executor = ExecutorRegistry.get_executor_for_solution(research)
             
             if not executor:
@@ -1324,7 +1346,7 @@ Respond in this format:
                 if request_id:
                     await notify_progress(
                         request_id, "no_executor",
-                        "自動予約機能は未対応です",
+                        f"{service_name}の自動予約は未対応です。URLをお伝えします",
                         "completed"
                     )
                 
@@ -1342,14 +1364,13 @@ Respond in this format:
             if request_id:
                 executor.set_request_id(request_id)
             
-            params = research.get("params", {})
             search_result = await executor.search(params)
             result["search_result"] = search_result.to_dict()
             
             if not search_result.success or not search_result.options:
                 # 検索失敗または結果なし
                 result["phase"] = "search_failed"
-                result["message"] = search_result.message or "検索結果が見つかりませんでした"
+                result["message"] = search_result.message or "該当する便が見つかりませんでした"
                 
                 if request_id:
                     await notify_progress(
@@ -1361,13 +1382,32 @@ Respond in this format:
                 return result
             
             # ========================================
-            # Step 4: 提案を生成
+            # Step 4: 検索結果から最良を選択（根拠付き）
             # ========================================
+            best_option = search_result.options[0]
+            option_count = len(search_result.options)
+            
             if request_id:
+                # 検索結果の表示（根拠付き）
                 await notify_progress(
-                    request_id, "propose", "提案を作成しています...", "running"
+                    request_id, "search_result",
+                    f"予約可能な候補が{option_count}件見つかりました",
+                    "completed"
+                )
+                
+                # 選択理由を表示
+                selection_reason = f"「{best_option.title}」を選択します"
+                if best_option.price:
+                    selection_reason += f"（¥{best_option.price:,}）"
+                await notify_progress(
+                    request_id, "selection",
+                    selection_reason,
+                    "completed"
                 )
             
+            # ========================================
+            # Step 5: 提案を生成
+            # ========================================
             proposal = await self._generate_proposal_from_search(
                 wish=wish,
                 research=research,
@@ -1377,11 +1417,6 @@ Respond in this format:
             result["proposal"] = proposal
             result["phase"] = "proposed"
             result["success"] = True
-            
-            if request_id:
-                await notify_progress(
-                    request_id, "propose_complete", "提案を作成しました", "completed"
-                )
             
             return result
             
