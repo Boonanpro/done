@@ -660,7 +660,7 @@ async def send_dan_message_stream(
                 analyzed_state = await agent._analyze_wish(initial_state)
                 task_type = analyzed_state.get("task_type")
                 
-                # タスクタイプに応じた自然言語メッセージを生成
+                # タスクタイプに応じた自然言語メッセージを生成（アクションにつなげる）
                 if task_type == TaskType.TRAVEL:
                     # 旅行の場合：パラメータを抽出して詳細な検索メッセージを表示
                     travel_params = await agent._extract_travel_params(request.content)
@@ -668,35 +668,39 @@ async def send_dan_message_stream(
                     arrival = travel_params.get("arrival", "")
                     transport_type = travel_params.get("transport_type", "shinkansen")
                     
-                    # 交通手段の日本語化
-                    transport_ja = {
-                        "shinkansen": "新幹線",
-                        "train": "電車",
-                        "bus": "バス",
-                        "flight": "飛行機"
-                    }.get(transport_type, "交通手段")
+                    # 交通手段とサービス名の対応
+                    transport_info = {
+                        "shinkansen": {"ja": "新幹線", "service": "Yahoo!乗換案内"},
+                        "train": {"ja": "電車", "service": "Yahoo!乗換案内"},
+                        "bus": {"ja": "高速バス", "service": "高速バスネット"},
+                        "flight": {"ja": "飛行機", "service": "スカイスキャナー"}
+                    }.get(transport_type, {"ja": "交通手段", "service": "検索サイト"})
+                    
+                    transport_ja = transport_info["ja"]
+                    service_name = transport_info["service"]
                     
                     if departure and arrival:
-                        intent_label = f"ユーザーは{transport_ja}での移動を希望しているようです"
-                        search_label = f"{departure}→{arrival}の{transport_ja}を検索しています..."
+                        # 意図 + アクション形式
+                        intent_label = f"{transport_ja}での移動を希望 → {service_name}で検索します"
+                        search_label = f"{service_name}にアクセス中... {departure}→{arrival}"
                     else:
-                        intent_label = "交通手段の情報を探しています"
-                        search_label = "交通情報を検索中..."
+                        intent_label = f"{transport_ja}の情報を探しています → 検索を開始します"
+                        search_label = f"{service_name}で検索中..."
                 elif task_type == TaskType.PURCHASE:
-                    intent_label = "商品の購入を希望しているようです"
-                    search_label = "商品情報を検索中..."
+                    intent_label = "商品購入を希望 → Amazonで検索します"
+                    search_label = "Amazon.co.jpにアクセス中..."
                 elif task_type == TaskType.PHONE:
-                    intent_label = "電話での問い合わせを希望しているようです"
+                    intent_label = "電話での問い合わせを希望 → 電話番号を確認します"
                     search_label = "電話情報を確認中..."
                 elif task_type == TaskType.EMAIL:
-                    intent_label = "メール関連のリクエストを検出しました"
+                    intent_label = "メール操作を希望 → Gmailにアクセスします"
                     search_label = "メール情報を確認中..."
                 elif task_type == TaskType.RESEARCH:
-                    intent_label = "情報を調べたいようです"
-                    search_label = "Web情報を検索中..."
+                    intent_label = "情報収集を希望 → Web検索を実行します"
+                    search_label = "Webを検索中..."
                 else:
-                    intent_label = "リクエストを分析しました"
-                    search_label = "情報を検索中..."
+                    intent_label = "リクエストを分析完了 → 最適な方法を検討します"
+                    search_label = "関連情報を収集中..."
                 
                 yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'intent', 'label': intent_label, 'status': 'completed'}})}\n\n"
                 
@@ -706,24 +710,35 @@ async def send_dan_message_stream(
                 search_results = await agent._search_for_proposal(request.content, task_type)
                 search_count = len(search_results) if search_results else 0
                 
-                # 検索結果の自然言語表示
+                # 検索結果の自然言語表示（サービス名を含む）
                 if search_count > 0:
                     if task_type == TaskType.TRAVEL and search_results:
                         # 旅行の場合：最初の結果を表示
                         first_result = search_results[0]
                         title = first_result.get("title", "")
+                        exec_params = first_result.get("execution_params", {})
+                        service = exec_params.get("service", "")
+                        
+                        # サービス名を日本語化
+                        service_ja = {
+                            "yahoo_transit": "Yahoo!乗換案内",
+                            "kousokubus": "高速バスネット",
+                            "skyscanner": "スカイスキャナー"
+                        }.get(service, service_name if 'service_name' in dir() else "検索サイト")
+                        
                         if title:
-                            search_complete_label = f"{title}など{search_count}件見つかりました"
+                            search_complete_label = f"{service_ja}から{search_count}件取得 → {title}"
                         else:
-                            search_complete_label = f"{search_count}件の候補が見つかりました"
+                            search_complete_label = f"{service_ja}から{search_count}件の候補を取得しました"
                     elif task_type == TaskType.PURCHASE and search_results:
                         first_result = search_results[0]
                         title = first_result.get("title", "商品")[:20]
-                        search_complete_label = f"{title}...など{search_count}件見つかりました"
+                        search_complete_label = f"Amazonから{search_count}件取得 → {title}..."
                     else:
                         search_complete_label = f"{search_count}件の情報を取得しました"
                 else:
-                    search_complete_label = "検索完了（AIの知識で回答します）"
+                    # 「AIの知識で回答します」を使わない
+                    search_complete_label = "検索完了 → 最適な提案を作成します"
                 
                 yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'search', 'label': search_complete_label, 'status': 'completed'}})}\n\n"
                 
@@ -848,38 +863,41 @@ async def send_dan_message(
             analyzed_state = await agent._analyze_wish(initial_state)
             task_type = analyzed_state.get("task_type")
             
-            # タスクタイプに応じた自然言語メッセージを生成
+            # タスクタイプに応じた自然言語メッセージを生成（アクションにつなげる）
+            service_name = "検索サイト"  # デフォルト
             if task_type == TaskType.TRAVEL:
                 travel_params = await agent._extract_travel_params(request.content)
                 departure = travel_params.get("departure", "")
                 arrival = travel_params.get("arrival", "")
                 transport_type = travel_params.get("transport_type", "shinkansen")
                 
-                transport_ja = {
-                    "shinkansen": "新幹線",
-                    "train": "電車",
-                    "bus": "バス",
-                    "flight": "飛行機"
-                }.get(transport_type, "交通手段")
+                # 交通手段とサービス名の対応
+                transport_info = {
+                    "shinkansen": {"ja": "新幹線", "service": "Yahoo!乗換案内"},
+                    "train": {"ja": "電車", "service": "Yahoo!乗換案内"},
+                    "bus": {"ja": "高速バス", "service": "高速バスネット"},
+                    "flight": {"ja": "飛行機", "service": "スカイスキャナー"}
+                }.get(transport_type, {"ja": "交通手段", "service": "検索サイト"})
+                
+                transport_ja = transport_info["ja"]
+                service_name = transport_info["service"]
                 
                 if departure and arrival:
-                    intent_label = f"ユーザーは{transport_ja}での移動を希望しているようです"
-                    search_label = f"{departure}→{arrival}の{transport_ja}を検索しています..."
+                    intent_label = f"{transport_ja}での移動を希望 → {service_name}で検索します"
                 else:
-                    intent_label = "交通手段の情報を探しています"
-                    search_label = "交通情報を検索中..."
+                    intent_label = f"{transport_ja}の情報を探しています → 検索を開始します"
             elif task_type == TaskType.PURCHASE:
-                intent_label = "商品の購入を希望しているようです"
-                search_label = "商品情報を検索中..."
+                intent_label = "商品購入を希望 → Amazonで検索します"
+                service_name = "Amazon"
             elif task_type == TaskType.PHONE:
-                intent_label = "電話での問い合わせを希望しているようです"
-                search_label = "電話情報を確認中..."
+                intent_label = "電話での問い合わせを希望 → 電話番号を確認します"
+                service_name = "電話"
             elif task_type == TaskType.RESEARCH:
-                intent_label = "情報を調べたいようです"
-                search_label = "Web情報を検索中..."
+                intent_label = "情報収集を希望 → Web検索を実行します"
+                service_name = "Web検索"
             else:
-                intent_label = "リクエストを分析しました"
-                search_label = "情報を検索中..."
+                intent_label = "リクエストを分析完了 → 最適な方法を検討します"
+                service_name = "検索"
             
             process_steps.append(ProcessStep(id="intent", label=intent_label, status="completed"))
             
@@ -891,18 +909,29 @@ async def send_dan_message(
                 if task_type == TaskType.TRAVEL and search_results:
                     first_result = search_results[0]
                     title = first_result.get("title", "")
+                    exec_params = first_result.get("execution_params", {})
+                    service = exec_params.get("service", "")
+                    
+                    # サービス名を日本語化
+                    service_ja = {
+                        "yahoo_transit": "Yahoo!乗換案内",
+                        "kousokubus": "高速バスネット",
+                        "skyscanner": "スカイスキャナー"
+                    }.get(service, service_name)
+                    
                     if title:
-                        search_complete_label = f"{title}など{search_count}件見つかりました"
+                        search_complete_label = f"{service_ja}から{search_count}件取得 → {title}"
                     else:
-                        search_complete_label = f"{search_count}件の候補が見つかりました"
+                        search_complete_label = f"{service_ja}から{search_count}件の候補を取得しました"
                 elif task_type == TaskType.PURCHASE and search_results:
                     first_result = search_results[0]
                     title = first_result.get("title", "商品")[:20]
-                    search_complete_label = f"{title}...など{search_count}件見つかりました"
+                    search_complete_label = f"Amazonから{search_count}件取得 → {title}..."
                 else:
                     search_complete_label = f"{search_count}件の情報を取得しました"
             else:
-                search_complete_label = "検索完了（AIの知識で回答します）"
+                # 「AIの知識で回答します」を使わない
+                search_complete_label = "検索完了 → 最適な提案を作成します"
             
             process_steps.append(ProcessStep(id="search", label=search_complete_label, status="completed"))
         
