@@ -665,145 +665,50 @@ async def send_dan_message_stream(
                 full_proposal = proposed_state.get("execution_result", {}).get("full_proposal", "")
                 ai_response_content = full_proposal
             else:
-                # Step 2: 意図理解（AIに思考させる）
+                # ========================================
+                # Architecture v2: 推論ファースト・Executor実行フロー
+                # ========================================
+                
                 yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'receive', 'label': 'リクエストを分析しています', 'status': 'completed'}})}\n\n"
                 
-                # 分析ステップを実行
-                analyzed_state = await agent._analyze_wish(initial_state)
-                task_type = analyzed_state.get("task_type")
-                
-                # タスクタイプに応じた自然言語メッセージを生成（アクションにつなげる）
-                if task_type == TaskType.TRAVEL:
-                    # 旅行の場合：パラメータを抽出して詳細な検索メッセージを表示
-                    travel_params = await agent._extract_travel_params(request.content)
-                    departure = travel_params.get("departure", "")
-                    arrival = travel_params.get("arrival", "")
-                    transport_type = travel_params.get("transport_type", "shinkansen")
-                    
-                    # 交通手段とサービス名の対応
-                    transport_info = {
-                        "shinkansen": {"ja": "新幹線", "service": "Yahoo!乗換案内"},
-                        "train": {"ja": "電車", "service": "Yahoo!乗換案内"},
-                        "bus": {"ja": "高速バス", "service": "高速バスネット"},
-                        "flight": {"ja": "飛行機", "service": "スカイスキャナー"}
-                    }.get(transport_type, {"ja": "交通手段", "service": "検索サイト"})
-                    
-                    transport_ja = transport_info["ja"]
-                    service_name = transport_info["service"]
-                    
-                    if departure and arrival:
-                        # 意図 + アクション形式
-                        intent_label = f"{transport_ja}での移動を希望 → {service_name}で検索します"
-                        search_label = f"{service_name}にアクセス中... {departure}→{arrival}"
-                    else:
-                        intent_label = f"{transport_ja}の情報を探しています → 検索を開始します"
-                        search_label = f"{service_name}で検索中..."
-                elif task_type == TaskType.PURCHASE:
-                    intent_label = "商品購入を希望 → Amazonで検索します"
-                    search_label = "Amazon.co.jpにアクセス中..."
-                elif task_type == TaskType.PHONE:
-                    intent_label = "電話での問い合わせを希望 → 電話番号を確認します"
-                    search_label = "電話情報を確認中..."
-                elif task_type == TaskType.EMAIL:
-                    intent_label = "メール操作を希望 → Gmailにアクセスします"
-                    search_label = "メール情報を確認中..."
-                elif task_type == TaskType.RESEARCH:
-                    intent_label = "情報収集を希望 → Web検索を実行します"
-                    search_label = "Webを検索中..."
-                else:
-                    intent_label = "リクエストを分析完了 → 最適な方法を検討します"
-                    search_label = "関連情報を収集中..."
-                
-                yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'intent', 'label': intent_label, 'status': 'completed'}})}\n\n"
-                
-                # Step 3: 検索（タスクタイプに応じて）+ リアルタイムプログレス
-                yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'search', 'label': search_label, 'status': 'running'}})}\n\n"
-                
-                # 検索をバックグラウンドタスクで実行し、プログレスをリアルタイムで表示
-                search_task = asyncio.create_task(
-                    agent._search_for_proposal(request.content, task_type)
+                # process_wish_v2をバックグラウンドで実行
+                process_task = asyncio.create_task(
+                    agent.process_wish_v2(
+                        wish=request.content,
+                        user_id=current_user.user_id,
+                        request_id=request_id,
+                    )
                 )
                 
-                # 検索が完了するまでプログレスキューを監視
-                while not search_task.done():
+                # プログレスキューを監視してSSEで送信
+                while not process_task.done():
                     try:
-                        # プログレスキューからメッセージを取得（タイムアウト付き）
                         progress_update = await asyncio.wait_for(
                             progress_queue.get(), 
                             timeout=0.1
                         )
-                        # プログレスをSSEで送信
-                        yield f"data: {json.dumps({'type': 'process', 'step': {'id': progress_update.step, 'label': progress_update.label, 'status': progress_update.status}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'process', 'step': {'id': progress_update.step_id, 'label': progress_update.label, 'status': progress_update.status}})}\n\n"
                     except asyncio.TimeoutError:
-                        # タイムアウトした場合は検索タスクの状態を確認
                         continue
                 
                 # 残りのプログレスメッセージを送信
                 while not progress_queue.empty():
                     try:
                         progress_update = progress_queue.get_nowait()
-                        yield f"data: {json.dumps({'type': 'process', 'step': {'id': progress_update.step, 'label': progress_update.label, 'status': progress_update.status}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'process', 'step': {'id': progress_update.step_id, 'label': progress_update.label, 'status': progress_update.status}})}\n\n"
                     except asyncio.QueueEmpty:
                         break
                 
-                # 検索結果を取得
-                search_results = await search_task
-                search_count = len(search_results) if search_results else 0
+                # 結果を取得
+                result = await process_task
                 
-                # 検索結果の自然言語表示（サービス名を含む）
-                if search_count > 0:
-                    if task_type == TaskType.TRAVEL and search_results:
-                        # 旅行の場合：最初の結果を表示
-                        first_result = search_results[0]
-                        title = first_result.get("title", "")
-                        exec_params = first_result.get("execution_params", {})
-                        service = exec_params.get("service", "")
-                        
-                        # サービス名を日本語化
-                        service_ja = {
-                            "yahoo_transit": "Yahoo!乗換案内",
-                            "kousokubus": "高速バスネット",
-                            "skyscanner": "スカイスキャナー"
-                        }.get(service, service_name if 'service_name' in dir() else "検索サイト")
-                        
-                        if title:
-                            search_complete_label = f"{service_ja}から{search_count}件取得 → {title}"
-                        else:
-                            search_complete_label = f"{service_ja}から{search_count}件の候補を取得しました"
-                    elif task_type == TaskType.PURCHASE and search_results:
-                        first_result = search_results[0]
-                        title = first_result.get("title", "商品")[:20]
-                        search_complete_label = f"Amazonから{search_count}件取得 → {title}..."
-                    else:
-                        search_complete_label = f"{search_count}件の情報を取得しました"
-                else:
-                    # 「AIの知識で回答します」を使わない
-                    search_complete_label = "検索完了 → 最適な提案を作成します"
+                # 提案を取得
+                proposal = result.get("proposal", {})
+                ai_response_content = proposal.get("full_proposal", "")
                 
-                yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'search', 'label': search_complete_label, 'status': 'completed'}})}\n\n"
-                
-                # Step 4: Agentの提案生成（Action First原則を適用）
-                yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'propose', 'label': '回答を作成しています', 'status': 'running'}})}\n\n"
-                
-                # Agentの_propose_actionsを使用（検索結果を含めた状態で）
-                proposal_state = {
-                    "messages": [LCHumanMessage(content=request.content)],
-                    "task_id": "",
-                    "user_id": current_user.user_id,
-                    "original_wish": request.content,
-                    "task_type": task_type,
-                    "proposed_actions": [],
-                    "requires_confirmation": False,
-                    "execution_result": None,
-                    "status": None,
-                    "search_results": search_results,
-                }
-                
-                proposed_state = await agent._propose_actions(proposal_state)
-                
-                # 提案内容を取得（Action Firstフォーマット）
-                full_proposal = proposed_state.get("execution_result", {}).get("full_proposal", "")
-                ai_response_content = full_proposal
+                # 提案がない場合はエラーメッセージ
+                if not ai_response_content:
+                    ai_response_content = result.get("message", "申し訳ありません。処理中にエラーが発生しました。")
             
             # DBに保存
             ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content)
