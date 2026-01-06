@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     VOICE_DEFAULT_LANGUAGE: str = "ja"
     VOICE_WEBHOOK_BASE_URL: str = ""
     
+    # EX Reservation (SmartEX) Credentials
+    EX_MEMBER_ID: str = ""
+    EX_PASSWORD: str = ""
+    
     # Properties for Gmail settings
     @property
     def gmail_client_id(self) -> str:

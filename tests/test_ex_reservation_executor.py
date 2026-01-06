@@ -100,7 +100,7 @@ class TestEXReservationExecutorWithMock:
         result = await executor._ensure_logged_in(mock_page, None)
         
         assert result["success"] is True
-        assert "ログイン済み" in result["message"]
+        assert "Already logged in" in result["message"]
     
     @pytest.mark.asyncio
     async def test_ensure_logged_in_no_credentials(self, mock_page):
@@ -113,7 +113,7 @@ class TestEXReservationExecutorWithMock:
         result = await executor._ensure_logged_in(mock_page, None)
         
         assert result["success"] is False
-        assert "ログイン情報が必要" in result["message"]
+        assert "credentials required" in result["message"]
     
     @pytest.mark.asyncio
     async def test_ensure_logged_in_missing_password(self, mock_page):
@@ -129,7 +129,7 @@ class TestEXReservationExecutorWithMock:
         )
         
         assert result["success"] is False
-        assert "不足" in result["message"]
+        assert "missing" in result["message"]
     
     @pytest.mark.asyncio
     async def test_enter_reservation_details(self, mock_page):
@@ -148,7 +148,7 @@ class TestEXReservationExecutorWithMock:
         )
         
         assert result["success"] is True
-        assert "入力しました" in result["message"]
+        assert "entered" in result["message"].lower()
     
     @pytest.mark.asyncio
     async def test_search_and_select_train_no_results(self, mock_page):
@@ -166,7 +166,7 @@ class TestEXReservationExecutorWithMock:
         result = await executor._search_and_select_train(mock_page)
         
         assert result["success"] is False
-        assert "見つかりません" in result["message"]
+        assert "No trains found" in result["message"] or "not found" in result["message"].lower()
     
     @pytest.mark.asyncio
     async def test_search_and_select_train_success(self, mock_page):
@@ -181,7 +181,7 @@ class TestEXReservationExecutorWithMock:
         result = await executor._search_and_select_train(mock_page)
         
         assert result["success"] is True
-        assert "選択しました" in result["message"]
+        assert "selected" in result["message"].lower()
         assert "train_info" in result
 
 
@@ -244,7 +244,7 @@ class TestIntegrationEXReservationExecutor:
             
             # 検証
             assert result.success is True
-            assert "確認画面まで進みました" in result.message
+            assert "confirmation screen" in result.message.lower()
             assert result.confirmation_number is not None
             assert result.details is not None
             assert "departure" in result.details

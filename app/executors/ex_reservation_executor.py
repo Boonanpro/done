@@ -276,6 +276,14 @@ class EXReservationExecutor(BaseExecutor):
             await page.wait_for_load_state("domcontentloaded")
             await page.wait_for_timeout(2000)
             
+            # OTP（2段階認証）が必要かチェック
+            otp_result = await self._handle_otp_if_required(
+                page=page,
+                user_id=credentials.get("user_id", ""),
+            )
+            if not otp_result["success"]:
+                return otp_result
+            
             # ログイン成功を確認
             if "login" in page.url.lower() or "error" in page.url.lower():
                 return {
@@ -294,6 +302,101 @@ class EXReservationExecutor(BaseExecutor):
             return {
                 "success": False,
                 "message": f"Error during login: {str(e)}",
+            }
+    
+    async def _handle_otp_if_required(
+        self,
+        page: Page,
+        user_id: str,
+    ) -> dict[str, Any]:
+        """
+        OTP（2段階認証）が必要な場合に処理
+        
+        SmartEXは「自動音声案内発信」ボタンをクリックすると、
+        登録電話番号に自動発信され、音声でOTPが通知される。
+        Twilioで着信を受け、文字起こしからOTPを抽出して入力する。
+        
+        Args:
+            page: Playwrightページ
+            user_id: ユーザーID（OTPService用）
+            
+        Returns:
+            {"success": bool, "message": str}
+        """
+        try:
+            # OTP入力画面かどうか確認
+            otp_send_button = await page.query_selector(self.SELECTORS["otp_send_button"])
+            
+            if not otp_send_button:
+                # OTP不要（通常ログイン成功）
+                return {"success": True, "message": "OTP not required"}
+            
+            # OTPが必要な場合
+            print("[EX_OTP] OTP authentication required")
+            
+            # 「自動音声案内発信」ボタンをクリック
+            await otp_send_button.click()
+            print("[EX_OTP] Clicked 'Send voice guidance' button")
+            
+            # OTPServiceを使用してOTPを待機・取得
+            from app.services.otp_service import get_otp_service
+            otp_service = get_otp_service()
+            
+            # 音声OTPを待機（最大90秒、5秒間隔でポーリング）
+            # SmartEXからの発信 → Twilio着信 → 文字起こし → OTP抽出
+            otp_code = None
+            
+            # まずVoice OTPを試行
+            print("[EX_OTP] Waiting for voice OTP...")
+            for attempt in range(18):  # 90秒 / 5秒 = 18回
+                await page.wait_for_timeout(5000)
+                
+                # 最新の音声通話からOTPを抽出
+                otp_result = await otp_service.extract_otp_from_latest_voice_call(
+                    user_id=user_id,
+                    service="ex_reservation",
+                    max_age_minutes=3,
+                )
+                
+                if otp_result and otp_result.code:
+                    otp_code = otp_result.code
+                    print(f"[EX_OTP] OTP obtained: {otp_code[:2]}****")
+                    break
+                
+                print(f"[EX_OTP] Waiting... attempt {attempt + 1}/18")
+            
+            if not otp_code:
+                return {
+                    "success": False,
+                    "message": "OTP not received. Please check Twilio configuration and phone number registration.",
+                }
+            
+            # OTPを入力
+            otp_input = await page.wait_for_selector(self.SELECTORS["otp_input"], timeout=10000)
+            if otp_input:
+                await otp_input.fill(otp_code)
+                print("[EX_OTP] OTP entered")
+            else:
+                return {
+                    "success": False,
+                    "message": "OTP input field not found",
+                }
+            
+            # 次へボタンをクリック
+            next_button = await page.query_selector(self.SELECTORS["otp_next_button"])
+            if next_button:
+                await next_button.click()
+                await page.wait_for_load_state("domcontentloaded")
+                await page.wait_for_timeout(2000)
+                print("[EX_OTP] OTP submitted")
+            
+            return {"success": True, "message": "OTP authentication successful"}
+            
+        except Exception as e:
+            print(f"[EX_OTP] Error: {str(e)}")
+            return {
+                "success": False,
+                "message": f"OTP handling error: {str(e)}",
             }
     
     async def _enter_reservation_details(
@@ -434,11 +537,16 @@ class EXReservationExecutor(BaseExecutor):
         await get_page()  # ブラウザスレッドを確保
         options: List[SearchOption] = []
         
+        # デバッグ用print（ログ設定に依存しない）
+        print(f"[EX_SEARCH] Starting search with params: {params}")
+        
         try:
             departure = params.get("departure", "東京")
             arrival = params.get("arrival", "新大阪")
             date = params.get("date", "")
             time = params.get("time", "")
+            
+            print(f"[EX_SEARCH] departure={departure}, arrival={arrival}, date={date}, time={time}")
             
             await self._notify_progress(
                 "browser",
@@ -495,8 +603,11 @@ class EXReservationExecutor(BaseExecutor):
             # 候補を取得（SmartEXの場合）
             train_candidates = await page_query_selector_all('[class*="candidate"], [class*="train"], [class*="result"]')
             
+            print(f"[EX_SEARCH] Found {len(train_candidates) if train_candidates else 0} train candidates")
+            
             # 候補が見つからない場合は簡易検索結果を返す
             # （実際のサイトでは詳細なパース処理が必要）
+            print(f"[EX_SEARCH] options before fallback: {len(options)}")
             if not options:
                 # SmartEXページから情報を取得できなかった場合のフォールバック
                 # 仮のデータを返す（実際の実装では正確なデータをパースする）
@@ -570,6 +681,10 @@ class EXReservationExecutor(BaseExecutor):
             )
             
         except Exception as e:
+            import traceback
+            print(f"[EX_SEARCH] Exception: {str(e)}")
+            print(traceback.format_exc())
+            
             screenshot_path = f"error_ex_search_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
             try:
                 await page_screenshot(screenshot_path)
