@@ -5,13 +5,15 @@ State Machine - 状態機械を駆動するメインロジック
 1. 状態機械で固定の遷移
 2. 各状態でLLMを呼び出し
 3. Executorで実行
-4. Criticで評価（Step 4で追加予定）
+4. Criticで評価
 
 既存のagent.pyとは独立して動作し、段階的に移行する。
 """
 import json
 import logging
 from typing import Optional, Any, AsyncIterator
+
+import anthropic
 
 from app.agent.states import AgentState, State
 from app.agent.prompts import (
@@ -23,8 +25,19 @@ from app.agent.prompts import (
     get_verify_prompt,
     get_report_prompt,
 )
+from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# 利用可能な情報源
+TOOL_TYPES = {
+    "none": "検索不要（LLMの知識で回答）",
+    "web_search": "Web検索（Tavily + Jina）",
+    "ex_reservation": "EX予約（新幹線）",
+    "amazon": "Amazon",
+    "rakuten": "楽天",
+    "highway_bus": "高速バス",
+}
 
 
 class StateMachine:
@@ -43,7 +56,17 @@ class StateMachine:
         llm_client: Optional[Any] = None,
     ):
         self.state = AgentState(session_id=session_id, user_id=user_id)
-        self.llm_client = llm_client  # Anthropic client（外部から注入）
+        
+        # LLMクライアント（渡されなければ自動生成）
+        if llm_client:
+            self.llm_client = llm_client
+        elif settings.ANTHROPIC_API_KEY:
+            self.llm_client = anthropic.AsyncAnthropic(
+                api_key=settings.ANTHROPIC_API_KEY
+            )
+        else:
+            self.llm_client = None
+            logger.warning("ANTHROPIC_API_KEY not set, LLM calls will return mock responses")
     
     async def process_message(self, message: str) -> dict[str, Any]:
         """
@@ -116,6 +139,12 @@ class StateMachine:
             for step in intake_result["reasoning_steps"]:
                 self.state.add_reasoning_step(step)
         
+        # 雑談・質問の場合は状態機械を抜ける
+        task_type = intake_result.get("task_type", "other")
+        if task_type == "other":
+            self.state.add_reasoning_step("→ 通常の会話として応答します")
+            return await self._respond_as_chat(message)
+        
         # 次の状態へ
         self.state.transition_to(State.PLAN)
         
@@ -143,17 +172,32 @@ class StateMachine:
         return await self._process_research()
     
     async def _process_research(self) -> dict[str, Any]:
-        """RESEARCH: 情報収集（Executor.search()を呼ぶ）"""
+        """RESEARCH: 情報収集（ツールに応じて分岐）"""
         self.state.add_reasoning_step("情報を収集しています...")
         
-        # 使用するExecutorを特定
+        # 使用するツールを特定
         tools = self.state.plan_result.get("tools", [])
         search_results = []
         
         for tool in tools:
-            result = await self._call_executor_search(tool)
-            if result:
-                search_results.append(result)
+            if tool == "none":
+                # 検索不要
+                self.state.add_reasoning_step("→ LLMの知識で回答します")
+                continue
+            
+            elif tool == "web_search":
+                # Tavily検索 + Jinaでページ内容取得
+                self.state.add_reasoning_step("→ Web検索を実行中...")
+                result = await self._call_web_search()
+                if result:
+                    search_results.append(result)
+            
+            else:
+                # Executor.search()
+                self.state.add_reasoning_step(f"→ {tool}で検索中...")
+                result = await self._call_executor_search(tool)
+                if result:
+                    search_results.append(result)
         
         # LLMで検索結果を整理
         prompt = get_research_prompt(self.state.plan_result, search_results)
@@ -200,16 +244,54 @@ class StateMachine:
             for step in proposal["reasoning_steps"]:
                 self.state.add_reasoning_step(step)
         
+        # ============================================================
+        # Criticで提案を評価（最大2回まで修正を試みる）
+        # ============================================================
+        self.state.add_reasoning_step("提案を確認しています...")
+        
+        from app.agent.critic import Critic
+        critic = Critic(self.llm_client)
+        
+        for attempt in range(2):
+            evaluation = await critic.evaluate_proposal(
+                self.state.proposal,
+                self.state.intake_result,
+            )
+            
+            if evaluation.get("is_valid", True):
+                self.state.add_reasoning_step("→ 提案は妥当と判断されました")
+                break
+            
+            # 問題がある場合
+            self.state.add_reasoning_step(f"→ 問題が見つかりました（{attempt + 1}回目）")
+            
+            for issue in evaluation.get("issues", []):
+                self.state.add_reasoning_step(f"  問題: {issue}")
+            
+            for suggestion in evaluation.get("suggestions", []):
+                self.state.add_reasoning_step(f"  修正: {suggestion}")
+            
+            # 修正を試みる
+            self.state.add_reasoning_step("→ 提案を修正中...")
+            fixed_proposal = await critic.suggest_fix(
+                self.state.proposal,
+                evaluation.get("issues", []),
+                evaluation.get("suggestions", []),
+            )
+            self.state.proposal = fixed_proposal
+        
+        # ============================================================
+        
         # 次の状態へ（CONFIRM）
         self.state.transition_to(State.CONFIRM)
         
         # 承認待ち
         return {
             "state": State.CONFIRM.value,
-            "response": self._format_proposal(proposal),
+            "response": self._format_proposal(self.state.proposal),
             "reasoning_steps": self.state.reasoning_steps,
             "needs_confirmation": True,
-            "proposal": proposal,
+            "proposal": self.state.proposal,
         }
     
     async def _process_confirm(self, message: str) -> dict[str, Any]:
@@ -372,13 +454,94 @@ class StateMachine:
             logger.warning(f"Failed to parse JSON: {e}")
             return {"raw_response": response}
     
+    async def _call_web_search(self) -> Optional[dict]:
+        """Tavily検索 + Jinaでページ内容取得"""
+        try:
+            from app.tools.tavily_search import search_with_tavily
+            from app.tools.jina_reader import search_and_read
+            
+            # 検索クエリを構築
+            intent = self.state.intake_result.get("intent", "")
+            details = self.state.intake_result.get("details", {})
+            
+            # クエリを組み立て
+            query_parts = [intent]
+            for key in ["departure", "arrival", "date", "time"]:
+                if details.get(key):
+                    query_parts.append(str(details[key]))
+            
+            query = " ".join(query_parts)
+            
+            # Tavilyで検索
+            tavily_results = await search_with_tavily(query, max_results=5)
+            
+            if not tavily_results:
+                return None
+            
+            # Jinaでページ内容を取得（上位3件）
+            results_with_content = await search_and_read(
+                [r.model_dump() for r in tavily_results],
+                max_pages=3,
+            )
+            
+            return {
+                "source": "web_search",
+                "query": query,
+                "results": results_with_content,
+            }
+        
+        except Exception as e:
+            logger.exception(f"Web search failed: {e}")
+            return None
+    
+    async def _respond_as_chat(self, message: str) -> dict[str, Any]:
+        """雑談・質問への通常応答"""
+        prompt = f"""
+以下のユーザーメッセージに対して、友好的に応答してください。
+タスクの実行は不要です。自然な会話として返してください。
+
+ユーザー: {message}
+
+応答:
+"""
+        
+        response = await self._call_llm(prompt)
+        
+        return {
+            "state": "CHAT",
+            "response": response.strip(),
+            "reasoning_steps": self.state.reasoning_steps,
+            "is_chat": True,
+        }
+    
     async def _call_executor_search(self, executor_name: str) -> Optional[dict]:
         """Executor.search()を呼ぶ"""
         try:
-            from app.executors.registry import ExecutorRegistry
+            from app.executors.registry import ExecutorRegistry, register_all_executors
             
-            registry = ExecutorRegistry()
-            executor = registry.get_executor(executor_name)
+            # Executorを登録
+            register_all_executors()
+            
+            # executor_nameからservice_type/service_nameを判定
+            executor_mapping = {
+                "ex_reservation": ("train", "ex_reservation"),
+                "amazon": ("product", "amazon"),
+                "rakuten": ("product", "rakuten"),
+                "highway_bus": ("bus", "willer"),
+                "bank_transfer": ("payment", "bank_transfer"),
+                "voice": ("voice", "phone"),
+            }
+            
+            if executor_name not in executor_mapping:
+                logger.warning(f"Unknown executor: {executor_name}")
+                return None
+            
+            service_type, service_name = executor_mapping[executor_name]
+            executor = ExecutorRegistry.find(
+                service_type=service_type,
+                service_name=service_name,
+                capability="search",
+            )
             
             if not executor:
                 logger.warning(f"Executor not found: {executor_name}")
@@ -388,7 +551,14 @@ class StateMachine:
             params = self._build_search_params()
             
             result = await executor.search(params)
-            return result.to_dict()
+            
+            # ExecutorSearchResult → dict変換
+            if hasattr(result, 'to_dict'):
+                return result.to_dict()
+            elif hasattr(result, 'model_dump'):
+                return result.model_dump()
+            else:
+                return result
         
         except Exception as e:
             logger.exception(f"Executor search failed: {e}")
@@ -397,11 +567,32 @@ class StateMachine:
     async def _call_executor_execute(self, executor_name: str) -> dict:
         """Executor.execute()を呼ぶ"""
         try:
-            from app.executors.registry import ExecutorRegistry
+            from app.executors.registry import ExecutorRegistry, register_all_executors
             from app.models.schemas import SearchResult, SearchResultCategory
             
-            registry = ExecutorRegistry()
-            executor = registry.get_executor(executor_name)
+            # Executorを登録
+            register_all_executors()
+            
+            # executor_nameからservice_type/service_nameを判定
+            executor_mapping = {
+                "ex_reservation": ("train", "ex_reservation"),
+                "amazon": ("product", "amazon"),
+                "rakuten": ("product", "rakuten"),
+                "highway_bus": ("bus", "willer"),
+                "bank_transfer": ("payment", "bank_transfer"),
+                "voice": ("voice", "phone"),
+            }
+            
+            if executor_name not in executor_mapping:
+                logger.warning(f"Unknown executor: {executor_name}")
+                return {"success": False, "message": f"Unknown executor: {executor_name}"}
+            
+            service_type, service_name = executor_mapping[executor_name]
+            executor = ExecutorRegistry.find(
+                service_type=service_type,
+                service_name=service_name,
+                capability="execute",
+            )
             
             if not executor:
                 logger.warning(f"Executor not found: {executor_name}")
