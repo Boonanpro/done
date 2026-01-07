@@ -46,6 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - バックエンドAPI連携（`lib/api-client.ts`）
 
 ### Fixed
+- **EX予約の料金ハードコードを削除** - 実際のWeb検索から料金を取得するように修正
+  - ハードコードされた14,720円を削除
+  - 2段階のフォールバック価格取得を実装:
+    1. TavilyのAI回答/スニペットから抽出（高速）
+    2. Jina AI Readerでページ全体を読む（確実）
+  - `tavily_search_raw()` 関数を追加（生レスポンス取得用）
+  - 価格フォーマット時のint変換エラーを修正
+  - 関連ファイル: `app/executors/ex_reservation_executor.py`, `app/tools/tavily_search.py`, `app/agent/state_machine.py`
 - チャットメッセージの表示順を修正（古いメッセージが上、新しいメッセージが下）
 - チャット画面のスクロールを修正（過去のメッセージを遡れるように）
 - **APIクライアント不足メソッド追加** - 未定義だったAPIメソッドを追加
