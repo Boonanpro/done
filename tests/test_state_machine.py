@@ -3,12 +3,15 @@ StateMachine テスト
 
 状態機械の動作確認テスト。
 LLM APIを使用するため、ANTHROPIC_API_KEYが必要。
+
+Step 6追加: agent.py統合テスト
 """
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
 from app.agent.state_machine import StateMachine
 from app.agent.states import State
+from app.agent.agent import AISecretaryAgent
 
 
 class TestStateMachineBasic:
@@ -209,4 +212,159 @@ class TestStateMachineIntegration:
         assert result.get("state") == "CHAT"
         # is_chatフラグがTrueであること
         assert result.get("is_chat") is True
+
+
+class TestAgentStateMachineIntegration:
+    """Step 6: agent.py統合テスト"""
+
+    @pytest.fixture
+    def mock_llm_client(self):
+        """LLMクライアントのモック"""
+        client = MagicMock()
+        client.messages = MagicMock()
+        return client
+
+    @pytest.mark.asyncio
+    async def test_process_with_state_machine_new_session(self, mock_llm_client):
+        """新規セッションでの処理（モック）"""
+        agent = AISecretaryAgent()
+
+        # StateMachineをモック注入（メソッド内でインポートされるのでstate_machineモジュールをパッチ）
+        with patch('app.agent.state_machine.StateMachine') as MockSM:
+            mock_sm_instance = MagicMock()
+            mock_sm_instance.process_message = AsyncMock(return_value={
+                "state": "CHAT",
+                "response": "こんにちは！",
+                "reasoning_steps": ["挨拶と判断"],
+                "is_chat": True,
+            })
+            MockSM.return_value = mock_sm_instance
+
+            result = await agent.process_with_state_machine(
+                message="こんにちは",
+                user_id="test-user",
+            )
+
+        # session_idが返されること
+        assert "session_id" in result
+        # 状態がCHATであること
+        assert result.get("state") == "CHAT"
+        # is_chatフラグがTrueであること
+        assert result.get("is_chat") is True
+
+    @pytest.mark.asyncio
+    async def test_process_with_state_machine_task(self, mock_llm_client):
+        """タスクメッセージの処理（モック）"""
+        agent = AISecretaryAgent()
+
+        with patch('app.agent.state_machine.StateMachine') as MockSM:
+            mock_sm_instance = MagicMock()
+            mock_sm_instance.process_message = AsyncMock(return_value={
+                "state": "confirm",
+                "response": "**おすすめ**: のぞみ45号",
+                "reasoning_steps": ["新幹線移動と判断", "EX予約を使用"],
+                "needs_confirmation": True,
+                "proposal": {
+                    "recommendation": {"title": "のぞみ45号", "price": 14720}
+                },
+            })
+            mock_sm_instance.state = MagicMock()
+            mock_sm_instance.state.to_dict = MagicMock(return_value={"current_state": "confirm"})
+            MockSM.return_value = mock_sm_instance
+
+            result = await agent.process_with_state_machine(
+                message="明日18時に新大阪から博多まで行きたい",
+                session_id="test-session-1",
+                user_id="test-user",
+            )
+
+        # session_idが返されること
+        assert result.get("session_id") == "test-session-1"
+        # 状態がconfirmであること
+        assert result.get("state") == "confirm"
+        # needs_confirmationがTrueであること
+        assert result.get("needs_confirmation") is True
+        # proposalが含まれていること
+        assert result.get("proposal") is not None
+
+    @pytest.mark.asyncio
+    async def test_confirm_state_machine(self, mock_llm_client):
+        """提案の承認（モック）"""
+        agent = AISecretaryAgent()
+
+        # まずセッションを作成
+        with patch('app.agent.state_machine.StateMachine') as MockSM:
+            mock_sm_instance = MagicMock()
+            mock_sm_instance.process_message = AsyncMock(return_value={
+                "state": "confirm",
+                "response": "提案内容",
+                "reasoning_steps": [],
+                "needs_confirmation": True,
+            })
+            mock_sm_instance.state = MagicMock()
+            mock_sm_instance.state.to_dict = MagicMock(return_value={"current_state": "confirm"})
+            MockSM.return_value = mock_sm_instance
+
+            await agent.process_with_state_machine(
+                message="テスト",
+                session_id="test-confirm-session",
+                user_id="test-user",
+            )
+
+            # 承認時のモック
+            mock_sm_instance.process_message = AsyncMock(return_value={
+                "state": "REPORT",
+                "response": "予約が完了しました",
+                "reasoning_steps": ["承認されました", "実行完了"],
+                "needs_confirmation": False,
+            })
+
+            result = await agent.confirm_state_machine("test-confirm-session")
+
+        # 状態がREPORTであること
+        assert result.get("state") == "REPORT"
+        # needs_confirmationがFalseであること
+        assert result.get("needs_confirmation") is False
+
+    @pytest.mark.asyncio
+    async def test_get_state_machine_state(self, mock_llm_client):
+        """状態取得（モック）"""
+        agent = AISecretaryAgent()
+
+        with patch('app.agent.state_machine.StateMachine') as MockSM:
+            mock_sm_instance = MagicMock()
+            mock_sm_instance.process_message = AsyncMock(return_value={
+                "state": "confirm",
+                "response": "提案内容",
+                "reasoning_steps": [],
+            })
+            mock_sm_instance.state = MagicMock()
+            mock_sm_instance.state.to_dict = MagicMock(return_value={
+                "current_state": "confirm",
+                "session_id": "test-state-session",
+                "user_id": "test-user",
+            })
+            MockSM.return_value = mock_sm_instance
+
+            await agent.process_with_state_machine(
+                message="テスト",
+                session_id="test-state-session",
+                user_id="test-user",
+            )
+
+            state = agent.get_state_machine_state("test-state-session")
+
+        # 状態が取得できること
+        assert state is not None
+        assert state.get("current_state") == "confirm"
+
+    @pytest.mark.asyncio
+    async def test_get_state_machine_state_not_found(self):
+        """存在しないセッションの状態取得"""
+        agent = AISecretaryAgent()
+
+        state = agent.get_state_machine_state("non-existent-session")
+
+        # Noneが返されること
+        assert state is None
 

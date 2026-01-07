@@ -155,7 +155,11 @@ class StateMachine:
         """PLAN: サブタスク分解"""
         self.state.add_reasoning_step("実行計画を立てています...")
         
-        prompt = get_plan_prompt(self.state.intake_result)
+        # 過去の実行履歴があれば渡す（失敗したツールを避けるため）
+        prompt = get_plan_prompt(
+            self.state.intake_result,
+            execution_history=self.state.execution_history,
+        )
         llm_response = await self._call_llm(prompt)
         
         plan_result = self._parse_json_response(llm_response)
@@ -188,16 +192,60 @@ class StateMachine:
             elif tool == "web_search":
                 # Tavily検索 + Jinaでページ内容取得
                 self.state.add_reasoning_step("→ Web検索を実行中...")
-                result = await self._call_web_search()
-                if result:
-                    search_results.append(result)
+                try:
+                    result = await self._call_web_search()
+                    if result:
+                        search_results.append(result)
+                        self.state.add_execution_record(
+                            tool="web_search",
+                            action="search",
+                            success=True,
+                            result={"count": len(result.get("results", []))},
+                        )
+                    else:
+                        self.state.add_execution_record(
+                            tool="web_search",
+                            action="search",
+                            success=False,
+                            error="検索結果が空でした",
+                        )
+                except Exception as e:
+                    self.state.add_execution_record(
+                        tool="web_search",
+                        action="search",
+                        success=False,
+                        error=str(e),
+                    )
+                    self.state.add_reasoning_step(f"→ Web検索に失敗: {e}")
             
             else:
                 # Executor.search()
                 self.state.add_reasoning_step(f"→ {tool}で検索中...")
-                result = await self._call_executor_search(tool)
-                if result:
-                    search_results.append(result)
+                try:
+                    result = await self._call_executor_search(tool)
+                    if result:
+                        search_results.append(result)
+                        self.state.add_execution_record(
+                            tool=tool,
+                            action="search",
+                            success=True,
+                            result={"count": len(result.get("options", []))},
+                        )
+                    else:
+                        self.state.add_execution_record(
+                            tool=tool,
+                            action="search",
+                            success=False,
+                            error="検索結果が空でした",
+                        )
+                except Exception as e:
+                    self.state.add_execution_record(
+                        tool=tool,
+                        action="search",
+                        success=False,
+                        error=str(e),
+                    )
+                    self.state.add_reasoning_step(f"→ {tool}の検索に失敗: {e}")
         
         # LLMで検索結果を整理
         prompt = get_research_prompt(self.state.plan_result, search_results)
@@ -246,9 +294,8 @@ class StateMachine:
         
         # ============================================================
         # Criticで提案を評価（最大2回まで修正を試みる）
+        # 問題があれば、必要に応じてJina + Tavilyで再検索して修正
         # ============================================================
-        self.state.add_reasoning_step("提案を確認しています...")
-        
         from app.agent.critic import Critic
         critic = Critic(self.llm_client)
         
@@ -259,25 +306,29 @@ class StateMachine:
             )
             
             if evaluation.get("is_valid", True):
-                self.state.add_reasoning_step("→ 提案は妥当と判断されました")
                 break
             
-            # 問題がある場合
-            self.state.add_reasoning_step(f"→ 問題が見つかりました（{attempt + 1}回目）")
+            # 問題がある場合 → 自問形式で表示
+            issues = evaluation.get("issues", [])
+            suggestions = evaluation.get("suggestions", [])
             
-            for issue in evaluation.get("issues", []):
-                self.state.add_reasoning_step(f"  問題: {issue}")
+            # 自問形式に変換して表示
+            self_question = await critic.format_as_self_question(issues, suggestions)
+            if self_question:
+                self.state.add_reasoning_step(self_question)
             
-            for suggestion in evaluation.get("suggestions", []):
-                self.state.add_reasoning_step(f"  修正: {suggestion}")
-            
-            # 修正を試みる
-            self.state.add_reasoning_step("→ 提案を修正中...")
-            fixed_proposal = await critic.suggest_fix(
+            # 修正を試みる（必要に応じてWeb再検索を実行）
+            fixed_proposal, fix_steps = await critic.suggest_fix(
                 self.state.proposal,
-                evaluation.get("issues", []),
-                evaluation.get("suggestions", []),
+                issues,
+                suggestions,
+                intake_result=self.state.intake_result,  # 再検索用
             )
+            
+            # 修正過程のreasoning_stepsを追加
+            for step in fix_steps:
+                self.state.add_reasoning_step(step)
+            
             self.state.proposal = fixed_proposal
         
         # ============================================================

@@ -12,7 +12,7 @@
 | Step 4 | Critic実装 | ✅ 完了 |
 | Step 5 | プロセス表示自動生成 | ✅ 完了 |
 | 追加 | Jina AI Reader + Tavily統合 | ✅ 完了 |
-| Step 6 | agent.pyへの統合 | ❌ 未着手 |
+| Step 6 | agent.pyへの統合 | ✅ 完了（2026-01-07） |
 | Step 7 | フロントエンド接続 | ❌ 未着手 |
 | Step 8 | Executorログイン修正 | ❌ 未着手 |
 
@@ -21,6 +21,12 @@
 - ✅ パラメータ抽出（departure/arrival）正常
 - ✅ Criticが提案を評価し妥当と判断
 - ✅ 雑談メッセージ → 通常会話として応答
+- ✅ **agent.py統合テスト** - 10件すべてPASS（2026-01-07追加）
+  - `test_process_with_state_machine_new_session`
+  - `test_process_with_state_machine_task`
+  - `test_confirm_state_machine`
+  - `test_get_state_machine_state`
+  - `test_get_state_machine_state_not_found`
 
 ---
 
@@ -106,11 +112,21 @@ class Critic:
 ```
 app/
 ├── agent/
-│   ├── agent.py           # メインAgent（StateMachine統合予定）
+│   ├── agent.py           # メインAgent（StateMachine統合済み ✅）
+│   │   ├── process_with_state_machine()  # 状態機械ベースの処理
+│   │   ├── confirm_state_machine()       # 提案承認
+│   │   ├── revise_state_machine()        # 提案修正
+│   │   └── get_state_machine_state()     # 状態取得
 │   ├── states.py          # AgentState定義 ✅
 │   ├── state_machine.py   # 状態機械のメインロジック ✅
 │   ├── prompts.py         # 各ステートのプロンプト ✅
 │   └── critic.py          # Critic（評価器） ✅
+├── api/
+│   └── routes.py          # APIルート（SM統合済み ✅）
+│       ├── POST /sm/message              # メッセージ処理
+│       ├── POST /sm/{session_id}/confirm # 承認
+│       ├── POST /sm/{session_id}/revise  # 修正
+│       └── GET /sm/{session_id}/state    # 状態取得
 ├── tools/
 │   ├── jina_reader.py     # Jina AI Reader ✅
 │   └── tavily_search.py   # Tavily検索 ✅
@@ -120,19 +136,24 @@ app/
 │   └── ex_reservation_executor.py  # ログイン修正必要 ⚠️
 └── services/
     └── progress_callback.py  # プロセス表示用
+
+tests/
+└── test_state_machine.py  # StateMachine + 統合テスト（10件PASS）
 ```
 
 ---
 
 ## 次のステップ
 
-1. **Step 6: agent.pyへのStateMachine統合**
-   - `process_wish` メソッドで `StateMachine` を使うように変更
-   - フロントからのAPIリクエストがStateMachineを経由するようにする
+1. ~~**Step 6: agent.pyへのStateMachine統合**~~ ✅ 完了
+   - `process_with_state_machine()` メソッド追加
+   - APIエンドポイント追加: `/api/v1/sm/message`, `/api/v1/sm/{session_id}/confirm`, etc.
+   - テスト追加: `tests/test_state_machine.py` に統合テスト5件追加
 
 2. **Step 7: フロントエンド接続**
-   - APIルートの修正
-   - WebSocket対応（リアルタイムナレーション表示）
+   - APIルートの修正（SSE対応検討）
+   - WebSocket対応（リアルタイムreasoning_steps表示）
+   - フロントエンドで`/api/v1/sm/message`を呼ぶように変更
 
 3. **Step 8: Executorのログイン修正**
    - SmartEXのセレクタ/URL更新

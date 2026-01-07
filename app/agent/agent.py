@@ -1,5 +1,9 @@
 """
 AI Secretary Agent - LangGraph Implementation
+
+Step 6: StateMachine統合
+- process_with_state_machine(): 新しい状態機械ベースの処理
+- 既存のprocess_wish()は後方互換性のため維持
 """
 from typing import TypedDict, Annotated, Sequence, Optional, Any
 from datetime import datetime
@@ -1276,6 +1280,7 @@ Respond in this format:
         
         # Executorを登録
         register_all_executors()
+        logger.info(f"[PROCESS_V2] Starting process_wish_v2 for: {wish}")
         
         result = {
             "success": False,
@@ -1359,7 +1364,11 @@ Respond in this format:
             # ========================================
             # Step 2: Executorを探す
             # ========================================
+            logger.info(f"[PROCESS_V2] Research result: {research}")
+            logger.info(f"[PROCESS_V2] Looking for executor with service_type={research.get('service_type')}, service_name={research.get('service_name')}")
+            
             executor = ExecutorRegistry.get_executor_for_solution(research)
+            logger.info(f"[PROCESS_V2] Found executor: {executor}")
             
             if not executor:
                 # Executorが見つからない場合
@@ -1384,10 +1393,13 @@ Respond in this format:
             # ========================================
             # Step 3: Executor.search() で予約可能かを確認
             # ========================================
+            logger.info(f"[PROCESS_V2] Calling executor.search() with params: {params}")
+            
             if request_id:
                 executor.set_request_id(request_id)
             
             search_result = await executor.search(params)
+            logger.info(f"[PROCESS_V2] Search result: success={search_result.success}, options={len(search_result.options)}")
             result["search_result"] = search_result.to_dict()
             
             if not search_result.success or not search_result.options:
@@ -1710,3 +1722,156 @@ Respond in this format:
             "can_execute": False,
             "full_proposal": response.content,
         }
+    
+    # ========================================
+    # Step 6: StateMachine統合
+    # ========================================
+    
+    # セッションごとのStateMachineインスタンスを保持
+    _state_machines: dict[str, "StateMachine"] = {}
+    
+    async def process_with_state_machine(
+        self,
+        message: str,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        StateMachineを使ってメッセージを処理
+        
+        新しいアーキテクチャ:
+        1. 状態機械で固定の遷移
+        2. 各状態でLLMを呼び出し
+        3. Executorで実行
+        4. Criticで評価
+        
+        Args:
+            message: ユーザーからのメッセージ
+            session_id: セッションID（省略時は自動生成）
+            user_id: ユーザーID
+            
+        Returns:
+            {
+                "session_id": セッションID,
+                "state": 現在の状態,
+                "response": ユーザーへの応答,
+                "reasoning_steps": 推論過程（プロセス表示用）,
+                "needs_confirmation": 承認が必要か,
+                "proposal": 提案内容（提案フェーズの場合）,
+                "error": エラーがあれば,
+            }
+        """
+        from app.agent.state_machine import StateMachine
+        
+        # セッションIDがなければ生成
+        if not session_id:
+            session_id = str(uuid.uuid4())
+        
+        # ユーザーIDのデフォルト
+        if not user_id:
+            user_id = "default-user"
+        
+        # StateMachineを取得または作成
+        if session_id not in AISecretaryAgent._state_machines:
+            AISecretaryAgent._state_machines[session_id] = StateMachine(
+                session_id=session_id,
+                user_id=user_id,
+            )
+        
+        sm = AISecretaryAgent._state_machines[session_id]
+        
+        # メッセージを処理
+        result = await sm.process_message(message)
+        
+        # session_idを結果に追加
+        result["session_id"] = session_id
+        
+        # 状態がREPORTまたはCHATなら終了済み
+        from app.agent.states import State
+        is_complete = result.get("state") in [State.REPORT.value, "CHAT", "REPORT"]
+        
+        # 完了したらStateMachineを削除（メモリリーク防止）
+        if is_complete:
+            if session_id in AISecretaryAgent._state_machines:
+                del AISecretaryAgent._state_machines[session_id]
+        
+        return result
+    
+    async def confirm_state_machine(
+        self,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """
+        StateMachineで提案を承認
+        
+        Args:
+            session_id: セッションID
+            
+        Returns:
+            実行結果
+        """
+        if session_id not in AISecretaryAgent._state_machines:
+            return {
+                "error": f"Session not found: {session_id}",
+                "session_id": session_id,
+            }
+        
+        sm = AISecretaryAgent._state_machines[session_id]
+        
+        # "OK"を送信して承認
+        result = await sm.process_message("OK")
+        result["session_id"] = session_id
+        
+        # 完了したらStateMachineを削除
+        from app.agent.states import State
+        is_complete = result.get("state") in [State.REPORT.value, "REPORT"]
+        if is_complete:
+            if session_id in AISecretaryAgent._state_machines:
+                del AISecretaryAgent._state_machines[session_id]
+        
+        return result
+    
+    async def revise_state_machine(
+        self,
+        session_id: str,
+        revision: str,
+    ) -> dict[str, Any]:
+        """
+        StateMachineで提案を修正
+        
+        Args:
+            session_id: セッションID
+            revision: 修正内容
+            
+        Returns:
+            修正後の提案
+        """
+        if session_id not in AISecretaryAgent._state_machines:
+            return {
+                "error": f"Session not found: {session_id}",
+                "session_id": session_id,
+            }
+        
+        sm = AISecretaryAgent._state_machines[session_id]
+        
+        # 修正内容を送信
+        result = await sm.process_message(revision)
+        result["session_id"] = session_id
+        
+        return result
+    
+    def get_state_machine_state(self, session_id: str) -> Optional[dict]:
+        """
+        StateMachineの現在の状態を取得
+        
+        Args:
+            session_id: セッションID
+            
+        Returns:
+            状態情報（なければNone）
+        """
+        if session_id not in AISecretaryAgent._state_machines:
+            return None
+        
+        sm = AISecretaryAgent._state_machines[session_id]
+        return sm.state.to_dict()

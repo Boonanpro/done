@@ -85,7 +85,7 @@ PLAN_PROMPT = """
 
 ## INTAKEの結果
 {intake_result}
-
+{execution_history_section}
 ## タスク
 このタスクを実行するための計画を立ててください：
 
@@ -95,8 +95,20 @@ PLAN_PROMPT = """
 4. risks: リスク・注意点
 5. reasoning_steps: 推論過程（日本語の配列）
 
-## 利用可能なExecutor
-- ex_reservation: EX予約（新幹線）
+## reasoning_stepsの書き方（重要）
+自問自答形式で、なぜそのツールを選んだかの根拠を書いてください：
+
+良い例：
+- 「新幹線で行きたい」→ EX予約が最適。在来線や飛行機は対象外。
+- 新大阪→博多はのぞみで約2時間半。EX予約なら空席確認と予約が一括でできる。
+- 高速バスという選択肢もあるが、時間優先なら新幹線の方が良いだろう。
+
+悪い例：
+- ex_reservationで検索する ← なぜ？が書かれていない
+
+## 利用可能なツール
+- web_search: 一般的なWeb検索（Tavily + Jina AI Reader）
+- ex_reservation: EX予約（新幹線）- ログインが必要
 - amazon: Amazon商品購入
 - rakuten: 楽天商品購入
 - highway_bus: 高速バス予約
@@ -107,6 +119,7 @@ PLAN_PROMPT = """
 - **具体的な情報（列車名、料金、商品名など）は推測しない**
 - 具体的な情報はExecutorの検索結果から取得する
 - 計画段階では「新幹線を検索する」のように抽象的に記述する
+- **過去に失敗したツールは避け、代替手段を検討する**
 
 ## 出力形式
 ```json
@@ -320,10 +333,30 @@ def get_intake_prompt(wish: str, user_preferences: dict = None) -> str:
     return INTAKE_PROMPT.format(wish=wish, rules=rules)
 
 
-def get_plan_prompt(intake_result: dict) -> str:
-    """PLANプロンプトを生成"""
+def get_plan_prompt(intake_result: dict, execution_history: list = None) -> str:
+    """
+    PLANプロンプトを生成
+    
+    Args:
+        intake_result: ユーザーの要望
+        execution_history: 過去の実行履歴（失敗情報含む）
+    """
     import json
-    return PLAN_PROMPT.format(intake_result=json.dumps(intake_result, ensure_ascii=False, indent=2))
+    
+    # 実行履歴があれば追加
+    execution_history_section = ""
+    if execution_history:
+        failures = [r for r in execution_history if not r.get("success")]
+        if failures:
+            execution_history_section = "\n## 過去の実行履歴（注意が必要）\n"
+            for f in failures:
+                execution_history_section += f"- ❌ {f['tool']}の{f['action']}に失敗: {f.get('error', '不明なエラー')}\n"
+            execution_history_section += "\n"
+    
+    return PLAN_PROMPT.format(
+        intake_result=json.dumps(intake_result, ensure_ascii=False, indent=2),
+        execution_history_section=execution_history_section,
+    )
 
 
 def get_research_prompt(plan_result: dict, search_results: list) -> str:

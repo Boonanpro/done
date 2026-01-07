@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **PLANのナレーション改善** - 自問形式で「なぜそのツールを選んだか」の根拠を表示
+  - プロンプトに良い例・悪い例を追加
+  - 関連ファイル: `app/agent/prompts.py`
+- **実行履歴の構造化と記憶保持** - 実行結果を構造化して保持し、次の推論に渡す
+  - `execution_history` - 成功/失敗両方を記録するリスト
+  - `add_execution_record()` - 実行結果を記録するメソッド
+  - `get_failed_tools()` / `get_execution_summary()` - 失敗情報を取得
+  - PLANに戻る時に失敗したツール情報を渡し、同じ失敗を繰り返さないようにする
+  - 関連ファイル: `app/agent/states.py`, `app/agent/state_machine.py`, `app/agent/prompts.py`
+- **PLANプロンプトにweb_searchを追加** - LLMがTavily + Jina AI Readerを選択できるように
+- **Critic再検索機能** - Criticが「根拠不足」を指摘した場合に自動でWeb再検索を実行
+  - `_needs_additional_research()` - 再検索が必要かどうかをキーワードで判定
+  - `_research_for_fix()` - Jina AI Reader + Tavilyで正確な情報を取得
+  - `suggest_fix()` を拡張 - 必要に応じて再検索結果を根拠に提案を修正
+  - 関連ファイル: `app/agent/critic.py`, `app/agent/state_machine.py`
+- **Step 6: agent.pyへのStateMachine統合** - 新しい状態機械アーキテクチャをエージェントに統合
+  - `process_with_state_machine()` - 状態機械ベースのメッセージ処理
+  - `confirm_state_machine()` - 提案の承認
+  - `revise_state_machine()` - 提案の修正
+  - `get_state_machine_state()` - 状態取得
+  - 新規APIエンドポイント:
+    - `POST /api/v1/sm/message` - StateMachineでメッセージを処理
+    - `POST /api/v1/sm/{session_id}/confirm` - 提案を承認
+    - `POST /api/v1/sm/{session_id}/revise` - 提案を修正
+    - `GET /api/v1/sm/{session_id}/state` - 状態を取得
+  - 関連ファイル: `app/agent/agent.py`, `app/api/routes.py`, `tests/test_state_machine.py`
+  
 - **リアルタイムプロセス表示** - SSEストリーミングでAI思考プロセスを1つずつ表示
   - メッセージ送信直後は「考え中...」を表示、その後プロセスが1つずつ追加される
   - 各ステップ到着時に表示追加、完了時に✓マーク、実行中はスピナーアニメーション

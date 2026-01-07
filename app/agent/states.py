@@ -88,6 +88,9 @@ class AgentState:
     # 推論過程（プロセス表示用）
     reasoning_steps: list[str] = field(default_factory=list)
     
+    # 実行履歴（成功/失敗両方を記録、次の推論に渡す）
+    execution_history: list[dict[str, Any]] = field(default_factory=list)
+    
     # ユーザーの傾向（将来のPhase 5で実装）
     user_preferences: dict[str, Any] = field(default_factory=dict)
     
@@ -116,6 +119,58 @@ class AgentState:
     def add_reasoning_step(self, step: str) -> None:
         """推論ステップを追加（プロセス表示用）"""
         self.reasoning_steps.append(step)
+    
+    def add_execution_record(
+        self,
+        tool: str,
+        action: str,
+        success: bool,
+        result: Any = None,
+        error: str = None,
+    ) -> None:
+        """
+        実行履歴を追加（成功/失敗両方を記録）
+        
+        次の推論に渡すために構造化して保持する。
+        PLANに戻る時やCriticが修正する時に参照される。
+        
+        Args:
+            tool: 使用したツール（ex_reservation, web_search, etc.）
+            action: 実行したアクション（search, login, execute, etc.）
+            success: 成功したか
+            result: 結果（成功時）
+            error: エラーメッセージ（失敗時）
+        """
+        record = {
+            "tool": tool,
+            "action": action,
+            "success": success,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        if success and result:
+            record["result"] = result
+        if not success and error:
+            record["error"] = error
+        
+        self.execution_history.append(record)
+    
+    def get_failed_tools(self) -> list[str]:
+        """失敗したツールのリストを取得"""
+        return list(set(
+            r["tool"] for r in self.execution_history
+            if not r["success"]
+        ))
+    
+    def get_execution_summary(self) -> dict[str, Any]:
+        """
+        実行履歴のサマリーを取得（次の推論に渡す用）
+        """
+        return {
+            "total_attempts": len(self.execution_history),
+            "successes": [r for r in self.execution_history if r["success"]],
+            "failures": [r for r in self.execution_history if not r["success"]],
+            "failed_tools": self.get_failed_tools(),
+        }
     
     def can_proceed_to_propose(self) -> bool:
         """
@@ -149,6 +204,7 @@ class AgentState:
             "verification": self.verification,
             "report": self.report,
             "reasoning_steps": self.reasoning_steps,
+            "execution_history": self.execution_history,
             "error": self.error,
         }
     
@@ -167,6 +223,7 @@ class AgentState:
         state.verification = data.get("verification", {})
         state.report = data.get("report", {})
         state.reasoning_steps = data.get("reasoning_steps", [])
+        state.execution_history = data.get("execution_history", [])
         state.user_preferences = data.get("user_preferences", {})
         state.error = data.get("error")
         return state

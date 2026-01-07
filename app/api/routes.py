@@ -1,5 +1,11 @@
 """
 Main API Routes
+
+Step 6: StateMachine統合 - 新しいエンドポイント追加
+- POST /sm/message: StateMachineでメッセージを処理
+- POST /sm/{session_id}/confirm: 提案を承認
+- POST /sm/{session_id}/revise: 提案を修正
+- GET /sm/{session_id}/state: 状態を取得
 """
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
@@ -251,6 +257,192 @@ async def get_execution_status(id: str):
             raise HTTPException(status_code=404, detail="Execution state not found")
         
         return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Step 6: StateMachine APIs ====================
+
+class SMMessageRequest(BaseModel):
+    """StateMachineメッセージリクエスト"""
+    message: str
+    session_id: Optional[str] = None  # 新規セッションの場合は省略可
+    user_id: Optional[str] = None
+
+
+class SMMessageResponse(BaseModel):
+    """StateMachineメッセージレスポンス"""
+    session_id: str
+    state: str
+    response: str
+    reasoning_steps: list[str] = []
+    needs_confirmation: bool = False
+    is_chat: bool = False
+    proposal: Optional[dict] = None
+    error: Optional[str] = None
+
+
+class SMReviseRequest(BaseModel):
+    """StateMachine修正リクエスト"""
+    revision: str
+
+
+@router.post("/sm/message", response_model=SMMessageResponse)
+async def sm_process_message(request: SMMessageRequest):
+    """
+    StateMachineでメッセージを処理（新しいアーキテクチャ）
+    
+    状態遷移:
+    INTAKE → PLAN → RESEARCH → PROPOSE → CONFIRM → EXECUTE → VERIFY → REPORT
+    
+    特徴:
+    - LLMの推論過程がreasoning_stepsで見える
+    - 承認が必要な場合はneeds_confirmation=trueになる
+    - 雑談はis_chat=trueで即座に応答
+    
+    使い方:
+    1. 最初のリクエストでsession_idを省略 → 新しいセッションが開始
+    2. レスポンスのsession_idを保存
+    3. 続きのメッセージで同じsession_idを使用
+    
+    Example Request (新規セッション):
+    ```json
+    {
+      "message": "明日18時に新大阪から博多まで新幹線で行きたい"
+    }
+    ```
+    
+    Example Response (提案待ち):
+    ```json
+    {
+      "session_id": "uuid",
+      "state": "confirm",
+      "response": "**おすすめ**: のぞみ45号（新大阪駅→博多駅）\\n...",
+      "reasoning_steps": ["新幹線移動と判断", "EX予約を使用", "のぞみ45号を選択"],
+      "needs_confirmation": true,
+      "proposal": {...}
+    }
+    ```
+    """
+    try:
+        agent = get_agent()
+        result = await agent.process_with_state_machine(
+            message=request.message,
+            session_id=request.session_id,
+            user_id=request.user_id,
+        )
+        
+        return SMMessageResponse(
+            session_id=result.get("session_id", ""),
+            state=result.get("state", "unknown"),
+            response=result.get("response", ""),
+            reasoning_steps=result.get("reasoning_steps", []),
+            needs_confirmation=result.get("needs_confirmation", False),
+            is_chat=result.get("is_chat", False),
+            proposal=result.get("proposal"),
+            error=result.get("error"),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sm/{session_id}/confirm", response_model=SMMessageResponse)
+async def sm_confirm(session_id: str):
+    """
+    StateMachineで提案を承認
+    
+    needs_confirmation=trueのレスポンスを受け取った後、
+    このエンドポイントで承認するとExecutorが実行される。
+    
+    Example Response (実行完了):
+    ```json
+    {
+      "session_id": "uuid",
+      "state": "REPORT",
+      "response": "## 予約完了\\n...",
+      "reasoning_steps": ["承認されました", "実行中", "予約番号: XXX"],
+      "needs_confirmation": false
+    }
+    ```
+    """
+    try:
+        agent = get_agent()
+        result = await agent.confirm_state_machine(session_id)
+        
+        if result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
+        
+        return SMMessageResponse(
+            session_id=result.get("session_id", session_id),
+            state=result.get("state", "unknown"),
+            response=result.get("response", ""),
+            reasoning_steps=result.get("reasoning_steps", []),
+            needs_confirmation=result.get("needs_confirmation", False),
+            is_chat=result.get("is_chat", False),
+            proposal=result.get("proposal"),
+            error=result.get("error"),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sm/{session_id}/revise", response_model=SMMessageResponse)
+async def sm_revise(session_id: str, request: SMReviseRequest):
+    """
+    StateMachineで提案を修正
+    
+    needs_confirmation=trueのレスポンスを受け取った後、
+    修正内容を送信すると再検索・再提案される。
+    
+    Example Request:
+    ```json
+    {
+      "revision": "グリーン車にして"
+    }
+    ```
+    """
+    try:
+        agent = get_agent()
+        result = await agent.revise_state_machine(session_id, request.revision)
+        
+        if result.get("error"):
+            raise HTTPException(status_code=404, detail=result["error"])
+        
+        return SMMessageResponse(
+            session_id=result.get("session_id", session_id),
+            state=result.get("state", "unknown"),
+            response=result.get("response", ""),
+            reasoning_steps=result.get("reasoning_steps", []),
+            needs_confirmation=result.get("needs_confirmation", False),
+            is_chat=result.get("is_chat", False),
+            proposal=result.get("proposal"),
+            error=result.get("error"),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sm/{session_id}/state")
+async def sm_get_state(session_id: str):
+    """
+    StateMachineの現在の状態を取得
+    
+    デバッグ・進捗確認用。
+    """
+    try:
+        agent = get_agent()
+        state = agent.get_state_machine_state(session_id)
+        
+        if not state:
+            raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+        
+        return state
     except HTTPException:
         raise
     except Exception as e:
