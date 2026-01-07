@@ -707,7 +707,11 @@ class StateMachine:
         lines = []
         lines.append(f"**おすすめ**: {rec.get('title', '不明')}")
         if rec.get("price"):
-            lines.append(f"**価格**: ¥{rec.get('price'):,}")
+            try:
+                price = int(rec.get('price'))
+                lines.append(f"**価格**: ¥{price:,}")
+            except (ValueError, TypeError):
+                lines.append(f"**価格**: ¥{rec.get('price')}")
         if reason:
             lines.append(f"**理由**: {reason}")
         

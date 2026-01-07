@@ -1,12 +1,53 @@
 """
 Tavily Search Tool - AI-optimized web search
 """
-from typing import Optional
+from typing import Optional, Any
 from langchain_core.tools import tool
 import httpx
 
 from app.config import settings
 from app.models.schemas import SearchResult, SearchResultCategory
+
+
+async def tavily_search_raw(
+    query: str,
+    max_results: int = 5,
+    search_depth: str = "basic",
+) -> dict[str, Any]:
+    """
+    Tavily APIの生のレスポンスを返す（スニペット抽出用）
+    
+    Returns:
+        {
+            "answer": "AI回答",
+            "results": [{"title": ..., "url": ..., "content": ...}, ...]
+        }
+    """
+    if not settings.TAVILY_API_KEY:
+        return {"error": "TAVILY_API_KEY is not configured", "results": []}
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": settings.TAVILY_API_KEY,
+                    "query": query,
+                    "search_depth": search_depth,
+                    "max_results": max_results,
+                    "include_answer": True,
+                    "include_raw_content": False,
+                },
+                timeout=30.0,
+            )
+            
+            if response.status_code != 200:
+                return {"error": f"Tavily API error: {response.status_code}", "results": []}
+            
+            return response.json()
+            
+    except Exception as e:
+        return {"error": str(e), "results": []}
 
 
 @tool

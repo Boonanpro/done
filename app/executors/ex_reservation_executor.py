@@ -605,54 +605,18 @@ class EXReservationExecutor(BaseExecutor):
             
             print(f"[EX_SEARCH] Found {len(train_candidates) if train_candidates else 0} train candidates")
             
-            # 候補が見つからない場合は簡易検索結果を返す
-            # （実際のサイトでは詳細なパース処理が必要）
-            print(f"[EX_SEARCH] options before fallback: {len(options)}")
+            # SmartEXから候補を取得できなかった場合 → web_searchで料金を取得
             if not options:
-                # SmartEXページから情報を取得できなかった場合のフォールバック
-                # 仮のデータを返す（実際の実装では正確なデータをパースする）
-                options.append(SearchOption(
-                    id="train_1",
-                    title=f"のぞみ41号（{departure}→{arrival}）",
-                    description=f"{date} 17:03発 → 19:30着",
-                    price=14720,
-                    available=True,
-                    details={
-                        "departure": departure,
-                        "arrival": arrival,
-                        "date": date,
-                        "time": "17:03",
-                        "train_name": "のぞみ41号",
-                    },
-                ))
-                options.append(SearchOption(
-                    id="train_2",
-                    title=f"のぞみ43号（{departure}→{arrival}）",
-                    description=f"{date} 17:33発 → 20:00着",
-                    price=14720,
-                    available=True,
-                    details={
-                        "departure": departure,
-                        "arrival": arrival,
-                        "date": date,
-                        "time": "17:33",
-                        "train_name": "のぞみ43号",
-                    },
-                ))
-                options.append(SearchOption(
-                    id="train_3",
-                    title=f"のぞみ45号（{departure}→{arrival}）",
-                    description=f"{date} 18:03発 → 20:30着",
-                    price=14720,
-                    available=True,
-                    details={
-                        "departure": departure,
-                        "arrival": arrival,
-                        "date": date,
-                        "time": "18:03",
-                        "train_name": "のぞみ45号",
-                    },
-                ))
+                print("[EX_SEARCH] No options from SmartEX, falling back to web_search")
+                await self._notify_progress(
+                    "fallback",
+                    "EX予約から情報を取得できませんでした。Web検索で料金を確認中...",
+                )
+                
+                # web_searchで新幹線料金を検索
+                web_result = await self._search_train_price_via_web(departure, arrival, date, time)
+                if web_result:
+                    options = web_result
             
             # スクリーンショット
             screenshot_path = f"ex_search_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
@@ -697,3 +661,136 @@ class EXReservationExecutor(BaseExecutor):
                 message=f"検索エラー: {str(e)}",
                 screenshot_path=screenshot_path,
             )
+    
+    async def _search_train_price_via_web(
+        self,
+        departure: str,
+        arrival: str,
+        date: str,
+        time: str,
+    ) -> List[SearchOption]:
+        """
+        Web検索で新幹線の料金を取得（SmartEX検索が失敗した場合のフォールバック）
+        
+        1. Tavilyのスニペット/AI回答から価格抽出（高速）
+        2. 取れなければJinaでページ全体を読む（確実）
+        """
+        try:
+            from app.tools.tavily_search import tavily_search_raw
+            from app.tools.jina_reader import read_url
+            import re
+            
+            # 検索クエリを構築
+            query = f"{departure} {arrival} 新幹線 料金 のぞみ 指定席"
+            
+            print(f"[EX_SEARCH] Web search query: {query}")
+            
+            # Tavilyで検索（生のレスポンスを取得）
+            tavily_results = await tavily_search_raw(query, max_results=5)
+            
+            if not tavily_results:
+                print("[EX_SEARCH] No Tavily results")
+                return []
+            
+            price_info = None
+            
+            # 価格抽出用の正規表現パターン
+            price_patterns = [
+                r'指定席[^\d]*(\d{1,2},?\d{3})円',
+                r'のぞみ[^\d]*指定席[^\d]*(\d{1,2},?\d{3})円',
+                r'(\d{1,2},?\d{3})円[^\d]*指定席',
+                r'料金合計[^\d]*(\d{1,2},?\d{3})円',
+                r'(\d{1,2},?\d{3})円',  # 最後の手段：数字+円
+            ]
+            
+            # ===== Step 1: Tavilyのスニペット/AI回答から抽出 =====
+            print("[EX_SEARCH] Step 1: Extracting from Tavily snippets...")
+            
+            # AI回答から抽出
+            if tavily_results.get("answer"):
+                answer = tavily_results["answer"]
+                print(f"[EX_SEARCH] AI Answer: {answer[:200]}...")
+                for pattern in price_patterns:
+                    match = re.search(pattern, answer)
+                    if match:
+                        price_str = match.group(1).replace(',', '')
+                        price_info = int(price_str)
+                        print(f"[EX_SEARCH] Found price in AI answer: {price_info}")
+                        break
+            
+            # スニペットから抽出
+            if not price_info:
+                for result in tavily_results.get("results", []):
+                    content = result.get("content", "")
+                    if content:
+                        print(f"[EX_SEARCH] Snippet: {content[:100]}...")
+                        for pattern in price_patterns:
+                            match = re.search(pattern, content)
+                            if match:
+                                price_str = match.group(1).replace(',', '')
+                                price_info = int(price_str)
+                                print(f"[EX_SEARCH] Found price in snippet: {price_info}")
+                                break
+                        if price_info:
+                            break
+            
+            # ===== Step 2: Jinaでページ全体を読む =====
+            if not price_info:
+                print("[EX_SEARCH] Step 2: Reading full pages with Jina...")
+                for result in tavily_results.get("results", [])[:3]:
+                    try:
+                        url = result.get("url", "")
+                        if not url:
+                            continue
+                        
+                        print(f"[EX_SEARCH] Reading URL: {url}")
+                        jina_result = await read_url(url)
+                        content = jina_result.get("content", "") if jina_result else ""
+                        
+                        if content:
+                            for pattern in price_patterns:
+                                match = re.search(pattern, content)
+                                if match:
+                                    price_str = match.group(1).replace(',', '')
+                                    price_info = int(price_str)
+                                    print(f"[EX_SEARCH] Found price via Jina: {price_info}")
+                                    break
+                            if price_info:
+                                break
+                    
+                    except Exception as e:
+                        print(f"[EX_SEARCH] Error reading URL: {e}")
+                        continue
+            
+            # 価格が見つからなかった場合
+            if not price_info:
+                print("[EX_SEARCH] Could not extract price from web search")
+                return []
+            
+            # 検索結果を構築（実際のWeb検索から取得した価格を使用）
+            options = [
+                SearchOption(
+                    id="train_web_1",
+                    title=f"のぞみ（{departure}→{arrival}）",
+                    description=f"{date} 17時台 普通車指定席",
+                    price=price_info,
+                    available=True,
+                    details={
+                        "departure": departure,
+                        "arrival": arrival,
+                        "date": date,
+                        "time": time or "17:00",
+                        "seat_type": "普通車指定席",
+                        "source": "web_search",
+                        "note": "Web検索から取得した料金です。時刻表はEX予約で確認してください。",
+                    },
+                ),
+            ]
+            
+            return options
+            
+        except Exception as e:
+            print(f"[EX_SEARCH] Web search fallback failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
