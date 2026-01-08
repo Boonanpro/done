@@ -499,7 +499,7 @@ class ChatService:
         
         messages = []
         for msg in result.data or []:
-            messages.append({
+            message_dict = {
                 "id": msg["id"],
                 "room_id": msg["room_id"],
                 "sender_id": msg["sender_id"],
@@ -507,7 +507,11 @@ class ChatService:
                 "sender_type": msg["sender_type"],
                 "content": msg["content"],
                 "created_at": msg["created_at"],
-            })
+            }
+            # ai_contextがあれば追加（reasoning_steps等）
+            if msg.get("ai_context"):
+                message_dict["ai_context"] = msg["ai_context"]
+            messages.append(message_dict)
         
         return messages
     

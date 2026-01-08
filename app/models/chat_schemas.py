@@ -203,6 +203,7 @@ class MessageResponse(BaseModel):
     sender_type: SenderType
     content: str
     created_at: datetime
+    ai_context: Optional[dict] = None  # reasoning_steps等を含む
 
 
 class MessagesListResponse(BaseModel):
