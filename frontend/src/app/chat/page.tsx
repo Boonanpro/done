@@ -11,7 +11,7 @@ import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
-import { api, type MessageResponse, type ProcessStep, ApiError } from '@/lib/api-client';
+import { api, type MessageResponse, type ProcessStep, type StateMachineResponse, ApiError } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth-store';
 import { cn } from '@/lib/utils';
 
@@ -82,6 +82,9 @@ function ProcessDisplay({ steps, isCollapsed, onToggle, isProcessing = false }: 
 // ペンディング中のプロセスを管理するための特別なID
 const PENDING_PROCESS_ID = '__pending__';
 
+// セッションID保存キー
+const SM_SESSION_KEY = 'done-sm-session';
+
 export default function ChatPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -90,6 +93,24 @@ export default function ChatPage() {
   const isLoading = useAuthStore((state) => state.isLoading);
   const [message, setMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
+  
+  // StateMachine state - localStorageから初期化
+  const [smSession, setSmSession] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem(SM_SESSION_KEY);
+    }
+    return null;
+  });
+  const [pendingConfirmation, setPendingConfirmation] = useState<StateMachineResponse | null>(null);
+  const [revisionInput, setRevisionInput] = useState('');
+  const [showRevisionInput, setShowRevisionInput] = useState(false);
+  
+  // セッションIDをlocalStorageに保存
+  useEffect(() => {
+    if (smSession) {
+      localStorage.setItem(SM_SESSION_KEY, smSession);
+    }
+  }, [smSession]);
   
   // すべてのプロセスを統一管理（処理中も完了後も同じ）
   const [processes, setProcesses] = useState<Map<string, { 
@@ -124,6 +145,13 @@ export default function ChatPage() {
     retryDelay: 1000,
     staleTime: 30 * 1000,
   });
+  
+  // dan_room_idをセッションIDとして使用（ブラウザリフレッシュ後も維持）
+  useEffect(() => {
+    if (danRoom?.id && !smSession) {
+      setSmSession(danRoom.id);
+    }
+  }, [danRoom?.id, smSession]);
 
   // Fetch messages
   const {
@@ -142,7 +170,7 @@ export default function ChatPage() {
   const messages = messagesData?.messages || [];
   const hasError = roomError || messagesError;
 
-  // SSEストリーミングでメッセージ送信
+  // StateMachine APIでメッセージ送信
   const handleSendMessage = useCallback(async () => {
     if (!message.trim() || isSending) return;
     
@@ -177,84 +205,120 @@ export default function ChatPage() {
       return newMap;
     });
     
-    let realUserMessageId: string | null = null;
-    let aiMessageId: string | null = null;
-    const processSteps: ProcessStep[] = [];
-    
     try {
-      await api.dan.sendMessageStream(
-        content,
-        // onProcess
-        (step) => {
-          // 既存のステップを更新または追加
-          const existingIndex = processSteps.findIndex(s => s.id === step.id);
-          if (existingIndex >= 0) {
-            processSteps[existingIndex] = step;
-          } else {
-            processSteps.push(step);
-          }
-          setProcesses(prev => {
-            const newMap = new Map(prev);
-            newMap.set(PENDING_PROCESS_ID, {
-              steps: [...processSteps],
-              isCollapsed: false,
-              isProcessing: true,
-            });
-            return newMap;
-          });
+      // SSEストリーミングでStateMachine APIを呼び出し
+      console.log('[Chat] Starting SSE stream', { content, smSession, userId: user?.id });
+      const aiMessageId = `ai-${Date.now()}`;
+      let stepIndex = 0;
+      
+      await api.sm.sendMessageStream(
+        {
+          message: content,
+          session_id: smSession || undefined,
+          user_id: user?.id,
         },
-        // onUserMessage
-        (userMsg) => {
-          realUserMessageId = userMsg.id;
-          // 楽観的に追加したメッセージを実際のメッセージに置き換え
-          queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => {
-            const existingMessages = old?.messages || [];
-            const filtered = existingMessages.filter(m => m.id !== tempUserMessageId);
-            return { messages: [userMsg, ...filtered] };
-          });
-        },
-        // onAiMessage
-        (aiMsg) => {
-          aiMessageId = aiMsg.id;
-          // AI返信をキャッシュに追加
-          queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
-            messages: [aiMsg, ...(old?.messages || [])],
-          }));
-        },
-        // onError
-        (error) => {
-          toast.error(`エラー: ${error}`);
-          // プロセスをエラー状態で保持（削除しない）
-          setProcesses(prev => {
-            const newMap = new Map(prev);
-            newMap.delete(PENDING_PROCESS_ID);
-            return newMap;
-          });
-        },
-        // onDone
-        () => {
-          // ペンディングプロセスをAIメッセージIDに紐づけて確定
-          if (aiMessageId) {
+        {
+          // ナレーションをリアルタイムで表示
+          onReasoningStep: (step: string) => {
             setProcesses(prev => {
               const newMap = new Map(prev);
+              const current = newMap.get(PENDING_PROCESS_ID) || {
+                steps: [],
+                isCollapsed: false,
+                isProcessing: true,
+              };
+              
+              // 前のステップを全て「completed」に変更
+              const updatedSteps = current.steps.map(s => ({
+                ...s,
+                status: 'completed' as const,
+              }));
+              
+              // 新しいステップは「running」状態（次が来るまでローディング）
+              const newStep: ProcessStep = {
+                id: `step-${stepIndex++}`,
+                label: step,
+                status: 'running' as const,
+              };
+              
+              newMap.set(PENDING_PROCESS_ID, {
+                ...current,
+                steps: [...updatedSteps, newStep],
+              });
+              return newMap;
+            });
+          },
+          
+          // 完了時の処理
+          onComplete: (response) => {
+            // セッションIDを保存
+            if (response.session_id) {
+              setSmSession(response.session_id);
+            }
+            
+            // AI返信をメッセージとして追加
+            const aiMessage: MessageResponse = {
+              id: aiMessageId,
+              room_id: danRoom?.id || '',
+              sender_id: 'dan',
+              sender_name: 'ダン',
+              sender_type: 'ai',
+              content: response.response,
+              created_at: new Date().toISOString(),
+            };
+            
+            queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
+              messages: [aiMessage, ...(old?.messages || [])],
+            }));
+            
+            // プロセスを確定（全ステップをcompletedに）
+            setProcesses(prev => {
+              const newMap = new Map(prev);
+              const pendingProcess = newMap.get(PENDING_PROCESS_ID);
               newMap.delete(PENDING_PROCESS_ID);
-              newMap.set(aiMessageId!, {
-                steps: [...processSteps],
+              
+              // 全ステップを「completed」に変更
+              const completedSteps = (pendingProcess?.steps || []).map(s => ({
+                ...s,
+                status: 'completed' as const,
+              }));
+              
+              newMap.set(aiMessageId, {
+                steps: completedSteps,
                 isCollapsed: false,
                 isProcessing: false,
               });
               return newMap;
             });
-          } else {
-            // AI返信がなかった場合はプロセスを削除
+            
+            // 確認が必要な場合
+            if (response.needs_confirmation && response.proposal) {
+              setPendingConfirmation(response);
+            }
+            
+            // エラーがある場合
+            if (response.error) {
+              toast.error(`エラー: ${response.error}`);
+            }
+            
+            setIsSending(false);
+          },
+          
+          // エラー時の処理
+          onError: (error: string) => {
+            toast.error(`エラー: ${error}`);
             setProcesses(prev => {
               const newMap = new Map(prev);
               newMap.delete(PENDING_PROCESS_ID);
               return newMap;
             });
-          }
+            setIsSending(false);
+          },
         }
       );
+      
+      return; // SSEのコールバックでisSendingを制御するので、ここでは何もしない
+      
     } catch (error) {
       if (error instanceof ApiError) {
         if (error.status === 401) {
@@ -274,7 +338,78 @@ export default function ChatPage() {
     } finally {
       setIsSending(false);
     }
-  }, [message, isSending, queryClient, messagesData, danRoom?.id, user?.id, user?.display_name]);
+  }, [message, isSending, queryClient, messagesData, danRoom?.id, user?.id, user?.display_name, smSession]);
+
+  // 提案を承認
+  const handleConfirm = useCallback(async () => {
+    if (!smSession || !pendingConfirmation) return;
+    
+    setIsSending(true);
+    try {
+      const response = await api.sm.confirm(smSession, user?.id);
+      
+      // AI返信を追加
+      const aiMessage: MessageResponse = {
+        id: `ai-confirm-${Date.now()}`,
+        room_id: danRoom?.id || '',
+        sender_id: 'dan',
+        sender_name: 'ダン',
+        sender_type: 'ai',
+        content: response.response,
+        created_at: new Date().toISOString(),
+      };
+      
+      queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
+        messages: [aiMessage, ...(old?.messages || [])],
+      }));
+      
+      setPendingConfirmation(null);
+      toast.success('実行を開始しました');
+    } catch (error) {
+      toast.error('確認に失敗しました');
+    } finally {
+      setIsSending(false);
+    }
+  }, [smSession, pendingConfirmation, queryClient, messagesData, danRoom?.id]);
+
+  // 提案を修正
+  const handleRevise = useCallback(async () => {
+    if (!smSession || !revisionInput.trim()) return;
+    
+    setIsSending(true);
+    try {
+      const response = await api.sm.revise(smSession, revisionInput.trim(), user?.id);
+      
+      // AI返信を追加
+      const aiMessage: MessageResponse = {
+        id: `ai-revise-${Date.now()}`,
+        room_id: danRoom?.id || '',
+        sender_id: 'dan',
+        sender_name: 'ダン',
+        sender_type: 'ai',
+        content: response.response,
+        created_at: new Date().toISOString(),
+      };
+      
+      queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
+        messages: [aiMessage, ...(old?.messages || [])],
+      }));
+      
+      setRevisionInput('');
+      setShowRevisionInput(false);
+      
+      // 新しい確認が必要な場合
+      if (response.needs_confirmation && response.proposal) {
+        setPendingConfirmation(response);
+      } else {
+        setPendingConfirmation(null);
+      }
+    } catch (error) {
+      toast.error('修正に失敗しました');
+    } finally {
+      setIsSending(false);
+    }
+  }, [smSession, revisionInput, queryClient, messagesData, danRoom?.id]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
@@ -474,6 +609,74 @@ export default function ChatPage() {
             <div ref={messagesEndRef} />
           </div>
         </div>
+
+        {/* Confirmation Panel */}
+        {pendingConfirmation && (
+          <div className="shrink-0 border-t border-border bg-muted/30 px-4 py-3">
+            <div className="max-w-3xl mx-auto">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium text-primary">確認が必要です</span>
+              </div>
+              {showRevisionInput ? (
+                <div className="space-y-2">
+                  <textarea
+                    value={revisionInput}
+                    onChange={(e) => setRevisionInput(e.target.value)}
+                    placeholder="修正内容を入力..."
+                    rows={2}
+                    className="w-full px-3 py-2 rounded-lg border border-border bg-background text-sm focus:outline-none focus:border-primary/50"
+                  />
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      onClick={handleRevise}
+                      disabled={!revisionInput.trim() || isSending}
+                    >
+                      {isSending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}
+                      送信
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        setShowRevisionInput(false);
+                        setRevisionInput('');
+                      }}
+                    >
+                      キャンセル
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    onClick={handleConfirm}
+                    disabled={isSending}
+                    className="bg-primary hover:bg-primary/90"
+                  >
+                    {isSending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Check className="h-4 w-4 mr-1" />}
+                    これで進める
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setShowRevisionInput(true)}
+                  >
+                    修正する
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setPendingConfirmation(null)}
+                  >
+                    キャンセル
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Input Area */}
         <div className="shrink-0 border-t border-border p-4">

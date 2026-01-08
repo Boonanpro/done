@@ -1817,10 +1817,12 @@ Respond in this format:
             }
         
         sm = AISecretaryAgent._state_machines[session_id]
+        user_id = sm.state.user_id
         
         # "OK"を送信して承認
         result = await sm.process_message("OK")
         result["session_id"] = session_id
+        result["user_id"] = user_id  # DB保存用にuser_idを含める
         
         # 完了したらStateMachineを削除
         from app.agent.states import State
@@ -1875,3 +1877,19 @@ Respond in this format:
         
         sm = AISecretaryAgent._state_machines[session_id]
         return sm.state.to_dict()
+    
+    def get_state_machine_user_id(self, session_id: str) -> Optional[str]:
+        """
+        StateMachineセッションのuser_idを取得
+        
+        Args:
+            session_id: セッションID
+            
+        Returns:
+            user_id（なければNone）
+        """
+        if session_id not in AISecretaryAgent._state_machines:
+            return None
+        
+        sm = AISecretaryAgent._state_machines[session_id]
+        return sm.state.user_id if sm.state.user_id else None

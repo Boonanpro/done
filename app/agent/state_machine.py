@@ -47,6 +47,10 @@ class StateMachine:
     使い方:
         sm = StateMachine(session_id="xxx", user_id="yyy")
         result = await sm.process_message("新大阪から博多まで行きたい")
+        
+    SSEストリーミング:
+        sm = StateMachine(session_id="xxx", user_id="yyy", on_reasoning_step=callback)
+        # callbackは async def callback(step: str) の形式
     """
     
     def __init__(
@@ -54,8 +58,10 @@ class StateMachine:
         session_id: str,
         user_id: str,
         llm_client: Optional[Any] = None,
+        on_reasoning_step: Optional[Any] = None,  # コールバック関数
     ):
         self.state = AgentState(session_id=session_id, user_id=user_id)
+        self._on_reasoning_step = on_reasoning_step  # SSE用コールバック
         
         # LLMクライアント（渡されなければ自動生成）
         if llm_client:
@@ -67,6 +73,15 @@ class StateMachine:
         else:
             self.llm_client = None
             logger.warning("ANTHROPIC_API_KEY not set, LLM calls will return mock responses")
+    
+    async def _add_reasoning_step(self, step: str) -> None:
+        """推論ステップを追加し、コールバックがあれば呼び出す"""
+        import asyncio
+        self.state.add_reasoning_step(step)
+        if self._on_reasoning_step:
+            await self._on_reasoning_step(step)
+            # SSEが即座に送信されるよう、小さな遅延を入れる
+            await asyncio.sleep(0.05)
     
     async def process_message(self, message: str) -> dict[str, Any]:
         """
@@ -124,9 +139,9 @@ class StateMachine:
     
     async def _process_intake(self, message: str) -> dict[str, Any]:
         """INTAKE: ユーザーの要望を構造化"""
-        self.state.add_reasoning_step("ユーザーの要望を分析しています...")
+        await self._add_reasoning_step("ユーザーの要望を分析しています...")
         
-        # LLMを呼び出して要望を構造化
+        # LLMを呼び出して要望を構造化（ストリーミングで[STEP]がリアルタイム送信される）
         prompt = get_intake_prompt(message, self.state.user_preferences)
         llm_response = await self._call_llm(prompt)
         
@@ -137,12 +152,12 @@ class StateMachine:
         # reasoning_stepsをマージ
         if "reasoning_steps" in intake_result:
             for step in intake_result["reasoning_steps"]:
-                self.state.add_reasoning_step(step)
+                await self._add_reasoning_step(step)
         
         # 雑談・質問の場合は状態機械を抜ける
         task_type = intake_result.get("task_type", "other")
         if task_type == "other":
-            self.state.add_reasoning_step("→ 通常の会話として応答します")
+            await self._add_reasoning_step("→ 通常の会話として応答します")
             return await self._respond_as_chat(message)
         
         # 次の状態へ
@@ -153,7 +168,7 @@ class StateMachine:
     
     async def _process_plan(self) -> dict[str, Any]:
         """PLAN: サブタスク分解"""
-        self.state.add_reasoning_step("実行計画を立てています...")
+        await self._add_reasoning_step("実行計画を立てています...")
         
         # 過去の実行履歴があれば渡す（失敗したツールを避けるため）
         prompt = get_plan_prompt(
@@ -167,7 +182,7 @@ class StateMachine:
         
         if "reasoning_steps" in plan_result:
             for step in plan_result["reasoning_steps"]:
-                self.state.add_reasoning_step(step)
+                await self._add_reasoning_step(step)
         
         # 次の状態へ
         self.state.transition_to(State.RESEARCH)
@@ -177,7 +192,7 @@ class StateMachine:
     
     async def _process_research(self) -> dict[str, Any]:
         """RESEARCH: 情報収集（ツールに応じて分岐）"""
-        self.state.add_reasoning_step("情報を収集しています...")
+        await self._add_reasoning_step("情報を収集しています...")
         
         # 使用するツールを特定
         tools = self.state.plan_result.get("tools", [])
@@ -186,12 +201,12 @@ class StateMachine:
         for tool in tools:
             if tool == "none":
                 # 検索不要
-                self.state.add_reasoning_step("→ LLMの知識で回答します")
+                await self._add_reasoning_step("→ LLMの知識で回答します")
                 continue
             
             elif tool == "web_search":
                 # Tavily検索 + Jinaでページ内容取得
-                self.state.add_reasoning_step("→ Web検索を実行中...")
+                await self._add_reasoning_step("→ Web検索を実行中...")
                 try:
                     result = await self._call_web_search()
                     if result:
@@ -216,11 +231,11 @@ class StateMachine:
                         success=False,
                         error=str(e),
                     )
-                    self.state.add_reasoning_step(f"→ Web検索に失敗: {e}")
+                    await self._add_reasoning_step(f"→ Web検索に失敗: {e}")
             
             else:
                 # Executor.search()
-                self.state.add_reasoning_step(f"→ {tool}で検索中...")
+                await self._add_reasoning_step(f"→ {tool}で検索中...")
                 try:
                     result = await self._call_executor_search(tool)
                     if result:
@@ -245,7 +260,7 @@ class StateMachine:
                         success=False,
                         error=str(e),
                     )
-                    self.state.add_reasoning_step(f"→ {tool}の検索に失敗: {e}")
+                    await self._add_reasoning_step(f"→ {tool}の検索に失敗: {e}")
         
         # LLMで検索結果を整理
         prompt = get_research_prompt(self.state.plan_result, search_results)
@@ -256,12 +271,12 @@ class StateMachine:
         
         if "reasoning_steps" in research_result:
             for step in research_result["reasoning_steps"]:
-                self.state.add_reasoning_step(step)
+                await self._add_reasoning_step(step)
         
         # 十分な情報が集まったか確認
         if not self.state.can_proceed_to_propose():
             # 情報不足 → PLANに戻る
-            self.state.add_reasoning_step("情報が不足しています。計画を見直します...")
+            await self._add_reasoning_step("情報が不足しています。計画を見直します...")
             self.state.transition_to(State.PLAN)
             return {
                 "state": State.PLAN.value,
@@ -277,7 +292,7 @@ class StateMachine:
     
     async def _process_propose(self) -> dict[str, Any]:
         """PROPOSE: 提案を作成"""
-        self.state.add_reasoning_step("おすすめを選んでいます...")
+        await self._add_reasoning_step("おすすめを選んでいます...")
         
         prompt = get_propose_prompt(
             self.state.intake_result,
@@ -290,7 +305,7 @@ class StateMachine:
         
         if "reasoning_steps" in proposal:
             for step in proposal["reasoning_steps"]:
-                self.state.add_reasoning_step(step)
+                await self._add_reasoning_step(step)
         
         # ============================================================
         # Criticで提案を評価（最大2回まで修正を試みる）
@@ -315,7 +330,7 @@ class StateMachine:
             # 自問形式に変換して表示
             self_question = await critic.format_as_self_question(issues, suggestions)
             if self_question:
-                self.state.add_reasoning_step(self_question)
+                await self._add_reasoning_step(self_question)
             
             # 修正を試みる（必要に応じてWeb再検索を実行）
             fixed_proposal, fix_steps = await critic.suggest_fix(
@@ -327,7 +342,7 @@ class StateMachine:
             
             # 修正過程のreasoning_stepsを追加
             for step in fix_steps:
-                self.state.add_reasoning_step(step)
+                await self._add_reasoning_step(step)
             
             self.state.proposal = fixed_proposal
         
@@ -351,7 +366,7 @@ class StateMachine:
         # 特別なメッセージの処理
         if message.lower() in ["ok", "yes", "はい", "お願い", "進めて", "それで"]:
             # 承認
-            self.state.add_reasoning_step("承認されました。実行を開始します...")
+            await self._add_reasoning_step("承認されました。実行を開始します...")
             self.state.transition_to(State.EXECUTE)
             return await self._process_execute()
         
@@ -364,14 +379,14 @@ class StateMachine:
         
         if response_type == "approval":
             # 承認
-            self.state.add_reasoning_step("承認されました。実行を開始します...")
+            await self._add_reasoning_step("承認されました。実行を開始します...")
             self.state.transition_to(State.EXECUTE)
             return await self._process_execute()
         
         elif response_type == "modification":
             # 修正要望 → PLANに戻る
             modification = confirm_result.get("modification_details", message)
-            self.state.add_reasoning_step(f"修正要望: {modification}")
+            await self._add_reasoning_step(f"修正要望: {modification}")
             
             # 修正内容をintake_resultに反映
             self.state.intake_result["modification"] = modification
@@ -381,7 +396,7 @@ class StateMachine:
         
         elif response_type == "rejection":
             # 拒否
-            self.state.add_reasoning_step("キャンセルされました。")
+            await self._add_reasoning_step("キャンセルされました。")
             return {
                 "state": State.REPORT.value,
                 "response": "わかりました。キャンセルしました。",
@@ -390,7 +405,7 @@ class StateMachine:
         
         elif response_type == "question":
             # 質問 → 回答して再度CONFIRM
-            self.state.add_reasoning_step(f"質問に回答します: {message}")
+            await self._add_reasoning_step(f"質問に回答します: {message}")
             # TODO: 質問に回答するロジック
             return {
                 "state": State.CONFIRM.value,
@@ -410,7 +425,7 @@ class StateMachine:
     
     async def _process_execute(self) -> dict[str, Any]:
         """EXECUTE: Executor.execute()を呼ぶ"""
-        self.state.add_reasoning_step("実行中...")
+        await self._add_reasoning_step("実行中...")
         
         # 使用するExecutorを特定
         tools = self.state.plan_result.get("tools", [])
@@ -427,7 +442,7 @@ class StateMachine:
     
     async def _process_verify(self) -> dict[str, Any]:
         """VERIFY: 実行結果を確認"""
-        self.state.add_reasoning_step("実行結果を確認しています...")
+        await self._add_reasoning_step("実行結果を確認しています...")
         
         prompt = get_verify_prompt(self.state.execution_result)
         llm_response = await self._call_llm(prompt)
@@ -437,7 +452,7 @@ class StateMachine:
         
         if "reasoning_steps" in verification:
             for step in verification["reasoning_steps"]:
-                self.state.add_reasoning_step(step)
+                await self._add_reasoning_step(step)
         
         # 次の状態へ
         self.state.transition_to(State.REPORT)
@@ -468,19 +483,68 @@ class StateMachine:
     # ============================================================
     
     async def _call_llm(self, prompt: str) -> str:
-        """LLMを呼び出す"""
+        """LLMを呼び出す（ストリーミング版）
+        
+        [STEP] 行を検出したらリアルタイムでコールバックを呼び出し、
+        [RESULT]...[/RESULT] の中身をJSONとして返す。
+        """
         if not self.llm_client:
             # モック応答（テスト用）
             logger.warning("LLM client not set, returning mock response")
             return '{"mock": true}'
         
         try:
-            response = await self.llm_client.messages.create(
+            full_response = ""
+            current_line = ""
+            in_result = False
+            result_content = ""
+            
+            # ストリーミングで受け取る
+            async with self.llm_client.messages.stream(
                 model="claude-sonnet-4-20250514",
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}],
-            )
-            return response.content[0].text
+            ) as stream:
+                async for text in stream.text_stream:
+                    full_response += text
+                    current_line += text
+                    
+                    # 改行で行を処理
+                    while "\n" in current_line:
+                        line, current_line = current_line.split("\n", 1)
+                        line = line.strip()
+                        
+                        # [STEP] 行を検出
+                        if line.startswith("[STEP]"):
+                            step_text = line[6:].strip()
+                            if step_text:
+                                await self._add_reasoning_step(step_text)
+                        
+                        # [RESULT] 開始
+                        elif line == "[RESULT]":
+                            in_result = True
+                        
+                        # [/RESULT] 終了
+                        elif line == "[/RESULT]":
+                            in_result = False
+                        
+                        # RESULT内のコンテンツを収集
+                        elif in_result:
+                            result_content += line + "\n"
+            
+            # 最後の行を処理
+            if current_line.strip():
+                if current_line.strip().startswith("[STEP]"):
+                    step_text = current_line.strip()[6:].strip()
+                    if step_text:
+                        await self._add_reasoning_step(step_text)
+            
+            # [RESULT]が見つからなかった場合は全文を返す（後方互換）
+            if not result_content.strip():
+                return full_response
+            
+            return result_content.strip()
+            
         except Exception as e:
             logger.exception(f"LLM call failed: {e}")
             return '{"error": "LLM call failed"}'

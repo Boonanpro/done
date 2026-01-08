@@ -41,23 +41,23 @@ INTAKE_PROMPT = """
 {wish}
 
 ## タスク
-以下を構造化してJSON形式で出力してください：
-
-1. intent: 何をしたいか（1文で）
-2. task_type: タスクの種類（travel / purchase / payment / reservation / phone / other）
-3. details: 具体的な情報（出発地、到着地、日時、商品名など）
-4. constraints: 制約条件（予算、時間、条件など）
-5. deadline: いつまでに（日時または「なるべく早く」など）
-6. assumptions: 仮定した項目とその値（例：「時間 → 17時」）
-7. reasoning_steps: 推論過程（日本語の配列）
+ユーザーの要望を分析し、構造化してください。
 
 {rules}
 
-## 出力形式
-```json
+## 出力形式（必ずこの形式で出力）
+
+まず、思考過程を1行ずつ [STEP] で出力してください：
+[STEP] 思考ステップ1
+[STEP] 思考ステップ2
+[STEP] 思考ステップ3
+（必要なだけ続ける）
+
+次に、[RESULT] と [/RESULT] の間にJSONを出力してください：
+[RESULT]
 {{
-  "intent": "...",
-  "task_type": "...",
+  "intent": "何をしたいか（1文で）",
+  "task_type": "travel / purchase / payment / reservation / phone / other のいずれか",
   "details": {{
     "departure": "出発地（駅名、空港名など）",
     "arrival": "到着地（駅名、空港名など）",
@@ -67,13 +67,15 @@ INTAKE_PROMPT = """
     "quantity": "数量（購入の場合）"
   }},
   "constraints": {{}},
-  "deadline": "...",
-  "assumptions": [],
-  "reasoning_steps": []
+  "deadline": "いつまでに",
+  "assumptions": ["仮定した項目とその値"]
 }}
-```
+[/RESULT]
 
-**重要**: detailsには上記のフィールドを必ず使用すること。
+**重要**: 
+- [STEP] は1行に1つの思考
+- [RESULT] の中はJSONのみ（reasoning_stepsは不要）
+- detailsには上記のフィールドを必ず使用すること
 """
 
 # ============================================================

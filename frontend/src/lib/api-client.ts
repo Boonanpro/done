@@ -3,6 +3,8 @@
  * Handles all HTTP requests to the backend API
  */
 
+import { useAuthStore } from '@/stores/auth-store';
+
 // API Base URL - use environment variable or default to localhost
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -168,6 +170,65 @@ export interface AISettingsUpdateRequest {
   mode?: AIMode | null;
   personality?: string | null;
   auto_reply_delay_ms?: number | null;
+}
+
+// StateMachine types
+export type StateMachineState = 
+  | 'intake'
+  | 'plan'
+  | 'research'
+  | 'propose'
+  | 'confirm'
+  | 'execute'
+  | 'verify'
+  | 'report'
+  | 'chat'
+  | 'error';
+
+export interface StateMachineProposal {
+  recommendation: {
+    id?: string;
+    title: string;
+    price?: number;
+    details?: Record<string, unknown>;
+  };
+  recommendation_reason: string;
+  alternatives?: Array<{
+    title: string;
+    reason?: string;
+    note?: string;
+  }>;
+  risks?: string[];
+  next_action?: string;
+  reasoning_steps?: string[];
+}
+
+export interface StateMachineResponse {
+  session_id: string;
+  state: StateMachineState;
+  response: string;
+  reasoning_steps: string[];
+  needs_confirmation: boolean;
+  is_chat: boolean;
+  proposal: StateMachineProposal | null;
+  error: string | null;
+}
+
+export interface StateMachineMessageRequest {
+  message: string;
+  session_id?: string;
+  user_id?: string;
+}
+
+export interface StateMachineConfirmRequest {
+  action: 'confirm' | 'revise';
+  revision?: string;
+  user_id?: string;
+}
+
+export interface StateMachineReviseRequest {
+  revision: string;
+  user_id?: string;
 }
 
 // Task types
@@ -640,6 +701,128 @@ export const api = {
   // Alias: invites points to invite for compatibility
   get invites() {
     return this.invite;
+  },
+
+  // StateMachine endpoints (new architecture)
+  sm: {
+    sendMessage: (data: StateMachineMessageRequest) =>
+      request<StateMachineResponse>('/sm/message', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    /**
+     * SSEストリーミング版のsendMessage
+     * ナレーション（reasoning_steps）をリアルタイムで受信する
+     * 
+     * @param data リクエストデータ
+     * @param onReasoningStep ナレーション受信時のコールバック
+     * @param onComplete 完了時のコールバック
+     * @param onError エラー時のコールバック
+     */
+    sendMessageStream: async (
+      data: StateMachineMessageRequest,
+      callbacks: {
+        onReasoningStep?: (step: string) => void;
+        onComplete?: (response: StateMachineResponse) => void;
+        onError?: (error: string) => void;
+      }
+    ): Promise<void> => {
+      console.log('[SSE] sendMessageStream called');
+      let token: string | null = null;
+      try {
+        token = useAuthStore.getState().token;
+      } catch (e) {
+        console.error('[SSE] Failed to get token', e);
+      }
+      const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+      
+      console.log('[SSE] Starting stream request', { data, baseUrl, hasToken: !!token });
+      
+      try {
+        const response = await fetch(`${baseUrl}/sm/message/stream`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify(data),
+        });
+        
+        console.log('[SSE] Response received', { status: response.status, ok: response.ok });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        const reader = response.body?.getReader();
+        if (!reader) {
+          throw new Error('No response body');
+        }
+        
+        const decoder = new TextDecoder();
+        let buffer = '';
+        
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          buffer += decoder.decode(value, { stream: true });
+          
+          // SSEイベントをパース
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          
+          let eventType = '';
+          let eventData = '';
+          
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+              eventData = line.slice(6);
+            } else if (line === '' && eventData) {
+              // イベント完了
+              try {
+                const parsed = JSON.parse(eventData);
+                
+                if (eventType === 'reasoning_step' && callbacks.onReasoningStep) {
+                  callbacks.onReasoningStep(parsed.step);
+                } else if (eventType === 'complete' && callbacks.onComplete) {
+                  callbacks.onComplete(parsed as StateMachineResponse);
+                } else if (eventType === 'error' && callbacks.onError) {
+                  callbacks.onError(parsed.error);
+                }
+              } catch {
+                console.error('Failed to parse SSE data:', eventData);
+              }
+              
+              eventType = '';
+              eventData = '';
+            }
+          }
+        }
+      } catch (error) {
+        if (callbacks.onError) {
+          callbacks.onError(error instanceof Error ? error.message : String(error));
+        }
+      }
+    },
+
+    confirm: (sessionId: string, userId?: string) =>
+      request<StateMachineResponse>(`/sm/${sessionId}/confirm`, {
+        method: 'POST',
+        body: JSON.stringify({ user_id: userId }),
+      }),
+
+    revise: (sessionId: string, revision: string, userId?: string) =>
+      request<StateMachineResponse>(`/sm/${sessionId}/revise`, {
+        method: 'POST',
+        body: JSON.stringify({ revision, user_id: userId }),
+      }),
+
+    getState: (sessionId: string) =>
+      request<StateMachineResponse>(`/sm/${sessionId}/state`),
   },
 };
 
