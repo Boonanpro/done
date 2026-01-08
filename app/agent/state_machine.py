@@ -549,6 +549,32 @@ class StateMachine:
             logger.exception(f"LLM call failed: {e}")
             return '{"error": "LLM call failed"}'
     
+    async def _call_llm_with_messages(self, system_prompt: str, messages: list) -> str:
+        """Messages配列方式でLLMを呼び出す（会話履歴対応）
+        
+        Args:
+            system_prompt: システムプロンプト
+            messages: [{"role": "user/assistant", "content": "..."}] の配列
+        
+        Returns:
+            LLMの応答テキスト
+        """
+        if not self.llm_client:
+            logger.warning("LLM client not set, returning mock response")
+            return "モック応答です"
+        
+        try:
+            response = await self.llm_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2000,
+                system=system_prompt,
+                messages=messages,
+            )
+            return response.content[0].text
+        except Exception as e:
+            logger.exception(f"LLM call with messages failed: {e}")
+            return "エラーが発生しました"
+    
     def _parse_json_response(self, response: str) -> dict:
         """LLMのレスポンスからJSONを抽出"""
         try:
@@ -610,7 +636,7 @@ class StateMachine:
             return None
     
     async def _respond_as_chat(self, message: str) -> dict[str, Any]:
-        """雑談・質問への通常応答"""
+        """雑談・質問への通常応答（Messages配列方式）"""
         from datetime import datetime
         import pytz
         
@@ -619,22 +645,13 @@ class StateMachine:
         now = datetime.now(jst)
         current_datetime = now.strftime("%Y年%m月%d日 %H:%M:%S（%A）")
         
-        # 会話履歴を取得（直近10件）
-        conversation_history = await self._get_conversation_history(limit=10)
-        history_text = ""
-        if conversation_history:
-            history_text = "\n## 直近の会話履歴\n"
-            for msg in reversed(conversation_history):  # 古い順に
-                role = "ユーザー" if msg.get("sender_type") == "human" else "ダン"
-                content = msg.get("content", "")[:200]  # 長すぎる場合は切り詰め
-                history_text += f"{role}: {content}\n"
-        
-        prompt = f"""あなたは「ダン」という名前のAI秘書です。
+        # システムプロンプト
+        system_prompt = f"""あなたは「ダン」という名前のAI秘書です。
 
 ## 現在の情報
 - 現在時刻: {current_datetime}
 - タイムゾーン: 日本時間 (JST/UTC+9)
-{history_text}
+
 ## あなたの特徴
 - 親しみやすく、カジュアルな口調
 - 技術的な質問には技術的に答える
@@ -642,18 +659,27 @@ class StateMachine:
 - 「分からない」時は正直に言う
 - ユーザーの質問の真意を理解しようとする
 
-## ユーザーのメッセージ
-{message}
-
 ## 注意
 - 質問の意図を正しく理解してから答える
 - 「コードを修正したい」などの技術的質問には、具体的なアドバイスを
-- 会話履歴から文脈を読み取る
-
-応答:
-"""
+- 会話履歴から文脈を読み取る"""
         
-        response = await self._call_llm(prompt)
+        # 会話履歴をMessages配列形式で取得
+        conversation_history = await self._get_conversation_history(limit=10)
+        messages = []
+        
+        # 古い順に追加（reversedで時系列順に）
+        for msg in reversed(conversation_history):
+            role = "user" if msg.get("sender_type") == "human" else "assistant"
+            content = msg.get("content", "")
+            if content:
+                messages.append({"role": role, "content": content})
+        
+        # 新しいユーザーメッセージを追加
+        messages.append({"role": "user", "content": message})
+        
+        # Messages配列方式でLLMを呼び出し
+        response = await self._call_llm_with_messages(system_prompt, messages)
         
         return {
             "state": "CHAT",
