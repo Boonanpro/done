@@ -517,6 +517,9 @@ class StateMachine:
             current_line = ""
             in_result = False
             result_content = ""
+            step_count = 0
+            
+            print(f"[LLM_CALL] Starting LLM stream...", flush=True)
             
             # ストリーミングで受け取る
             async with self.llm_client.messages.stream(
@@ -537,19 +540,25 @@ class StateMachine:
                         if line.startswith("[STEP]"):
                             step_text = line[6:].strip()
                             if step_text:
+                                step_count += 1
+                                print(f"[LLM_CALL] STEP detected #{step_count}: {step_text[:50]}...", flush=True)
                                 await self._add_reasoning_step(step_text)
                         
                         # [RESULT] 開始
                         elif line == "[RESULT]":
                             in_result = True
+                            print(f"[LLM_CALL] RESULT block started", flush=True)
                         
                         # [/RESULT] 終了
                         elif line == "[/RESULT]":
                             in_result = False
+                            print(f"[LLM_CALL] RESULT block ended", flush=True)
                         
                         # RESULT内のコンテンツを収集
                         elif in_result:
                             result_content += line + "\n"
+            
+            print(f"[LLM_CALL] Stream complete. Steps: {step_count}, Has RESULT: {bool(result_content.strip())}", flush=True)
             
             # 最後の行を処理
             if current_line.strip():
@@ -560,6 +569,7 @@ class StateMachine:
             
             # [RESULT]が見つからなかった場合は全文を返す（後方互換）
             if not result_content.strip():
+                print(f"[LLM_CALL] No RESULT block, returning full response (first 200 chars): {full_response[:200]}...", flush=True)
                 return full_response
             
             return result_content.strip()
