@@ -160,8 +160,24 @@ class StateMachine:
         # 雑談・質問の場合は状態機械を抜ける
         task_type = intake_result.get("task_type", "other")
         if task_type == "other":
-            await self._add_reasoning_step("→ 通常の会話として応答します")
-            return await self._respond_as_chat(message)
+            # 検索が必要かどうかを確認
+            requires_search = intake_result.get("requires_search", False)
+            search_results = None
+            
+            if requires_search:
+                search_query = intake_result.get("search_query", "")
+                if search_query:
+                    await self._add_reasoning_step(f"→ 検索中: {search_query}")
+                    search_results = await self._call_web_search(search_query)
+                    if search_results:
+                        await self._add_reasoning_step("→ 検索結果を元に回答します")
+                    else:
+                        await self._add_reasoning_step("→ 検索結果が見つかりませんでした")
+            
+            if not requires_search:
+                await self._add_reasoning_step("→ 通常の会話として応答します")
+            
+            return await self._respond_as_chat(message, search_results=search_results)
         
         # 次の状態へ
         self.state.transition_to(State.PLAN)
@@ -598,23 +614,28 @@ class StateMachine:
             logger.warning(f"Failed to parse JSON: {e}")
             return {"raw_response": response}
     
-    async def _call_web_search(self) -> Optional[dict]:
-        """Tavily検索 + Jinaでページ内容取得"""
+    async def _call_web_search(self, query: str = None) -> Optional[dict]:
+        """Tavily検索 + Jinaでページ内容取得
+        
+        Args:
+            query: 検索クエリ（指定がない場合はintake_resultから構築）
+        """
         try:
             from app.tools.tavily_search import search_with_tavily
             from app.tools.jina_reader import search_and_read
             
-            # 検索クエリを構築
-            intent = self.state.intake_result.get("intent", "")
-            details = self.state.intake_result.get("details", {})
-            
-            # クエリを組み立て
-            query_parts = [intent]
-            for key in ["departure", "arrival", "date", "time"]:
-                if details.get(key):
-                    query_parts.append(str(details[key]))
-            
-            query = " ".join(query_parts)
+            # 検索クエリを構築（引数で指定されていない場合）
+            if not query:
+                intent = self.state.intake_result.get("intent", "")
+                details = self.state.intake_result.get("details", {})
+                
+                # クエリを組み立て
+                query_parts = [intent]
+                for key in ["departure", "arrival", "date", "time"]:
+                    if details.get(key):
+                        query_parts.append(str(details[key]))
+                
+                query = " ".join(query_parts)
             
             # Tavilyで検索
             tavily_results = await search_with_tavily(query, max_results=5)
@@ -638,8 +659,13 @@ class StateMachine:
             logger.exception(f"Web search failed: {e}")
             return None
     
-    async def _respond_as_chat(self, message: str) -> dict[str, Any]:
-        """雑談・質問への通常応答（Messages配列方式）"""
+    async def _respond_as_chat(self, message: str, search_results: dict = None) -> dict[str, Any]:
+        """雑談・質問への通常応答（Messages配列方式）
+        
+        Args:
+            message: ユーザーのメッセージ
+            search_results: 検索結果（requires_searchがtrueの場合に渡される）
+        """
         from datetime import datetime
         import pytz
         
@@ -648,13 +674,24 @@ class StateMachine:
         now = datetime.now(jst)
         current_datetime = now.strftime("%Y年%m月%d日 %H:%M:%S（%A）")
         
+        # 検索結果セクションを構築
+        search_section = ""
+        if search_results and search_results.get("results"):
+            search_section = "\n## 検索結果（参考情報）\n"
+            for i, result in enumerate(search_results["results"][:5], 1):
+                title = result.get("title", "")
+                content = result.get("content", "")[:500]  # 長すぎる場合は切り詰め
+                url = result.get("url", "")
+                search_section += f"\n### {i}. {title}\n{content}\n出典: {url}\n"
+            search_section += "\n※上記の検索結果を参考に、最新の情報を含めて回答してください。\n"
+        
         # システムプロンプト
         system_prompt = f"""あなたは「ダン」という名前のAI秘書です。
 
 ## 現在の情報
 - 現在時刻: {current_datetime}
 - タイムゾーン: 日本時間 (JST/UTC+9)
-
+{search_section}
 ## あなたの特徴
 - 親しみやすく、カジュアルな口調
 - 技術的な質問には技術的に答える
@@ -665,7 +702,8 @@ class StateMachine:
 ## 注意
 - 質問の意図を正しく理解してから答える
 - 「コードを修正したい」などの技術的質問には、具体的なアドバイスを
-- 会話履歴から文脈を読み取る"""
+- 会話履歴から文脈を読み取る
+- 検索結果がある場合は、その情報を元に回答する"""
         
         # 会話履歴をMessages配列形式で取得
         conversation_history = await self._get_conversation_history(limit=10)

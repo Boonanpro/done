@@ -65,6 +65,8 @@ INTAKE_PROMPT = """
 {{
   "intent": "何をしたいか（1文で）",
   "task_type": "travel / purchase / payment / reservation / phone / other のいずれか",
+  "requires_search": true または false,
+  "search_query": "検索が必要な場合の検索クエリ（日本語）",
   "details": {{
     "departure": "出発地（駅名、空港名など）",
     "arrival": "到着地（駅名、空港名など）",
@@ -83,6 +85,8 @@ INTAKE_PROMPT = """
 - [STEP] は1行に1つの思考
 - [RESULT] の中はJSONのみ（reasoning_stepsは不要）
 - detailsには上記のフィールドを必ず使用すること
+- requires_search: 最新情報やリアルタイム情報が必要な場合はtrue（例：今日のニュース、天気、株価など）
+- search_query: requires_searchがtrueの場合、適切な検索クエリを設定
 """
 
 # ============================================================
