@@ -141,8 +141,11 @@ class StateMachine:
         """INTAKE: ユーザーの要望を構造化"""
         await self._add_reasoning_step("ユーザーの要望を分析しています...")
         
+        # 会話履歴を取得（文脈理解のため）
+        conversation_history = await self._get_conversation_history(limit=10)
+        
         # LLMを呼び出して要望を構造化（ストリーミングで[STEP]がリアルタイム送信される）
-        prompt = get_intake_prompt(message, self.state.user_preferences)
+        prompt = get_intake_prompt(message, self.state.user_preferences, conversation_history)
         llm_response = await self._call_llm(prompt)
         
         # レスポンスをパース
@@ -699,15 +702,15 @@ class StateMachine:
             if not self.state.user_id:
                 return []
             
-            # dan_room_idを取得
-            room_result = supabase.table("dan_rooms").select("id").eq("user_id", self.state.user_id).limit(1).execute()
-            if not room_result.data:
+            # usersテーブルからdan_room_idを直接取得
+            user_result = supabase.client.table("users").select("dan_room_id").eq("id", self.state.user_id).limit(1).execute()
+            if not user_result.data or not user_result.data[0].get("dan_room_id"):
                 return []
             
-            room_id = room_result.data[0]["id"]
+            room_id = user_result.data[0]["dan_room_id"]
             
-            # メッセージを取得
-            messages_result = supabase.table("dan_messages").select(
+            # chat_messagesテーブルからメッセージを取得
+            messages_result = supabase.client.table("chat_messages").select(
                 "content, sender_type, created_at"
             ).eq("room_id", room_id).order("created_at", desc=True).limit(limit).execute()
             

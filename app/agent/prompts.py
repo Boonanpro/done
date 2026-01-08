@@ -41,7 +41,10 @@ INTAKE_PROMPT = """
 - 現在時刻: {current_datetime}
 - タイムゾーン: 日本時間 (JST/UTC+9)
 
-## ユーザーの要望
+## 直近の会話履歴
+{conversation_history}
+
+## ユーザーの最新メッセージ
 {wish}
 
 ## タスク
@@ -326,8 +329,14 @@ REPORT_PROMPT = """
 # ヘルパー関数
 # ============================================================
 
-def get_intake_prompt(wish: str, user_preferences: dict = None) -> str:
-    """INTAKEプロンプトを生成"""
+def get_intake_prompt(wish: str, user_preferences: dict = None, conversation_history: list = None) -> str:
+    """INTAKEプロンプトを生成
+    
+    Args:
+        wish: ユーザーの最新メッセージ
+        user_preferences: ユーザーの傾向（将来のPhase 5用）
+        conversation_history: 直近の会話履歴（DBから取得したリスト）
+    """
     from datetime import datetime
     import pytz
     
@@ -344,7 +353,28 @@ def get_intake_prompt(wish: str, user_preferences: dict = None) -> str:
         for key, value in user_preferences.items():
             rules += f"- {key}: {value}\n"
     
-    return INTAKE_PROMPT.format(wish=wish, rules=rules, current_datetime=current_datetime)
+    # 会話履歴をフォーマット
+    if conversation_history:
+        history_lines = []
+        # 古い順に並べる（reversedで時系列順に）
+        for msg in reversed(conversation_history):
+            sender = "ユーザー" if msg.get("sender_type") == "human" else "ダン"
+            content = msg.get("content", "")
+            if content:
+                # 長いメッセージは省略
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                history_lines.append(f"{sender}: {content}")
+        conversation_history_str = "\n".join(history_lines)
+    else:
+        conversation_history_str = "（会話履歴なし - 新しい会話の開始）"
+    
+    return INTAKE_PROMPT.format(
+        wish=wish, 
+        rules=rules, 
+        current_datetime=current_datetime,
+        conversation_history=conversation_history_str
+    )
 
 
 def get_plan_prompt(intake_result: dict, execution_history: list = None) -> str:
