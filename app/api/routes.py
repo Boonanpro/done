@@ -362,16 +362,17 @@ async def sm_process_message(
             user_id=user_id,
         )
         
-        # AIメッセージをDBに保存
+        # AIメッセージをDBに保存（reasoning_stepsも含む）
         ai_response = result.get("response", "")
+        reasoning_steps = result.get("reasoning_steps", [])
         if ai_response:
-            await service.send_dan_ai_message(user_id, ai_response)
+            await service.send_dan_ai_message(user_id, ai_response, reasoning_steps=reasoning_steps)
         
         return SMMessageResponse(
             session_id=session_id,  # dan_room_idを返す
             state=result.get("state", "unknown"),
             response=ai_response,
-            reasoning_steps=result.get("reasoning_steps", []),
+            reasoning_steps=reasoning_steps,
             needs_confirmation=result.get("needs_confirmation", False),
             is_chat=result.get("is_chat", False),
             proposal=result.get("proposal"),
@@ -461,17 +462,18 @@ async def sm_process_message_stream(
                         result = event["result"]
                         session_id = event["session_id"]
                         
-                        # AIメッセージをDBに保存
+                        # AIメッセージをDBに保存（reasoning_stepsも含む）
                         ai_response = result.get("response", "")
+                        reasoning_steps = result.get("reasoning_steps", [])
                         if ai_response:
-                            await service.send_dan_ai_message(user_id, ai_response)
+                            await service.send_dan_ai_message(user_id, ai_response, reasoning_steps=reasoning_steps)
                         
                         # 最終レスポンスを送信
                         response_data = {
                             "session_id": session_id,
                             "state": result.get("state", "unknown"),
                             "response": ai_response,
-                            "reasoning_steps": result.get("reasoning_steps", []),
+                            "reasoning_steps": reasoning_steps,
                             "needs_confirmation": result.get("needs_confirmation", False),
                             "is_chat": result.get("is_chat", False),
                             "proposal": result.get("proposal"),
@@ -542,17 +544,18 @@ async def sm_confirm(
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
         
-        # AIメッセージをDBに保存
+        # AIメッセージをDBに保存（reasoning_stepsも含む）
         ai_response = result.get("response", "")
+        reasoning_steps = result.get("reasoning_steps", [])
         user_id = result.get("user_id") or (current_user.user_id if current_user else None) or request.user_id
         if ai_response and user_id:
-            await service.send_dan_ai_message(user_id, ai_response)
+            await service.send_dan_ai_message(user_id, ai_response, reasoning_steps=reasoning_steps)
         
         return SMMessageResponse(
             session_id=session_id,
             state=result.get("state", "unknown"),
             response=ai_response,
-            reasoning_steps=result.get("reasoning_steps", []),
+            reasoning_steps=reasoning_steps,
             needs_confirmation=result.get("needs_confirmation", False),
             is_chat=result.get("is_chat", False),
             proposal=result.get("proposal"),
@@ -597,16 +600,17 @@ async def sm_revise(
         if result.get("error"):
             raise HTTPException(status_code=404, detail=result["error"])
         
-        # AIメッセージをDBに保存
+        # AIメッセージをDBに保存（reasoning_stepsも含む）
         ai_response = result.get("response", "")
+        reasoning_steps = result.get("reasoning_steps", [])
         if ai_response and user_id:
-            await service.send_dan_ai_message(user_id, ai_response)
+            await service.send_dan_ai_message(user_id, ai_response, reasoning_steps=reasoning_steps)
         
         return SMMessageResponse(
             session_id=session_id,
             state=result.get("state", "unknown"),
             response=ai_response,
-            reasoning_steps=result.get("reasoning_steps", []),
+            reasoning_steps=reasoning_steps,
             needs_confirmation=result.get("needs_confirmation", False),
             is_chat=result.get("is_chat", False),
             proposal=result.get("proposal"),

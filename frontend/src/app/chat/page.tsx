@@ -170,6 +170,35 @@ export default function ChatPage() {
   const messages = messagesData?.messages || [];
   const hasError = roomError || messagesError;
 
+  // DBから取得したメッセージのreasoning_stepsをprocessesに初期化
+  useEffect(() => {
+    if (!messages.length) return;
+    
+    setProcesses(prev => {
+      const newMap = new Map(prev);
+      
+      // AIメッセージのreasoning_stepsを読み込む
+      for (const msg of messages) {
+        if (msg.sender_type === 'ai' && msg.ai_context?.reasoning_steps?.length) {
+          // 既にprocessesに存在しない場合のみ追加
+          if (!newMap.has(msg.id)) {
+            newMap.set(msg.id, {
+              steps: msg.ai_context.reasoning_steps.map((step, idx) => ({
+                id: `step-${idx}`,
+                label: step,
+                status: 'completed' as const,
+              })),
+              isCollapsed: true, // 既存のプロセスは折りたたんで表示
+              isProcessing: false,
+            });
+          }
+        }
+      }
+      
+      return newMap;
+    });
+  }, [messages]);
+
   // StateMachine APIでメッセージ送信
   const handleSendMessage = useCallback(async () => {
     if (!message.trim() || isSending) return;

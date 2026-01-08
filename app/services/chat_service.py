@@ -777,26 +777,41 @@ class ChatService:
         dan_room = await self.get_or_create_dan_room(user_id)
         return await self.send_message(dan_room["id"], user_id, content, sender_type="human")
     
-    async def send_dan_ai_message(self, user_id: str, content: str) -> dict:
+    async def send_dan_ai_message(
+        self,
+        user_id: str,
+        content: str,
+        reasoning_steps: list[str] = None,
+    ) -> dict:
         """
         ダンからユーザーにメッセージを送信（AI側）
         
         Args:
             user_id: 対象ユーザーID
             content: メッセージ内容
+            reasoning_steps: 推論過程（プロセス/ナレーション）
             
         Returns:
             送信されたメッセージ
         """
         dan_room = await self.get_or_create_dan_room(user_id)
         
+        # ai_contextを構築
+        ai_context = None
+        if reasoning_steps:
+            ai_context = {"reasoning_steps": reasoning_steps}
+        
         # AIからのメッセージとして送信
-        result = self.supabase.table("chat_messages").insert({
+        insert_data = {
             "room_id": dan_room["id"],
             "sender_id": None,  # AIなのでsender_idはnull
             "sender_type": "ai",
             "content": content,
-        }).execute()
+        }
+        if ai_context:
+            insert_data["ai_context"] = ai_context
+        
+        result = self.supabase.table("chat_messages").insert(insert_data).execute()
         
         if result.data:
             msg = result.data[0]

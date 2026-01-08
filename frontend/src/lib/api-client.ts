@@ -41,6 +41,9 @@ export interface MessageResponse {
   sender_type: 'human' | 'ai';
   content: string;
   created_at: string;
+  ai_context?: {
+    reasoning_steps?: string[];
+  };
 }
 
 export interface MessagesListResponse {
