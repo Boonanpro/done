@@ -591,8 +591,8 @@ export default function ChatPage() {
 
                         <div
                           className={cn(
-                            'max-w-[70%] space-y-1',
-                            isUser && 'items-end text-right'
+                            'max-w-[70%] space-y-1 flex flex-col',
+                            isUser && 'items-end'
                           )}
                         >
                           <p className="text-xs text-muted-foreground">
@@ -600,7 +600,7 @@ export default function ChatPage() {
                           </p>
                           <div
                             className={cn(
-                              'px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap',
+                              'px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap text-left',
                               isUser
                                 ? 'bg-primary text-primary-foreground rounded-br-md'
                                 : 'bg-muted rounded-bl-md'
