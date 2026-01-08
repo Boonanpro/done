@@ -37,6 +37,10 @@ DEFAULT_RULES = """
 INTAKE_PROMPT = """
 あなたはユーザーの要望を構造化するアシスタントです。
 
+## 現在の情報
+- 現在時刻: {current_datetime}
+- タイムゾーン: 日本時間 (JST/UTC+9)
+
 ## ユーザーの要望
 {wish}
 
@@ -324,6 +328,14 @@ REPORT_PROMPT = """
 
 def get_intake_prompt(wish: str, user_preferences: dict = None) -> str:
     """INTAKEプロンプトを生成"""
+    from datetime import datetime
+    import pytz
+    
+    # 現在時刻（日本時間）
+    jst = pytz.timezone('Asia/Tokyo')
+    now = datetime.now(jst)
+    current_datetime = now.strftime("%Y年%m月%d日 %H:%M:%S（%A）")
+    
     rules = DEFAULT_RULES
     
     # ユーザーの傾向があれば追加（将来のPhase 5用）
@@ -332,7 +344,7 @@ def get_intake_prompt(wish: str, user_preferences: dict = None) -> str:
         for key, value in user_preferences.items():
             rules += f"- {key}: {value}\n"
     
-    return INTAKE_PROMPT.format(wish=wish, rules=rules)
+    return INTAKE_PROMPT.format(wish=wish, rules=rules, current_datetime=current_datetime)
 
 
 def get_plan_prompt(intake_result: dict, execution_history: list = None) -> str:

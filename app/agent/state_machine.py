@@ -611,11 +611,44 @@ class StateMachine:
     
     async def _respond_as_chat(self, message: str) -> dict[str, Any]:
         """雑談・質問への通常応答"""
-        prompt = f"""
-以下のユーザーメッセージに対して、友好的に応答してください。
-タスクの実行は不要です。自然な会話として返してください。
+        from datetime import datetime
+        import pytz
+        
+        # 現在時刻（日本時間）
+        jst = pytz.timezone('Asia/Tokyo')
+        now = datetime.now(jst)
+        current_datetime = now.strftime("%Y年%m月%d日 %H:%M:%S（%A）")
+        
+        # 会話履歴を取得（直近10件）
+        conversation_history = await self._get_conversation_history(limit=10)
+        history_text = ""
+        if conversation_history:
+            history_text = "\n## 直近の会話履歴\n"
+            for msg in reversed(conversation_history):  # 古い順に
+                role = "ユーザー" if msg.get("sender_type") == "human" else "ダン"
+                content = msg.get("content", "")[:200]  # 長すぎる場合は切り詰め
+                history_text += f"{role}: {content}\n"
+        
+        prompt = f"""あなたは「ダン」という名前のAI秘書です。
 
-ユーザー: {message}
+## 現在の情報
+- 現在時刻: {current_datetime}
+- タイムゾーン: 日本時間 (JST/UTC+9)
+{history_text}
+## あなたの特徴
+- 親しみやすく、カジュアルな口調
+- 技術的な質問には技術的に答える
+- 自分のソースコードにはアクセスできないが、一般的なLLM/AIの仕組みは説明できる
+- 「分からない」時は正直に言う
+- ユーザーの質問の真意を理解しようとする
+
+## ユーザーのメッセージ
+{message}
+
+## 注意
+- 質問の意図を正しく理解してから答える
+- 「コードを修正したい」などの技術的質問には、具体的なアドバイスを
+- 会話履歴から文脈を読み取る
 
 応答:
 """
@@ -628,6 +661,34 @@ class StateMachine:
             "reasoning_steps": self.state.reasoning_steps,
             "is_chat": True,
         }
+    
+    async def _get_conversation_history(self, limit: int = 10) -> list:
+        """会話履歴を取得"""
+        try:
+            from app.services.supabase_client import get_supabase_client
+            
+            supabase = get_supabase_client()
+            
+            # ユーザーのdan_roomを取得してメッセージを取得
+            if not self.state.user_id:
+                return []
+            
+            # dan_room_idを取得
+            room_result = supabase.table("dan_rooms").select("id").eq("user_id", self.state.user_id).limit(1).execute()
+            if not room_result.data:
+                return []
+            
+            room_id = room_result.data[0]["id"]
+            
+            # メッセージを取得
+            messages_result = supabase.table("dan_messages").select(
+                "content, sender_type, created_at"
+            ).eq("room_id", room_id).order("created_at", desc=True).limit(limit).execute()
+            
+            return messages_result.data or []
+        except Exception as e:
+            logger.warning(f"Failed to get conversation history: {e}")
+            return []
     
     async def _call_executor_search(self, executor_name: str) -> Optional[dict]:
         """Executor.search()を呼ぶ"""
