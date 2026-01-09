@@ -605,10 +605,11 @@ async def send_dan_message_stream(
             
             message = await service.send_dan_message(current_user.user_id, request.content)
             user = await service.get_user_by_id(current_user.user_id)
+            room_id = message["room_id"]
             
             user_message = {
                 "id": message["id"],
-                "room_id": message["room_id"],
+                "room_id": room_id,
                 "sender_id": message["sender_id"],
                 "sender_name": user["display_name"] if user else "You",
                 "sender_type": message["sender_type"],
@@ -618,6 +619,27 @@ async def send_dan_message_stream(
             
             # ユーザーメッセージを送信
             yield f"data: {json.dumps({'type': 'user_message', 'message': user_message})}\n\n"
+            
+            # Step 1.5: 同一セッション（ルーム）の会話履歴を取得
+            # 現在のメッセージより前のメッセージを取得（直近10件）
+            conversation_history = []
+            try:
+                # 現在のメッセージを除く直近のメッセージを取得
+                recent_messages = await service.get_messages(room_id, current_user.user_id, limit=11)
+                # 最新のメッセージ（今送ったもの）を除外
+                conversation_history = [
+                    {
+                        "sender_type": msg.get("sender_type", "unknown"),
+                        "sender_name": msg.get("sender_name", ""),
+                        "content": msg.get("content", ""),
+                    }
+                    for msg in recent_messages[1:]  # 最新を除く
+                ]
+                # 時系列順に並べ替え（古い順）
+                conversation_history = list(reversed(conversation_history))
+            except Exception as e:
+                import logging
+                logging.warning(f"Failed to get conversation history: {e}")
             
             # 挨拶かどうかをチェック
             content_lower = request.content.lower()
@@ -671,12 +693,13 @@ async def send_dan_message_stream(
                 
                 yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'receive', 'label': 'リクエストを分析しています', 'status': 'completed'}})}\n\n"
                 
-                # process_wish_v2をバックグラウンドで実行
+                # process_wish_v2をバックグラウンドで実行（会話履歴付き）
                 process_task = asyncio.create_task(
                     agent.process_wish_v2(
                         wish=request.content,
                         user_id=current_user.user_id,
                         request_id=request_id,
+                        conversation_history=conversation_history,
                     )
                 )
                 
@@ -760,6 +783,7 @@ async def send_dan_message(
         from langchain_core.messages import HumanMessage as LCHumanMessage
         from app.agent.agent import AISecretaryAgent
         from app.models.schemas import TaskType
+        import logging
         
         # 挨拶キーワード
         GREETING_KEYWORDS = ["おはよう", "こんにちは", "こんばんは", "ありがとう", "おやすみ",
@@ -768,16 +792,36 @@ async def send_dan_message(
         # ユーザーメッセージを保存
         message = await service.send_dan_message(current_user.user_id, request.content)
         user = await service.get_user_by_id(current_user.user_id)
+        room_id = message["room_id"]
         
         user_message = MessageResponse(
             id=message["id"],
-            room_id=message["room_id"],
+            room_id=room_id,
             sender_id=message["sender_id"],
             sender_name=user["display_name"] if user else "You",
             sender_type=message["sender_type"],
             content=message["content"],
             created_at=message["created_at"],
         )
+        
+        # 同一セッション（ルーム）の会話履歴を取得
+        conversation_history = []
+        try:
+            # 現在のメッセージを除く直近のメッセージを取得
+            recent_messages = await service.get_messages(room_id, current_user.user_id, limit=11)
+            # 最新のメッセージ（今送ったもの）を除外
+            conversation_history = [
+                {
+                    "sender_type": msg.get("sender_type", "unknown"),
+                    "sender_name": msg.get("sender_name", ""),
+                    "content": msg.get("content", ""),
+                }
+                for msg in recent_messages[1:]  # 最新を除く
+            ]
+            # 時系列順に並べ替え（古い順）
+            conversation_history = list(reversed(conversation_history))
+        except Exception as e:
+            logging.warning(f"Failed to get conversation history: {e}")
         
         # 挨拶かどうかをチェック
         content_lower = request.content.lower()
@@ -830,11 +874,12 @@ async def send_dan_message(
             
             process_steps.append(ProcessStep(id="receive", label="リクエストを分析しています", status="completed"))
             
-            # process_wish_v2を実行
+            # process_wish_v2を実行（会話履歴付き）
             result = await agent.process_wish_v2(
                 wish=request.content,
                 user_id=current_user.user_id,
                 request_id=None,  # 非ストリーム版はプログレス通知なし
+                conversation_history=conversation_history,
             )
             
             # 結果からプロセスステップを生成

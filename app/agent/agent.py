@@ -1258,6 +1258,7 @@ Respond in this format:
         wish: str,
         user_id: str,
         request_id: Optional[str] = None,
+        conversation_history: Optional[list[dict]] = None,
     ) -> dict:
         """
         Architecture v2: 推論ファースト・Executor実行フロー
@@ -1271,6 +1272,7 @@ Respond in this format:
             wish: ユーザーの願望
             user_id: ユーザーID
             request_id: プログレス通知用ID
+            conversation_history: 同一セッション内の会話履歴（直近のメッセージリスト）
             
         Returns:
             処理結果
@@ -1280,7 +1282,12 @@ Respond in this format:
         
         # Executorを登録
         register_all_executors()
-        logger.info(f"[PROCESS_V2] Starting process_wish_v2 for: {wish}")
+        
+        # 会話履歴がない場合は空リスト
+        if conversation_history is None:
+            conversation_history = []
+        
+        logger.info(f"[PROCESS_V2] Starting process_wish_v2 for: {wish}, history_count: {len(conversation_history)}")
         
         result = {
             "success": False,
@@ -1301,7 +1308,7 @@ Respond in this format:
                     request_id, "thinking", "考え中...", "running"
                 )
             
-            research = await self._research_optimal_solution(wish)
+            research = await self._research_optimal_solution(wish, conversation_history)
             result["research_result"] = research
             
             # 根拠を含んだプログレスメッセージを生成
@@ -1353,6 +1360,27 @@ Respond in this format:
                 if request_id:
                     await notify_progress(request_id, "reasoning", reasoning_msg, "completed")
             
+            elif research.get("task_type") == "research":
+                # 調査・検索タイプの場合
+                goal = params.get("goal", wish)
+                steps = params.get("steps", [])
+                
+                if request_id:
+                    await notify_progress(
+                        request_id, "reasoning",
+                        f"「{goal}」を実現するために情報を調査します",
+                        "completed"
+                    )
+                
+                # 計画したステップを表示
+                if steps and request_id:
+                    step_summary = "、".join([s.get("action", "") for s in steps[:3]])
+                    await notify_progress(
+                        request_id, "plan",
+                        f"計画: {step_summary}",
+                        "completed"
+                    )
+            
             else:
                 if request_id:
                     await notify_progress(
@@ -1371,22 +1399,51 @@ Respond in this format:
             logger.info(f"[PROCESS_V2] Found executor: {executor}")
             
             if not executor:
-                # Executorが見つからない場合
-                result["phase"] = "no_executor"
-                result["message"] = f"自動予約機能はまだ対応していません。手動で予約をお願いします。"
+                # Executorが見つからない場合 → ツールベースのアクションを試みる
+                logger.info(f"[PROCESS_V2] No executor found, checking for tool-based action")
                 
-                if request_id:
-                    await notify_progress(
-                        request_id, "no_executor",
-                        f"{service_name}の自動予約は未対応です。URLをお伝えします",
-                        "completed"
-                    )
-                
-                # 提案だけは生成
-                proposal = await self._generate_manual_proposal(wish, research)
-                result["proposal"] = proposal
-                result["success"] = True
-                return result
+                # ツールを使ったアクションが可能か確認
+                if research.get("requires_tools", False) or research.get("params", {}).get("actionable", False):
+                    # ツールベースのアクション提案を生成
+                    result["phase"] = "tool_based_action"
+                    
+                    if request_id:
+                        await notify_progress(
+                            request_id, "tool_action",
+                            "利用可能なツールでアクションを提案します",
+                            "running"
+                        )
+                    
+                    # ツールを使ったアクション提案を生成
+                    proposal = await self._generate_tool_based_proposal(wish, research, request_id, conversation_history)
+                    result["proposal"] = proposal
+                    result["success"] = True
+                    
+                    if request_id:
+                        await notify_progress(
+                            request_id, "proposal_ready",
+                            "アクションを提案しました",
+                            "completed"
+                        )
+                    
+                    return result
+                else:
+                    # フィジカルな作業が必要、または対応不可
+                    result["phase"] = "no_executor"
+                    result["message"] = f"自動実行機能はまだ対応していません。手動で対応をお願いします。"
+                    
+                    if request_id:
+                        await notify_progress(
+                            request_id, "no_executor",
+                            f"{service_name}の自動実行は未対応です。手順をお伝えします",
+                            "completed"
+                        )
+                    
+                    # 手動対応の提案を生成
+                    proposal = await self._generate_manual_proposal(wish, research)
+                    result["proposal"] = proposal
+                    result["success"] = True
+                    return result
             
             result["executor_found"] = True
             
@@ -1482,18 +1539,22 @@ Respond in this format:
             
             return result
     
-    async def _research_optimal_solution(self, wish: str) -> dict:
+    async def _research_optimal_solution(self, wish: str, conversation_history: list[dict] = None) -> dict:
         """
         推論 + Web検索で最適解を導出
         
         Args:
             wish: ユーザーの願望
+            conversation_history: 同一セッション内の会話履歴
             
         Returns:
             最適解の情報
         """
+        if conversation_history is None:
+            conversation_history = []
+        
         # まずタスクタイプを分析
-        task_type = await self._determine_task_type(wish)
+        task_type = await self._determine_task_type(wish, conversation_history)
         
         # タスクタイプに応じてパラメータを抽出
         if task_type == TaskType.TRAVEL:
@@ -1551,19 +1612,231 @@ Respond in this format:
                 "original_wish": wish,
             }
         
+        elif task_type == TaskType.RESEARCH:
+            # 調査・検索が必要な場合（サービス探し、比較、雇用など）
+            # LLMで必要なアクションを分析
+            action_plan = await self._analyze_required_actions(wish, conversation_history)
+            
+            return {
+                "task_type": task_type.value,
+                "service_type": "research",
+                "service_name": "web_research",
+                "service_display_name": "Web調査",
+                "params": action_plan,
+                "original_wish": wish,
+                "requires_tools": True,  # ツールを使用したアクションが必要
+            }
+        
         else:
-            # その他
+            # その他の場合もLLMで分析してアクション可能か判断
+            action_plan = await self._analyze_required_actions(wish, conversation_history)
+            
             return {
                 "task_type": task_type.value,
                 "service_type": "generic",
                 "service_name": None,
-                "service_display_name": "汎用",
-                "params": {},
+                "service_display_name": "汎用対応",
+                "params": action_plan,
                 "original_wish": wish,
+                "requires_tools": action_plan.get("actionable", False),
             }
     
-    async def _determine_task_type(self, wish: str) -> TaskType:
-        """タスクタイプを判定"""
+    def _format_conversation_history(self, conversation_history: list[dict], max_messages: int = 10) -> str:
+        """
+        会話履歴をLLMプロンプト用にフォーマット
+        
+        Args:
+            conversation_history: 会話履歴のリスト（各要素は sender_type, content を含む）
+            max_messages: 最大メッセージ数
+            
+        Returns:
+            フォーマットされた会話履歴文字列
+        """
+        if not conversation_history:
+            return "（会話履歴なし - 新しい会話の開始）"
+        
+        # 直近のメッセージのみを使用
+        recent_history = conversation_history[-max_messages:] if len(conversation_history) > max_messages else conversation_history
+        
+        lines = []
+        for msg in recent_history:
+            sender_type = msg.get("sender_type", "unknown")
+            content = msg.get("content", "")
+            sender_name = msg.get("sender_name", "")
+            
+            if sender_type == "human" or sender_type == "user":
+                prefix = "ユーザー"
+            elif sender_type == "ai" or sender_type == "assistant":
+                prefix = "ダン"
+            else:
+                prefix = sender_name or sender_type
+            
+            # 長すぎるメッセージは省略
+            if len(content) > 500:
+                content = content[:500] + "..."
+            
+            lines.append(f"{prefix}: {content}")
+        
+        return "\n".join(lines)
+    
+    async def _analyze_required_actions(self, wish: str, conversation_history: list[dict] = None) -> dict:
+        """
+        LLMで要望を実現するために必要なアクションを分析
+        
+        Args:
+            wish: ユーザーの願望
+            conversation_history: 同一セッション内の会話履歴
+        
+        Returns:
+            {
+                "actionable": bool,  # Webツールで対応可能か
+                "steps": [...],  # 必要なステップ
+                "tools_needed": [...],  # 必要なツール
+                "search_query": str,  # 最初の検索クエリ
+                "goal": str,  # 最終目標
+            }
+        """
+        if conversation_history is None:
+            conversation_history = []
+        
+        # 会話履歴をフォーマット
+        history_text = self._format_conversation_history(conversation_history)
+        
+        analysis_prompt = f"""ユーザーのリクエストを分析し、Web上で実行可能なアクションプランを作成してください。
+
+## 直近の会話履歴（このセッション内のみ）
+{history_text}
+
+## 現在のリクエスト
+{wish}
+
+## 利用可能なツール
+1. search_web: Web検索（情報収集、サービス探し）
+2. send_email: メール送信（問い合わせ、申し込み）
+3. browse_website: Webサイト閲覧（詳細確認、フォーム入力）
+4. make_phone_call: 電話発信（AI音声での問い合わせ）
+
+## 分析基準
+- フィジカルな作業（実際に会う、物を運ぶなど）が必要 → actionable: false
+- Web上で完結できる（調査、問い合わせ、予約など） → actionable: true
+- 情報収集が必要 → search_webを使用
+- 問い合わせが必要 → send_emailまたはmake_phone_callを使用
+
+## 重要な注意事項
+- **与えられた会話履歴のみに基づいて判断してください**
+- **会話履歴にない情報を推測・捏造しないでください**
+- **別のセッションや過去の会話を想像しないでください**
+- 会話履歴がない場合は、現在のリクエストのみで判断してください
+
+回答はJSON形式で:
+{{
+  "actionable": true/false,
+  "goal": "最終的に達成したいこと",
+  "steps": [
+    {{"step": 1, "action": "アクション内容", "tool": "使用ツール"}},
+    ...
+  ],
+  "tools_needed": ["必要なツール1", "必要なツール2"],
+  "search_query": "最初に検索するキーワード",
+  "reasoning": "このアクションプランの理由"
+}}"""
+
+        try:
+            response = await self.llm.ainvoke([HumanMessage(content=analysis_prompt)])
+            content = response.content
+            
+            import json
+            import re
+            # JSONを抽出（複数行対応）
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if json_match:
+                parsed = json.loads(json_match.group())
+                return parsed
+        except Exception as e:
+            logger.warning(f"Action analysis failed: {e}")
+        
+        # フォールバック: Web検索可能と仮定
+        return {
+            "actionable": True,
+            "goal": wish,
+            "steps": [{"step": 1, "action": "Web検索で情報収集", "tool": "search_web"}],
+            "tools_needed": ["search_web"],
+            "search_query": wish,
+            "reasoning": "詳細分析に失敗したため、まずWeb検索で情報収集します",
+        }
+    
+    async def _determine_task_type(self, wish: str, conversation_history: list[dict] = None) -> TaskType:
+        """
+        タスクタイプをLLMで判定（キーワードベースではなく意味理解）
+        会話履歴がある場合は文脈を考慮する
+        """
+        if conversation_history is None:
+            conversation_history = []
+        
+        # 会話履歴をフォーマット
+        history_text = self._format_conversation_history(conversation_history)
+        
+        analysis_prompt = f"""ユーザーのリクエストを分析し、最も適切なタスクタイプを判定してください。
+
+## 直近の会話履歴（このセッション内のみ）
+{history_text}
+
+## 現在のリクエスト
+{wish}
+
+## タスクタイプ
+- phone: 電話を使った対応が必要（予約電話、問い合わせ電話など）
+- travel: 交通機関の予約（新幹線、電車、バス、飛行機など）
+- purchase: 商品の購入
+- email: メールの送信・検索・読み取り
+- research: 情報収集・調査（サービス探し、比較、調査など）
+- other: 上記に該当しない
+
+## 判定基準
+- 「〇〇したい」「〇〇を探して」「〇〇を雇いたい」などはresearchに分類
+- Web検索で情報を集めて何かを見つける必要があるものはresearch
+- 具体的なサービス予約（電車、バス、飛行機）はtravel
+- 電話をかけることが明示されていればphone
+- 商品を買うことが明示されていればpurchase
+
+## 重要な注意事項
+- **与えられた会話履歴のみに基づいて判断してください**
+- **会話履歴にない情報を推測・捏造しないでください**
+- **別のセッションや過去の会話を想像しないでください**
+- 会話履歴がない場合は、現在のリクエストのみで判断してください
+
+回答は以下のJSONフォーマットで:
+{{"task_type": "タイプ名", "reasoning": "判定理由"}}"""
+
+        try:
+            response = await self.llm.ainvoke([HumanMessage(content=analysis_prompt)])
+            content = response.content
+            
+            # JSONをパース
+            import json
+            import re
+            json_match = re.search(r'\{[^{}]*\}', content)
+            if json_match:
+                parsed = json.loads(json_match.group())
+                task_type_str = parsed.get("task_type", "other").lower()
+                
+                type_map = {
+                    "phone": TaskType.PHONE,
+                    "travel": TaskType.TRAVEL,
+                    "purchase": TaskType.PURCHASE,
+                    "email": TaskType.EMAIL,
+                    "research": TaskType.RESEARCH,
+                    "other": TaskType.OTHER,
+                }
+                return type_map.get(task_type_str, TaskType.OTHER)
+        except Exception as e:
+            logger.warning(f"LLM task type detection failed: {e}")
+        
+        # フォールバック: キーワードベース
+        return self._determine_task_type_fallback(wish)
+    
+    def _determine_task_type_fallback(self, wish: str) -> TaskType:
+        """フォールバック: キーワードベースのタスクタイプ判定"""
         wish_lower = wish.lower()
         
         # 電話
@@ -1574,7 +1847,7 @@ Respond in this format:
         
         # 旅行
         travel_keywords_ja = ["新幹線", "電車", "特急", "飛行機", "航空", "バス", "高速バス", 
-                              "予約", "チケット", "乗車券", "切符", "行きたい", "移動", "便"]
+                              "予約", "チケット", "乗車券", "切符", "移動", "便"]
         travel_keywords_en = ["travel", "train", "shinkansen", "bus", "highway", 
                               "flight", "book", "reservation", "willer"]
         if any(kw in wish_lower for kw in travel_keywords_ja) or \
@@ -1588,6 +1861,13 @@ Respond in this format:
         # メール
         if "メール" in wish_lower or "email" in wish_lower:
             return TaskType.EMAIL
+        
+        # 調査系（雇いたい、探して、調べて、見つけてなど）
+        research_keywords = ["探して", "調べて", "見つけて", "雇いたい", "頼みたい", 
+                            "依頼したい", "知りたい", "教えて", "比較", "おすすめ",
+                            "search", "find", "look for", "hire", "recommend"]
+        if any(kw in wish_lower for kw in research_keywords):
+            return TaskType.RESEARCH
         
         return TaskType.OTHER
     
@@ -1680,13 +1960,146 @@ Respond in this format:
             "full_proposal": content,
         }
     
+    async def _generate_tool_based_proposal(
+        self,
+        wish: str,
+        research: dict,
+        request_id: Optional[str] = None,
+        conversation_history: list[dict] = None,
+    ) -> dict:
+        """
+        利用可能なツールを使ったアクション提案を生成
+        
+        Executorがなくても、search_web, send_email, browse_website などの
+        ツールを組み合わせてアクションを提案する。
+        """
+        from app.services.progress_callback import notify_progress
+        
+        if conversation_history is None:
+            conversation_history = []
+        
+        params = research.get("params", {})
+        steps = params.get("steps", [])
+        tools_needed = params.get("tools_needed", ["search_web"])
+        search_query = params.get("search_query", wish)
+        goal = params.get("goal", wish)
+        
+        # 会話履歴をフォーマット
+        history_text = self._format_conversation_history(conversation_history)
+        
+        # Step 1: まずWeb検索を実行
+        if request_id:
+            await notify_progress(request_id, "web_search", "Web検索で情報を収集しています...", "running")
+        
+        search_results = []
+        try:
+            search_results = await tavily_search.ainvoke({
+                "query": search_query,
+                "max_results": 5
+            })
+            logger.info(f"[TOOL_PROPOSAL] Web search completed: {len(search_results)} results")
+        except Exception as e:
+            logger.warning(f"Web search failed: {e}")
+        
+        if request_id:
+            await notify_progress(
+                request_id, "web_search", 
+                f"関連情報を{len(search_results)}件見つけました", 
+                "completed"
+            )
+        
+        # Step 2: 検索結果を元にアクション提案を生成
+        search_summary = ""
+        if search_results:
+            for i, r in enumerate(search_results[:5], 1):
+                title = r.get("title", "不明")
+                url = r.get("url", "")
+                snippet = r.get("snippet", r.get("content", ""))[:200]
+                search_summary += f"{i}. {title}\n   URL: {url}\n   概要: {snippet}\n\n"
+        
+        proposal_prompt = f"""以下のリクエストに対して、具体的なアクションを提案してください。
+
+## 直近の会話履歴（このセッション内のみ）
+{history_text}
+
+## 現在のリクエスト
+{wish}
+
+## 最終目標
+{goal}
+
+## Web検索結果
+{search_summary if search_summary else "検索結果なし"}
+
+## 利用可能なツール
+- search_web: さらに詳細な検索
+- send_email: 問い合わせメールの送信
+- browse_website: Webサイトの詳細確認
+- make_phone_call: 電話での問い合わせ（AI音声）
+
+## 重要ルール
+- **質問は絶対にしない**。情報が不足していても仮定して具体的なアクションを提案する
+- 検索結果から最も適切なサービス/会社を選んで、具体的な問い合わせ内容まで提案する
+- 「〇〇してもよろしいですか？」ではなく「〇〇します」と断定する
+- 問い合わせ先が見つかった場合は、問い合わせメールの文面まで具体的に書く
+
+## 重要な注意事項
+- **与えられた会話履歴のみに基づいて判断してください**
+- **会話履歴にない情報を推測・捏造しないでください**
+- **別のセッションや過去の会話を想像しないでください**
+
+以下の形式で回答してください:
+
+[ACTION]
+（具体的に何をするか - サービス名、連絡先、アクション内容を明記）
+
+[DETAILS]
+（問い合わせメールの文面、または次のステップの詳細）
+
+[NOTES]
+（仮定した点、変更可能な点）"""
+
+        response = await self.llm.ainvoke([
+            SystemMessage(content=self.SYSTEM_PROMPT),
+            HumanMessage(content=proposal_prompt)
+        ])
+        
+        content = response.content
+        
+        # アクション部分を抽出
+        action = ""
+        details = ""
+        notes = ""
+        
+        if "[ACTION]" in content:
+            parts = content.split("[ACTION]")[1]
+            if "[DETAILS]" in parts:
+                action = parts.split("[DETAILS]")[0].strip()
+                parts = parts.split("[DETAILS]")[1]
+            if "[NOTES]" in parts:
+                details = parts.split("[NOTES]")[0].strip()
+                notes = parts.split("[NOTES]")[1].strip()
+            else:
+                details = parts.strip()
+        
+        return {
+            "action": action or "情報を調査し、問い合わせを行います",
+            "details": details,
+            "notes": notes,
+            "search_results": search_results,
+            "tools_used": ["search_web"],
+            "tools_available": tools_needed,
+            "can_execute": True,  # ツールベースの実行が可能
+            "full_proposal": content,
+        }
+    
     async def _generate_manual_proposal(
         self,
         wish: str,
         research: dict,
     ) -> dict:
         """
-        Executorがない場合の手動提案を生成
+        フィジカルな作業が必要な場合の手動提案を生成
         """
         proposal_prompt = f"""以下のリクエストに対して、手動での対応方法を提案してください。
 
@@ -1696,7 +2109,10 @@ Respond in this format:
 - 推奨サービス: {research.get('service_display_name', '不明')}
 - サービスタイプ: {research.get('service_type', '不明')}
 
-自動予約機能はまだ対応していないため、手動での対応方法を提案してください。
+このリクエストは物理的な作業が必要なため、自動実行はできません。
+代わりに、ユーザーが手動で行う手順を具体的に説明してください。
+
+重要: 質問はせず、手順を断定的に説明してください。
 
 以下の形式で回答してください:
 
@@ -1704,7 +2120,7 @@ Respond in this format:
 （手動で行う操作を説明）
 
 [DETAILS]
-（詳細情報、URLなど）
+（詳細な手順、参考URL、連絡先など）
 
 [NOTES]
 （注意点）"""
