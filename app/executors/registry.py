@@ -212,8 +212,8 @@ def register_all_executors():
     
     アプリケーション起動時に呼び出す
     """
-    # Train（新幹線）
-    from app.executors.ex_reservation_executor import EXReservationExecutor
+    # Train（新幹線）- 新しいアクション分割版
+    from app.executors.ex_reservation import EXReservationExecutor
     ExecutorRegistry.register(
         executor_class=EXReservationExecutor,
         service_type="train",
