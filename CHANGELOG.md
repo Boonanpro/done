@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **EX予約OTPログイン完全実装** - 電話認証（音声OTP）を含む完全自動ログイン
+  - `login_with_auto_otp()` - OTP必要/不要を自動判定する統合ログイン関数
+  - ダイアログオーバーレイ対応（`force: true`でクリック、JavaScriptフォールバック）
+  - セレクタ修正（「次へ」ボタン: `input[value="次へ"]`）
+  - テストスクリプト作成（`scripts/test_ex_otp_login.py`、ログファイル出力機能付き）
+  - デバッグスクリプト作成（`scripts/check_ex_otp_selectors.py`, `scripts/debug_ex_otp_buttons.py`）
+  - 実機テスト成功: ID/パスワード → 音声発信 → ダイアログ閉じる → OTP入力 → ログイン完了
+  - 関連ファイル: `app/executors/ex_reservation/login.py`, `app/executors/ex_reservation/selectors.py`
 - **PLANのナレーション改善** - 自問形式で「なぜそのツールを選んだか」の根拠を表示
   - プロンプトに良い例・悪い例を追加
   - 関連ファイル: `app/agent/prompts.py`

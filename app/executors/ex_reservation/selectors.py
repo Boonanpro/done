@@ -12,31 +12,31 @@ URLS = {
     "expy_login": "https://shinkansen1.jr-central.co.jp/RSV_P/index.htm",
 }
 
-# ===== ログインページ（実確認済み）=====
+# ===== ログインページ（実確認済み 2026/01/09）=====
 LOGIN = {
-    # 会員ID入力 - placeholder="数字10桁（半角）"
-    "member_id": 'input[placeholder="数字10桁（半角）"]',
+    # 会員ID入力 - role="textbox" name="会員ID"
+    "member_id": 'role=textbox[name="会員ID"]',
     
-    # パスワード入力 - placeholder="英数記号4-8桁（半角）"
-    "password": 'input[placeholder="英数記号4-8桁（半角）"]',
+    # パスワード入力 - role="textbox" name="パスワード"  
+    "password": 'role=textbox[name="パスワード"]',
     
-    # ログインボタン
-    "login_button": 'button:has-text("ログイン")',
+    # ログインボタン - role="button" name="ログイン"
+    "login_button": 'role=button[name="ログイン"]',
 }
 
-# ===== OTPページ（実確認済み・電話認証）=====
+# ===== OTPページ（実確認済み 2026/01/10・電話認証）=====
 OTP = {
-    # 自動音声案内発信ボタン
-    "send_voice_button": 'button:has-text("自動音声案内発信")',
-    
-    # OTP入力フィールド - placeholder="数字6桁（半角）"
-    "otp_input": 'input[placeholder="数字6桁（半角）"]',
-    
-    # 次へボタン
-    "next_button": 'button:has-text("次へ")',
-    
-    # 閉じるボタン（ダイアログ）
-    "close_dialog": 'generic:has-text("閉じる")',
+    # 自動音声案内発信ボタン - input[value]で正確に指定
+    "send_voice_button": 'input[value="自動音声案内発信"]',
+
+    # 閉じるボタン - 音声案内発信後のダイアログを閉じる（存在しない場合あり）
+    "close_button": 'button:has-text("閉じる"), input[value="閉じる"]',
+
+    # OTP入力フィールド - input[type="tel"]
+    "otp_input": 'input[type="tel"]',
+
+    # 次へボタン - 実際は"OK"ではなく"次へ"
+    "next_button": 'input[value="次へ"]',
 }
 
 # ===== マイページ（実確認済み）=====
