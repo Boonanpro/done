@@ -17,7 +17,7 @@ from playwright.async_api import async_playwright
 from dotenv import load_dotenv
 
 from app.executors.ex_reservation.selectors import URLS, COMMON
-from app.executors.ex_reservation.login import login_with_auto_otp
+from app.executors.ex_reservation.login import login, complete_otp_authentication
 
 # .envファイルを読み込み
 load_dotenv()
@@ -100,19 +100,28 @@ async def main():
             print(f"パスワード: {'*' * len(PASSWORD)}\n")
 
             print("=" * 60)
-            print("統合ログイン関数を実行します")
-            print("OTP必要な場合は自動でOTP処理を行います")
+            print("ログイン処理を開始します")
             print("=" * 60)
             print()
 
-            # 統合ログイン関数を実行
-            # OTPが必要な場合は自動でget_otp_from_user()が呼ばれる
-            result = await login_with_auto_otp(
+            # Step 1: 通常のログインを試みる
+            result = await login(
                 page=page,
                 member_id=MEMBER_ID,
                 password=PASSWORD,
-                otp_callback=get_otp_from_user,  # OTP取得コールバック
             )
+
+            # Step 2: OTP必要な場合はOTP処理を実行
+            if result.requires_otp:
+                print("\n" + "=" * 60)
+                print("OTP認証が必要です")
+                print("=" * 60)
+                print()
+
+                result = await complete_otp_authentication(
+                    page=page,
+                    otp_callback=get_otp_from_user,  # OTP取得コールバック
+                )
 
             print("\n" + "=" * 60)
             print("ログイン結果")
@@ -123,7 +132,7 @@ async def main():
             print()
 
             if result.success:
-                print("✓ ログイン成功！")
+                print("OK ログイン成功！")
 
                 # ログイン後のページを確認
                 current_url = page.url
@@ -140,7 +149,7 @@ async def main():
                 print(f"スクリーンショット保存: {screenshot_path}")
 
             else:
-                print(f"✗ ログイン失敗: {result.message}")
+                print(f"NG ログイン失敗: {result.message}")
 
                 # エラー時のスクリーンショット
                 screenshot_path = "screenshots/ex_otp_failure.png"

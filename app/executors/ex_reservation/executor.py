@@ -15,7 +15,7 @@ from app.executors.base import BaseExecutor, ExecutorSearchResult, SearchOption
 from app.tools.browser import get_page, take_screenshot
 
 from app.executors.ex_reservation.selectors import URLS, MYPAGE
-from app.executors.ex_reservation.login import login, check_logged_in, request_otp, enter_otp
+from app.executors.ex_reservation.login import login, check_logged_in, complete_otp_authentication
 from app.executors.ex_reservation.search import (
     open_search_form,
     fill_search_form,
@@ -216,7 +216,14 @@ class EXReservationExecutor(BaseExecutor):
                     credentials.get("member_id", credentials.get("email", "")),
                     credentials.get("password", ""),
                 )
-                
+
+                if login_result.requires_otp:
+                    # OTPが必要な場合
+                    return ExecutionResult(
+                        success=False,
+                        message="電話認証（OTP）が必要です。登録済み電話番号に着信があります。",
+                    )
+
                 if not login_result.success:
                     return ExecutionResult(
                         success=False,

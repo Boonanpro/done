@@ -281,7 +281,7 @@ async def close_otp_dialog(page: Page) -> LoginResult:
                 # 「閉じる」を含むか判定（柔軟に）
                 search_text = (text + value + class_name + onclick).lower()
                 if any(keyword in search_text for keyword in ["閉じる", "close", "とじる", "閉", "×", "x"]):
-                    print(f"[CLOSE_DIALOG] ✓ 候補発見: {info}")
+                    print(f"[CLOSE_DIALOG] OK 候補発見: {info}")
                     if close_button is None:  # 最初に見つかったものを使う
                         close_button = btn
                         button_info = info
@@ -297,7 +297,7 @@ async def close_otp_dialog(page: Page) -> LoginResult:
             # ダイアログ内の閉じるボタンを直接探す
             dialog_close_selectors = [
                 'text="閉じる"',
-                'text="✕ 閉じる"',
+                'text="x 閉じる"',
                 ':text("閉じる")',
                 '[class*="close"]',
                 '[class*="LBX"] >> text="閉じる"',
@@ -309,7 +309,7 @@ async def close_otp_dialog(page: Page) -> LoginResult:
                     locator = page.locator(selector)
                     count = await locator.count()
                     if count > 0:
-                        print(f"[CLOSE_DIALOG]   ✓ 見つかった: {selector}")
+                        print(f"[CLOSE_DIALOG]   OK 見つかった: {selector}")
                         close_button = locator.first
                         button_info = selector
                         break
@@ -328,13 +328,13 @@ async def close_otp_dialog(page: Page) -> LoginResult:
         try:
             # force: true でオーバーレイを無視してクリック
             await close_button.click(force=True, timeout=5000)
-            print("[CLOSE_DIALOG] ✓ クリック成功")
+            print("[CLOSE_DIALOG] OK クリック成功")
         except Exception as e:
             print(f"[CLOSE_DIALOG] × クリック失敗: {e}")
             print("[CLOSE_DIALOG] JavaScriptで直接クリックを試みます...")
             try:
                 await close_button.evaluate("el => el.click()")
-                print("[CLOSE_DIALOG] ✓ JavaScriptクリック成功")
+                print("[CLOSE_DIALOG] OK JavaScriptクリック成功")
             except Exception as js_error:
                 print(f"[CLOSE_DIALOG] × JavaScriptクリックも失敗: {js_error}")
                 return LoginResult(
@@ -344,7 +344,7 @@ async def close_otp_dialog(page: Page) -> LoginResult:
 
         await page.wait_for_timeout(1500)
 
-        print("[CLOSE_DIALOG] ✓ ダイアログを閉じました")
+        print("[CLOSE_DIALOG] OK ダイアログを閉じました")
         return LoginResult(
             success=True,
             message="ダイアログを閉じました",
@@ -466,7 +466,7 @@ async def enter_otp(page: Page, otp_code: str) -> LoginResult:
         print(f"[OTP_ENTER] ページ状態: {state.value}")
 
         if state == PageState.LOGGED_IN:
-            print("[OTP_ENTER] ✓ ログイン成功を検出")
+            print("[OTP_ENTER] OK ログイン成功を検出")
             return LoginResult(
                 success=True,
                 message="OTP認証成功",
@@ -483,7 +483,7 @@ async def enter_otp(page: Page, otp_code: str) -> LoginResult:
 
         # URLで判定
         if "ClientService" in current_url:
-            print("[OTP_ENTER] ✓ URLからログイン成功を判定")
+            print("[OTP_ENTER] OK URLからログイン成功を判定")
             return LoginResult(
                 success=True,
                 message="OTP認証成功",
@@ -513,71 +513,43 @@ async def enter_otp(page: Page, otp_code: str) -> LoginResult:
         )
 
 
-async def login_with_auto_otp(
+async def complete_otp_authentication(
     page: Page,
-    member_id: str,
-    password: str,
-    otp_callback: Optional[Callable[[], Awaitable[str]]] = None,
+    otp_callback: Callable[[], Awaitable[str]],
 ) -> LoginResult:
     """
-    OTP自動判定付き統合ログイン
+    OTP認証処理を完了する
 
-    1. ID/パスワードでログインを試みる
-    2. OTP必要な場合：
-       - コールバック関数を呼び出してOTPを取得
-       - complete_otp_login()で自動処理
-    3. OTP不要な場合：
-       - そのまま完了
+    login()でOTPが必要と判定された後に呼び出す。
+
+    1. 音声OTPを発信
+    2. ダイアログを閉じる
+    3. コールバックでOTPを取得
+    4. OTPを入力してログイン完了
 
     Args:
-        page: Playwrightページ
-        member_id: 会員ID
-        password: パスワード
+        page: Playwrightページ（OTP画面にいる状態）
         otp_callback: OTPを取得するコールバック関数（async）
 
     Returns:
-        LoginResult: 最終的なログイン結果
+        LoginResult: ログイン結果
     """
     try:
-        print(f"[LOGIN] 会員ID: {member_id}")
+        print("[OTP_AUTH] OTP認証を開始します")
 
-        # Step 1: 通常のログインを試みる
-        login_result = await login(page, member_id, password)
-
-        print(f"[LOGIN] 初回ログイン結果: {login_result.message}")
-        print(f"[LOGIN] OTP必要: {login_result.requires_otp}")
-
-        # Step 2: OTP不要な場合はそのまま返す
-        if not login_result.requires_otp:
-            if login_result.success:
-                print("[LOGIN] ✓ ログイン成功（OTP不要）")
-            return login_result
-
-        # Step 3: OTP必要な場合
-        print("[LOGIN] OTP認証が必要です")
-
-        if otp_callback is None:
-            return LoginResult(
-                success=False,
-                message="OTP認証が必要ですが、OTPコールバックが提供されていません",
-                requires_otp=True,
-                page_state=PageState.OTP_REQUIRED,
-            )
-
-        # Step 4: まず「自動音声案内発信」ボタンをクリック
-        print("[LOGIN] 自動音声案内を発信します...")
+        # Step 1: 音声OTPを発信
+        print("[OTP_AUTH] 自動音声案内を発信します...")
         request_result = await request_otp(page)
         if not request_result.success:
             return request_result
 
-        print("[LOGIN] 電話が発信されました。登録済み電話番号に着信があります。")
+        print("[OTP_AUTH] 電話が発信されました。登録済み電話番号に着信があります。")
 
-        # Step 5: ダイアログを閉じる（必須）
-        print("[LOGIN] ダイアログを閉じます...")
+        # Step 2: ダイアログを閉じる（必須）
+        print("[OTP_AUTH] ダイアログを閉じます...")
         close_result = await close_otp_dialog(page)
         if not close_result.success:
-            # 閉じるボタンが見つからない場合はエラー
-            print(f"[LOGIN] × エラー: {close_result.message}")
+            print(f"[OTP_AUTH] × エラー: {close_result.message}")
             return LoginResult(
                 success=False,
                 message=f"ダイアログを閉じることができません: {close_result.message}",
@@ -585,10 +557,10 @@ async def login_with_auto_otp(
                 page_state=PageState.OTP_REQUIRED,
             )
 
-        print("[LOGIN] ✓ ダイアログを閉じました")
+        print("[OTP_AUTH] OK ダイアログを閉じました")
 
-        # Step 6: コールバックでOTPを取得（電話が鳴っている間に待つ）
-        print("[LOGIN] OTPの入力を待っています...")
+        # Step 3: コールバックでOTPを取得
+        print("[OTP_AUTH] OTPの入力を待っています...")
         otp_code = await otp_callback()
 
         if not otp_code or len(otp_code) != 6:
@@ -599,26 +571,26 @@ async def login_with_auto_otp(
                 page_state=PageState.OTP_REQUIRED,
             )
 
-        print(f"[LOGIN] OTPを取得しました: {otp_code}")
+        print(f"[OTP_AUTH] OTPを取得しました: {otp_code}")
 
-        # Step 7: OTPを入力してログイン
-        print("[LOGIN] OTPを入力してログインします...")
+        # Step 4: OTPを入力してログイン
+        print("[OTP_AUTH] OTPを入力してログインします...")
         otp_result = await enter_otp(page, otp_code)
 
         if otp_result.success:
-            print("[LOGIN] ✓ OTPログイン成功")
+            print("[OTP_AUTH] OK OTPログイン成功")
         else:
-            print(f"[LOGIN] ✗ OTPログイン失敗: {otp_result.message}")
+            print(f"[OTP_AUTH] NG OTPログイン失敗: {otp_result.message}")
 
         return otp_result
 
     except Exception as e:
-        print(f"[LOGIN] エラー: {str(e)}")
+        print(f"[OTP_AUTH] エラー: {str(e)}")
         import traceback
         traceback.print_exc()
 
         return LoginResult(
             success=False,
-            message=f"ログインエラー: {str(e)}",
+            message=f"OTP認証エラー: {str(e)}",
             page_state=PageState.UNKNOWN,
         )
