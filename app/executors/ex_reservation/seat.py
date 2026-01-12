@@ -135,7 +135,12 @@ async def handle_agreement_dialog(page: Page) -> bool:
         return False
 
 
-async def complete_seat_selection(page: Page, product_index: int = 0, seat_position: str = "指定なし") -> SeatSelectionResult:
+async def complete_seat_selection(
+    page: Page,
+    product_index: int = 0,
+    seat_position: str = "指定なし",
+    allow_separate_seats: bool = False
+) -> SeatSelectionResult:
     """
     座席選択を完了して確認画面へ進む
 
@@ -143,6 +148,7 @@ async def complete_seat_selection(page: Page, product_index: int = 0, seat_posit
         page: Playwrightページ
         product_index: 商品のインデックス（0: 最初の商品）
         seat_position: 座席位置（"指定なし", "窓側A", "通路側C", "通路側D", "窓側E"）
+        allow_separate_seats: 席が離れても良いか（複数人予約時のみ有効）
 
     Returns:
         SeatSelectionResult: 座席選択結果
@@ -167,6 +173,17 @@ async def complete_seat_selection(page: Page, product_index: int = 0, seat_posit
                     message=f"座席位置（{seat_position}）の選択に失敗しました",
                 )
             print("✓ 座席位置選択完了")
+
+        # 「席が離れても良い」チェックボックス（複数人予約時）
+        if allow_separate_seats:
+            print("「席が離れても良い」をチェック中...")
+            checkbox = page.locator(SEAT_SELECTION["allow_separate_checkbox"])
+            if await checkbox.count() > 0:
+                await checkbox.click(force=True)
+                await page.wait_for_timeout(500)
+                print("✓ 「席が離れても良い」をチェックしました")
+            else:
+                print("⚠️  「席が離れても良い」チェックボックスが見つかりません（1人予約の場合は正常）")
 
         # スクリーンショット
         screenshot_path = f"ex_seat_selected_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"

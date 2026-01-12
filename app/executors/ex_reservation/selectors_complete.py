@@ -211,6 +211,9 @@ SEAT_SELECTION = {
     # 座席表から指定するボタン
     "seat_map_button": 'button.seat_map_button',
 
+    # 席が離れても良い チェックボックス（複数人予約時）
+    "allow_separate_checkbox": '#mchk1',  # input[type="checkbox"][name="mchk1"]
+
     # 予約を続けるボタン（商品選択後に表示）
     "continue_button": 'input[name="b4"]',  # input[type="submit"][value="予約を続ける"]
 
