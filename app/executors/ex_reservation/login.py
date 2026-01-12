@@ -36,27 +36,30 @@ class LoginResult:
 async def detect_page_state(page: Page) -> PageState:
     """
     現在のページ状態を検出
-    
+
     Returns:
         PageState: ページ状態
     """
     try:
-        # OTP画面かチェック
-        if await page.locator(OTP["send_voice_button"]).count() > 0:
+        # OTP画面かチェック（音声OTPまたはSMS OTPボタンの存在で判定）
+        voice_otp_exists = await page.locator(OTP["send_voice_button"]).count() > 0
+        sms_otp_exists = await page.locator(OTP["send_sms_button"]).count() > 0
+
+        if voice_otp_exists or sms_otp_exists:
             return PageState.OTP_REQUIRED
-        
+
         # ログイン済みかチェック
         if await page.locator(COMMON["logged_in"]).count() > 0:
             return PageState.LOGGED_IN
-        
+
         # ログインフォームかチェック
         if await page.locator(LOGIN["member_id"]).count() > 0:
             return PageState.LOGIN_FORM
-        
+
         # エラーかチェック
         if await page.locator(COMMON["error"]).count() > 0:
             return PageState.ERROR
-        
+
         return PageState.UNKNOWN
     except Exception:
         return PageState.UNKNOWN
@@ -138,7 +141,7 @@ async def login(
         if state == PageState.OTP_REQUIRED:
             return LoginResult(
                 success=False,
-                message="ワンタイムパスワード（電話認証）が必要です",
+                message="ワンタイムパスワード（OTP認証）が必要です",
                 requires_otp=True,
                 page_state=state,
             )
@@ -196,28 +199,39 @@ async def login(
 
 async def request_otp(page: Page) -> LoginResult:
     """
-    OTP（電話認証）を要求
+    OTP（電話認証またはSMS認証）を要求
 
-    「自動音声案内発信」ボタンをクリックして電話を発信する
+    「自動音声案内発信」ボタンまたは「SMS送信」ボタンをクリックしてOTPを発信する
 
     Returns:
         LoginResult: 結果
     """
     try:
-        # 「自動音声案内発信」ボタンをクリック
-        send_button = page.locator(OTP["send_voice_button"])
-        if await send_button.count() == 0:
+        # SMS送信ボタンがあるかチェック
+        sms_button = page.locator(OTP["send_sms_button"])
+        if await sms_button.count() > 0:
+            print("[REQUEST_OTP] SMS送信ボタンを検出しました")
+            await sms_button.click()
+            await page.wait_for_timeout(2000)
             return LoginResult(
-                success=False,
-                message="自動音声案内発信ボタンが見つかりません",
+                success=True,
+                message="SMS認証を送信しました。登録済み電話番号にSMSが届きます。",
             )
 
-        await send_button.click()
-        await page.wait_for_timeout(2000)
+        # 音声案内発信ボタンがあるかチェック
+        voice_button = page.locator(OTP["send_voice_button"])
+        if await voice_button.count() > 0:
+            print("[REQUEST_OTP] 自動音声案内発信ボタンを検出しました")
+            await voice_button.click()
+            await page.wait_for_timeout(2000)
+            return LoginResult(
+                success=True,
+                message="電話認証を発信しました。登録済み電話番号に着信があります。",
+            )
 
         return LoginResult(
-            success=True,
-            message="電話認証を発信しました。登録済み電話番号に着信があります。",
+            success=False,
+            message="OTP発信ボタン（SMS送信または自動音声案内発信）が見つかりません",
         )
 
     except Exception as e:

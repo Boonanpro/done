@@ -24,10 +24,13 @@ LOGIN = {
     "login_button": 'role=button[name="ログイン"]',
 }
 
-# ===== OTPページ（実確認済み 2026/01/10・電話認証）=====
+# ===== OTPページ（実確認済み 2026/01/10・電話認証・SMS認証対応）=====
 OTP = {
     # 自動音声案内発信ボタン - input[value]で正確に指定
     "send_voice_button": 'input[value="自動音声案内発信"]',
+
+    # SMS送信ボタン - SMS認証の場合に表示される
+    "send_sms_button": 'button:has-text("SMS送信"), input[value="SMS送信"]',
 
     # 閉じるボタン - 音声案内発信後のダイアログを閉じる（存在しない場合あり）
     "close_button": 'button:has-text("閉じる"), input[value="閉じる"]',
@@ -89,8 +92,8 @@ SEARCH_FORM = {
     # 座席の種類
     "seat_type": 'combobox >> nth=9',
     
-    # 予約を続けるボタン
-    "continue_button": 'button:has-text("予約を続ける")',
+    # 予約を続けるボタン（実際はinput type="submit"）
+    "continue_button": 'input[type="submit"][value*="予約"], button:has-text("予約を続ける")',
     
     # 戻るボタン
     "back_button": 'button:has-text("戻る")',
@@ -140,8 +143,8 @@ PRODUCT_SELECT = {
     # 座席表から指定するボタン
     "seat_map_button": 'button:has-text("座席表から指定する")',
     
-    # 予約を続けるボタン
-    "continue_button": 'button:has-text("予約を続ける")',
+    # 予約を続けるボタン（実際はinput type="submit"）
+    "continue_button": 'input[type="submit"][value*="予約"], button:has-text("予約を続ける")',
 }
 
 # ===== 最終確認画面（実確認済み）=====
