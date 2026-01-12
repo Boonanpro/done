@@ -89,8 +89,9 @@ async def handle_agreement_dialog(page: Page) -> bool:
     """
     try:
         # ダイアログが表示されているかチェック
-        dialog = page.locator(AGREEMENT_DIALOG["dialog"])
-        if await dialog.count() > 0 and await dialog.is_visible():
+        # まず見出しで確認（より確実）
+        heading = page.locator(AGREEMENT_DIALOG["heading"])
+        if await heading.count() > 0:
             print("同意事項ダイアログが表示されました")
 
             # スクリーンショット
@@ -98,34 +99,41 @@ async def handle_agreement_dialog(page: Page) -> bool:
             await page.screenshot(path=screenshot_path)
             print(f"  スクリーンショット: {screenshot_path}")
 
-            # 同意するチェックボックスをクリック（JavaScriptイベントを発火させる）
+            # 同意するチェックボックスをクリック
             agree_checkbox = page.locator(AGREEMENT_DIALOG["agree_checkbox"])
             if await agree_checkbox.count() > 0:
-                # .check() ではなく .click() を使用してJavaScriptイベントを発火
                 await agree_checkbox.click(force=True)
                 print("  「同意する」をクリックしました")
 
-                # JavaScriptの処理を待つ
+                # ボタンが有効化されるのを待つ
                 await page.wait_for_timeout(1000)
 
-                # ボタンが有効化されたか確認
-                continue_btn = page.locator(AGREEMENT_DIALOG["continue_button"])
-                is_enabled = not await continue_btn.is_disabled()
-                print(f"  「予約を続ける」ボタンの状態: {'有効' if is_enabled else '無効'}")
+                # JavaScriptでダイアログ内のボタンを直接クリック
+                # sb-4: 同意後に確認画面へ進むボタン (display:noneでも発火)
+                await page.evaluate("""
+                    () => {
+                        const button = document.getElementById('sb-4');
+                        if (button && button.onclick) {
+                            button.onclick.call(button);
+                        }
+                    }
+                """)
+                print("  「予約を続ける」ボタンをクリックしました（JavaScript実行）")
 
-                if not is_enabled:
-                    # まだ無効の場合は少し待つ
-                    await page.wait_for_timeout(2000)
-                    is_enabled = not await continue_btn.is_disabled()
-                    print(f"  再確認後の状態: {'有効' if is_enabled else '無効'}")
+                # ページ遷移を待つ
+                await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                await page.wait_for_timeout(1000)
 
-                # 予約を続けるボタンをクリック
-                if await continue_btn.count() > 0:
-                    await continue_btn.click()
-                    await page.wait_for_load_state("domcontentloaded")
-                    await page.wait_for_timeout(2000)
-                    print("  「予約を続ける」をクリックしました")
+                # ダイアログが閉じたか確認
+                dialog = page.locator(AGREEMENT_DIALOG["dialog"])
+                dialog_visible = await dialog.is_visible() if await dialog.count() > 0 else False
+
+                if not dialog_visible:
+                    print("  [OK] ダイアログが閉じました")
                     return True
+                else:
+                    print("  [WARN]  ダイアログがまだ表示されています")
+                    return False
 
             return False
         return False
@@ -162,7 +170,7 @@ async def complete_seat_selection(
                 message="商品の選択に失敗しました",
             )
 
-        print("✓ 商品選択完了")
+        print("[OK] 商品選択完了")
 
         # 座席位置を選択
         if seat_position != "指定なし":
@@ -172,7 +180,7 @@ async def complete_seat_selection(
                     success=False,
                     message=f"座席位置（{seat_position}）の選択に失敗しました",
                 )
-            print("✓ 座席位置選択完了")
+            print("[OK] 座席位置選択完了")
 
         # 「席が離れても良い」チェックボックス（複数人予約時）
         if allow_separate_seats:
@@ -181,9 +189,9 @@ async def complete_seat_selection(
             if await checkbox.count() > 0:
                 await checkbox.click(force=True)
                 await page.wait_for_timeout(500)
-                print("✓ 「席が離れても良い」をチェックしました")
+                print("[OK] 「席が離れても良い」をチェックしました")
             else:
-                print("⚠️  「席が離れても良い」チェックボックスが見つかりません（1人予約の場合は正常）")
+                print("[WARN]  「席が離れても良い」チェックボックスが見つかりません（1人予約の場合は正常）")
 
         # スクリーンショット
         screenshot_path = f"ex_seat_selected_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
@@ -195,7 +203,8 @@ async def complete_seat_selection(
         if await continue_btn.count() > 0:
             await continue_btn.click()
             await page.wait_for_load_state("domcontentloaded")
-            await page.wait_for_timeout(3000)
+            # ダイアログまたは確認画面の表示を待つ
+            await page.wait_for_timeout(2000)
         else:
             return SeatSelectionResult(
                 success=False,
@@ -204,6 +213,7 @@ async def complete_seat_selection(
             )
 
         # 同意事項ダイアログが表示された場合に対応
+        print("同意事項ダイアログの確認中...")
         await handle_agreement_dialog(page)
 
         # 確認画面のスクリーンショット
