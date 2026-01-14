@@ -59,10 +59,18 @@ class StateMachine:
         user_id: str,
         llm_client: Optional[Any] = None,
         on_reasoning_step: Optional[Any] = None,  # コールバック関数
+        existing_state: Optional[AgentState] = None,  # 既存セッションから復元
     ):
-        self.state = AgentState(session_id=session_id, user_id=user_id)
+        # 既存セッションがあれば復元、なければ新規作成
+        if existing_state:
+            self.state = existing_state
+            logger.info(f"Restored existing session {session_id} (state: {existing_state.current_state.value})")
+        else:
+            self.state = AgentState(session_id=session_id, user_id=user_id)
+            logger.info(f"Created new session {session_id}")
+
         self._on_reasoning_step = on_reasoning_step  # SSE用コールバック
-        
+
         # LLMクライアント（渡されなければ自動生成）
         if llm_client:
             self.llm_client = llm_client
@@ -136,29 +144,135 @@ class StateMachine:
                 "state": State.ERROR.value,
                 "error": str(e),
             }
+        finally:
+            # セッションを保存
+            await self._save_session()
     
     async def _process_intake(self, message: str) -> dict[str, Any]:
         """INTAKE: ユーザーの要望を構造化"""
         await self._add_reasoning_step("ユーザーの要望を分析しています...")
-        
+
         # 会話履歴を取得（文脈理解のため）
         conversation_history = await self._get_conversation_history(limit=10)
-        
+
+        # 前回の状態情報を準備
+        previous_state = {
+            "current_state": self.state.current_state.value,
+            "intake_result": self.state.intake_result,
+            "research_result": self.state.research_result,
+        }
+
+        # DEBUG: セッション状態を確認
+        logger.warning(f"[DEBUG] Session ID: {self.state.session_id}")
+        logger.warning(f"[DEBUG] research_result: {self.state.research_result}")
+        logger.warning(f"[DEBUG] credentials_required: {self.state.research_result.get('credentials_required') if self.state.research_result else None}")
+
         # LLMを呼び出して要望を構造化（ストリーミングで[STEP]がリアルタイム送信される）
-        prompt = get_intake_prompt(message, self.state.user_preferences, conversation_history)
+        prompt = get_intake_prompt(message, self.state.user_preferences, conversation_history, previous_state)
         llm_response = await self._call_llm(prompt)
-        
+
         # レスポンスをパース
         intake_result = self._parse_json_response(llm_response)
-        self.state.intake_result = intake_result
+
+        # task_typeを取得
+        task_type = intake_result.get("task_type", "other")
         
         # reasoning_stepsをマージ
         if "reasoning_steps" in intake_result:
             for step in intake_result["reasoning_steps"]:
                 await self._add_reasoning_step(step)
-        
+
+        # ========================================
+        # follow_up: 前回の情報不足を解消
+        # ========================================
+        if task_type == "follow_up":
+            # 前回のintake_resultに新しい情報をマージ
+            if self.state.intake_result:
+                previous_details = self.state.intake_result.get("details", {})
+                new_details = intake_result.get("details", {})
+                merged_details = {**previous_details, **new_details}
+                self.state.intake_result["details"] = merged_details
+                logger.info(f"Merged details: {merged_details}")
+            else:
+                self.state.intake_result = intake_result
+
+            # 必須情報が揃ったか確認
+            if self._has_sufficient_info():
+                await self._add_reasoning_step("→ 必須情報が揃いました。計画を立てます")
+                self.state.transition_to(State.PLAN)
+                return await self._process_plan()
+            else:
+                # まだ不足
+                missing = self._get_missing_info_str()
+                await self._add_reasoning_step(f"→ まだ{missing}が不足しています")
+                return {
+                    "state": State.INTAKE.value,
+                    "response": f"{missing}を教えてください。",
+                    "reasoning_steps": self.state.reasoning_steps,
+                }
+
+        # ========================================
+        # credentials_providing: 認証情報の提供
+        # ========================================
+        if task_type == "credentials_providing":
+            credentials = intake_result.get("credentials", {})
+            member_id = credentials.get("member_id")
+            password = credentials.get("password")
+
+            if not member_id or not password:
+                await self._add_reasoning_step("→ 認証情報が不完全です")
+                return {
+                    "state": State.INTAKE.value,
+                    "response": "会員IDとパスワードの両方を教えてください。",
+                    "reasoning_steps": self.state.reasoning_steps,
+                }
+
+            # 前回のresearch_resultから、どのExecutorの認証情報が必要だったかを取得
+            executor_name = self.state.research_result.get("executor_name")
+            if not executor_name:
+                await self._add_reasoning_step("→ 認証情報を保存するExecutorが不明です")
+                return {
+                    "state": State.INTAKE.value,
+                    "response": "認証情報の保存に失敗しました。もう一度最初からお試しください。",
+                    "reasoning_steps": self.state.reasoning_steps,
+                }
+
+            # credentials_serviceで保存
+            await self._add_reasoning_step(f"→ {executor_name}の認証情報を保存しています...")
+            from app.services.credentials_service import get_credentials_service
+            creds_service = get_credentials_service()
+
+            try:
+                await creds_service.save_credential(
+                    user_id=self.state.user_id,
+                    service=executor_name,
+                    credentials={
+                        "member_id": member_id,
+                        "password": password,
+                    },
+                )
+                await self._add_reasoning_step("→ 認証情報を保存しました")
+            except Exception as e:
+                logger.exception(f"Failed to save credentials: {e}")
+                await self._add_reasoning_step(f"→ 認証情報の保存に失敗: {e}")
+                return {
+                    "state": State.INTAKE.value,
+                    "response": "認証情報の保存に失敗しました。もう一度お試しください。",
+                    "reasoning_steps": self.state.reasoning_steps,
+                }
+
+            # 認証情報保存成功 → PLANからやり直す（既にplan_resultがあるはず）
+            if self.state.plan_result:
+                await self._add_reasoning_step("→ 認証情報が揃ったので検索を再開します")
+                self.state.transition_to(State.RESEARCH)
+                return await self._process_research()
+            else:
+                # plan_resultがない場合はINTAKEから
+                await self._add_reasoning_step("→ 認証情報が揃いました。計画を立てます")
+                self.state.transition_to(State.PLAN)
+                return await self._process_plan()
+
         # 雑談・質問の場合は状態機械を抜ける
-        task_type = intake_result.get("task_type", "other")
         if task_type == "other":
             # 検索が必要かどうかを確認
             requires_search = intake_result.get("requires_search", False)
@@ -176,12 +290,27 @@ class StateMachine:
             
             if not requires_search:
                 await self._add_reasoning_step("→ 通常の会話として応答します")
-            
+
             return await self._respond_as_chat(message, search_results=search_results)
-        
+
+        # ========================================
+        # 新しいタスク (travel, purchase等)
+        # ========================================
+        self.state.intake_result = intake_result
+
+        # 必須情報チェック（PLANに進む前に）
+        if not self._has_sufficient_info():
+            missing = self._get_missing_info_str()
+            await self._add_reasoning_step(f"→ {missing}が不足しています")
+            return {
+                "state": State.INTAKE.value,
+                "response": f"{missing}を教えてください。",
+                "reasoning_steps": self.state.reasoning_steps,
+            }
+
         # 次の状態へ
         self.state.transition_to(State.PLAN)
-        
+
         # PLANも続けて実行
         return await self._process_plan()
     
@@ -212,17 +341,18 @@ class StateMachine:
     async def _process_research(self) -> dict[str, Any]:
         """RESEARCH: 情報収集（ツールに応じて分岐）"""
         await self._add_reasoning_step("情報を収集しています...")
-        
+
         # 使用するツールを特定
         tools = self.state.plan_result.get("tools", [])
         search_results = []
-        
+        credentials_required_executor = None  # 認証情報が必要なExecutor
+
         for tool in tools:
             if tool == "none":
                 # 検索不要
                 await self._add_reasoning_step("→ LLMの知識で回答します")
                 continue
-            
+
             elif tool == "web_search":
                 # Tavily検索 + Jinaでページ内容取得
                 await self._add_reasoning_step("→ Web検索を実行中...")
@@ -251,20 +381,31 @@ class StateMachine:
                         error=str(e),
                     )
                     await self._add_reasoning_step(f"→ Web検索に失敗: {e}")
-            
+
             else:
                 # Executor.search()
                 await self._add_reasoning_step(f"→ {tool}で検索中...")
                 try:
                     result = await self._call_executor_search(tool)
                     if result:
-                        search_results.append(result)
-                        self.state.add_execution_record(
-                            tool=tool,
-                            action="search",
-                            success=True,
-                            result={"count": len(result.get("options", []))},
-                        )
+                        # 認証情報が必要な場合を検知
+                        if result.get("error") == "credentials_required":
+                            credentials_required_executor = tool
+                            await self._add_reasoning_step(f"→ {tool}の認証情報が必要です")
+                            self.state.add_execution_record(
+                                tool=tool,
+                                action="search",
+                                success=False,
+                                error="credentials_required",
+                            )
+                        else:
+                            search_results.append(result)
+                            self.state.add_execution_record(
+                                tool=tool,
+                                action="search",
+                                success=True,
+                                result={"count": len(result.get("options", []))},
+                            )
                     else:
                         self.state.add_execution_record(
                             tool=tool,
@@ -280,7 +421,42 @@ class StateMachine:
                         error=str(e),
                     )
                     await self._add_reasoning_step(f"→ {tool}の検索に失敗: {e}")
-        
+
+        # 認証情報が必要な場合、優先的に要求
+        if credentials_required_executor:
+            executor_display_name = {
+                "ex_reservation": "EX予約",
+                "amazon": "Amazon",
+                "rakuten": "楽天",
+            }.get(credentials_required_executor, credentials_required_executor)
+
+            # Web検索結果があれば参考情報として表示
+            reference_info = ""
+            if search_results:
+                await self._add_reasoning_step("→ 参考情報として時刻表を確認しました")
+                reference_info = "\n\n【参考】Web検索で時刻表情報を確認しています..."
+
+            response = f"{executor_display_name}の認証情報が必要です。\n\n以下の情報を教えてください：\n- 会員ID\n- パスワード{reference_info}"
+
+            # 状態をINTAKEに戻す（認証情報の入力を待つ）
+            self.state.transition_to(State.INTAKE)
+            # 認証情報が必要なことをresearch_resultに記録
+            self.state.research_result = {
+                "credentials_required": True,
+                "executor_name": credentials_required_executor,
+                "web_search_results": search_results,
+            }
+
+            # DEBUG: 設定を確認
+            logger.warning(f"[DEBUG] Setting credentials_required=True for executor={credentials_required_executor}")
+            logger.warning(f"[DEBUG] research_result set to: {self.state.research_result}")
+
+            return {
+                "state": State.INTAKE.value,
+                "response": response,
+                "reasoning_steps": self.state.reasoning_steps,
+            }
+
         # LLMで検索結果を整理
         prompt = get_research_prompt(self.state.plan_result, search_results)
         llm_response = await self._call_llm(prompt)
@@ -294,12 +470,24 @@ class StateMachine:
         
         # 十分な情報が集まったか確認
         if not self.state.can_proceed_to_propose():
-            # 情報不足 → PLANに戻る
+            # 情報不足 → 具体的な不足情報を提示
             await self._add_reasoning_step("情報が不足しています。計画を見直します...")
-            self.state.transition_to(State.PLAN)
+
+            # research_resultから不足情報を取得
+            missing_items = research_result.get("missing", [])
+            if missing_items:
+                missing_str = "、".join(missing_items)
+                response = f"{missing_str}の情報が不足しています。詳しく教えてください。"
+            else:
+                # missingがない場合は基本情報をチェック
+                missing_str = self._get_missing_info_str()
+                response = f"{missing_str}を教えてください。"
+
+            # 状態はINTAKEに戻す（ユーザーからの追加情報を待つ）
+            self.state.transition_to(State.INTAKE)
             return {
-                "state": State.PLAN.value,
-                "response": "情報が不足しています。もう少し詳しく教えてください。",
+                "state": State.INTAKE.value,
+                "response": response,
                 "reasoning_steps": self.state.reasoning_steps,
             }
         
@@ -445,18 +633,29 @@ class StateMachine:
     async def _process_execute(self) -> dict[str, Any]:
         """EXECUTE: Executor.execute()を呼ぶ"""
         await self._add_reasoning_step("実行中...")
-        
+
         # 使用するExecutorを特定
         tools = self.state.plan_result.get("tools", [])
-        
+
         for tool in tools:
+            # web_searchやnoneはスキップ（Executorのみ実行）
+            if tool in ["web_search", "none"]:
+                continue
+
+            await self._add_reasoning_step(f"→ {tool}で予約を実行しています...")
             result = await self._call_executor_execute(tool)
             self.state.execution_result = result
+
+            if result.get("success"):
+                await self._add_reasoning_step(f"→ {tool}の実行が完了しました")
+            else:
+                await self._add_reasoning_step(f"→ {tool}の実行に失敗: {result.get('message')}")
+
             break  # 最初の1つだけ実行（複数対応は将来）
-        
+
         # 次の状態へ
         self.state.transition_to(State.VERIFY)
-        
+
         return await self._process_verify()
     
     async def _process_verify(self) -> dict[str, Any]:
@@ -771,10 +970,10 @@ class StateMachine:
         """Executor.search()を呼ぶ"""
         try:
             from app.executors.registry import ExecutorRegistry, register_all_executors
-            
+
             # Executorを登録
             register_all_executors()
-            
+
             # executor_nameからservice_type/service_nameを判定
             executor_mapping = {
                 "ex_reservation": ("train", "ex_reservation"),
@@ -784,27 +983,43 @@ class StateMachine:
                 "bank_transfer": ("payment", "bank_transfer"),
                 "voice": ("voice", "phone"),
             }
-            
+
             if executor_name not in executor_mapping:
                 logger.warning(f"Unknown executor: {executor_name}")
                 return None
-            
+
             service_type, service_name = executor_mapping[executor_name]
             executor = ExecutorRegistry.find(
                 service_type=service_type,
                 service_name=service_name,
                 capability="search",
             )
-            
+
             if not executor:
                 logger.warning(f"Executor not found: {executor_name}")
                 return None
-            
+
+            # credentials取得
+            from app.services.credentials_service import get_credentials_service
+            creds_service = get_credentials_service()
+            credentials = await creds_service.get_credential(
+                self.state.user_id,
+                executor_name,
+            )
+
+            # 認証情報が必要なのに未登録の場合、特別な応答を返す
+            if not credentials and executor_name in ["ex_reservation", "amazon", "rakuten"]:
+                return {
+                    "error": "credentials_required",
+                    "executor_name": executor_name,
+                    "message": f"{executor_name}の認証情報が登録されていません",
+                }
+
             # 検索パラメータを構築
             params = self._build_search_params()
-            
-            result = await executor.search(params)
-            
+
+            result = await executor.search(params, credentials)
+
             # ExecutorSearchResult → dict変換
             if hasattr(result, 'to_dict'):
                 return result.to_dict()
@@ -812,7 +1027,7 @@ class StateMachine:
                 return result.model_dump()
             else:
                 return result
-        
+
         except Exception as e:
             logger.exception(f"Executor search failed: {e}")
             return None
@@ -944,6 +1159,60 @@ class StateMachine:
             lines.append("\n**注意**:")
             for note in notes:
                 lines.append(f"- {note}")
-        
+
         return "\n".join(lines)
+
+    async def _save_session(self) -> None:
+        """セッションを保存"""
+        try:
+            from app.services.session_service import get_session_service
+            session_service = get_session_service()
+            logger.warning(f"[DEBUG] Saving session {self.state.session_id}, research_result={self.state.research_result}")
+            await session_service.save_session(self.state)
+            logger.warning(f"[DEBUG] Session saved successfully")
+        except Exception as e:
+            logger.warning(f"Failed to save session: {e}")
+
+    def _has_sufficient_info(self) -> bool:
+        """必須情報が揃っているか確認"""
+        details = self.state.intake_result.get("details", {})
+        task_type = self.state.intake_result.get("task_type")
+
+        if task_type in ["travel", "reservation"]:
+            return bool(details.get("departure") and details.get("arrival"))
+        elif task_type == "purchase":
+            return bool(details.get("product"))
+        elif task_type == "payment":
+            return bool(details.get("amount") and details.get("recipient"))
+        elif task_type == "phone":
+            return bool(details.get("phone_number") or details.get("company"))
+        # 他のタスクタイプは情報不足なし（検索等で補完可能）
+        return True
+
+    def _get_missing_info_str(self) -> str:
+        """不足している情報を文字列で取得"""
+        details = self.state.intake_result.get("details", {})
+        task_type = self.state.intake_result.get("task_type")
+        missing = []
+
+        if task_type in ["travel", "reservation"]:
+            if not details.get("departure"):
+                missing.append("出発地")
+            if not details.get("arrival"):
+                missing.append("到着地")
+        elif task_type == "purchase":
+            if not details.get("product"):
+                missing.append("商品名")
+        elif task_type == "payment":
+            if not details.get("amount"):
+                missing.append("金額")
+            if not details.get("recipient"):
+                missing.append("支払先")
+        elif task_type == "phone":
+            if not details.get("phone_number") and not details.get("company"):
+                missing.append("電話番号または会社名")
+
+        if missing:
+            return "と".join(missing)
+        return "詳細情報"
 

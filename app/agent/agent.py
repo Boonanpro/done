@@ -1401,44 +1401,64 @@ Respond in this format:
             if not executor:
                 # Executorが見つからない場合 → ツールベースのアクションを試みる
                 logger.info(f"[PROCESS_V2] No executor found, checking for tool-based action")
-                
+
+                # イシューを記録
+                try:
+                    from app.services.issue_tracker import IssueTracker, Issue, IssueType
+                    issue_tracker = IssueTracker()
+                    await issue_tracker.record_issue(Issue(
+                        issue_type=IssueType.EXECUTOR_MISSING,
+                        original_wish=wish,
+                        service_type=research.get("service_type"),
+                        service_name=research.get("service_name"),
+                        research_result=research,
+                        error_message=f"Executor not found for {research.get('service_name') or research.get('service_type')}",
+                        error_details={
+                            "research_result": research,
+                        },
+                        user_id=user_id,
+                    ))
+                    logger.info(f"[ISSUE] Recorded EXECUTOR_MISSING issue for {research.get('service_name')}")
+                except Exception as e:
+                    logger.error(f"[ISSUE] Failed to record issue: {e}")
+
                 # ツールを使ったアクションが可能か確認
                 if research.get("requires_tools", False) or research.get("params", {}).get("actionable", False):
                     # ツールベースのアクション提案を生成
                     result["phase"] = "tool_based_action"
-                    
+
                     if request_id:
                         await notify_progress(
                             request_id, "tool_action",
                             "利用可能なツールでアクションを提案します",
                             "running"
                         )
-                    
+
                     # ツールを使ったアクション提案を生成
                     proposal = await self._generate_tool_based_proposal(wish, research, request_id, conversation_history)
                     result["proposal"] = proposal
                     result["success"] = True
-                    
+
                     if request_id:
                         await notify_progress(
                             request_id, "proposal_ready",
                             "アクションを提案しました",
                             "completed"
                         )
-                    
+
                     return result
                 else:
                     # フィジカルな作業が必要、または対応不可
                     result["phase"] = "no_executor"
                     result["message"] = f"自動実行機能はまだ対応していません。手動で対応をお願いします。"
-                    
+
                     if request_id:
                         await notify_progress(
                             request_id, "no_executor",
                             f"{service_name}の自動実行は未対応です。手順をお伝えします",
                             "completed"
                         )
-                    
+
                     # 手動対応の提案を生成
                     proposal = await self._generate_manual_proposal(wish, research)
                     result["proposal"] = proposal
@@ -1463,14 +1483,35 @@ Respond in this format:
                 # 検索失敗または結果なし
                 result["phase"] = "search_failed"
                 result["message"] = search_result.message or "該当する便が見つかりませんでした"
-                
+
+                # イシューを記録（セレクタが古い可能性）
+                try:
+                    from app.services.issue_tracker import IssueTracker, Issue, IssueType
+                    issue_tracker = IssueTracker()
+                    await issue_tracker.record_issue(Issue(
+                        issue_type=IssueType.SEARCH_FAILED,
+                        original_wish=wish,
+                        service_type=research.get("service_type"),
+                        service_name=research.get("service_name"),
+                        research_result=research,
+                        error_message=f"Search failed: {search_result.message}",
+                        error_details={
+                            "search_params": params,
+                            "search_result": search_result.to_dict(),
+                        },
+                        user_id=user_id,
+                    ))
+                    logger.info(f"[ISSUE] Recorded SEARCH_FAILED issue for {research.get('service_name')}")
+                except Exception as e:
+                    logger.error(f"[ISSUE] Failed to record issue: {e}")
+
                 if request_id:
                     await notify_progress(
                         request_id, "search_failed",
                         result["message"],
                         "error"
                     )
-                
+
                 return result
             
             # ========================================
