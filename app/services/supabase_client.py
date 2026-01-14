@@ -12,15 +12,18 @@ from app.services.encryption import get_encryption_service
 
 class SupabaseClient:
     """Supabaseクライアント"""
-    
+
     def __init__(self):
         """クライアントを初期化"""
         if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
             raise ValueError("Supabase URLとKeyを設定してください")
-        
+
+        # バックエンド処理ではservice_roleキーを優先使用（RLSバイパス）
+        key = settings.SUPABASE_SERVICE_ROLE_KEY or settings.SUPABASE_KEY
+
         self.client: Client = create_client(
             settings.SUPABASE_URL,
-            settings.SUPABASE_KEY,
+            key,
         )
         self.encryption = get_encryption_service()
     
