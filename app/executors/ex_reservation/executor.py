@@ -30,6 +30,9 @@ from app.executors.ex_reservation.book import (
     go_back,
 )
 
+# Executor用: 本物のPlaywright Pageを取得
+from app.tools.browser import get_executor_page
+
 
 class EXReservationExecutor(BaseExecutor):
     """EX予約（新幹線）実行ロジック"""
@@ -59,7 +62,7 @@ class EXReservationExecutor(BaseExecutor):
         Returns:
             ExecutorSearchResult: 検索結果
         """
-        page = await get_page()
+        page = await get_executor_page()
         options: List[SearchOption] = []
         
         try:
@@ -90,12 +93,70 @@ class EXReservationExecutor(BaseExecutor):
                 )
                 
                 if login_result.requires_otp:
-                    # OTPが必要な場合
-                    return ExecutorSearchResult(
-                        success=False,
-                        options=[],
-                        message="電話認証（OTP）が必要です。登録済み電話番号に着信があります。",
+                    # OTPが必要な場合 - 自動処理
+                    await self._notify_progress("otp", "SMS認証を処理中...")
+                    print("[EX_SEARCH] OTP required, starting automatic OTP flow")
+
+                    from app.executors.ex_reservation.login import request_otp, close_otp_dialog, enter_otp
+                    from app.services.otp_service import get_otp_service
+
+                    # Step 1: SMS送信ボタンをクリック
+                    otp_request_result = await request_otp(page)
+                    if not otp_request_result.success:
+                        return ExecutorSearchResult(
+                            success=False,
+                            options=[],
+                            message=f"OTP送信失敗: {otp_request_result.message}",
+                        )
+                    print(f"[EX_SEARCH] OTP requested: {otp_request_result.message}")
+
+                    # Step 2: ダイアログを閉じる
+                    close_result = await close_otp_dialog(page)
+                    if not close_result.success:
+                        print(f"[EX_SEARCH] Warning: {close_result.message}")
+
+                    # Step 3: OTPをGmail経由で取得（SMS Forwarder → Gmail転送）
+                    await self._notify_progress("otp_wait", "OTPの到着を待機中...")
+                    print("[EX_SEARCH] Waiting for OTP via Gmail...")
+
+                    otp_service = get_otp_service()
+                    otp_user_id = getattr(self, '_user_id', None)
+                    if not otp_user_id:
+                        return ExecutorSearchResult(
+                            success=False,
+                            options=[],
+                            message="OTP取得に必要なuser_idが設定されていません。認証を確認してください。",
+                        )
+                    print(f"[EX_SEARCH] OTP user_id: {otp_user_id[:8]}...")
+                    otp_code = await otp_service.wait_for_otp(
+                        user_id=otp_user_id,
+                        service="ex_reservation",
+                        source="email",  # SMS Forwarder経由でGmailに届く
+                        timeout_seconds=90,
+                        poll_interval=5,
                     )
+
+                    if not otp_code:
+                        return ExecutorSearchResult(
+                            success=False,
+                            options=[],
+                            message="OTPの取得がタイムアウトしました。SMSがGmailに転送されているか確認してください。",
+                        )
+
+                    print(f"[EX_SEARCH] OTP received: {otp_code[:2]}****")
+
+                    # Step 4: OTPを入力してログイン完了
+                    await self._notify_progress("otp_enter", "OTPを入力中...")
+                    otp_login_result = await enter_otp(page, otp_code)
+
+                    if not otp_login_result.success:
+                        return ExecutorSearchResult(
+                            success=False,
+                            options=[],
+                            message=f"OTPログイン失敗: {otp_login_result.message}",
+                        )
+
+                    print("[EX_SEARCH] OTP login successful")
                 
                 if not login_result.success:
                     return ExecutorSearchResult(
@@ -193,7 +254,7 @@ class EXReservationExecutor(BaseExecutor):
         
         注意: 安全のため、確認画面まで進み、実際の購入は行わない
         """
-        page = await get_page()
+        page = await get_executor_page()
         
         try:
             details = search_result.details or {}

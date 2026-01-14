@@ -116,26 +116,31 @@ class BaseExecutor(ABC):
         self,
         params: Dict[str, Any],
         credentials: Optional[Dict[str, str]] = None,
+        user_id: Optional[str] = None,
     ) -> ExecutorSearchResult:
         """
         探索モード: 予約可能な選択肢を検索
-        
+
         実際のサイトにPlaywrightでアクセスし、
         空席・在庫・価格を確認して予約可能なものだけ返す。
-        
+
         Args:
             params: 検索パラメータ（出発地、到着地、日時など）
             credentials: 認証情報（オプション）
-            
+            user_id: ユーザーID（OTP取得等に使用）
+
         Returns:
             ExecutorSearchResult: 検索結果
         """
+        # user_idをインスタンス変数として保持
+        self._user_id = user_id
+
         try:
             await self._notify_progress(
                 "executor_start",
                 f"{self.service_display_name}で検索を開始します...",
             )
-            
+
             # サブクラスの実装を呼び出し
             result = await self._do_search(params, credentials)
             
