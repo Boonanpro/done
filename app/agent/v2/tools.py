@@ -220,34 +220,71 @@ async def execute_tool(
     print(f"[TOOL_DEBUG] params keys: {list(params.keys())}")
     print(f"[TOOL_DEBUG] credentials passed: {credentials is not None}")
 
-    # パラメータから認証情報を抽出（LLMがパラメータに含めた場合）
+    # 認証情報の取得優先順位:
+    # 1. 引数で渡された credentials
+    # 2. DBに保存済みの認証情報
+    # 3. LLMがパラメータに含めた認証情報
     if credentials is None:
-        cred_keys = ["user_id", "member_id", "login_id", "id", "username"]
-        pass_keys = ["password", "pass", "pw"]
+        # まずDBから認証情報を取得
+        from app.services.credentials_service import get_credentials_service
+        creds_service = get_credentials_service()
 
-        extracted_id = None
-        extracted_pass = None
+        # スキル名からサービス名を決定
+        service_name = skill_name  # ex_reservation, amazon など
+        stored_creds = await creds_service.get_credential(user_id, service_name)
 
-        for key in cred_keys:
-            if key in params:
-                extracted_id = params.pop(key)
-                print(f"[TOOL_DEBUG] Found credential ID with key: {key}")
-                break
-
-        for key in pass_keys:
-            if key in params:
-                extracted_pass = params.pop(key)
-                print(f"[TOOL_DEBUG] Found password with key: {key}")
-                break
-
-        if extracted_id and extracted_pass:
-            # EX予約は member_id を使用
-            credentials = {"member_id": extracted_id, "password": extracted_pass}
-            print(f"[TOOL_DEBUG] Extracted credentials: member_id={extracted_id[:3]}***")
+        if stored_creds:
+            print(f"[TOOL_DEBUG] Found stored credentials for {service_name}")
+            # EX予約は member_id/password、他は username/password など
+            if "member_id" in stored_creds:
+                credentials = {
+                    "member_id": stored_creds["member_id"],
+                    "password": stored_creds["password"],
+                }
+            elif "username" in stored_creds:
+                credentials = {
+                    "username": stored_creds["username"],
+                    "password": stored_creds["password"],
+                }
+            elif "email" in stored_creds:
+                credentials = {
+                    "email": stored_creds["email"],
+                    "password": stored_creds["password"],
+                }
+            print(f"[TOOL_DEBUG] Using stored credentials: keys={list(credentials.keys())}")
         else:
-            print(f"[TOOL_DEBUG] WARNING: Credentials not found in params!")
-            print(f"[TOOL_DEBUG]   extracted_id found: {extracted_id is not None}")
-            print(f"[TOOL_DEBUG]   extracted_pass found: {extracted_pass is not None}")
+            print(f"[TOOL_DEBUG] No stored credentials for {service_name}, checking params...")
+
+            # DBに無ければパラメータから抽出（LLMがパラメータに含めた場合）
+            cred_keys = ["user_id", "member_id", "login_id", "id", "username"]
+            pass_keys = ["password", "pass", "pw"]
+
+            extracted_id = None
+            extracted_pass = None
+
+            for key in cred_keys:
+                if key in params:
+                    extracted_id = params.pop(key)
+                    print(f"[TOOL_DEBUG] Found credential ID with key: {key}")
+                    break
+
+            for key in pass_keys:
+                if key in params:
+                    extracted_pass = params.pop(key)
+                    print(f"[TOOL_DEBUG] Found password with key: {key}")
+                    break
+
+            if extracted_id and extracted_pass:
+                # EX予約は member_id を使用
+                credentials = {"member_id": extracted_id, "password": extracted_pass}
+                print(f"[TOOL_DEBUG] Extracted credentials: member_id={extracted_id[:3]}***")
+
+                # 今後のために保存（ユーザーが許可した場合のみ）
+                # TODO: ユーザー確認後に保存するフローを追加
+            else:
+                print(f"[TOOL_DEBUG] WARNING: Credentials not found!")
+                print(f"[TOOL_DEBUG]   - Not in DB for service: {service_name}")
+                print(f"[TOOL_DEBUG]   - Not in params either")
 
     # スキルを取得
     skill = SkillRegistry.get(skill_name)
