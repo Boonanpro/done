@@ -92,6 +92,61 @@ class AgentRunner:
             }
         """
         try:
+            # 0. 認証情報待ちの場合、ユーザー入力から認証情報を抽出
+            pending_tool = self.session.data.get("pending_tool_call")
+            if pending_tool and not credentials:
+                extracted = await self._extract_credentials_from_message(user_message)
+                if extracted:
+                    credentials = extracted
+                    # 認証情報をDBに保存
+                    from app.services.credentials_service import get_credentials_service
+                    creds_service = get_credentials_service()
+                    service_name = pending_tool.get("skill", "unknown")
+
+                    await creds_service.save_credential(
+                        user_id=self.session.user_id,
+                        service=service_name,
+                        credentials=credentials,
+                        credential_type="login",
+                    )
+                    logger.info(f"Saved credentials for {service_name}")
+
+                    # 保留中のツールを再実行
+                    self.session.data.pop("pending_tool_call", None)
+
+                    if self._on_reasoning_step:
+                        await self._on_reasoning_step("🔐 認証情報を保存しました")
+                        await self._on_reasoning_step(f"🔧 {pending_tool['skill']} を再実行します...")
+
+                    result = await execute_tool(
+                        tool_call=pending_tool,
+                        user_id=self.session.user_id,
+                        credentials=credentials,
+                    )
+
+                    # 結果をセッションに追加
+                    result_text = format_tool_result(
+                        result, pending_tool["skill"], pending_tool["action"]
+                    )
+                    self.session.add_user_message(result_text)
+
+                    # LLMに結果を伝えて応答を生成
+                    llm_response = await self._call_llm()
+                    parsed = self._parse_response(llm_response)
+                    if parsed["new_state"]:
+                        self.session.transition_to(parsed["new_state"])
+                    self.session.add_assistant_message(llm_response)
+
+                    store = get_session_store()
+                    await store.save(self.session)
+
+                    return {
+                        "response": parsed["user_response"],
+                        "state": self.session.current_state.value,
+                        "reasoning_steps": self.session.reasoning_steps,
+                        "tool_results": [{"tool": pending_tool, "result": result}],
+                    }
+
             # 1. 推論ステップをクリア（新しいターン）
             self.session.clear_reasoning_steps()
 
@@ -133,6 +188,38 @@ class AgentRunner:
                     user_id=self.session.user_id,
                     credentials=credentials,
                 )
+
+                # 認証情報が必要な場合は特別処理
+                if result.get("credentials_required"):
+                    # 保留中のツール呼び出しを保存
+                    self.session.data["pending_tool_call"] = tool_call
+
+                    # ユーザーに認証情報を要求
+                    display_name = result.get("display_name", result.get("service"))
+                    labels = result.get("labels", {})
+
+                    # フィールドのラベルを取得
+                    field_prompts = []
+                    for field in result.get("fields", []):
+                        label = labels.get(field, field)
+                        field_prompts.append(f"・{label}")
+
+                    prompt_text = f"{display_name}を利用するには認証情報が必要です。\n\n以下の情報を教えてください:\n" + "\n".join(field_prompts)
+
+                    # セッションを保存
+                    store = get_session_store()
+                    await store.save(self.session)
+
+                    return {
+                        "response": prompt_text,
+                        "state": self.session.current_state.value,
+                        "reasoning_steps": self.session.reasoning_steps,
+                        "credentials_required": True,
+                        "service": result.get("service"),
+                        "fields": result.get("fields"),
+                        "labels": result.get("labels"),
+                    }
+
                 tool_results.append({
                     "tool": tool_call,
                     "result": result,
@@ -254,6 +341,70 @@ class AgentRunner:
         except Exception as e:
             logger.exception(f"LLM call failed: {e}")
             return f"[STATE: CHAT]\nエラーが発生しました: {e}"
+
+    async def _extract_credentials_from_message(self, message: str) -> Optional[Dict[str, str]]:
+        """
+        ユーザーメッセージから認証情報を抽出
+
+        対応パターン:
+        - "会員ID: 12345 パスワード: mypass"
+        - "12345 / mypass"
+        - "ID: 12345, PW: mypass"
+        - "12345\nmypass"
+        """
+        import re
+
+        # パターン1: ラベル付き（会員ID: xxx パスワード: yyy）
+        id_patterns = [
+            r'(?:会員ID|ID|ユーザー名|メールアドレス|member_id|username|email)[:\s：]+([^\s,、]+)',
+        ]
+        pass_patterns = [
+            r'(?:パスワード|PW|pass|password)[:\s：]+([^\s,、]+)',
+        ]
+
+        member_id = None
+        password = None
+
+        for pattern in id_patterns:
+            match = re.search(pattern, message, re.IGNORECASE)
+            if match:
+                member_id = match.group(1).strip()
+                break
+
+        for pattern in pass_patterns:
+            match = re.search(pattern, message, re.IGNORECASE)
+            if match:
+                password = match.group(1).strip()
+                break
+
+        if member_id and password:
+            return {"member_id": member_id, "password": password}
+
+        # パターン2: スラッシュ区切り（12345 / mypass）
+        slash_match = re.match(r'^([^\s/]+)\s*/\s*([^\s]+)$', message.strip())
+        if slash_match:
+            return {
+                "member_id": slash_match.group(1).strip(),
+                "password": slash_match.group(2).strip(),
+            }
+
+        # パターン3: 改行区切り
+        lines = [l.strip() for l in message.strip().split('\n') if l.strip()]
+        if len(lines) == 2:
+            return {
+                "member_id": lines[0],
+                "password": lines[1],
+            }
+
+        # パターン4: スペース区切り（2単語のみの場合）
+        words = message.strip().split()
+        if len(words) == 2:
+            return {
+                "member_id": words[0],
+                "password": words[1],
+            }
+
+        return None
 
     def _parse_response(self, response: str) -> Dict[str, Any]:
         """

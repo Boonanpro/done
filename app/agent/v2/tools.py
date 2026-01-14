@@ -279,12 +279,47 @@ async def execute_tool(
                 credentials = {"member_id": extracted_id, "password": extracted_pass}
                 print(f"[TOOL_DEBUG] Extracted credentials: member_id={extracted_id[:3]}***")
 
-                # 今後のために保存（ユーザーが許可した場合のみ）
-                # TODO: ユーザー確認後に保存するフローを追加
+                # 認証情報をDBに保存（次回から自動使用）
+                await creds_service.save_credential(
+                    user_id=user_id,
+                    service=service_name,
+                    credentials=credentials,
+                    credential_type="login",
+                )
+                print(f"[TOOL_DEBUG] Saved credentials to DB for future use")
             else:
-                print(f"[TOOL_DEBUG] WARNING: Credentials not found!")
-                print(f"[TOOL_DEBUG]   - Not in DB for service: {service_name}")
-                print(f"[TOOL_DEBUG]   - Not in params either")
+                # 認証情報が見つからない → ユーザーに要求
+                print(f"[TOOL_DEBUG] Credentials not found, requesting from user")
+
+                # サービスごとの認証情報フォーマット
+                credential_formats = {
+                    "ex_reservation": {
+                        "display_name": "EX予約（SmartEX）",
+                        "fields": ["member_id", "password"],
+                        "labels": {"member_id": "会員ID", "password": "パスワード"},
+                    },
+                    "amazon": {
+                        "display_name": "Amazon",
+                        "fields": ["email", "password"],
+                        "labels": {"email": "メールアドレス", "password": "パスワード"},
+                    },
+                }
+
+                format_info = credential_formats.get(service_name, {
+                    "display_name": service_name,
+                    "fields": ["username", "password"],
+                    "labels": {"username": "ユーザー名", "password": "パスワード"},
+                })
+
+                return {
+                    "success": False,
+                    "credentials_required": True,
+                    "service": service_name,
+                    "display_name": format_info["display_name"],
+                    "fields": format_info["fields"],
+                    "labels": format_info["labels"],
+                    "message": f"{format_info['display_name']}の認証情報が必要です。",
+                }
 
     # スキルを取得
     skill = SkillRegistry.get(skill_name)
