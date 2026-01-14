@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 class CredentialsService:
     """認証情報管理サービス（Supabase永続化版）"""
 
+    # 使用するテーブル名（既存のcredentialsテーブルを使用）
+    TABLE_NAME = "credentials"
+
     def __init__(self):
         """サービスを初期化"""
         self.encryption = get_encryption_service()
@@ -40,29 +43,29 @@ class CredentialsService:
             保存結果
         """
         try:
-            encrypted_data = self.encryption.encrypt_dict(credentials)
+            # credential_typeをcredentialsに含めて保存
+            creds_with_type = {**credentials, "_credential_type": credential_type}
+            encrypted_data = self.encryption.encrypt_dict(creds_with_type)
             encrypted_str = encrypted_data.decode('utf-8')  # bytesをstrに変換
 
             # 既存のレコードを確認
-            existing = self.supabase.table("user_credentials").select("id").eq(
+            existing = self.supabase.table(self.TABLE_NAME).select("id").eq(
                 "user_id", user_id
             ).eq(
-                "service", service
+                "service_name", service
             ).execute()
 
             if existing.data:
                 # 更新
-                self.supabase.table("user_credentials").update({
+                self.supabase.table(self.TABLE_NAME).update({
                     "encrypted_data": encrypted_str,
-                    "credential_type": credential_type,
-                }).eq("user_id", user_id).eq("service", service).execute()
+                }).eq("user_id", user_id).eq("service_name", service).execute()
                 logger.info(f"Credentials updated for user {user_id}, service {service}")
             else:
                 # 新規作成
-                self.supabase.table("user_credentials").insert({
+                self.supabase.table(self.TABLE_NAME).insert({
                     "user_id": user_id,
-                    "service": service,
-                    "credential_type": credential_type,
+                    "service_name": service,
                     "encrypted_data": encrypted_str,
                 }).execute()
                 logger.info(f"Credentials saved for user {user_id}, service {service}")
@@ -96,10 +99,10 @@ class CredentialsService:
             復号された認証情報、なければNone
         """
         try:
-            result = self.supabase.table("user_credentials").select("*").eq(
+            result = self.supabase.table(self.TABLE_NAME).select("*").eq(
                 "user_id", user_id
             ).eq(
-                "service", service
+                "service_name", service
             ).execute()
 
             if not result.data:
@@ -109,10 +112,13 @@ class CredentialsService:
             encrypted_bytes = stored["encrypted_data"].encode('utf-8')
             decrypted = self.encryption.decrypt_dict(encrypted_bytes)
 
+            # _credential_typeを取り出してトップレベルに
+            credential_type = decrypted.pop("_credential_type", "login")
+
             return {
                 "id": stored["id"],
-                "service": stored["service"],
-                "credential_type": stored.get("credential_type", "login"),
+                "service": stored["service_name"],
+                "credential_type": credential_type,
                 **decrypted,
             }
         except Exception as e:
@@ -133,14 +139,13 @@ class CredentialsService:
             保存済みサービス一覧（認証情報は含まない）
         """
         try:
-            result = self.supabase.table("user_credentials").select(
-                "id, service, credential_type, created_at, updated_at"
+            result = self.supabase.table(self.TABLE_NAME).select(
+                "id, service_name, created_at, updated_at"
             ).eq("user_id", user_id).execute()
 
             return [
                 {
-                    "service": row["service"],
-                    "credential_type": row.get("credential_type", "login"),
+                    "service": row["service_name"],
                     "created_at": row["created_at"],
                     "updated_at": row.get("updated_at"),
                 }
@@ -166,10 +171,10 @@ class CredentialsService:
             削除結果
         """
         try:
-            result = self.supabase.table("user_credentials").delete().eq(
+            result = self.supabase.table(self.TABLE_NAME).delete().eq(
                 "user_id", user_id
             ).eq(
-                "service", service
+                "service_name", service
             ).execute()
 
             if result.data:
@@ -209,10 +214,10 @@ class CredentialsService:
             存在する場合True
         """
         try:
-            result = self.supabase.table("user_credentials").select("id").eq(
+            result = self.supabase.table(self.TABLE_NAME).select("id").eq(
                 "user_id", user_id
             ).eq(
-                "service", service
+                "service_name", service
             ).execute()
 
             return bool(result.data)
