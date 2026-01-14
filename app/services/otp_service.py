@@ -5,6 +5,9 @@ OTP Service - Phase 9: OTP Automation
 import re
 import asyncio
 import logging
+import imaplib
+import email as email_lib
+from email.header import decode_header
 from typing import Optional, List, Tuple
 from datetime import datetime, timedelta, timezone
 
@@ -184,7 +187,163 @@ class OTPService:
                     )
         
         return None
-    
+
+    async def extract_otp_from_email_imap(
+        self,
+        user_id: str,
+        service: Optional[str] = None,
+        max_age_minutes: Optional[int] = None,
+        subject_filter: Optional[str] = "[SMSFW]",
+    ) -> Optional[OTPResult]:
+        """
+        IMAPを使用してGmailからOTPを抽出（OAuth2不要）
+
+        Args:
+            user_id: ユーザーID
+            service: 対象サービス（amazon, ex_reservation等）
+            max_age_minutes: 最大経過時間（分）
+            subject_filter: 件名フィルタ（SMS Forwarderは[SMSFW]を付ける）
+
+        Returns:
+            抽出されたOTP情報
+        """
+        from app.services.credentials_service import get_credentials_service
+
+        if max_age_minutes is None:
+            max_age_minutes = self.max_age_minutes
+
+        # Gmail IMAP認証情報を取得
+        creds_service = get_credentials_service()
+        gmail_creds = await creds_service.get_credential(user_id, "gmail_imap")
+
+        if not gmail_creds:
+            logger.warning(f"No gmail_imap credentials for user {user_id}")
+            return None
+
+        gmail_address = gmail_creds.get("email") or gmail_creds.get("username")
+        gmail_password = gmail_creds.get("password") or gmail_creds.get("app_password")
+
+        if not gmail_address or not gmail_password:
+            logger.warning(f"Incomplete gmail_imap credentials for user {user_id}")
+            return None
+
+        try:
+            # Gmail IMAPに接続
+            logger.info(f"Connecting to Gmail IMAP for user {user_id}...")
+            imap = imaplib.IMAP4_SSL('imap.gmail.com')
+            imap.login(gmail_address, gmail_password)
+            imap.select('INBOX')
+
+            # 件名フィルタで検索
+            if subject_filter:
+                _, messages = imap.search(None, 'SUBJECT', subject_filter)
+            else:
+                _, messages = imap.search(None, 'UNSEEN')
+
+            message_ids = messages[0].split()
+
+            if not message_ids:
+                logger.debug(f"No emails found with filter: {subject_filter}")
+                imap.close()
+                imap.logout()
+                return None
+
+            # 最新のメールから確認（最新10件）
+            message_ids = list(reversed(message_ids[-10:]))
+            cutoff_time = datetime.now() - timedelta(minutes=max_age_minutes)
+
+            for msg_id in message_ids:
+                _, msg_data = imap.fetch(msg_id, '(RFC822)')
+
+                email_body = msg_data[0][1]
+                email_message = email_lib.message_from_bytes(email_body)
+
+                # 件名をデコード
+                subject_raw = email_message.get('Subject', '')
+                subject_decoded = decode_header(subject_raw)
+                subject = ""
+                for content, encoding in subject_decoded:
+                    if isinstance(content, bytes):
+                        if encoding:
+                            subject += content.decode(encoding, errors='ignore')
+                        else:
+                            subject += content.decode('utf-8', errors='ignore')
+                    else:
+                        subject += str(content)
+
+                from_header = email_message.get('From', '')
+
+                # 本文を取得
+                body = ""
+                if email_message.is_multipart():
+                    for part in email_message.walk():
+                        if part.get_content_type() == "text/plain":
+                            body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                            break
+                else:
+                    body = email_message.get_payload(decode=True).decode('utf-8', errors='ignore')
+
+                # OTP抽出
+                otp_code = self._extract_otp_from_text(subject) or self._extract_otp_from_text(body)
+
+                if otp_code:
+                    # メールを既読にする
+                    imap.store(msg_id, '+FLAGS', '\\Seen')
+
+                    imap.close()
+                    imap.logout()
+
+                    # OTPを保存
+                    expires_at = datetime.now(timezone.utc) + timedelta(minutes=self.otp_expiry_minutes)
+                    source_id = f"imap_{msg_id.decode() if isinstance(msg_id, bytes) else msg_id}"
+
+                    # 重複チェック
+                    existing = self.supabase.table("otp_extractions").select("id").eq(
+                        "source_id", source_id
+                    ).execute()
+
+                    if existing.data:
+                        return await self._get_otp_by_id(existing.data[0]["id"])
+
+                    insert_data = {
+                        "user_id": user_id,
+                        "source": OTPSource.EMAIL.value,
+                        "source_id": source_id,
+                        "service": service,
+                        "sender": from_header,
+                        "subject": subject,
+                        "otp_code": otp_code,
+                        "expires_at": expires_at.isoformat(),
+                    }
+
+                    insert_result = self.supabase.table("otp_extractions").insert(insert_data).execute()
+
+                    if insert_result.data:
+                        otp_data = insert_result.data[0]
+                        logger.info(f"OTP extracted via IMAP for user {user_id}: {otp_code[:2]}****")
+                        return OTPResult(
+                            id=otp_data["id"],
+                            code=otp_data["otp_code"],
+                            source=OTPSource.EMAIL,
+                            sender=otp_data.get("sender"),
+                            subject=otp_data.get("subject"),
+                            service=otp_data.get("service"),
+                            extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
+                            expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                            is_used=otp_data.get("is_used", False),
+                        )
+
+            imap.close()
+            imap.logout()
+            return None
+
+        except imaplib.IMAP4.error as e:
+            logger.error(f"IMAP error: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to extract OTP via IMAP: {e}")
+            return None
+
     async def extract_otp_from_sms(
         self,
         user_id: str,
@@ -504,51 +663,75 @@ class OTPService:
     ) -> Optional[str]:
         """
         OTPが届くまで待機して取得（Executor向け）
-        
+
         Args:
             user_id: ユーザーID
             service: 対象サービス
             source: ソース（email/sms）
             timeout_seconds: タイムアウト秒数
             poll_interval: ポーリング間隔秒数
-            
+
         Returns:
             OTPコード、タイムアウトの場合はNone
         """
+        from app.services.credentials_service import get_credentials_service
+
         if timeout_seconds is None:
             timeout_seconds = self.wait_timeout
         if poll_interval is None:
             poll_interval = self.poll_interval
-        
+
         logger.info(f"Waiting for OTP (service={service}, source={source}, timeout={timeout_seconds}s)")
-        
+
+        # IMAP認証情報があるか確認
+        creds_service = get_credentials_service()
+        has_imap_creds = await creds_service.has_credential(user_id, "gmail_imap")
+        use_imap = source == "email" and has_imap_creds
+
+        if use_imap:
+            logger.info(f"Using IMAP method for OTP extraction (user={user_id})")
+        else:
+            logger.info(f"Using OAuth2/Gmail API method for OTP extraction (user={user_id})")
+
         start_time = datetime.now(timezone.utc)
         deadline = start_time + timedelta(seconds=timeout_seconds)
-        
+
         while datetime.now(timezone.utc) < deadline:
+            otp_result = None
+
             # OTPを抽出
             if source == "email":
-                otp_result = await self.extract_otp_from_email(
-                    user_id=user_id,
-                    service=service,
-                    max_age_minutes=2,  # 短い時間で最新を取得
-                )
+                if use_imap:
+                    # IMAP方式（優先）
+                    otp_result = await self.extract_otp_from_email_imap(
+                        user_id=user_id,
+                        service=service,
+                        max_age_minutes=2,
+                        subject_filter="[SMSFW]",  # SMS Forwarder経由
+                    )
+                else:
+                    # OAuth2方式（フォールバック）
+                    otp_result = await self.extract_otp_from_email(
+                        user_id=user_id,
+                        service=service,
+                        max_age_minutes=2,
+                    )
             else:
                 otp_result = await self.extract_otp_from_sms(
                     user_id=user_id,
                     service=service,
                     max_age_minutes=2,
                 )
-            
+
             if otp_result and not otp_result.is_used:
                 # OTPを使用済みにマーク
                 await self.mark_otp_used(otp_result.id)
                 logger.info(f"OTP obtained for {service}: {otp_result.code[:2]}****")
                 return otp_result.code
-            
+
             # 待機
             await asyncio.sleep(poll_interval)
-        
+
         logger.warning(f"OTP wait timed out for {service}")
         return None
     
