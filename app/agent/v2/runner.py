@@ -93,7 +93,7 @@ class AgentRunner:
         """
         try:
             # 0. 認証情報待ちの場合、ユーザー入力から認証情報を抽出
-            pending_tool = self.session.data.get("pending_tool_call")
+            pending_tool = self.session.context.get("pending_tool_call")
             if pending_tool and not credentials:
                 extracted = await self._extract_credentials_from_message(user_message)
                 if extracted:
@@ -112,7 +112,7 @@ class AgentRunner:
                     logger.info(f"Saved credentials for {service_name}")
 
                     # 保留中のツールを再実行
-                    self.session.data.pop("pending_tool_call", None)
+                    self.session.context.pop("pending_tool_call", None)
 
                     if self._on_reasoning_step:
                         await self._on_reasoning_step("🔐 認証情報を保存しました")
@@ -192,7 +192,7 @@ class AgentRunner:
                 # 認証情報が必要な場合は特別処理
                 if result.get("credentials_required"):
                     # 保留中のツール呼び出しを保存
-                    self.session.data["pending_tool_call"] = tool_call
+                    self.session.context["pending_tool_call"] = tool_call
 
                     # ユーザーに認証情報を要求
                     display_name = result.get("display_name", result.get("service"))
