@@ -182,15 +182,18 @@ class GmailService:
     async def sync_emails(self, user_id: str, max_results: int = 50) -> Tuple[int, List[str]]:
         """
         新着メールを同期
-        
+
         Returns:
             (new_message_count, message_ids)
         """
         # 接続情報を取得
         conn_result = self.supabase.table("gmail_connections").select("*").eq("user_id", user_id).eq("is_active", True).execute()
-        
+
         if not conn_result.data:
-            raise ValueError("Gmail not connected")
+            # ユーザー固有の接続がない場合、デフォルト接続を使用（開発/シングルユーザー環境用）
+            conn_result = self.supabase.table("gmail_connections").select("*").eq("is_active", True).limit(1).execute()
+            if not conn_result.data:
+                raise ValueError("Gmail not connected")
         
         conn = conn_result.data[0]
         credentials = self._get_credentials(conn["encrypted_token"])
@@ -349,18 +352,21 @@ class GmailService:
         """
         # 接続情報を取得
         conn_result = self.supabase.table("gmail_connections").select("*").eq("user_id", user_id).eq("is_active", True).execute()
-        
+
         if not conn_result.data:
-            raise ValueError("Gmail not connected")
-        
+            # ユーザー固有の接続がない場合、デフォルト接続を使用
+            conn_result = self.supabase.table("gmail_connections").select("*").eq("is_active", True).limit(1).execute()
+            if not conn_result.data:
+                raise ValueError("Gmail not connected")
+
         conn = conn_result.data[0]
         credentials = self._get_credentials(conn["encrypted_token"])
-        
+
         if not credentials:
             raise ValueError("Invalid Gmail credentials")
-        
+
         service = build('gmail', 'v1', credentials=credentials)
-        
+
         # 添付ファイルをダウンロード
         attachment = service.users().messages().attachments().get(
             userId='me',
@@ -410,6 +416,7 @@ def get_gmail_service() -> GmailService:
     if _gmail_service is None:
         _gmail_service = GmailService()
     return _gmail_service
+
 
 
 
