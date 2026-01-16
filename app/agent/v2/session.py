@@ -8,8 +8,47 @@ LLMは自分が何を言ったかを覚えている。
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 import json
+
+
+def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
+    """ISO形式のdatetime文字列をパース（Supabaseの形式に対応）
+
+    Supabaseはマイクロ秒が5桁の場合がある（例: 2026-01-15T12:50:21.69659+00:00）
+    Python標準のfromisoformatは6桁を期待するため、調整が必要
+    """
+    if not dt_str:
+        return None
+    try:
+        # まず標準的なパースを試みる
+        dt_str = dt_str.replace("Z", "+00:00")
+        return datetime.fromisoformat(dt_str)
+    except ValueError:
+        # マイクロ秒の桁数問題に対応
+        try:
+            # タイムゾーン部分を分離
+            if '+' in dt_str:
+                main_part, tz_part = dt_str.rsplit('+', 1)
+                tz_part = '+' + tz_part
+            elif dt_str.endswith('Z'):
+                main_part = dt_str[:-1]
+                tz_part = '+00:00'
+            else:
+                main_part = dt_str
+                tz_part = ''
+
+            # マイクロ秒部分を6桁に調整
+            if '.' in main_part:
+                date_time, microsec = main_part.rsplit('.', 1)
+                # 6桁になるようパディングまたはトリミング
+                microsec = microsec.ljust(6, '0')[:6]
+                main_part = f"{date_time}.{microsec}"
+
+            return datetime.fromisoformat(main_part + tz_part)
+        except Exception:
+            # それでも失敗したら現在時刻を返す
+            return datetime.now(timezone.utc)
 
 
 class State(str, Enum):
@@ -121,9 +160,13 @@ class Session:
         session.context = data.get("context", {})
 
         if data.get("created_at"):
-            session.created_at = datetime.fromisoformat(data["created_at"])
+            parsed = _parse_datetime(data["created_at"])
+            if parsed:
+                session.created_at = parsed
         if data.get("updated_at"):
-            session.updated_at = datetime.fromisoformat(data["updated_at"])
+            parsed = _parse_datetime(data["updated_at"])
+            if parsed:
+                session.updated_at = parsed
 
         return session
 
