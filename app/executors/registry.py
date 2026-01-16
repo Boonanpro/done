@@ -220,7 +220,7 @@ def register_all_executors():
         service_name="ex_reservation",
         display_name="EX予約（新幹線）",
         url_patterns=["smart-ex.jp", "jr-central.co.jp"],
-        capabilities=["search", "execute"],
+        capabilities=["search", "execute", "cancel"],  # cancelを追加
     )
     
     # Bus（高速バス）
