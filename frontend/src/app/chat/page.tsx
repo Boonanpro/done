@@ -11,7 +11,7 @@ import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
-import { api, type MessageResponse, type ProcessStep, type StateMachineResponse, ApiError } from '@/lib/api-client';
+import { api, type MessageResponse, type ProcessStep, type StateMachineResponse, type StateMachineState, ApiError } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth-store';
 import { cn } from '@/lib/utils';
 
@@ -55,23 +55,26 @@ function ProcessDisplay({ steps, isCollapsed, onToggle, isProcessing = false }: 
             )}
             
             {/* プロセスステップ */}
-            {steps.map((step) => (
-              <div
-                key={step.id}
-                className="flex items-center gap-2 text-xs"
-              >
-                {step.status === 'completed' ? (
-                  <Check className="h-3 w-3 text-muted-foreground" />
-                ) : step.status === 'running' ? (
-                  <Loader2 className="h-3 w-3 text-primary animate-spin" />
-                ) : (
-                  <span className="h-3 w-3 rounded-full bg-muted-foreground/30" />
-                )}
-                <span className="text-muted-foreground">
-                  {step.label}
-                </span>
-              </div>
-            ))}
+            {steps.map((step, index) => {
+              const isLatest = index === steps.length - 1;
+              const shouldSpin = isLatest && isProcessing;
+
+              return (
+                <div
+                  key={step.id}
+                  className="flex items-center gap-2 text-xs"
+                >
+                  {shouldSpin ? (
+                    <Loader2 className="h-3 w-3 text-primary animate-spin" />
+                  ) : (
+                    <span className="h-3 w-3" />
+                  )}
+                  <span className="text-muted-foreground">
+                    {step.label}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -247,8 +250,8 @@ export default function ChatPage() {
           user_id: user?.id,
         },
         {
-          // ナレーションをリアルタイムで表示
-          onReasoningStep: (step: string) => {
+          // プロセスステップをリアルタイムで表示
+          onProcessStep: (step: ProcessStep) => {
             setProcesses(prev => {
               const newMap = new Map(prev);
               const current = newMap.get(PENDING_PROCESS_ID) || {
@@ -256,80 +259,89 @@ export default function ChatPage() {
                 isCollapsed: false,
                 isProcessing: true,
               };
-              
-              // 前のステップを全て「completed」に変更
-              const updatedSteps = current.steps.map(s => ({
-                ...s,
-                status: 'completed' as const,
-              }));
-              
-              // 新しいステップは「running」状態（次が来るまでローディング）
-              const newStep: ProcessStep = {
-                id: `step-${stepIndex++}`,
-                label: step,
-                status: 'running' as const,
-              };
-              
+
+              // 既存のステップをIDで探す
+              const existingIndex = current.steps.findIndex(s => s.id === step.id);
+              let updatedSteps: ProcessStep[];
+
+              if (existingIndex >= 0) {
+                // 既存のステップを更新
+                updatedSteps = [...current.steps];
+                updatedSteps[existingIndex] = step;
+              } else {
+                // 新しいステップを追加
+                updatedSteps = [...current.steps, step];
+              }
+
               newMap.set(PENDING_PROCESS_ID, {
                 ...current,
-                steps: [...updatedSteps, newStep],
+                steps: updatedSteps,
               });
               return newMap;
             });
           },
-          
-          // 完了時の処理
-          onComplete: (response) => {
-            // セッションIDを保存
-            if (response.session_id) {
-              setSmSession(response.session_id);
-            }
-            
+
+          // ユーザーメッセージを受信
+          onUserMessage: (message) => {
+            // 楽観的更新を実メッセージで置き換え
+            queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => {
+              const filtered = (old?.messages || []).filter(m => !m.id.startsWith('temp-user-'));
+              return {
+                messages: [message, ...filtered],
+              };
+            });
+          },
+
+          // AIメッセージを受信
+          onAIMessage: (message) => {
             // AI返信をメッセージとして追加
-            const aiMessage: MessageResponse = {
-              id: aiMessageId,
-              room_id: danRoom?.id || '',
-              sender_id: 'dan',
-              sender_name: 'ダン',
-              sender_type: 'ai',
-              content: response.response,
-              created_at: new Date().toISOString(),
-            };
-            
             queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
-              messages: [aiMessage, ...(old?.messages || [])],
+              messages: [message, ...(old?.messages || [])],
             }));
-            
+
             // プロセスを確定（全ステップをcompletedに）
             setProcesses(prev => {
               const newMap = new Map(prev);
               const pendingProcess = newMap.get(PENDING_PROCESS_ID);
               newMap.delete(PENDING_PROCESS_ID);
-              
-              // 全ステップを「completed」に変更
-              const completedSteps = (pendingProcess?.steps || []).map(s => ({
-                ...s,
-                status: 'completed' as const,
-              }));
-              
-              newMap.set(aiMessageId, {
-                steps: completedSteps,
-                isCollapsed: false,
-                isProcessing: false,
-              });
+
+              if (pendingProcess) {
+                newMap.set(message.id, {
+                  steps: pendingProcess.steps,
+                  isCollapsed: false,
+                  isProcessing: false,
+                });
+              }
+
               return newMap;
             });
-            
-            // 確認が必要な場合
-            if (response.needs_confirmation && response.proposal) {
-              setPendingConfirmation(response);
+
+            // PROPOSE状態（承認待ち）を検出して承認パネルを表示
+            const content = message.content || '';
+            const isProposeState = content.includes('[STATE: PROPOSE]');
+            const hasConfirmationQuestion =
+              content.includes('確定しますか') ||
+              content.includes('よろしいですか') ||
+              content.includes('この内容で進め') ||
+              content.includes('予約を実行しますか');
+
+            if (isProposeState || hasConfirmationQuestion) {
+              // StateMachineResponse形式で承認待ち状態を設定
+              setPendingConfirmation({
+                session_id: smSession || '',
+                state: 'propose' as StateMachineState,
+                response: content,
+                reasoning_steps: [],
+                needs_confirmation: true,
+                is_chat: false,
+                proposal: null,
+                error: null,
+              });
             }
-            
-            // エラーがある場合
-            if (response.error) {
-              toast.error(`エラー: ${response.error}`);
-            }
-            
+          },
+
+          // 完了時の処理
+          onComplete: () => {
             setIsSending(false);
           },
           
@@ -440,10 +452,10 @@ export default function ChatPage() {
     }
   }, [smSession, revisionInput, queryClient, messagesData, danRoom?.id]);
 
-  // Scroll to bottom on new messages
+  // Scroll to bottom on new messages (not on process toggle)
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, processes]);
+  }, [messages]);
 
   // Auto-resize textarea
   useEffect(() => {
