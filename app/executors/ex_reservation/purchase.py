@@ -82,7 +82,11 @@ async def handle_3d_secure(page: Page, otp_callback=None, max_wait_seconds: int 
                 print("  OTPコードの入力を待っています...")
                 try:
                     otp_code = await otp_callback()
-                    print(f"  OTPコード受信: {otp_code[:3]}*** (長さ: {len(otp_code)})")
+                    if otp_code:
+                        print(f"  OTPコード受信: {otp_code[:3]}*** (長さ: {len(otp_code)})")
+                    else:
+                        print("  [ERROR] OTPコードが取得できませんでした（タイムアウト）")
+                        return False
                 except Exception as e:
                     print(f"  [ERROR] OTP取得エラー: {e}")
                     return False
@@ -187,6 +191,9 @@ async def execute_purchase(page: Page, confirm: bool = True, handle_3ds: bool = 
         PurchaseResult: 購入結果
     """
     try:
+        # 3DS認証成功フラグ（wait_for_selectorの結果を保持）
+        _3ds_complete_success = False
+
         # 確認画面にいるか確認
         heading = page.locator(CONFIRMATION["not_complete_heading"])
         if await heading.count() == 0:
@@ -265,15 +272,39 @@ async def execute_purchase(page: Page, confirm: bool = True, handle_3ds: bool = 
                         timeout=30000,
                         state="visible"
                     )
-                    print("  [OK] 完了画面が表示されました")
+                    print("  [OK] 完了画面が表示されました（3DS認証後）")
+                    # wait_for_selectorが成功したら、完了画面到達済みとしてフラグを立てる
+                    _3ds_complete_success = True
                 except PlaywrightTimeout:
                     print("  [WARN] 完了画面の表示がタイムアウトしました")
-                    # それでも続行して確認
-                    pass
+                    _3ds_complete_success = False
 
         # 完了画面に到達したか確認
-        complete_heading = page.locator(PURCHASE_COMPLETE["complete_heading"])
-        if await complete_heading.count() > 0:
+        # 複数のパターンでチェック（句点の有無、部分一致など）
+        complete_selectors = [
+            PURCHASE_COMPLETE["complete_heading"],  # text="予約が完了しました"
+            'text=/予約が完了/',  # 部分一致
+            ':has-text("予約が完了しました")',  # 含む
+            '.complete-message, .success-message',  # クラス名
+        ]
+
+        complete_found = False
+        for selector in complete_selectors:
+            try:
+                elem = page.locator(selector)
+                if await elem.count() > 0:
+                    complete_found = True
+                    print(f"  [OK] 完了画面検出（セレクタ: {selector[:30]}...）")
+                    break
+            except Exception:
+                continue
+
+        # 3DS認証後にwait_for_selectorが成功していた場合も完了とみなす
+        if handle_3ds and _3ds_complete_success:
+            complete_found = True
+            print("  [OK] 3DS認証後の完了を信頼")
+
+        if complete_found:
             print("\n[OK] 予約が完了しました！")
 
             # 予約番号を取得（お預かり番号も対象）
