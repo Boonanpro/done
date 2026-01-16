@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp } from 'lucide-react';
+import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp, Square } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -96,6 +96,7 @@ export default function ChatPage() {
   const isLoading = useAuthStore((state) => state.isLoading);
   const [message, setMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
   
   // StateMachine state - localStorageから初期化
   const [smSession, setSmSession] = useState<string | null>(() => {
@@ -238,11 +239,15 @@ export default function ChatPage() {
     });
     
     try {
+      // AbortController作成
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
       // SSEストリーミングでStateMachine APIを呼び出し
       console.log('[Chat] Starting SSE stream', { content, smSession, userId: user?.id });
       const aiMessageId = `ai-${Date.now()}`;
       let stepIndex = 0;
-      
+
       await api.sm.sendMessageStream(
         {
           message: content,
@@ -358,7 +363,8 @@ export default function ChatPage() {
             });
             setIsSending(false);
           },
-        }
+        },
+        controller.signal  // AbortSignal追加
       );
       
       return; // SSEのコールバックでisSendingを制御するので、ここでは何もしない
@@ -430,6 +436,10 @@ export default function ChatPage() {
         });
 
         try {
+          // AbortController作成
+          const controller = new AbortController();
+          abortControllerRef.current = controller;
+
           await api.sm.sendMessageStream(
             {
               message: confirmMessage,
@@ -494,7 +504,8 @@ export default function ChatPage() {
                 });
                 setIsSending(false);
               },
-            }
+            },
+            controller.signal  // AbortSignal追加
           );
         } catch (error) {
           toast.error('確認処理に失敗しました');
@@ -554,6 +565,10 @@ export default function ChatPage() {
         });
 
         try {
+          // AbortController作成
+          const controller = new AbortController();
+          abortControllerRef.current = controller;
+
           await api.sm.sendMessageStream(
             {
               message: revisionMessage,
@@ -642,7 +657,8 @@ export default function ChatPage() {
                 });
                 setIsSending(false);
               },
-            }
+            },
+            controller.signal  // AbortSignal追加
           );
         } catch (error) {
           toast.error('修正処理に失敗しました');
@@ -696,6 +712,33 @@ export default function ChatPage() {
 
   // ペンディングプロセスがあるか
   const pendingProcess = processes.get(PENDING_PROCESS_ID);
+
+  // 処理をキャンセル
+  const handleCancel = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsSending(false);
+    setProcesses(prev => {
+      const newMap = new Map(prev);
+      newMap.delete(PENDING_PROCESS_ID);
+      return newMap;
+    });
+    toast.info('処理を停止しました');
+  }, []);
+
+  // Escapeキーでキャンセル
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isSending) {
+        e.preventDefault();
+        handleCancel();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isSending, handleCancel]);
 
   // Error state
   if (hasError && !isLoadingRoom && !isLoadingMessages) {
@@ -943,18 +986,26 @@ export default function ChatPage() {
                 className="flex-1 resize-none bg-transparent text-sm focus:outline-none min-h-[36px] max-h-[200px] py-2"
               />
 
-              <Button
-                size="icon"
-                className="h-9 w-9 shrink-0"
-                onClick={handleSendMessage}
-                disabled={!message.trim() || isSending}
-              >
-                {isSending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
+              {isSending ? (
+                <Button
+                  size="icon"
+                  variant="destructive"
+                  className="h-9 w-9 shrink-0"
+                  onClick={handleCancel}
+                  title="停止 (Escキー)"
+                >
+                  <Square className="h-4 w-4" />
+                </Button>
+              ) : (
+                <Button
+                  size="icon"
+                  className="h-9 w-9 shrink-0"
+                  onClick={handleSendMessage}
+                  disabled={!message.trim()}
+                >
                   <Send className="h-4 w-4" />
-                )}
-              </Button>
+                </Button>
+              )}
             </div>
           </div>
         </div>

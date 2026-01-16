@@ -361,6 +361,25 @@ async function request<T>(
   });
 
   if (!response.ok) {
+    // 401 Unauthorized: セッション切れ → ログインページにリダイレクト
+    if (response.status === 401) {
+      // トークンをクリア
+      setStoredToken(null);
+      immediateToken = null;
+      // auth-storeをクリア
+      try {
+        useAuthStore.getState().logout();
+      } catch {
+        // store未初期化時は無視
+      }
+      // ログインページにリダイレクト（ブラウザ環境のみ）
+      if (typeof window !== 'undefined') {
+        window.location.href = '/login';
+        // リダイレクト中はエラーをスローしない
+        return new Promise(() => {});
+      }
+    }
+
     let data: unknown;
     try {
       data = await response.json();
@@ -717,19 +736,21 @@ export const api = {
     /**
      * SSEストリーミング版のsendMessage
      * ナレーション（reasoning_steps）をリアルタイムで受信する
-     * 
+     *
      * @param data リクエストデータ
-     * @param onReasoningStep ナレーション受信時のコールバック
-     * @param onComplete 完了時のコールバック
-     * @param onError エラー時のコールバック
+     * @param callbacks コールバック関数群
+     * @param signal AbortSignal（キャンセル用）
      */
     sendMessageStream: async (
       data: StateMachineMessageRequest,
       callbacks: {
-        onReasoningStep?: (step: string) => void;
-        onComplete?: (response: StateMachineResponse) => void;
+        onProcessStep?: (step: ProcessStep) => void;
+        onUserMessage?: (message: MessageResponse) => void;
+        onAIMessage?: (message: MessageResponse) => void;
+        onComplete?: () => void;
         onError?: (error: string) => void;
-      }
+      },
+      signal?: AbortSignal
     ): Promise<void> => {
       console.log('[SSE] sendMessageStream called');
       let token: string | null = null;
@@ -738,74 +759,88 @@ export const api = {
       } catch (e) {
         console.error('[SSE] Failed to get token', e);
       }
-      const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
-      
+      const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
       console.log('[SSE] Starting stream request', { data, baseUrl, hasToken: !!token });
-      
+
       try {
-        const response = await fetch(`${baseUrl}/sm/message/stream`, {
+        const response = await fetch(`${baseUrl}/api/v1/chat/dan/messages/stream`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify(data),
+          body: JSON.stringify({ content: data.message }),
+          signal,  // AbortSignal追加
         });
-        
+
         console.log('[SSE] Response received', { status: response.status, ok: response.ok });
-        
+
+        // 401エラー時はログインページにリダイレクト
+        if (response.status === 401) {
+          setStoredToken(null);
+          try {
+            useAuthStore.getState().logout();
+          } catch {
+            // store未初期化時は無視
+          }
+          if (typeof window !== 'undefined') {
+            window.location.href = '/login';
+          }
+          return;
+        }
+
         if (!response.ok) {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
-        
+
         const reader = response.body?.getReader();
         if (!reader) {
           throw new Error('No response body');
         }
-        
+
         const decoder = new TextDecoder();
         let buffer = '';
-        
+
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          
+
           buffer += decoder.decode(value, { stream: true });
-          
-          // SSEイベントをパース
+
+          // SSEイベントをパース (data: {...}\n\n形式)
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
-          
-          let eventType = '';
-          let eventData = '';
-          
+
           for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim();
-            } else if (line.startsWith('data: ')) {
-              eventData = line.slice(6);
-            } else if (line === '' && eventData) {
-              // イベント完了
+            if (line.startsWith('data: ')) {
+              const eventData = line.slice(6);
               try {
                 const parsed = JSON.parse(eventData);
-                
-                if (eventType === 'reasoning_step' && callbacks.onReasoningStep) {
-                  callbacks.onReasoningStep(parsed.step);
-                } else if (eventType === 'complete' && callbacks.onComplete) {
-                  callbacks.onComplete(parsed as StateMachineResponse);
-                } else if (eventType === 'error' && callbacks.onError) {
-                  callbacks.onError(parsed.error);
+
+                if (parsed.type === 'process' && callbacks.onProcessStep) {
+                  callbacks.onProcessStep(parsed.step);
+                } else if (parsed.type === 'user_message' && callbacks.onUserMessage) {
+                  callbacks.onUserMessage(parsed.message);
+                } else if (parsed.type === 'ai_message' && callbacks.onAIMessage) {
+                  callbacks.onAIMessage(parsed.message);
+                } else if (parsed.type === 'done' && callbacks.onComplete) {
+                  callbacks.onComplete();
+                } else if (parsed.type === 'error' && callbacks.onError) {
+                  callbacks.onError(parsed.message);
                 }
-              } catch {
-                console.error('Failed to parse SSE data:', eventData);
+              } catch (err) {
+                console.error('Failed to parse SSE data:', eventData, err);
               }
-              
-              eventType = '';
-              eventData = '';
             }
           }
         }
       } catch (error) {
+        // AbortErrorは意図的なキャンセルなのでエラーとして扱わない
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          console.log('[SSE] Request cancelled by user');
+          return;
+        }
         if (callbacks.onError) {
           callbacks.onError(error instanceof Error ? error.message : String(error));
         }
