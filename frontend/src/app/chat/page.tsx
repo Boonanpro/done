@@ -323,7 +323,10 @@ export default function ChatPage() {
               content.includes('確定しますか') ||
               content.includes('よろしいですか') ||
               content.includes('この内容で進め') ||
-              content.includes('予約を実行しますか');
+              content.includes('予約を実行しますか') ||
+              content.includes('予約しますか') ||
+              content.includes('購入しますか') ||
+              content.includes('実行しますか');
 
             if (isProposeState || hasConfirmationQuestion) {
               // StateMachineResponse形式で承認待ち状態を設定
@@ -381,76 +384,275 @@ export default function ChatPage() {
     }
   }, [message, isSending, queryClient, messagesData, danRoom?.id, user?.id, user?.display_name, smSession]);
 
-  // 提案を承認
+  // 提案を承認 - 明確な承認メッセージを送信
   const handleConfirm = useCallback(async () => {
-    if (!smSession || !pendingConfirmation) return;
-    
-    setIsSending(true);
-    try {
-      const response = await api.sm.confirm(smSession, user?.id);
-      
-      // AI返信を追加
-      const aiMessage: MessageResponse = {
-        id: `ai-confirm-${Date.now()}`,
-        room_id: danRoom?.id || '',
-        sender_id: 'dan',
-        sender_name: 'ダン',
-        sender_type: 'ai',
-        content: response.response,
-        created_at: new Date().toISOString(),
-      };
-      
-      queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
-        messages: [aiMessage, ...(old?.messages || [])],
-      }));
-      
-      setPendingConfirmation(null);
-      toast.success('実行を開始しました');
-    } catch (error) {
-      toast.error('確認に失敗しました');
-    } finally {
-      setIsSending(false);
-    }
-  }, [smSession, pendingConfirmation, queryClient, messagesData, danRoom?.id]);
+    if (!pendingConfirmation) return;
 
-  // 提案を修正
-  const handleRevise = useCallback(async () => {
-    if (!smSession || !revisionInput.trim()) return;
-    
-    setIsSending(true);
-    try {
-      const response = await api.sm.revise(smSession, revisionInput.trim(), user?.id);
-      
-      // AI返信を追加
-      const aiMessage: MessageResponse = {
-        id: `ai-revise-${Date.now()}`,
-        room_id: danRoom?.id || '',
-        sender_id: 'dan',
-        sender_name: 'ダン',
-        sender_type: 'ai',
-        content: response.response,
-        created_at: new Date().toISOString(),
+    // 承認パネルを閉じる
+    setPendingConfirmation(null);
+
+    // 明確な承認メッセージを送信（通常のチャットフローを使用）
+    const confirmMessage = 'はい、この内容で確定してください。';
+    setMessage(confirmMessage);
+
+    // 少し遅延してから送信（setMessageの反映を待つ）
+    setTimeout(() => {
+      // handleSendMessageと同等の処理を実行
+      const sendConfirmation = async () => {
+        setMessage('');
+        setIsSending(true);
+
+        // 楽観的更新：ユーザーメッセージを即座に表示
+        const tempUserMessageId = `temp-user-${Date.now()}`;
+        const optimisticUserMessage: MessageResponse = {
+          id: tempUserMessageId,
+          room_id: danRoom?.id || '',
+          sender_id: user?.id || '',
+          sender_name: user?.display_name || 'You',
+          sender_type: 'human',
+          content: confirmMessage,
+          created_at: new Date().toISOString(),
+        };
+
+        queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
+          messages: [optimisticUserMessage, ...(old?.messages || [])],
+        }));
+
+        // プロセス表示を開始
+        setProcesses(prev => {
+          const newMap = new Map(prev);
+          newMap.set(PENDING_PROCESS_ID, {
+            steps: [],
+            isCollapsed: false,
+            isProcessing: true,
+          });
+          return newMap;
+        });
+
+        try {
+          await api.sm.sendMessageStream(
+            {
+              message: confirmMessage,
+              session_id: smSession || undefined,
+              user_id: user?.id,
+            },
+            {
+              onProcessStep: (step) => {
+                setProcesses(prev => {
+                  const newMap = new Map(prev);
+                  const current = newMap.get(PENDING_PROCESS_ID) || {
+                    steps: [],
+                    isCollapsed: false,
+                    isProcessing: true,
+                  };
+                  const existingIndex = current.steps.findIndex(s => s.id === step.id);
+                  let updatedSteps;
+                  if (existingIndex >= 0) {
+                    updatedSteps = [...current.steps];
+                    updatedSteps[existingIndex] = step;
+                  } else {
+                    updatedSteps = [...current.steps, step];
+                  }
+                  newMap.set(PENDING_PROCESS_ID, { ...current, steps: updatedSteps });
+                  return newMap;
+                });
+              },
+              onUserMessage: (message) => {
+                queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => {
+                  const filtered = (old?.messages || []).filter(m => !m.id.startsWith('temp-user-'));
+                  return { messages: [message, ...filtered] };
+                });
+              },
+              onAIMessage: (message) => {
+                queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
+                  messages: [message, ...(old?.messages || [])],
+                }));
+                setProcesses(prev => {
+                  const newMap = new Map(prev);
+                  const pendingProcess = newMap.get(PENDING_PROCESS_ID);
+                  newMap.delete(PENDING_PROCESS_ID);
+                  if (pendingProcess) {
+                    newMap.set(message.id, {
+                      steps: pendingProcess.steps,
+                      isCollapsed: false,
+                      isProcessing: false,
+                    });
+                  }
+                  return newMap;
+                });
+                // 完了メッセージの場合は承認パネルを表示しない
+              },
+              onComplete: () => {
+                setIsSending(false);
+              },
+              onError: (error) => {
+                toast.error(`エラー: ${error}`);
+                setProcesses(prev => {
+                  const newMap = new Map(prev);
+                  newMap.delete(PENDING_PROCESS_ID);
+                  return newMap;
+                });
+                setIsSending(false);
+              },
+            }
+          );
+        } catch (error) {
+          toast.error('確認処理に失敗しました');
+          setIsSending(false);
+        }
       };
-      
-      queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
-        messages: [aiMessage, ...(old?.messages || [])],
-      }));
-      
-      setRevisionInput('');
-      setShowRevisionInput(false);
-      
-      // 新しい確認が必要な場合
-      if (response.needs_confirmation && response.proposal) {
-        setPendingConfirmation(response);
-      } else {
-        setPendingConfirmation(null);
-      }
-    } catch (error) {
-      toast.error('修正に失敗しました');
-    } finally {
-      setIsSending(false);
-    }
-  }, [smSession, revisionInput, queryClient, messagesData, danRoom?.id]);
+
+      sendConfirmation();
+    }, 0);
+  }, [pendingConfirmation, queryClient, messagesData, danRoom?.id, user?.id, user?.display_name, smSession]);
+
+  // 提案を修正 - 修正内容をメッセージとして送信
+  const handleRevise = useCallback(async () => {
+    if (!revisionInput.trim()) return;
+
+    const revisionMessage = revisionInput.trim();
+
+    // UI状態をリセット
+    setPendingConfirmation(null);
+    setRevisionInput('');
+    setShowRevisionInput(false);
+
+    // 修正要望をメッセージとして設定して送信
+    setMessage(revisionMessage);
+
+    // 少し遅延してから送信
+    setTimeout(() => {
+      const sendRevision = async () => {
+        setMessage('');
+        setIsSending(true);
+
+        // 楽観的更新
+        const tempUserMessageId = `temp-user-${Date.now()}`;
+        const optimisticUserMessage: MessageResponse = {
+          id: tempUserMessageId,
+          room_id: danRoom?.id || '',
+          sender_id: user?.id || '',
+          sender_name: user?.display_name || 'You',
+          sender_type: 'human',
+          content: revisionMessage,
+          created_at: new Date().toISOString(),
+        };
+
+        queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
+          messages: [optimisticUserMessage, ...(old?.messages || [])],
+        }));
+
+        // プロセス表示を開始
+        setProcesses(prev => {
+          const newMap = new Map(prev);
+          newMap.set(PENDING_PROCESS_ID, {
+            steps: [],
+            isCollapsed: false,
+            isProcessing: true,
+          });
+          return newMap;
+        });
+
+        try {
+          await api.sm.sendMessageStream(
+            {
+              message: revisionMessage,
+              session_id: smSession || undefined,
+              user_id: user?.id,
+            },
+            {
+              onProcessStep: (step) => {
+                setProcesses(prev => {
+                  const newMap = new Map(prev);
+                  const current = newMap.get(PENDING_PROCESS_ID) || {
+                    steps: [],
+                    isCollapsed: false,
+                    isProcessing: true,
+                  };
+                  const existingIndex = current.steps.findIndex(s => s.id === step.id);
+                  let updatedSteps;
+                  if (existingIndex >= 0) {
+                    updatedSteps = [...current.steps];
+                    updatedSteps[existingIndex] = step;
+                  } else {
+                    updatedSteps = [...current.steps, step];
+                  }
+                  newMap.set(PENDING_PROCESS_ID, { ...current, steps: updatedSteps });
+                  return newMap;
+                });
+              },
+              onUserMessage: (message) => {
+                queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => {
+                  const filtered = (old?.messages || []).filter(m => !m.id.startsWith('temp-user-'));
+                  return { messages: [message, ...filtered] };
+                });
+              },
+              onAIMessage: (message) => {
+                queryClient.setQueryData(['dan-messages'], (old: typeof messagesData) => ({
+                  messages: [message, ...(old?.messages || [])],
+                }));
+                setProcesses(prev => {
+                  const newMap = new Map(prev);
+                  const pendingProcess = newMap.get(PENDING_PROCESS_ID);
+                  newMap.delete(PENDING_PROCESS_ID);
+                  if (pendingProcess) {
+                    newMap.set(message.id, {
+                      steps: pendingProcess.steps,
+                      isCollapsed: false,
+                      isProcessing: false,
+                    });
+                  }
+                  return newMap;
+                });
+
+                // 新しい提案の場合は承認パネルを表示
+                const content = message.content || '';
+                const isProposeState = content.includes('[STATE: PROPOSE]');
+                const hasConfirmationQuestion =
+                  content.includes('確定しますか') ||
+                  content.includes('よろしいですか') ||
+                  content.includes('この内容で進め') ||
+                  content.includes('予約を実行しますか') ||
+                  content.includes('予約しますか') ||
+                  content.includes('購入しますか') ||
+                  content.includes('実行しますか');
+
+                if (isProposeState || hasConfirmationQuestion) {
+                  setPendingConfirmation({
+                    session_id: smSession || '',
+                    state: 'propose' as StateMachineState,
+                    response: content,
+                    reasoning_steps: [],
+                    needs_confirmation: true,
+                    is_chat: false,
+                    proposal: null,
+                    error: null,
+                  });
+                }
+              },
+              onComplete: () => {
+                setIsSending(false);
+              },
+              onError: (error) => {
+                toast.error(`エラー: ${error}`);
+                setProcesses(prev => {
+                  const newMap = new Map(prev);
+                  newMap.delete(PENDING_PROCESS_ID);
+                  return newMap;
+                });
+                setIsSending(false);
+              },
+            }
+          );
+        } catch (error) {
+          toast.error('修正処理に失敗しました');
+          setIsSending(false);
+        }
+      };
+
+      sendRevision();
+    }, 0);
+  }, [revisionInput, queryClient, messagesData, danRoom?.id, user?.id, user?.display_name, smSession]);
 
   // Scroll to bottom on new messages (not on process toggle)
   useEffect(() => {
