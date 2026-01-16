@@ -135,6 +135,25 @@ async def _execute_page_command(page, cmd: str, args: dict):
         result = await page.evaluate(args["expression"])
         return {"result": result}
 
+    elif cmd == "wait_for_selector":
+        try:
+            element = await page.wait_for_selector(
+                args["selector"],
+                timeout=args.get("timeout", 30000),
+                state=args.get("state", "visible")
+            )
+            return {"found": element is not None}
+        except Exception:
+            return {"found": False}
+
+    elif cmd == "query_selector":
+        element = await page.query_selector(args["selector"])
+        return {"found": element is not None}
+
+    elif cmd == "query_selector_all":
+        elements = await page.query_selector_all(args["selector"])
+        return {"count": len(elements)}
+
     elif cmd == "locator_is_visible":
         locator = page.locator(args["selector"])
         if args.get("index") is not None:
@@ -180,14 +199,20 @@ async def _execute_page_command(page, cmd: str, args: dict):
 
 def _ensure_executor_thread():
     """Executor用スレッドを確保"""
-    global _executor_thread
+    global _executor_thread, _executor_command_queue, _executor_result_queue
 
     if _executor_thread is None or not _executor_thread.is_alive():
         _executor_ready.clear()
         _executor_shutdown.clear()
 
+        # キューをクリア（古いセッションのゴミを除去）
+        _executor_command_queue = queue.Queue()
+        _executor_result_queue = queue.Queue()
+
         _executor_thread = threading.Thread(target=_executor_thread_main, daemon=True)
         _executor_thread.start()
+
+        print("[EXECUTOR_BROWSER] Waiting for browser to be ready...")
 
         # 準備完了を待機
         if not _executor_ready.wait(timeout=30):
@@ -241,10 +266,10 @@ class ExecutorPageProxy:
     def locator(self, selector: str):
         return ExecutorLocatorProxy(selector)
 
-    async def wait_for_load_state(self, state: str = "domcontentloaded"):
+    async def wait_for_load_state(self, state: str = "domcontentloaded", timeout: int = None):
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, lambda: _send_executor_command("wait_for_load_state", state=state)
+            None, lambda: _send_executor_command("wait_for_load_state", state=state, timeout=timeout)
         )
 
     async def wait_for_timeout(self, timeout: int):
@@ -265,6 +290,39 @@ class ExecutorPageProxy:
             None, lambda: _send_executor_command("content")
         )
         return result.get("content", "")
+
+    async def evaluate(self, expression: str, arg=None):
+        """JavaScriptを実行"""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("evaluate", expression=expression, arg=arg)
+        )
+        return result.get("result")
+
+    async def wait_for_selector(self, selector: str, timeout: int = 30000, state: str = "visible"):
+        """セレクタが表示されるまで待機"""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("wait_for_selector", selector=selector, timeout=timeout, state=state)
+        )
+        return ExecutorLocatorProxy(selector) if result.get("found") else None
+
+    async def query_selector(self, selector: str):
+        """セレクタで要素を取得"""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("query_selector", selector=selector)
+        )
+        return ExecutorLocatorProxy(selector) if result.get("found") else None
+
+    async def query_selector_all(self, selector: str):
+        """セレクタで全要素を取得"""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("query_selector_all", selector=selector)
+        )
+        count = result.get("count", 0)
+        return [ExecutorLocatorProxy(selector, i) for i in range(count)]
 
     @property
     def keyboard(self):
@@ -598,11 +656,11 @@ class BrowserPage:
             None, lambda: _send_command("goto", url=url, wait_until=wait_until, timeout=timeout)
         )
 
-    async def wait_for_load_state(self, state: str = "domcontentloaded"):
+    async def wait_for_load_state(self, state: str = "domcontentloaded", timeout: int = None):
         """ロード状態を待機"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, lambda: _send_command("wait_for_load_state", state=state)
+            None, lambda: _send_command("wait_for_load_state", state=state, timeout=timeout)
         )
 
     async def wait_for_timeout(self, timeout: int):

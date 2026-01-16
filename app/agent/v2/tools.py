@@ -330,10 +330,15 @@ async def execute_tool(
         }
 
     # Executorを取得
+    # book/purchase/reserve は execute として扱う（capability登録名）
+    capability = action
+    if action in ("book", "purchase", "reserve"):
+        capability = "execute"
+
     executor = find_executor(
         service_type=skill.service_type,
         service_name=skill.service_name,
-        capability=action,
+        capability=capability,
     )
 
     if not executor:
@@ -355,21 +360,28 @@ async def execute_tool(
             print(f"[TOOL_DEBUG] Search result message: {result.message}")
             return result.to_dict()
 
-        elif action == "execute":
-            # execute はsearch結果が必要（別途実装）
-            return {
-                "success": False,
-                "error": "execute requires selection from search results",
-            }
+        elif action in ("book", "execute", "purchase", "reserve"):
+            # 購入/予約確定アクション
+            # search結果から確認画面まで進んでいる状態で、購入を実行
+            print(f"[TOOL_DEBUG] Book/Execute/Purchase action called")
+            print(f"[TOOL_DEBUG] Has purchase method: {hasattr(executor, 'purchase')}")
+            if hasattr(executor, "purchase"):
+                # EXReservationExecutor等の購入メソッド
+                print(f"[TOOL_DEBUG] Calling executor.purchase()...")
+                result = await executor.purchase(params=params, credentials=credentials, user_id=user_id)
+                print(f"[TOOL_DEBUG] Purchase result: {result}")
+                return result if isinstance(result, dict) else {"success": result.success, "message": result.message}
+            else:
+                print(f"[TOOL_DEBUG] No purchase method found")
+                return {
+                    "success": False,
+                    "error": f"{skill_name} は購入機能に対応していません",
+                }
 
         elif action == "cancel":
-            if hasattr(executor, "cancel"):
-                result = await executor.cancel(
-                    reservation_id=params.get("reservation_id"),
-                    credentials=credentials,
-                )
-                return result
-            return {"success": False, "error": "cancel not supported"}
+            # キャンセル/払戻アクション
+            result = await executor.cancel(params=params, credentials=credentials, user_id=user_id)
+            return {"success": result.success, "message": result.message}
 
         else:
             return {"success": False, "error": f"Unknown action: {action}"}
