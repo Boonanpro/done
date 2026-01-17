@@ -521,9 +521,12 @@ class EXReservationExecutor(BaseExecutor):
                 )
 
             # 予約番号が指定されていない場合、予約一覧から自動検出
+            # この場合、予約一覧画面に遷移するのでcancel_reservationでの再遷移をスキップ
+            already_on_reservation_list = False
             if not reservation_id:
                 await self._notify_progress("cancel", "予約一覧を確認中...")
                 logger.info("予約番号が未指定のため、予約一覧から検索します")
+                already_on_reservation_list = True  # 予約一覧に遷移する
 
                 # メニューを開く
                 menu_button = page.locator('button:has-text("メニュー"), a:has-text("メニュー")').first
@@ -725,6 +728,7 @@ class EXReservationExecutor(BaseExecutor):
                 page,
                 reservation_number=reservation_id,
                 confirm=confirm,
+                skip_navigation=already_on_reservation_list,
             )
 
             if cancel_result.success:

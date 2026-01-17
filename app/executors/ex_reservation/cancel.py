@@ -25,6 +25,7 @@ async def cancel_reservation(
     page: Page,
     reservation_number: str,
     confirm: bool = False,
+    skip_navigation: bool = False,
 ) -> CancelResult:
     """
     予約をキャンセル（払戻）する
@@ -33,6 +34,7 @@ async def cancel_reservation(
         page: Playwrightのページオブジェクト
         reservation_number: 予約番号（お預かり番号）
         confirm: Trueの場合、実際にキャンセルを実行
+        skip_navigation: Trueの場合、既に予約確認画面にいると仮定してナビゲーションをスキップ
 
     Returns:
         CancelResult: キャンセル結果
@@ -41,63 +43,67 @@ async def cancel_reservation(
         print(f"[CANCEL] 予約番号 {reservation_number} をキャンセル中...")
         print()
 
-        # Step 1: メニューボタンをクリック
-        print("[1/7] メニューを開く...")
-        menu_button = page.locator('button:has-text("メニュー"), a:has-text("メニュー")').first
-        if await menu_button.count() > 0:
-            await menu_button.click()
-            await page.wait_for_timeout(2000)
-            print("  [OK] メニューを開きました")
+        # skip_navigation=Trueの場合、既に予約確認画面にいるのでStep 1-2をスキップ
+        if skip_navigation:
+            print("[1-2/7] スキップ（既に予約確認画面にいます）")
         else:
-            print("  [INFO] メニューボタンが見つかりません（すでにメニュー画面の可能性）")
+            # Step 1: メニューボタンをクリック
+            print("[1/7] メニューを開く...")
+            menu_button = page.locator('button:has-text("メニュー"), a:has-text("メニュー")').first
+            if await menu_button.count() > 0:
+                await menu_button.click()
+                await page.wait_for_timeout(2000)
+                print("  [OK] メニューを開きました")
+            else:
+                print("  [INFO] メニューボタンが見つかりません（すでにメニュー画面の可能性）")
 
-        # Step 2: 予約確認リンクをクリック
-        print("[2/7] 予約確認画面に移動...")
+            # Step 2: 予約確認リンクをクリック
+            print("[2/7] 予約確認画面に移動...")
 
-        # より広いセレクタで検索
-        reservation_link_selectors = [
-            'a:has-text("予約確認/変更/払戻")',
-            'a:has-text("予約確認")',
-            'a:has-text("確認")',
-            'text="予約確認"',
-        ]
+            # より広いセレクタで検索
+            reservation_link_selectors = [
+                'a:has-text("予約確認/変更/払戻")',
+                'a:has-text("予約確認")',
+                'a:has-text("確認")',
+                'text="予約確認"',
+            ]
 
-        reservation_link = None
-        for selector in reservation_link_selectors:
-            link = page.locator(selector).first
-            if await link.count() > 0:
-                # テキストに"確認"または"変更"または"払戻"が含まれているか確認
-                text_content = await link.text_content()
-                if text_content and ("確認" in text_content or "変更" in text_content or "払戻" in text_content):
-                    reservation_link = link
-                    print(f"  [INFO] リンクを発見: '{text_content.strip()}'")
-                    break
+            reservation_link = None
+            for selector in reservation_link_selectors:
+                link = page.locator(selector).first
+                if await link.count() > 0:
+                    # テキストに"確認"または"変更"または"払戻"が含まれているか確認
+                    text_content = await link.text_content()
+                    if text_content and ("確認" in text_content or "変更" in text_content or "払戻" in text_content):
+                        reservation_link = link
+                        print(f"  [INFO] リンクを発見: '{text_content.strip()}'")
+                        break
 
-        if not reservation_link:
-            # デバッグ: 現在の画面を保存
-            screenshot_debug = f"ex_cancel_debug_no_link_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
-            await page.screenshot(path=screenshot_debug)
+            if not reservation_link:
+                # デバッグ: 現在の画面を保存
+                screenshot_debug = f"ex_cancel_debug_no_link_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+                await page.screenshot(path=screenshot_debug)
 
-            # 全てのリンクを表示
-            all_links = await page.locator('a').all()
-            print(f"  [DEBUG] Found {len(all_links)} links on page:")
-            for i, link in enumerate(all_links[:20]):
-                try:
-                    text = await link.text_content()
-                    if text and text.strip():
-                        print(f"    [{i}] {text.strip()[:50]}")
-                except:
-                    pass
+                # 全てのリンクを表示
+                all_links = await page.locator('a').all()
+                print(f"  [DEBUG] Found {len(all_links)} links on page:")
+                for i, link in enumerate(all_links[:20]):
+                    try:
+                        text = await link.text_content()
+                        if text and text.strip():
+                            print(f"    [{i}] {text.strip()[:50]}")
+                    except:
+                        pass
 
-            return CancelResult(
-                success=False,
-                message="予約確認リンクが見つかりませんでした",
-                screenshot_path=screenshot_debug
-            )
+                return CancelResult(
+                    success=False,
+                    message="予約確認リンクが見つかりませんでした",
+                    screenshot_path=screenshot_debug
+                )
 
-        await reservation_link.click()
-        await page.wait_for_timeout(3000)
-        print("  [OK] 予約確認画面に移動しました")
+            await reservation_link.click()
+            await page.wait_for_timeout(3000)
+            print("  [OK] 予約確認画面に移動しました")
 
         # Step 3: 予約番号を探す
         print(f"[3/7] 予約番号 {reservation_number} を検索...")
