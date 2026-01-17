@@ -101,7 +101,8 @@ async def cancel_reservation(
 
         # Step 3: 予約番号を探す
         print(f"[3/7] 予約番号 {reservation_number} を検索...")
-        reservation_element = page.get_by_text(reservation_number, exact=False).first
+        # ExecutorPageProxyではget_by_textがないのでlocatorを使用
+        reservation_element = page.locator(f'text={reservation_number}').first
 
         if await reservation_element.count() == 0:
             # スクリーンショットを保存

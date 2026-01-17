@@ -99,10 +99,41 @@ async def login(
         # ログインページにアクセス
         await page.goto(URLS["login"], wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(2000)
-        
+
+        # ページ状態を確認（既にログイン済みならリダイレクトされている可能性）
+        current_state = await detect_page_state(page)
+        print(f"[LOGIN] ログインページ移動後の状態: {current_state}")
+
+        if current_state == PageState.LOGGED_IN:
+            print("[LOGIN] 既にログイン済み - スキップ")
+            return LoginResult(
+                success=True,
+                message="既にログイン済みです",
+                page_state=current_state,
+            )
+
+        if current_state == PageState.OTP_REQUIRED:
+            print("[LOGIN] OTP認証が必要")
+            return LoginResult(
+                success=False,
+                message="ワンタイムパスワード（OTP認証）が必要です",
+                requires_otp=True,
+                page_state=current_state,
+            )
+
         # 会員ID入力
         member_id_locator = page.locator(LOGIN["member_id"])
         if await member_id_locator.count() == 0:
+            # ログインフォームがない場合、ページ状態を再確認
+            print(f"[LOGIN] 会員IDフィールドなし、URL: {page.url}")
+            # URLでログイン状態を推測
+            if "smart-ex.jp" in page.url or "ClientService" in page.url:
+                print("[LOGIN] URLからログイン済みと判断")
+                return LoginResult(
+                    success=True,
+                    message="ログイン済み（リダイレクト検出）",
+                    page_state=PageState.LOGGED_IN,
+                )
             return LoginResult(
                 success=False,
                 message="会員ID入力フィールドが見つかりません",
@@ -115,6 +146,24 @@ async def login(
         # パスワード入力
         password_locator = page.locator(LOGIN["password"])
         if await password_locator.count() == 0:
+            # パスワードフィールドがない場合、ログイン状態を再確認
+            print(f"[LOGIN] パスワードフィールドなし、URL: {page.url}")
+            recheck_state = await detect_page_state(page)
+            if recheck_state == PageState.LOGGED_IN:
+                print("[LOGIN] 既にログイン済み（パスワード入力不要）")
+                return LoginResult(
+                    success=True,
+                    message="既にログイン済みです",
+                    page_state=recheck_state,
+                )
+            if recheck_state == PageState.OTP_REQUIRED:
+                print("[LOGIN] OTP認証画面に遷移")
+                return LoginResult(
+                    success=False,
+                    message="ワンタイムパスワード（OTP認証）が必要です",
+                    requires_otp=True,
+                    page_state=recheck_state,
+                )
             return LoginResult(
                 success=False,
                 message="パスワード入力フィールドが見つかりません",

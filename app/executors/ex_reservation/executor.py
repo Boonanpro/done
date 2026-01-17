@@ -508,7 +508,8 @@ class EXReservationExecutor(BaseExecutor):
                 params.get("reservation_number") or
                 ""
             )
-            confirm = params.get("confirm", False)
+            # ユーザーが「キャンセルして」と言った場合は実行する（デフォルトTrue）
+            confirm = params.get("confirm", True)
             departure_date = params.get("departure_date", "")
             train_name = params.get("train_name", "")
 
@@ -550,139 +551,170 @@ class EXReservationExecutor(BaseExecutor):
                 # 予約情報を含む要素を探す
                 reservations_found = []
 
-                # 予約番号（8桁）を含む要素を全て取得
-                reservation_number_elements = await page.locator('text=/\\d{8}/').all()
+                # 予約件数が1件で払戻ボタンがある場合、予約番号不要で直接払戻可能
+                refund_buttons = await page.locator('button:has-text("払戻"), a:has-text("払戻"), input[value*="払戻"]').all()
+                logger.info(f"払戻ボタン数: {len(refund_buttons)}")
 
-                for elem in reservation_number_elements:
+                if len(refund_buttons) == 1:
+                    # 予約が1件のみ - 予約番号を取得して直接キャンセル処理へ
+                    # お預かり番号を探す
                     try:
-                        text = await elem.text_content() or ""
-                        match = re.search(r'(\d{8})', text)
+                        reservation_text = await page.locator('text=/お預かり番号/').first.text_content() or ""
+                        match = re.search(r'(\d{4,})', reservation_text)
                         if match:
-                            res_num = match.group(1)
-                            # 親要素から予約情報を取得（列車名、日付など）
-                            # 周辺のテキストを取得
-                            parent = elem.locator('..')
-                            parent_text = ""
-                            try:
-                                parent_text = await parent.text_content() or ""
-                            except:
-                                pass
-
-                            # さらに上位の要素を探して情報を取得
-                            grandparent_text = ""
-                            try:
-                                grandparent = parent.locator('..')
-                                grandparent_text = await grandparent.text_content() or ""
-                            except:
-                                pass
-
-                            full_context = f"{text} {parent_text} {grandparent_text}"
-
-                            reservations_found.append({
-                                "reservation_number": res_num,
-                                "context": full_context[:200],  # 最初の200文字
-                            })
+                            reservation_id = match.group(1)
+                            logger.info(f"予約が1件のみ、自動選択: {reservation_id}")
+                            await self._notify_progress("cancel", f"予約番号 {reservation_id} を選択しました")
+                        else:
+                            # 予約番号が取れなくても、1件だけなので続行
+                            reservation_id = "auto"
+                            logger.info("予約番号不明だが1件のみのため自動選択")
                     except Exception as e:
-                        logger.debug(f"予約情報取得エラー: {e}")
-                        continue
-
-                # 重複を除去
-                seen = set()
-                unique_reservations = []
-                for res in reservations_found:
-                    if res["reservation_number"] not in seen:
-                        seen.add(res["reservation_number"])
-                        unique_reservations.append(res)
-
-                if not unique_reservations:
+                        reservation_id = "auto"
+                        logger.info(f"予約番号取得エラー、1件のみのため自動選択: {e}")
+                elif len(refund_buttons) == 0:
+                    # 払戻ボタンがない = 予約がない
                     return ExecutionResult(
                         success=False,
-                        message="予約が見つかりませんでした。予約一覧に有効な予約がないか、ページ構造が変更された可能性があります。",
+                        message="予約が見つかりませんでした。予約一覧に払戻ボタンがありません。",
                         details={"screenshot": screenshot_list},
                     )
+                else:
+                    # 複数の払戻ボタンがある = 複数予約、マッチングが必要
+                    logger.info(f"複数予約あり ({len(refund_buttons)}件)、予約番号でマッチング")
 
-                logger.info(f"予約を{len(unique_reservations)}件発見")
+                    # 予約番号（4桁以上）を含む要素を全て取得
+                    reservation_number_elements = await page.locator('text=/お預かり番号/').all()
+                    logger.info(f"お預かり番号要素数: {len(reservation_number_elements)}")
 
-                # 予約が1件のみの場合 → そのままキャンセル
-                if len(unique_reservations) == 1:
-                    reservation_id = unique_reservations[0]["reservation_number"]
-                    logger.info(f"予約が1件のみのため自動選択: {reservation_id}")
-                    await self._notify_progress("cancel", f"予約番号 {reservation_id} を選択しました")
+                    for elem in reservation_number_elements:
+                        try:
+                            text = await elem.text_content() or ""
+                            match = re.search(r'(\d{4,})', text)
+                            if match:
+                                res_num = match.group(1)
+                                # 親要素から予約情報を取得（列車名、日付など）
+                                parent = elem.locator('..')
+                                parent_text = ""
+                                try:
+                                    parent_text = await parent.text_content() or ""
+                                except:
+                                    pass
 
-                # 予約が複数あり、文脈情報（日付・列車名）がある場合 → マッチングを試みる
-                elif len(unique_reservations) > 1 and (departure_date or train_name):
-                    logger.info(f"複数予約あり、文脈情報でマッチング: date={departure_date}, train={train_name}")
-                    matched = None
+                                grandparent_text = ""
+                                try:
+                                    grandparent = parent.locator('..')
+                                    grandparent_text = await grandparent.text_content() or ""
+                                except:
+                                    pass
 
-                    for res in unique_reservations:
-                        context = res["context"]
-                        # 日付でマッチング（YYYY-MM-DD → MM/DD や M月D日 形式にも対応）
-                        date_match = False
-                        if departure_date:
-                            # 様々な日付形式をチェック
-                            date_patterns = [
-                                departure_date,  # 2026-02-10
-                                departure_date.replace("-", "/"),  # 2026/02/10
-                                f"{int(departure_date[5:7])}月{int(departure_date[8:10])}日",  # 2月10日
-                                f"{int(departure_date[5:7])}/{int(departure_date[8:10])}",  # 2/10
-                            ]
-                            for dp in date_patterns:
-                                if dp in context:
-                                    date_match = True
+                                full_context = f"{text} {parent_text} {grandparent_text}"
+
+                                reservations_found.append({
+                                    "reservation_number": res_num,
+                                    "context": full_context[:200],
+                                })
+                        except Exception as e:
+                            logger.debug(f"予約情報取得エラー: {e}")
+                            continue
+
+                    # 重複を除去
+                    seen = set()
+                    unique_reservations = []
+                    for res in reservations_found:
+                        if res["reservation_number"] not in seen:
+                            seen.add(res["reservation_number"])
+                            unique_reservations.append(res)
+
+                    if not unique_reservations:
+                        return ExecutionResult(
+                            success=False,
+                            message="複数予約があるようですが、予約番号を取得できませんでした。",
+                            details={"screenshot": screenshot_list},
+                        )
+
+                    logger.info(f"予約を{len(unique_reservations)}件発見")
+
+                    # 予約が1件のみの場合 → そのままキャンセル
+                    if len(unique_reservations) == 1:
+                        reservation_id = unique_reservations[0]["reservation_number"]
+                        logger.info(f"予約が1件のみのため自動選択: {reservation_id}")
+                        await self._notify_progress("cancel", f"予約番号 {reservation_id} を選択しました")
+
+                    # 予約が複数あり、文脈情報（日付・列車名）がある場合 → マッチングを試みる
+                    elif len(unique_reservations) > 1 and (departure_date or train_name):
+                        logger.info(f"複数予約あり、文脈情報でマッチング: date={departure_date}, train={train_name}")
+                        matched = None
+
+                        for res in unique_reservations:
+                            context = res["context"]
+                            # 日付でマッチング（YYYY-MM-DD → MM/DD や M月D日 形式にも対応）
+                            date_match = False
+                            if departure_date:
+                                # 様々な日付形式をチェック
+                                date_patterns = [
+                                    departure_date,  # 2026-02-10
+                                    departure_date.replace("-", "/"),  # 2026/02/10
+                                    f"{int(departure_date[5:7])}月{int(departure_date[8:10])}日",  # 2月10日
+                                    f"{int(departure_date[5:7])}/{int(departure_date[8:10])}",  # 2/10
+                                ]
+                                for dp in date_patterns:
+                                    if dp in context:
+                                        date_match = True
+                                        break
+
+                            # 列車名でマッチング
+                            train_match = False
+                            if train_name:
+                                # 「のぞみ37号」→「のぞみ」「37」などで部分マッチ
+                                train_parts = re.findall(r'[ぁ-んァ-ン一-龥]+|\d+', train_name)
+                                train_match = all(part in context for part in train_parts if part)
+
+                            # 両方指定されている場合は両方マッチ、片方のみの場合はその条件でマッチ
+                            if departure_date and train_name:
+                                if date_match and train_match:
+                                    matched = res
                                     break
-
-                        # 列車名でマッチング
-                        train_match = False
-                        if train_name:
-                            # 「のぞみ37号」→「のぞみ」「37」などで部分マッチ
-                            train_parts = re.findall(r'[ぁ-んァ-ン一-龥]+|\d+', train_name)
-                            train_match = all(part in context for part in train_parts if part)
-
-                        # 両方指定されている場合は両方マッチ、片方のみの場合はその条件でマッチ
-                        if departure_date and train_name:
-                            if date_match and train_match:
+                            elif departure_date and date_match:
                                 matched = res
                                 break
-                        elif departure_date and date_match:
-                            matched = res
-                            break
-                        elif train_name and train_match:
-                            matched = res
-                            break
+                            elif train_name and train_match:
+                                matched = res
+                                break
 
-                    if matched:
-                        reservation_id = matched["reservation_number"]
-                        logger.info(f"文脈情報にマッチした予約を選択: {reservation_id}")
-                        await self._notify_progress("cancel", f"予約番号 {reservation_id} をマッチしました")
+                        if matched:
+                            reservation_id = matched["reservation_number"]
+                            logger.info(f"文脈情報にマッチした予約を選択: {reservation_id}")
+                            await self._notify_progress("cancel", f"予約番号 {reservation_id} をマッチしました")
+                        else:
+                            # マッチしない場合は一覧を返す
+                            reservations_list = "\n".join([
+                                f"・{res['reservation_number']}: {res['context'][:50]}..."
+                                for res in unique_reservations
+                            ])
+                            return ExecutionResult(
+                                success=False,
+                                message=f"複数の予約が見つかりましたが、指定された条件にマッチするものがありませんでした。\n\n予約一覧:\n{reservations_list}\n\nキャンセルしたい予約番号を指定してください。",
+                                details={
+                                    "screenshot": screenshot_list,
+                                    "reservations": unique_reservations,
+                                },
+                            )
+
+                    # 予約が複数あり、文脈情報もない場合 → 一覧を返してユーザーに選択を促す
                     else:
-                        # マッチしない場合は一覧を返す
                         reservations_list = "\n".join([
                             f"・{res['reservation_number']}: {res['context'][:50]}..."
                             for res in unique_reservations
                         ])
                         return ExecutionResult(
                             success=False,
-                            message=f"複数の予約が見つかりましたが、指定された条件にマッチするものがありませんでした。\n\n予約一覧:\n{reservations_list}\n\nキャンセルしたい予約番号を指定してください。",
+                            message=f"複数の予約が見つかりました。どの予約をキャンセルしますか？\n\n{reservations_list}\n\nキャンセルしたい予約番号を指定してください。",
                             details={
                                 "screenshot": screenshot_list,
                                 "reservations": unique_reservations,
                             },
                         )
-
-                # 予約が複数あり、文脈情報もない場合 → 一覧を返してユーザーに選択を促す
-                else:
-                    reservations_list = "\n".join([
-                        f"・{res['reservation_number']}: {res['context'][:50]}..."
-                        for res in unique_reservations
-                    ])
-                    return ExecutionResult(
-                        success=False,
-                        message=f"複数の予約が見つかりました。どの予約をキャンセルしますか？\n\n{reservations_list}\n\nキャンセルしたい予約番号を指定してください。",
-                        details={
-                            "screenshot": screenshot_list,
-                            "reservations": unique_reservations,
-                        },
-                    )
 
             logger.info(f"キャンセル開始: {reservation_id}")
 
@@ -743,4 +775,6 @@ class EXReservationExecutor(BaseExecutor):
         Returns:
             ExecutionResult: キャンセル結果
         """
+        # user_idを保持（OTP取得で使用）
+        self._user_id = user_id
         return await self._do_cancel(params, credentials)
