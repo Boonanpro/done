@@ -13,8 +13,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.api.routes import router as api_router
-from app.api.line_webhook import router as line_webhook_router
 from app.api.chat_routes import router as chat_router
 from app.api.credentials_routes import router as credentials_router
 from app.api.gmail_routes import router as gmail_router
@@ -24,6 +22,10 @@ from app.api.invoice_routes import router as invoice_router
 from app.api.bank_account_routes import router as bank_account_router
 from app.api.otp_routes import router as otp_router
 from app.api.voice_routes import router as voice_router
+from app.executors.registry import register_all_executors
+
+# 全Executorを登録
+register_all_executors()
 
 app = FastAPI(
     title="AI Secretary System",
@@ -49,7 +51,6 @@ app.add_middleware(
 )
 
 # ルーター登録
-app.include_router(api_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(credentials_router, prefix="/api/v1")
 app.include_router(gmail_router, prefix="/api/v1")
@@ -59,7 +60,6 @@ app.include_router(invoice_router, prefix="/api/v1")
 app.include_router(bank_account_router, prefix="/api/v1")
 app.include_router(otp_router, prefix="/api/v1")
 app.include_router(voice_router)  # Already has /api/v1/voice prefix
-app.include_router(line_webhook_router, prefix="/webhook")
 
 
 @app.get("/")

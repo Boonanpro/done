@@ -59,7 +59,6 @@ celery_app.conf.update(
     # タスクルーティング
     task_routes={
         "app.tasks.task_handlers.execute_browser_task": {"queue": "browser_tasks"},
-        "app.tasks.task_handlers.process_wish_task": {"queue": "high_priority"},
         "app.tasks.payment_tasks.execute_single_payment": {"queue": "browser_tasks"},
     },
     

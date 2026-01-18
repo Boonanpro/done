@@ -18,40 +18,6 @@ def run_async(coro):
         loop.close()
 
 
-@celery_app.task(bind=True, max_retries=3)
-def process_wish_task(
-    self,
-    wish: str,
-    user_id: Optional[str] = None,
-) -> dict[str, Any]:
-    """
-    ユーザーの願望を非同期で処理するタスク
-    
-    Args:
-        wish: ユーザーの願望
-        user_id: ユーザーID
-        
-    Returns:
-        処理結果
-    """
-    try:
-        from app.agent.agent import AISecretaryAgent
-        
-        agent = AISecretaryAgent()
-        result = run_async(agent.process_wish(wish=wish, user_id=user_id))
-        
-        return {
-            "status": "success",
-            "task_id": result["task_id"],
-            "message": result["message"],
-            "proposed_actions": result["proposed_actions"],
-            "requires_confirmation": result["requires_confirmation"],
-        }
-    except Exception as e:
-        # リトライ
-        self.retry(exc=e, countdown=60)
-
-
 @celery_app.task(bind=True, max_retries=2)
 def execute_browser_task(
     self,

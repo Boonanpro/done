@@ -92,6 +92,9 @@ class AgentRunner:
             }
         """
         try:
+            print(f"[RUNNER_DEBUG] Starting process_message for user {self.session.user_id}")
+            print(f"[RUNNER_DEBUG] Message: {user_message[:50]}...")
+
             # 0. 認証情報待ちの場合、ユーザー入力から認証情報を抽出
             pending_tool = self.session.context.get("pending_tool_call")
             if pending_tool and not credentials:
@@ -155,9 +158,12 @@ class AgentRunner:
 
             # 3. LLM呼び出し→ツール実行ループ
             tool_results = []
+            print(f"[RUNNER_DEBUG] Starting LLM loop, state: {self.session.current_state.value}")
             for loop_count in range(MAX_TOOL_LOOPS + 1):
                 # LLMを呼び出し
+                print(f"[RUNNER_DEBUG] Calling LLM (loop {loop_count})...")
                 llm_response = await self._call_llm()
+                print(f"[RUNNER_DEBUG] LLM response length: {len(llm_response)}")
 
                 # レスポンスを解析
                 parsed = self._parse_response(llm_response)
@@ -248,6 +254,10 @@ class AgentRunner:
             }
 
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            print(f"[RUNNER_ERROR] Exception in process_message:")
+            print(f"[RUNNER_ERROR] {error_details}")
             logger.exception(f"Error in process_message: {e}")
             return {
                 "response": "申し訳ありません。エラーが発生しました。",
@@ -258,8 +268,21 @@ class AgentRunner:
 
     def _build_system_prompt(self) -> str:
         """システムプロンプトを構築（Progressive Disclosure）"""
+        print("[RUNNER_DEBUG] Building system prompt...")
         # ベースのシステムプロンプト
         system = load_system_prompt()
+        print(f"[RUNNER_DEBUG] Base system prompt length: {len(system)}")
+
+        # 現在日時を注入（LLMが正確な日時を把握するため）
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        weekdays = ['月', '火', '水', '木', '金', '土', '日']
+        tomorrow = now + timedelta(days=1)
+        system += f"\n\n## 現在の日時\n"
+        system += f"- 今日: {now.strftime('%Y年%m月%d日')}（{weekdays[now.weekday()]}曜日）\n"
+        system += f"- 現在時刻: {now.strftime('%H:%M')}\n"
+        system += f"- 「明日」は {tomorrow.strftime('%Y年%m月%d日')} です\n"
+        system += f"- 日付パラメータは必ず YYYY-MM-DD 形式で指定してください（例: {tomorrow.strftime('%Y-%m-%d')}）"
 
         # 現在の状態のプロンプトを追加
         state_prompt = load_state_prompt(self.session.current_state)
@@ -288,10 +311,34 @@ class AgentRunner:
         for skill in skills:
             lines.append(f"### {skill.display_name}")
             lines.append(f"- スキル名: `{skill.name}`")
+
+            # SKILL.mdからアクション情報を抽出
+            actions = self._extract_actions_from_skill(skill.raw_content)
+            if actions:
+                lines.append(f"- 利用可能なアクション: {', '.join(actions)}")
+
             lines.append(f"- 説明: {skill.description[:100]}...")
             lines.append("")
 
         return "\n".join(lines)
+
+    def _extract_actions_from_skill(self, content: str) -> list:
+        """SKILL.mdからアクション一覧を抽出"""
+        import re
+        actions = []
+
+        # テーブル形式 | `action` | を検出
+        table_matches = re.findall(r'\|\s*`(\w+)`\s*\|', content)
+        if table_matches:
+            actions.extend(table_matches)
+
+        # [TOOL: xxx action] 形式からアクションを検出
+        tool_matches = re.findall(r'\[TOOL:\s*\S+\s+(\w+)\]', content)
+        if tool_matches:
+            actions.extend(tool_matches)
+
+        # 重複除去して返す
+        return list(dict.fromkeys(actions))
 
     async def _call_llm(self) -> str:
         """LLMを呼び出す（ストリーミング）"""

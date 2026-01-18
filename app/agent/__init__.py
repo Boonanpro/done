@@ -1,7 +1,6 @@
 """
-AI Agent Package
+AI Agent Package - v2 Architecture
 """
-from app.agent.agent import AISecretaryAgent
+from app.agent.v2.runner import AgentRunner, create_runner
 
-__all__ = ["AISecretaryAgent"]
-
+__all__ = ["AgentRunner", "create_runner"]

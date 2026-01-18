@@ -577,10 +577,8 @@ async def send_dan_message_stream(
     current_user: TokenData = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ):
-    """ダンにメッセージを送信し、AISecretaryAgentでプロセスをSSEストリーミング（自然言語版 + コールバック）"""
+    """ダンにメッセージを送信（SSEストリーミング版）- Agent v2を使用"""
     from starlette.responses import StreamingResponse
-    from app.agent.agent import AISecretaryAgent
-    from app.models.schemas import TaskType
     from app.services.progress_callback import (
         ProgressCallbackRegistry, 
         set_current_request_id,
@@ -650,27 +648,9 @@ async def send_dan_message_stream(
             # 挨拶かどうかをチェック
             content_lower = request.content.lower()
             is_greeting = any(kw in content_lower for kw in GREETING_KEYWORDS)
-            
-            # Agentを初期化（検索ツールを有効化）
-            agent = AISecretaryAgent(tool_names=["search_web"])
-            
-            # タスクタイプを分析
-            from langchain_core.messages import HumanMessage as LCHumanMessage
-            initial_state = {
-                "messages": [LCHumanMessage(content=request.content)],
-                "task_id": "",
-                "user_id": current_user.user_id,
-                "original_wish": request.content,
-                "task_type": None,
-                "proposed_actions": [],
-                "requires_confirmation": False,
-                "execution_result": None,
-                "status": None,
-                "search_results": [],
-            }
-            
+
             # ========================================
-            # StateMachineで処理（自問自答ナレーション付き）
+            # Agent v2で処理
             # ========================================
 
             # 推論ステップを収集するためのリストとキュー
@@ -784,168 +764,6 @@ async def send_dan_message_stream(
             "X-Accel-Buffering": "no",
         }
     )
-
-
-@router.post("/dan/messages", response_model=DanMessageResponse)
-async def send_dan_message(
-    request: MessageSendRequest,
-    current_user: TokenData = Depends(get_current_user),
-    service: ChatService = Depends(get_chat_service),
-):
-    """ダンにメッセージを送信（非ストリーミング版）- AISecretaryAgentを使用（自然言語版）"""
-    try:
-        from langchain_core.messages import HumanMessage as LCHumanMessage
-        from app.agent.agent import AISecretaryAgent
-        from app.models.schemas import TaskType
-        import logging
-        
-        # 挨拶キーワード
-        GREETING_KEYWORDS = ["おはよう", "こんにちは", "こんばんは", "ありがとう", "おやすみ",
-                             "hello", "hi", "thanks", "thank you", "good morning", "good night"]
-        
-        # ユーザーメッセージを保存
-        message = await service.send_dan_message(current_user.user_id, request.content)
-        user = await service.get_user_by_id(current_user.user_id)
-        room_id = message["room_id"]
-        
-        user_message = MessageResponse(
-            id=message["id"],
-            room_id=room_id,
-            sender_id=message["sender_id"],
-            sender_name=user["display_name"] if user else "You",
-            sender_type=message["sender_type"],
-            content=message["content"],
-            created_at=message["created_at"],
-        )
-        
-        # 同一セッション（ルーム）の会話履歴を取得
-        conversation_history = []
-        try:
-            # 現在のメッセージを除く直近のメッセージを取得
-            recent_messages = await service.get_messages(room_id, current_user.user_id, limit=11)
-            # 最新のメッセージ（今送ったもの）を除外
-            conversation_history = [
-                {
-                    "sender_type": msg.get("sender_type", "unknown"),
-                    "sender_name": msg.get("sender_name", ""),
-                    "content": msg.get("content", ""),
-                }
-                for msg in recent_messages[1:]  # 最新を除く
-            ]
-            # 時系列順に並べ替え（古い順）
-            conversation_history = list(reversed(conversation_history))
-        except Exception as e:
-            logging.warning(f"Failed to get conversation history: {e}")
-        
-        # 挨拶かどうかをチェック
-        content_lower = request.content.lower()
-        is_greeting = any(kw in content_lower for kw in GREETING_KEYWORDS)
-        
-        # AISecretaryAgentで処理
-        agent = AISecretaryAgent(tool_names=["search_web"])
-        
-        # タスクタイプを分析
-        initial_state = {
-            "messages": [LCHumanMessage(content=request.content)],
-            "task_id": "",
-            "user_id": current_user.user_id,
-            "original_wish": request.content,
-            "task_type": None,
-            "proposed_actions": [],
-            "requires_confirmation": False,
-            "execution_result": None,
-            "status": None,
-            "search_results": [],
-        }
-        
-        process_steps = []
-        
-        if is_greeting:
-            # 挨拶の場合は検索をスキップ
-            process_steps.append(ProcessStep(id="receive", label="挨拶に応答します", status="completed"))
-            
-            # 提案生成（挨拶用）
-            proposal_state = {
-                "messages": [LCHumanMessage(content=request.content)],
-                "task_id": "",
-                "user_id": current_user.user_id,
-                "original_wish": request.content,
-                "task_type": TaskType.OTHER,
-                "proposed_actions": [],
-                "requires_confirmation": False,
-                "execution_result": None,
-                "status": None,
-                "search_results": [],
-            }
-            
-            proposed_state = await agent._propose_actions(proposal_state)
-            full_proposal = proposed_state.get("execution_result", {}).get("full_proposal", "")
-            process_steps.append(ProcessStep(id="propose", label="回答を作成しました", status="completed"))
-        else:
-            # ========================================
-            # Architecture v2: 推論ファースト・Executor実行フロー
-            # ========================================
-            
-            process_steps.append(ProcessStep(id="receive", label="リクエストを分析しています", status="completed"))
-            
-            # process_wish_v2を実行（会話履歴付き）
-            result = await agent.process_wish_v2(
-                wish=request.content,
-                user_id=current_user.user_id,
-                request_id=None,  # 非ストリーム版はプログレス通知なし
-                conversation_history=conversation_history,
-            )
-            
-            # 結果からプロセスステップを生成
-            research = result.get("research_result", {})
-            service_display_name = research.get("service_display_name", "検索")
-            
-            if result.get("executor_found"):
-                process_steps.append(ProcessStep(
-                    id="search", 
-                    label=f"{service_display_name}で検索しました", 
-                    status="completed"
-                ))
-            else:
-                process_steps.append(ProcessStep(
-                    id="search", 
-                    label=f"最適な方法を検討しました", 
-                    status="completed"
-                ))
-            
-            # 提案を取得
-            proposal = result.get("proposal", {})
-            full_proposal = proposal.get("full_proposal", "")
-            
-            if not full_proposal:
-                full_proposal = result.get("message", "申し訳ありません。処理中にエラーが発生しました。")
-            
-            process_steps.append(ProcessStep(id="propose", label="回答を作成しました", status="completed"))
-        
-        # DBに保存
-        ai_message_data = await service.send_dan_ai_message(current_user.user_id, full_proposal)
-        
-        ai_message = MessageResponse(
-            id=ai_message_data["id"],
-            room_id=ai_message_data["room_id"],
-            sender_id=ai_message_data.get("sender_id"),
-            sender_name="ダン",
-            sender_type=SenderType.AI,
-            content=ai_message_data["content"],
-            created_at=ai_message_data["created_at"],
-        )
-        
-        return DanMessageResponse(
-            user_message=user_message,
-            ai_message=ai_message,
-            process_steps=process_steps,
-        )
-        
-    except Exception as e:
-        import logging
-        import traceback
-        logging.error(f"Failed to send dan message: {e}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/dan/read", response_model=ReadMarkResponse)

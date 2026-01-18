@@ -330,16 +330,24 @@ async def execute_tool(
         }
 
     # Executorを取得
-    # book/purchase/reserve は execute として扱う（capability登録名）
+    # アクション名 → capability名のマッピング（registry登録名に合わせる）
     capability = action
     if action in ("book", "purchase", "reserve"):
         capability = "execute"
+    elif action in ("cancel_reservation", "cancel"):
+        capability = "cancel"
+    elif action in ("list_reservations",):
+        capability = "search"  # 予約一覧は検索機能で取得
+
+    print(f"[TOOL_DEBUG] Looking for executor: service_type={skill.service_type}, service_name={skill.service_name}, capability={capability}")
 
     executor = find_executor(
         service_type=skill.service_type,
         service_name=skill.service_name,
         capability=capability,
     )
+
+    print(f"[TOOL_DEBUG] find_executor returned: {executor}")
 
     if not executor:
         return {
@@ -378,10 +386,23 @@ async def execute_tool(
                     "error": f"{skill_name} は購入機能に対応していません",
                 }
 
-        elif action == "cancel":
+        elif action in ("cancel", "cancel_reservation"):
             # キャンセル/払戻アクション
+            print(f"[TOOL_DEBUG] Cancel action called, calling executor.cancel()...")
             result = await executor.cancel(params=params, credentials=credentials, user_id=user_id)
+            print(f"[TOOL_DEBUG] Cancel result: success={result.success}, message={result.message}")
             return {"success": result.success, "message": result.message}
+
+        elif action == "list_reservations":
+            # 予約一覧取得アクション
+            print(f"[TOOL_DEBUG] List reservations action called")
+            if hasattr(executor, "list_reservations"):
+                result = await executor.list_reservations(params=params, credentials=credentials, user_id=user_id)
+                return result.to_dict() if hasattr(result, 'to_dict') else result
+            else:
+                # list_reservationsがない場合、searchで代用
+                result = await executor.search(params={"action": "list"}, credentials=credentials, user_id=user_id)
+                return result.to_dict() if hasattr(result, 'to_dict') else result
 
         else:
             return {"success": False, "error": f"Unknown action: {action}"}
