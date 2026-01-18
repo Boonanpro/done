@@ -744,11 +744,11 @@ export const api = {
     sendMessageStream: async (
       data: StateMachineMessageRequest,
       callbacks: {
-        onProcessStep?: (step: ProcessStep) => void;
-        onUserMessage?: (message: MessageResponse) => void;
-        onAIMessage?: (message: MessageResponse) => void;
-        onComplete?: () => void;
-        onError?: (error: string) => void;
+        onProcessStep?: (step: ProcessStep, sessionId?: string) => void;
+        onUserMessage?: (message: MessageResponse, sessionId?: string) => void;
+        onAIMessage?: (message: MessageResponse, sessionId?: string) => void;
+        onComplete?: (sessionId?: string) => void;
+        onError?: (error: string, sessionId?: string) => void;
       },
       signal?: AbortSignal
     ): Promise<void> => {
@@ -770,7 +770,7 @@ export const api = {
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify({ content: data.message }),
+          body: JSON.stringify({ content: data.message, session_id: data.session_id }),
           signal,  // AbortSignal追加
         });
 
@@ -818,16 +818,19 @@ export const api = {
               try {
                 const parsed = JSON.parse(eventData);
 
+                // session_idを抽出（バックエンドから送信される）
+                const eventSessionId = parsed.session_id as string | undefined;
+
                 if (parsed.type === 'process' && callbacks.onProcessStep) {
-                  callbacks.onProcessStep(parsed.step);
+                  callbacks.onProcessStep(parsed.step, eventSessionId);
                 } else if (parsed.type === 'user_message' && callbacks.onUserMessage) {
-                  callbacks.onUserMessage(parsed.message);
+                  callbacks.onUserMessage(parsed.message, eventSessionId);
                 } else if (parsed.type === 'ai_message' && callbacks.onAIMessage) {
-                  callbacks.onAIMessage(parsed.message);
+                  callbacks.onAIMessage(parsed.message, eventSessionId);
                 } else if (parsed.type === 'done' && callbacks.onComplete) {
-                  callbacks.onComplete();
+                  callbacks.onComplete(eventSessionId);
                 } else if (parsed.type === 'error' && callbacks.onError) {
-                  callbacks.onError(parsed.message);
+                  callbacks.onError(parsed.message, eventSessionId);
                 }
               } catch (err) {
                 console.error('Failed to parse SSE data:', eventData, err);

@@ -2,7 +2,7 @@
 
 import { useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname, useRouter, useParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   MessageSquare,
@@ -34,15 +34,13 @@ import {
 } from '@/components/ui/tooltip';
 import { useAuth } from '@/hooks/use-auth';
 import { api, SessionResponse, ApiError } from '@/lib/api-client';
+import { useSessionStateStore } from '@/stores/session-state-store';
 
 // Hook to safely check localStorage after hydration
 function useHasToken() {
   return useSyncExternalStore(
-    // Subscribe function - localStorage doesn't have events, so we just return a no-op
     () => () => {},
-    // Client snapshot
     () => !!localStorage.getItem('done-token'),
-    // Server snapshot - always false on server
     () => false
   );
 }
@@ -69,19 +67,27 @@ const navItems = [
 export function Sidebar({ className }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
+  const params = useParams();
   const queryClient = useQueryClient();
   const { user, logout, isLoggingOut } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  // Check if token exists in localStorage (safe for SSR)
   const hasToken = useHasToken();
+
+  // URLから現在のセッションIDを取得（唯一の真実源）
+  const currentSessionId = params.sessionId as string | undefined;
+
+  // セッション状態ストア
+  const setActiveSessionId = useSessionStateStore((state) => state.setActiveSessionId);
+  const sessionStates = useSessionStateStore((state) => state.sessions);
+  const markAsRead = useSessionStateStore((state) => state.markAsRead);
 
   // Fetch sessions
   const { data: sessionsData, isLoading: isLoadingSessions } = useQuery({
     queryKey: ['dan-sessions'],
     queryFn: api.dan.getSessions,
     enabled: hasToken,
-    staleTime: 60 * 1000, // 1 minute - cache longer
+    staleTime: 60 * 1000,
   });
 
   // Filter sessions by search query
@@ -92,61 +98,37 @@ export function Sidebar({ className }: SidebarProps) {
   // Create new session
   const createSessionMutation = useMutation({
     mutationFn: api.dan.createSession,
-    onSuccess: () => {
-      // Invalidate queries to refresh the session list
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['dan-sessions'] });
-      queryClient.invalidateQueries({ queryKey: ['dan-messages'] });
-      queryClient.invalidateQueries({ queryKey: ['dan-room'] });
-      // Navigate to chat page
-      router.push('/chat');
-      toast.success('新しい会話を開始しました');
+      if (data?.id) {
+        // 新しいセッションに直接遷移
+        router.push(`/chat/${data.id}`);
+        toast.success('新しい会話を開始しました');
+      }
     },
     onError: () => {
       toast.error('新しい会話の開始に失敗しました');
     },
   });
 
-  // Switch session (optimized - returns all data in one call)
-  const switchSessionMutation = useMutation({
-    mutationFn: (sessionId: string) => api.dan.switchSession(sessionId, 50),
-    onSuccess: (data) => {
-      // Directly update cache with returned data - no need for separate API calls
-      queryClient.setQueryData(['dan-room'], data.room);
-      queryClient.setQueryData(['dan-messages'], data.messages);
-      // Update sessions list to reflect new current session
-      queryClient.setQueryData(['dan-sessions'], (old: typeof sessionsData) => ({
-        sessions: old?.sessions || [],
-        current_session_id: data.session_id,
-      }));
-      router.push('/chat');
-    },
-    onError: () => {
-      toast.error('セッションの切り替えに失敗しました');
-    },
-  });
-
   // Delete session
   const deleteSessionMutation = useMutation({
     mutationFn: (sessionId: string) => api.dan.deleteSession(sessionId),
-    onSuccess: (data, sessionId) => {
-      const wasActive = sessionId === sessionsData?.current_session_id;
+    onSuccess: (data, deletedSessionId) => {
+      const wasActive = deletedSessionId === currentSessionId;
       const newActiveId = data.new_active_session_id;
-      
-      // Remove from cache and update current session if needed
+
+      // Remove from cache
       queryClient.setQueryData(['dan-sessions'], (old: typeof sessionsData) => ({
-        sessions: old?.sessions?.filter((s) => s.id !== sessionId) || [],
+        sessions: old?.sessions?.filter((s) => s.id !== deletedSessionId) || [],
         current_session_id: newActiveId || old?.current_session_id,
       }));
-      
-      // If the deleted session was active, switch to new session
+
+      // If the deleted session was active, navigate to new session
       if (wasActive && newActiveId) {
-        // Fetch new session data
-        api.dan.switchSession(newActiveId, 50).then((switchData) => {
-          queryClient.setQueryData(['dan-room'], switchData.room);
-          queryClient.setQueryData(['dan-messages'], switchData.messages);
-        });
+        router.push(`/chat/${newActiveId}`);
       }
-      
+
       toast.success('会話を削除しました');
     },
     onError: (err) => {
@@ -162,18 +144,20 @@ export function Sidebar({ className }: SidebarProps) {
     createSessionMutation.mutate();
   };
 
+  // セッションクリック時はURLで遷移するだけ
   const handleSessionClick = (session: SessionResponse) => {
-    // If already the current session, just navigate to chat
-    if (session.id === sessionsData?.current_session_id) {
-      router.push('/chat');
-      return;
+    if (session.id === currentSessionId) {
+      return; // 既に同じセッション
     }
-    // Otherwise, switch to the session (optimized)
-    switchSessionMutation.mutate(session.id);
+    // セッション状態を更新して既読にする
+    setActiveSessionId(session.id);
+    markAsRead(session.id);
+    // URLで遷移
+    router.push(`/chat/${session.id}`);
   };
 
   const handleDeleteSession = (e: React.MouseEvent, sessionId: string) => {
-    e.stopPropagation(); // Prevent session click
+    e.stopPropagation();
     deleteSessionMutation.mutate(sessionId);
   };
 
@@ -186,7 +170,6 @@ export function Sidebar({ className }: SidebarProps) {
     }
   };
 
-  // Format relative time
   const formatRelativeTime = (dateString: string | undefined) => {
     if (!dateString) return '';
     const date = new Date(dateString);
@@ -210,7 +193,7 @@ export function Sidebar({ className }: SidebarProps) {
         animate={{ width: isCollapsed ? 64 : 280 }}
         transition={{ duration: 0.2, ease: 'easeInOut' }}
         className={cn(
-          'relative flex flex-col h-screen bg-sidebar border-r border-sidebar-border',
+          'relative flex flex-col h-full overflow-hidden bg-sidebar border-r border-sidebar-border',
           className
         )}
       >
@@ -296,8 +279,7 @@ export function Sidebar({ className }: SidebarProps) {
         <Separator className="bg-sidebar-border" />
 
         {/* Chat Sessions */}
-        <ScrollArea className="flex-1 px-3 py-2">
-          {/* Dan section header */}
+        <ScrollArea className="flex-1 min-h-0 px-3 py-2">
           {!isCollapsed && (
             <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground font-medium">
               <MessageSquare className="h-3 w-3" />
@@ -305,7 +287,6 @@ export function Sidebar({ className }: SidebarProps) {
             </div>
           )}
 
-          {/* Sessions list */}
           <nav className="space-y-1">
             {isLoadingSessions ? (
               <div className="flex items-center justify-center py-4">
@@ -319,11 +300,12 @@ export function Sidebar({ className }: SidebarProps) {
               )
             ) : (
               filteredSessions.map((session) => {
-                const isActive = session.id === sessionsData?.current_session_id;
-                const isSwitching = switchSessionMutation.isPending && 
-                  switchSessionMutation.variables === session.id;
+                // URLのsessionIdと比較してアクティブ判定
+                const isActive = session.id === currentSessionId;
                 const isDeleting = deleteSessionMutation.isPending &&
                   deleteSessionMutation.variables === session.id;
+                const unreadCount = sessionStates.get(session.id)?.unreadCount || 0;
+                const hasUnread = unreadCount > 0;
 
                 return (
                   <Tooltip key={session.id}>
@@ -340,20 +322,20 @@ export function Sidebar({ className }: SidebarProps) {
                         )}
                         onClick={() => !isDeleting && handleSessionClick(session)}
                       >
-                        {isSwitching ? (
-                          <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
-                        ) : (
-                          <MessageCircle className="h-4 w-4 shrink-0" />
-                        )}
+                        <div className="relative shrink-0">
+                          <MessageCircle className="h-4 w-4" />
+                          {hasUnread && !isActive && (
+                            <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-white border border-sidebar-border" />
+                          )}
+                        </div>
                         {!isCollapsed && (
                           <>
                             <div className="flex-1 min-w-0">
-                              <p className="truncate font-medium">{session.title}</p>
+                              <p className={cn("truncate", hasUnread && !isActive && "font-semibold")}>{session.title}</p>
                               <p className="text-xs text-muted-foreground truncate">
                                 {formatRelativeTime(session.last_message_at)}
                               </p>
                             </div>
-                            {/* Delete button */}
                             <button
                               onClick={(e) => handleDeleteSession(e, session.id)}
                               disabled={isDeleting}
@@ -376,6 +358,7 @@ export function Sidebar({ className }: SidebarProps) {
                         <p className="text-xs text-muted-foreground">
                           {formatRelativeTime(session.last_message_at)}
                         </p>
+                        {hasUnread && <p className="text-xs text-primary">新着メッセージあり</p>}
                       </TooltipContent>
                     )}
                   </Tooltip>
@@ -386,7 +369,6 @@ export function Sidebar({ className }: SidebarProps) {
 
           <Separator className="my-3 bg-sidebar-border" />
 
-          {/* Other navigation items */}
           <nav className="space-y-1">
             {navItems.map((item) => {
               const isActive = pathname.startsWith(item.href);

@@ -192,6 +192,7 @@ class AddMemberRequest(BaseModel):
 class MessageSendRequest(BaseModel):
     """Send message request"""
     content: str = Field(..., min_length=1, max_length=10000)
+    session_id: Optional[str] = Field(None, description="Target session/room ID")
 
 
 class MessageResponse(BaseModel):

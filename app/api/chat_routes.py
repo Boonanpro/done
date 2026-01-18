@@ -601,12 +601,18 @@ async def send_dan_message_stream(
         
         try:
             # Step 1: ユーザーメッセージを保存
-            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'receive', 'label': '考え中...', 'status': 'running'}})}\n\n"
-            
-            message = await service.send_dan_message(current_user.user_id, request.content)
+            # session_idが指定されていればそのルームに、なければ現在のDanルームに送信
+            if request.session_id:
+                room_id = request.session_id
+                message = await service.send_message(room_id, current_user.user_id, request.content, sender_type="human")
+            else:
+                message = await service.send_dan_message(current_user.user_id, request.content)
+                room_id = message["room_id"]
             user = await service.get_user_by_id(current_user.user_id)
-            room_id = message["room_id"]
-            
+
+            # 最初のプロセスステップ（session_id付き）
+            yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': 'receive', 'label': '考え中...', 'status': 'running'}})}\n\n"
+
             user_message = {
                 "id": message["id"],
                 "room_id": room_id,
@@ -616,9 +622,9 @@ async def send_dan_message_stream(
                 "content": message["content"],
                 "created_at": message["created_at"].isoformat() if hasattr(message["created_at"], 'isoformat') else str(message["created_at"]),
             }
-            
-            # ユーザーメッセージを送信
-            yield f"data: {json.dumps({'type': 'user_message', 'message': user_message})}\n\n"
+
+            # ユーザーメッセージを送信（session_id付き）
+            yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
             
             # Step 1.5: 同一セッション（ルーム）の会話履歴を取得
             # 現在のメッセージより前のメッセージを取得（直近10件）
@@ -663,79 +669,87 @@ async def send_dan_message_stream(
                 "search_results": [],
             }
             
-            # 挨拶の場合は分析・検索をスキップして直接回答
+            # ========================================
+            # StateMachineで処理（自問自答ナレーション付き）
+            # ========================================
+
+            # 推論ステップを収集するためのリストとキュー
+            reasoning_steps = []
+            reasoning_queue = asyncio.Queue()
+
+            # 推論ステップをキューに追加するコールバック
+            async def on_reasoning_step(step: str):
+                reasoning_steps.append(step)
+                await reasoning_queue.put(step)
+
+            # 挨拶の場合はシンプルに応答
             if is_greeting:
-                yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'receive', 'label': '挨拶に応答します', 'status': 'completed'}})}\n\n"
-                
-                # 直接提案生成（挨拶用）
-                yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'propose', 'label': '回答を作成しています', 'status': 'running'}})}\n\n"
-                
-                proposal_state = {
-                    "messages": [LCHumanMessage(content=request.content)],
-                    "task_id": "",
-                    "user_id": current_user.user_id,
-                    "original_wish": request.content,
-                    "task_type": TaskType.OTHER,
-                    "proposed_actions": [],
-                    "requires_confirmation": False,
-                    "execution_result": None,
-                    "status": None,
-                    "search_results": [],
-                }
-                
-                proposed_state = await agent._propose_actions(proposal_state)
-                full_proposal = proposed_state.get("execution_result", {}).get("full_proposal", "")
-                ai_response_content = full_proposal
+                yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': 'greeting', 'label': '挨拶に応答します', 'status': 'completed'}})}\n\n"
+                ai_response_content = "こんにちは！何かお手伝いできることはありますか？"
             else:
                 # ========================================
-                # Architecture v2: 推論ファースト・Executor実行フロー
+                # Agent v2: Messages配列ベースのrunner
                 # ========================================
-                
-                yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'receive', 'label': 'リクエストを分析しています', 'status': 'completed'}})}\n\n"
-                
-                # process_wish_v2をバックグラウンドで実行（会話履歴付き）
-                process_task = asyncio.create_task(
-                    agent.process_wish_v2(
-                        wish=request.content,
-                        user_id=current_user.user_id,
-                        request_id=request_id,
-                        conversation_history=conversation_history,
-                    )
+                from app.agent.v2.runner import create_runner
+                from app.executors.registry import register_all_executors
+
+                # Executor登録
+                register_all_executors()
+
+                # Agent v2 Runner作成
+                runner = await create_runner(
+                    session_id=room_id,
+                    user_id=current_user.user_id,
+                    on_reasoning_step=on_reasoning_step,
                 )
-                
-                # プログレスキューを監視してSSEで送信
+
+                # メッセージ処理をバックグラウンドで実行
+                process_task = asyncio.create_task(runner.process_message(request.content))
+
+                # キューを監視してSSEで送信
+                step_counter = 0
                 while not process_task.done():
                     try:
-                        progress_update = await asyncio.wait_for(
-                            progress_queue.get(), 
-                            timeout=0.1
-                        )
-                        yield f"data: {json.dumps({'type': 'process', 'step': {'id': progress_update.step_id, 'label': progress_update.label, 'status': progress_update.status}})}\n\n"
+                        step = await asyncio.wait_for(reasoning_queue.get(), timeout=0.1)
+                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'reasoning-{step_counter}', 'label': step, 'status': 'running'}})}\n\n"
+                        step_counter += 1
                     except asyncio.TimeoutError:
                         continue
-                
-                # 残りのプログレスメッセージを送信
-                while not progress_queue.empty():
+
+                # 残りのステップを送信
+                while not reasoning_queue.empty():
                     try:
-                        progress_update = progress_queue.get_nowait()
-                        yield f"data: {json.dumps({'type': 'process', 'step': {'id': progress_update.step_id, 'label': progress_update.label, 'status': progress_update.status}})}\n\n"
+                        step = reasoning_queue.get_nowait()
+                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'reasoning-{step_counter}', 'label': step, 'status': 'completed'}})}\n\n"
+                        step_counter += 1
                     except asyncio.QueueEmpty:
                         break
-                
+
                 # 結果を取得
                 result = await process_task
-                
-                # 提案を取得
-                proposal = result.get("proposal", {})
-                ai_response_content = proposal.get("full_proposal", "")
-                
-                # 提案がない場合はエラーメッセージ
-                if not ai_response_content:
-                    ai_response_content = result.get("message", "申し訳ありません。処理中にエラーが発生しました。")
+
+                # 応答を取得
+                ai_response_content = result.get("response", "申し訳ありません。処理中にエラーが発生しました。")
+
+                # ツール実行結果があれば通知
+                if result.get("tool_results"):
+                    for tr in result["tool_results"]:
+                        tool_info = f"{tr['tool']['skill']} {tr['tool']['action']}"
+                        success = tr['result'].get('success', False)
+                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'tool-{tool_info}', 'label': f'ツール実行: {tool_info}', 'status': 'completed' if success else 'error'}})}\n\n"
+
+                # エラーがあれば通知
+                if result.get("error"):
+                    yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': result['error']})}\n\n"
             
-            # DBに保存
-            ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content)
-            
+            # DBに保存（指定されたroom_idを使用）
+            ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content, reasoning_steps, room_id=room_id)
+
+            if not ai_message_data:
+                import logging
+                logging.error(f"send_dan_ai_message returned None for user {current_user.user_id}")
+                raise ValueError("Failed to save AI message: returned None")
+
             ai_message = {
                 "id": ai_message_data["id"],
                 "room_id": ai_message_data["room_id"],
@@ -746,10 +760,10 @@ async def send_dan_message_stream(
                 "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
             }
             
-            # 完了
-            yield f"data: {json.dumps({'type': 'process', 'step': {'id': 'propose', 'label': '回答を作成しました', 'status': 'completed'}})}\n\n"
-            yield f"data: {json.dumps({'type': 'ai_message', 'message': ai_message})}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            # 完了（session_id付き）
+            yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': 'propose', 'label': '回答を作成しました', 'status': 'completed'}})}\n\n"
+            yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
             
         except Exception as e:
             import logging

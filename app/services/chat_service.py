@@ -786,19 +786,25 @@ class ChatService:
         user_id: str,
         content: str,
         reasoning_steps: list[str] = None,
+        room_id: str = None,
     ) -> dict:
         """
         ダンからユーザーにメッセージを送信（AI側）
-        
+
         Args:
             user_id: 対象ユーザーID
             content: メッセージ内容
             reasoning_steps: 推論過程（プロセス/ナレーション）
-            
+            room_id: 送信先ルームID（指定しない場合は現在のDanルーム）
+
         Returns:
             送信されたメッセージ
         """
-        dan_room = await self.get_or_create_dan_room(user_id)
+        if room_id:
+            target_room_id = room_id
+        else:
+            dan_room = await self.get_or_create_dan_room(user_id)
+            target_room_id = dan_room["id"]
         
         # ai_contextを構築
         ai_context = None
@@ -807,7 +813,7 @@ class ChatService:
         
         # AIからのメッセージとして送信
         insert_data = {
-            "room_id": dan_room["id"],
+            "room_id": target_room_id,
             "sender_id": None,  # AIなのでsender_idはnull
             "sender_type": "ai",
             "content": content,

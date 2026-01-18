@@ -1,0 +1,735 @@
+'use client';
+
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useRouter, useParams } from 'next/navigation';
+import { motion } from 'framer-motion';
+import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp, Square } from 'lucide-react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
+
+import { MainLayout } from '@/components/layout/main-layout';
+import { Button } from '@/components/ui/button';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Skeleton } from '@/components/ui/skeleton';
+import { api, type MessageResponse, type ProcessStep, type StateMachineResponse, type StateMachineState, ApiError } from '@/lib/api-client';
+import { useAuthStore } from '@/stores/auth-store';
+import { useSessionStateStore, PENDING_PROCESS_ID } from '@/stores/session-state-store';
+import { cn } from '@/lib/utils';
+
+// プロセスステップの表示コンポーネント
+interface ProcessDisplayProps {
+  steps: ProcessStep[];
+  isCollapsed: boolean;
+  onToggle: () => void;
+  isProcessing?: boolean;
+}
+
+function ProcessDisplay({ steps, isCollapsed, onToggle, isProcessing = false }: ProcessDisplayProps) {
+  const hasSteps = steps.length > 0;
+
+  return (
+    <div className="flex gap-3 mb-2">
+      <div className="w-10 shrink-0" />
+      <div className="flex-1 px-4 py-2 rounded-xl bg-muted/50 border border-border">
+        <button
+          onClick={onToggle}
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors w-full"
+        >
+          {isCollapsed ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
+          <span>プロセス</span>
+        </button>
+        {!isCollapsed && (
+          <div className="mt-2 pl-2 border-l-2 border-primary/30 space-y-1">
+            {isProcessing && !hasSteps && (
+              <div className="flex items-center gap-2 text-xs">
+                <Loader2 className="h-3 w-3 text-primary animate-spin" />
+                <span>考え中...</span>
+              </div>
+            )}
+            {steps.map((step, index) => {
+              const isLatest = index === steps.length - 1;
+              const shouldSpin = isLatest && isProcessing;
+              return (
+                <div key={step.id} className="flex items-center gap-2 text-xs">
+                  {shouldSpin ? (
+                    <Loader2 className="h-3 w-3 text-primary animate-spin" />
+                  ) : (
+                    <span className="h-3 w-3" />
+                  )}
+                  <span className="text-muted-foreground">{step.label}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function ChatSessionPage() {
+  const router = useRouter();
+  const params = useParams();
+  const queryClient = useQueryClient();
+
+  // URLからセッションIDを取得（唯一の真実源）
+  const sessionId = params.sessionId as string;
+
+  const user = useAuthStore((state) => state.user);
+  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
+  const isLoading = useAuthStore((state) => state.isLoading);
+  const [message, setMessage] = useState('');
+
+  // セッション別ストア
+  const sessions = useSessionStateStore((state) => state.sessions);
+  const setActiveSessionId = useSessionStateStore((state) => state.setActiveSessionId);
+  const getSessionState = useSessionStateStore((state) => state.getSessionState);
+  const setProcess = useSessionStateStore((state) => state.setProcess);
+  const deleteProcess = useSessionStateStore((state) => state.deleteProcess);
+  const addProcessStep = useSessionStateStore((state) => state.addProcessStep);
+  const toggleProcessCollapse = useSessionStateStore((state) => state.toggleProcessCollapse);
+  const setPendingConfirmation = useSessionStateStore((state) => state.setPendingConfirmation);
+  const setIsSending = useSessionStateStore((state) => state.setIsSending);
+  const setRevisionInput = useSessionStateStore((state) => state.setRevisionInput);
+  const setShowRevisionInput = useSessionStateStore((state) => state.setShowRevisionInput);
+  const initializeProcessesFromMessages = useSessionStateStore((state) => state.initializeProcessesFromMessages);
+  const incrementUnread = useSessionStateStore((state) => state.incrementUnread);
+  const markAsRead = useSessionStateStore((state) => state.markAsRead);
+
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const hasToken = typeof window !== 'undefined' && !!localStorage.getItem('done-token');
+
+  // 認証チェック
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated && !hasToken) {
+      router.push('/login');
+    }
+  }, [isLoading, isAuthenticated, hasToken, router]);
+
+  // セッションIDが変わったらアクティブセッションを更新
+  useEffect(() => {
+    if (sessionId) {
+      setActiveSessionId(sessionId);
+      markAsRead(sessionId);
+    }
+  }, [sessionId, setActiveSessionId, markAsRead]);
+
+  // 現在のセッションの状態を取得
+  const currentSessionState = useMemo(() => {
+    if (!sessionId) return null;
+    return sessions.get(sessionId) || null;
+  }, [sessionId, sessions]);
+
+  const processes = currentSessionState?.processes || new Map();
+  const pendingConfirmation = currentSessionState?.pendingConfirmation || null;
+  const isSending = currentSessionState?.isSending || false;
+  const revisionInput = currentSessionState?.revisionInput || '';
+  const showRevisionInput = currentSessionState?.showRevisionInput || false;
+
+  // メッセージ取得（URLのsessionIdを直接使用）
+  const {
+    data: messagesData,
+    isLoading: isLoadingMessages,
+    error: messagesError,
+    refetch: refetchMessages,
+  } = useQuery({
+    queryKey: ['messages', sessionId],
+    queryFn: () => api.rooms.getMessages(sessionId, { limit: 50 }),
+    enabled: !!sessionId,
+    staleTime: 5 * 1000,
+    retry: 2,
+  });
+
+  const messages = messagesData?.messages || [];
+
+  // DBから取得したメッセージのreasoning_stepsをprocessesに初期化
+  useEffect(() => {
+    if (!messages.length || !sessionId) return;
+    initializeProcessesFromMessages(sessionId, messages);
+  }, [messages, sessionId, initializeProcessesFromMessages]);
+
+  // メッセージ送信
+  const handleSendMessage = useCallback(async () => {
+    if (!message.trim() || isSending || !sessionId) return;
+
+    const content = message.trim();
+    setMessage('');
+    setIsSending(sessionId, true);
+
+    const tempUserMessageId = `temp-user-${Date.now()}`;
+    const optimisticUserMessage: MessageResponse = {
+      id: tempUserMessageId,
+      room_id: sessionId,
+      sender_id: user?.id || '',
+      sender_name: user?.display_name || 'You',
+      sender_type: 'human',
+      content,
+      created_at: new Date().toISOString(),
+    };
+
+    queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
+      messages: [optimisticUserMessage, ...(old?.messages || [])],
+    }));
+
+    setProcess(sessionId, PENDING_PROCESS_ID, {
+      steps: [],
+      isCollapsed: false,
+      isProcessing: true,
+    });
+
+    try {
+      const controller = new AbortController();
+      abortControllersRef.current.set(sessionId, controller);
+
+      await api.sm.sendMessageStream(
+        {
+          message: content,
+          session_id: sessionId,
+          user_id: user?.id,
+        },
+        {
+          onProcessStep: (step: ProcessStep, eventSessionId?: string) => {
+            const targetSessionId = eventSessionId || sessionId;
+            addProcessStep(targetSessionId, PENDING_PROCESS_ID, step);
+          },
+
+          onUserMessage: (msg, eventSessionId?: string) => {
+            const targetSessionId = eventSessionId || sessionId;
+            queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => {
+              const filtered = (old?.messages || []).filter(m => !m.id.startsWith('temp-user-'));
+              return { messages: [msg, ...filtered] };
+            });
+          },
+
+          onAIMessage: (msg, eventSessionId?: string) => {
+            const targetSessionId = eventSessionId || sessionId;
+            const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
+            const isCurrentSession = targetSessionId === currentActiveSessionId;
+
+            // 常に正しいセッションのキャッシュに追加
+            queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => ({
+              messages: [msg, ...(old?.messages || [])],
+            }));
+
+            // 別セッションの場合は未読カウントを増やす
+            if (!isCurrentSession) {
+              incrementUnread(targetSessionId);
+            }
+
+            // プロセスを確定
+            const pendingProcess = getSessionState(targetSessionId).processes.get(PENDING_PROCESS_ID);
+            deleteProcess(targetSessionId, PENDING_PROCESS_ID);
+            if (pendingProcess) {
+              setProcess(targetSessionId, msg.id, {
+                steps: pendingProcess.steps,
+                isCollapsed: false,
+                isProcessing: false,
+              });
+            }
+
+            // 提案パネル表示（現在のセッションのみ）
+            if (isCurrentSession) {
+              const msgContent = msg.content || '';
+              const isProposeState = msgContent.includes('[STATE: PROPOSE]');
+              const hasConfirmationQuestion =
+                msgContent.includes('確定しますか') ||
+                msgContent.includes('よろしいですか') ||
+                msgContent.includes('この内容で進め') ||
+                msgContent.includes('予約を実行しますか') ||
+                msgContent.includes('予約しますか') ||
+                msgContent.includes('購入しますか') ||
+                msgContent.includes('実行しますか');
+
+              if (isProposeState || hasConfirmationQuestion) {
+                setPendingConfirmation(targetSessionId, {
+                  session_id: targetSessionId,
+                  state: 'propose' as StateMachineState,
+                  response: msgContent,
+                  reasoning_steps: [],
+                  needs_confirmation: true,
+                  is_chat: false,
+                  proposal: null,
+                  error: null,
+                });
+              }
+            }
+          },
+
+          onComplete: (eventSessionId?: string) => {
+            const targetSessionId = eventSessionId || sessionId;
+            setIsSending(targetSessionId, false);
+          },
+
+          onError: (error: string, eventSessionId?: string) => {
+            const targetSessionId = eventSessionId || sessionId;
+            toast.error(`エラー: ${error}`);
+            deleteProcess(targetSessionId, PENDING_PROCESS_ID);
+            setIsSending(targetSessionId, false);
+          },
+        },
+        controller.signal
+      );
+    } catch (error) {
+      if (error instanceof ApiError) {
+        if (error.status === 401) {
+          toast.error('セッションが切れました。再度ログインしてください。');
+        } else {
+          toast.error('メッセージの送信に失敗しました');
+        }
+      } else {
+        toast.error('ネットワークエラーが発生しました');
+      }
+      deleteProcess(sessionId, PENDING_PROCESS_ID);
+    } finally {
+      setIsSending(sessionId, false);
+    }
+  }, [message, isSending, sessionId, queryClient, messagesData, user?.id, user?.display_name, setIsSending, setProcess, addProcessStep, getSessionState, deleteProcess, setPendingConfirmation, incrementUnread]);
+
+  // 提案を承認
+  const handleConfirm = useCallback(async () => {
+    if (!pendingConfirmation || !sessionId) return;
+
+    setPendingConfirmation(sessionId, null);
+    const confirmMessage = 'はい、この内容で確定してください。';
+
+    setTimeout(async () => {
+      setIsSending(sessionId, true);
+
+      const tempUserMessageId = `temp-user-${Date.now()}`;
+      const optimisticUserMessage: MessageResponse = {
+        id: tempUserMessageId,
+        room_id: sessionId,
+        sender_id: user?.id || '',
+        sender_name: user?.display_name || 'You',
+        sender_type: 'human',
+        content: confirmMessage,
+        created_at: new Date().toISOString(),
+      };
+
+      queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
+        messages: [optimisticUserMessage, ...(old?.messages || [])],
+      }));
+
+      setProcess(sessionId, PENDING_PROCESS_ID, {
+        steps: [],
+        isCollapsed: false,
+        isProcessing: true,
+      });
+
+      try {
+        const controller = new AbortController();
+        abortControllersRef.current.set(sessionId, controller);
+
+        await api.sm.sendMessageStream(
+          { message: confirmMessage, session_id: sessionId, user_id: user?.id },
+          {
+            onProcessStep: (step, eventSessionId) => {
+              addProcessStep(eventSessionId || sessionId, PENDING_PROCESS_ID, step);
+            },
+            onUserMessage: (msg, eventSessionId) => {
+              const targetSessionId = eventSessionId || sessionId;
+              queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => {
+                const filtered = (old?.messages || []).filter(m => !m.id.startsWith('temp-user-'));
+                return { messages: [msg, ...filtered] };
+              });
+            },
+            onAIMessage: (msg, eventSessionId) => {
+              const targetSessionId = eventSessionId || sessionId;
+              const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
+              const isCurrentSession = targetSessionId === currentActiveSessionId;
+              queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => ({
+                messages: [msg, ...(old?.messages || [])],
+              }));
+              if (!isCurrentSession) {
+                incrementUnread(targetSessionId);
+              }
+              const proc = getSessionState(targetSessionId).processes.get(PENDING_PROCESS_ID);
+              deleteProcess(targetSessionId, PENDING_PROCESS_ID);
+              if (proc) {
+                setProcess(targetSessionId, msg.id, { steps: proc.steps, isCollapsed: false, isProcessing: false });
+              }
+            },
+            onComplete: (eventSessionId) => setIsSending(eventSessionId || sessionId, false),
+            onError: (error, eventSessionId) => {
+              toast.error(`エラー: ${error}`);
+              deleteProcess(eventSessionId || sessionId, PENDING_PROCESS_ID);
+              setIsSending(eventSessionId || sessionId, false);
+            },
+          },
+          controller.signal
+        );
+      } catch {
+        toast.error('確認処理に失敗しました');
+        setIsSending(sessionId, false);
+      }
+    }, 0);
+  }, [pendingConfirmation, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setIsSending, setProcess, addProcessStep, getSessionState, deleteProcess, incrementUnread]);
+
+  // 提案を修正
+  const handleRevise = useCallback(async () => {
+    if (!revisionInput.trim() || !sessionId) return;
+
+    const revisionMessage = revisionInput.trim();
+    setPendingConfirmation(sessionId, null);
+    setRevisionInput(sessionId, '');
+    setShowRevisionInput(sessionId, false);
+
+    setTimeout(async () => {
+      setIsSending(sessionId, true);
+
+      const tempUserMessageId = `temp-user-${Date.now()}`;
+      const optimisticUserMessage: MessageResponse = {
+        id: tempUserMessageId,
+        room_id: sessionId,
+        sender_id: user?.id || '',
+        sender_name: user?.display_name || 'You',
+        sender_type: 'human',
+        content: revisionMessage,
+        created_at: new Date().toISOString(),
+      };
+
+      queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
+        messages: [optimisticUserMessage, ...(old?.messages || [])],
+      }));
+
+      setProcess(sessionId, PENDING_PROCESS_ID, {
+        steps: [],
+        isCollapsed: false,
+        isProcessing: true,
+      });
+
+      try {
+        const controller = new AbortController();
+        abortControllersRef.current.set(sessionId, controller);
+
+        await api.sm.sendMessageStream(
+          { message: revisionMessage, session_id: sessionId, user_id: user?.id },
+          {
+            onProcessStep: (step, eventSessionId) => {
+              addProcessStep(eventSessionId || sessionId, PENDING_PROCESS_ID, step);
+            },
+            onUserMessage: (msg, eventSessionId) => {
+              const targetSessionId = eventSessionId || sessionId;
+              queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => {
+                const filtered = (old?.messages || []).filter(m => !m.id.startsWith('temp-user-'));
+                return { messages: [msg, ...filtered] };
+              });
+            },
+            onAIMessage: (msg, eventSessionId) => {
+              const targetSessionId = eventSessionId || sessionId;
+              const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
+              const isCurrentSession = targetSessionId === currentActiveSessionId;
+              queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => ({
+                messages: [msg, ...(old?.messages || [])],
+              }));
+              if (!isCurrentSession) {
+                incrementUnread(targetSessionId);
+              }
+              const proc = getSessionState(targetSessionId).processes.get(PENDING_PROCESS_ID);
+              deleteProcess(targetSessionId, PENDING_PROCESS_ID);
+              if (proc) {
+                setProcess(targetSessionId, msg.id, { steps: proc.steps, isCollapsed: false, isProcessing: false });
+              }
+              // 新しい提案検出
+              if (isCurrentSession) {
+                const msgContent = msg.content || '';
+                const isProposeState = msgContent.includes('[STATE: PROPOSE]');
+                const hasConfirmationQuestion =
+                  msgContent.includes('確定しますか') || msgContent.includes('よろしいですか') ||
+                  msgContent.includes('この内容で進め') || msgContent.includes('予約を実行しますか') ||
+                  msgContent.includes('予約しますか') || msgContent.includes('購入しますか') ||
+                  msgContent.includes('実行しますか');
+                if (isProposeState || hasConfirmationQuestion) {
+                  setPendingConfirmation(targetSessionId, {
+                    session_id: targetSessionId,
+                    state: 'propose' as StateMachineState,
+                    response: msgContent,
+                    reasoning_steps: [],
+                    needs_confirmation: true,
+                    is_chat: false,
+                    proposal: null,
+                    error: null,
+                  });
+                }
+              }
+            },
+            onComplete: (eventSessionId) => setIsSending(eventSessionId || sessionId, false),
+            onError: (error, eventSessionId) => {
+              toast.error(`エラー: ${error}`);
+              deleteProcess(eventSessionId || sessionId, PENDING_PROCESS_ID);
+              setIsSending(eventSessionId || sessionId, false);
+            },
+          },
+          controller.signal
+        );
+      } catch {
+        toast.error('修正処理に失敗しました');
+        setIsSending(sessionId, false);
+      }
+    }, 0);
+  }, [revisionInput, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setRevisionInput, setShowRevisionInput, setIsSending, setProcess, addProcessStep, getSessionState, deleteProcess, incrementUnread]);
+
+  // スクロール
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // テキストエリア自動リサイズ
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 200)}px`;
+    }
+  }, [message]);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  };
+
+  const handleToggleProcessCollapse = useCallback((processId: string) => {
+    if (sessionId) {
+      toggleProcessCollapse(sessionId, processId);
+    }
+  }, [sessionId, toggleProcessCollapse]);
+
+  const pendingProcess = processes.get(PENDING_PROCESS_ID);
+
+  const handleCancel = useCallback(() => {
+    if (!sessionId) return;
+    const controller = abortControllersRef.current.get(sessionId);
+    if (controller) {
+      controller.abort();
+      abortControllersRef.current.delete(sessionId);
+    }
+    setIsSending(sessionId, false);
+    deleteProcess(sessionId, PENDING_PROCESS_ID);
+    toast.info('処理を停止しました');
+  }, [sessionId, setIsSending, deleteProcess]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isSending) {
+        e.preventDefault();
+        handleCancel();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isSending, handleCancel]);
+
+  const setRevisionInputValue = useCallback((value: string) => {
+    if (sessionId) setRevisionInput(sessionId, value);
+  }, [sessionId, setRevisionInput]);
+
+  const setShowRevisionInputValue = useCallback((show: boolean) => {
+    if (sessionId) setShowRevisionInput(sessionId, show);
+  }, [sessionId, setShowRevisionInput]);
+
+  const clearPendingConfirmation = useCallback(() => {
+    if (sessionId) setPendingConfirmation(sessionId, null);
+  }, [sessionId, setPendingConfirmation]);
+
+  // エラー状態
+  if (messagesError && !isLoadingMessages) {
+    return (
+      <MainLayout>
+        <div className="flex flex-col items-center justify-center h-full">
+          <AlertCircle className="h-16 w-16 text-destructive/50 mb-4" />
+          <h2 className="text-xl font-semibold mb-2">接続エラー</h2>
+          <p className="text-muted-foreground mb-4 text-center max-w-md">
+            サーバーとの接続に問題が発生しました。
+          </p>
+          <Button onClick={() => refetchMessages()} className="gap-2">
+            <RefreshCw className="h-4 w-4" />
+            再試行
+          </Button>
+        </div>
+      </MainLayout>
+    );
+  }
+
+  return (
+    <MainLayout>
+      <div className="flex flex-col h-full overflow-hidden">
+        {/* Header */}
+        <div className="shrink-0 flex items-center gap-3 px-6 py-4 border-b border-border">
+          <Avatar className="h-10 w-10">
+            <AvatarFallback className="bg-primary/10">
+              <Bot className="h-5 w-5 text-primary" />
+            </AvatarFallback>
+          </Avatar>
+          <div>
+            <h1 className="font-semibold">ダン</h1>
+            <p className="text-xs text-muted-foreground">AI秘書</p>
+          </div>
+        </div>
+
+        {/* Messages Area */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-6">
+          <div className="max-w-3xl mx-auto py-6 space-y-4">
+            {isLoadingMessages ? (
+              Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className={cn('flex gap-3', i % 2 === 0 ? '' : 'justify-end')}>
+                  {i % 2 === 0 && <Skeleton className="h-10 w-10 rounded-full" />}
+                  <div className="space-y-2">
+                    <Skeleton className="h-4 w-20" />
+                    <Skeleton className="h-16 w-64 rounded-xl" />
+                  </div>
+                </div>
+              ))
+            ) : messages.length === 0 && !pendingProcess ? (
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="text-center py-20"
+              >
+                <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-primary/10 flex items-center justify-center">
+                  <Bot className="h-10 w-10 text-primary" />
+                </div>
+                <h2 className="text-xl font-semibold mb-2">こんにちは!</h2>
+                <p className="text-muted-foreground max-w-md mx-auto">
+                  私はダン、あなたのAI秘書です。<br />何かお手伝いできることはありますか?
+                </p>
+              </motion.div>
+            ) : (
+              <>
+                {[...messages].reverse().map((msg) => {
+                  const isUser = msg.sender_type === 'human';
+                  const processData = processes.get(msg.id);
+
+                  return (
+                    <div key={msg.id}>
+                      {!isUser && processData && (
+                        <ProcessDisplay
+                          steps={processData.steps}
+                          isCollapsed={processData.isCollapsed}
+                          onToggle={() => handleToggleProcessCollapse(msg.id)}
+                          isProcessing={processData.isProcessing}
+                        />
+                      )}
+                      <div className={cn('flex gap-3', isUser && 'justify-end')}>
+                        {!isUser && (
+                          <Avatar className="h-10 w-10 shrink-0">
+                            <AvatarFallback className="bg-primary/10">
+                              <Bot className="h-5 w-5 text-primary" />
+                            </AvatarFallback>
+                          </Avatar>
+                        )}
+                        <div className={cn('max-w-[70%] space-y-1 flex flex-col', isUser && 'items-end')}>
+                          <p className="text-xs text-muted-foreground">{isUser ? 'あなた' : 'ダン'}</p>
+                          <div
+                            className={cn(
+                              'px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap text-left',
+                              isUser ? 'bg-primary text-primary-foreground rounded-br-md' : 'bg-muted rounded-bl-md'
+                            )}
+                          >
+                            {msg.content}
+                          </div>
+                        </div>
+                        {isUser && (
+                          <Avatar className="h-10 w-10 shrink-0">
+                            <AvatarFallback className="bg-secondary text-secondary-foreground">
+                              {user?.display_name?.charAt(0) || 'U'}
+                            </AvatarFallback>
+                          </Avatar>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                {pendingProcess && (
+                  <ProcessDisplay
+                    steps={pendingProcess.steps}
+                    isCollapsed={pendingProcess.isCollapsed}
+                    onToggle={() => handleToggleProcessCollapse(PENDING_PROCESS_ID)}
+                    isProcessing={pendingProcess.isProcessing}
+                  />
+                )}
+              </>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+        </div>
+
+        {/* Confirmation Panel */}
+        {pendingConfirmation && (
+          <div className="shrink-0 border-t border-border bg-muted/30 px-4 py-3">
+            <div className="max-w-3xl mx-auto">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium text-primary">確認が必要です</span>
+              </div>
+              {showRevisionInput ? (
+                <div className="space-y-2">
+                  <textarea
+                    value={revisionInput}
+                    onChange={(e) => setRevisionInputValue(e.target.value)}
+                    placeholder="修正内容を入力..."
+                    rows={2}
+                    className="w-full px-3 py-2 rounded-lg border border-border bg-background text-sm focus:outline-none focus:border-primary/50"
+                  />
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={handleRevise} disabled={!revisionInput.trim() || isSending}>
+                      {isSending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : null}
+                      送信
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => { setShowRevisionInputValue(false); setRevisionInputValue(''); }}>
+                      キャンセル
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={handleConfirm} disabled={isSending} className="bg-primary hover:bg-primary/90">
+                    {isSending ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Check className="h-4 w-4 mr-1" />}
+                    これで進める
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setShowRevisionInputValue(true)}>
+                    修正する
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={clearPendingConfirmation}>
+                    キャンセル
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Input Area */}
+        <div className="shrink-0 border-t border-border p-4">
+          <div className="max-w-3xl mx-auto">
+            <div className="flex items-end gap-2 p-2 rounded-2xl border border-border bg-input/30 focus-within:border-primary/50 transition-colors">
+              <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground">
+                <Paperclip className="h-4 w-4" />
+              </Button>
+              <textarea
+                ref={textareaRef}
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="メッセージを入力..."
+                rows={1}
+                className="flex-1 resize-none bg-transparent text-sm focus:outline-none min-h-[36px] max-h-[200px] py-2"
+              />
+              {isSending ? (
+                <Button size="icon" variant="destructive" className="h-9 w-9 shrink-0" onClick={handleCancel} title="停止 (Escキー)">
+                  <Square className="h-4 w-4" />
+                </Button>
+              ) : (
+                <Button size="icon" className="h-9 w-9 shrink-0" onClick={handleSendMessage} disabled={!message.trim()}>
+                  <Send className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </MainLayout>
+  );
+}
