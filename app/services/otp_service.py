@@ -22,6 +22,46 @@ from app.models.otp_schemas import (
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
+    """
+    ISO形式のdatetime文字列をパース（Supabaseの形式に対応）
+    マイクロ秒の桁数が6桁でない場合も対応
+    """
+    if not dt_str:
+        return None
+    try:
+        # Z を +00:00 に置換
+        dt_str = dt_str.replace("Z", "+00:00")
+        # fromisoformat を試す
+        return datetime.fromisoformat(dt_str)
+    except ValueError:
+        # マイクロ秒の桁数問題に対応
+        # 例: '2026-01-15T12:36:18.07883+00:00' → '2026-01-15T12:36:18.078830+00:00'
+        try:
+            # タイムゾーン部分を分離
+            if '+' in dt_str:
+                main_part, tz_part = dt_str.rsplit('+', 1)
+                tz_part = '+' + tz_part
+            elif dt_str.count('-') > 2:  # 負のタイムゾーン
+                parts = dt_str.rsplit('-', 1)
+                main_part = parts[0]
+                tz_part = '-' + parts[1]
+            else:
+                main_part = dt_str
+                tz_part = ''
+
+            # マイクロ秒部分を6桁に調整
+            if '.' in main_part:
+                date_time, microsec = main_part.rsplit('.', 1)
+                microsec = microsec.ljust(6, '0')[:6]  # 6桁に調整
+                main_part = f"{date_time}.{microsec}"
+
+            return datetime.fromisoformat(main_part + tz_part)
+        except Exception:
+            return datetime.now(timezone.utc)
+
+
 # デフォルト設定
 DEFAULT_OTP_EXPIRY_MINUTES = 10
 DEFAULT_MAX_AGE_MINUTES = 5
@@ -181,8 +221,8 @@ class OTPService:
                         sender=otp_data.get("sender"),
                         subject=otp_data.get("subject"),
                         service=otp_data.get("service"),
-                        extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
-                        expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                        extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
+                        expires_at=_parse_datetime(otp_data.get("expires_at")),
                         is_used=otp_data.get("is_used", False),
                     )
         
@@ -229,21 +269,24 @@ class OTPService:
 
         try:
             # Gmail IMAPに接続
-            logger.info(f"Connecting to Gmail IMAP for user {user_id}...")
+            logger.info(f"[IMAP] Connecting to Gmail IMAP for user {user_id[:8]}...")
             imap = imaplib.IMAP4_SSL('imap.gmail.com')
             imap.login(gmail_address, gmail_password)
             imap.select('INBOX')
+            logger.info(f"[IMAP] Connected successfully")
 
             # 件名フィルタで検索
             if subject_filter:
+                logger.debug(f"[IMAP] Searching for subject containing: {subject_filter}")
                 _, messages = imap.search(None, 'SUBJECT', subject_filter)
             else:
                 _, messages = imap.search(None, 'UNSEEN')
 
             message_ids = messages[0].split()
+            logger.info(f"[IMAP] Found {len(message_ids)} emails matching filter")
 
             if not message_ids:
-                logger.debug(f"No emails found with filter: {subject_filter}")
+                logger.debug(f"[IMAP] No emails found with filter: {subject_filter}")
                 imap.close()
                 imap.logout()
                 return None
@@ -284,9 +327,11 @@ class OTPService:
                     body = email_message.get_payload(decode=True).decode('utf-8', errors='ignore')
 
                 # OTP抽出
+                logger.debug(f"[IMAP] Checking email - Subject: {subject[:50] if subject else 'None'}...")
                 otp_code = self._extract_otp_from_text(subject) or self._extract_otp_from_text(body)
 
                 if otp_code:
+                    logger.info(f"[IMAP] OTP extracted from email: {otp_code[:2]}****")
                     # メールを既読にする
                     imap.store(msg_id, '+FLAGS', '\\Seen')
 
@@ -328,8 +373,8 @@ class OTPService:
                             sender=otp_data.get("sender"),
                             subject=otp_data.get("subject"),
                             service=otp_data.get("service"),
-                            extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
-                            expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                            extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
+                            expires_at=_parse_datetime(otp_data.get("expires_at")),
                             is_used=otp_data.get("is_used", False),
                         )
 
@@ -390,8 +435,8 @@ class OTPService:
                 source=OTPSource.SMS,
                 sender=otp_data.get("sender"),
                 service=otp_data.get("service"),
-                extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
-                expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
+                expires_at=_parse_datetime(otp_data.get("expires_at")),
                 is_used=otp_data.get("is_used", False),
             )
         
@@ -449,8 +494,8 @@ class OTPService:
                 source=OTPSource.VOICE,
                 sender=otp_data.get("sender"),
                 service=otp_data.get("service"),
-                extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
-                expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
+                expires_at=_parse_datetime(otp_data.get("expires_at")),
                 is_used=otp_data.get("is_used", False),
             )
         
@@ -485,8 +530,8 @@ class OTPService:
                 source=OTPSource.VOICE,
                 sender=otp_data.get("sender"),
                 service=otp_data.get("service"),
-                extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
-                expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
+                expires_at=_parse_datetime(otp_data.get("expires_at")),
                 is_used=otp_data.get("is_used", False),
             )
         
@@ -584,8 +629,8 @@ class OTPService:
                 sender=otp_data.get("sender"),
                 subject=otp_data.get("subject"),
                 service=otp_data.get("service"),
-                extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
-                expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
+                expires_at=_parse_datetime(otp_data.get("expires_at")),
                 is_used=otp_data.get("is_used", False),
             )
         
@@ -646,8 +691,8 @@ class OTPService:
                 sender=otp_data.get("sender"),
                 subject=otp_data.get("subject"),
                 service=otp_data.get("service"),
-                extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
-                expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
+                expires_at=_parse_datetime(otp_data.get("expires_at")),
                 is_used=otp_data.get("is_used", False),
             ))
         
@@ -696,19 +741,26 @@ class OTPService:
         start_time = datetime.now(timezone.utc)
         deadline = start_time + timedelta(seconds=timeout_seconds)
 
+        poll_count = 0
         while datetime.now(timezone.utc) < deadline:
             otp_result = None
+            poll_count += 1
 
             # OTPを抽出
             if source == "email":
                 if use_imap:
                     # IMAP方式（優先）
+                    logger.debug(f"[IMAP] Polling #{poll_count} for {service}...")
                     otp_result = await self.extract_otp_from_email_imap(
                         user_id=user_id,
                         service=service,
                         max_age_minutes=2,
                         subject_filter="[SMSFW]",  # SMS Forwarder経由
                     )
+                    if otp_result:
+                        logger.info(f"[IMAP] OTP found: {otp_result.code[:2]}****, is_used={otp_result.is_used}")
+                    else:
+                        logger.debug(f"[IMAP] No OTP found in poll #{poll_count}")
                 else:
                     # OAuth2方式（フォールバック）
                     otp_result = await self.extract_otp_from_email(
@@ -797,8 +849,8 @@ class OTPService:
                 source=OTPSource.SMS,
                 sender=otp_data.get("sender"),
                 service=otp_data.get("service"),
-                extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
-                expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
+                expires_at=_parse_datetime(otp_data.get("expires_at")),
                 is_used=False,
             )
         
@@ -837,8 +889,8 @@ class OTPService:
                 sender=otp_data.get("sender"),
                 subject=otp_data.get("subject"),
                 service=otp_data.get("service"),
-                extracted_at=datetime.fromisoformat(otp_data["extracted_at"].replace("Z", "+00:00")) if otp_data.get("extracted_at") else datetime.now(timezone.utc),
-                expires_at=datetime.fromisoformat(otp_data["expires_at"].replace("Z", "+00:00")) if otp_data.get("expires_at") else None,
+                extracted_at=_parse_datetime(otp_data.get("extracted_at")) or datetime.now(timezone.utc),
+                expires_at=_parse_datetime(otp_data.get("expires_at")),
                 is_used=otp_data.get("is_used", False),
             )
         return None
