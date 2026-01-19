@@ -418,6 +418,80 @@ class BaseExecutor(ABC):
         )
         return None
     
+    # ========================================
+    # キャンセルモード（cancel）
+    # ========================================
+
+    async def cancel(
+        self,
+        params: Dict[str, Any],
+        credentials: Optional[Dict[str, str]] = None,
+        user_id: Optional[str] = None,
+    ) -> ExecutionResult:
+        """
+        キャンセルモード: 予約をキャンセル（払戻）
+
+        Args:
+            params: キャンセルパラメータ（reservation_id等）
+            credentials: 認証情報（オプション）
+            user_id: ユーザーID
+
+        Returns:
+            ExecutionResult: キャンセル結果
+        """
+        self._user_id = user_id
+
+        try:
+            await self._notify_progress(
+                "cancel_start",
+                f"{self.service_display_name}でキャンセルを開始します...",
+            )
+
+            # サブクラスの実装を呼び出し
+            result = await self._do_cancel(params, credentials)
+
+            if result.success:
+                await self._notify_progress(
+                    "cancel_complete",
+                    f"{self.service_display_name}でキャンセルが完了しました",
+                    "completed",
+                )
+            else:
+                await self._notify_progress(
+                    "cancel_failed",
+                    f"{self.service_display_name}でキャンセル失敗: {result.message}",
+                    "error",
+                )
+
+            return result
+
+        except Exception as e:
+            await self._notify_progress(
+                "cancel_error",
+                f"{self.service_display_name}でエラー: {str(e)}",
+                "error",
+            )
+            return ExecutionResult(
+                success=False,
+                message=f"キャンセルエラー: {str(e)}",
+            )
+
+    async def _do_cancel(
+        self,
+        params: Dict[str, Any],
+        credentials: Optional[Dict[str, str]] = None,
+    ) -> ExecutionResult:
+        """
+        実際のキャンセルロジック（サブクラスで実装）
+
+        デフォルト実装はキャンセル非対応を返す。
+        cancel機能を持つExecutorはこのメソッドをオーバーライドする。
+        """
+        return ExecutionResult(
+            success=False,
+            message=f"{self.service_display_name}はキャンセル機能に対応していません",
+        )
+
     async def _detect_otp_page(self, page) -> bool:
         """
         現在のページがOTP入力画面かどうかを検知
@@ -650,7 +724,7 @@ class ExecutorFactory:
             適切なExecutor
         """
         if category == "train":
-            from app.executors.ex_reservation_executor import EXReservationExecutor
+            from app.executors.ex_reservation import EXReservationExecutor
             return EXReservationExecutor()
         elif category == "bus":
             from app.executors.highway_bus_executor import HighwayBusExecutor

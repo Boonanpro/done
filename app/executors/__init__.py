@@ -5,6 +5,6 @@ Executors Package for Phase 3B: Execution Engine
 from app.executors.base import BaseExecutor, ExecutorFactory
 from app.executors.amazon_executor import AmazonExecutor
 from app.executors.rakuten_executor import RakutenExecutor
-from app.executors.ex_reservation_executor import EXReservationExecutor
+from app.executors.ex_reservation import EXReservationExecutor  # 新しい場所から
 
 __all__ = ["BaseExecutor", "ExecutorFactory", "AmazonExecutor", "RakutenExecutor", "EXReservationExecutor"]

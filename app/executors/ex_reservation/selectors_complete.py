@@ -62,6 +62,7 @@ MYPAGE = {
 SEARCH_FORM = {
     # セレクトボックス（ID指定で確実）
     "registered_route": '#s-1',  # 登録した区間から選ぶ
+    "date_area": '.new_date_area',  # 日付選択エリア（クリックでカレンダー表示）
     "hour": '#s-3',              # 時刻（時）6時〜23時
     "minute": '#s-4',            # 時刻（分）00分〜55分（5分刻み）
     "departure_arrival": '#s-5', # 出発/到着
@@ -71,6 +72,10 @@ SEARCH_FORM = {
     "adult_count": '#s10',       # おとな人数
     "child_count": '#s11',       # こども人数
     "seat_type": '#c1-6',        # 座席の種類
+
+    # 日付カレンダー
+    "calendar_popup": '.popup_wrap',
+    "date_cell_prefix": '.selectable.',  # 日付セル（例: .selectable.20260130）
 
     # ボタン
     "continue_button": 'input[type="submit"][value*="予約"]',
@@ -135,6 +140,20 @@ SEARCH_FORM = {
         "21時": "21",
         "22時": "22",
         "23時": "23",
+    },
+    "minutes": {
+        "00分": "00",
+        "05分": "05",
+        "10分": "10",
+        "15分": "15",
+        "20分": "20",
+        "25分": "25",
+        "30分": "30",
+        "35分": "35",
+        "40分": "40",
+        "45分": "45",
+        "50分": "50",
+        "55分": "55",
     },
 }
 
@@ -242,7 +261,7 @@ AGREEMENT_DIALOG = {
 # ===== 最終確認画面（検証済み）=====
 CONFIRMATION = {
     # 見出し「まだ予約は完了していません。」
-    "not_complete_heading": 'text="まだ予約は完了していません"',
+    "not_complete_heading": 'text="まだ予約は完了していません。"',
 
     # 列車情報エリア
     "train_info": 'text=/\\d+時\\d+分 発/',
@@ -254,10 +273,25 @@ CONFIRMATION = {
     "total": 'text="合計"',
 
     # 戻るボタン
-    "back_button": 'button:has-text("戻る")',
+    "back_button": 'a[name="b1"]',
 
-    # 予約する（購入）ボタン - ※これは押さない（実際の購入になる）
-    "purchase_button": 'input[type="submit"][value="予約する（購入）"]',
+    # 予約する（購入）ボタン - ID指定で確実
+    "purchase_button": '#sb-1',  # input[value="予約する（購入）"] onclick="check_new('RSWP200AIDP016')"
+}
+
+# ===== 購入完了画面 =====
+PURCHASE_COMPLETE = {
+    # 完了見出し
+    "complete_heading": 'text="予約が完了しました"',
+
+    # 予約番号
+    "reservation_number": 'text=/予約番号[：:]/',
+
+    # トップへ戻るボタン
+    "top_button": 'text="トップへ戻る"',
+
+    # 予約確認ボタン
+    "confirm_reservation": 'text="予約確認"',
 }
 
 # ===== 共通（検証済み）=====
