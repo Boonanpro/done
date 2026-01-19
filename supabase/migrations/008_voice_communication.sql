@@ -155,3 +155,4 @@ COMMENT ON COLUMN voice_settings.elevenlabs_voice_id IS 'ElevenLabsの音声ID�
 
 
 
+
