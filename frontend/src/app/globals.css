@@ -108,14 +108,20 @@
   * {
     @apply border-border outline-ring/50;
   }
-  
+
   html {
     color-scheme: dark;
+    height: 100%;
+    overflow: hidden;
   }
-  
+
   body {
     @apply bg-background text-foreground antialiased;
     font-feature-settings: "rlig" 1, "calt" 1;
+    height: 100%;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
   }
   
   /* Custom scrollbar - Cursor style */

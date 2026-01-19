@@ -13,7 +13,7 @@ export function MainLayout({
   showNotifications = true,
 }: MainLayoutProps) {
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div className="flex h-dvh overflow-hidden bg-background">
       <Sidebar />
       <main className="flex-1 flex flex-col overflow-hidden relative">
         {children}
