@@ -73,6 +73,8 @@ class Skill:
             return "bus", "willer"
         elif "電話" in content or "音声" in content:
             return "voice", "phone"
+        elif "developer" in name or "開発機能" in content or "self-healing" in content_lower:
+            return "developer", "developer"
 
         return None, None
 
@@ -98,20 +100,27 @@ class SkillRegistry:
         if instance._loaded:
             return
 
-        for skill_dir in SKILL_DIRECTORIES:
-            if not skill_dir.exists():
-                continue
+        def find_skills(directory: Path, depth: int = 0) -> None:
+            """再帰的にSKILL.mdを検索（最大深度3）"""
+            if depth > 3 or not directory.exists():
+                return
 
-            for skill_path in skill_dir.iterdir():
-                if skill_path.is_dir():
-                    skill_file = skill_path / "SKILL.md"
+            for path in directory.iterdir():
+                if path.is_dir():
+                    skill_file = path / "SKILL.md"
                     if skill_file.exists():
                         try:
-                            skill = Skill.from_file(skill_path.name, skill_file)
+                            skill = Skill.from_file(path.name, skill_file)
                             instance._skills[skill.name] = skill
                             logger.info(f"Loaded skill: {skill.name}")
                         except Exception as e:
-                            logger.warning(f"Failed to load skill {skill_path.name}: {e}")
+                            logger.warning(f"Failed to load skill {path.name}: {e}")
+                    else:
+                        # サブディレクトリを再帰的に検索
+                        find_skills(path, depth + 1)
+
+        for skill_dir in SKILL_DIRECTORIES:
+            find_skills(skill_dir)
 
         instance._loaded = True
 
@@ -362,7 +371,16 @@ async def execute_tool(
         print(f"[TOOL_DEBUG] Credentials keys: {list(credentials.keys())}")
 
     try:
-        if action == "search":
+        # Developer skill: actionをparamsに含めてsearchに渡す
+        if skill.service_type == "developer":
+            print(f"[TOOL_DEBUG] Developer skill detected, routing action={action} through search")
+            params["action"] = action
+            result = await executor.search(params=params, credentials=credentials, user_id=user_id)
+            print(f"[TOOL_DEBUG] Developer result success: {result.success}")
+            print(f"[TOOL_DEBUG] Developer result message: {result.message}")
+            return result.to_dict()
+
+        elif action == "search":
             result = await executor.search(params=params, credentials=credentials, user_id=user_id)
             print(f"[TOOL_DEBUG] Search result success: {result.success}")
             print(f"[TOOL_DEBUG] Search result message: {result.message}")

@@ -62,6 +62,7 @@ class State(str, Enum):
     VERIFY = "verify"      # 結果確認
     REPORT = "report"      # 報告
     CHAT = "chat"          # 雑談モード
+    DEVELOP = "develop"    # 自己修正モード（Self-Healing）
 
 
 @dataclass

@@ -278,6 +278,17 @@ def register_all_executors():
         capabilities=["execute"],
     )
 
+    # Developer（開発機能 - Self-Healing）
+    from app.executors.developer import DeveloperExecutor
+    ExecutorRegistry.register(
+        executor_class=DeveloperExecutor,
+        service_type="developer",
+        service_name="developer",
+        display_name="開発機能",
+        url_patterns=[],
+        capabilities=["search", "execute"],  # Phase 2: 変更機能追加
+    )
+
 
 # 便利関数
 def get_executor_registry() -> ExecutorRegistry:
