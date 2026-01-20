@@ -25,6 +25,12 @@ PROMPTS_DIR = Path(__file__).parent / "prompts"
 # ツール実行の最大ループ回数（無限ループ防止）
 MAX_TOOL_LOOPS = 3
 
+# モデル設定（動的切り替え用）
+MODELS = {
+    "default": "claude-sonnet-4-5-20250929",      # 通常モード: Sonnet 4.5（コーディング最強、コスパ良）
+    "develop": "claude-opus-4-5-20251101",        # DEVELOPモード: Opus 4.5（複雑な設計判断）
+}
+
 
 def load_prompt(filename: str) -> str:
     """プロンプトファイルを読み込む"""
@@ -292,6 +298,11 @@ class AgentRunner:
         # 利用可能なスキル情報を追加
         system += self._build_skills_prompt()
 
+        # Progressive Disclosure: 会話文脈から必要なアクションマニュアルを動的に追加
+        action_manuals = self._load_relevant_action_manuals()
+        if action_manuals:
+            system += action_manuals
+
         return system
 
     def _build_skills_prompt(self) -> str:
@@ -340,6 +351,77 @@ class AgentRunner:
         # 重複除去して返す
         return list(dict.fromkeys(actions))
 
+    def _load_relevant_action_manuals(self) -> str:
+        """
+        会話文脈から必要なアクションマニュアルを動的に読み込む（Progressive Disclosure）
+
+        Returns:
+            アクションマニュアルの内容（システムプロンプトに追加する形式）
+        """
+        # 会話履歴から最新のユーザーメッセージを取得
+        messages = self.session.get_messages_for_llm()
+        if not messages:
+            return ""
+
+        # 最新のユーザーメッセージと直近のコンテキストを分析
+        context_text = ""
+        for msg in messages[-3:]:  # 直近3メッセージを分析
+            if isinstance(msg.get("content"), str):
+                context_text += msg["content"] + " "
+
+        # アクション検出ルール（スキル名 → アクション → キーワード）
+        action_detection_rules = {
+            "ex-reservation": {
+                "search": ["検索", "予約", "新幹線", "探して", "取って", "東京", "新大阪", "名古屋", "博多", "行き"],
+                "cancel": ["キャンセル", "取り消", "払戻", "払い戻", "やめ", "取消"],
+            },
+            # 他のスキルのルールもここに追加可能
+        }
+
+        loaded_manuals = []
+
+        for skill_name, action_rules in action_detection_rules.items():
+            skill = SkillRegistry.get(skill_name)
+            if not skill:
+                continue
+
+            for action, keywords in action_rules.items():
+                # キーワードマッチング
+                if any(kw in context_text for kw in keywords):
+                    manual = skill.get_action_manual(action)
+                    if manual:
+                        loaded_manuals.append((skill_name, action, manual))
+                        logger.info(f"Progressive Disclosure: Loaded {skill_name}/{action} manual")
+
+        if not loaded_manuals:
+            return ""
+
+        # マニュアルをシステムプロンプト形式で整形
+        lines = ["\n\n---\n\n## アクション詳細マニュアル\n"]
+        lines.append("以下は、現在のタスクに関連するアクションの詳細な使い方です。\n")
+
+        for skill_name, action, manual in loaded_manuals:
+            lines.append(f"### {skill_name} / {action}\n")
+            lines.append(manual)
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def _get_model(self) -> str:
+        """
+        現在の状態に応じてモデルを選択（動的モデル切り替え）
+
+        - DEVELOPモード: Opus 4.5（複雑な設計・コード修正）
+        - その他: Sonnet 4.5（通常タスク、コスパ最強）
+        """
+        if self.session.current_state == State.DEVELOP:
+            model = MODELS["develop"]
+            logger.info(f"Using Opus 4.5 for DEVELOP mode")
+        else:
+            model = MODELS["default"]
+
+        return model
+
     async def _call_llm(self) -> str:
         """LLMを呼び出す（ストリーミング）"""
         if not self.llm_client:
@@ -347,13 +429,14 @@ class AgentRunner:
 
         messages = self.session.get_messages_for_llm()
         system_prompt = self._build_system_prompt()
+        model = self._get_model()
 
         full_response = ""
         current_line = ""
 
         try:
             async with self.llm_client.messages.stream(
-                model="claude-sonnet-4-20250514",
+                model=model,
                 max_tokens=2000,
                 system=system_prompt,
                 messages=messages,
