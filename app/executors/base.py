@@ -23,6 +23,7 @@ from app.models.schemas import (
 )
 from app.services.execution_service import get_execution_service
 from app.services.credentials_service import get_credentials_service
+import traceback
 
 
 @dataclass
@@ -164,6 +165,17 @@ class BaseExecutor(ABC):
             return result
             
         except Exception as e:
+            # エラーログをキャプチャ（ダンの自己診断用）
+            from app.services.logging import capture_error
+            capture_error(
+                source=f"{self.service_name}.search",
+                message=str(e),
+                traceback=traceback.format_exc(),
+                level="ERROR",
+                user_id=getattr(self, '_user_id', None),
+                context={"params": params},
+            )
+
             await self._notify_progress(
                 "executor_error",
                 f"{self.service_display_name}でエラー: {str(e)}",
@@ -281,10 +293,20 @@ class BaseExecutor(ABC):
             
         except Exception as e:
             # エラーを記録（詳細なトレースバック付き）
-            import traceback
             error_details = traceback.format_exc()
             print(f"[EXECUTOR ERROR] {task_id}: {str(e)}\n{error_details}")
-            
+
+            # エラーログをキャプチャ（ダンの自己診断用）
+            from app.services.logging import capture_error
+            capture_error(
+                source=f"{self.service_name}.execute",
+                message=str(e),
+                traceback=error_details,
+                level="ERROR",
+                user_id=user_id,
+                context={"task_id": task_id},
+            )
+
             error_result = ExecutionResult(
                 success=False,
                 message=f"Execution error: {str(e)}",
