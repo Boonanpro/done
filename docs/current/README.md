@@ -47,16 +47,32 @@ app/agent/v2/           # メインロジック
 | スキル | SKILL.md | Executor | 状態 |
 |--------|----------|----------|------|
 | ex-reservation | ✅ | ✅ | 動作中 |
+| **developer** | ✅ | ✅ | **実装済み（実ケース未テスト）** |
 | amazon | ❌ | ✅ | SKILL.md未作成 |
 | highway-bus | ❌ | ✅ | SKILL.md未作成 |
 | bank-transfer | ❌ | ✅ | SKILL.md未作成 |
 | rakuten | ❌ | ✅ | SKILL.md未作成 |
 
+## Self-Healing機能の進捗
+
+詳細: [developer_plan.md](./developer_plan.md)
+
+| Phase | 内容 | 状態 | 備考 |
+|-------|------|------|------|
+| Phase 1 | 読み取り専用（read, list, git操作） | ✅ 完了 | |
+| Phase 1.5 | エラーログ追跡（Supabase永続化） | ✅ 完了 | |
+| Phase 2 | 変更機能（write, delete, test, commit） | ✅ 完了 | |
+| Phase 3 | 状態機械統合（DEVELOP状態、承認レベル） | ✅ 完了 | |
+| Phase 4 | 自己改善ループ（自律的なエラー検知→修正） | ❌ 未着手 | IssueTracker連携等 |
+
+**注意**: Phase 1-3は実装済みだが、実際のユースケースでの動作確認は未実施。
+
 ## 次のステップ
 
-1. **他サービスのSKILL.md作成** - Amazon、高速バス、銀行振込など
-2. **Self-Healing機能** - ダンがスキルを自己改善する仕組み
-3. **agent-browser検討** - コンテキスト削減のため
+1. **DeveloperExecutorの実ケーステスト** - 実際に使って動作確認
+2. **他サービスのSKILL.md作成** - Amazon、高速バス、銀行振込など
+3. **Phase 4: 自己改善ループ** - 自律的なエラー検知→Issue作成→修正→クローズ
+4. **agent-browser検討** - コンテキスト削減のため
 
 ## 将来の設計方針
 
