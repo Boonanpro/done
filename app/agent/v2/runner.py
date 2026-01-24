@@ -231,6 +231,12 @@ class AgentRunner:
                 # ユーザー回答を抽出
                 if parsed["user_response"]:
                     user_response = parsed["user_response"]
+                    # respond_to_userのtool_resultを追加（次のLLM呼び出しで必要）
+                    if parsed.get("respond_to_user_id"):
+                        self.session.add_tool_result(
+                            tool_use_id=parsed["respond_to_user_id"],
+                            content="回答を表示しました。",
+                        )
 
                 # ツール呼び出しがない、または最大ループに達した場合は終了
                 if not parsed["tool_calls"] or loop_count >= max_loops:
@@ -615,6 +621,7 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
             }
         """
         user_response = None
+        respond_to_user_id = None  # respond_to_userのtool_use_id
         tool_calls = []
         new_state = None
 
@@ -644,6 +651,7 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
                 if tool_name == "respond_to_user":
                     # ユーザー回答を抽出
                     user_response = tool_input.get("response", "")
+                    respond_to_user_id = tool_use_id  # IDを保存
                     print(f"[LLM_DEBUG] User response extracted: {user_response[:50]}...")
                 else:
                     # スキルツール呼び出し
@@ -660,6 +668,7 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
 
         return {
             "user_response": user_response,
+            "respond_to_user_id": respond_to_user_id,  # tool_use_idを返す
             "tool_calls": tool_calls,
             "new_state": new_state,
             "stop_reason": response.stop_reason,
