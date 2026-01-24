@@ -386,49 +386,70 @@ class AgentRunner:
 
 ## 出力ルール（厳守）
 
-### 内部処理は必ず [STEP] で囲む
+### ユーザー回答は respond_to_user ツールを使う
 
-以下のような内部処理は、必ず `[STEP]` で始める:
-- 「〜を確認します」 → `[STEP] 〜を確認します`
-- 「〜を実行します」 → `[STEP] 〜を実行します`
-- 「〜を探します」 → `[STEP] 〜を探します`
+**重要**: ユーザーへの最終回答は、必ず `respond_to_user` ツールを呼び出して出力する。
 
-**[STEP] なしで書くと、ユーザーに見えてしまう。**
+テキストとして直接書いた内容は「内部処理」としてユーザーには表示されない。
+ユーザーに見せたい回答は respond_to_user ツール経由で出力すること。
 
-### 絶対に書いてはいけない表現
+### 内部処理の書き方
 
-以下は [STEP] 付きでも禁止:
-- 「ツール実行:」「ツールを実行」
-- 「回答を作成」
-- 「スクリーンショットを見ると」
-- 「画面をスクロールして」
+思考過程や確認事項は、テキストとしてそのまま書く:
+```
+商品を検索中...
+価格は990円、4本セット
+在庫を確認...
+```
+
+これらはプロセスモニターに表示され、ユーザー回答には含まれない。
+
+### ワークフロー例
+
+1. ツールを呼び出して情報を取得
+2. 結果を分析（テキストで思考を書く）
+3. respond_to_user ツールでユーザーに回答
+
+```
+[STATE: RESEARCH]
+商品を検索します...
+
+(amazon_search ツールを呼び出し)
+
+検索結果を確認中...
+4本セットが990円で見つかった
+
+(respond_to_user ツールを呼び出し)
+response: "アベンヌウォーター 50ml 4本セットが990円で見つかりました。カートに入れますか？"
+```
 """
 
     def _build_skills_prompt(self) -> str:
-        """利用可能なスキルのプロンプトを構築"""
+        """利用可能なスキルのプロンプトを構築（Native Tool Use対応）"""
         skills = SkillRegistry.list_all()
         if not skills:
             return ""
 
         lines = ["\n\n---\n\n## 利用可能なツール\n"]
-        lines.append("ツールを使う時は以下の形式で宣言してください:\n")
-        lines.append("```")
-        lines.append("[TOOL: skill-name action]")
-        lines.append("param1: value1")
-        lines.append("param2: value2")
-        lines.append("```\n")
+        lines.append("以下のツールが利用可能です。ツールを使う時は直接呼び出してください。\n")
 
         for skill in skills:
             lines.append(f"### {skill.display_name}")
-            lines.append(f"- スキル名: `{skill.name}`")
 
             # SKILL.mdからアクション情報を抽出
             actions = self._extract_actions_from_skill(skill.raw_content)
             if actions:
-                lines.append(f"- 利用可能なアクション: {', '.join(actions)}")
+                tool_names = [f"`{skill.name.replace('-', '_')}_{action}`" for action in actions]
+                lines.append(f"- ツール: {', '.join(tool_names)}")
 
             lines.append(f"- 説明: {skill.description[:100]}...")
             lines.append("")
+
+        # respond_to_user ツールの説明
+        lines.append("### ユーザー回答")
+        lines.append("- ツール: `respond_to_user`")
+        lines.append("- 説明: ユーザーへの最終回答を出力（必須）")
+        lines.append("")
 
         return "\n".join(lines)
 
