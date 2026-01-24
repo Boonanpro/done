@@ -78,7 +78,8 @@ class Session:
     user_id: str
 
     # 会話履歴（これが全て）
-    messages: List[Dict[str, str]] = field(default_factory=list)
+    # contentはstrまたはList[ContentBlock]（Vision API対応）
+    messages: List[Dict[str, Any]] = field(default_factory=list)
 
     # 現在の状態
     current_state: State = State.INTAKE
@@ -101,11 +102,113 @@ class Session:
         })
         self.updated_at = datetime.utcnow()
 
+    def add_user_message_with_images(
+        self,
+        text: str,
+        images: List[Dict[str, Any]],
+    ) -> None:
+        """
+        画像を含むユーザーメッセージを追加（Vision API対応）
+
+        Args:
+            text: テキストコンテンツ
+            images: 画像コンテンツのリスト（Anthropic Vision API形式）
+                   例: [{"type": "image", "source": {"type": "base64", ...}}]
+        """
+        if not images:
+            # 画像がなければ通常のメッセージとして追加
+            self.add_user_message(text)
+            return
+
+        # 画像 + テキストのcontent blocks形式
+        content_blocks = []
+
+        # 画像を先に追加（LLMが画像を見てからテキストを読む）
+        for img in images:
+            content_blocks.append(img)
+
+        # テキストを追加
+        content_blocks.append({
+            "type": "text",
+            "text": text,
+        })
+
+        self.messages.append({
+            "role": "user",
+            "content": content_blocks,
+        })
+        self.updated_at = datetime.utcnow()
+
     def add_assistant_message(self, content: str) -> None:
         """アシスタントメッセージを追加"""
         self.messages.append({
             "role": "assistant",
             "content": content
+        })
+        self.updated_at = datetime.utcnow()
+
+    def add_assistant_message_from_response(self, response: Any) -> None:
+        """
+        Anthropic Message responseからアシスタントメッセージを追加（Native Tool Use対応）
+
+        Args:
+            response: anthropic.types.Message オブジェクト
+        """
+        # content blocksをそのまま保存（text, tool_use両方を含む）
+        content_blocks = []
+        for block in response.content:
+            if block.type == "text":
+                content_blocks.append({
+                    "type": "text",
+                    "text": block.text,
+                })
+            elif block.type == "tool_use":
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+
+        self.messages.append({
+            "role": "assistant",
+            "content": content_blocks,
+        })
+        self.updated_at = datetime.utcnow()
+
+    def add_tool_result(
+        self,
+        tool_use_id: str,
+        content: str,
+        images: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """
+        ツール実行結果を追加（Native Tool Use対応）
+
+        Args:
+            tool_use_id: ツール呼び出しID
+            content: ツール実行結果のテキスト
+            images: 画像コンテンツ（Vision API用）
+        """
+        if images:
+            # 画像を含む場合はcontent blocks形式
+            result_content = []
+            for img in images:
+                result_content.append(img)
+            result_content.append({
+                "type": "text",
+                "text": content,
+            })
+        else:
+            result_content = content
+
+        self.messages.append({
+            "role": "user",
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": result_content,
+            }],
         })
         self.updated_at = datetime.utcnow()
 
@@ -117,7 +220,7 @@ class Session:
         """推論ステップをクリア（次のターン用）"""
         self.reasoning_steps = []
 
-    def get_messages_for_llm(self) -> List[Dict[str, str]]:
+    def get_messages_for_llm(self) -> List[Dict[str, Any]]:
         """LLMに渡すメッセージ配列を取得"""
         return self.messages.copy()
 

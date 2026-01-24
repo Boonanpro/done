@@ -1,7 +1,8 @@
 """
-Tools - スキルとExecutorの橋渡し（B方式: キーワード検出）
+Tools - スキルとExecutorの橋渡し（Native Tool Use方式）
 
-LLMが [TOOL: skill-name action] と宣言 → コードが検出してExecutorを呼び出し
+Anthropic Tool Use APIを使用して構造化された出力を実現。
+プロセス（テキストブロック）と回答（respond_to_userツール）を100%分離。
 """
 
 import re
@@ -11,6 +12,186 @@ from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================
+# Native Tool Use: スキル→Tool変換
+# ============================================
+
+def convert_skill_to_tools(skill: "Skill") -> List[Dict[str, Any]]:
+    """
+    スキルをAnthropic Tool形式に変換
+
+    各スキルのアクションを個別のツールとして定義。
+    ツール名は `{skill_name}_{action}` 形式。
+
+    Args:
+        skill: Skillオブジェクト
+
+    Returns:
+        Anthropic Tool形式の辞書のリスト
+    """
+    tools = []
+
+    # スキルごとのアクション定義
+    skill_actions = {
+        "ex-reservation": {
+            "search": {
+                "description": "新幹線を検索し、確認画面まで進む",
+                "parameters": {
+                    "departure": {"type": "string", "description": "出発駅（例: 東京）"},
+                    "arrival": {"type": "string", "description": "到着駅（例: 新大阪）"},
+                    "date": {"type": "string", "description": "乗車日（YYYY-MM-DD形式）"},
+                    "time": {"type": "string", "description": "出発時刻（HH:MM形式）"},
+                    "seat_position": {"type": "string", "description": "座席位置（窓側/通路側）", "optional": True},
+                    "specific_seat": {"type": "string", "description": "特定座席（例: 5号車3番A席）", "optional": True},
+                },
+                "required": ["departure", "arrival", "date", "time"],
+            },
+            "cancel": {
+                "description": "予約をキャンセル（払戻）",
+                "parameters": {
+                    "reservation_id": {"type": "string", "description": "予約番号", "optional": True},
+                },
+                "required": [],
+            },
+        },
+        "amazon": {
+            "search": {
+                "description": "Amazon.co.jpで商品を検索",
+                "parameters": {
+                    "query": {"type": "string", "description": "検索キーワード"},
+                    "target": {"type": "string", "description": "探している商品の詳細（サイズ、個数等）", "optional": True},
+                },
+                "required": ["query"],
+            },
+            "scroll": {
+                "description": "ページをスクロールして商品を探す",
+                "parameters": {
+                    "direction": {"type": "string", "description": "スクロール方向（up/down）"},
+                },
+                "required": ["direction"],
+            },
+            "click_product": {
+                "description": "商品をクリックして詳細ページを開く",
+                "parameters": {
+                    "x": {"type": "number", "description": "クリックするX座標"},
+                    "y": {"type": "number", "description": "クリックするY座標"},
+                    "asin": {"type": "string", "description": "Amazon商品ID（ASIN）", "optional": True},
+                },
+                "required": ["x", "y"],
+            },
+            "add_to_cart": {
+                "description": "商品をカートに追加",
+                "parameters": {
+                    "quantity": {"type": "number", "description": "数量"},
+                },
+                "required": [],
+            },
+            "checkout": {
+                "description": "レジに進む",
+                "parameters": {},
+                "required": [],
+            },
+            "purchase": {
+                "description": "注文を確定",
+                "parameters": {},
+                "required": [],
+            },
+        },
+        "developer": {
+            "investigate": {
+                "description": "エラーを調査して原因を特定",
+                "parameters": {
+                    "error_message": {"type": "string", "description": "エラーメッセージ"},
+                    "context": {"type": "string", "description": "エラーが発生した状況", "optional": True},
+                },
+                "required": ["error_message"],
+            },
+            "fix": {
+                "description": "特定されたエラーを修正",
+                "parameters": {
+                    "file_path": {"type": "string", "description": "修正対象ファイル"},
+                    "fix_description": {"type": "string", "description": "修正内容"},
+                },
+                "required": ["file_path", "fix_description"],
+            },
+        },
+    }
+
+    # スキルのアクション定義を取得
+    actions = skill_actions.get(skill.name, {})
+
+    for action_name, action_def in actions.items():
+        # パラメータスキーマを構築
+        properties = {}
+        required = action_def.get("required", [])
+
+        for param_name, param_def in action_def.get("parameters", {}).items():
+            properties[param_name] = {
+                "type": param_def.get("type", "string"),
+                "description": param_def.get("description", ""),
+            }
+
+        tool = {
+            "name": f"{skill.name.replace('-', '_')}_{action_name}",
+            "description": f"[{skill.display_name}] {action_def['description']}",
+            "input_schema": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        }
+        tools.append(tool)
+
+    return tools
+
+
+def get_all_skill_tools() -> List[Dict[str, Any]]:
+    """
+    全スキルのツール定義を取得
+
+    Returns:
+        全スキルのAnthropic Tool形式のリスト
+    """
+    SkillRegistry.load()
+    all_tools = []
+
+    for skill in SkillRegistry.list_all():
+        tools = convert_skill_to_tools(skill)
+        all_tools.extend(tools)
+
+    return all_tools
+
+
+def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
+    """
+    ツール名からスキル名とアクションを抽出
+
+    Args:
+        tool_name: ツール名（例: ex_reservation_search）
+
+    Returns:
+        (skill_name, action) のタプル、または None
+    """
+    # respond_to_user は特別扱い
+    if tool_name == "respond_to_user":
+        return None
+
+    # スキル名とアクションを分離
+    # ex_reservation_search → ex-reservation, search
+    # amazon_click_product → amazon, click_product
+
+    known_skills = ["ex_reservation", "amazon", "developer"]
+
+    for skill_prefix in known_skills:
+        if tool_name.startswith(skill_prefix + "_"):
+            action = tool_name[len(skill_prefix) + 1:]
+            # ex_reservation → ex-reservation に戻す
+            skill_name = skill_prefix.replace("_", "-")
+            return (skill_name, action)
+
+    return None
 
 # スキルディレクトリ
 SKILL_DIRECTORIES = [
@@ -28,6 +209,48 @@ class Skill:
     service_type: Optional[str] = None
     service_name: Optional[str] = None
     raw_content: str = ""
+    skill_dir: Optional[Path] = None  # スキルディレクトリへのパス
+
+    def get_action_manual(self, action: str) -> Optional[str]:
+        """
+        アクション固有のマニュアルを取得（Progressive Disclosure）
+
+        Args:
+            action: アクション名（search, cancel など）
+
+        Returns:
+            actions/{action}.md の内容、または None
+        """
+        if not self.skill_dir:
+            return None
+
+        action_file = self.skill_dir / "actions" / f"{action}.md"
+        if action_file.exists():
+            try:
+                return action_file.read_text(encoding="utf-8")
+            except Exception as e:
+                logger.warning(f"Failed to load action manual {action_file}: {e}")
+                return None
+        return None
+
+    def list_available_actions(self) -> List[str]:
+        """
+        利用可能なアクション一覧を取得
+
+        Returns:
+            アクション名のリスト
+        """
+        if not self.skill_dir:
+            return []
+
+        actions_dir = self.skill_dir / "actions"
+        if not actions_dir.exists():
+            return []
+
+        actions = []
+        for action_file in actions_dir.glob("*.md"):
+            actions.append(action_file.stem)
+        return actions
 
     @classmethod
     def from_file(cls, name: str, filepath: Path) -> "Skill":
@@ -56,6 +279,7 @@ class Skill:
             service_type=service_type,
             service_name=service_name,
             raw_content=content,
+            skill_dir=filepath.parent,  # SKILL.mdの親ディレクトリ
         )
 
     @staticmethod
@@ -63,7 +287,20 @@ class Skill:
         """コンテンツからサービスタイプを推測"""
         content_lower = content.lower()
 
-        if "ex予約" in content or "新幹線" in content or name == "ex-reservation":
+        # 名前による判定を優先（最も確実）
+        if name == "developer":
+            return "developer", "developer"
+        elif name == "ex-reservation":
+            return "train", "ex_reservation"
+        elif name == "frontend-design":
+            return "frontend", "frontend_design"
+        elif name == "amazon":
+            return "product", "amazon"
+
+        # 内容による判定（フォールバック）
+        if "developer" in name or "開発機能" in content or "self-healing" in content_lower:
+            return "developer", "developer"
+        elif "ex予約" in content or "新幹線" in content:
             return "train", "ex_reservation"
         elif "amazon" in content_lower:
             return "product", "amazon"
@@ -73,8 +310,6 @@ class Skill:
             return "bus", "willer"
         elif "電話" in content or "音声" in content:
             return "voice", "phone"
-        elif "developer" in name or "開発機能" in content or "self-healing" in content_lower:
-            return "developer", "developer"
 
         return None, None
 
@@ -141,6 +376,23 @@ class SkillRegistry:
         """スキルのプロンプト（SKILL.md内容）を取得"""
         skill = cls.get(name)
         return skill.raw_content if skill else ""
+
+    @classmethod
+    def get_action_manual(cls, skill_name: str, action: str) -> Optional[str]:
+        """
+        アクション固有のマニュアルを取得
+
+        Args:
+            skill_name: スキル名
+            action: アクション名
+
+        Returns:
+            アクションマニュアルの内容、または None
+        """
+        skill = cls.get(skill_name)
+        if skill:
+            return skill.get_action_manual(action)
+        return None
 
 
 def parse_tool_call(response: str) -> Optional[Dict[str, Any]]:
@@ -219,27 +471,59 @@ async def execute_tool(
     Returns:
         実行結果
     """
-    from app.executors.registry import find_executor
+    from app.executors.registry import find_executor, register_all_executors
+
+    # Executorを登録（初回のみ実行される）
+    register_all_executors()
 
     skill_name = tool_call["skill"]
     action = tool_call["action"]
     params = tool_call["params"]
 
+    # リトライハンドラをインポート
+    from app.agent.v2.retry_handler import with_session_retry
+
     print(f"[TOOL_DEBUG] execute_tool called: skill={skill_name}, action={action}")
     print(f"[TOOL_DEBUG] params keys: {list(params.keys())}")
     print(f"[TOOL_DEBUG] credentials passed: {credentials is not None}")
+
+    # ★★★ 最初にスキルの存在を確認（認証チェックより先）★★★
+    # 存在しないスキルに対して「認証が必要」と誤った応答を返さないため
+    skill = SkillRegistry.get(skill_name)
+    if not skill:
+        print(f"[TOOL_DEBUG] Unknown skill: {skill_name}")
+        return {
+            "success": False,
+            "error": f"スキル '{skill_name}' は存在しません。利用可能なスキル: amazon, ex-reservation, developer",
+            "error_type": "unknown",
+        }
+
+    # 認証不要なアクション（これらはcredentials無しで実行可能）
+    actions_not_requiring_auth = {
+        "amazon": ["search", "scroll", "click_product"],  # 検索・スクロール・商品詳細はログイン不要
+        "developer": ["investigate", "fix", "analyze"],  # 開発系は認証不要
+    }
+
+    # このアクションが認証不要かチェック
+    skip_auth = action in actions_not_requiring_auth.get(skill_name, [])
+    if skip_auth:
+        print(f"[TOOL_DEBUG] Action '{action}' does not require authentication, skipping credential check")
+
+    # スキル名からサービス名を決定（ハイフンをアンダースコアに変換）
+    service_name = skill_name.replace("-", "_")  # ex-reservation → ex_reservation
 
     # 認証情報の取得優先順位:
     # 1. 引数で渡された credentials
     # 2. DBに保存済みの認証情報
     # 3. LLMがパラメータに含めた認証情報
+    #
+    # 重要: 認証不要アクションでも認証情報があれば渡す（ログイン済みブラウザ活用）
+    #       認証不要アクションで認証情報がなくても、Executorに処理を委ねる
     if credentials is None:
         # まずDBから認証情報を取得
         from app.services.credentials_service import get_credentials_service
         creds_service = get_credentials_service()
 
-        # スキル名からサービス名を決定
-        service_name = skill_name  # ex_reservation, amazon など
         stored_creds = await creds_service.get_credential(user_id, service_name)
 
         if stored_creds:
@@ -296,8 +580,9 @@ async def execute_tool(
                     credential_type="login",
                 )
                 print(f"[TOOL_DEBUG] Saved credentials to DB for future use")
-            else:
-                # 認証情報が見つからない → ユーザーに要求
+            elif not skip_auth:
+                # 認証が必要なアクションで認証情報が見つからない → ユーザーに要求
+                # 重要: 認証不要アクション（skip_auth=True）の場合はExecutorに委ねる
                 print(f"[TOOL_DEBUG] Credentials not found, requesting from user")
 
                 # サービスごとの認証情報フォーマット
@@ -322,6 +607,7 @@ async def execute_tool(
 
                 return {
                     "success": False,
+                    "error_type": "credentials_required",
                     "credentials_required": True,
                     "service": service_name,
                     "display_name": format_info["display_name"],
@@ -330,15 +616,7 @@ async def execute_tool(
                     "message": f"{format_info['display_name']}の認証情報が必要です。",
                 }
 
-    # スキルを取得
-    skill = SkillRegistry.get(skill_name)
-    if not skill:
-        return {
-            "success": False,
-            "error": f"Unknown skill: {skill_name}",
-        }
-
-    # Executorを取得
+    # Executorを取得（スキルは既に上で検証済み）
     # アクション名 → capability名のマッピング（registry登録名に合わせる）
     capability = action
     if action in ("book", "purchase", "reserve"):
@@ -347,6 +625,10 @@ async def execute_tool(
         capability = "cancel"
     elif action in ("list_reservations",):
         capability = "search"  # 予約一覧は検索機能で取得
+
+    # Developer skillは全アクションをsearch経由で実行
+    if skill.service_type == "developer":
+        capability = "search"
 
     print(f"[TOOL_DEBUG] Looking for executor: service_type={skill.service_type}, service_name={skill.service_name}, capability={capability}")
 
@@ -377,13 +659,28 @@ async def execute_tool(
             params["action"] = action
             result = await executor.search(params=params, credentials=credentials, user_id=user_id)
             print(f"[TOOL_DEBUG] Developer result success: {result.success}")
-            print(f"[TOOL_DEBUG] Developer result message: {result.message}")
+            try:
+                print(f"[TOOL_DEBUG] Developer result message: {result.message}")
+            except UnicodeEncodeError:
+                safe_msg = result.message.encode('cp932', errors='replace').decode('cp932')
+                print(f"[TOOL_DEBUG] Developer result message: {safe_msg}")
             return result.to_dict()
 
         elif action == "search":
-            result = await executor.search(params=params, credentials=credentials, user_id=user_id)
+            # セッション切れ自動再試行ラッパー
+            result = await with_session_retry(
+                executor=executor,
+                operation=lambda: executor.search(params=params, credentials=credentials, user_id=user_id),
+                credentials=credentials,
+                user_id=user_id,
+            )
             print(f"[TOOL_DEBUG] Search result success: {result.success}")
-            print(f"[TOOL_DEBUG] Search result message: {result.message}")
+            # Windows cp932対策: ¥記号等のUnicode文字を安全に出力
+            try:
+                print(f"[TOOL_DEBUG] Search result message: {result.message}")
+            except UnicodeEncodeError:
+                safe_msg = result.message.encode('cp932', errors='replace').decode('cp932')
+                print(f"[TOOL_DEBUG] Search result message: {safe_msg}")
             return result.to_dict()
 
         elif action in ("book", "execute", "purchase", "reserve"):
@@ -395,7 +692,10 @@ async def execute_tool(
                 # EXReservationExecutor等の購入メソッド
                 print(f"[TOOL_DEBUG] Calling executor.purchase()...")
                 result = await executor.purchase(params=params, credentials=credentials, user_id=user_id)
-                print(f"[TOOL_DEBUG] Purchase result: {result}")
+                try:
+                    print(f"[TOOL_DEBUG] Purchase result: {result}")
+                except UnicodeEncodeError:
+                    print(f"[TOOL_DEBUG] Purchase result: (message contains special characters)")
                 return result if isinstance(result, dict) else {"success": result.success, "message": result.message}
             else:
                 print(f"[TOOL_DEBUG] No purchase method found")
@@ -405,22 +705,126 @@ async def execute_tool(
                 }
 
         elif action in ("cancel", "cancel_reservation"):
-            # キャンセル/払戻アクション
+            # キャンセル/払戻アクション（セッション切れ自動再試行ラッパー）
             print(f"[TOOL_DEBUG] Cancel action called, calling executor.cancel()...")
-            result = await executor.cancel(params=params, credentials=credentials, user_id=user_id)
-            print(f"[TOOL_DEBUG] Cancel result: success={result.success}, message={result.message}")
+            result = await with_session_retry(
+                executor=executor,
+                operation=lambda: executor.cancel(params=params, credentials=credentials, user_id=user_id),
+                credentials=credentials,
+                user_id=user_id,
+            )
+            try:
+                print(f"[TOOL_DEBUG] Cancel result: success={result.success}, message={result.message}")
+            except UnicodeEncodeError:
+                safe_msg = result.message.encode('cp932', errors='replace').decode('cp932')
+                print(f"[TOOL_DEBUG] Cancel result: success={result.success}, message={safe_msg}")
             return {"success": result.success, "message": result.message}
 
+        elif action == "add_to_cart":
+            # Amazon カート追加アクション（セッション切れ自動再試行ラッパー）
+            print(f"[TOOL_DEBUG] Add to cart action called")
+            if hasattr(executor, "add_to_cart"):
+                result = await with_session_retry(
+                    executor=executor,
+                    operation=lambda: executor.add_to_cart(params=params, credentials=credentials, user_id=user_id),
+                    credentials=credentials,
+                    user_id=user_id,
+                )
+                try:
+                    print(f"[TOOL_DEBUG] Add to cart result: success={result.success}, message={result.message}")
+                except UnicodeEncodeError:
+                    safe_msg = result.message.encode('cp932', errors='replace').decode('cp932')
+                    print(f"[TOOL_DEBUG] Add to cart result: success={result.success}, message={safe_msg}")
+                return {"success": result.success, "message": result.message, "details": result.details}
+            else:
+                return {"success": False, "error": f"{skill_name} は add_to_cart に対応していません"}
+
+        elif action == "order_history":
+            # Amazon 注文履歴アクション（セッション切れ自動再試行ラッパー）
+            print(f"[TOOL_DEBUG] Order history action called")
+            if hasattr(executor, "order_history"):
+                result = await with_session_retry(
+                    executor=executor,
+                    operation=lambda: executor.order_history(params=params, credentials=credentials, user_id=user_id),
+                    credentials=credentials,
+                    user_id=user_id,
+                )
+                try:
+                    print(f"[TOOL_DEBUG] Order history result: success={result.success}, message={result.message}")
+                except UnicodeEncodeError:
+                    safe_msg = result.message.encode('cp932', errors='replace').decode('cp932')
+                    print(f"[TOOL_DEBUG] Order history result: success={result.success}, message={safe_msg}")
+                return {"success": result.success, "message": result.message, "details": result.details}
+            else:
+                return {"success": False, "error": f"{skill_name} は order_history に対応していません"}
+
         elif action == "list_reservations":
-            # 予約一覧取得アクション
+            # 予約一覧取得アクション（セッション切れ自動再試行ラッパー）
             print(f"[TOOL_DEBUG] List reservations action called")
             if hasattr(executor, "list_reservations"):
-                result = await executor.list_reservations(params=params, credentials=credentials, user_id=user_id)
+                result = await with_session_retry(
+                    executor=executor,
+                    operation=lambda: executor.list_reservations(params=params, credentials=credentials, user_id=user_id),
+                    credentials=credentials,
+                    user_id=user_id,
+                )
                 return result.to_dict() if hasattr(result, 'to_dict') else result
             else:
                 # list_reservationsがない場合、searchで代用
-                result = await executor.search(params={"action": "list"}, credentials=credentials, user_id=user_id)
+                result = await with_session_retry(
+                    executor=executor,
+                    operation=lambda: executor.search(params={"action": "list"}, credentials=credentials, user_id=user_id),
+                    credentials=credentials,
+                    user_id=user_id,
+                )
                 return result.to_dict() if hasattr(result, 'to_dict') else result
+
+        elif action == "checkout":
+            # Amazon チェックアウトアクション（セッション切れ自動再試行ラッパー）
+            print(f"[TOOL_DEBUG] Checkout action called")
+            if hasattr(executor, "checkout"):
+                result = await with_session_retry(
+                    executor=executor,
+                    operation=lambda: executor.checkout(params=params, credentials=credentials, user_id=user_id),
+                    credentials=credentials,
+                    user_id=user_id,
+                )
+                try:
+                    print(f"[TOOL_DEBUG] Checkout result: success={result.success}, message={result.message}")
+                except UnicodeEncodeError:
+                    safe_msg = result.message.encode('cp932', errors='replace').decode('cp932')
+                    print(f"[TOOL_DEBUG] Checkout result: success={result.success}, message={safe_msg}")
+                return {"success": result.success, "message": result.message, "details": getattr(result, 'details', None)}
+            else:
+                return {"success": False, "error": f"{skill_name} は checkout に対応していません"}
+
+        elif action == "scroll":
+            # Amazon Vision: スクロールアクション
+            print(f"[TOOL_DEBUG] Scroll action called")
+            if hasattr(executor, "scroll"):
+                result = await executor.scroll(params=params, credentials=credentials, user_id=user_id)
+                try:
+                    print(f"[TOOL_DEBUG] Scroll result: success={result.success}, message={result.message}")
+                except UnicodeEncodeError:
+                    safe_msg = result.message.encode('cp932', errors='replace').decode('cp932')
+                    print(f"[TOOL_DEBUG] Scroll result: success={result.success}, message={safe_msg}")
+                return {"success": result.success, "message": result.message, "details": getattr(result, 'details', None)}
+            else:
+                return {"success": False, "error": f"{skill_name} は scroll に対応していません"}
+
+        elif action == "click_product":
+            # Amazon Vision: 商品クリックアクション
+            print(f"[TOOL_DEBUG] Click product action called")
+            if hasattr(executor, "click_product"):
+                result = await executor.click_product(params=params, credentials=credentials, user_id=user_id)
+                try:
+                    print(f"[TOOL_DEBUG] Click product result: success={result.success}, message={result.message}")
+                except UnicodeEncodeError:
+                    safe_msg = result.message.encode('cp932', errors='replace').decode('cp932')
+                    print(f"[TOOL_DEBUG] Click product result: success={result.success}, message={safe_msg}")
+                return {"success": result.success, "message": result.message, "details": getattr(result, 'details', None)}
+            else:
+                return {"success": False, "error": f"{skill_name} は click_product に対応していません"}
 
         else:
             return {"success": False, "error": f"Unknown action: {action}"}
@@ -430,9 +834,30 @@ async def execute_tool(
         return {"success": False, "error": str(e)}
 
 
-def format_tool_result(result: Dict[str, Any], skill_name: str, action: str) -> str:
+@dataclass
+class FormattedToolResult:
+    """
+    フォーマットされたツール結果
+
+    Vision API対応: テキストと画像を両方含められる
+    """
+    text: str
+    images: List[Dict[str, Any]] = field(default_factory=list)  # Vision API用画像リスト
+
+    def has_images(self) -> bool:
+        """画像が含まれているか"""
+        return len(self.images) > 0
+
+
+def format_tool_result(result: Dict[str, Any], skill_name: str, action: str) -> FormattedToolResult:
     """
     ツール実行結果をLLMに渡すフォーマットに変換
+
+    第一原理に基づいた設計:
+    1. 差分があれば必ず報告
+    2. ブラウザの実際の状態を報告
+    3. 失敗時は理由と代替案を提示
+    4. 決定ポイントのスクリーンショットをVision形式で含める（ダンが見えるように）
 
     Args:
         result: execute_tool()の戻り値
@@ -440,30 +865,118 @@ def format_tool_result(result: Dict[str, Any], skill_name: str, action: str) -> 
         action: アクション名
 
     Returns:
-        LLMに追加するメッセージ
+        FormattedToolResult: テキストメッセージと画像のリスト
     """
-    if not result.get("success", False):
-        # ExecutorSearchResult は 'message' を使用、その他は 'error' を使用
+    images = []
+
+    # スクリーンショットがあればVision API形式に変換
+    screenshot_base64 = result.get("screenshot_base64")
+    if screenshot_base64:
+        images.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": screenshot_base64,
+            },
+        })
+        logger.info(f"[VISION] スクリーンショットをメッセージに追加 ({len(screenshot_base64)} bytes)")
+
+    lines = [f"[TOOL RESULT: {skill_name} {action}]"]
+
+    # 成功/失敗
+    success = result.get("success", False)
+
+    if not success:
+        # エラーメッセージ
         error_msg = result.get("message") or result.get("error", "不明なエラー")
-        return f"[TOOL RESULT: {skill_name} {action}]\nエラー: {error_msg}"
+        lines.append(f"エラー: {error_msg}")
+
+        # 失敗理由（第一原理: なぜ失敗したかを明示）
+        if result.get("failure_reason"):
+            lines.append(f"失敗理由: {result['failure_reason']}")
+
+        # ブラウザ状態（第一原理: 実際の状態を報告）
+        browser_state = result.get("browser_state")
+        if browser_state:
+            lines.append(f"\n【ブラウザ状態】")
+            if isinstance(browser_state, dict):
+                if browser_state.get("logged_in") is not None:
+                    lines.append(f"  ログイン: {'済み' if browser_state['logged_in'] else '未ログイン'}")
+                if browser_state.get("page_type"):
+                    lines.append(f"  ページ: {browser_state['page_type']}")
+                if browser_state.get("error_message"):
+                    lines.append(f"  ページ上のエラー: {browser_state['error_message']}")
+
+        # 代替案
+        if result.get("suggested_alternatives"):
+            lines.append(f"\n【代替案】")
+            for alt in result["suggested_alternatives"]:
+                lines.append(f"  - {alt}")
+
+        return FormattedToolResult(text="\n".join(lines), images=images)
 
     # 検索結果の場合
     if action == "search" and "options" in result:
-        options = result["options"]
-        if not options:
-            return f"[TOOL RESULT: {skill_name} {action}]\n該当する結果がありませんでした。"
+        # messageがあればそれを使う（座席表機能の詳細含む）
+        if result.get("message"):
+            lines.append(result['message'])
+        else:
+            # messageがなければoptions からフォーマット（従来の動作）
+            options = result["options"]
+            if not options:
+                lines.append("該当する結果がありませんでした。")
+            else:
+                lines.append(f"{len(options)}件見つかりました:\n")
+                for i, opt in enumerate(options[:5], 1):  # 最大5件
+                    lines.append(f"{i}. {opt.get('title', '不明')}")
+                    if opt.get("description"):
+                        lines.append(f"   {opt['description']}")
+                    if opt.get("price"):
+                        lines.append(f"   料金: ¥{opt['price']:,}")
+                    lines.append("")
 
-        lines = [f"[TOOL RESULT: {skill_name} {action}]", f"{len(options)}件見つかりました:\n"]
+        # 差分報告（第一原理: 要件と結果の差分を必ず報告）
+        deviation = result.get("deviation")
+        if deviation and isinstance(deviation, dict) and deviation.get("has_deviation"):
+            lines.append("\n【重要: 要件との差分】")
+            if deviation.get("reason"):
+                lines.append(f"  {deviation['reason']}")
+            if deviation.get("requested"):
+                req = deviation["requested"]
+                req_desc = []
+                if req.get("seat_type"):
+                    req_desc.append(req["seat_type"])
+                if req.get("adjacent_empty"):
+                    req_desc.append("隣空席希望")
+                if req_desc:
+                    lines.append(f"  要求された条件: {', '.join(req_desc)}")
+            if deviation.get("actual"):
+                act = deviation["actual"]
+                if act.get("seat"):
+                    lines.append(f"  実際に選択: {act['seat']}")
+                if act.get("seat_type"):
+                    lines.append(f"  実際の座席タイプ: {act['seat_type']}")
+            if deviation.get("alternatives_checked"):
+                lines.append(f"  確認済みの号車: {', '.join(deviation['alternatives_checked'])}")
 
-        for i, opt in enumerate(options[:5], 1):  # 最大5件
-            lines.append(f"{i}. {opt.get('title', '不明')}")
-            if opt.get("description"):
-                lines.append(f"   {opt['description']}")
-            if opt.get("price"):
-                lines.append(f"   料金: ¥{opt['price']:,}")
-            lines.append("")
+        # ブラウザ状態
+        browser_state = result.get("browser_state")
+        if browser_state and isinstance(browser_state, dict):
+            lines.append("\n【ブラウザ状態】")
+            if browser_state.get("logged_in") is not None:
+                lines.append(f"  ログイン: {'済み' if browser_state['logged_in'] else '未ログイン'}")
+            if browser_state.get("page_type"):
+                lines.append(f"  現在のページ: {browser_state['page_type']}")
 
-        return "\n".join(lines)
+        return FormattedToolResult(text="\n".join(lines), images=images)
 
     # その他の結果
-    return f"[TOOL RESULT: {skill_name} {action}]\n{result.get('message', '完了')}"
+    lines.append(result.get('message', '完了'))
+
+    # 差分があれば追加
+    deviation = result.get("deviation")
+    if deviation and isinstance(deviation, dict) and deviation.get("has_deviation"):
+        lines.append(f"\n【差分】{deviation.get('reason', '詳細不明')}")
+
+    return FormattedToolResult(text="\n".join(lines), images=images)

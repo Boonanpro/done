@@ -1,9 +1,13 @@
 """
-AgentRunner - 会話ループのメインロジック
+AgentRunner - 会話ループのメインロジック（Native Tool Use方式）
 
 Messages配列を維持しながらLLMと対話する。
 状態遷移はLLMの出力から検出し、コードは追従するだけ。
-ツール呼び出しはB方式（キーワード検出）で実行。
+
+Native Tool Use:
+- respond_to_user ツールでユーザー回答を構造化
+- テキストブロックは全てプロセスとして処理
+- プロセス漏出を100%防止
 """
 
 import re
@@ -14,7 +18,10 @@ from pathlib import Path
 import anthropic
 
 from app.agent.v2.session import Session, State, get_session_store
-from app.agent.v2.tools import parse_tool_call, execute_tool, format_tool_result, FormattedToolResult, SkillRegistry
+from app.agent.v2.tools import (
+    execute_tool, format_tool_result, FormattedToolResult, SkillRegistry,
+    get_all_skill_tools, parse_tool_name,
+)
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -108,7 +115,7 @@ class AgentRunner:
         credentials: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
-        ユーザーメッセージを処理
+        ユーザーメッセージを処理（Native Tool Use方式）
 
         Args:
             user_message: ユーザーのメッセージ
@@ -116,9 +123,9 @@ class AgentRunner:
 
         Returns:
             {
-                "response": ユーザーへの応答,
+                "response": ユーザーへの応答（respond_to_userツールから抽出）,
                 "state": 現在の状態,
-                "reasoning_steps": 推論過程,
+                "reasoning_steps": 推論過程（テキストブロックから抽出）,
                 "tool_results": ツール実行結果（あれば）,
             }
         """
@@ -158,30 +165,31 @@ class AgentRunner:
                         credentials=credentials,
                     )
 
-                    # 結果をセッションに追加（Vision API対応）
+                    # ツール結果をtool_result形式でメッセージに追加
                     formatted = format_tool_result(
                         result, pending_tool["skill"], pending_tool["action"]
                     )
-                    if formatted.has_images():
-                        # 画像があればVision形式で追加
-                        self.session.add_user_message_with_images(
-                            formatted.text, formatted.images
-                        )
-                    else:
-                        self.session.add_user_message(formatted.text)
+                    self.session.add_tool_result(
+                        tool_use_id=pending_tool.get("tool_use_id", "pending"),
+                        content=formatted.text,
+                        images=formatted.images if formatted.has_images() else None,
+                    )
 
                     # LLMに結果を伝えて応答を生成
-                    llm_response = await self._call_llm()
-                    parsed = self._parse_response(llm_response)
+                    response = await self._call_llm_with_tools()
+                    parsed = await self._process_llm_response(response)
+
                     if parsed["new_state"]:
                         self.session.transition_to(parsed["new_state"])
-                    self.session.add_assistant_message(llm_response)
+
+                    # アシスタントメッセージを追加
+                    self.session.add_assistant_message_from_response(response)
 
                     store = get_session_store()
                     await store.save(self.session)
 
                     return {
-                        "response": parsed["user_response"],
+                        "response": parsed["user_response"] or "処理が完了しました。",
                         "state": self.session.current_state.value,
                         "reasoning_steps": self.session.reasoning_steps,
                         "tool_results": [{"tool": pending_tool, "result": result}],
@@ -193,130 +201,132 @@ class AgentRunner:
             # 2. ユーザーメッセージを追加
             self.session.add_user_message(user_message)
 
-            # 3. LLM呼び出し→ツール実行ループ
+            # 3. LLM呼び出し→ツール実行ループ（Native Tool Use）
             tool_results = []
+            user_response = None
             print(f"[RUNNER_DEBUG] Starting LLM loop, state: {self.session.current_state.value}")
 
             # 状態に応じた上限を決定
             if self.session.current_state == State.DEVELOP:
                 max_loops = MAX_TOOL_LOOPS_DEVELOP
             else:
-                max_loops = MAX_TOOL_LOOPS_SAFETY  # 実質上限なし（LLMが自然に終了）
+                max_loops = MAX_TOOL_LOOPS_SAFETY
 
             for loop_count in range(max_loops + 1):
-                # LLMを呼び出し
-                print(f"[RUNNER_DEBUG] Calling LLM (loop {loop_count})...")
-                llm_response = await self._call_llm()
-                print(f"[RUNNER_DEBUG] LLM response length: {len(llm_response)}")
+                print(f"[RUNNER_DEBUG] Calling LLM with tools (loop {loop_count})...")
 
-                # レスポンスを解析
-                parsed = self._parse_response(llm_response)
+                # LLMをTool Use APIで呼び出し
+                response = await self._call_llm_with_tools()
 
-                # 状態遷移を検出・適用
+                # レスポンスを処理
+                parsed = await self._process_llm_response(response)
+
+                # 状態遷移を適用
                 if parsed["new_state"]:
                     self.session.transition_to(parsed["new_state"])
 
                 # アシスタントメッセージを追加
-                self.session.add_assistant_message(llm_response)
+                self.session.add_assistant_message_from_response(response)
 
-                # ツール呼び出しを検出
-                tool_call = parse_tool_call(llm_response)
+                # ユーザー回答を抽出
+                if parsed["user_response"]:
+                    user_response = parsed["user_response"]
 
-                if not tool_call or loop_count >= max_loops:
-                    # ツール呼び出しなし、または最大ループに達した
+                # ツール呼び出しがない、または最大ループに達した場合は終了
+                if not parsed["tool_calls"] or loop_count >= max_loops:
+                    print(f"[RUNNER_DEBUG] No more tool calls or max loops reached")
                     break
 
                 # ツールを実行
-                logger.info(f"Executing tool: {tool_call}")
-                if self._on_reasoning_step:
-                    await self._on_reasoning_step(
-                        f"🔧 {tool_call['skill']} {tool_call['action']}..."
+                for tool_call in parsed["tool_calls"]:
+                    tool_use_id = tool_call["tool_use_id"]
+                    skill_name = tool_call["skill"]
+                    action = tool_call["action"]
+                    params = tool_call["params"]
+
+                    logger.info(f"Executing tool: {skill_name} {action}")
+                    if self._on_reasoning_step:
+                        await self._on_reasoning_step(f"🔧 {skill_name} {action}...")
+
+                    result = await execute_tool(
+                        tool_call=tool_call,
+                        user_id=self.session.user_id,
+                        credentials=credentials,
                     )
 
-                result = await execute_tool(
-                    tool_call=tool_call,
-                    user_id=self.session.user_id,
-                    credentials=credentials,
-                )
+                    # エラータイプに基づいて処理を分岐
+                    error_type = result.get("error_type")
 
-                # エラータイプに基づいて処理を分岐
-                error_type = result.get("error_type")
+                    # 認証情報が必要な場合は特別処理
+                    if result.get("credentials_required") or error_type in (
+                        "credentials_required",
+                        "credentials_invalid",
+                        "session_expired",
+                    ):
+                        # 保留中のツール呼び出しを保存
+                        tool_call["tool_use_id"] = tool_use_id
+                        self.session.context["pending_tool_call"] = tool_call
 
-                # 認証情報が必要な場合は特別処理
-                # credentials_required または認証関連のerror_typeの場合
-                if result.get("credentials_required") or error_type in (
-                    "credentials_required",
-                    "credentials_invalid",
-                    "session_expired",
-                ):
-                    # 保留中のツール呼び出しを保存
-                    self.session.context["pending_tool_call"] = tool_call
+                        # ユーザーに認証情報を要求
+                        display_name = result.get("display_name", result.get("service"))
+                        labels = result.get("labels", {})
 
-                    # ユーザーに認証情報を要求
-                    display_name = result.get("display_name", result.get("service"))
-                    labels = result.get("labels", {})
+                        field_prompts = []
+                        for field in result.get("fields", []):
+                            label = labels.get(field, field)
+                            field_prompts.append(f"・{label}")
 
-                    # フィールドのラベルを取得
-                    field_prompts = []
-                    for field in result.get("fields", []):
-                        label = labels.get(field, field)
-                        field_prompts.append(f"・{label}")
+                        prompt_text = f"{display_name}を利用するには認証情報が必要です。\n\n以下の情報を教えてください:\n" + "\n".join(field_prompts)
 
-                    prompt_text = f"{display_name}を利用するには認証情報が必要です。\n\n以下の情報を教えてください:\n" + "\n".join(field_prompts)
+                        store = get_session_store()
+                        await store.save(self.session)
 
-                    # セッションを保存
-                    store = get_session_store()
-                    await store.save(self.session)
+                        return {
+                            "response": prompt_text,
+                            "state": self.session.current_state.value,
+                            "reasoning_steps": self.session.reasoning_steps,
+                            "credentials_required": True,
+                            "service": result.get("service"),
+                            "fields": result.get("fields"),
+                            "labels": result.get("labels"),
+                        }
 
-                    return {
-                        "response": prompt_text,
-                        "state": self.session.current_state.value,
-                        "reasoning_steps": self.session.reasoning_steps,
-                        "credentials_required": True,
-                        "service": result.get("service"),
-                        "fields": result.get("fields"),
-                        "labels": result.get("labels"),
-                    }
+                    # エラーログ
+                    if error_type and not result.get("success"):
+                        logger.info(f"Tool error: type={error_type}, recoverable={result.get('recoverable', True)}")
 
-                # その他のエラー: 実際のエラーメッセージをLLMに伝える
-                # error_typeがあれば、それをログに記録
-                if error_type and not result.get("success"):
-                    logger.info(f"Tool error: type={error_type}, recoverable={result.get('recoverable', True)}")
+                    tool_results.append({
+                        "tool": tool_call,
+                        "result": result,
+                    })
 
-                tool_results.append({
-                    "tool": tool_call,
-                    "result": result,
-                })
-
-                # 結果をMessagesに追加（userロールで追加してLLMに伝える）
-                # Vision API対応: 画像があればcontent blocks形式で追加
-                formatted = format_tool_result(
-                    result, tool_call["skill"], tool_call["action"]
-                )
-                if formatted.has_images():
-                    # 画像があればVision形式で追加（ダンが画面を見られる）
-                    self.session.add_user_message_with_images(
-                        formatted.text, formatted.images
+                    # ツール結果をtool_result形式でメッセージに追加
+                    formatted = format_tool_result(result, skill_name, action)
+                    self.session.add_tool_result(
+                        tool_use_id=tool_use_id,
+                        content=formatted.text,
+                        images=formatted.images if formatted.has_images() else None,
                     )
-                    logger.info(f"[VISION] Added {len(formatted.images)} image(s) to message")
-                else:
-                    self.session.add_user_message(formatted.text)
 
-                if self._on_reasoning_step:
-                    status = "✅" if result.get("success") else "❌"
-                    vision_indicator = " 👁️" if formatted.has_images() else ""
-                    await self._on_reasoning_step(f"{status} ツール実行完了{vision_indicator}")
+                    if self._on_reasoning_step:
+                        status = "✅" if result.get("success") else "❌"
+                        vision_indicator = " 👁️" if formatted.has_images() else ""
+                        await self._on_reasoning_step(f"{status} ツール実行完了{vision_indicator}")
 
             # 4. セッションを保存
             store = get_session_store()
             await store.save(self.session)
 
+            # フォールバック: respond_to_userが呼ばれなかった場合
+            if not user_response:
+                logger.warning("respond_to_user was not called, using fallback")
+                user_response = "処理が完了しました。"
+
             return {
-                "response": parsed["user_response"],
+                "response": user_response,
                 "state": self.session.current_state.value,
                 "reasoning_steps": self.session.reasoning_steps,
                 "tool_results": tool_results,
-                "raw_response": llm_response,
             }
 
         except Exception as e:
@@ -523,52 +533,157 @@ class AgentRunner:
 
         return model
 
-    async def _call_llm(self) -> str:
-        """LLMを呼び出す（ストリーミング）"""
+    def _get_tools(self) -> List[Dict[str, Any]]:
+        """
+        LLMに渡すツール一覧を取得
+
+        Returns:
+            respond_to_user + 全スキルツール
+        """
+        tools = [RESPOND_TO_USER_TOOL]
+        tools.extend(get_all_skill_tools())
+        return tools
+
+    async def _call_llm_with_tools(self) -> "anthropic.types.Message":
+        """
+        LLMをTool Use APIで呼び出す
+
+        Returns:
+            Anthropic Message オブジェクト（content blocksを含む）
+        """
         if not self.llm_client:
-            return "[STATE: CHAT]\nLLMクライアントが設定されていません。"
+            raise RuntimeError("LLMクライアントが設定されていません")
 
         messages = self.session.get_messages_for_llm()
         system_prompt = self._build_system_prompt()
         model = self._get_model()
+        tools = self._get_tools()
 
-        full_response = ""
-        current_line = ""
+        print(f"[LLM_DEBUG] Calling LLM with {len(tools)} tools")
+        print(f"[LLM_DEBUG] Tool names: {[t['name'] for t in tools]}")
 
+        response = await self.llm_client.messages.create(
+            model=model,
+            max_tokens=4000,
+            system=system_prompt,
+            messages=messages,
+            tools=tools,
+        )
+
+        print(f"[LLM_DEBUG] Response stop_reason: {response.stop_reason}")
+        print(f"[LLM_DEBUG] Response content blocks: {len(response.content)}")
+
+        return response
+
+    async def _process_llm_response(
+        self,
+        response: "anthropic.types.Message",
+    ) -> Dict[str, Any]:
+        """
+        LLMレスポンスのcontent blocksを処理
+
+        - text blocks → プロセスとして通知
+        - tool_use blocks → ツール実行または回答抽出
+
+        Returns:
+            {
+                "user_response": ユーザー回答（respond_to_userから）,
+                "tool_calls": 実行すべきスキルツール呼び出しリスト,
+                "new_state": 検出された状態遷移,
+                "stop_reason": LLMの停止理由,
+            }
+        """
+        user_response = None
+        tool_calls = []
+        new_state = None
+
+        for block in response.content:
+            if block.type == "text":
+                # テキストブロック → プロセスとして処理
+                text = block.text
+                await self._process_text_block(text)
+
+                # [STATE: XXX] を検出
+                state_match = re.search(r'\[STATE:\s*(\w+)\]', text)
+                if state_match:
+                    state_name = state_match.group(1).lower()
+                    try:
+                        new_state = State(state_name)
+                    except ValueError:
+                        pass
+
+            elif block.type == "tool_use":
+                # ツール呼び出しブロック
+                tool_name = block.name
+                tool_input = block.input
+                tool_use_id = block.id
+
+                print(f"[LLM_DEBUG] Tool use: {tool_name}")
+
+                if tool_name == "respond_to_user":
+                    # ユーザー回答を抽出
+                    user_response = tool_input.get("response", "")
+                    print(f"[LLM_DEBUG] User response extracted: {user_response[:50]}...")
+                else:
+                    # スキルツール呼び出し
+                    parsed = parse_tool_name(tool_name)
+                    if parsed:
+                        skill_name, action = parsed
+                        tool_calls.append({
+                            "tool_use_id": tool_use_id,
+                            "skill": skill_name,
+                            "action": action,
+                            "params": tool_input,
+                        })
+                        print(f"[LLM_DEBUG] Skill tool: {skill_name} {action}")
+
+        return {
+            "user_response": user_response,
+            "tool_calls": tool_calls,
+            "new_state": new_state,
+            "stop_reason": response.stop_reason,
+        }
+
+    async def _process_text_block(self, text: str) -> None:
+        """
+        テキストブロックをプロセスとして処理
+
+        - 各行をプロセスモニターに通知
+        - [STATE: XXX] を検出して状態遷移を通知
+        """
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+
+            # [STATE: XXX] を検出
+            state_match = re.match(r'\[STATE:\s*(\w+)\]', line)
+            if state_match:
+                state_name = state_match.group(1).upper()
+                self.session.add_reasoning_step(f"→ {state_name}")
+                if self._on_reasoning_step:
+                    await self._on_reasoning_step(f"→ {state_name}")
+                continue
+
+            # その他のテキストはプロセスとして通知
+            self.session.add_reasoning_step(line)
+            if self._on_reasoning_step:
+                await self._on_reasoning_step(line)
+
+    # Legacy: 旧方式との互換性のため残す（将来削除予定）
+    async def _call_llm(self) -> str:
+        """LLMを呼び出す（レガシー：テキスト形式で返す）"""
         try:
-            async with self.llm_client.messages.stream(
-                model=model,
-                max_tokens=2000,
-                system=system_prompt,
-                messages=messages,
-            ) as stream:
-                async for text in stream.text_stream:
-                    full_response += text
-                    current_line += text
-
-                    # 改行で行を処理
-                    while "\n" in current_line:
-                        line, current_line = current_line.split("\n", 1)
-                        line = line.strip()
-
-                        # [STEP] を検出してリアルタイム通知
-                        if line.startswith("[STEP]"):
-                            step_text = line[6:].strip()
-                            if step_text:
-                                self.session.add_reasoning_step(step_text)
-                                if self._on_reasoning_step:
-                                    await self._on_reasoning_step(step_text)
-
-                        # [STATE: XXX] を検出
-                        state_match = re.match(r'\[STATE:\s*(\w+)\]', line)
-                        if state_match:
-                            state_name = state_match.group(1).upper()
-                            self.session.add_reasoning_step(f"→ {state_name}")
-                            if self._on_reasoning_step:
-                                await self._on_reasoning_step(f"→ {state_name}")
-
-            return full_response
-
+            response = await self._call_llm_with_tools()
+            # テキストブロックを結合して返す
+            text_parts = []
+            for block in response.content:
+                if block.type == "text":
+                    text_parts.append(block.text)
+                elif block.type == "tool_use":
+                    if block.name == "respond_to_user":
+                        text_parts.append(block.input.get("response", ""))
+            return "\n".join(text_parts)
         except Exception as e:
             logger.exception(f"LLM call failed: {e}")
             return f"[STATE: CHAT]\nエラーが発生しました: {e}"
