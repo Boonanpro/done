@@ -14,7 +14,7 @@ from pathlib import Path
 import anthropic
 
 from app.agent.v2.session import Session, State, get_session_store
-from app.agent.v2.tools import parse_tool_call, execute_tool, format_tool_result, SkillRegistry
+from app.agent.v2.tools import parse_tool_call, execute_tool, format_tool_result, FormattedToolResult, SkillRegistry
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -22,13 +22,38 @@ logger = logging.getLogger(__name__)
 # プロンプトディレクトリ
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-# ツール実行の最大ループ回数（無限ループ防止）
-MAX_TOOL_LOOPS = 3
+# ツール実行の最大ループ回数
+# - DEVELOPモード: 10回（複雑な調査が必要なため）
+# - その他: 上限なし（LLMが自然に終了する設計）
+# ※安全弁として100回を超えたら強制終了
+MAX_TOOL_LOOPS_DEVELOP = 10
+MAX_TOOL_LOOPS_SAFETY = 100  # 万が一の暴走防止
 
 # モデル設定（動的切り替え用）
 MODELS = {
     "default": "claude-sonnet-4-5-20250929",      # 通常モード: Sonnet 4.5（コーディング最強、コスパ良）
     "develop": "claude-opus-4-5-20251101",        # DEVELOPモード: Opus 4.5（複雑な設計判断）
+}
+
+# ============================================
+# Native Tool Use: ツール定義
+# ============================================
+
+# respond_to_user: ユーザーへの最終回答を構造化して出力するツール
+# このツールを経由することで、プロセス（テキストブロック）と回答を100%分離できる
+RESPOND_TO_USER_TOOL = {
+    "name": "respond_to_user",
+    "description": "ユーザーへの最終回答を出力する。内部処理が完了したら、必ずこのツールを使って回答すること。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "response": {
+                "type": "string",
+                "description": "ユーザーに表示する回答テキスト"
+            }
+        },
+        "required": ["response"]
+    }
 }
 
 
@@ -133,11 +158,17 @@ class AgentRunner:
                         credentials=credentials,
                     )
 
-                    # 結果をセッションに追加
-                    result_text = format_tool_result(
+                    # 結果をセッションに追加（Vision API対応）
+                    formatted = format_tool_result(
                         result, pending_tool["skill"], pending_tool["action"]
                     )
-                    self.session.add_user_message(result_text)
+                    if formatted.has_images():
+                        # 画像があればVision形式で追加
+                        self.session.add_user_message_with_images(
+                            formatted.text, formatted.images
+                        )
+                    else:
+                        self.session.add_user_message(formatted.text)
 
                     # LLMに結果を伝えて応答を生成
                     llm_response = await self._call_llm()
@@ -165,7 +196,14 @@ class AgentRunner:
             # 3. LLM呼び出し→ツール実行ループ
             tool_results = []
             print(f"[RUNNER_DEBUG] Starting LLM loop, state: {self.session.current_state.value}")
-            for loop_count in range(MAX_TOOL_LOOPS + 1):
+
+            # 状態に応じた上限を決定
+            if self.session.current_state == State.DEVELOP:
+                max_loops = MAX_TOOL_LOOPS_DEVELOP
+            else:
+                max_loops = MAX_TOOL_LOOPS_SAFETY  # 実質上限なし（LLMが自然に終了）
+
+            for loop_count in range(max_loops + 1):
                 # LLMを呼び出し
                 print(f"[RUNNER_DEBUG] Calling LLM (loop {loop_count})...")
                 llm_response = await self._call_llm()
@@ -184,7 +222,7 @@ class AgentRunner:
                 # ツール呼び出しを検出
                 tool_call = parse_tool_call(llm_response)
 
-                if not tool_call or loop_count >= MAX_TOOL_LOOPS:
+                if not tool_call or loop_count >= max_loops:
                     # ツール呼び出しなし、または最大ループに達した
                     break
 
@@ -201,8 +239,16 @@ class AgentRunner:
                     credentials=credentials,
                 )
 
+                # エラータイプに基づいて処理を分岐
+                error_type = result.get("error_type")
+
                 # 認証情報が必要な場合は特別処理
-                if result.get("credentials_required"):
+                # credentials_required または認証関連のerror_typeの場合
+                if result.get("credentials_required") or error_type in (
+                    "credentials_required",
+                    "credentials_invalid",
+                    "session_expired",
+                ):
                     # 保留中のツール呼び出しを保存
                     self.session.context["pending_tool_call"] = tool_call
 
@@ -232,20 +278,34 @@ class AgentRunner:
                         "labels": result.get("labels"),
                     }
 
+                # その他のエラー: 実際のエラーメッセージをLLMに伝える
+                # error_typeがあれば、それをログに記録
+                if error_type and not result.get("success"):
+                    logger.info(f"Tool error: type={error_type}, recoverable={result.get('recoverable', True)}")
+
                 tool_results.append({
                     "tool": tool_call,
                     "result": result,
                 })
 
                 # 結果をMessagesに追加（userロールで追加してLLMに伝える）
-                result_text = format_tool_result(
+                # Vision API対応: 画像があればcontent blocks形式で追加
+                formatted = format_tool_result(
                     result, tool_call["skill"], tool_call["action"]
                 )
-                self.session.add_user_message(result_text)
+                if formatted.has_images():
+                    # 画像があればVision形式で追加（ダンが画面を見られる）
+                    self.session.add_user_message_with_images(
+                        formatted.text, formatted.images
+                    )
+                    logger.info(f"[VISION] Added {len(formatted.images)} image(s) to message")
+                else:
+                    self.session.add_user_message(formatted.text)
 
                 if self._on_reasoning_step:
                     status = "✅" if result.get("success") else "❌"
-                    await self._on_reasoning_step(f"{status} ツール実行完了")
+                    vision_indicator = " 👁️" if formatted.has_images() else ""
+                    await self._on_reasoning_step(f"{status} ツール実行完了{vision_indicator}")
 
             # 4. セッションを保存
             store = get_session_store()
@@ -303,7 +363,36 @@ class AgentRunner:
         if action_manuals:
             system += action_manuals
 
+        # 出力ルールを最後に追加（recency bias対策）
+        system += self._build_output_rules()
+
         return system
+
+    def _build_output_rules(self) -> str:
+        """出力ルールを構築（常にプロンプトの最後に配置）"""
+        return """
+
+---
+
+## 出力ルール（厳守）
+
+### 内部処理は必ず [STEP] で囲む
+
+以下のような内部処理は、必ず `[STEP]` で始める:
+- 「〜を確認します」 → `[STEP] 〜を確認します`
+- 「〜を実行します」 → `[STEP] 〜を実行します`
+- 「〜を探します」 → `[STEP] 〜を探します`
+
+**[STEP] なしで書くと、ユーザーに見えてしまう。**
+
+### 絶対に書いてはいけない表現
+
+以下は [STEP] 付きでも禁止:
+- 「ツール実行:」「ツールを実行」
+- 「回答を作成」
+- 「スクリーンショットを見ると」
+- 「画面をスクロールして」
+"""
 
     def _build_skills_prompt(self) -> str:
         """利用可能なスキルのプロンプトを構築"""
@@ -366,8 +455,14 @@ class AgentRunner:
         # 最新のユーザーメッセージと直近のコンテキストを分析
         context_text = ""
         for msg in messages[-3:]:  # 直近3メッセージを分析
-            if isinstance(msg.get("content"), str):
-                context_text += msg["content"] + " "
+            content = msg.get("content")
+            if isinstance(content, str):
+                context_text += content + " "
+            elif isinstance(content, list):
+                # Vision API形式のメッセージからテキスト部分を抽出
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        context_text += block.get("text", "") + " "
 
         # アクション検出ルール（スキル名 → アクション → キーワード）
         action_detection_rules = {
@@ -375,7 +470,13 @@ class AgentRunner:
                 "search": ["検索", "予約", "新幹線", "探して", "取って", "東京", "新大阪", "名古屋", "博多", "行き"],
                 "cancel": ["キャンセル", "取り消", "払戻", "払い戻", "やめ", "取消"],
             },
-            # 他のスキルのルールもここに追加可能
+            "amazon": {
+                "search": ["Amazon", "アマゾン", "買って", "購入", "探して", "商品"],
+                "scroll": ["Amazon", "アマゾン", "買って", "購入", "探して", "商品"],  # searchと同時にロード
+                "click_product": ["Amazon", "アマゾン", "買って", "購入", "探して", "商品"],  # searchと同時にロード
+                "add_to_cart": ["カート", "カートに入れ", "カートに追加"],
+                "checkout": ["レジ", "注文", "購入手続き", "チェックアウト"],
+            },
         }
 
         loaded_manuals = []
@@ -508,7 +609,14 @@ class AgentRunner:
                 break
 
         if member_id and password:
-            return {"member_id": member_id, "password": password}
+            # サービスに応じてキー名を調整
+            pending_tool = self.session.context.get("pending_tool_call")
+            service = pending_tool.get("skill", "") if pending_tool else ""
+
+            if service == "amazon":
+                return {"email": member_id, "password": password}
+            else:
+                return {"member_id": member_id, "password": password}
 
         # パターン2: スラッシュ区切り（12345 / mypass）
         slash_match = re.match(r'^([^\s/]+)\s*/\s*([^\s]+)$', message.strip())
@@ -536,9 +644,30 @@ class AgentRunner:
 
         return None
 
+    # 内部処理パターン（[STEP] なしで出力された場合にフィルタ）
+    # セーフティネット: LLMがルール違反した場合の最後の防壁
+    # 注意: パターンは短い単純な行のみにマッチするよう制限
+    #       長い文章（句点を含む複文）は正当なコンテンツの可能性が高い
+    INTERNAL_PATTERNS = [
+        # 完全に単独の内部処理行のみ（。や、を含まない短い行）
+        re.compile(r'^[^。、]{0,15}を確認します$'),  # 15文字以下で「〜を確認します」
+        re.compile(r'^[^。、]{0,15}を実行します$'),  # 15文字以下で「〜を実行します」
+        re.compile(r'^[^。、]{0,15}を探します$'),    # 15文字以下で「〜を探します」
+        # 明らかに内部的な表現（行頭のみ）
+        re.compile(r'^ツール実行[:：]'),
+        re.compile(r'^回答を作成'),
+    ]
+
     def _parse_response(self, response: str) -> Dict[str, Any]:
         """
         LLMのレスポンスを解析
+
+        内部制御情報を除外してユーザー向け応答のみを抽出:
+        - [STATE: XXX] → 状態遷移として処理、ユーザーには非表示
+        - [STEP] XXX → 推論過程として記録、ユーザーには非表示
+        - [TOOL: xxx action] + パラメータ → ツール呼び出しとして処理、ユーザーには非表示
+        - コードブロック内のツール呼び出し → プロンプト例コピーの可能性、除外
+        - 内部処理パターン（セーフティネット） → LLMがルール違反した場合の防壁
 
         Returns:
             {
@@ -549,33 +678,83 @@ class AgentRunner:
         """
         new_state = None
         steps = []
-        user_response_lines = []
+        user_lines = []
 
-        for line in response.split("\n"):
-            line_stripped = line.strip()
+        lines = response.split("\n")
+        i = 0
+        n = len(lines)
 
-            # [STATE: XXX] を検出
-            state_match = re.match(r'\[STATE:\s*(\w+)\]', line_stripped)
+        while i < n:
+            line = lines[i]
+            stripped = line.strip()
+
+            # 1. [STATE: XXX] を検出
+            state_match = re.match(r'\[STATE:\s*(\w+)\]', stripped)
             if state_match:
                 state_name = state_match.group(1).lower()
                 try:
                     new_state = State(state_name)
                 except ValueError:
                     pass
+                i += 1
                 continue
 
-            # [STEP] を検出
-            if line_stripped.startswith("[STEP]"):
-                step_text = line_stripped[6:].strip()
+            # 2. [STEP] を検出
+            if stripped.startswith("[STEP]"):
+                step_text = stripped[6:].strip()
                 if step_text:
                     steps.append(step_text)
+                i += 1
                 continue
 
-            # それ以外はユーザー向け応答
-            user_response_lines.append(line)
+            # 3. ``` + [TOOL:] パターン（コードブロック内のツール呼び出し）
+            if stripped == "```":
+                # 次の行を先読みしてツール呼び出しかチェック
+                if i + 1 < n and re.match(r'\[TOOL:\s*\S+\s+\w+\]', lines[i + 1].strip()):
+                    # ツールブロック: 閉じる ``` まで全てスキップ
+                    i += 2  # ``` と [TOOL:] をスキップ
+                    while i < n:
+                        if lines[i].strip() == "```":
+                            i += 1  # 閉じる ``` をスキップ
+                            break
+                        i += 1
+                    continue
+                # 通常のコードブロック: そのまま出力
+                user_lines.append(line)
+                i += 1
+                continue
+
+            # 4. [TOOL: xxx action] を直接検出
+            if re.match(r'\[TOOL:\s*\S+\s+\w+\]', stripped):
+                i += 1
+                # パラメータ行をスキップ（key: value 形式）
+                while i < n:
+                    param_line = lines[i].strip()
+                    # 空行で終了（空行自体もスキップ）
+                    if param_line == "":
+                        i += 1
+                        break
+                    # パラメータ形式でなければ終了
+                    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*:\s*.+$', param_line):
+                        break  # この行は次のループで処理
+                    i += 1
+                continue
+
+            # 5. セーフティネット: 内部処理パターンをフィルタ（短い単純な行のみ）
+            if stripped and any(pattern.match(stripped) for pattern in self.INTERNAL_PATTERNS):
+                logger.debug(f"Filtered internal pattern: {stripped}")
+                i += 1
+                continue
+
+            # 6. その他: ユーザー向け応答
+            user_lines.append(line)
+            i += 1
 
         # ユーザー向け応答を整形
-        user_response = "\n".join(user_response_lines).strip()
+        user_response = "\n".join(user_lines).strip()
+
+        # 連続する空行を1つにまとめる（フィルタリング後の整形）
+        user_response = re.sub(r'\n{3,}', '\n\n', user_response)
 
         return {
             "new_state": new_state,
