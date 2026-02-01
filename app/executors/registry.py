@@ -206,22 +206,30 @@ class ExecutorRegistry:
         return None
 
 
+_executors_registered = False
+
 def register_all_executors():
     """
     全てのExecutorを登録
-    
+
     アプリケーション起動時に呼び出す
+    複数回呼ばれても安全（idempotent）
     """
-    # Train（新幹線）- 新しいアクション分割版
-    from app.executors.ex_reservation import EXReservationExecutor
-    ExecutorRegistry.register(
-        executor_class=EXReservationExecutor,
-        service_type="train",
-        service_name="ex_reservation",
-        display_name="EX予約（新幹線）",
-        url_patterns=["smart-ex.jp", "jr-central.co.jp"],
-        capabilities=["search", "execute", "cancel"],  # cancelを追加
-    )
+    global _executors_registered
+    if _executors_registered:
+        return
+    _executors_registered = True
+
+    # Train（新幹線）- 無効化: experiment/no-state-machine
+    # from app.executors.ex_reservation import EXReservationExecutor
+    # ExecutorRegistry.register(
+    #     executor_class=EXReservationExecutor,
+    #     service_type="train",
+    #     service_name="ex_reservation",
+    #     display_name="EX予約（新幹線）",
+    #     url_patterns=["smart-ex.jp", "jr-central.co.jp"],
+    #     capabilities=["search", "execute", "cancel"],
+    # )
     
     # Bus（高速バス）
     from app.executors.highway_bus_executor import HighwayBusExecutor
@@ -231,17 +239,6 @@ def register_all_executors():
         service_name="willer",
         display_name="WILLER TRAVEL",
         url_patterns=["willer.co.jp", "travel.willer.co.jp"],
-        capabilities=["search", "execute"],
-    )
-    
-    # Product（Amazon）
-    from app.executors.amazon_executor import AmazonExecutor
-    ExecutorRegistry.register(
-        executor_class=AmazonExecutor,
-        service_type="product",
-        service_name="amazon",
-        display_name="Amazon",
-        url_patterns=["amazon.co.jp", "amazon.com"],
         capabilities=["search", "execute"],
     )
     
@@ -276,17 +273,6 @@ def register_all_executors():
         display_name="銀行振込",
         url_patterns=[],
         capabilities=["execute"],
-    )
-
-    # Developer（開発機能 - Self-Healing）
-    from app.executors.developer import DeveloperExecutor
-    ExecutorRegistry.register(
-        executor_class=DeveloperExecutor,
-        service_type="developer",
-        service_name="developer",
-        display_name="開発機能",
-        url_patterns=[],
-        capabilities=["search", "execute"],  # Phase 2: 変更機能追加
     )
 
 
