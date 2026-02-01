@@ -26,21 +26,39 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def safe_print(msg: str) -> None:
+    """Windows cp932でも安全にprint（エンコードできない文字は置換）"""
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        # エンコードできない文字を ? に置換して出力
+        safe_msg = msg.encode('cp932', errors='replace').decode('cp932')
+        print(safe_msg)
+
+
 # プロンプトディレクトリ
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-# ツール実行の最大ループ回数
-# - DEVELOPモード: 10回（複雑な調査が必要なため）
-# - その他: 上限なし（LLMが自然に終了する設計）
-# ※安全弁として100回を超えたら強制終了
-MAX_TOOL_LOOPS_DEVELOP = 10
-MAX_TOOL_LOOPS_SAFETY = 100  # 万が一の暴走防止
+# ツール実行の最大ループ回数（安全弁として100回を超えたら強制終了）
+MAX_TOOL_LOOPS = 100
 
-# モデル設定（動的切り替え用）
-MODELS = {
-    "default": "claude-sonnet-4-5-20250929",      # 通常モード: Sonnet 4.5（コーディング最強、コスパ良）
-    "develop": "claude-opus-4-5-20251101",        # DEVELOPモード: Opus 4.5（複雑な設計判断）
-}
+# セーフティネット: LLMがルール違反した場合に除外するパターン
+# これらのパターンに一致する行はプロセスモニターに表示しない
+INTERNAL_FILTER_PATTERNS = [
+    r'^.*を確認します[。]?$',
+    r'^.*を実行します[。]?$',
+    r'^.*を探します[。]?$',
+    r'^.*にスクロール.*$',
+    r'^.*スクリーンショット.*$',
+    r'^.*ページ構造.*$',
+    r'^.*の検出に失敗.*$',
+    r'^ツール実行[:：].*$',
+    r'^回答を作成.*$',
+]
+
+# 使用するモデル
+MODEL = "claude-sonnet-4-5-20250929"  # Sonnet 4.5
 
 # ============================================
 # Native Tool Use: ツール定義
@@ -131,69 +149,25 @@ class AgentRunner:
         """
         try:
             print(f"[RUNNER_DEBUG] Starting process_message for user {self.session.user_id}")
-            print(f"[RUNNER_DEBUG] Message: {user_message[:50]}...")
+            safe_print(f"[RUNNER_DEBUG] Message: {user_message[:50]}...")
 
-            # 0. 認証情報待ちの場合、ユーザー入力から認証情報を抽出
-            pending_tool = self.session.context.get("pending_tool_call")
-            if pending_tool and not credentials:
-                extracted = await self._extract_credentials_from_message(user_message)
-                if extracted:
-                    credentials = extracted
-                    # 認証情報をDBに保存
-                    from app.services.credentials_service import get_credentials_service
-                    creds_service = get_credentials_service()
-                    service_name = pending_tool.get("skill", "unknown")
+            # 現在のセッションIDをコンテキストに設定（キャンセルチェック用）
+            from app.services.cancellation import CancellationRegistry
+            CancellationRegistry.set_current_session(self.session.session_id)
 
-                    await creds_service.save_credential(
-                        user_id=self.session.user_id,
-                        service=service_name,
-                        credentials=credentials,
-                        credential_type="login",
-                    )
-                    logger.info(f"Saved credentials for {service_name}")
-
-                    # 保留中のツールを再実行
-                    self.session.context.pop("pending_tool_call", None)
-
-                    if self._on_reasoning_step:
-                        await self._on_reasoning_step("🔐 認証情報を保存しました")
-                        await self._on_reasoning_step(f"🔧 {pending_tool['skill']} を再実行します...")
-
-                    result = await execute_tool(
-                        tool_call=pending_tool,
-                        user_id=self.session.user_id,
-                        credentials=credentials,
-                    )
-
-                    # ツール結果をtool_result形式でメッセージに追加
-                    formatted = format_tool_result(
-                        result, pending_tool["skill"], pending_tool["action"]
-                    )
-                    self.session.add_tool_result(
-                        tool_use_id=pending_tool.get("tool_use_id", "pending"),
-                        content=formatted.text,
-                        images=formatted.images if formatted.has_images() else None,
-                    )
-
-                    # LLMに結果を伝えて応答を生成
-                    response = await self._call_llm_with_tools()
-                    parsed = await self._process_llm_response(response)
-
-                    if parsed["new_state"]:
-                        self.session.transition_to(parsed["new_state"])
-
-                    # アシスタントメッセージを追加
-                    self.session.add_assistant_message_from_response(response)
-
-                    store = get_session_store()
-                    await store.save(self.session)
-
-                    return {
-                        "response": parsed["user_response"] or "処理が完了しました。",
-                        "state": self.session.current_state.value,
-                        "reasoning_steps": self.session.reasoning_steps,
-                        "tool_results": [{"tool": pending_tool, "result": result}],
-                    }
+            # 0.5. Deterministic skill lookup routing (bypass LLM)
+            skill_lookup_response = self._maybe_handle_skill_lookup(user_message)
+            if skill_lookup_response:
+                self.session.clear_reasoning_steps()
+                self.session.add_user_message(user_message)
+                self.session.add_assistant_message(skill_lookup_response)
+                store = get_session_store()
+                await store.save(self.session)
+                return {
+                    "response": skill_lookup_response,
+                    "state": self.session.current_state.value,
+                    "reasoning_steps": self.session.reasoning_steps,
+                }
 
             # 1. 推論ステップをクリア（新しいターン）
             self.session.clear_reasoning_steps()
@@ -206,13 +180,18 @@ class AgentRunner:
             user_response = None
             print(f"[RUNNER_DEBUG] Starting LLM loop, state: {self.session.current_state.value}")
 
-            # 状態に応じた上限を決定
-            if self.session.current_state == State.DEVELOP:
-                max_loops = MAX_TOOL_LOOPS_DEVELOP
-            else:
-                max_loops = MAX_TOOL_LOOPS_SAFETY
+            for loop_count in range(MAX_TOOL_LOOPS + 1):
+                # キャンセルチェック
+                from app.services.cancellation import CancellationRegistry
+                if CancellationRegistry.is_cancelled(self.session.session_id):
+                    logger.info(f"Session {self.session.session_id} cancelled at loop start")
+                    return {
+                        "response": "処理が中断されました。",
+                        "state": self.session.current_state.value,
+                        "reasoning_steps": self.session.reasoning_steps,
+                        "cancelled": True,
+                    }
 
-            for loop_count in range(max_loops + 1):
                 print(f"[RUNNER_DEBUG] Calling LLM with tools (loop {loop_count})...")
 
                 # LLMをTool Use APIで呼び出し
@@ -221,9 +200,9 @@ class AgentRunner:
                 # レスポンスを処理
                 parsed = await self._process_llm_response(response)
 
-                # 状態遷移を適用
-                if parsed["new_state"]:
-                    self.session.transition_to(parsed["new_state"])
+                # 状態遷移を適用（無効化: experiment/no-state-machine）
+                # if parsed["new_state"]:
+                #     self.session.transition_to(parsed["new_state"])
 
                 # アシスタントメッセージを追加
                 self.session.add_assistant_message_from_response(response)
@@ -239,63 +218,56 @@ class AgentRunner:
                         )
 
                 # ツール呼び出しがない、または最大ループに達した場合は終了
-                if not parsed["tool_calls"] or loop_count >= max_loops:
+                if not parsed["tool_calls"] or loop_count >= MAX_TOOL_LOOPS:
                     print(f"[RUNNER_DEBUG] No more tool calls or max loops reached")
                     break
 
                 # ツールを実行
                 for tool_call in parsed["tool_calls"]:
+                    # ツール実行前にもキャンセルチェック
+                    if CancellationRegistry.is_cancelled(self.session.session_id):
+                        logger.info(f"Session {self.session.session_id} cancelled before tool execution")
+                        return {
+                            "response": "処理が中断されました。",
+                            "state": self.session.current_state.value,
+                            "reasoning_steps": self.session.reasoning_steps,
+                            "cancelled": True,
+                        }
+
                     tool_use_id = tool_call["tool_use_id"]
                     skill_name = tool_call["skill"]
                     action = tool_call["action"]
                     params = tool_call["params"]
 
                     logger.info(f"Executing tool: {skill_name} {action}")
-                    if self._on_reasoning_step:
+                    # visual_browseは独自の進捗通知を行うのでDan側は出力しない
+                    if self._on_reasoning_step and skill_name != "_visual":
                         await self._on_reasoning_step(f"🔧 {skill_name} {action}...")
 
                     result = await execute_tool(
                         tool_call=tool_call,
                         user_id=self.session.user_id,
                         credentials=credentials,
+                        session_id=self.session.session_id,
                     )
 
                     # エラータイプに基づいて処理を分岐
                     error_type = result.get("error_type")
 
-                    # 認証情報が必要な場合は特別処理
+                    # 認証情報が必要な場合: tool_resultを追加してLLMに処理を任せる
+                    # LLMが自然な言葉でユーザーに聞き、save_credentialsで保存する
                     if result.get("credentials_required") or error_type in (
                         "credentials_required",
                         "credentials_invalid",
                         "session_expired",
                     ):
-                        # 保留中のツール呼び出しを保存
-                        tool_call["tool_use_id"] = tool_use_id
-                        self.session.context["pending_tool_call"] = tool_call
-
-                        # ユーザーに認証情報を要求
-                        display_name = result.get("display_name", result.get("service"))
-                        labels = result.get("labels", {})
-
-                        field_prompts = []
-                        for field in result.get("fields", []):
-                            label = labels.get(field, field)
-                            field_prompts.append(f"・{label}")
-
-                        prompt_text = f"{display_name}を利用するには認証情報が必要です。\n\n以下の情報を教えてください:\n" + "\n".join(field_prompts)
-
-                        store = get_session_store()
-                        await store.save(self.session)
-
-                        return {
-                            "response": prompt_text,
-                            "state": self.session.current_state.value,
-                            "reasoning_steps": self.session.reasoning_steps,
-                            "credentials_required": True,
-                            "service": result.get("service"),
-                            "fields": result.get("fields"),
-                            "labels": result.get("labels"),
-                        }
+                        service_name = result.get("service") or result.get("service_name") or skill_name or "unknown"
+                        display_name = result.get("display_name") or result.get("service_display_name") or service_name
+                        self.session.add_tool_result(
+                            tool_use_id=tool_use_id,
+                            content=f"認証情報が必要です: {display_name}。ユーザーにログイン情報を聞いて、教えてもらったら save_credentials ツールで保存してください。"
+                        )
+                        # returnせずに続行し、LLMに応答を生成させる
 
                     # エラーログ
                     if error_type and not result.get("success"):
@@ -307,14 +279,17 @@ class AgentRunner:
                     })
 
                     # ツール結果をtool_result形式でメッセージに追加
-                    formatted = format_tool_result(result, skill_name, action)
+                    # Progressive Disclosure: スキル情報を渡してマニュアルを注入
+                    skill = SkillRegistry.get(skill_name)
+                    formatted = format_tool_result(result, skill_name, action, skill=skill)
                     self.session.add_tool_result(
                         tool_use_id=tool_use_id,
                         content=formatted.text,
                         images=formatted.images if formatted.has_images() else None,
                     )
 
-                    if self._on_reasoning_step:
+                    # visual_browseは独自の進捗通知を行うのでDan側は出力しない
+                    if self._on_reasoning_step and skill_name != "_visual":
                         status = "✅" if result.get("success") else "❌"
                         vision_indicator = " 👁️" if formatted.has_images() else ""
                         await self._on_reasoning_step(f"{status} ツール実行完了{vision_indicator}")
@@ -328,25 +303,58 @@ class AgentRunner:
                 logger.warning("respond_to_user was not called, using fallback")
                 user_response = "処理が完了しました。"
 
+            # ブラウザセッションIDを抽出（スキル化用）
+            browser_session_id = None
+            for tool_result in tool_results:
+                result = tool_result.get("result", {})
+                if result.get("browser_session_id"):
+                    browser_session_id = result["browser_session_id"]
+                    break
+
             return {
                 "response": user_response,
                 "state": self.session.current_state.value,
                 "reasoning_steps": self.session.reasoning_steps,
                 "tool_results": tool_results,
+                "browser_session_id": browser_session_id,  # スキル化用
             }
 
         except Exception as e:
             import traceback
+            from app.services.cancellation import CancelledError
+
+            # キャンセルされた場合は正常終了として扱う
+            if isinstance(e, CancelledError):
+                logger.info(f"Session {self.session.session_id} cancelled")
+                return {
+                    "response": "処理がキャンセルされました。",
+                    "state": self.session.current_state.value,
+                    "reasoning_steps": self.session.reasoning_steps,
+                    "cancelled": True,
+                }
+
             error_details = traceback.format_exc()
             print(f"[RUNNER_ERROR] Exception in process_message:")
             print(f"[RUNNER_ERROR] {error_details}")
             logger.exception(f"Error in process_message: {e}")
+
+            # ★★★ 重要: エラー発生時はキャッシュをクリア ★★★
+            # メモリ上のセッションが不整合な状態（tool_useあり、tool_resultなし）に
+            # なっている可能性があるため、キャッシュから削除して次回DBから再読み込み
+            store = get_session_store()
+            store.invalidate_cache(self.session.session_id, self.session.user_id)
+            logger.info(f"Session cache invalidated due to error: {self.session.session_id}")
+
             return {
                 "response": "申し訳ありません。エラーが発生しました。",
                 "state": self.session.current_state.value,
                 "reasoning_steps": self.session.reasoning_steps,
                 "error": str(e),
             }
+        finally:
+            # セッションIDをクリア
+            from app.services.cancellation import CancellationRegistry
+            CancellationRegistry.set_current_session(None)
 
     def _build_system_prompt(self) -> str:
         """システムプロンプトを構築（Progressive Disclosure）"""
@@ -366,10 +374,10 @@ class AgentRunner:
         system += f"- 「明日」は {tomorrow.strftime('%Y年%m月%d日')} です\n"
         system += f"- 日付パラメータは必ず YYYY-MM-DD 形式で指定してください（例: {tomorrow.strftime('%Y-%m-%d')}）"
 
-        # 現在の状態のプロンプトを追加
-        state_prompt = load_state_prompt(self.session.current_state)
-        if state_prompt:
-            system += f"\n\n---\n\n## 現在の状態: {self.session.current_state.value.upper()}\n\n{state_prompt}"
+        # 現在の状態のプロンプトを追加（無効化: experiment/no-state-machine）
+        # state_prompt = load_state_prompt(self.session.current_state)
+        # if state_prompt:
+        #     system += f"\n\n---\n\n## 現在の状態: {self.session.current_state.value.upper()}\n\n{state_prompt}"
 
         # 利用可能なスキル情報を追加
         system += self._build_skills_prompt()
@@ -394,7 +402,7 @@ class AgentRunner:
 
 ### ユーザー回答は respond_to_user ツールを使う
 
-**重要**: ユーザーへの最終回答は、必ず `respond_to_user` ツールを呼び出して出力する。
+重要: ユーザーへの最終回答は、必ず respond_to_user ツールを呼び出して出力する。
 
 テキストとして直接書いた内容は「内部処理」としてユーザーには表示されない。
 ユーザーに見せたい回答は respond_to_user ツール経由で出力すること。
@@ -432,6 +440,8 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
 
     def _build_skills_prompt(self) -> str:
         """利用可能なスキルのプロンプトを構築（Native Tool Use対応）"""
+        from app.services.skill_loader import get_skill_loader
+
         skills = SkillRegistry.list_all()
         if not skills:
             return ""
@@ -457,6 +467,14 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
         lines.append("- 説明: ユーザーへの最終回答を出力（必須）")
         lines.append("")
 
+        # 学習済みスキル（生成されたスキル）の情報を追加
+        skill_loader = get_skill_loader()
+        learned_skills_summary = skill_loader.get_generated_skills_summary()
+        if learned_skills_summary:
+            lines.append("\n---\n")
+            lines.append(learned_skills_summary)
+            lines.append("")
+
         return "\n".join(lines)
 
     def _extract_actions_from_skill(self, content: str) -> list:
@@ -477,88 +495,134 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
         # 重複除去して返す
         return list(dict.fromkeys(actions))
 
-    def _load_relevant_action_manuals(self) -> str:
-        """
-        会話文脈から必要なアクションマニュアルを動的に読み込む（Progressive Disclosure）
 
-        Returns:
-            アクションマニュアルの内容（システムプロンプトに追加する形式）
-        """
-        # 会話履歴から最新のユーザーメッセージを取得
-        messages = self.session.get_messages_for_llm()
-        if not messages:
-            return ""
 
-        # 最新のユーザーメッセージと直近のコンテキストを分析
-        context_text = ""
-        for msg in messages[-3:]:  # 直近3メッセージを分析
-            content = msg.get("content")
-            if isinstance(content, str):
-                context_text += content + " "
-            elif isinstance(content, list):
-                # Vision API形式のメッセージからテキスト部分を抽出
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        context_text += block.get("text", "") + " "
+    def _normalize_skill_token(self, text: str) -> str:
+        """Normalize skill tokens for lookup (ASCII-only, stable matching)."""
+        import re
+        normalized = re.sub(r"[^a-z0-9]+", "_", text.lower())
+        normalized = normalized.strip("_")
+        return normalized
 
-        # アクション検出ルール（スキル名 → アクション → キーワード）
-        action_detection_rules = {
-            "ex-reservation": {
-                "search": ["検索", "予約", "新幹線", "探して", "取って", "東京", "新大阪", "名古屋", "博多", "行き"],
-                "cancel": ["キャンセル", "取り消", "払戻", "払い戻", "やめ", "取消"],
-            },
-            "amazon": {
-                "search": ["Amazon", "アマゾン", "買って", "購入", "探して", "商品"],
-                "scroll": ["Amazon", "アマゾン", "買って", "購入", "探して", "商品"],  # searchと同時にロード
-                "click_product": ["Amazon", "アマゾン", "買って", "購入", "探して", "商品"],  # searchと同時にロード
-                "add_to_cart": ["カート", "カートに入れ", "カートに追加"],
-                "checkout": ["レジ", "注文", "購入手続き", "チェックアウト"],
-            },
-        }
+    def _find_skill_for_lookup(self, message: str, allow_substring: bool) -> Optional["Skill"]:
+        """Find a skill by exact/substring match against normalized aliases."""
+        SkillRegistry.reload()
+        skills = SkillRegistry.list_all()
+        if not skills:
+            return None
 
-        loaded_manuals = []
+        alias_map: Dict[str, Any] = {}
+        for skill in skills:
+            variants = {
+                skill.name,
+                skill.name.replace("-", "_"),
+                skill.name.replace("_", "-"),
+                skill.display_name,
+            }
+            for variant in variants:
+                key = self._normalize_skill_token(variant)
+                if key:
+                    alias_map.setdefault(key, skill)
 
-        for skill_name, action_rules in action_detection_rules.items():
-            skill = SkillRegistry.get(skill_name)
-            if not skill:
-                continue
+        normalized_msg = self._normalize_skill_token(message)
+        if normalized_msg in alias_map:
+            return alias_map[normalized_msg]
 
-            for action, keywords in action_rules.items():
-                # キーワードマッチング
-                if any(kw in context_text for kw in keywords):
-                    manual = skill.get_action_manual(action)
-                    if manual:
-                        loaded_manuals.append((skill_name, action, manual))
-                        logger.info(f"Progressive Disclosure: Loaded {skill_name}/{action} manual")
+        if allow_substring:
+            for key, skill in sorted(alias_map.items(), key=lambda item: len(item[0]), reverse=True):
+                if key and key in normalized_msg:
+                    return skill
 
-        if not loaded_manuals:
-            return ""
+        return None
 
-        # マニュアルをシステムプロンプト形式で整形
-        lines = ["\n\n---\n\n## アクション詳細マニュアル\n"]
-        lines.append("以下は、現在のタスクに関連するアクションの詳細な使い方です。\n")
-
-        for skill_name, action, manual in loaded_manuals:
-            lines.append(f"### {skill_name} / {action}\n")
-            lines.append(manual)
-            lines.append("")
-
+    def _build_skill_list_response(self, skills: List["Skill"]) -> str:
+        limit = 30
+        lines = [f"????????: {len(skills)}?"]
+        lines.append("")
+        for skill in skills[:limit]:
+            lines.append(f"- {skill.display_name} (`{skill.name}`)")
+        if len(skills) > limit:
+            lines.append(f"... ?? {len(skills) - limit} ?")
+        lines.append("")
+        lines.append("????<skill_name>?????????????")
         return "\n".join(lines)
 
+    def _build_skill_detail_response(self, skill: "Skill") -> str:
+        actions = self._extract_actions_from_skill(skill.raw_content) or skill.list_available_actions()
+        tools = []
+        for action in actions:
+            tools.append(f"`{skill.name.replace('-', '_')}_{action}`")
+
+        lines = [f"{skill.display_name} (`{skill.name}`)"]
+        if skill.description:
+            lines.append(f"- ??: {skill.description}")
+        if tools:
+            lines.append(f"- ???: {', '.join(tools)}")
+        return "\n".join(lines)
+
+
+    def _maybe_handle_skill_lookup(self, user_message: str) -> Optional[str]:
+        """Return a direct response when the user asks about skills or lists them."""
+        message = (user_message or "").strip()
+        if not message:
+            return None
+
+        lower = message.lower()
+
+        list_triggers = [
+            "skill list",
+            "skills",
+            "list skills",
+            "available skills",
+        ]
+        if any(t in lower for t in list_triggers) or "?????" in message or "??????" in message:
+            skills = SkillRegistry.list_all()
+            return self._build_skill_list_response(skills)
+
+        lookup_triggers = [
+            "what is",
+            "what's",
+            "about",
+            "help",
+            "details",
+        ]
+        has_lookup_trigger = any(t in lower for t in lookup_triggers)
+        if "??" in message or "???" in message or "????" in message or "???" in message or "??" in message:
+            has_lookup_trigger = True
+
+        ascii_short = (len(message) <= 40 and len(message) >= 4 and all(ord(c) < 128 for c in message) and ("_" in message or "-" in message or message.isalnum()))
+        if not has_lookup_trigger and not ascii_short and "???" not in message and "skill" not in lower:
+            return None
+
+        skill = self._find_skill_for_lookup(message, allow_substring=has_lookup_trigger)
+        if skill:
+            return self._build_skill_detail_response(skill)
+
+        if has_lookup_trigger and ("???" in message or "skill" in lower):
+            skills = SkillRegistry.list_all()
+            return self._build_skill_list_response(skills)
+
+        return None
+
+    def _load_relevant_action_manuals(self) -> str:
+        """
+        廃止: Progressive Disclosureはformat_tool_result()で実装
+
+        以前はここでキーワードマッチングによりアクションマニュアルを
+        システムプロンプトに事前ロードしていたが、以下の問題があった:
+        - ハードコードされたキーワードの保守が困難
+        - 不要なマニュアルがロードされてトークン消費
+
+        新しいアプローチ:
+        - ツール実行時にformat_tool_result()がスキル本文とアクションマニュアルを
+          tool_resultに注入する
+        - LLMはツール呼び出し後に必要な情報を参照できる
+        """
+        return ""
+
     def _get_model(self) -> str:
-        """
-        現在の状態に応じてモデルを選択（動的モデル切り替え）
-
-        - DEVELOPモード: Opus 4.5（複雑な設計・コード修正）
-        - その他: Sonnet 4.5（通常タスク、コスパ最強）
-        """
-        if self.session.current_state == State.DEVELOP:
-            model = MODELS["develop"]
-            logger.info(f"Using Opus 4.5 for DEVELOP mode")
-        else:
-            model = MODELS["default"]
-
-        return model
+        """使用するモデルを返す"""
+        return MODEL
 
     def _get_tools(self) -> List[Dict[str, Any]]:
         """
@@ -631,14 +695,14 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
                 text = block.text
                 await self._process_text_block(text)
 
-                # [STATE: XXX] を検出
-                state_match = re.search(r'\[STATE:\s*(\w+)\]', text)
-                if state_match:
-                    state_name = state_match.group(1).lower()
-                    try:
-                        new_state = State(state_name)
-                    except ValueError:
-                        pass
+                # [STATE: XXX] を検出（無効化: experiment/no-state-machine）
+                # state_match = re.search(r'\[STATE:\s*(\w+)\]', text)
+                # if state_match:
+                #     state_name = state_match.group(1).lower()
+                #     try:
+                #         new_state = State(state_name)
+                #     except ValueError:
+                #         pass
 
             elif block.type == "tool_use":
                 # ツール呼び出しブロック
@@ -652,7 +716,7 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
                     # ユーザー回答を抽出
                     user_response = tool_input.get("response", "")
                     respond_to_user_id = tool_use_id  # IDを保存
-                    print(f"[LLM_DEBUG] User response extracted: {user_response[:50]}...")
+                    safe_print(f"[LLM_DEBUG] User response extracted: {user_response[:50]}...")
                 else:
                     # スキルツール呼び出し
                     parsed = parse_tool_name(tool_name)
@@ -680,19 +744,31 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
 
         - 各行をプロセスモニターに通知
         - [STATE: XXX] を検出して状態遷移を通知
+        - セーフティネット: 内部処理パターンはフィルタリング
         """
         for line in text.split("\n"):
             line = line.strip()
             if not line:
                 continue
 
-            # [STATE: XXX] を検出
-            state_match = re.match(r'\[STATE:\s*(\w+)\]', line)
-            if state_match:
-                state_name = state_match.group(1).upper()
-                self.session.add_reasoning_step(f"→ {state_name}")
-                if self._on_reasoning_step:
-                    await self._on_reasoning_step(f"→ {state_name}")
+            # [STATE: XXX] を検出（無効化: experiment/no-state-machine）
+            # state_match = re.match(r'\[STATE:\s*(\w+)\]', line)
+            # if state_match:
+            #     state_name = state_match.group(1).upper()
+            #     self.session.add_reasoning_step(f"→ {state_name}")
+            #     if self._on_reasoning_step:
+            #         await self._on_reasoning_step(f"→ {state_name}")
+            #     continue
+
+            # セーフティネット: 内部処理パターンはスキップ（プロセスモニターに表示しない）
+            should_skip = False
+            for pattern in INTERNAL_FILTER_PATTERNS:
+                if re.match(pattern, line):
+                    should_skip = True
+                    logger.debug(f"Filtered internal pattern: {line}")
+                    break
+
+            if should_skip:
                 continue
 
             # その他のテキストはプロセスとして通知
@@ -718,76 +794,6 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
             logger.exception(f"LLM call failed: {e}")
             return f"[STATE: CHAT]\nエラーが発生しました: {e}"
 
-    async def _extract_credentials_from_message(self, message: str) -> Optional[Dict[str, str]]:
-        """
-        ユーザーメッセージから認証情報を抽出
-
-        対応パターン:
-        - "会員ID: 12345 パスワード: mypass"
-        - "12345 / mypass"
-        - "ID: 12345, PW: mypass"
-        - "12345\nmypass"
-        """
-        import re
-
-        # パターン1: ラベル付き（会員ID: xxx パスワード: yyy）
-        id_patterns = [
-            r'(?:会員ID|ID|ユーザー名|メールアドレス|member_id|username|email)[:\s：]+([^\s,、]+)',
-        ]
-        pass_patterns = [
-            r'(?:パスワード|PW|pass|password)[:\s：]+([^\s,、]+)',
-        ]
-
-        member_id = None
-        password = None
-
-        for pattern in id_patterns:
-            match = re.search(pattern, message, re.IGNORECASE)
-            if match:
-                member_id = match.group(1).strip()
-                break
-
-        for pattern in pass_patterns:
-            match = re.search(pattern, message, re.IGNORECASE)
-            if match:
-                password = match.group(1).strip()
-                break
-
-        if member_id and password:
-            # サービスに応じてキー名を調整
-            pending_tool = self.session.context.get("pending_tool_call")
-            service = pending_tool.get("skill", "") if pending_tool else ""
-
-            if service == "amazon":
-                return {"email": member_id, "password": password}
-            else:
-                return {"member_id": member_id, "password": password}
-
-        # パターン2: スラッシュ区切り（12345 / mypass）
-        slash_match = re.match(r'^([^\s/]+)\s*/\s*([^\s]+)$', message.strip())
-        if slash_match:
-            return {
-                "member_id": slash_match.group(1).strip(),
-                "password": slash_match.group(2).strip(),
-            }
-
-        # パターン3: 改行区切り
-        lines = [l.strip() for l in message.strip().split('\n') if l.strip()]
-        if len(lines) == 2:
-            return {
-                "member_id": lines[0],
-                "password": lines[1],
-            }
-
-        # パターン4: スペース区切り（2単語のみの場合）
-        words = message.strip().split()
-        if len(words) == 2:
-            return {
-                "member_id": words[0],
-                "password": words[1],
-            }
-
-        return None
 
 async def create_runner(
     session_id: str,
