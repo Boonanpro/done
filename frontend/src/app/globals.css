@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@plugin "@tailwindcss/typography";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -149,4 +150,41 @@
   :focus-visible {
     @apply outline-2 outline-offset-2 outline-ring;
   }
+}
+
+/* Markdown prose styles for Dan's messages */
+.prose-dan,
+.prose-dan * {
+  color: #ffffff !important;
+}
+
+.prose-dan strong,
+.prose-dan b {
+  color: #ffffff !important;
+  font-weight: 700 !important;
+}
+
+.prose-dan p {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose-dan p:first-child {
+  margin-top: 0;
+}
+
+.prose-dan p:last-child {
+  margin-bottom: 0;
+}
+
+.prose-dan ul,
+.prose-dan ol {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+  padding-left: 1.25em;
+}
+
+.prose-dan li {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
 }

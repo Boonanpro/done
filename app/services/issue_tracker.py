@@ -22,6 +22,7 @@ class IssueType(Enum):
     SELECTOR_OUTDATED = "selector_outdated"  # セレクタが古い
     EXECUTION_FAILED = "execution_failed"  # 実行に失敗した
     SEARCH_FAILED = "search_failed"  # 検索に失敗した
+    USER_INPUT_REQUIRED = "user_input_required"  # ユーザー入力が必要（必須項目、認証等）
 
 
 class IssueStatus(Enum):
@@ -43,6 +44,15 @@ class Issue:
     error_message: str
     error_details: dict
     user_id: str
+    # v2: スキル化のための追加フィールド
+    screenshots: list[str] = None  # スクリーンショットファイルパスの配列
+    html_snapshot_path: Optional[str] = None  # HTMLスナップショットのファイルパス
+    page_url: Optional[str] = None  # エラー発生時のページURL
+    fallback_action: Optional[str] = None  # フォールバックアクションの説明
+
+    def __post_init__(self):
+        if self.screenshots is None:
+            self.screenshots = []
 
 
 class IssueTracker:
@@ -96,6 +106,11 @@ class IssueTracker:
                 "suggested_solutions": suggested_solutions,
                 "priority": 1,
                 "status": IssueStatus.OPEN.value,
+                # v2: スキル化のための追加フィールド
+                "screenshots": issue.screenshots,
+                "html_snapshot_path": issue.html_snapshot_path,
+                "page_url": issue.page_url,
+                "fallback_action": issue.fallback_action,
             }).execute()
 
             issue_id = result.data[0]["id"]
@@ -170,6 +185,10 @@ class IssueTracker:
                 "research_result": issue.research_result,
                 "error_message": issue.error_message,
                 "error_details": issue.error_details,
+                # v2: スキル化のための追加フィールド
+                "screenshots": issue.screenshots,
+                "html_snapshot_path": issue.html_snapshot_path,
+                "page_url": issue.page_url,
             }).execute()
 
         except Exception as e:
@@ -246,6 +265,21 @@ class IssueTracker:
                     "セレクタを検証",
                     "検索結果の解析ロジックを確認",
                     "修正を実装",
+                ],
+            })
+
+        elif issue.issue_type == IssueType.USER_INPUT_REQUIRED:
+            solutions.append({
+                "type": "create_skill_action",
+                "description": "ユーザー入力が必要な箇所を特定し、スキルアクションとして定義する必要があります",
+                "estimated_effort": "medium",
+                "page_url": issue.page_url,
+                "suggested_steps": [
+                    "page_urlにアクセスしてエラー箇所を確認",
+                    "必須入力項目を特定",
+                    "スキップ可能か、デフォルト値で対応可能かを判断",
+                    "対応方法をSKILL.mdに追記",
+                    "executorに処理を追加",
                 ],
             })
 

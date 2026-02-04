@@ -749,6 +749,7 @@ export const api = {
         onAIMessage?: (message: MessageResponse, sessionId?: string) => void;
         onComplete?: (sessionId?: string) => void;
         onError?: (error: string, sessionId?: string) => void;
+        onSkillAvailable?: (browserSessionId: string, sessionId?: string) => void;
       },
       signal?: AbortSignal
     ): Promise<void> => {
@@ -827,7 +828,16 @@ export const api = {
                   callbacks.onUserMessage(parsed.message, eventSessionId);
                 } else if (parsed.type === 'ai_message' && callbacks.onAIMessage) {
                   callbacks.onAIMessage(parsed.message, eventSessionId);
-                } else if (parsed.type === 'done' && callbacks.onComplete) {
+                } else if (parsed.type === 'done') {
+                  // スキル化可能な場合、コールバックを呼び出す
+                  if (parsed.can_create_skill && parsed.browser_session_id && callbacks.onSkillAvailable) {
+                    callbacks.onSkillAvailable(parsed.browser_session_id, eventSessionId);
+                  }
+                  if (callbacks.onComplete) {
+                    callbacks.onComplete(eventSessionId);
+                  }
+                } else if (parsed.type === 'cancelled' && callbacks.onComplete) {
+                  // キャンセルも完了として処理
                   callbacks.onComplete(eventSessionId);
                 } else if (parsed.type === 'error' && callbacks.onError) {
                   callbacks.onError(parsed.message, eventSessionId);
@@ -864,6 +874,182 @@ export const api = {
 
     getState: (sessionId: string) =>
       request<StateMachineResponse>(`/sm/${sessionId}/state`),
+
+    /**
+     * セッションをキャンセル
+     * バックエンドのツール実行を停止する
+     */
+    cancelSession: (sessionId: string) =>
+      request<{ success: boolean; session_id: string }>('/chat/dan/cancel', {
+        method: 'POST',
+        body: JSON.stringify({ session_id: sessionId }),
+      }),
+  },
+
+  // Skills endpoints
+  skills: {
+    analyze: (sessionId: string, instruction?: string) =>
+      request<{
+        success: boolean;
+        // 複数提案対応（新規）
+        proposals: Array<{
+          proposal_id: string;
+          skill_name: string;
+          description: string;
+          site: string;
+          actions: string[];
+          parameters: Array<{
+            name: string;
+            type: string;
+            required: boolean;
+            description: string;
+          }>;
+          decision: string;  // create / extend / skip
+          target_skill?: string | null;
+          new_actions?: string[] | null;
+        }>;
+        message: string;
+        // 後方互換（deprecated）
+        proposal_id: string | null;
+        status: string | null;
+        skill_name: string | null;
+        description: string | null;
+        site: string | null;
+        actions: string[];
+        parameters: Array<{
+          name: string;
+          type: string;
+          required: boolean;
+          description: string;
+        }>;
+        analysis?: Record<string, unknown> | null;
+        steps?: string[] | null;
+        decision?: string | null;  // create / extend / skip
+        decision_reason?: string | null;
+        skip_reason?: string | null;
+      }>('/skills/analyze', {
+        method: 'POST',
+        body: JSON.stringify({
+          session_id: sessionId,
+          instruction,
+        }),
+      }),
+
+    generate: (proposalId: string, skillName?: string, instruction?: string) =>
+      request<{
+        success: boolean;
+        proposal_id: string | null;
+        status: string | null;
+        skill_name: string;
+        skill_path: string | null;
+        files_created: string[] | null;
+        message: string;
+      }>('/skills/generate', {
+        method: 'POST',
+        body: JSON.stringify({
+          proposal_id: proposalId,
+          skill_name: skillName,
+          instruction,
+        }),
+      }),
+
+    listProposals: (sessionId?: string, status?: string, limit: number = 10) =>
+      request<{
+        proposals: Array<{
+          id: string;
+          session_id: string;
+          instruction?: string | null;
+          status: string;
+          skill_name?: string | null;
+          description?: string | null;
+          site?: string | null;
+          actions: string[];
+          parameters: Array<{
+            name: string;
+            type: string;
+            required: boolean;
+            description: string;
+          }>;
+          analysis?: Record<string, unknown> | null;
+          steps?: string[] | null;
+          created_at?: string | null;
+          updated_at?: string | null;
+        }>;
+      }>(`/skills/proposals?${new URLSearchParams({
+        ...(sessionId ? { session_id: sessionId } : {}),
+        ...(status ? { status } : {}),
+        ...(limit ? { limit: String(limit) } : {}),
+      }).toString()}`),
+
+    getProposal: (proposalId: string) =>
+      request<{
+        id: string;
+        session_id: string;
+        instruction?: string | null;
+        status: string;
+        skill_name?: string | null;
+        description?: string | null;
+        site?: string | null;
+        actions: string[];
+        parameters: Array<{
+          name: string;
+          type: string;
+          required: boolean;
+          description: string;
+        }>;
+        analysis?: Record<string, unknown> | null;
+        steps?: string[] | null;
+        created_at?: string | null;
+        updated_at?: string | null;
+      }>(`/skills/proposals/${proposalId}`),
+
+    dismissProposal: (proposalId: string, status: string = 'dismissed') =>
+      request<{
+        id: string;
+        session_id: string;
+        instruction?: string | null;
+        status: string;
+        skill_name?: string | null;
+        description?: string | null;
+        site?: string | null;
+        actions: string[];
+        parameters: Array<{
+          name: string;
+          type: string;
+          required: boolean;
+          description: string;
+        }>;
+        analysis?: Record<string, unknown> | null;
+        steps?: string[] | null;
+        created_at?: string | null;
+        updated_at?: string | null;
+      }>(`/skills/proposals/${proposalId}/dismiss`, {
+        method: 'POST',
+        body: JSON.stringify({ status }),
+      }),
+
+    list: () =>
+      request<{
+        skills: Array<{
+          name: string;
+          title: string;
+          path: string;
+          generated_at: string | null;
+          has_actions: boolean;
+        }>;
+      }>('/skills/list'),
+
+    get: (skillName: string) =>
+      request<{
+        name: string;
+        skill_md: string;
+        actions: Record<string, string>;
+        selectors: string | null;
+      }>(`/skills/${skillName}`),
+
+    delete: (skillName: string) =>
+      request<{ success: boolean; message: string }>(`/skills/${skillName}`, {
+        method: 'DELETE',
+      }),
   },
 };
-

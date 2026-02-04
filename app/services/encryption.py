@@ -1,15 +1,18 @@
 """
 Encryption Service for Secure Credential Storage
 """
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
-import os
+import hashlib
 import json
+import logging
 from typing import Any
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class EncryptionService:
@@ -25,9 +28,12 @@ class EncryptionService:
             key = settings.ENCRYPTION_KEY
         
         if not key:
-            # 開発用にランダムキーを生成（本番では必ず固定キーを使用）
-            key = Fernet.generate_key().decode()
-        
+            raise ValueError(
+                "ENCRYPTION_KEY environment variable is required. "
+                "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            )
+
+        self._key = key  # デバッグ用にキーを保持（ハッシュ出力用）
         self._fernet = self._create_fernet(key)
     
     def _create_fernet(self, key: str) -> Fernet:
@@ -58,17 +64,41 @@ class EncryptionService:
         """
         return self._fernet.encrypt(data.encode())
     
+    def _get_key_hash(self) -> str:
+        """デバッグ用にキーのハッシュ値を取得（キー自体は出力しない）"""
+        return hashlib.sha256(self._key.encode()).hexdigest()[:16]
+
     def decrypt(self, encrypted_data: bytes) -> str:
         """
         暗号化されたデータを復号
-        
+
         Args:
             encrypted_data: 暗号化されたバイト列
-            
+
         Returns:
             復号された文字列
+
+        Raises:
+            InvalidToken: 復号に失敗した場合（キー不一致など）
         """
-        return self._fernet.decrypt(encrypted_data).decode()
+        try:
+            return self._fernet.decrypt(encrypted_data).decode()
+        except InvalidToken as e:
+            key_hash = self._get_key_hash()
+            data_preview = encrypted_data[:50].decode('utf-8', errors='replace') if encrypted_data else 'None'
+            logger.error(
+                f"Decryption failed: InvalidToken. "
+                f"Key hash: {key_hash}, "
+                f"Data preview: {data_preview}..."
+            )
+            raise
+        except Exception as e:
+            key_hash = self._get_key_hash()
+            logger.error(
+                f"Decryption failed with unexpected error: {type(e).__name__}: {e}. "
+                f"Key hash: {key_hash}"
+            )
+            raise
     
     def encrypt_dict(self, data: dict[str, Any]) -> bytes:
         """
@@ -86,15 +116,26 @@ class EncryptionService:
     def decrypt_dict(self, encrypted_data: bytes) -> dict[str, Any]:
         """
         暗号化された辞書を復号
-        
+
         Args:
             encrypted_data: 暗号化されたバイト列
-            
+
         Returns:
             復号された辞書
+
+        Raises:
+            InvalidToken: 復号に失敗した場合（キー不一致など）
+            json.JSONDecodeError: JSONパースに失敗した場合
         """
-        json_str = self.decrypt(encrypted_data)
-        return json.loads(json_str)
+        try:
+            json_str = self.decrypt(encrypted_data)
+            return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            logger.error(
+                f"Failed to parse decrypted data as JSON: {e}. "
+                f"This may indicate data corruption."
+            )
+            raise
     
     def encrypt_credential(
         self,

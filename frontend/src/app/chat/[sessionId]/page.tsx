@@ -3,9 +3,12 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp, Square } from 'lucide-react';
+import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp, Square, Sparkles, X } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
+
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
@@ -79,6 +82,37 @@ export default function ChatSessionPage() {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   const isLoading = useAuthStore((state) => state.isLoading);
   const [message, setMessage] = useState('');
+
+  // スキル化ダイアログ用の状態（複数提案対応）
+  const [showSkillDialog, setShowSkillDialog] = useState(false);
+  const [browserSessionId, setBrowserSessionId] = useState<string | null>(null);
+  const [isAnalyzingSkill, setIsAnalyzingSkill] = useState(false);
+  const [isCreatingSkill, setIsCreatingSkill] = useState(false);
+  // 複数提案のリスト
+  const [skillProposals, setSkillProposals] = useState<Array<{
+    proposal_id: string;
+    skill_name: string;
+    description: string;
+    site: string;
+    actions: string[];
+    parameters: Array<{ name: string; type: string; required: boolean; description: string }>;
+    decision: string;
+    target_skill?: string | null;
+    new_actions?: string[] | null;
+  }>>([]);
+  // 現在表示中の提案インデックス
+  const [currentProposalIndex, setCurrentProposalIndex] = useState(0);
+  // 後方互換用（単一提案の場合）
+  const [skillProposal, setSkillProposal] = useState<{
+    proposal_id?: string;
+    status?: string;
+    skill_name: string;
+    description: string;
+    site: string;
+    actions: string[];
+    parameters: Array<{ name: string; type: string; required: boolean; description: string }>;
+    steps?: string[];
+  } | null>(null);
 
   // セッション別ストア
   const sessions = useSessionStateStore((state) => state.sessions);
@@ -269,6 +303,15 @@ export default function ChatSessionPage() {
             deleteProcess(targetSessionId, PENDING_PROCESS_ID);
             setIsSending(targetSessionId, false);
           },
+
+          onSkillAvailable: (browserSessId: string, eventSessionId?: string) => {
+            const targetSessionId = eventSessionId || sessionId;
+            const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
+            // アクティブなセッションの場合のみダイアログを表示（分析→提案）
+            if (targetSessionId === currentActiveSessionId) {
+              handleShowSkillProposal(browserSessId);
+            }
+          },
         },
         controller.signal
       );
@@ -357,6 +400,13 @@ export default function ChatSessionPage() {
               toast.error(`エラー: ${error}`);
               deleteProcess(eventSessionId || sessionId, PENDING_PROCESS_ID);
               setIsSending(eventSessionId || sessionId, false);
+            },
+            onSkillAvailable: (browserSessId: string, eventSessionId?: string) => {
+              const targetSessionId = eventSessionId || sessionId;
+              const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
+              if (targetSessionId === currentActiveSessionId) {
+                handleShowSkillProposal(browserSessId);
+              }
             },
           },
           controller.signal
@@ -462,6 +512,13 @@ export default function ChatSessionPage() {
               deleteProcess(eventSessionId || sessionId, PENDING_PROCESS_ID);
               setIsSending(eventSessionId || sessionId, false);
             },
+            onSkillAvailable: (browserSessId: string, eventSessionId?: string) => {
+              const targetSessionId = eventSessionId || sessionId;
+              const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
+              if (targetSessionId === currentActiveSessionId) {
+                handleShowSkillProposal(browserSessId);
+              }
+            },
           },
           controller.signal
         );
@@ -500,17 +557,268 @@ export default function ChatSessionPage() {
 
   const pendingProcess = processes.get(PENDING_PROCESS_ID);
 
-  const handleCancel = useCallback(() => {
+  const handleCancel = useCallback(async () => {
     if (!sessionId) return;
+
+    // 1. AbortControllerでfetchを中止（既存）
     const controller = abortControllersRef.current.get(sessionId);
     if (controller) {
       controller.abort();
       abortControllersRef.current.delete(sessionId);
     }
+
+    // 2. バックエンドにキャンセルをリクエスト（新規）
+    try {
+      await api.sm.cancelSession(sessionId);
+    } catch (e) {
+      console.error('Failed to cancel session:', e);
+    }
+
+    // 3. UI更新（既存）
     setIsSending(sessionId, false);
     deleteProcess(sessionId, PENDING_PROCESS_ID);
     toast.info('処理を停止しました');
   }, [sessionId, setIsSending, deleteProcess]);
+
+  // スキル提案を表示（分析→ダイアログ表示）複数提案対応
+  const handleShowSkillProposal = useCallback(async (sessId: string) => {
+    console.log('[SKILL_DEBUG] handleShowSkillProposal called with sessId:', sessId);
+    setBrowserSessionId(sessId);
+    setIsAnalyzingSkill(true);
+    setShowSkillDialog(true);
+    setSkillProposals([]);
+    setCurrentProposalIndex(0);
+    setSkillProposal(null);
+
+    try {
+      console.log('[SKILL_DEBUG] Calling api.skills.analyze...');
+      const result = await api.skills.analyze(sessId);
+      console.log('[SKILL_DEBUG] API result:', JSON.stringify(result, null, 2));
+
+      // skip の場合はダイアログを表示しない
+      if (result.decision === 'skip') {
+        console.log('[SKILL_DEBUG] Skipped:', result.skip_reason || result.decision_reason);
+        setShowSkillDialog(false);
+        setBrowserSessionId(null);
+        return;
+      }
+
+      // 複数提案対応
+      if (result.success && result.proposals && result.proposals.length > 0) {
+        console.log('[SKILL_DEBUG] Success! Setting proposals:', result.proposals.length);
+        // LocalStorage に提案IDを保存（カンマ区切り）
+        if (sessionId) {
+          const proposalIds = result.proposals.map(p => p.proposal_id).join(',');
+          localStorage.setItem(`skill_proposal_ids:${sessionId}`, proposalIds);
+        }
+        setSkillProposals(result.proposals);
+        setCurrentProposalIndex(0);
+        // 後方互換用にも設定
+        const first = result.proposals[0];
+        setSkillProposal({
+          proposal_id: first.proposal_id,
+          skill_name: first.skill_name,
+          description: first.description || '',
+          site: first.site || '',
+          actions: first.actions || [],
+          parameters: first.parameters || [],
+        });
+      } else if (result.success && result.skill_name) {
+        // 後方互換: 単一提案
+        console.log('[SKILL_DEBUG] Success! Setting single proposal:', result.skill_name);
+        if (result.proposal_id && sessionId) {
+          localStorage.setItem(`skill_proposal_ids:${sessionId}`, result.proposal_id);
+        }
+        setSkillProposals([{
+          proposal_id: result.proposal_id || '',
+          skill_name: result.skill_name,
+          description: result.description || '',
+          site: result.site || '',
+          actions: result.actions || [],
+          parameters: result.parameters || [],
+          decision: result.decision || 'create',
+        }]);
+        setSkillProposal({
+          proposal_id: result.proposal_id || undefined,
+          status: result.status || undefined,
+          skill_name: result.skill_name,
+          description: result.description || '',
+          site: result.site || '',
+          actions: result.actions || [],
+          parameters: result.parameters || [],
+          steps: result.steps || undefined,
+        });
+      } else {
+        console.log('[SKILL_DEBUG] API returned success=false or no proposals, closing dialog');
+        setShowSkillDialog(false);
+        setBrowserSessionId(null);
+      }
+    } catch (error) {
+      console.error('[SKILL_DEBUG] Exception in analyze:', error);
+      toast.error('スキル分析に失敗しました。再度お試しください。');
+      setShowSkillDialog(false);
+      setBrowserSessionId(null);
+      return;
+    } finally {
+      setIsAnalyzingSkill(false);
+    }
+  }, [sessionId]);
+
+  // 現在表示中の提案
+  const currentProposal = skillProposals[currentProposalIndex] || null;
+
+  // スキル作成ハンドラ（現在の提案を作成して次へ）
+  const handleCreateSkill = useCallback(async () => {
+    if (!browserSessionId || !currentProposal) return;
+
+    if (!currentProposal.proposal_id) {
+      toast.error('Proposal ID is missing.');
+      return;
+    }
+
+    setIsCreatingSkill(true);
+    try {
+      const result = await api.skills.generate(currentProposal.proposal_id);
+      if (result.success) {
+        toast.success(`Created skill ${result.skill_name}.`);
+
+        // 次の提案があれば進む
+        if (currentProposalIndex < skillProposals.length - 1) {
+          setCurrentProposalIndex(prev => prev + 1);
+          setIsCreatingSkill(false);
+          return;
+        }
+
+        // 全て完了
+        if (sessionId) {
+          localStorage.removeItem(`skill_proposal_ids:${sessionId}`);
+        }
+      } else {
+        toast.error('Skill generation failed.');
+      }
+    } catch (error) {
+      console.error('Failed to create skill:', error);
+      toast.error('Failed to create skill.');
+    } finally {
+      setIsCreatingSkill(false);
+      // 最後の提案 or エラー時はダイアログを閉じる
+      if (currentProposalIndex >= skillProposals.length - 1) {
+        setShowSkillDialog(false);
+        setBrowserSessionId(null);
+        setSkillProposals([]);
+        setSkillProposal(null);
+      }
+    }
+  }, [browserSessionId, currentProposal, currentProposalIndex, skillProposals.length, sessionId]);
+
+  // 現在の提案をスキップして次へ
+  const handleSkipCurrentProposal = useCallback(async () => {
+    if (!currentProposal) return;
+
+    // 提案をdismiss
+    try {
+      await api.skills.dismissProposal(currentProposal.proposal_id);
+    } catch (error) {
+      console.error('Failed to dismiss proposal:', error);
+    }
+
+    // 次の提案があれば進む
+    if (currentProposalIndex < skillProposals.length - 1) {
+      setCurrentProposalIndex(prev => prev + 1);
+      return;
+    }
+
+    // 全てスキップ完了
+    if (sessionId) {
+      localStorage.removeItem(`skill_proposal_ids:${sessionId}`);
+    }
+    setShowSkillDialog(false);
+    setBrowserSessionId(null);
+    setSkillProposals([]);
+    setSkillProposal(null);
+  }, [currentProposal, currentProposalIndex, skillProposals.length, sessionId]);
+
+  // スキルダイアログを閉じる（全提案をスキップ）
+  const handleDismissSkillDialog = useCallback(async () => {
+    setShowSkillDialog(false);
+    setBrowserSessionId(null);
+    setSkillProposals([]);
+    setSkillProposal(null);
+
+    if (sessionId) {
+      localStorage.removeItem(`skill_proposal_ids:${sessionId}`);
+    }
+
+    // 残りの全提案をdismiss
+    for (let i = currentProposalIndex; i < skillProposals.length; i++) {
+      const proposal = skillProposals[i];
+      if (proposal?.proposal_id) {
+        try {
+          await api.skills.dismissProposal(proposal.proposal_id);
+        } catch (error) {
+          console.error('Failed to dismiss skill proposal:', error);
+        }
+      }
+    }
+  }, [sessionId, skillProposals, currentProposalIndex]);
+
+  // 複数提案の復元
+  useEffect(() => {
+    if (!sessionId) return;
+    const storedIds = localStorage.getItem(`skill_proposal_ids:${sessionId}`);
+    if (!storedIds) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const ids = storedIds.split(',').filter(Boolean);
+        const validProposals: typeof skillProposals = [];
+
+        for (const id of ids) {
+          const proposal = await api.skills.getProposal(id);
+          if (cancelled) return;
+          if (proposal.status === 'generated' || proposal.status === 'dismissed' || proposal.status === 'skipped') {
+            continue;
+          }
+          validProposals.push({
+            proposal_id: proposal.id,
+            skill_name: proposal.skill_name || 'generated_skill',
+            description: proposal.description || '',
+            site: proposal.site || '',
+            actions: proposal.actions || [],
+            parameters: proposal.parameters || [],
+            decision: 'create',
+          });
+        }
+
+        if (cancelled) return;
+
+        if (validProposals.length === 0) {
+          localStorage.removeItem(`skill_proposal_ids:${sessionId}`);
+          return;
+        }
+
+        setSkillProposals(validProposals);
+        setCurrentProposalIndex(0);
+        // 後方互換用
+        setSkillProposal({
+          proposal_id: validProposals[0].proposal_id,
+          skill_name: validProposals[0].skill_name,
+          description: validProposals[0].description,
+          site: validProposals[0].site,
+          actions: validProposals[0].actions,
+          parameters: validProposals[0].parameters,
+        });
+        setShowSkillDialog(true);
+      } catch (error) {
+        console.error('Failed to restore skill proposals:', error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -625,11 +933,13 @@ export default function ChatSessionPage() {
                           <p className="text-xs text-muted-foreground">{isUser ? 'あなた' : 'ダン'}</p>
                           <div
                             className={cn(
-                              'px-4 py-3 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap text-left',
-                              isUser ? 'bg-primary text-primary-foreground rounded-br-md' : 'bg-muted rounded-bl-md'
+                              'px-4 py-3 rounded-2xl text-sm leading-relaxed text-left',
+                              isUser
+                                ? 'bg-primary text-primary-foreground rounded-br-md'
+                                : 'bg-muted rounded-bl-md prose prose-sm prose-dan max-w-none'
                             )}
                           >
-                            {msg.content}
+                            {isUser ? msg.content : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>}
                           </div>
                         </div>
                         {isUser && (
@@ -697,6 +1007,99 @@ export default function ChatSessionPage() {
                   </Button>
                 </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Skill Creation Dialog (カルーセル対応) */}
+        {showSkillDialog && (
+          <div className="shrink-0 border-t border-border bg-primary/5 px-4 py-3">
+            <div className="max-w-3xl mx-auto">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="h-4 w-4 text-primary" />
+                  <span className="text-sm font-medium">
+                    {isAnalyzingSkill ? '操作を分析中...' : (
+                      skillProposals.length > 1
+                        ? `スキル提案 (${currentProposalIndex + 1}/${skillProposals.length})`
+                        : 'スキルを作成できます'
+                    )}
+                  </span>
+                </div>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-6 w-6"
+                  onClick={handleDismissSkillDialog}
+                  disabled={isAnalyzingSkill || isCreatingSkill}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+
+              {isAnalyzingSkill ? (
+                <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  <span>どんなスキルを作れるか確認しています...</span>
+                </div>
+              ) : currentProposal ? (
+                <>
+                  <div className="mt-2 p-2 rounded bg-background/50 border border-border/50">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-sm font-medium text-primary">{currentProposal.skill_name}</span>
+                      {currentProposal.site && (
+                        <span className="text-xs text-muted-foreground">({currentProposal.site})</span>
+                      )}
+                      {currentProposal.decision === 'extend' && (
+                        <span className="text-xs bg-yellow-100 text-yellow-800 px-1 rounded">拡張</span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground">{currentProposal.description}</p>
+                    {currentProposal.parameters.length > 0 && (
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        パラメータ: {currentProposal.parameters.map(p => p.name).join(', ')}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex gap-2 mt-3">
+                    <Button
+                      size="sm"
+                      onClick={handleCreateSkill}
+                      disabled={isCreatingSkill}
+                      className="bg-primary hover:bg-primary/90"
+                    >
+                      {isCreatingSkill ? (
+                        <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                      ) : (
+                        <Sparkles className="h-4 w-4 mr-1" />
+                      )}
+                      {isCreatingSkill ? '作成中...' : (
+                        currentProposal.decision === 'extend' ? 'アクションを追加' : 'このスキルを作成'
+                      )}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleSkipCurrentProposal}
+                      disabled={isCreatingSkill}
+                    >
+                      {skillProposals.length > 1 && currentProposalIndex < skillProposals.length - 1
+                        ? 'スキップして次へ'
+                        : 'スキップ'}
+                    </Button>
+                    {skillProposals.length > 1 && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={handleDismissSkillDialog}
+                        disabled={isCreatingSkill}
+                      >
+                        全てスキップ
+                      </Button>
+                    )}
+                  </div>
+                </>
+              ) : null}
             </div>
           </div>
         )}

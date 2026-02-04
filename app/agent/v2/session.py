@@ -62,7 +62,6 @@ class State(str, Enum):
     VERIFY = "verify"      # 結果確認
     REPORT = "report"      # 報告
     CHAT = "chat"          # 雑談モード
-    DEVELOP = "develop"    # 自己修正モード（Self-Healing）
 
 
 @dataclass
@@ -202,6 +201,20 @@ class Session:
         else:
             result_content = content
 
+        # Ensure one tool_result per tool_use_id by replacing existing content if present.
+        for msg in self.messages:
+            if msg.get("role") != "user":
+                continue
+            blocks = msg.get("content")
+            if not isinstance(blocks, list):
+                continue
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    if block.get("tool_use_id") == tool_use_id:
+                        block["content"] = result_content
+                        self.updated_at = datetime.utcnow()
+                        return
+
         self.messages.append({
             "role": "user",
             "content": [{
@@ -272,7 +285,60 @@ class Session:
             if parsed:
                 session.updated_at = parsed
 
+        # 注: メッセージの整合性修復はSessionStore.get_or_createで行う
+        # （修復時にDBも更新する必要があるため）
+
         return session
+
+    def _repair_messages(self) -> None:
+        """
+        メッセージ配列の整合性を修復
+
+        Claude APIの要件:
+        - tool_useを含むassistantメッセージの後には、必ずtool_resultが必要
+        - この要件を満たさないメッセージは削除する
+
+        エラー発生時にセッションが不整合な状態で残った場合の自動復旧用。
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        repaired = False
+        max_iterations = 10  # 無限ループ防止
+
+        for _ in range(max_iterations):
+            if not self.messages:
+                break
+
+            last_msg = self.messages[-1]
+
+            # 最後がassistantメッセージでtool_useを含んでいる場合
+            if last_msg.get("role") == "assistant":
+                content = last_msg.get("content", [])
+                if isinstance(content, list):
+                    has_tool_use = any(
+                        block.get("type") == "tool_use"
+                        for block in content
+                        if isinstance(block, dict)
+                    )
+                    if has_tool_use:
+                        # tool_resultがないので削除
+                        logger.warning(
+                            f"[Session._repair_messages] Removing incomplete assistant message "
+                            f"(tool_use without tool_result) from session {self.session_id}"
+                        )
+                        self.messages.pop()
+                        repaired = True
+                        continue  # 再度チェック
+
+            # 問題なければ終了
+            break
+
+        if repaired:
+            logger.info(
+                f"[Session._repair_messages] Session {self.session_id} repaired, "
+                f"now has {len(self.messages)} messages"
+            )
 
 
 class SessionStore:
@@ -289,13 +355,35 @@ class SessionStore:
         """キャッシュキーを生成"""
         return f"{user_id}:{session_id}"
 
+    def invalidate_cache(self, session_id: str, user_id: str) -> None:
+        """
+        キャッシュを無効化（エラー発生時の復旧用）
+
+        メモリ上のセッションが不整合な状態になった場合に呼び出す。
+        次回のget_or_createでDBから最後に正常保存された状態を読み込む。
+        """
+        key = self._make_key(session_id, user_id)
+        if key in self._cache:
+            del self._cache[key]
+
     async def get_or_create(self, session_id: str, user_id: str) -> Session:
         """セッションを取得または作成"""
+        import logging
+        logger = logging.getLogger(__name__)
+
         key = self._make_key(session_id, user_id)
 
-        # キャッシュにあれば返す
+        # キャッシュにあれば返す（キャンセル等で不整合になった場合も常に修復）
         if key in self._cache:
-            return self._cache[key]
+            session = self._cache[key]
+            original_count = len(session.messages)
+            session._repair_messages()
+            if len(session.messages) != original_count:
+                logger.info(
+                    f"[SessionStore] Repaired cached session {session_id}: "
+                    f"{original_count} -> {len(session.messages)} messages"
+                )
+            return session
 
         # DBから取得を試みる
         session = await self._load_from_db(session_id, user_id)
@@ -303,6 +391,18 @@ class SessionStore:
         if session is None:
             # 新規作成
             session = Session(session_id=session_id, user_id=user_id)
+        else:
+            # ★★★ メッセージの整合性を修復 ★★★
+            original_count = len(session.messages)
+            session._repair_messages()
+
+            # 修復があった場合はDBも更新
+            if len(session.messages) != original_count:
+                logger.info(
+                    f"[SessionStore] Session {session_id} repaired: "
+                    f"{original_count} -> {len(session.messages)} messages. Saving to DB."
+                )
+                await self._save_to_db(session)
 
         # キャッシュに保存
         self._cache[key] = session

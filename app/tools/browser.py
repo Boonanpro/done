@@ -18,6 +18,7 @@ _executor_result_queue: queue.Queue = queue.Queue()
 _executor_ready = threading.Event()
 _executor_shutdown = threading.Event()
 _executor_page_proxy = None
+_executor_browser_alive = threading.Event()  # ブラウザ生存フラグ
 
 
 def _executor_thread_main():
@@ -42,7 +43,17 @@ async def _executor_worker():
     playwright = None
     browser = None
     context = None
-    page = None
+
+    # ページ状態を管理（複数タブ対応）
+    pages_state = {
+        "current": None,  # 現在アクティブなページ
+        "all_pages": [],  # 全てのページ
+    }
+
+    def on_new_page(new_page):
+        """新しいタブ/ページが開かれた時のハンドラ"""
+        print(f"[EXECUTOR_BROWSER] New tab opened: {new_page.url}")
+        pages_state["all_pages"].append(new_page)
 
     try:
         print("[EXECUTOR_BROWSER] Starting Playwright...")
@@ -53,13 +64,20 @@ async def _executor_worker():
         os.makedirs(user_data_dir, exist_ok=True)
 
         context = await browser.new_context(
-            viewport={"width": 1280, "height": 720},
+            viewport={"width": 1440, "height": 900},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         )
+
+        # 新しいタブを検知するリスナーを登録
+        context.on("page", on_new_page)
+
         page = await context.new_page()
+        pages_state["current"] = page
+        pages_state["all_pages"].append(page)
 
         print("[EXECUTOR_BROWSER] Browser ready")
         _executor_ready.set()
+        _executor_browser_alive.set()  # ブラウザ生存フラグをセット
 
         # コマンドループ
         while not _executor_shutdown.is_set():
@@ -69,26 +87,85 @@ async def _executor_worker():
                 continue
 
             try:
-                result = await _execute_page_command(page, cmd, args)
+                result = await _execute_page_command(pages_state, context, cmd, args)
                 _executor_result_queue.put(("success", result))
             except Exception as e:
+                error_str = str(e).lower()
+                # ブラウザクローズエラーを検出
+                if "closed" in error_str or "target" in error_str or "disposed" in error_str:
+                    print(f"[EXECUTOR_BROWSER] Browser has been closed: {e}")
+                    _executor_browser_alive.clear()  # ブラウザ死亡をマーク
+                    _executor_result_queue.put(("browser_closed", str(e)))
+                    break  # ワーカーループを終了してスレッドを終了させる
                 _executor_result_queue.put(("error", str(e)))
 
     finally:
-        if page:
-            await page.close()
-        if context:
-            await context.close()
-        if browser:
-            await browser.close()
-        if playwright:
-            await playwright.stop()
+        _executor_browser_alive.clear()  # ブラウザ死亡をマーク
+        try:
+            if page:
+                await page.close()
+        except Exception:
+            pass
+        try:
+            if context:
+                await context.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                await browser.close()
+        except Exception:
+            pass
+        try:
+            if playwright:
+                await playwright.stop()
+        except Exception:
+            pass
         print("[EXECUTOR_BROWSER] Browser closed")
 
 
-async def _execute_page_command(page, cmd: str, args: dict):
+async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict):
     """ページコマンドを実行"""
-    if cmd == "goto":
+    page = pages_state["current"]
+
+    # タブ管理コマンド
+    if cmd == "switch_to_latest_tab":
+        # 最新のタブに切り替え
+        all_pages = pages_state["all_pages"]
+        if len(all_pages) > 1:
+            # 閉じられたページを除外
+            valid_pages = [p for p in all_pages if not p.is_closed()]
+            pages_state["all_pages"] = valid_pages
+
+            if valid_pages:
+                latest = valid_pages[-1]
+                if latest != pages_state["current"]:
+                    pages_state["current"] = latest
+                    await latest.bring_to_front()
+                    await latest.wait_for_load_state("domcontentloaded")
+                    print(f"[EXECUTOR_BROWSER] Switched to tab: {latest.url}")
+                    return {"switched": True, "url": latest.url, "tab_count": len(valid_pages)}
+        return {"switched": False, "url": page.url, "tab_count": len(pages_state["all_pages"])}
+
+    elif cmd == "get_tab_count":
+        # 有効なタブ数を取得
+        valid_pages = [p for p in pages_state["all_pages"] if not p.is_closed()]
+        pages_state["all_pages"] = valid_pages
+        return {"count": len(valid_pages), "current_url": page.url}
+
+    elif cmd == "close_current_tab":
+        # 現在のタブを閉じて前のタブに切り替え
+        all_pages = pages_state["all_pages"]
+        if len(all_pages) > 1:
+            current = pages_state["current"]
+            all_pages.remove(current)
+            await current.close()
+            pages_state["current"] = all_pages[-1]
+            await pages_state["current"].bring_to_front()
+            return {"closed": True, "url": pages_state["current"].url}
+        return {"closed": False, "url": page.url}
+
+    elif cmd == "goto":
         await page.goto(args["url"], wait_until=args.get("wait_until", "domcontentloaded"))
         return {"url": page.url}
 
@@ -123,9 +200,40 @@ async def _execute_page_command(page, cmd: str, args: dict):
         await page.keyboard.press(args["key"])
         return {}
 
+    elif cmd == "keyboard_type":
+        # テキストを入力（一文字ずつではなく一括）
+        await page.keyboard.type(args["text"], delay=args.get("delay", 50))
+        return {}
+
     elif cmd == "screenshot":
         await page.screenshot(path=args["path"], full_page=args.get("full_page", True))
         return {"path": args["path"]}
+
+    elif cmd == "screenshot_base64":
+        import base64
+        screenshot_bytes = await page.screenshot(full_page=args.get("full_page", False))
+        base64_str = base64.b64encode(screenshot_bytes).decode('utf-8')
+        return {"base64": base64_str, "media_type": "image/png"}
+
+    elif cmd == "mouse_click":
+        await page.mouse.click(args["x"], args["y"])
+        return {}
+
+    elif cmd == "mouse_move":
+        await page.mouse.move(args["x"], args["y"])
+        return {}
+
+    elif cmd == "go_back":
+        await page.go_back()
+        return {"url": page.url}
+
+    elif cmd == "go_forward":
+        await page.go_forward()
+        return {"url": page.url}
+
+    elif cmd == "reload":
+        await page.reload()
+        return {"url": page.url}
 
     elif cmd == "content":
         html = await page.content()
@@ -193,17 +301,131 @@ async def _execute_page_command(page, cmd: str, args: dict):
         await page.locator(args["selector"]).nth(args["index"]).click(force=args.get("force", False))
         return {}
 
+    elif cmd == "aria_snapshot":
+        # Playwrightのアクセシビリティツリーを取得
+        snapshot = await page.accessibility.snapshot()
+        return {"snapshot": snapshot}
+
+    elif cmd == "get_interactive_elements":
+        # インタラクティブ要素のリストを取得（ダンの視覚用）
+        # JavaScriptで要素を列挙し、ref IDを振る
+        script = """
+        () => {
+            const interactiveSelectors = [
+                'a[href]', 'button', 'input', 'select', 'textarea',
+                '[role="button"]', '[role="link"]', '[role="checkbox"]',
+                '[role="radio"]', '[role="combobox"]', '[role="textbox"]',
+                '[role="searchbox"]', '[role="listbox"]', '[role="option"]',
+                '[tabindex]:not([tabindex="-1"])', '[onclick]'
+            ];
+
+            const elements = [];
+            const seen = new Set();
+            let refId = 1;
+
+            for (const selector of interactiveSelectors) {
+                for (const el of document.querySelectorAll(selector)) {
+                    if (seen.has(el)) continue;
+                    seen.add(el);
+
+                    // 表示されている要素のみ
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
+                    const style = window.getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility === 'hidden') continue;
+
+                    // data-ref属性を付与
+                    const ref = `e${refId++}`;
+                    el.setAttribute('data-dan-ref', ref);
+
+                    // 要素情報を収集
+                    const tagName = el.tagName.toLowerCase();
+                    const type = el.getAttribute('type') || '';
+                    const role = el.getAttribute('role') || tagName;
+                    const text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().slice(0, 50);
+                    const name = el.getAttribute('name') || '';
+                    const id = el.id || '';
+
+                    elements.push({
+                        ref: '@' + ref,
+                        tag: tagName,
+                        role: role,
+                        type: type,
+                        text: text,
+                        name: name,
+                        id: id,
+                        rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) }
+                    });
+                }
+            }
+
+            return elements;
+        }
+        """
+        elements = await page.evaluate(script)
+        return {"elements": elements, "count": len(elements)}
+
+    elif cmd == "click_by_ref":
+        # data-dan-ref属性でクリック
+        ref = args["ref"].replace("@", "")
+        await page.locator(f'[data-dan-ref="{ref}"]').click(force=args.get("force", False))
+        return {}
+
+    elif cmd == "fill_by_ref":
+        # data-dan-ref属性で入力
+        ref = args["ref"].replace("@", "")
+        await page.locator(f'[data-dan-ref="{ref}"]').fill(args["value"])
+        return {}
+
+    elif cmd == "get_page_summary":
+        # ページの要約情報を取得（タイトル、URL、主要なテキスト）
+        title = await page.title()
+        url = page.url
+
+        # 主要なテキストを取得
+        main_text_script = """
+        () => {
+            const mainSelectors = ['main', 'article', '#content', '.content', '#main', '.main'];
+            for (const sel of mainSelectors) {
+                const el = document.querySelector(sel);
+                if (el) return el.innerText.slice(0, 1000);
+            }
+            return document.body.innerText.slice(0, 1000);
+        }
+        """
+        main_text = await page.evaluate(main_text_script)
+
+        return {
+            "title": title,
+            "url": url,
+            "main_text": main_text
+        }
+
     else:
         raise ValueError(f"Unknown command: {cmd}")
 
 
 def _ensure_executor_thread():
-    """Executor用スレッドを確保"""
+    """Executor用スレッドを確保（ブラウザ生存チェック付き）"""
     global _executor_thread, _executor_command_queue, _executor_result_queue
 
-    if _executor_thread is None or not _executor_thread.is_alive():
+    # スレッドが生きていてもブラウザが死んでいれば再起動が必要
+    need_restart = (
+        _executor_thread is None or
+        not _executor_thread.is_alive() or
+        not _executor_browser_alive.is_set()  # ブラウザ死亡チェック
+    )
+
+    if need_restart:
+        # 既存スレッドが生きている場合はシャットダウンを待つ
+        if _executor_thread is not None and _executor_thread.is_alive():
+            print("[EXECUTOR_BROWSER] Browser died, shutting down old thread...")
+            _executor_shutdown.set()
+            _executor_thread.join(timeout=5)
+
         _executor_ready.clear()
         _executor_shutdown.clear()
+        _executor_browser_alive.clear()
 
         # キューをクリア（古いセッションのゴミを除去）
         _executor_command_queue = queue.Queue()
@@ -220,25 +442,61 @@ def _ensure_executor_thread():
 
 
 def _send_executor_command(cmd: str, **args) -> dict:
-    """Executorスレッドにコマンドを送信"""
-    _ensure_executor_thread()
+    """Executorスレッドにコマンドを送信（ブラウザクローズ時は自動再起動、キャンセル対応）"""
+    from app.services.cancellation import CancellationRegistry, CancelledError
 
-    # 結果キューをクリア
-    while not _executor_result_queue.empty():
-        try:
-            _executor_result_queue.get_nowait()
-        except queue.Empty:
-            break
+    max_retries = 2  # ブラウザクローズ時のリトライ回数
 
-    _executor_command_queue.put((cmd, args, None))
+    # コマンド送信前にキャンセルチェック
+    if CancellationRegistry.check_cancelled():
+        session_id = CancellationRegistry.get_current_session()
+        print(f"[EXECUTOR_BROWSER] Command cancelled before execution: {cmd}")
+        raise CancelledError(session_id or "unknown", "ブラウザ操作がキャンセルされました")
 
-    try:
-        status, result = _executor_result_queue.get(timeout=120)
-        if status == "error":
-            raise RuntimeError(result)
-        return result
-    except queue.Empty:
-        raise RuntimeError("Executor command timed out")
+    for attempt in range(max_retries):
+        _ensure_executor_thread()
+
+        # 結果キューをクリア
+        while not _executor_result_queue.empty():
+            try:
+                _executor_result_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        _executor_command_queue.put((cmd, args, None))
+
+        # 結果を待機（短いタイムアウトでループし、キャンセルをチェック）
+        wait_timeout = 2.0  # 2秒ごとにキャンセルチェック
+        total_timeout = 120.0  # 全体のタイムアウト
+        elapsed = 0.0
+
+        while elapsed < total_timeout:
+            # キャンセルチェック
+            if CancellationRegistry.check_cancelled():
+                session_id = CancellationRegistry.get_current_session()
+                print(f"[EXECUTOR_BROWSER] Command cancelled during execution: {cmd}")
+                raise CancelledError(session_id or "unknown", "ブラウザ操作がキャンセルされました")
+
+            try:
+                status, result = _executor_result_queue.get(timeout=wait_timeout)
+                if status == "error":
+                    raise RuntimeError(result)
+                elif status == "browser_closed":
+                    # ブラウザが閉じられた - 再起動してリトライ
+                    if attempt < max_retries - 1:
+                        print(f"[EXECUTOR_BROWSER] Browser was closed, restarting... (attempt {attempt + 1})")
+                        _executor_browser_alive.clear()  # 再起動をトリガー
+                        break  # 内側ループを抜けてリトライ
+                    else:
+                        raise RuntimeError(f"Browser was closed and failed to recover: {result}")
+                return result
+            except queue.Empty:
+                elapsed += wait_timeout
+                continue
+
+        # ここに来たらタイムアウト（browser_closedでbreakした場合は除く）
+        if elapsed >= total_timeout:
+            raise RuntimeError("Executor command timed out")
 
 
 class ExecutorPageProxy:
@@ -284,6 +542,14 @@ class ExecutorPageProxy:
             None, lambda: _send_executor_command("screenshot", path=path, full_page=full_page)
         )
 
+    async def screenshot_base64(self, full_page: bool = False) -> dict:
+        """スクリーンショットをbase64で取得（Vision API用）"""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("screenshot_base64", full_page=full_page)
+        )
+        return result  # {"base64": "...", "media_type": "image/png"}
+
     async def content(self) -> str:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
@@ -324,9 +590,173 @@ class ExecutorPageProxy:
         count = result.get("count", 0)
         return [ExecutorLocatorProxy(selector, i) for i in range(count)]
 
+    async def go_back(self):
+        """ブラウザの戻るボタン"""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("go_back")
+        )
+        return result
+
+    async def inner_text(self, selector: str) -> str:
+        """要素のテキストを取得"""
+        result = await self.evaluate(f'document.querySelector("{selector}")?.innerText || ""')
+        return result or ""
+
+    async def go_forward(self):
+        """ブラウザの進むボタン"""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("go_forward")
+        )
+        return result
+
+    async def reload(self):
+        """ページを再読み込み"""
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("reload")
+        )
+        return result
+
     @property
     def keyboard(self):
         return ExecutorKeyboardProxy()
+
+    @property
+    def mouse(self):
+        return ExecutorMouseProxy()
+
+    # ========================================
+    # タブ管理
+    # ========================================
+
+    async def switch_to_latest_tab(self) -> dict:
+        """
+        最新のタブ（新しく開いたタブ）に切り替え
+
+        Returns:
+            {"switched": bool, "url": str, "tab_count": int}
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("switch_to_latest_tab")
+        )
+
+    async def get_tab_count(self) -> dict:
+        """
+        開いているタブ数を取得
+
+        Returns:
+            {"count": int, "current_url": str}
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("get_tab_count")
+        )
+
+    async def close_current_tab(self) -> dict:
+        """
+        現在のタブを閉じて前のタブに切り替え
+
+        Returns:
+            {"closed": bool, "url": str}
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("close_current_tab")
+        )
+
+    # ========================================
+    # ダン視覚機能（Vision for Dan）
+    # ========================================
+
+    async def get_aria_snapshot(self) -> dict:
+        """
+        ページのアクセシビリティスナップショットを取得
+
+        Returns:
+            dict: Playwrightのアクセシビリティツリー
+        """
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("aria_snapshot")
+        )
+        return result.get("snapshot", {})
+
+    async def get_interactive_elements(self) -> list:
+        """
+        インタラクティブ要素のリストを取得（data-dan-ref属性付き）
+
+        各要素には @e1, @e2 のような参照IDが振られる。
+        click_by_ref(), fill_by_ref() でこの参照を使って操作可能。
+
+        Returns:
+            list: [{"ref": "@e1", "tag": "button", "role": "button", "text": "カートに入れる", ...}, ...]
+        """
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("get_interactive_elements")
+        )
+        return result.get("elements", [])
+
+    async def click_by_ref(self, ref: str, force: bool = False):
+        """
+        data-dan-ref属性でクリック
+
+        Args:
+            ref: 参照ID（@e1 形式）
+            force: 強制クリック
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("click_by_ref", ref=ref, force=force)
+        )
+
+    async def fill_by_ref(self, ref: str, value: str):
+        """
+        data-dan-ref属性で入力
+
+        Args:
+            ref: 参照ID（@e1 形式）
+            value: 入力値
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("fill_by_ref", ref=ref, value=value)
+        )
+
+    async def get_page_summary(self) -> dict:
+        """
+        ページの要約情報を取得
+
+        Returns:
+            dict: {"title": "...", "url": "...", "main_text": "..."}
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("get_page_summary")
+        )
+
+    async def get_page_state(self) -> dict:
+        """
+        ダンがページ状態を理解するための包括的な情報を取得
+
+        Returns:
+            dict: {
+                "summary": {"title": "...", "url": "...", "main_text": "..."},
+                "interactive_elements": [...],
+                "element_count": N
+            }
+        """
+        summary = await self.get_page_summary()
+        elements = await self.get_interactive_elements()
+
+        return {
+            "summary": summary,
+            "interactive_elements": elements[:50],  # 最大50要素
+            "element_count": len(elements),
+        }
 
 
 class ExecutorLocatorProxy:
@@ -424,6 +854,30 @@ class ExecutorKeyboardProxy:
             None, lambda: _send_executor_command("keyboard_press", key=key)
         )
 
+    async def type(self, text: str, delay: int = 50):
+        """テキストを入力（一括）"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("keyboard_type", text=text, delay=delay)
+        )
+
+
+class ExecutorMouseProxy:
+    """Mouse Proxy for coordinate-based clicks"""
+
+    async def click(self, x: float, y: float):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("mouse_click", x=x, y=y)
+        )
+
+    async def move(self, x: float, y: float):
+        """マウスを指定座標に移動（ホバー用）"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("mouse_move", x=x, y=y)
+        )
+
 
 async def get_executor_page():
     """Executor用のPage Proxyを返す"""
@@ -437,6 +891,42 @@ async def close_executor_browser():
     if _executor_thread and _executor_thread.is_alive():
         _executor_thread.join(timeout=10)
     _executor_thread = None
+
+
+def abort_executor_session():
+    """
+    実行中のブラウザセッションを中断
+
+    - コマンドキューをクリアして待機中のコマンドを破棄
+    - 結果キューもクリア
+    - ブラウザ自体は閉じない（次回再利用可能）
+
+    重要: 進行中のPlaywrightコマンドは完了まで待つ必要がある。
+    ただし、_send_executor_command内のキャンセルチェックにより、
+    次のコマンドは実行されない。
+    """
+    global _executor_command_queue, _executor_result_queue
+
+    cleared_commands = 0
+    cleared_results = 0
+
+    # コマンドキューをクリア
+    while not _executor_command_queue.empty():
+        try:
+            _executor_command_queue.get_nowait()
+            cleared_commands += 1
+        except queue.Empty:
+            break
+
+    # 結果キューもクリア
+    while not _executor_result_queue.empty():
+        try:
+            _executor_result_queue.get_nowait()
+            cleared_results += 1
+        except queue.Empty:
+            break
+
+    print(f"[EXECUTOR_BROWSER] Session aborted - cleared {cleared_commands} commands, {cleared_results} results")
 
 
 # ===== 専用スレッドでPlaywrightを実行（旧方式、互換性のため残す） =====
@@ -484,7 +974,7 @@ async def _browser_worker():
         os.makedirs(user_data_dir, exist_ok=True)
         
         context = await browser.new_context(
-            viewport={"width": 1280, "height": 720},
+            viewport={"width": 1440, "height": 900},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         )
         page = await context.new_page()

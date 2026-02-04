@@ -8,6 +8,7 @@ Gemini 3 Flash を使用。
 スキルが存在しない場合のフォールバックとして使用。
 """
 
+import base64
 import hashlib
 import logging
 import re
@@ -15,7 +16,8 @@ import time
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from app.config import settings
 from app.services import learning_service
@@ -35,8 +37,8 @@ logger = logging.getLogger(__name__)
 # モデル設定
 # ============================================
 
-# Gemini 3 Flash
-VISUAL_AGENT_MODEL = "gemini-3-flash"
+# Gemini Computer Use専用モデル（最も安定・効率的）
+VISUAL_AGENT_MODEL = "gemini-2.5-computer-use-preview-10-2025"
 
 # 最大ステップ数（安全弁）
 MAX_STEPS = 20
@@ -86,11 +88,7 @@ class VisualAgent:
         self.page = None
         self.action_executor = None
 
-        # Gemini API の設定
-        if settings.GOOGLE_GEMINI_API_KEY:
-            genai.configure(api_key=settings.GOOGLE_GEMINI_API_KEY)
-
-        # メッセージ履歴（Gemini形式）
+        # メッセージ履歴（新SDKでは不使用だが互換性のため残す）
         self.chat_history: List[Dict[str, Any]] = []
 
         self._total_tokens = 0
@@ -141,55 +139,137 @@ class VisualAgent:
 
         return "visual", "no_selectors"
 
-    def _get_gemini_tools(self) -> List:
-        """Gemini形式のツール定義を生成"""
-        function_declarations = []
-
-        for action in VISUAL_AGENT_ACTIONS:
-            # パラメータをGemini形式に変換
-            properties = {}
-            required = action["parameters"].get("required", [])
-
-            for prop_name, prop_def in action["parameters"].get("properties", {}).items():
-                prop_type = prop_def.get("type", "string").upper()
-                if prop_type == "INTEGER":
-                    prop_type = "NUMBER"
-                elif prop_type == "BOOLEAN":
-                    prop_type = "BOOLEAN"
-                else:
-                    prop_type = "STRING"
-
-                properties[prop_name] = genai.protos.Schema(
-                    type=prop_type,
-                    description=prop_def.get("description", ""),
+    def _get_computer_use_tool(self) -> List[types.Tool]:
+        """Gemini Computer Use ツールを返す"""
+        return [
+            types.Tool(
+                computer_use=types.ComputerUse(
+                    environment=types.Environment.ENVIRONMENT_BROWSER
                 )
-
-            func_decl = genai.protos.FunctionDeclaration(
-                name=action["name"],
-                description=action["description"],
-                parameters=genai.protos.Schema(
-                    type="OBJECT",
-                    properties=properties,
-                    required=required,
-                ) if properties else None,
             )
-            function_declarations.append(func_decl)
+        ]
 
-        return [genai.protos.Tool(function_declarations=function_declarations)]
-
-    def _build_gemini_content(self, text: str, screenshot_base64: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _build_gemini_content(self, text: str, screenshot_base64: Optional[str] = None) -> List[types.Part]:
         """Gemini形式のコンテンツを構築"""
-        parts = [{"text": text}]
+        parts = [types.Part.from_text(text=text)]
 
         if screenshot_base64:
-            parts.append({
-                "inline_data": {
-                    "mime_type": "image/png",
-                    "data": screenshot_base64,
-                }
-            })
+            parts.append(types.Part.from_bytes(
+                data=base64.b64decode(screenshot_base64),
+                mime_type="image/png",
+            ))
 
         return parts
+
+    def _denormalize_coords(self, x: int, y: int, screen_width: int = 1440, screen_height: int = 900) -> tuple:
+        """
+        Gemini Computer Useの正規化座標(0-999)を実際のピクセル座標に変換
+        """
+        actual_x = int(x * screen_width / 1000)
+        actual_y = int(y * screen_height / 1000)
+        return actual_x, actual_y
+
+    def _map_computer_use_action(self, cu_action: str, params: dict) -> dict:
+        """Computer Useアクションを内部アクション形式に変換"""
+        mapping = {
+            "click_at": self._map_click_at,
+            "type_text_at": self._map_type_at,
+            "scroll_at": self._map_scroll_at,
+            "scroll_document": self._map_scroll_document,
+            "navigate": self._map_navigate,
+            "key_combination": self._map_key,
+            "go_back": lambda p: {"name": "go_back", "params": {}},
+            "go_forward": lambda p: {"name": "go_forward", "params": {}},
+            "wait_5_seconds": lambda p: {"name": "wait", "params": {"seconds": 5}},
+            "hover_at": self._map_hover_at,
+            # 追加のComputer Useアクション
+            "open_web_browser": lambda p: {"name": "wait", "params": {"seconds": 1}},  # ブラウザは既に開いている
+            "search": lambda p: {"name": "navigate", "params": {"url": f"https://www.google.com/search?q={p.get('query', '')}"}},
+            "drag_and_drop": self._map_drag_and_drop,
+            "done": self._map_done,
+        }
+
+        if cu_action in mapping:
+            return mapping[cu_action](params)
+
+        # 未知のアクションはそのまま返す
+        logger.warning(f"[VisualAgent] Unknown Computer Use action: {cu_action}")
+        return {"name": cu_action, "params": params}
+
+    def _map_click_at(self, params: dict) -> dict:
+        x, y = self._denormalize_coords(params.get("x", 0), params.get("y", 0))
+        return {"name": "click", "params": {"x": x, "y": y}}
+
+    def _map_type_at(self, params: dict) -> dict:
+        x, y = self._denormalize_coords(params.get("x", 0), params.get("y", 0))
+        return {
+            "name": "type",
+            "params": {
+                "text": params.get("text", ""),
+                "press_enter": params.get("press_enter", False),
+                # click位置も含める（type_text_atは位置指定+入力を1ステップで行う）
+                "_click_first": {"x": x, "y": y}
+            }
+        }
+
+    def _map_scroll_at(self, params: dict) -> dict:
+        direction = params.get("direction", "down")
+        return {
+            "name": "scroll",
+            "params": {
+                "direction": direction,
+                "amount": params.get("magnitude", 500)
+            }
+        }
+
+    def _map_scroll_document(self, params: dict) -> dict:
+        direction = params.get("direction", "down")
+        return {
+            "name": "scroll",
+            "params": {
+                "direction": direction,
+                "amount": 500
+            }
+        }
+
+    def _map_navigate(self, params: dict) -> dict:
+        return {"name": "navigate", "params": {"url": params.get("url", "")}}
+
+    def _map_key(self, params: dict) -> dict:
+        # キーコンビネーションを単一キーに変換
+        keys = params.get("keys", [])
+        if keys:
+            # Modifier + Key の形式を Playwright形式に変換
+            key_str = "+".join(keys)
+            return {"name": "press_key", "params": {"key": key_str}}
+        return {"name": "press_key", "params": {"key": "Escape"}}
+
+    def _map_hover_at(self, params: dict) -> dict:
+        x, y = self._denormalize_coords(params.get("x", 0), params.get("y", 0))
+        return {"name": "hover", "params": {"x": x, "y": y}}
+
+    def _map_drag_and_drop(self, params: dict) -> dict:
+        x, y = self._denormalize_coords(params.get("x", 0), params.get("y", 0))
+        dest_x, dest_y = self._denormalize_coords(
+            params.get("destination_x", 0),
+            params.get("destination_y", 0)
+        )
+        return {
+            "name": "drag_and_drop",
+            "params": {
+                "start_x": x, "start_y": y,
+                "end_x": dest_x, "end_y": dest_y
+            }
+        }
+
+    def _map_done(self, params: dict) -> dict:
+        return {
+            "name": "done",
+            "params": {
+                "success": params.get("success", True),
+                "message": params.get("message", "Task completed"),
+            }
+        }
 
     async def execute_task(
         self,
@@ -250,15 +330,11 @@ class VisualAgent:
         # システムプロンプトを構築
         system_prompt = self._build_system_prompt(task, params or {}, credentials)
 
-        # Gemini モデルを初期化（システムプロンプト付き）
-        gemini_model = genai.GenerativeModel(
-            model_name=self.model,
-            system_instruction=system_prompt,
-            tools=self._get_gemini_tools(),
-        )
+        # Gemini Client を初期化
+        client = genai.Client(api_key=settings.GOOGLE_GEMINI_API_KEY)
 
-        # チャットセッションを開始
-        chat = gemini_model.start_chat(history=[])
+        # メッセージ履歴を初期化
+        messages: List[types.Content] = []
 
         # 初回のスクリーンショットを取得
         screenshot_data = await self.page.screenshot_base64()
@@ -315,22 +391,21 @@ class VisualAgent:
                 if step_num == 1:
                     # 初回メッセージ
                     content_parts = self._build_gemini_content(initial_message, screenshot_base64)
-                else:
-                    # tool_result を含むメッセージは既に chat.history に追加されている
-                    content_parts = None
+                    messages.append(types.Content(
+                        role="user",
+                        parts=content_parts,
+                    ))
 
                 # LLM呼び出し
-                if content_parts:
-                    response = await chat.send_message_async(
-                        content_parts,
-                        generation_config=genai.types.GenerationConfig(
-                            max_output_tokens=1024,
-                        ),
-                    )
-                else:
-                    # 前のループで function_response を送信済みなので、ここでは何もしない
-                    # (Geminiは自動的に次のレスポンスを返す)
-                    pass
+                response = await client.aio.models.generate_content(
+                    model=self.model,
+                    contents=messages,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        tools=self._get_computer_use_tool(),
+                        max_output_tokens=1024,
+                    ),
+                )
 
                 llm_duration_ms = int((time.time() - start_time) * 1000)
 
@@ -498,6 +573,10 @@ class VisualAgent:
                 # 繰り返し検出
                 repeat_warning = self._detect_repeat_actions(action_name, action_params)
 
+                # モデルの応答を履歴に追加
+                if response.candidates and response.candidates[0].content:
+                    messages.append(response.candidates[0].content)
+
                 # function_response を送信
                 result_text = action_result.message or "Action completed"
                 if action_result.data:
@@ -505,30 +584,31 @@ class VisualAgent:
                 if repeat_warning:
                     result_text = repeat_warning + "\n\n" + result_text
 
-                # Gemini に function_response を送信（スクリーンショット付き）
+                # function_response部分（元のComputer Useアクション名を使用）
+                # Computer Useモデルは function_response に url を必須とする
+                original_cu_name = action.get("_original_cu_name", action_name)
+                current_url = self.page.url if self.page else ""
                 function_response_parts = [
-                    genai.protos.Part(
-                        function_response=genai.protos.FunctionResponse(
-                            name=action_name,
-                            response={"result": result_text},
-                        )
+                    types.Part.from_function_response(
+                        name=original_cu_name,
+                        response={"result": result_text, "url": current_url},
                     ),
-                    genai.protos.Part(
-                        inline_data=genai.protos.Blob(
-                            mime_type="image/png",
-                            data=screenshot_base64.encode() if isinstance(screenshot_base64, str) else screenshot_base64,
-                        )
-                    ) if screenshot_base64 else None,
                 ]
-                function_response_parts = [p for p in function_response_parts if p is not None]
 
-                # 次のレスポンスを取得
-                response = await chat.send_message_async(
-                    function_response_parts,
-                    generation_config=genai.types.GenerationConfig(
-                        max_output_tokens=1024,
-                    ),
-                )
+                # スクリーンショットを追加
+                if screenshot_base64:
+                    function_response_parts.append(
+                        types.Part.from_bytes(
+                            data=base64.b64decode(screenshot_base64) if isinstance(screenshot_base64, str) else screenshot_base64,
+                            mime_type="image/png",
+                        )
+                    )
+
+                # ユーザーメッセージとして履歴に追加
+                messages.append(types.Content(
+                    role="user",
+                    parts=function_response_parts,
+                ))
 
             except Exception as e:
                 logger.error(f"[VisualAgent] Step {step_num} error: {e}", exc_info=True)
@@ -538,7 +618,7 @@ class VisualAgent:
             progress = self._generate_progress_summary()
 
             try:
-                progress["summary_text"] = await self._ask_llm_for_summary(chat)
+                progress["summary_text"] = await self._ask_llm_for_summary(messages)
             except Exception:
                 progress["summary_text"] = f"実行アクション: {', '.join(progress['actions_executed'][-5:])}"
 
@@ -565,7 +645,7 @@ class VisualAgent:
 
     def _extract_action_from_gemini(self, response) -> tuple[Optional[Dict[str, Any]], str]:
         """
-        Geminiレスポンスからアクション情報を抽出
+        Geminiレスポンスからアクション情報を抽出（Computer Use形式対応）
 
         Returns:
             (action, reasoning) のタプル
@@ -583,15 +663,24 @@ class VisualAgent:
             return None, ""
 
         for part in candidate.content.parts:
+            # テキスト部分（思考/reasoning）
             if hasattr(part, "text") and part.text:
                 reasoning = part.text
+            # thought 属性もチェック（一部モデルはこちらを使う）
+            if hasattr(part, "thought") and part.thought:
+                reasoning = part.thought
 
+            # function_call 形式（Computer Use のアクション）
             if hasattr(part, "function_call") and part.function_call:
                 func_call = part.function_call
-                action = {
-                    "name": func_call.name,
-                    "params": dict(func_call.args) if func_call.args else {},
-                }
+                cu_action_name = func_call.name
+                cu_params = dict(func_call.args) if func_call.args else {}
+
+                # Computer Use アクションを内部アクションにマッピング
+                action = self._map_computer_use_action(cu_action_name, cu_params)
+                # 元のComputer Useアクション名を保持（function_response用）
+                action["_original_cu_name"] = cu_action_name
+                logger.info(f"[VisualAgent] Computer Use action: {cu_action_name} -> {action}")
                 break
 
         return action, reasoning
@@ -650,23 +739,24 @@ class VisualAgent:
 """
 
         try:
-            # 計画用に別のモデルインスタンスを使用（ツールなし）
-            planning_model = genai.GenerativeModel(model_name=self.model)
+            # 計画用にClient を使用（ツールなし）
+            client = genai.Client(api_key=settings.GOOGLE_GEMINI_API_KEY)
 
             content_parts = self._build_gemini_content(planning_prompt, screenshot_base64)
 
-            response = await planning_model.generate_content_async(
-                content_parts,
-                generation_config=genai.types.GenerationConfig(
+            response = await client.aio.models.generate_content(
+                model=self.model,
+                contents=[types.Content(role="user", parts=content_parts)],
+                config=types.GenerateContentConfig(
                     max_output_tokens=512,
                 ),
             )
 
             # トークン使用量を記録
-            if hasattr(response, "usage_metadata"):
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
                 self._total_tokens += (
-                    response.usage_metadata.prompt_token_count +
-                    response.usage_metadata.candidates_token_count
+                    (response.usage_metadata.prompt_token_count or 0) +
+                    (response.usage_metadata.candidates_token_count or 0)
                 )
 
             # レスポンスをパース
@@ -740,8 +830,8 @@ class VisualAgent:
 {task}{params_str}
 
 # 画面情報
-- 解像度: 1024x768 ピクセル
-- 座標系: 左上が (0, 0)、右下が (1024, 768)
+- 解像度: 1440x900 ピクセル
+- 座標系: 左上が (0, 0)、右下が (1440, 900)
 
 # 指示
 1. スクリーンショットを見て、タスクを完了するために必要な次のアクションを1つ決定してください
@@ -830,7 +920,7 @@ class VisualAgent:
             "total_steps": len(actions),
         }
 
-    async def _ask_llm_for_summary(self, chat) -> str:
+    async def _ask_llm_for_summary(self, messages: List[types.Content]) -> str:
         """
         LLMに今まで何をしたかを要約させる
         """
@@ -846,9 +936,19 @@ class VisualAgent:
 【現在】××ページを表示中
 """
         try:
-            response = await chat.send_message_async(
-                summary_prompt,
-                generation_config=genai.types.GenerationConfig(
+            client = genai.Client(api_key=settings.GOOGLE_GEMINI_API_KEY)
+
+            # 要約用のメッセージを追加
+            summary_messages = messages.copy()
+            summary_messages.append(types.Content(
+                role="user",
+                parts=[types.Part.from_text(text=summary_prompt)],
+            ))
+
+            response = await client.aio.models.generate_content(
+                model=self.model,
+                contents=summary_messages,
+                config=types.GenerateContentConfig(
                     max_output_tokens=500,
                 ),
             )

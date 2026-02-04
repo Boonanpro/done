@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     
     # Anthropic (Claude)
     ANTHROPIC_API_KEY: str = ""
+
+    # Google Gemini (learning inference)
+    GOOGLE_GEMINI_API_KEY: str = ""
     
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"

@@ -12,6 +12,7 @@ Native Tool Use:
 
 import re
 import logging
+import asyncio
 from typing import Optional, Dict, Any, Callable, Awaitable, List
 from pathlib import Path
 
@@ -292,11 +293,22 @@ class AgentRunner:
                     if self._on_reasoning_step and skill_name != "_visual":
                         status = "✅" if result.get("success") else "❌"
                         vision_indicator = " 👁️" if formatted.has_images() else ""
-                        await self._on_reasoning_step(f"{status} ツール実行完了{vision_indicator}")
+                        # 具体的な結果メッセージを表示
+                        message = result.get("message", "")
+                        if message and len(message) < 100:
+                            await self._on_reasoning_step(f"{status} {message}{vision_indicator}")
+                        else:
+                            # 長いメッセージは要約
+                            action_label = f"{skill_name} {action}"
+                            await self._on_reasoning_step(f"{status} {action_label} 完了{vision_indicator}")
 
             # 4. セッションを保存
             store = get_session_store()
             await store.save(self.session)
+
+            # 5. 自動分析をトリガー（バックグラウンドで実行）
+            if tool_results:  # ツールを使った場合のみ分析
+                asyncio.create_task(self._trigger_learning_analysis())
 
             # フォールバック: respond_to_userが呼ばれなかった場合
             if not user_response:
@@ -379,10 +391,12 @@ class AgentRunner:
         # if state_prompt:
         #     system += f"\n\n---\n\n## 現在の状態: {self.session.current_state.value.upper()}\n\n{state_prompt}"
 
-        # 利用可能なスキル情報を追加
-        system += self._build_skills_prompt()
+        # Progressive Disclosure Level 1: スキル一覧（description のみ）
+        skill_list = self._build_skill_list_section()
+        if skill_list:
+            system += skill_list
 
-        # Progressive Disclosure: 会話文脈から必要なアクションマニュアルを動的に追加
+        # Progressive Disclosure Level 2-3: 会話文脈から必要なアクションマニュアルを動的に追加
         action_manuals = self._load_relevant_action_manuals()
         if action_manuals:
             system += action_manuals
@@ -425,10 +439,9 @@ class AgentRunner:
 3. respond_to_user ツールでユーザーに回答
 
 ```
-[STATE: RESEARCH]
 商品を検索します...
 
-(amazon_search ツールを呼び出し)
+(visual_browse ツールを呼び出し)
 
 検索結果を確認中...
 4本セットが990円で見つかった
@@ -438,63 +451,18 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
 ```
 """
 
-    def _build_skills_prompt(self) -> str:
-        """利用可能なスキルのプロンプトを構築（Native Tool Use対応）"""
-        from app.services.skill_loader import get_skill_loader
-
+    def _build_skill_list_section(self) -> str:
+        """スキル一覧（description のみ）- Progressive Disclosure Level 1"""
         skills = SkillRegistry.list_all()
         if not skills:
             return ""
 
-        lines = ["\n\n---\n\n## 利用可能なツール\n"]
-        lines.append("以下のツールが利用可能です。ツールを使う時は直接呼び出してください。\n")
-
+        lines = ["\n\n## 利用可能なスキル"]
         for skill in skills:
-            lines.append(f"### {skill.display_name}")
-
-            # SKILL.mdからアクション情報を抽出
-            actions = self._extract_actions_from_skill(skill.raw_content)
-            if actions:
-                tool_names = [f"`{skill.name.replace('-', '_')}_{action}`" for action in actions]
-                lines.append(f"- ツール: {', '.join(tool_names)}")
-
-            lines.append(f"- 説明: {skill.description[:100]}...")
-            lines.append("")
-
-        # respond_to_user ツールの説明
-        lines.append("### ユーザー回答")
-        lines.append("- ツール: `respond_to_user`")
-        lines.append("- 説明: ユーザーへの最終回答を出力（必須）")
-        lines.append("")
-
-        # 学習済みスキル（生成されたスキル）の情報を追加
-        skill_loader = get_skill_loader()
-        learned_skills_summary = skill_loader.get_generated_skills_summary()
-        if learned_skills_summary:
-            lines.append("\n---\n")
-            lines.append(learned_skills_summary)
-            lines.append("")
-
+            lines.append(f"- `{skill.name}`: {skill.description}")
+        lines.append("\n※ スキルを使う場合は visual_browse の skill_name に指定")
+        lines.append("※ 詳細が必要な場合は check_skill ツールで SKILL.md を取得")
         return "\n".join(lines)
-
-    def _extract_actions_from_skill(self, content: str) -> list:
-        """SKILL.mdからアクション一覧を抽出"""
-        import re
-        actions = []
-
-        # テーブル形式 | `action` | を検出
-        table_matches = re.findall(r'\|\s*`(\w+)`\s*\|', content)
-        if table_matches:
-            actions.extend(table_matches)
-
-        # [TOOL: xxx action] 形式からアクションを検出
-        tool_matches = re.findall(r'\[TOOL:\s*\S+\s+(\w+)\]', content)
-        if tool_matches:
-            actions.extend(tool_matches)
-
-        # 重複除去して返す
-        return list(dict.fromkeys(actions))
-
 
 
     def _normalize_skill_token(self, text: str) -> str:
@@ -775,6 +743,33 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
             self.session.add_reasoning_step(line)
             if self._on_reasoning_step:
                 await self._on_reasoning_step(line)
+
+    async def _trigger_learning_analysis(self) -> None:
+        """
+        学習分析をバックグラウンドで実行
+
+        ツール実行後に非同期で呼び出される。
+        エラーが発生してもユーザー体験に影響しない。
+        """
+        try:
+            from app.services import learning_service
+            result = await learning_service.trigger_auto_analysis(
+                session_id=self.session.session_id,
+                site=None,  # 全サイト対象
+            )
+            if result.get("skipped"):
+                logger.debug(f"Learning analysis skipped: {result.get('reason')}")
+            elif result.get("error"):
+                logger.warning(f"Learning analysis error: {result.get('error')}")
+            else:
+                logger.info(
+                    f"Learning analysis complete: "
+                    f"{result.get('retry_patterns_detected', 0)} patterns, "
+                    f"{result.get('rules_created', 0)} rules"
+                )
+        except Exception as e:
+            # エラーはログに記録するだけ（ユーザー体験に影響しない）
+            logger.warning(f"Learning analysis failed: {e}")
 
     # Legacy: 旧方式との互換性のため残す（将来削除予定）
     async def _call_llm(self) -> str:

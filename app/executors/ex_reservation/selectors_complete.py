@@ -240,6 +240,51 @@ SEAT_SELECTION = {
     "back_button": 'button:has-text("戻る")',
 }
 
+# ===== 座席表（シートマップ）検証済み 2026/01/20 =====
+SEAT_MAP = {
+    # 座席表を開くボタン
+    "open_button": 'button.seat_map_button',
+
+    # 座席表テーブル
+    "table": '#seatlist_table_pc',
+
+    # 号車選択セレクト（value例: "2,03,1,00" = 普通3号車）
+    "car_select": '#pc-sel1',
+
+    # 席番選択セレクト（value: 0=指定なし, 1-20=番号）
+    "row_select": '#pc-1',
+
+    # 席列チェックボックス
+    "seat_checkbox_a": '#pc-1a',  # A席（窓側）
+    "seat_checkbox_b": '#pc-1b',  # B席（中央）
+    "seat_checkbox_c": '#pc-1c',  # C席（通路側）
+    "seat_checkbox_d": '#pc-1d',  # D席（通路側）
+    "seat_checkbox_e": '#pc-1e',  # E席（窓側）
+
+    # 座席セル（IDパターン: [A-E]-[1-20]）
+    # 例: td#A-19, td#B-5
+    "seat_cell_pattern": 'td#{}',  # formatで使用: "A-19"
+
+    # 空席セル（disabledクラスがない、○表示）
+    "available_seat": '#seatlist_table_pc td:not(.disabled)',
+
+    # 予約済みセル（disabledクラスあり、×表示）
+    "occupied_seat": '#seatlist_table_pc td.disabled',
+
+    # hidden inputs for selected seats
+    "hidden_seat_row": '#jmpsel1',      # 選択座席1の番号
+    "hidden_seat_col_a": '#jmpsel1a',   # A席選択フラグ
+    "hidden_seat_col_b": '#jmpsel1b',   # B席選択フラグ
+    "hidden_seat_col_c": '#jmpsel1c',   # C席選択フラグ
+    "hidden_seat_col_d": '#jmpsel1d',   # D席選択フラグ
+    "hidden_seat_col_e": '#jmpsel1e',   # E席選択フラグ
+
+    # ボタン
+    "clear_button": '#clr01',
+    "continue_button": 'input[name="b4"]',  # 予約を続ける
+    "back_button": 'button[name="b0"]',     # 戻る
+}
+
 # ===== 同意事項ダイアログ（座席表表示時）（検証済み）=====
 AGREEMENT_DIALOG = {
     # ダイアログラッパー

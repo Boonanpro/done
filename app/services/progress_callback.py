@@ -5,6 +5,7 @@ Progress Callback Service
 from typing import Callable, Optional, Awaitable
 from dataclasses import dataclass
 import asyncio
+import contextvars
 import logging
 
 logger = logging.getLogger(__name__)
@@ -74,19 +75,22 @@ class ProgressCallbackRegistry:
         return cls._queues.get(request_id)
 
 
-# コンテキスト変数（現在のリクエストIDを保持）
-_current_request_id: Optional[str] = None
+# コンテキスト変数（現在のリクエストIDを保持）- async対応
+# contextvars.ContextVarを使用することで、各asyncタスクが独自のコンテキストを持つ
+# これにより、セッション間でリクエストIDが干渉しなくなる
+_current_request_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    'current_request_id', default=None
+)
 
 
 def set_current_request_id(request_id: Optional[str]) -> None:
     """現在のリクエストIDを設定"""
-    global _current_request_id
-    _current_request_id = request_id
+    _current_request_id.set(request_id)
 
 
 def get_current_request_id() -> Optional[str]:
     """現在のリクエストIDを取得"""
-    return _current_request_id
+    return _current_request_id.get()
 
 
 async def notify_progress(step: str, label: str, status: str = "running", details: Optional[dict] = None) -> None:

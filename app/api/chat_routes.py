@@ -54,9 +54,16 @@ from app.models.chat_schemas import (
     # Dan Page & Proposals (2E & 2G)
     DanRoomResponse, ProposalResponse, ProposalsListResponse, ProposalActionRequest,
     # Sessions
-    SessionResponse, SessionsListResponse, SessionCreateResponse, 
+    SessionResponse, SessionsListResponse, SessionCreateResponse,
     SessionActivateResponse, SessionUpdateRequest,
 )
+
+from pydantic import BaseModel
+
+
+class CancelRequest(BaseModel):
+    """キャンセルリクエスト"""
+    session_id: str
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 security = HTTPBearer(auto_error=False)
@@ -587,16 +594,18 @@ async def send_dan_message_stream(
     import uuid
     import asyncio
     
-    # 挨拶キーワード
-    GREETING_KEYWORDS = ["おはよう", "こんにちは", "こんばんは", "ありがとう", "おやすみ",
-                         "hello", "hi", "thanks", "thank you", "good morning", "good night"]
+    # 挨拶のハードコード返答は廃止。必ずAgent v2に渡す。
     
     async def generate_stream():
         # リクエストIDを生成（プログレスコールバック用）
         request_id = str(uuid.uuid4())
         progress_queue = ProgressCallbackRegistry.create_queue(request_id)
         set_current_request_id(request_id)
-        
+
+        # キャンセルフラグを登録
+        from app.services.cancellation import CancellationRegistry
+        room_id_for_cancel = None  # 後で設定
+
         try:
             # Step 1: ユーザーメッセージを保存
             # session_idが指定されていればそのルームに、なければ現在のDanルームに送信
@@ -607,6 +616,10 @@ async def send_dan_message_stream(
                 message = await service.send_dan_message(current_user.user_id, request.content)
                 room_id = message["room_id"]
             user = await service.get_user_by_id(current_user.user_id)
+
+            # キャンセルフラグを登録（room_idが確定してから）
+            room_id_for_cancel = room_id
+            CancellationRegistry.register(room_id)
 
             # 最初のプロセスステップ（session_id付き）
             yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': 'receive', 'label': '考え中...', 'status': 'running'}})}\n\n"
@@ -645,10 +658,6 @@ async def send_dan_message_stream(
                 import logging
                 logging.warning(f"Failed to get conversation history: {e}")
             
-            # 挨拶かどうかをチェック
-            content_lower = request.content.lower()
-            is_greeting = any(kw in content_lower for kw in GREETING_KEYWORDS)
-
             # ========================================
             # Agent v2で処理
             # ========================================
@@ -662,66 +671,84 @@ async def send_dan_message_stream(
                 reasoning_steps.append(step)
                 await reasoning_queue.put(step)
 
-            # 挨拶の場合はシンプルに応答
-            if is_greeting:
-                yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': 'greeting', 'label': '挨拶に応答します', 'status': 'completed'}})}\n\n"
-                ai_response_content = "こんにちは！何かお手伝いできることはありますか？"
-            else:
-                # ========================================
-                # Agent v2: Messages配列ベースのrunner
-                # ========================================
-                from app.agent.v2.runner import create_runner
-                from app.executors.registry import register_all_executors
+            # ========================================
+            # Agent v2: Messages配列ベースのrunner
+            # ========================================
+            result = {}  # デフォルト初期化（browser_session_id等の参照用）
+            from app.agent.v2.runner import create_runner
+            from app.executors.registry import register_all_executors
 
-                # Executor登録
-                register_all_executors()
+            # Executor登録
+            register_all_executors()
 
-                # Agent v2 Runner作成
-                runner = await create_runner(
-                    session_id=room_id,
-                    user_id=current_user.user_id,
-                    on_reasoning_step=on_reasoning_step,
-                )
+            # Agent v2 Runner作成
+            runner = await create_runner(
+                session_id=room_id,
+                user_id=current_user.user_id,
+                on_reasoning_step=on_reasoning_step,
+            )
 
-                # メッセージ処理をバックグラウンドで実行
-                process_task = asyncio.create_task(runner.process_message(request.content))
+            # メッセージ処理をバックグラウンドで実行
+            process_task = asyncio.create_task(runner.process_message(request.content))
 
-                # キューを監視してSSEで送信
-                step_counter = 0
-                while not process_task.done():
-                    try:
-                        step = await asyncio.wait_for(reasoning_queue.get(), timeout=0.1)
-                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'reasoning-{step_counter}', 'label': step, 'status': 'running'}})}\n\n"
-                        step_counter += 1
-                    except asyncio.TimeoutError:
-                        continue
+            # キューを監視してSSEで送信（reasoning_queueとprogress_queue両方）
+            step_counter = 0
+            while not process_task.done():
+                # キャンセルチェック
+                if CancellationRegistry.is_cancelled(room_id):
+                    process_task.cancel()
+                    yield f"data: {json.dumps({'type': 'cancelled', 'session_id': room_id})}\n\n"
+                    return
 
-                # 残りのステップを送信
-                while not reasoning_queue.empty():
-                    try:
-                        step = reasoning_queue.get_nowait()
-                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'reasoning-{step_counter}', 'label': step, 'status': 'completed'}})}\n\n"
-                        step_counter += 1
-                    except asyncio.QueueEmpty:
-                        break
+                # reasoning_queueをチェック
+                try:
+                    step = await asyncio.wait_for(reasoning_queue.get(), timeout=0.05)
+                    yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'reasoning-{step_counter}', 'label': step, 'status': 'running'}})}\n\n"
+                    step_counter += 1
+                except asyncio.TimeoutError:
+                    pass
 
-                # 結果を取得
-                result = await process_task
+                # progress_queueもチェック（VisualAgent等の進捗）
+                try:
+                    progress_update = progress_queue.get_nowait()
+                    yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'visual-{step_counter}', 'label': progress_update.label, 'status': progress_update.status}})}\n\n"
+                    step_counter += 1
+                except asyncio.QueueEmpty:
+                    pass
 
-                # 応答を取得
-                ai_response_content = result.get("response", "申し訳ありません。処理中にエラーが発生しました。")
+            # 残りのステップを送信
+            while not reasoning_queue.empty():
+                try:
+                    step = reasoning_queue.get_nowait()
+                    yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'reasoning-{step_counter}', 'label': step, 'status': 'completed'}})}\n\n"
+                    step_counter += 1
+                except asyncio.QueueEmpty:
+                    break
 
-                # ツール実行結果があれば通知
-                if result.get("tool_results"):
-                    for tr in result["tool_results"]:
-                        tool_info = f"{tr['tool']['skill']} {tr['tool']['action']}"
-                        success = tr['result'].get('success', False)
-                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'tool-{tool_info}', 'label': f'ツール実行: {tool_info}', 'status': 'completed' if success else 'error'}})}\n\n"
+            # 残りのprogress更新も送信
+            while not progress_queue.empty():
+                try:
+                    progress_update = progress_queue.get_nowait()
+                    yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'visual-{step_counter}', 'label': progress_update.label, 'status': 'completed'}})}\n\n"
+                    step_counter += 1
+                except asyncio.QueueEmpty:
+                    break
 
-                # エラーがあれば通知
-                if result.get("error"):
-                    yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': result['error']})}\n\n"
-            
+            # 結果を取得
+            result = await process_task
+
+            # キャンセルされた場合
+            if result.get("cancelled"):
+                yield f"data: {json.dumps({'type': 'cancelled', 'session_id': room_id})}\n\n"
+                return
+
+            # 応答を取得（空文字列の場合もフォールバック）
+            ai_response_content = result.get("response") or "申し訳ありません。処理中にエラーが発生しました。"
+
+            # エラーがあれば通知
+            if result.get("error"):
+                yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': result['error']})}\n\n"
+
             # DBに保存（指定されたroom_idを使用）
             ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content, reasoning_steps, room_id=room_id)
 
@@ -741,9 +768,15 @@ async def send_dan_message_stream(
             }
             
             # 完了（session_id付き）
-            yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': 'propose', 'label': '回答を作成しました', 'status': 'completed'}})}\n\n"
             yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
+
+            # スキル化可能なブラウザセッションIDがあれば含める
+            done_data = {'type': 'done', 'session_id': room_id}
+            browser_session_id = result.get("browser_session_id")
+            if browser_session_id:
+                done_data['browser_session_id'] = browser_session_id
+                done_data['can_create_skill'] = True
+            yield f"data: {json.dumps(done_data)}\n\n"
             
         except Exception as e:
             import logging
@@ -754,6 +787,9 @@ async def send_dan_message_stream(
             # クリーンアップ: リクエストIDとコールバックを解除
             ProgressCallbackRegistry.unregister(request_id)
             set_current_request_id(None)
+            # キャンセルフラグを解除
+            if room_id_for_cancel:
+                CancellationRegistry.unregister(room_id_for_cancel)
     
     return StreamingResponse(
         generate_stream(),
@@ -926,11 +962,19 @@ async def delete_dan_session(
 ):
     """
     セッションを削除
-    
+
     - アクティブなセッションを削除した場合、別のセッションに自動切り替え
     - 関連するメッセージも全て削除される
+    - 実行中の処理とブラウザ操作もキャンセルされる
     """
     try:
+        # キャンセル処理: 実行中のタスクとブラウザ操作を停止
+        from app.services.cancellation import CancellationRegistry
+        from app.tools.browser import abort_executor_session
+
+        CancellationRegistry.cancel(session_id)
+        abort_executor_session()
+
         result = await service.delete_dan_session(current_user.user_id, session_id)
         return {
             "message": "Session deleted successfully",
@@ -940,6 +984,31 @@ async def delete_dan_session(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== Cancel Route ====================
+
+@router.post("/dan/cancel")
+async def cancel_dan_session(
+    request: CancelRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """
+    実行中のセッションをキャンセル
+
+    - CancellationRegistryにキャンセルフラグをセット
+    - ブラウザのコマンドキューをクリア
+    - 実行中のツールは次のチェックポイントで停止
+    """
+    from app.services.cancellation import CancellationRegistry
+    from app.tools.browser import abort_executor_session
+
+    success = CancellationRegistry.cancel(request.session_id)
+
+    # ブラウザセッションも停止
+    abort_executor_session()
+
+    return {"success": success, "session_id": request.session_id}
 
 
 # ==================== Proposal Routes (2G) ====================
@@ -1032,6 +1101,14 @@ class ConnectionManager:
     async def send_personal_message(self, message: dict, websocket: WebSocket):
         """特定のWebSocketにメッセージを送信"""
         await websocket.send_json(message)
+
+    def get_connection(self, room_id: str, user_id: str) -> Optional[WebSocket]:
+        """????????????"""
+        return self.active_connections.get(room_id, {}).get(user_id)
+
+    def is_connected(self, room_id: str, user_id: str) -> bool:
+        """?????????????"""
+        return self.get_connection(room_id, user_id) is not None
     
     async def broadcast_to_room(self, room_id: str, message: dict, exclude_user_id: str = None):
         """ルーム内の全員にメッセージをブロードキャスト"""

@@ -30,6 +30,10 @@ class SearchParams:
     seat_position: str = "指定なし"  # 窓側A, 通路側C, 指定なし
     product_type: str = "regular"  # regular, green
     adult_count: int = 1
+    # 座席表機能
+    specific_seat: Optional[str] = None  # 特定席指定（例: "5号車3番A席"）
+    prefer_adjacent_empty: bool = False  # 隣空席優先
+    show_seat_map: bool = False  # 座席表表示
 
     @classmethod
     def from_dict(cls, params: Dict[str, Any]) -> "SearchParams":
@@ -81,6 +85,11 @@ class SearchParams:
         # 人数
         adult_count = int(params.get("adult_count") or params.get("passengers") or 1)
 
+        # 座席表機能
+        specific_seat = params.get("specific_seat")
+        prefer_adjacent_empty = bool(params.get("prefer_adjacent_empty", False))
+        show_seat_map = bool(params.get("show_seat_map", False))
+
         return cls(
             departure=departure,
             arrival=arrival,
@@ -89,6 +98,9 @@ class SearchParams:
             seat_position=seat_position,
             product_type=product_type,
             adult_count=adult_count,
+            specific_seat=specific_seat,
+            prefer_adjacent_empty=prefer_adjacent_empty,
+            show_seat_map=show_seat_map,
         )
 
     @staticmethod
@@ -319,3 +331,143 @@ class CancelResult:
     refund_amount: Optional[int] = None
     refund_fee: Optional[int] = None
     screenshot_path: Optional[str] = None
+
+
+@dataclass
+class BrowserState:
+    """
+    ブラウザの実際の状態
+
+    第一原理: ブラウザの実際の状態が唯一の真実。
+    LLMの推測ではなく、実際のページ状態を報告する。
+    """
+    url: str = ""
+    page_type: str = ""  # "login", "search", "seat_map", "confirmation", "error"
+    logged_in: bool = False
+    current_car: Optional[int] = None  # 座席表表示時の号車
+    error_message: Optional[str] = None  # ページ上のエラーメッセージ
+    screenshot_path: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "url": self.url,
+            "page_type": self.page_type,
+            "logged_in": self.logged_in,
+            "current_car": self.current_car,
+            "error_message": self.error_message,
+            "screenshot_path": self.screenshot_path,
+        }
+
+
+@dataclass
+class RequestedConditions:
+    """
+    ユーザーがリクエストした条件
+
+    ツール結果で「何をリクエストされたか」を明示する。
+    """
+    seat_type: Optional[str] = None  # "2列席窓側", "3列席窓側", etc.
+    seat_position: Optional[str] = None  # "窓側A", "通路側C", etc.
+    adjacent_empty: bool = False  # 隣空席希望
+    specific_seat: Optional[str] = None  # "5号車3番E席"
+    car_number: Optional[int] = None  # 号車指定
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "seat_type": self.seat_type,
+            "seat_position": self.seat_position,
+            "adjacent_empty": self.adjacent_empty,
+            "specific_seat": self.specific_seat,
+            "car_number": self.car_number,
+        }
+
+    def describe(self) -> str:
+        """条件を日本語で説明"""
+        parts = []
+        if self.seat_type:
+            parts.append(self.seat_type)
+        if self.seat_position:
+            parts.append(self.seat_position)
+        if self.adjacent_empty:
+            parts.append("隣空席希望")
+        if self.specific_seat:
+            parts.append(f"指定席: {self.specific_seat}")
+        if self.car_number:
+            parts.append(f"{self.car_number}号車")
+        return "、".join(parts) if parts else "指定なし"
+
+
+@dataclass
+class ActualResult:
+    """
+    実際に選択された結果
+
+    ツール結果で「何を実行したか」を明示する。
+    """
+    seat: Optional[str] = None  # "4号車2番A席"
+    seat_type: Optional[str] = None  # "3列席窓側"
+    car_number: Optional[int] = None
+    adjacent_empty: bool = False  # 隣が空いているか
+    row: Optional[int] = None
+    letter: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "seat": self.seat,
+            "seat_type": self.seat_type,
+            "car_number": self.car_number,
+            "adjacent_empty": self.adjacent_empty,
+            "row": self.row,
+            "letter": self.letter,
+        }
+
+    def describe(self) -> str:
+        """結果を日本語で説明"""
+        parts = []
+        if self.seat:
+            parts.append(self.seat)
+        if self.seat_type:
+            parts.append(f"（{self.seat_type}）")
+        if self.adjacent_empty:
+            parts.append("隣も空席")
+        return "".join(parts) if parts else "未選択"
+
+
+@dataclass
+class SeatDeviation:
+    """
+    リクエストと結果の差分
+
+    第一原理: 差分があれば必ず報告する。
+    ユーザーが何を要求し、何が返されたかを明確にする。
+    """
+    has_deviation: bool = False
+    requested: Optional[RequestedConditions] = None
+    actual: Optional[ActualResult] = None
+    reason: Optional[str] = None  # 差分が生じた理由
+    alternatives_checked: List[str] = field(default_factory=list)  # 確認した代替案
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "has_deviation": self.has_deviation,
+            "requested": self.requested.to_dict() if self.requested else None,
+            "actual": self.actual.to_dict() if self.actual else None,
+            "reason": self.reason,
+            "alternatives_checked": self.alternatives_checked,
+        }
+
+    def describe(self) -> str:
+        """差分を日本語で説明"""
+        if not self.has_deviation:
+            return "要件通り"
+
+        parts = []
+        if self.requested:
+            parts.append(f"要求: {self.requested.describe()}")
+        if self.actual:
+            parts.append(f"実際: {self.actual.describe()}")
+        if self.reason:
+            parts.append(f"理由: {self.reason}")
+        if self.alternatives_checked:
+            parts.append(f"確認済み: {', '.join(self.alternatives_checked)}")
+        return " → ".join(parts)

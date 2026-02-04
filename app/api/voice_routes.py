@@ -3,9 +3,12 @@ Phase 10: Voice Communication API Routes
 音声通話関連のAPIエンドポイント
 """
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query, Form, Request, Response
+import uuid
+from fastapi import APIRouter, HTTPException, Query, Form, Request, Response, WebSocket, WebSocketDisconnect
 
 from app.services.voice_service import get_voice_service
+from app.services.auth_service import decode_access_token
+from app.services.dan_notifier import voice_session_registry
 from app.models.voice_schemas import (
     CallPurpose, PhoneRuleType, CallDirection, CallStatus,
     VoiceCallCreate, VoiceSettingsUpdate, VoiceSettingsResponse,
@@ -16,9 +19,145 @@ from app.models.voice_schemas import (
 )
 
 router = APIRouter(prefix="/api/v1/voice", tags=["voice"])
+ws_router = APIRouter()
 
 # デフォルトユーザーID（認証実装後は動的に取得）
 DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001"
+
+
+# ========================================
+# Voice Companion WebSocket (Phase 1-3)
+# ========================================
+
+@ws_router.websocket("/ws/voice")
+async def voice_companion_websocket(websocket: WebSocket):
+    """
+    Voice companion WebSocket endpoint.
+
+    Client -> Server:
+      { "type": "auth", "token": "JWT", "session_id": "optional" }
+      { "type": "user_message", "text": "..." }
+
+    Server -> Client:
+      { "type": "auth_success", "user_id": "...", "session_id": "..." }
+      { "type": "progress", "step": "..." }
+      { "type": "assistant_message", "text": "..." }
+    """
+    await websocket.accept()
+
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
+    is_processing = False
+
+    try:
+        auth_payload = await websocket.receive_json()
+        if auth_payload.get("type") != "auth":
+            await websocket.send_json({"type": "error", "message": "Authentication required"})
+            await websocket.close()
+            return
+
+        token = auth_payload.get("token")
+        session_id = auth_payload.get("session_id") or str(uuid.uuid4())
+
+        user_id = DEFAULT_USER_ID
+        if token:
+            token_data = decode_access_token(token)
+            if not token_data:
+                await websocket.send_json({"type": "error", "message": "Invalid or expired token"})
+                await websocket.close()
+                return
+            user_id = token_data.user_id
+
+        voice_session_registry.add(user_id, session_id, websocket)
+        await websocket.send_json({"type": "auth_success", "user_id": user_id, "session_id": session_id})
+
+        while True:
+            data = await websocket.receive_json()
+            msg_type = data.get("type")
+
+            if msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+
+            if msg_type == "cancel":
+                try:
+                    from app.services.cancellation import CancellationRegistry
+                    CancellationRegistry.cancel(session_id)
+                except Exception:
+                    pass
+                await websocket.send_json({"type": "cancelled", "session_id": session_id})
+                continue
+
+            if msg_type != "user_message":
+                await websocket.send_json({"type": "error", "message": "Unknown message type"})
+                continue
+
+            text = (data.get("text") or data.get("content") or "").strip()
+            if not text:
+                await websocket.send_json({"type": "error", "message": "Empty message"})
+                continue
+
+            if is_processing:
+                await websocket.send_json({"type": "busy", "message": "Already processing"})
+                continue
+
+            is_processing = True
+            try:
+                await websocket.send_json({"type": "processing", "status": "start"})
+            except Exception:
+                pass
+
+            async def on_reasoning_step(step: str):
+                try:
+                    await websocket.send_json({
+                        "type": "progress",
+                        "step": step,
+                        "session_id": session_id,
+                    })
+                except Exception as exc:
+                    logger.debug("Progress send failed: %s", exc)
+
+            try:
+                from app.agent.v2.runner import create_runner
+                from app.executors.registry import register_all_executors
+
+                register_all_executors()
+                runner = await create_runner(
+                    session_id=session_id,
+                    user_id=user_id,
+                    on_reasoning_step=on_reasoning_step,
+                )
+                result = await runner.process_message(text)
+
+                await websocket.send_json({
+                    "type": "assistant_message",
+                    "text": result.get("response") or "",
+                    "session_id": session_id,
+                    "reasoning_steps": result.get("reasoning_steps", []),
+                })
+            except Exception as exc:
+                logger.error("Voice processing error: %s", exc)
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Failed to process message",
+                    })
+                except Exception:
+                    pass
+            finally:
+                is_processing = False
+                try:
+                    await websocket.send_json({"type": "processing", "status": "done"})
+                except Exception:
+                    pass
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("Voice WebSocket connection error: %s", exc)
+    finally:
+        if user_id and session_id:
+            voice_session_registry.remove(user_id, session_id)
 
 
 # ========================================
@@ -322,7 +461,6 @@ async def twilio_incoming_webhook(
 # Media Streams WebSocket (10E)
 # ========================================
 
-from fastapi import WebSocket, WebSocketDisconnect
 import json
 import base64
 import asyncio
@@ -682,4 +820,3 @@ async def media_stream_websocket(websocket: WebSocket, call_sid: str):
         # クリーンアップ
         if handler.is_connected:
             await handler._finalize_call()
-

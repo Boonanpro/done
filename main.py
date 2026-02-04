@@ -21,7 +21,8 @@ from app.api.content_routes import router as content_router
 from app.api.invoice_routes import router as invoice_router
 from app.api.bank_account_routes import router as bank_account_router
 from app.api.otp_routes import router as otp_router
-from app.api.voice_routes import router as voice_router
+from app.api.voice_routes import router as voice_router, ws_router as voice_ws_router
+from app.api.skill_routes import router as skill_router
 from app.executors.registry import register_all_executors
 
 # 全Executorを登録
@@ -60,6 +61,8 @@ app.include_router(invoice_router, prefix="/api/v1")
 app.include_router(bank_account_router, prefix="/api/v1")
 app.include_router(otp_router, prefix="/api/v1")
 app.include_router(voice_router)  # Already has /api/v1/voice prefix
+app.include_router(voice_ws_router)
+app.include_router(skill_router, prefix="/api/v1")
 
 
 @app.get("/")

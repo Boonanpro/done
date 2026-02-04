@@ -1,8 +1,12 @@
 """
 Credentials Service for Phase 3B: Execution Engine
 認証情報の保存・取得・削除を管理するサービス（Supabase永続化）
+
+統一スキーマ（2026/01リファクタリング）:
+    全サービス共通で {"id": "...", "password": "..."} の形式を使用。
+    保存時・取得時に自動で正規化される。
 """
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 from datetime import datetime
 import logging
 
@@ -10,6 +14,55 @@ from app.services.encryption import get_encryption_service
 from app.services.supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================
+# 認証情報の正規化（統一スキーマ）
+# ============================================
+
+# IDとして認識するキー（優先順）
+ID_KEYS = ["id", "email", "member_id", "username", "login_id", "user_id"]
+# パスワードとして認識するキー（優先順）
+PASSWORD_KEYS = ["password", "pass", "pw"]
+
+
+def _normalize_credentials(credentials: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    認証情報のキー名を統一スキーマに正規化
+
+    入力例:
+        {"email": "user@example.com", "password": "xxx"}
+        {"member_id": "12345678", "pass": "xxx"}
+        {"username": "john", "pw": "xxx"}
+
+    出力（統一形式）:
+        {"id": "...", "password": "..."}
+
+    Args:
+        credentials: 様々なキー名の認証情報
+
+    Returns:
+        正規化された認証情報（id, password のみ）
+    """
+    normalized: Dict[str, Any] = {}
+
+    # IDを抽出（優先順で最初に見つかったものを使用）
+    for key in ID_KEYS:
+        if key in credentials and credentials[key]:
+            normalized["id"] = credentials[key]
+            break
+
+    # パスワードを抽出
+    for key in PASSWORD_KEYS:
+        if key in credentials and credentials[key]:
+            normalized["password"] = credentials[key]
+            break
+
+    # _credential_type があればそのまま保持（内部用）
+    if "_credential_type" in credentials:
+        normalized["_credential_type"] = credentials["_credential_type"]
+
+    return normalized
 
 
 class CredentialsService:
@@ -33,19 +86,25 @@ class CredentialsService:
         """
         認証情報を暗号化して保存
 
+        保存前に正規化を行い、統一スキーマ（id, password）に変換する。
+
         Args:
             user_id: ユーザーID
             service: サービス名（ex_reservation, amazon, gmail_imap等）
-            credentials: 認証情報（email, passwordなど）
+            credentials: 認証情報（email/member_id/username/id, password/pass/pw）
             credential_type: 認証タイプ（login, api_key, oauth, imap）
 
         Returns:
             保存結果
         """
         try:
-            # credential_typeをcredentialsに含めて保存
-            creds_with_type = {**credentials, "_credential_type": credential_type}
-            encrypted_data = self.encryption.encrypt_dict(creds_with_type)
+            # 認証情報を正規化（統一スキーマに変換）
+            normalized = _normalize_credentials(credentials)
+
+            # credential_typeを追加
+            normalized["_credential_type"] = credential_type
+
+            encrypted_data = self.encryption.encrypt_dict(normalized)
             encrypted_str = encrypted_data.decode('utf-8')  # bytesをstrに変換
 
             # 既存のレコードを確認
@@ -91,12 +150,15 @@ class CredentialsService:
         """
         認証情報を取得して復号
 
+        取得時も正規化を行い、統一スキーマ（id, password）で返す。
+        マイグレーション前の旧データにも対応。
+
         Args:
             user_id: ユーザーID
             service: サービス名
 
         Returns:
-            復号された認証情報、なければNone
+            正規化された認証情報（id, password）、なければNone
         """
         try:
             result = self.supabase.table(self.TABLE_NAME).select("*").eq(
@@ -115,11 +177,14 @@ class CredentialsService:
             # _credential_typeを取り出してトップレベルに
             credential_type = decrypted.pop("_credential_type", "login")
 
+            # 正規化して統一スキーマに変換（旧データ対応）
+            normalized = _normalize_credentials(decrypted)
+
             return {
-                "id": stored["id"],
+                "id": normalized.get("id"),
+                "password": normalized.get("password"),
                 "service": stored["service_name"],
                 "credential_type": credential_type,
-                **decrypted,
             }
         except Exception as e:
             logger.error(f"Failed to get credentials: {e}")

@@ -252,8 +252,12 @@ async def parse_confirmation_page(page: Page) -> Optional[BookingInfo]:
         # 日付を抽出
         date = _extract_pattern(html, r'(\d{4}年\d{1,2}月\d{1,2}日)')
 
-        # 座席情報を抽出（例: 3号車12A）
-        seat_info = _extract_pattern(html, r'(\d+号車\s*\d+[A-E])') or ""
+        # 座席情報を抽出（例: 5号車 3番A席, 3号車12A）
+        seat_info = (
+            _extract_pattern(html, r'(\d+号車\s*\d+番[A-E]席)') or  # 5号車 3番A席
+            _extract_pattern(html, r'(\d+号車\s*\d+[A-E])') or       # 3号車12A
+            ""
+        )
 
         # 価格を抽出
         price = 0

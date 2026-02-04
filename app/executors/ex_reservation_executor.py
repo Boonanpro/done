@@ -591,20 +591,20 @@ class EXReservationExecutor(BaseExecutor):
                 await page_wait_for_load_state("domcontentloaded")
                 await page_wait_for_timeout(3000)
             
-            # Step 5: 検索結果を取得
+            # Step 5: 列車選択画面で候補を確認
             await self._notify_progress(
                 "extracting",
                 "列車情報を抽出中...",
             )
-            
+
             # 現在のURLを取得
             current_url = await page_url()
-            
+
             # 候補を取得（SmartEXの場合）
             train_candidates = await page_query_selector_all('[class*="candidate"], [class*="train"], [class*="result"]')
-            
+
             print(f"[EX_SEARCH] Found {len(train_candidates) if train_candidates else 0} train candidates")
-            
+
             # SmartEXから候補を取得できなかった場合 → web_searchで料金を取得
             if not options:
                 print("[EX_SEARCH] No options from SmartEX, falling back to web_search")
@@ -612,20 +612,83 @@ class EXReservationExecutor(BaseExecutor):
                     "fallback",
                     "EX予約から情報を取得できませんでした。Web検索で料金を確認中...",
                 )
-                
+
                 # web_searchで新幹線料金を検索
                 web_result = await self._search_train_price_via_web(departure, arrival, date, time)
                 if web_result:
                     options = web_result
-            
-            # スクリーンショット
+
+            # Step 6: 最終確認画面まで進む（購入ボタンは押さない）
+            await self._notify_progress(
+                "selecting",
+                "列車を選択中...",
+            )
+
+            # 「この候補を選択」ボタンをクリック
+            select_button = await page_query_selector('text=この候補を選択')
+            if select_button:
+                print("[EX_SEARCH] Clicking '選択' button to proceed to confirmation")
+                await page_click('text=この候補を選択')
+                await page_wait_for_load_state("domcontentloaded")
+                await page_wait_for_timeout(2000)
+
+                # Step 7: 設備・座席選択画面があれば進む
+                # 座席位置の指定（パラメータから取得）
+                seat_position = params.get("seat_position", "")
+                if seat_position:
+                    await self._notify_progress(
+                        "seat_selection",
+                        f"座席を選択中... ({seat_position})",
+                    )
+                    # 座席位置のセレクトボックスがあれば選択
+                    seat_select = await page_query_selector('select[name*="seat"], select[name*="zaseki"]')
+                    if seat_select:
+                        # 座席位置をマッピング
+                        seat_map = {
+                            "窓側": "A", "window": "A",
+                            "通路側": "C", "aisle": "C",
+                            "A": "A", "B": "B", "C": "C", "D": "D", "E": "E",
+                        }
+                        seat_value = seat_map.get(seat_position, "")
+                        if seat_value:
+                            try:
+                                await seat_select.select_option(label=seat_value)
+                            except Exception as e:
+                                print(f"[EX_SEARCH] Could not select seat position: {e}")
+
+                # 「次へ」または「確認」ボタンを探してクリック
+                next_buttons = ['text=次へ', 'text=確認へ進む', 'text=確認', 'button[type="submit"]']
+                for btn_selector in next_buttons:
+                    next_btn = await page_query_selector(btn_selector)
+                    if next_btn:
+                        print(f"[EX_SEARCH] Clicking next button: {btn_selector}")
+                        await page_click(btn_selector)
+                        await page_wait_for_load_state("domcontentloaded")
+                        await page_wait_for_timeout(2000)
+                        break
+
+                # Step 8: 最終確認画面でスクリーンショットを撮る
+                await self._notify_progress(
+                    "confirmation",
+                    "確認画面に到達しました",
+                )
+
+                # 購入ボタンが表示されているか確認（最終確認画面にいることの確認）
+                purchase_btn = await page_query_selector('text=予約する（購入）')
+                if purchase_btn:
+                    print("[EX_SEARCH] Reached final confirmation screen")
+                else:
+                    print("[EX_SEARCH] May not be on final confirmation screen")
+
+            # 最終確認画面（または到達した画面）でスクリーンショット
             screenshot_path = f"ex_search_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
             await page_screenshot(screenshot_path)
-            
+            print(f"[EX_SEARCH] Screenshot saved: {screenshot_path}")
+
             return ExecutorSearchResult(
                 success=True,
                 options=options,
-                message=f"{len(options)}件の列車が見つかりました",
+                message=f"確認画面に到達しました。スクリーンショットを確認してください。",
                 search_url=current_url,
                 screenshot_path=screenshot_path,
             )

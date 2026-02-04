@@ -37,8 +37,23 @@ from app.executors.ex_reservation.search import (
 from app.executors.ex_reservation.seat import complete_seat_selection
 from app.executors.ex_reservation.cancel import cancel_reservation
 from app.executors.ex_reservation.selectors_complete import CONFIRMATION
+from app.services.cancellation import CancellationRegistry, CancelledError
 
 logger = logging.getLogger(__name__)
+
+
+def _check_cancelled() -> bool:
+    """キャンセル状態をチェック（ヘルパー関数）"""
+    if CancellationRegistry.check_cancelled():
+        session_id = CancellationRegistry.get_current_session()
+        logger.info(f"EX Reservation: Operation cancelled (session={session_id})")
+        return True
+    return False
+
+
+def _raise_if_cancelled():
+    """キャンセルされていたら例外を発生"""
+    CancellationRegistry.check_cancelled_raise()
 
 
 class EXReservationExecutor(BaseExecutor):
@@ -84,13 +99,30 @@ class EXReservationExecutor(BaseExecutor):
 
             await self._notify_progress("connect", f"{self.service_display_name}にアクセス中...")
 
+            # キャンセルチェック
+            _raise_if_cancelled()
+
             # Step 1: ログイン確認・実行
             if not await self._ensure_logged_in(page, credentials):
+                # 認証情報がない場合は credentials_required
+                if not credentials:
+                    return ExecutorSearchResult(
+                        success=False,
+                        options=[],
+                        message="ログインに必要な認証情報がありません",
+                        error_type="credentials_required",
+                        requires_credentials=True,
+                    )
+                # 認証情報はあるがログイン失敗
                 return ExecutorSearchResult(
                     success=False,
                     options=[],
-                    message="ログインに失敗しました",
+                    message="ログインに失敗しました。認証情報を確認してください。",
+                    error_type="credentials_invalid",
                 )
+
+            # キャンセルチェック
+            _raise_if_cancelled()
 
             # Step 2-4: 検索実行（search_trainsが一連の処理を行う）
             await self._notify_progress("search", f"列車を検索中... {search_params.departure}→{search_params.arrival}")
@@ -110,7 +142,12 @@ class EXReservationExecutor(BaseExecutor):
                     options=[],
                     message=ERROR_MESSAGES["no_trains"],
                     screenshot_path=search_result.screenshot_path,
+                    error_type="not_found",
+                    recoverable=True,
                 )
+
+            # キャンセルチェック
+            _raise_if_cancelled()
 
             # Step 5: 最適な列車を選択
             selected_train = self._select_best_train(search_result.trains, search_params.time)
@@ -121,6 +158,8 @@ class EXReservationExecutor(BaseExecutor):
                     options=[],
                     message=ERROR_MESSAGES["no_seats"],
                     screenshot_path=search_result.screenshot_path,
+                    error_type="not_available",
+                    recoverable=True,
                 )
 
             logger.info(f"列車選択: {selected_train.train_name} {selected_train.departure_time}発")
@@ -133,15 +172,27 @@ class EXReservationExecutor(BaseExecutor):
                     message="列車の選択に失敗しました",
                 )
 
+            # キャンセルチェック
+            _raise_if_cancelled()
+
             # Step 6: 座席選択→確認画面まで進む
             await self._notify_progress("seat", "座席を選択中...")
 
             product_index = 1 if search_params.product_type == "green" else 0
 
+            # 座席表機能の通知
+            if search_params.show_seat_map or search_params.prefer_adjacent_empty:
+                await self._notify_progress("seat_map", "座席表を確認中...")
+            if search_params.specific_seat:
+                await self._notify_progress("seat_map", f"指定席 {search_params.specific_seat} を選択中...")
+
             seat_result = await complete_seat_selection(
                 page,
                 product_index=product_index,
                 seat_position=search_params.seat_position,
+                specific_seat=search_params.specific_seat,
+                prefer_adjacent_empty=search_params.prefer_adjacent_empty,
+                show_seat_map=search_params.show_seat_map,
             )
 
             if not seat_result.success:
@@ -151,6 +202,9 @@ class EXReservationExecutor(BaseExecutor):
                     message=seat_result.message,
                     screenshot_path=seat_result.screenshot_path,
                 )
+
+            # キャンセルチェック
+            _raise_if_cancelled()
 
             # Step 7: 確認画面の情報を取得
             await self._notify_progress("confirm", "予約内容を確認中...")
@@ -170,36 +224,105 @@ class EXReservationExecutor(BaseExecutor):
                 else selected_train.arrival_time
             )
 
+            # 座席表で選択した座席がある場合はそちらを優先
+            if seat_result.selected_seat:
+                seat_info = seat_result.selected_seat
+
+            # 詳細情報を構築
+            details = {
+                "train_name": selected_train.train_name,
+                "departure_time": selected_train.departure_time,
+                "arrival_time": arrival_time,
+                "departure_station": search_params.departure,
+                "arrival_station": search_params.arrival,
+                "date": search_params.date,
+                "seat_info": seat_info,
+                "price": price,
+                "screenshot": screenshot_path,
+                "status": "確認画面で待機中",
+            }
+
+            # 座席表情報を追加
+            if seat_result.seat_map_info:
+                details["seat_map_screenshot"] = seat_result.seat_map_info.screenshot_path
+                details["available_seats"] = seat_result.seat_map_info.available_seats
+                details["car_number"] = seat_result.seat_map_info.car_number
+
+            if seat_result.adjacent_empty_seats:
+                details["adjacent_empty_seats"] = seat_result.adjacent_empty_seats
+
+            # 差分情報を追加（第一原理: 要件と結果の差分を報告）
+            deviation_dict = None
+            if seat_result.deviation:
+                deviation_dict = seat_result.deviation.to_dict()
+                details["deviation"] = deviation_dict
+
+            # ブラウザ状態を追加
+            browser_state_dict = None
+            if seat_result.browser_state:
+                browser_state_dict = seat_result.browser_state.to_dict()
+                details["browser_state"] = browser_state_dict
+
             proposal = SearchOption(
                 id=f"proposal_{selected_train.index}",
                 title=f"{selected_train.train_name} {selected_train.departure_time}発",
                 description=f"{search_params.departure} → {search_params.arrival}",
                 price=price,
                 available=True,
-                details={
-                    "train_name": selected_train.train_name,
-                    "departure_time": selected_train.departure_time,
-                    "arrival_time": arrival_time,
-                    "departure_station": search_params.departure,
-                    "arrival_station": search_params.arrival,
-                    "date": search_params.date,
-                    "seat_info": seat_info,
-                    "price": price,
-                    "screenshot": screenshot_path,
-                    "status": "確認画面で待機中",
-                },
+                details=details,
             )
 
+            # 座席情報を含むメッセージを構築
+            seat_display = seat_info if seat_info else "座席情報なし"
+            price_display = f"¥{price:,}" if price else "料金不明"
             message = (
                 f"予約準備完了: {selected_train.train_name} "
-                f"{selected_train.departure_time}発 → {arrival_time}着"
+                f"{selected_train.departure_time}発 → {arrival_time}着\n"
+                f"座席: {seat_display}\n"
+                f"料金: {price_display}"
             )
 
-            return ExecutorSearchResult(
+            # 隣が空いている席の情報を追加
+            if seat_result.adjacent_empty_seats and search_params.prefer_adjacent_empty:
+                message += f"\n\n隣が空いている席: {', '.join(seat_result.adjacent_empty_seats[:5])}"
+                if seat_result.selected_seat:
+                    message += f"\n（{seat_result.selected_seat} を選択しました - 隣も空席）"
+
+            # 差分情報をメッセージに追加（第一原理: 差分があれば必ず報告）
+            if seat_result.deviation and seat_result.deviation.has_deviation:
+                message += f"\n\n【重要: 要件との差分】\n{seat_result.deviation.describe()}"
+
+            # 結果を構築（差分情報とブラウザ状態を含む）
+            # Vision API用: 座席選択のスクリーンショットを含める（ダンが画面を見られるように）
+            vision_screenshot = seat_result.screenshot_base64 if seat_result else None
+
+            result = ExecutorSearchResult(
                 success=True,
                 options=[proposal],
                 message=message,
                 screenshot_path=screenshot_path,
+                screenshot_base64=vision_screenshot,  # Vision API用
+            )
+
+            # 差分情報とブラウザ状態を結果に追加
+            if deviation_dict:
+                result.deviation = deviation_dict
+            if browser_state_dict:
+                result.browser_state = browser_state_dict
+
+            if vision_screenshot:
+                logger.info("[VISION] 座席選択のスクリーンショットを結果に含めました")
+
+            return result
+
+        except CancelledError as e:
+            # キャンセルされた
+            logger.info(f"検索がキャンセルされました: {e.session_id}")
+            return ExecutorSearchResult(
+                success=False,
+                options=[],
+                message="処理がキャンセルされました",
+                error_type="cancelled",
             )
 
         except ValueError as e:
@@ -218,20 +341,62 @@ class EXReservationExecutor(BaseExecutor):
             except Exception:
                 pass
 
+            # タイムアウト時にセッション切れかどうかチェック
+            if await self.detect_session_expired(page):
+                logger.info("タイムアウト時にセッション切れを検出")
+                return ExecutorSearchResult(
+                    success=False,
+                    options=[],
+                    message="セッションが切れました。再ログインを試みます。",
+                    screenshot_path=screenshot_path,
+                    error_type="session_expired",
+                    recoverable=True,
+                )
+
             logger.error(f"タイムアウト: {e}")
             return ExecutorSearchResult(
                 success=False,
                 options=[],
                 message=f"タイムアウト: {str(e)}",
                 screenshot_path=screenshot_path,
+                error_type="page_timeout",
+                recoverable=True,
             )
 
         except Exception as e:
             logger.error(f"検索エラー: {e}", exc_info=True)
+
+            # エラー時にセッション切れかどうかチェック
+            try:
+                if await self.detect_session_expired(page):
+                    logger.info("エラー時にセッション切れを検出")
+                    return ExecutorSearchResult(
+                        success=False,
+                        options=[],
+                        message="セッションが切れました。再ログインを試みます。",
+                        error_type="session_expired",
+                        recoverable=True,
+                    )
+            except Exception:
+                pass
+
+            # エラータイプを推定
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                error_type = "page_timeout"
+            elif "selector" in error_str or "not found" in error_str or "locator" in error_str:
+                error_type = "selector_not_found"
+            elif "login" in error_str or "credential" in error_str or "auth" in error_str:
+                error_type = "credentials_invalid"
+            else:
+                error_type = "internal_error"
+
             return ExecutorSearchResult(
                 success=False,
                 options=[],
                 message=f"検索エラー: {str(e)}",
+                error_type=error_type,
+                recoverable=True,
             )
 
     async def _ensure_logged_in(
@@ -251,9 +416,10 @@ class EXReservationExecutor(BaseExecutor):
 
         await self._notify_progress("login", "ログイン中...")
 
+        # 統一スキーマ: credentials["id"] を使用
         login_result = await login(
             page,
-            credentials.get("member_id", credentials.get("email", "")),
+            credentials.get("id", ""),
             credentials.get("password", ""),
         )
 
@@ -404,6 +570,9 @@ class EXReservationExecutor(BaseExecutor):
         self._user_id = user_id
 
         try:
+            # キャンセルチェック
+            _raise_if_cancelled()
+
             confirm = params.get("confirm", True)
             handle_3ds = params.get("handle_3ds", True)
 
@@ -446,6 +615,9 @@ class EXReservationExecutor(BaseExecutor):
                     )
                 return None
 
+            # キャンセルチェック
+            _raise_if_cancelled()
+
             # 購入実行
             await self._notify_progress("purchase", "購入処理を実行中...")
 
@@ -477,6 +649,13 @@ class EXReservationExecutor(BaseExecutor):
                     },
                 )
 
+        except CancelledError as e:
+            logger.info(f"購入がキャンセルされました: {e.session_id}")
+            return ExecutionResult(
+                success=False,
+                message="購入処理がキャンセルされました",
+            )
+
         except Exception as e:
             logger.error(f"購入エラー: {e}", exc_info=True)
             return ExecutionResult(
@@ -502,6 +681,9 @@ class EXReservationExecutor(BaseExecutor):
         page = await get_executor_page()
 
         try:
+            # キャンセルチェック
+            _raise_if_cancelled()
+
             # パラメータ取得（複数の名前を受け付ける）
             reservation_id = (
                 params.get("reservation_id") or
@@ -512,6 +694,9 @@ class EXReservationExecutor(BaseExecutor):
             confirm = params.get("confirm", True)
             departure_date = params.get("departure_date", "")
             train_name = params.get("train_name", "")
+
+            # キャンセルチェック
+            _raise_if_cancelled()
 
             # ログイン確認（予約一覧を見るために先にログイン）
             if not await self._ensure_logged_in(page, credentials):
@@ -753,6 +938,13 @@ class EXReservationExecutor(BaseExecutor):
                     },
                 )
 
+        except CancelledError as e:
+            logger.info(f"キャンセル処理が中断されました: {e.session_id}")
+            return ExecutionResult(
+                success=False,
+                message="キャンセル処理が中断されました",
+            )
+
         except Exception as e:
             logger.error(f"キャンセルエラー: {e}", exc_info=True)
             return ExecutionResult(
@@ -782,3 +974,109 @@ class EXReservationExecutor(BaseExecutor):
         # user_idを保持（OTP取得で使用）
         self._user_id = user_id
         return await self._do_cancel(params, credentials)
+
+    # ========================================
+    # セッション切れ自動再試行（Session Auto-Retry）
+    # ========================================
+
+    def supports_auto_relogin(self) -> bool:
+        """EX予約は自動再ログインをサポート（OTP不要時のみ）"""
+        return True
+
+    async def detect_session_expired(self, page) -> bool:
+        """
+        セッション切れを検出
+
+        検出条件:
+        1. ログインページにリダイレクトされた（URLまたはログインフォームの存在）
+        2. セッションタイムアウトのエラーメッセージ表示
+
+        Args:
+            page: Playwrightページ
+
+        Returns:
+            セッション切れの場合True
+        """
+        from app.executors.ex_reservation.selectors_complete import LOGIN, URLS
+
+        try:
+            current_url = page.url
+
+            # 1. ログインページにリダイレクトされた
+            if "smart_index" in current_url or current_url == URLS["login"]:
+                logger.info("セッション切れ検出: ログインページにリダイレクト")
+                return True
+
+            # 2. ログインフォームが表示されている
+            login_button = page.locator(LOGIN["login_button"])
+            if await login_button.count() > 0:
+                # ログインボタンがあり、かつマイページの要素がない場合
+                from app.executors.ex_reservation.selectors_complete import MYPAGE
+                search_button = page.locator(MYPAGE["search_train"])
+                if await search_button.count() == 0:
+                    logger.info("セッション切れ検出: ログインフォーム表示")
+                    return True
+
+            # 3. セッションタイムアウトのエラーメッセージ
+            error_messages = [
+                "セッションがタイムアウト",
+                "セッションが切れ",
+                "再度ログイン",
+                "ログインし直し",
+            ]
+            page_text = await page.inner_text("body")
+            for msg in error_messages:
+                if msg in page_text:
+                    logger.info(f"セッション切れ検出: エラーメッセージ '{msg}'")
+                    return True
+
+            return False
+
+        except Exception as e:
+            logger.warning(f"セッション切れ検出中にエラー: {e}")
+            return False
+
+    async def re_login(
+        self,
+        page,
+        credentials: Dict[str, str],
+        user_id: Optional[str] = None,
+    ) -> bool:
+        """
+        セッション切れ後に再ログインを実行
+
+        注意: OTPが必要な場合はFalseを返す（自動再ログイン不可）
+
+        Args:
+            page: Playwrightページ
+            credentials: 認証情報（member_id, password）
+            user_id: ユーザーID（OTP取得に必要だが、自動再ログインではOTPスキップ）
+
+        Returns:
+            再ログイン成功の場合True、OTP必要や失敗の場合False
+        """
+        try:
+            logger.info("EX予約: 再ログイン開始")
+
+            # 統一スキーマ: credentials["id"] を使用
+            login_result = await login(
+                page,
+                credentials.get("id", ""),
+                credentials.get("password", ""),
+            )
+
+            # OTPが必要な場合は自動再ログイン不可
+            if login_result.requires_otp:
+                logger.info("再ログイン: OTPが必要なため自動再ログイン不可")
+                return False
+
+            if not login_result.success:
+                logger.warning(f"再ログイン失敗: {login_result.message}")
+                return False
+
+            logger.info("EX予約: 再ログイン成功")
+            return True
+
+        except Exception as e:
+            logger.error(f"再ログイン中にエラー: {e}", exc_info=True)
+            return False

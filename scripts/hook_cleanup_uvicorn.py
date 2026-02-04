@@ -1,93 +1,83 @@
 #!/usr/bin/env python3
 """
-Hook script for Claude Code - cleanup port 8000 before uvicorn commands.
+Hook script for Claude Code - BLOCK direct uvicorn commands.
 
-Reads stdin to check if the bash command contains "uvicorn".
-If so, runs the cleanup; otherwise exits immediately.
+This hook:
+1. Detects any uvicorn command
+2. ALWAYS blocks it
+3. Instructs to use 'python scripts/start_backend.py' instead
+
+Why block instead of cleanup?
+- start_backend.py kills both parent AND child processes
+- start_backend.py verifies startup with health check
+- start_backend.py provides clear logging
+- Hooks may not wait for completion, causing race conditions
+
+Exit codes:
+- 0: Success (with JSON output for deny)
 """
 
-import subprocess
 import sys
 import json
 
 
-def get_pids_on_port(port: int = 8000) -> list[int]:
-    """Get list of PIDs listening on the specified port."""
+def log_debug(msg: str):
+    """Write debug log to file."""
+    import datetime
     try:
-        result = subprocess.run(
-            ["netstat", "-ano"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-
-        pids = []
-        for line in result.stdout.split("\n"):
-            if f":{port}" in line and "LISTENING" in line:
-                parts = line.split()
-                if parts:
-                    try:
-                        pid = int(parts[-1])
-                        if pid > 0:
-                            pids.append(pid)
-                    except ValueError:
-                        pass
-
-        return list(set(pids))
+        with open("D:/done/logs/hook_debug.log", "a", encoding="utf-8") as f:
+            timestamp = datetime.datetime.now().isoformat()
+            f.write(f"[{timestamp}] {msg}\n")
     except Exception:
-        return []
-
-
-def kill_pid(pid: int) -> bool:
-    """Kill a process by PID."""
-    try:
-        result = subprocess.run(
-            ["taskkill", "/F", "/PID", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def cleanup_port():
-    """Clean up port 8000."""
-    pids = get_pids_on_port(8000)
-
-    if not pids:
-        return 0
-
-    for pid in pids:
-        kill_pid(pid)
-
-    return 0
+        pass
 
 
 def main():
-    """Check if uvicorn command, then cleanup."""
+    log_debug("=" * 50)
+    log_debug("Hook script started")
+
     try:
         # Read hook input from stdin
         stdin_data = sys.stdin.read()
+
         if not stdin_data.strip():
+            log_debug("Empty stdin, exiting")
             return 0
 
         data = json.loads(stdin_data)
         command = data.get("tool_input", {}).get("command", "")
+        log_debug(f"Command: {command[:100] if command else 'none'}")
 
-        # Only cleanup if this is a uvicorn command
+        # Only check for uvicorn commands
         if "uvicorn" not in command.lower():
+            log_debug("Not a uvicorn command, allowing")
             return 0
 
-        # Run cleanup
-        cleanup_port()
+        # Check if this is start_backend.py calling uvicorn (allow it)
+        if "start_backend.py" in command:
+            log_debug("start_backend.py detected, allowing")
+            return 0
 
-    except Exception:
-        # On any error, just return success to not block the command
-        pass
+        # Block direct uvicorn commands
+        log_debug("BLOCKING direct uvicorn command")
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": (
+                    "Direct uvicorn commands are blocked. "
+                    "Use 'python scripts/start_backend.py' instead. "
+                    "This ensures all old processes are killed and startup is verified."
+                )
+            }
+        }
+        print(json.dumps(output))
+        return 0
 
-    return 0
+    except Exception as e:
+        log_debug(f"Exception: {e}")
+        # On error, allow (don't block everything)
+        return 0
 
 
 if __name__ == "__main__":

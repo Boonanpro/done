@@ -384,6 +384,8 @@ class ActionExecutor:
                 return await self._run_script(params)
             elif action_name == "read_manual":
                 return await self._read_manual(params)
+            elif action_name == "drag_and_drop":
+                return await self._drag_and_drop(params)
             else:
                 return ActionResult(
                     success=False,
@@ -695,6 +697,15 @@ class ActionExecutor:
             return ActionResult(success=False, error="Text is required")
 
         try:
+            # Computer Useのtype_text_at対応：先にクリックが必要な場合
+            if "_click_first" in params:
+                click_params = params["_click_first"]
+                x = click_params.get("x", 0)
+                y = click_params.get("y", 0)
+                await self.page.mouse.click(float(x), float(y))
+                await self.page.wait_for_timeout(300)
+                logger.info(f"[ActionExecutor] Click before type at ({x}, {y})")
+
             # フォーカス要素の情報を取得（セレクタ抽出用）
             element_info = await self._get_active_element_info()
 
@@ -918,6 +929,40 @@ class ActionExecutor:
                 error=f"Hover failed: {e}"
             )
 
+    async def _drag_and_drop(self, params: Dict[str, Any]) -> ActionResult:
+        """ドラッグ&ドロップ"""
+        start_x = params.get("start_x")
+        start_y = params.get("start_y")
+        end_x = params.get("end_x")
+        end_y = params.get("end_y")
+
+        if start_x is None or start_y is None or end_x is None or end_y is None:
+            return ActionResult(
+                success=False,
+                error="start_x, start_y, end_x, end_y are required"
+            )
+
+        try:
+            # マウスをドラッグ
+            await self.page.mouse.move(float(start_x), float(start_y))
+            await self.page.wait_for_timeout(100)
+            await self.page.evaluate("document.dispatchEvent(new Event('mousedown'))")
+            await self.page.mouse.move(float(end_x), float(end_y), steps=10)
+            await self.page.wait_for_timeout(100)
+            await self.page.evaluate("document.dispatchEvent(new Event('mouseup'))")
+            await self.page.wait_for_timeout(500)
+
+            return ActionResult(
+                success=True,
+                message=f"Dragged from ({start_x}, {start_y}) to ({end_x}, {end_y})",
+                data={"start_x": start_x, "start_y": start_y, "end_x": end_x, "end_y": end_y}
+            )
+        except Exception as e:
+            return ActionResult(
+                success=False,
+                error=f"Drag and drop failed: {e}"
+            )
+
     async def _run_script(self, params: Dict[str, Any]) -> ActionResult:
         """
         スキルフォルダ内のPythonスクリプトを実行
@@ -1111,5 +1156,6 @@ def get_action_type(action_name: str) -> ActionType:
         "hover": ActionType.CLICK,
         "run_script": ActionType.CLICK,  # スクリプト実行はCLICK扱い（副作用あり）
         "read_manual": ActionType.WAIT,  # 手順書読み込みは副作用なし
+        "drag_and_drop": ActionType.CLICK,  # ドラッグ&ドロップ
     }
     return action_map.get(action_name, ActionType.ERROR)

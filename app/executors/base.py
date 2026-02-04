@@ -53,7 +53,15 @@ class SearchOption:
 
 @dataclass
 class ExecutorSearchResult:
-    """Executor検索結果"""
+    """
+    Executor検索結果
+
+    第一原理に基づいた設計:
+    1. 差分があれば必ず報告（deviation）
+    2. ブラウザの実際の状態を報告（browser_state）
+    3. 失敗時は理由と代替案を提示
+    4. 決定ポイントのスクリーンショットをVision形式で含める（ダンが見えるように）
+    """
     success: bool
     options: List[SearchOption]
     message: str = ""
@@ -61,9 +69,20 @@ class ExecutorSearchResult:
     service_display_name: str = ""
     search_url: Optional[str] = None
     screenshot_path: Optional[str] = None
-    
+    screenshot_base64: Optional[str] = None  # Vision API用（決定ポイントのスクショ）
+    # 第一原理: 差分報告
+    deviation: Optional[Dict[str, Any]] = None  # 要件と結果の差分
+    browser_state: Optional[Dict[str, Any]] = None  # ブラウザの実際の状態
+    # 失敗時の診断情報
+    failure_reason: Optional[str] = None
+    suggested_alternatives: Optional[List[str]] = None
+    # エラー分類体系（runner.pyでの分岐に使用）
+    error_type: Optional[str] = None      # ErrorType の値
+    requires_credentials: bool = False    # Executor側の認証要求判断
+    recoverable: bool = True              # リトライ可能か
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "success": self.success,
             "options": [opt.to_dict() for opt in self.options],
             "message": self.message,
@@ -72,6 +91,27 @@ class ExecutorSearchResult:
             "search_url": self.search_url,
             "screenshot_path": self.screenshot_path,
         }
+        # Vision API用スクリーンショット（存在する場合のみ）
+        if self.screenshot_base64:
+            result["screenshot_base64"] = self.screenshot_base64
+        # 差分情報を追加（存在する場合のみ）
+        if self.deviation:
+            result["deviation"] = self.deviation
+        if self.browser_state:
+            result["browser_state"] = self.browser_state
+        if self.failure_reason:
+            result["failure_reason"] = self.failure_reason
+        if self.suggested_alternatives:
+            result["suggested_alternatives"] = self.suggested_alternatives
+        # エラー分類体系
+        if self.error_type:
+            result["error_type"] = self.error_type
+        if self.requires_credentials:
+            result["requires_credentials"] = self.requires_credentials
+            result["credentials_required"] = self.requires_credentials  # 後方互換
+        if not self.recoverable:
+            result["recoverable"] = self.recoverable
+        return result
 
 
 class BaseExecutor(ABC):
@@ -181,12 +221,24 @@ class BaseExecutor(ABC):
                 f"{self.service_display_name}でエラー: {str(e)}",
                 "error",
             )
+
+            # エラータイプを推定
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                error_type = "page_timeout"
+            elif "credential" in error_str or "login" in error_str or "auth" in error_str:
+                error_type = "credentials_required"
+            else:
+                error_type = "internal_error"
+
             return ExecutorSearchResult(
                 success=False,
                 options=[],
                 message=f"検索エラー: {str(e)}",
                 service_name=self.service_name,
                 service_display_name=self.service_display_name,
+                error_type=error_type,
+                recoverable=True,
             )
     
     async def _do_search(
@@ -535,15 +587,15 @@ class BaseExecutor(ABC):
     async def _find_otp_field(self, page):
         """
         OTP入力フィールドを検索
-        
+
         Args:
             page: Playwrightページ
-            
+
         Returns:
             OTP入力フィールド（見つからない場合はNone）
         """
         from app.models.otp_schemas import OTP_FIELD_SELECTORS
-        
+
         for selector in OTP_FIELD_SELECTORS:
             try:
                 field = await page.wait_for_selector(selector, timeout=2000)
@@ -552,6 +604,59 @@ class BaseExecutor(ABC):
             except Exception:
                 continue
         return None
+
+    # ========================================
+    # セッション切れ自動再試行（Session Auto-Retry）
+    # ========================================
+
+    def supports_auto_relogin(self) -> bool:
+        """
+        自動再ログインをサポートするかどうか
+
+        サブクラスでTrueを返すと、セッション切れ時に自動再ログインが試行される。
+        デフォルトはFalse（再ログイン非対応）。
+
+        Returns:
+            自動再ログインをサポートする場合True
+        """
+        return False
+
+    async def detect_session_expired(self, page) -> bool:
+        """
+        現在のページがセッション切れ状態かどうかを検出
+
+        サブクラスでオーバーライドして、サービス固有のセッション切れ検出を実装する。
+        例: ログインページへのリダイレクト、エラーメッセージの表示など
+
+        Args:
+            page: Playwrightページ
+
+        Returns:
+            セッション切れの場合True
+        """
+        return False
+
+    async def re_login(
+        self,
+        page,
+        credentials: Dict[str, str],
+        user_id: Optional[str] = None,
+    ) -> bool:
+        """
+        セッション切れ後に再ログインを実行
+
+        サブクラスでオーバーライドして、サービス固有の再ログイン処理を実装する。
+        OTPが必要な場合はFalseを返す（自動再ログイン不可）。
+
+        Args:
+            page: Playwrightページ
+            credentials: 認証情報
+            user_id: ユーザーID（OTP取得に必要な場合）
+
+        Returns:
+            再ログイン成功の場合True、OTP必要や失敗の場合False
+        """
+        return False
 
 
 class GenericExecutor(BaseExecutor):
@@ -757,7 +862,7 @@ class ExecutorFactory:
         elif category == "product":
             # サービスに応じたExecutorを返す
             if service_name == "amazon":
-                from app.executors.amazon_executor import AmazonExecutor
+                from app.executors.amazon import AmazonExecutor  # Playwright版
                 return AmazonExecutor()
             elif service_name == "rakuten":
                 from app.executors.rakuten_executor import RakutenExecutor
