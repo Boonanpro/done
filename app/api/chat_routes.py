@@ -672,16 +672,12 @@ async def send_dan_message_stream(
                 await reasoning_queue.put(step)
 
             # ========================================
-            # Agent v2: Messages配列ベースのrunner
+            # Agent v3: OpenClaw-style Simple Runner
             # ========================================
-            result = {}  # デフォルト初期化（browser_session_id等の参照用）
-            from app.agent.v2.runner import create_runner
-            from app.executors.registry import register_all_executors
+            result = {}  # デフォルト初期化
+            from app.agent.v3.runner import create_runner
 
-            # Executor登録
-            register_all_executors()
-
-            # Agent v2 Runner作成
+            # Agent v3 Runner作成
             runner = await create_runner(
                 session_id=room_id,
                 user_id=current_user.user_id,
