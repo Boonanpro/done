@@ -233,7 +233,7 @@ class SimpleRunner:
     def _call_llm(self) -> anthropic.types.Message:
         """LLMを呼び出す"""
         return self.client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-haiku-4-5-20251001",  # Haiku 4.5: $1/$5 per MTok (67% cheaper than Sonnet)
             max_tokens=4096,
             system=self._build_system_prompt(),
             tools=ALL_TOOLS,
