@@ -118,7 +118,7 @@ async def voice_companion_websocket(websocket: WebSocket):
                     logger.debug("Progress send failed: %s", exc)
 
             try:
-                from app.agent.v3.runner import create_runner
+                from app.agent.v2.runner import create_runner
 
                 runner = await create_runner(
                     session_id=session_id,

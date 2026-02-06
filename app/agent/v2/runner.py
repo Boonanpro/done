@@ -6,7 +6,8 @@ Messages配列を維持しながらLLMと対話する。
 
 アーキテクチャ:
 - ブートストラップファイル: ~/.dan/workspace/ からペルソナ・ルールを読み込み
-- Native Tool Use: respond_to_user ツールでユーザー回答を構造化
+- Native Tool Use: LLMがツールを呼び出して操作を実行
+- テキスト出力がそのままユーザーへの返答になる
 - 自己学習: ダンがワークスペースファイルを読み書きして学習
 """
 
@@ -48,43 +49,13 @@ MAX_TOOL_LOOPS = 100
 COMPACTION_THRESHOLD = 80000  # この文字数を超えたらコンパクション発動
 COMPACTION_KEEP_RECENT = 10   # コンパクション時に残す最新メッセージ数
 
-# セーフティネット: LLMがルール違反した場合に除外するパターン
-# これらのパターンに一致する行はプロセスモニターに表示しない
-INTERNAL_FILTER_PATTERNS = [
-    r'^.*を確認します[。]?$',
-    r'^.*を実行します[。]?$',
-    r'^.*を探します[。]?$',
-    r'^.*にスクロール.*$',
-    r'^.*スクリーンショット.*$',
-    r'^.*ページ構造.*$',
-    r'^.*の検出に失敗.*$',
-    r'^ツール実行[:：].*$',
-    r'^回答を作成.*$',
-]
-
 # 使用するモデル
 MODEL = "claude-sonnet-4-5-20250929"  # Sonnet 4.5
 
 # ============================================
 # Native Tool Use: ツール定義
 # ============================================
-
-# respond_to_user: ユーザーへの最終回答を構造化して出力するツール
-# このツールを経由することで、プロセス（テキストブロック）と回答を100%分離できる
-RESPOND_TO_USER_TOOL = {
-    "name": "respond_to_user",
-    "description": "ユーザーへの最終回答を出力する。内部処理が完了したら、必ずこのツールを使って回答すること。",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "response": {
-                "type": "string",
-                "description": "ユーザーに表示する回答テキスト"
-            }
-        },
-        "required": ["response"]
-    }
-}
+# LLMのテキスト出力がそのままユーザーへの返答になる
 
 
 def get_core_prompt() -> str:
@@ -108,28 +79,28 @@ def load_bootstrap_file(filename: str) -> str:
 
 
 def load_all_bootstrap_files() -> str:
-    """全ブートストラップファイルを読み込んで結合"""
+    """全ブートストラップファイルを読み込んで結合（順番重要: RULES.md を最後に）"""
     parts = []
 
-    # SOUL.md - ペルソナ（読み取り専用）
-    soul = load_bootstrap_file("SOUL.md")
-    if soul:
-        parts.append(f"## ペルソナ\n\n{soul}")
-
-    # RULES.md - 運用ルール
-    rules = load_bootstrap_file("RULES.md")
-    if rules:
-        parts.append(f"## 運用ルール\n\n{rules}")
-
-    # USER.md - ユーザー情報
+    # 1. USER.md - ユーザー情報
     user = load_bootstrap_file("USER.md")
     if user:
         parts.append(f"## ユーザー情報\n\n{user}")
 
-    # MEMORY.md - 長期記憶
+    # 2. MEMORY.md - 長期記憶
     memory = load_bootstrap_file("MEMORY.md")
     if memory:
         parts.append(f"## 長期記憶\n\n{memory}")
+
+    # 3. SOUL.md - ペルソナ
+    soul = load_bootstrap_file("SOUL.md")
+    if soul:
+        parts.append(f"## ペルソナ\n\n{soul}")
+
+    # 4. RULES.md - 運用ルール（最後に配置 = recency bias で効きやすい）
+    rules = load_bootstrap_file("RULES.md")
+    if rules:
+        parts.append(rules)  # RULES.md は既にタイトル含むのでそのまま
 
     if parts:
         return "\n\n---\n\n".join(parts)
@@ -176,9 +147,9 @@ class AgentRunner:
 
         Returns:
             {
-                "response": ユーザーへの応答（respond_to_userツールから抽出）,
+                "response": ユーザーへの応答（テキストブロックから抽出）,
                 "state": 現在の状態,
-                "reasoning_steps": 推論過程（テキストブロックから抽出）,
+                "reasoning_steps": 推論過程,
                 "tool_results": ツール実行結果（あれば）,
             }
         """
@@ -242,13 +213,6 @@ class AgentRunner:
                 # ユーザー回答を抽出
                 if parsed["user_response"]:
                     user_response = parsed["user_response"]
-                    # respond_to_userのtool_resultを追加（次のLLM呼び出しで必要）
-                    if parsed.get("respond_to_user_id"):
-                        self.session.add_tool_result(
-                            tool_use_id=parsed["respond_to_user_id"],
-                            content="回答を表示しました。",
-                        )
-
                 # ツール呼び出しがない、または最大ループに達した場合は終了
                 if not parsed["tool_calls"] or loop_count >= MAX_TOOL_LOOPS:
                     print(f"[RUNNER_DEBUG] No more tool calls or max loops reached")
@@ -344,9 +308,9 @@ class AgentRunner:
             if tool_results:  # ツールを使った場合のみ分析
                 asyncio.create_task(self._trigger_learning_analysis())
 
-            # フォールバック: respond_to_userが呼ばれなかった場合
+            # フォールバック: テキスト出力がなかった場合
             if not user_response:
-                logger.warning("respond_to_user was not called, using fallback")
+                logger.warning("No text response from LLM, using fallback")
                 user_response = "処理が完了しました。"
 
             # ブラウザセッションIDを抽出（スキル化用）
@@ -403,120 +367,73 @@ class AgentRunner:
             CancellationRegistry.set_current_session(None)
 
     def _build_system_prompt(self) -> str:
-        """システムプロンプトを構築（ブートストラップファイル + Progressive Disclosure）"""
+        """
+        システムプロンプトを構築
+
+        順番（recency bias 考慮: 重要なルールは最後）:
+        1. コアID
+        2. 現在の日時
+        3. 利用可能なツール一覧
+        4. 利用可能なスキル一覧
+        5. ブートストラップファイル（USER → MEMORY → SOUL → RULES）
+        """
         print("[RUNNER_DEBUG] Building system prompt...")
+        parts = []
 
-        # 1. ブートストラップファイルを読み込み（ペルソナ、ルール、ユーザー情報、記憶）
-        bootstrap = load_all_bootstrap_files()
-        if bootstrap:
-            system = bootstrap + "\n\n---\n\n"
-            print(f"[RUNNER_DEBUG] Bootstrap files loaded: {len(bootstrap)} chars")
-        else:
-            system = ""
-            print("[RUNNER_DEBUG] No bootstrap files found")
+        # 1. コアプロンプト
+        parts.append(get_core_prompt())
+        print(f"[RUNNER_DEBUG] Core prompt added")
 
-        # 2. コアプロンプト（不変）
-        core = get_core_prompt()
-        system += core
-        print(f"[RUNNER_DEBUG] Core prompt: {len(core)} chars")
-
-        # 3. 現在日時を注入（LLMが正確な日時を把握するため）
-        from datetime import datetime, timedelta
+        # 2. 現在日時
+        from datetime import datetime
         now = datetime.now()
         weekdays = ['月', '火', '水', '木', '金', '土', '日']
-        tomorrow = now + timedelta(days=1)
-        system += f"\n\n## 現在の日時\n"
-        system += f"- 今日: {now.strftime('%Y年%m月%d日')}（{weekdays[now.weekday()]}曜日）\n"
-        system += f"- 現在時刻: {now.strftime('%H:%M')}\n"
-        system += f"- 「明日」は {tomorrow.strftime('%Y年%m月%d日')} です\n"
-        system += f"- 日付パラメータは必ず YYYY-MM-DD 形式で指定してください（例: {tomorrow.strftime('%Y-%m-%d')}）"
+        datetime_section = f"""## 現在の日時
+- 今日: {now.strftime('%Y年%m月%d日')}（{weekdays[now.weekday()]}曜日）
+- 現在時刻: {now.strftime('%H:%M')}"""
+        parts.append(datetime_section)
 
-        # 4. Progressive Disclosure Level 1: スキル一覧（description のみ）
+        # 3. 利用可能なツール一覧
+        tools_section = self._build_tools_list_section()
+        if tools_section:
+            parts.append(tools_section)
+
+        # 4. 利用可能なスキル一覧
         skill_list = self._build_skill_list_section()
         if skill_list:
-            system += skill_list
+            parts.append(skill_list)
 
-        # 5. 出力ルールを最後に追加（recency bias対策）
-        system += self._build_output_rules()
+        # 5. ブートストラップファイル（RULES.md が最後に来る）
+        bootstrap = load_all_bootstrap_files()
+        if bootstrap:
+            parts.append(bootstrap)
+            print(f"[RUNNER_DEBUG] Bootstrap files loaded: {len(bootstrap)} chars")
 
+        system = "\n\n---\n\n".join(parts)
         print(f"[RUNNER_DEBUG] Total system prompt: {len(system)} chars")
         return system
 
-    def _build_output_rules(self) -> str:
-        """出力ルールを構築（常にプロンプトの最後に配置）"""
-        return """
-
----
-
-## 出力ルール（厳守）
-
-### ユーザー回答は respond_to_user ツールを使う
-
-重要: ユーザーへの最終回答は、必ず respond_to_user ツールを呼び出して出力する。
-
-テキストとして直接書いた内容は「内部処理」としてユーザーには表示されない。
-ユーザーに見せたい回答は respond_to_user ツール経由で出力すること。
-
-### 内部処理の書き方
-
-思考過程や確認事項は、テキストとしてそのまま書く:
-```
-商品を検索中...
-価格は990円、4本セット
-在庫を確認...
-```
-
-これらはプロセスモニターに表示され、ユーザー回答には含まれない。
-
-### ワークフロー例
-
-1. ツールを呼び出して情報を取得
-2. 結果を分析（テキストで思考を書く）
-3. respond_to_user ツールでユーザーに回答
-
-```
-商品を検索します...
-
-(visual_browse ツールを呼び出し)
-
-検索結果を確認中...
-4本セットが990円で見つかった
-
-(respond_to_user ツールを呼び出し)
-response: "アベンヌウォーター 50ml 4本セットが990円で見つかりました。カートに入れますか？"
-```
-
-### 記憶リクエストの処理（必須）
-
-ユーザーが「覚えて」「覚えといて」「メモして」と言ったら:
-
-1. **必ず update_workspace ツールを呼び出す**
-2. その後で respond_to_user で回答
-
-**ツールを呼ばずに「覚えました」と返すのは禁止。実際にファイルに保存すること。**
-
-```
-ユーザー: 俺の名前は太郎だよ。覚えといて
-
-(update_workspace ツールを呼び出し)
-filename: "USER.md"
-append: "- 名前: 太郎"
-
-(respond_to_user ツールを呼び出し)
-response: "太郎さんですね。USER.mdに保存しました。"
-```
-"""
+    def _build_tools_list_section(self) -> str:
+        """利用可能なツール一覧を構築"""
+        tools = self._get_tools()
+        lines = ["## 利用可能なツール"]
+        for tool in tools:
+            name = tool.get("name", "")
+            desc = tool.get("description", "").split("\n")[0]  # 1行目のみ
+            lines.append(f"- `{name}`: {desc}")
+        return "\n".join(lines)
 
     def _build_skill_list_section(self) -> str:
-        """スキル一覧（description のみ）- Progressive Disclosure Level 1"""
+        """スキル一覧（description のみ）"""
         skills = SkillRegistry.list_all()
         if not skills:
             return ""
 
-        lines = ["\n\n## 利用可能なスキル"]
+        lines = ["## 利用可能なスキル"]
         for skill in skills:
             lines.append(f"- `{skill.name}`: {skill.description}")
-        lines.append("\n※ スキルを使う場合は visual_browse の skill_name に指定")
+        lines.append("")
+        lines.append("※ スキルを使う場合は visual_browse の skill_name に指定")
         lines.append("※ 詳細が必要な場合は check_skill ツールで SKILL.md を取得")
         return "\n".join(lines)
 
@@ -637,11 +554,9 @@ response: "太郎さんですね。USER.mdに保存しました。"
         LLMに渡すツール一覧を取得
 
         Returns:
-            respond_to_user + 全スキルツール
+            全スキルツール
         """
-        tools = [RESPOND_TO_USER_TOOL]
-        tools.extend(get_all_skill_tools())
-        return tools
+        return get_all_skill_tools()
 
     async def _call_llm_with_tools(self) -> "anthropic.types.Message":
         """
@@ -681,25 +596,26 @@ response: "太郎さんですね。USER.mdに保存しました。"
         """
         LLMレスポンスのcontent blocksを処理
 
-        - text blocks → プロセスとして通知
-        - tool_use blocks → ツール実行または回答抽出
+        - text blocks → ユーザーへの返答として収集
+        - tool_use blocks → ツール実行
 
         Returns:
             {
-                "user_response": ユーザー回答（respond_to_userから）,
+                "user_response": ユーザー回答（テキストブロックから）,
                 "tool_calls": 実行すべきスキルツール呼び出しリスト,
                 "stop_reason": LLMの停止理由,
             }
         """
-        user_response = None
-        respond_to_user_id = None  # respond_to_userのtool_use_id
+        text_parts = []
         tool_calls = []
 
         for block in response.content:
             if block.type == "text":
-                # テキストブロック → プロセスとして処理
-                text = block.text
-                await self._process_text_block(text)
+                # テキストブロック → ユーザーへの返答
+                text = block.text.strip()
+                if text:
+                    text_parts.append(text)
+                    safe_print(f"[LLM_DEBUG] Text block: {text[:50]}...")
 
             elif block.type == "tool_use":
                 # ツール呼び出しブロック
@@ -709,58 +625,26 @@ response: "太郎さんですね。USER.mdに保存しました。"
 
                 print(f"[LLM_DEBUG] Tool use: {tool_name}")
 
-                if tool_name == "respond_to_user":
-                    # ユーザー回答を抽出
-                    user_response = tool_input.get("response", "")
-                    respond_to_user_id = tool_use_id  # IDを保存
-                    safe_print(f"[LLM_DEBUG] User response extracted: {user_response[:50]}...")
-                else:
-                    # スキルツール呼び出し
-                    parsed = parse_tool_name(tool_name)
-                    if parsed:
-                        skill_name, action = parsed
-                        tool_calls.append({
-                            "tool_use_id": tool_use_id,
-                            "skill": skill_name,
-                            "action": action,
-                            "params": tool_input,
-                        })
-                        print(f"[LLM_DEBUG] Skill tool: {skill_name} {action}")
+                # スキルツール呼び出し
+                parsed = parse_tool_name(tool_name)
+                if parsed:
+                    skill_name, action = parsed
+                    tool_calls.append({
+                        "tool_use_id": tool_use_id,
+                        "skill": skill_name,
+                        "action": action,
+                        "params": tool_input,
+                    })
+                    print(f"[LLM_DEBUG] Skill tool: {skill_name} {action}")
+
+        # テキストブロックを結合してユーザー返答とする
+        user_response = "\n\n".join(text_parts) if text_parts else None
 
         return {
             "user_response": user_response,
-            "respond_to_user_id": respond_to_user_id,  # tool_use_idを返す
             "tool_calls": tool_calls,
             "stop_reason": response.stop_reason,
         }
-
-    async def _process_text_block(self, text: str) -> None:
-        """
-        テキストブロックをプロセスとして処理
-
-        - 各行をプロセスモニターに通知
-        - セーフティネット: 内部処理パターンはフィルタリング
-        """
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-
-            # セーフティネット: 内部処理パターンはスキップ（プロセスモニターに表示しない）
-            should_skip = False
-            for pattern in INTERNAL_FILTER_PATTERNS:
-                if re.match(pattern, line):
-                    should_skip = True
-                    logger.debug(f"Filtered internal pattern: {line}")
-                    break
-
-            if should_skip:
-                continue
-
-            # その他のテキストはプロセスとして通知
-            self.session.add_reasoning_step(line)
-            if self._on_reasoning_step:
-                await self._on_reasoning_step(line)
 
     async def _check_and_compact(self) -> None:
         """
@@ -817,7 +701,7 @@ response: "太郎さんですね。USER.mdに保存しました。"
 以下を行ってください:
 1. これまでの会話から重要な情報（ユーザーの好み、決定事項、進行中のタスク等）を抽出
 2. update_workspace ツールで memory/{date}.md に保存
-3. 会話の要約を respond_to_user で返す（この要約は会話履歴に残ります）
+3. 会話の要約をテキストで出力（この要約は会話履歴に残ります）
 
 要約は簡潔に、箇条書きで、重要なポイントのみ含めてください。
 """.format(date=datetime.now().strftime("%Y-%m-%d"))
@@ -839,13 +723,14 @@ response: "太郎さんですね。USER.mdに保存しました。"
             tools=tools,
         )
 
-        # ツール呼び出しを処理
+        # レスポンスを処理
         summary = "会話の要約が生成されませんでした。"
+        text_parts = []
         for block in response.content:
-            if block.type == "tool_use":
-                if block.name == "respond_to_user":
-                    summary = block.input.get("response", summary)
-                elif block.name == "update_workspace":
+            if block.type == "text":
+                text_parts.append(block.text.strip())
+            elif block.type == "tool_use":
+                if block.name == "update_workspace":
                     # update_workspaceを実行
                     from app.agent.v2.tools import execute_tool, parse_tool_name
                     parsed = parse_tool_name(block.name)
@@ -860,6 +745,10 @@ response: "太郎さんですね。USER.mdに保存しました。"
                             },
                             user_id=self.session.user_id,
                         )
+
+        # テキスト出力を要約として使用
+        if text_parts:
+            summary = "\n\n".join(text_parts)
 
         return summary
 
@@ -900,9 +789,6 @@ response: "太郎さんですね。USER.mdに保存しました。"
             for block in response.content:
                 if block.type == "text":
                     text_parts.append(block.text)
-                elif block.type == "tool_use":
-                    if block.name == "respond_to_user":
-                        text_parts.append(block.input.get("response", ""))
             return "\n".join(text_parts)
         except Exception as e:
             logger.exception(f"LLM call failed: {e}")

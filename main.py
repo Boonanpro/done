@@ -4,9 +4,8 @@ AI Secretary System - Main Entry Point (Phase 6 reload)
 import sys
 import asyncio
 
-# Windows用のイベントループポリシー設定（Playwright対応）
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# Windows: ProactorEventLoopPolicy（デフォルト）を使用
+# 注: WindowsSelectorEventLoopPolicyはPlaywrightのsubprocess起動を壊すので使わない
 
 import uvicorn
 from fastapi import FastAPI

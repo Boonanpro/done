@@ -925,51 +925,58 @@ class ChatService:
     
     async def create_dan_session(self, user_id: str, title: str = "新しい会話") -> dict:
         """
-        新しいダンセッションを作成
-        
+        ダンセッションを取得（単一セッションモード）
+
+        注意: 単一セッションモードでは新規作成せず、既存のメインセッションを返す。
+        将来マルチセッションに戻す場合は、この制限を解除する。
+
         Args:
             user_id: ユーザーID
-            title: セッションタイトル
-            
+            title: セッションタイトル（現在は無視）
+
         Returns:
-            作成されたセッション情報
+            既存のメインセッション情報
         """
-        # 新しいダンルームを作成
-        room_result = self.supabase.table("chat_rooms").insert({
-            "name": title,
-            "type": "dan",
-        }).execute()
-        
-        if not room_result.data:
-            raise ValueError("Failed to create session")
-        
-        room = room_result.data[0]
-        
-        # メンバー追加
-        self.supabase.table("chat_room_members").insert({
-            "room_id": room["id"],
-            "user_id": user_id,
-            "role": "owner",
-            "ai_mode": "auto",
-        }).execute()
-        
-        # AI設定
-        self.supabase.table("chat_ai_settings").insert({
-            "room_id": room["id"],
-            "enabled": True,
-            "mode": "auto",
-            "personality": "あなたはダン（Dan）、ユーザーの専属AIアシスタントです。丁寧で親しみやすい口調で話します。",
-        }).execute()
-        
-        # ユーザーのdan_room_idを更新（新しいセッションをアクティブに）
-        self.supabase.table("users").update({"dan_room_id": room["id"]}).eq("id", user_id).execute()
-        
+        # 単一セッションモード: 既存のメインセッションを返す
+        main_room = await self.get_or_create_dan_room(user_id)
+
         return {
-            "id": room["id"],
-            "title": room["name"],
-            "created_at": room["created_at"],
+            "id": main_room["id"],
+            "title": main_room.get("name", "ダンとの会話"),
+            "created_at": main_room.get("created_at"),
         }
-    
+
+        # === 以下は将来マルチセッションに戻す場合のコード ===
+        # # 新しいダンルームを作成
+        # room_result = self.supabase.table("chat_rooms").insert({
+        #     "name": title,
+        #     "type": "dan",
+        # }).execute()
+        #
+        # if not room_result.data:
+        #     raise ValueError("Failed to create session")
+        #
+        # room = room_result.data[0]
+        #
+        # # メンバー追加
+        # self.supabase.table("chat_room_members").insert({
+        #     "room_id": room["id"],
+        #     "user_id": user_id,
+        #     "role": "owner",
+        #     "ai_mode": "auto",
+        # }).execute()
+        #
+        # # AI設定
+        # self.supabase.table("chat_ai_settings").insert({
+        #     "room_id": room["id"],
+        #     "enabled": True,
+        #     "mode": "auto",
+        #     "personality": "あなたはダン（Dan）、ユーザーの専属AIアシスタントです。丁寧で親しみやすい口調で話します。",
+        # }).execute()
+        #
+        # # ユーザーのdan_room_idを更新（新しいセッションをアクティブに）
+        # self.supabase.table("users").update({"dan_room_id": room["id"]}).eq("id", user_id).execute()
+
     async def activate_dan_session(self, user_id: str, session_id: str) -> dict:
         """
         ダンセッションをアクティブにする

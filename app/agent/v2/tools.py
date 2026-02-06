@@ -2,7 +2,7 @@
 Tools - スキルとExecutorの橋渡し（Native Tool Use方式）
 
 Anthropic Tool Use APIを使用して構造化された出力を実現。
-プロセス（テキストブロック）と回答（respond_to_userツール）を100%分離。
+LLMのテキスト出力がそのままユーザーへの返答になる。
 """
 
 import re
@@ -599,9 +599,6 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     Returns:
         (skill_name, action) or None
     """
-    if tool_name == "respond_to_user":
-        return None
-
     if tool_name == "skill_generate":
         return ("_skill_generate", "generate")
 

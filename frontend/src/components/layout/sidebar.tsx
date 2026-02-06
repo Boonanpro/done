@@ -229,8 +229,11 @@ export function Sidebar({ className }: SidebarProps) {
           </Button>
         </div>
 
-        {/* New Chat Button */}
-        <div className="p-3">
+        {/*
+          New Chat Button - 単一セッションモードでは非表示
+          将来マルチセッションに戻す場合はコメント解除
+        */}
+        {/* <div className="p-3">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -252,7 +255,7 @@ export function Sidebar({ className }: SidebarProps) {
             </TooltipTrigger>
             {isCollapsed && <TooltipContent side="right">新しい会話</TooltipContent>}
           </Tooltip>
-        </div>
+        </div> */}
 
         {/* Search */}
         <AnimatePresence>

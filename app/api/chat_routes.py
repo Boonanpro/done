@@ -672,12 +672,12 @@ async def send_dan_message_stream(
                 await reasoning_queue.put(step)
 
             # ========================================
-            # Agent v3: OpenClaw-style Simple Runner
+            # Agent v2: Bootstrap files + Native Tool Use
             # ========================================
             result = {}  # デフォルト初期化
-            from app.agent.v3.runner import create_runner
+            from app.agent.v2.runner import create_runner
 
-            # Agent v3 Runner作成
+            # Agent v2 Runner作成
             runner = await create_runner(
                 session_id=room_id,
                 user_id=current_user.user_id,
