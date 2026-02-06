@@ -332,6 +332,8 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         SKILL_GENERATE_TOOL,
         SAVE_CREDENTIALS_TOOL,
         CHECK_SKILL_TOOL,
+        READ_WORKSPACE_TOOL,
+        UPDATE_WORKSPACE_TOOL,
     ]
 
 
@@ -493,6 +495,69 @@ CHECK_SKILL_TOOL = {
     }
 }
 
+# ============================================
+# ワークスペース読み書きツール（自己学習用）
+# ============================================
+
+WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
+
+READ_WORKSPACE_TOOL = {
+    "name": "read_workspace",
+    "description": """ワークスペースファイルを読み取る。
+自分のルール、ユーザー情報、記憶を確認する時に使用。
+
+読み取り可能なファイル:
+- RULES.md: 運用ルール
+- USER.md: ユーザー情報と好み
+- MEMORY.md: 長期記憶""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "enum": ["RULES.md", "USER.md", "MEMORY.md"],
+                "description": "読み取るファイル名"
+            }
+        },
+        "required": ["filename"]
+    }
+}
+
+UPDATE_WORKSPACE_TOOL = {
+    "name": "update_workspace",
+    "description": """ワークスペースファイルを更新する。
+学んだルール、ユーザーの好み、重要な情報を保存する時に使用。
+
+更新可能なファイル:
+- RULES.md: 新しいルールを追加、既存ルールを改善
+- USER.md: ユーザーの好みを記録
+- MEMORY.md: 重要な情報を保存
+
+使用例:
+- ユーザーが「簡潔に答えて」と言った → USER.md に追記
+- 特定の操作がうまくいかなかった → RULES.md に追記
+- 重要な会話の内容を忘れたくない → MEMORY.md に追記""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "filename": {
+                "type": "string",
+                "enum": ["RULES.md", "USER.md", "MEMORY.md"],
+                "description": "更新するファイル名"
+            },
+            "content": {
+                "type": "string",
+                "description": "新しいファイル内容（全体を置き換え）"
+            },
+            "append": {
+                "type": "string",
+                "description": "追記する内容（既存内容の末尾に追加）。content と同時に指定しない"
+            }
+        },
+        "required": ["filename"]
+    }
+}
+
 
 def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     """
@@ -521,6 +586,12 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "tavily_search":
         return ("_tavily", "search")
+
+    if tool_name == "read_workspace":
+        return ("_read_workspace", "read")
+
+    if tool_name == "update_workspace":
+        return ("_update_workspace", "update")
 
     # Prefer the longest matching skill prefix to avoid collisions.
     all_skills = SkillRegistry.list_all()
@@ -1209,7 +1280,68 @@ async def execute_tool(
     Returns:
         実行結果
     """
-    from app.executors.registry import find_executor, register_all_executors
+    skill_name = tool_call["skill"]
+    action = tool_call["action"]
+    params = tool_call["params"]
+
+    # ★★★ ワークスペース読み取り（外部依存なし）★★★
+    if skill_name == "_read_workspace":
+        filename = params.get("filename")
+        if not filename:
+            return {"success": False, "error": "filename が必要です"}
+
+        allowed_files = ["RULES.md", "USER.md", "MEMORY.md"]
+        if filename not in allowed_files:
+            return {"success": False, "error": f"許可されていないファイル: {filename}。読み取り可能: {allowed_files}"}
+
+        filepath = WORKSPACE_DIR / filename
+        if not filepath.exists():
+            return {"success": False, "error": f"ファイルが存在しません: {filename}"}
+
+        try:
+            content = filepath.read_text(encoding="utf-8")
+            return {"success": True, "filename": filename, "content": content}
+        except Exception as e:
+            return {"success": False, "error": f"読み取りエラー: {e}"}
+
+    # ★★★ ワークスペース更新（外部依存なし）★★★
+    if skill_name == "_update_workspace":
+        filename = params.get("filename")
+        content = params.get("content")
+        append = params.get("append")
+
+        if not filename:
+            return {"success": False, "error": "filename が必要です"}
+
+        allowed_files = ["RULES.md", "USER.md", "MEMORY.md"]
+        if filename not in allowed_files:
+            return {"success": False, "error": f"許可されていないファイル: {filename}。更新可能: {allowed_files}"}
+
+        if not content and not append:
+            return {"success": False, "error": "content または append が必要です"}
+
+        if content and append:
+            return {"success": False, "error": "content と append は同時に指定できません"}
+
+        filepath = WORKSPACE_DIR / filename
+
+        try:
+            WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+
+            if append:
+                existing = ""
+                if filepath.exists():
+                    existing = filepath.read_text(encoding="utf-8")
+                new_content = existing.rstrip() + "\n\n" + append
+                filepath.write_text(new_content, encoding="utf-8")
+                return {"success": True, "filename": filename, "action": "appended"}
+            else:
+                filepath.write_text(content, encoding="utf-8")
+                return {"success": True, "filename": filename, "action": "replaced"}
+        except Exception as e:
+            return {"success": False, "error": f"書き込みエラー: {e}"}
+
+    # 以下は外部依存あり
     from app.services.cancellation import CancellationRegistry, CancelledError
 
     # セッションIDを現在のコンテキストに設定（深い階層でもチェック可能に）
@@ -1225,12 +1357,12 @@ async def execute_tool(
             "cancelled": True,
         }
 
-    # Executorを登録（初回のみ実行される）
-    register_all_executors()
-
-    skill_name = tool_call["skill"]
-    action = tool_call["action"]
-    params = tool_call["params"]
+    # Executorを登録（初回のみ実行される）- 存在しない場合はスキップ
+    try:
+        from app.executors.registry import find_executor, register_all_executors
+        register_all_executors()
+    except ImportError:
+        pass  # registry が存在しない場合はスキップ
 
     # リトライハンドラをインポート
     from app.agent.v2.retry_handler import with_session_retry

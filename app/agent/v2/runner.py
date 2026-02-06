@@ -2,12 +2,12 @@
 AgentRunner - 会話ループのメインロジック（Native Tool Use方式）
 
 Messages配列を維持しながらLLMと対話する。
-状態遷移はLLMの出力から検出し、コードは追従するだけ。
+状態機械なし - LLMが自律的に判断する。
 
-Native Tool Use:
-- respond_to_user ツールでユーザー回答を構造化
-- テキストブロックは全てプロセスとして処理
-- プロセス漏出を100%防止
+アーキテクチャ:
+- ブートストラップファイル: ~/.dan/workspace/ からペルソナ・ルールを読み込み
+- Native Tool Use: respond_to_user ツールでユーザー回答を構造化
+- 自己学習: ダンがワークスペースファイルを読み書きして学習
 """
 
 import re
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import anthropic
 
-from app.agent.v2.session import Session, State, get_session_store
+from app.agent.v2.session import Session, get_session_store
 from app.agent.v2.tools import (
     execute_tool, format_tool_result, FormattedToolResult, SkillRegistry,
     get_all_skill_tools, parse_tool_name,
@@ -38,8 +38,8 @@ def safe_print(msg: str) -> None:
         print(safe_msg)
 
 
-# プロンプトディレクトリ
-PROMPTS_DIR = Path(__file__).parent / "prompts"
+# コアプロンプト（不変）
+CORE_PROMPT = "You are Dan, a personal AI assistant."
 
 # ツール実行の最大ループ回数（安全弁として100回を超えたら強制終了）
 MAX_TOOL_LOOPS = 100
@@ -83,23 +83,53 @@ RESPOND_TO_USER_TOOL = {
 }
 
 
-def load_prompt(filename: str) -> str:
-    """プロンプトファイルを読み込む"""
-    filepath = PROMPTS_DIR / filename
+def get_core_prompt() -> str:
+    """コアプロンプトを返す"""
+    return CORE_PROMPT
+
+
+# ブートストラップファイルのディレクトリ
+WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
+
+
+def load_bootstrap_file(filename: str) -> str:
+    """ブートストラップファイルを読み込む（~/.dan/workspace/）"""
+    filepath = WORKSPACE_DIR / filename
     if filepath.exists():
-        return filepath.read_text(encoding="utf-8")
-    logger.warning(f"Prompt file not found: {filepath}")
+        try:
+            return filepath.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to load bootstrap file {filename}: {e}")
     return ""
 
 
-def load_system_prompt() -> str:
-    """システムプロンプトを読み込む"""
-    return load_prompt("system.md")
+def load_all_bootstrap_files() -> str:
+    """全ブートストラップファイルを読み込んで結合"""
+    parts = []
 
+    # SOUL.md - ペルソナ（読み取り専用）
+    soul = load_bootstrap_file("SOUL.md")
+    if soul:
+        parts.append(f"## ペルソナ\n\n{soul}")
 
-def load_state_prompt(state: State) -> str:
-    """状態プロンプトを読み込む"""
-    return load_prompt(f"states/{state.value}.md")
+    # RULES.md - 運用ルール
+    rules = load_bootstrap_file("RULES.md")
+    if rules:
+        parts.append(f"## 運用ルール\n\n{rules}")
+
+    # USER.md - ユーザー情報
+    user = load_bootstrap_file("USER.md")
+    if user:
+        parts.append(f"## ユーザー情報\n\n{user}")
+
+    # MEMORY.md - 長期記憶
+    memory = load_bootstrap_file("MEMORY.md")
+    if memory:
+        parts.append(f"## 長期記憶\n\n{memory}")
+
+    if parts:
+        return "\n\n---\n\n".join(parts)
+    return ""
 
 
 class AgentRunner:
@@ -201,9 +231,6 @@ class AgentRunner:
                 # レスポンスを処理
                 parsed = await self._process_llm_response(response)
 
-                # 状態遷移を適用（無効化: experiment/no-state-machine）
-                # if parsed["new_state"]:
-                #     self.session.transition_to(parsed["new_state"])
 
                 # アシスタントメッセージを追加
                 self.session.add_assistant_message_from_response(response)
@@ -369,13 +396,24 @@ class AgentRunner:
             CancellationRegistry.set_current_session(None)
 
     def _build_system_prompt(self) -> str:
-        """システムプロンプトを構築（Progressive Disclosure）"""
+        """システムプロンプトを構築（ブートストラップファイル + Progressive Disclosure）"""
         print("[RUNNER_DEBUG] Building system prompt...")
-        # ベースのシステムプロンプト
-        system = load_system_prompt()
-        print(f"[RUNNER_DEBUG] Base system prompt length: {len(system)}")
 
-        # 現在日時を注入（LLMが正確な日時を把握するため）
+        # 1. ブートストラップファイルを読み込み（ペルソナ、ルール、ユーザー情報、記憶）
+        bootstrap = load_all_bootstrap_files()
+        if bootstrap:
+            system = bootstrap + "\n\n---\n\n"
+            print(f"[RUNNER_DEBUG] Bootstrap files loaded: {len(bootstrap)} chars")
+        else:
+            system = ""
+            print("[RUNNER_DEBUG] No bootstrap files found")
+
+        # 2. コアプロンプト（不変）
+        core = get_core_prompt()
+        system += core
+        print(f"[RUNNER_DEBUG] Core prompt: {len(core)} chars")
+
+        # 3. 現在日時を注入（LLMが正確な日時を把握するため）
         from datetime import datetime, timedelta
         now = datetime.now()
         weekdays = ['月', '火', '水', '木', '金', '土', '日']
@@ -386,24 +424,15 @@ class AgentRunner:
         system += f"- 「明日」は {tomorrow.strftime('%Y年%m月%d日')} です\n"
         system += f"- 日付パラメータは必ず YYYY-MM-DD 形式で指定してください（例: {tomorrow.strftime('%Y-%m-%d')}）"
 
-        # 現在の状態のプロンプトを追加（無効化: experiment/no-state-machine）
-        # state_prompt = load_state_prompt(self.session.current_state)
-        # if state_prompt:
-        #     system += f"\n\n---\n\n## 現在の状態: {self.session.current_state.value.upper()}\n\n{state_prompt}"
-
-        # Progressive Disclosure Level 1: スキル一覧（description のみ）
+        # 4. Progressive Disclosure Level 1: スキル一覧（description のみ）
         skill_list = self._build_skill_list_section()
         if skill_list:
             system += skill_list
 
-        # Progressive Disclosure Level 2-3: 会話文脈から必要なアクションマニュアルを動的に追加
-        action_manuals = self._load_relevant_action_manuals()
-        if action_manuals:
-            system += action_manuals
-
-        # 出力ルールを最後に追加（recency bias対策）
+        # 5. 出力ルールを最後に追加（recency bias対策）
         system += self._build_output_rules()
 
+        print(f"[RUNNER_DEBUG] Total system prompt: {len(system)} chars")
         return system
 
     def _build_output_rules(self) -> str:
@@ -572,22 +601,6 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
 
         return None
 
-    def _load_relevant_action_manuals(self) -> str:
-        """
-        廃止: Progressive Disclosureはformat_tool_result()で実装
-
-        以前はここでキーワードマッチングによりアクションマニュアルを
-        システムプロンプトに事前ロードしていたが、以下の問題があった:
-        - ハードコードされたキーワードの保守が困難
-        - 不要なマニュアルがロードされてトークン消費
-
-        新しいアプローチ:
-        - ツール実行時にformat_tool_result()がスキル本文とアクションマニュアルを
-          tool_resultに注入する
-        - LLMはツール呼び出し後に必要な情報を参照できる
-        """
-        return ""
-
     def _get_model(self) -> str:
         """使用するモデルを返す"""
         return MODEL
@@ -648,29 +661,18 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
             {
                 "user_response": ユーザー回答（respond_to_userから）,
                 "tool_calls": 実行すべきスキルツール呼び出しリスト,
-                "new_state": 検出された状態遷移,
                 "stop_reason": LLMの停止理由,
             }
         """
         user_response = None
         respond_to_user_id = None  # respond_to_userのtool_use_id
         tool_calls = []
-        new_state = None
 
         for block in response.content:
             if block.type == "text":
                 # テキストブロック → プロセスとして処理
                 text = block.text
                 await self._process_text_block(text)
-
-                # [STATE: XXX] を検出（無効化: experiment/no-state-machine）
-                # state_match = re.search(r'\[STATE:\s*(\w+)\]', text)
-                # if state_match:
-                #     state_name = state_match.group(1).lower()
-                #     try:
-                #         new_state = State(state_name)
-                #     except ValueError:
-                #         pass
 
             elif block.type == "tool_use":
                 # ツール呼び出しブロック
@@ -702,7 +704,6 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
             "user_response": user_response,
             "respond_to_user_id": respond_to_user_id,  # tool_use_idを返す
             "tool_calls": tool_calls,
-            "new_state": new_state,
             "stop_reason": response.stop_reason,
         }
 
@@ -711,22 +712,12 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
         テキストブロックをプロセスとして処理
 
         - 各行をプロセスモニターに通知
-        - [STATE: XXX] を検出して状態遷移を通知
         - セーフティネット: 内部処理パターンはフィルタリング
         """
         for line in text.split("\n"):
             line = line.strip()
             if not line:
                 continue
-
-            # [STATE: XXX] を検出（無効化: experiment/no-state-machine）
-            # state_match = re.match(r'\[STATE:\s*(\w+)\]', line)
-            # if state_match:
-            #     state_name = state_match.group(1).upper()
-            #     self.session.add_reasoning_step(f"→ {state_name}")
-            #     if self._on_reasoning_step:
-            #         await self._on_reasoning_step(f"→ {state_name}")
-            #     continue
 
             # セーフティネット: 内部処理パターンはスキップ（プロセスモニターに表示しない）
             should_skip = False
@@ -787,7 +778,7 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
             return "\n".join(text_parts)
         except Exception as e:
             logger.exception(f"LLM call failed: {e}")
-            return f"[STATE: CHAT]\nエラーが発生しました: {e}"
+            return f"エラーが発生しました: {e}"
 
 
 async def create_runner(
