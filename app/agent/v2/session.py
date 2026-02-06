@@ -237,6 +237,70 @@ class Session:
         """LLMに渡すメッセージ配列を取得"""
         return self.messages.copy()
 
+    def estimate_token_count(self) -> int:
+        """
+        メッセージのトークン数を推定
+
+        簡易推定: 日本語は1文字≒1-2トークン、英語は1単語≒1トークン
+        正確ではないが、閾値判定には十分
+        """
+        total_chars = 0
+        for msg in self.messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                # content blocks形式
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            total_chars += len(block.get("text", ""))
+                        elif block.get("type") == "tool_use":
+                            # tool inputも含める
+                            total_chars += len(json.dumps(block.get("input", {})))
+                        elif block.get("type") == "tool_result":
+                            result = block.get("content", "")
+                            if isinstance(result, str):
+                                total_chars += len(result)
+                            elif isinstance(result, list):
+                                for r in result:
+                                    if isinstance(r, dict) and r.get("type") == "text":
+                                        total_chars += len(r.get("text", ""))
+        # 日本語中心なので、文字数 ≒ トークン数として扱う
+        return total_chars
+
+    def compact(self, summary: str, keep_recent: int = 10) -> int:
+        """
+        古いメッセージを削除し、要約で置き換える
+
+        Args:
+            summary: 削除されるメッセージの要約
+            keep_recent: 残す最新メッセージ数
+
+        Returns:
+            削除されたメッセージ数
+        """
+        if len(self.messages) <= keep_recent:
+            return 0
+
+        # 削除対象のメッセージ数
+        to_remove = len(self.messages) - keep_recent
+
+        # 要約メッセージを先頭に挿入
+        summary_message = {
+            "role": "user",
+            "content": f"[会話の要約]\n{summary}\n\n---\n以下は最近の会話です。"
+        }
+
+        # 最新のkeep_recent件を残す
+        recent_messages = self.messages[-keep_recent:]
+
+        # 新しいメッセージ配列を構築
+        self.messages = [summary_message] + recent_messages
+        self.updated_at = datetime.utcnow()
+
+        return to_remove
+
     def set_context(self, key: str, value: Any) -> None:
         """コンテキストに値を設定"""
         self.context[key] = value

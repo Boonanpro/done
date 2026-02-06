@@ -334,6 +334,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         CHECK_SKILL_TOOL,
         READ_WORKSPACE_TOOL,
         UPDATE_WORKSPACE_TOOL,
+        SEARCH_MEMORY_TOOL,
     ]
 
 
@@ -532,18 +533,19 @@ UPDATE_WORKSPACE_TOOL = {
 - RULES.md: 新しいルールを追加、既存ルールを改善
 - USER.md: ユーザーの好みを記録
 - MEMORY.md: 重要な情報を保存
+- memory/YYYY-MM-DD.md: 日付別の会話ログ
 
 使用例:
 - ユーザーが「簡潔に答えて」と言った → USER.md に追記
 - 特定の操作がうまくいかなかった → RULES.md に追記
-- 重要な会話の内容を忘れたくない → MEMORY.md に追記""",
+- 重要な会話の内容を忘れたくない → MEMORY.md に追記
+- 今日の会話の要約を保存 → memory/2026-02-06.md に追記""",
     "input_schema": {
         "type": "object",
         "properties": {
             "filename": {
                 "type": "string",
-                "enum": ["RULES.md", "USER.md", "MEMORY.md"],
-                "description": "更新するファイル名"
+                "description": "更新するファイル名（例: USER.md, memory/2026-02-06.md）"
             },
             "content": {
                 "type": "string",
@@ -555,6 +557,34 @@ UPDATE_WORKSPACE_TOOL = {
             }
         },
         "required": ["filename"]
+    }
+}
+
+SEARCH_MEMORY_TOOL = {
+    "name": "search_memory",
+    "description": """過去の記憶を検索する（ハイブリッド検索: セマンティック + キーワード）。
+
+「あの件どうなった？」「前に話したこと」など、過去の会話や保存した情報を探す時に使用。
+MEMORY.md、USER.md、memory/*.md を横断検索する。
+
+使用例:
+- 「Amazon 買い物」で検索 → 過去のAmazon関連の会話を発見
+- 「好きな食べ物」で検索 → ユーザーの好みを発見
+- 「2月1日」で検索 → その日の会話ログを発見""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "検索クエリ（自然言語でOK）"
+            },
+            "max_results": {
+                "type": "integer",
+                "description": "最大結果数（デフォルト: 6）",
+                "default": 6
+            }
+        },
+        "required": ["query"]
     }
 }
 
@@ -592,6 +622,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "update_workspace":
         return ("_update_workspace", "update")
+
+    if tool_name == "search_memory":
+        return ("_search_memory", "search")
 
     # Prefer the longest matching skill prefix to avoid collisions.
     all_skills = SkillRegistry.list_all()
@@ -1313,9 +1346,12 @@ async def execute_tool(
         if not filename:
             return {"success": False, "error": "filename が必要です"}
 
-        allowed_files = ["RULES.md", "USER.md", "MEMORY.md"]
-        if filename not in allowed_files:
-            return {"success": False, "error": f"許可されていないファイル: {filename}。更新可能: {allowed_files}"}
+        # 許可されたファイル: ルートの.mdファイル または memory/*.md
+        allowed_root_files = ["RULES.md", "USER.md", "MEMORY.md"]
+        is_memory_file = filename.startswith("memory/") and filename.endswith(".md")
+
+        if filename not in allowed_root_files and not is_memory_file:
+            return {"success": False, "error": f"許可されていないファイル: {filename}。更新可能: {allowed_root_files} または memory/*.md"}
 
         if not content and not append:
             return {"success": False, "error": "content または append が必要です"}
@@ -1326,7 +1362,8 @@ async def execute_tool(
         filepath = WORKSPACE_DIR / filename
 
         try:
-            WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+            # memory/ ディレクトリも作成
+            filepath.parent.mkdir(parents=True, exist_ok=True)
 
             if append:
                 existing = ""
@@ -1334,12 +1371,57 @@ async def execute_tool(
                     existing = filepath.read_text(encoding="utf-8")
                 new_content = existing.rstrip() + "\n\n" + append
                 filepath.write_text(new_content, encoding="utf-8")
-                return {"success": True, "filename": filename, "action": "appended"}
+                result = {"success": True, "filename": filename, "action": "appended"}
             else:
                 filepath.write_text(content, encoding="utf-8")
-                return {"success": True, "filename": filename, "action": "replaced"}
+                result = {"success": True, "filename": filename, "action": "replaced"}
+
+            # 更新後にインデックスを再構築（非同期で）
+            try:
+                from app.services.memory_service import get_memory_service
+                memory_service = get_memory_service()
+                memory_service.index_file(filepath)
+            except Exception as e:
+                logger.warning(f"Failed to re-index memory file: {e}")
+
+            return result
         except Exception as e:
             return {"success": False, "error": f"書き込みエラー: {e}"}
+
+    # ★★★ メモリ検索（ハイブリッド検索）★★★
+    if skill_name == "_search_memory":
+        query = params.get("query")
+        max_results = params.get("max_results", 6)
+
+        if not query:
+            return {"success": False, "error": "query が必要です"}
+
+        try:
+            from app.services.memory_service import get_memory_service
+            memory_service = get_memory_service()
+
+            # 検索前にインデックスを更新（変更があれば）
+            memory_service.index_all()
+
+            results = memory_service.search(query, max_results=max_results)
+
+            if not results:
+                return {
+                    "success": True,
+                    "query": query,
+                    "results": [],
+                    "message": "該当する記憶が見つかりませんでした"
+                }
+
+            return {
+                "success": True,
+                "query": query,
+                "results": results,
+                "message": f"{len(results)}件の記憶が見つかりました"
+            }
+        except Exception as e:
+            logger.exception(f"Memory search failed: {e}")
+            return {"success": False, "error": f"検索エラー: {e}"}
 
     # 以下は外部依存あり
     from app.services.cancellation import CancellationRegistry, CancelledError

@@ -44,6 +44,10 @@ CORE_PROMPT = "You are Dan, a personal AI assistant."
 # ツール実行の最大ループ回数（安全弁として100回を超えたら強制終了）
 MAX_TOOL_LOOPS = 100
 
+# コンパクション設定
+COMPACTION_THRESHOLD = 80000  # この文字数を超えたらコンパクション発動
+COMPACTION_KEEP_RECENT = 10   # コンパクション時に残す最新メッセージ数
+
 # セーフティネット: LLMがルール違反した場合に除外するパターン
 # これらのパターンに一致する行はプロセスモニターに表示しない
 INTERNAL_FILTER_PATTERNS = [
@@ -333,7 +337,10 @@ class AgentRunner:
             store = get_session_store()
             await store.save(self.session)
 
-            # 5. 自動分析をトリガー（バックグラウンドで実行）
+            # 5. コンパクションチェック
+            await self._check_and_compact()
+
+            # 6. 自動分析をトリガー（バックグラウンドで実行）
             if tool_results:  # ツールを使った場合のみ分析
                 asyncio.create_task(self._trigger_learning_analysis())
 
@@ -477,6 +484,26 @@ class AgentRunner:
 
 (respond_to_user ツールを呼び出し)
 response: "アベンヌウォーター 50ml 4本セットが990円で見つかりました。カートに入れますか？"
+```
+
+### 記憶リクエストの処理（必須）
+
+ユーザーが「覚えて」「覚えといて」「メモして」と言ったら:
+
+1. **必ず update_workspace ツールを呼び出す**
+2. その後で respond_to_user で回答
+
+**ツールを呼ばずに「覚えました」と返すのは禁止。実際にファイルに保存すること。**
+
+```
+ユーザー: 俺の名前は太郎だよ。覚えといて
+
+(update_workspace ツールを呼び出し)
+filename: "USER.md"
+append: "- 名前: 太郎"
+
+(respond_to_user ツールを呼び出し)
+response: "太郎さんですね。USER.mdに保存しました。"
 ```
 """
 
@@ -734,6 +761,107 @@ response: "アベンヌウォーター 50ml 4本セットが990円で見つか�
             self.session.add_reasoning_step(line)
             if self._on_reasoning_step:
                 await self._on_reasoning_step(line)
+
+    async def _check_and_compact(self) -> None:
+        """
+        コンパクションが必要かチェックし、必要なら実行
+
+        1. トークン数が閾値を超えたらメモリフラッシュを実行
+        2. LLMに重要情報を memory/ に保存させる
+        3. 古いメッセージを削除し、要約を残す
+        """
+        token_count = self.session.estimate_token_count()
+        logger.debug(f"Token count: {token_count} / {COMPACTION_THRESHOLD}")
+
+        if token_count < COMPACTION_THRESHOLD:
+            return
+
+        logger.info(f"Compaction triggered: {token_count} tokens")
+
+        if self._on_reasoning_step:
+            await self._on_reasoning_step("📝 会話が長くなったので記憶を整理中...")
+
+        try:
+            # メモリフラッシュ: LLMに重要情報を保存させる
+            summary = await self._flush_to_memory()
+
+            # 古いメッセージを削除し、要約を残す
+            removed = self.session.compact(summary, keep_recent=COMPACTION_KEEP_RECENT)
+            logger.info(f"Compacted: removed {removed} messages, kept {COMPACTION_KEEP_RECENT}")
+
+            # セッションを再保存
+            store = get_session_store()
+            await store.save(self.session)
+
+            if self._on_reasoning_step:
+                await self._on_reasoning_step(f"✅ 記憶を整理しました（{removed}件のメッセージを要約）")
+
+        except Exception as e:
+            logger.exception(f"Compaction failed: {e}")
+            # コンパクション失敗は致命的ではない、続行
+
+    async def _flush_to_memory(self) -> str:
+        """
+        メモリフラッシュ: LLMに重要情報を memory/ に保存させる
+
+        Returns:
+            会話の要約テキスト
+        """
+        from datetime import datetime
+
+        # フラッシュ用のシステムプロンプト
+        flush_system = """あなたはDan、パーソナルAIアシスタントです。
+
+会話が長くなったので、重要な情報を保存する必要があります。
+
+以下を行ってください:
+1. これまでの会話から重要な情報（ユーザーの好み、決定事項、進行中のタスク等）を抽出
+2. update_workspace ツールで memory/{date}.md に保存
+3. 会話の要約を respond_to_user で返す（この要約は会話履歴に残ります）
+
+要約は簡潔に、箇条書きで、重要なポイントのみ含めてください。
+""".format(date=datetime.now().strftime("%Y-%m-%d"))
+
+        # フラッシュ用のメッセージ
+        flush_messages = self.session.get_messages_for_llm()
+        flush_messages.append({
+            "role": "user",
+            "content": "【システム】会話が長くなりました。重要な情報を memory/ に保存し、会話の要約を作成してください。"
+        })
+
+        # LLM呼び出し
+        tools = self._get_tools()
+        response = await self.llm_client.messages.create(
+            model=self._get_model(),
+            max_tokens=2000,
+            system=flush_system,
+            messages=flush_messages,
+            tools=tools,
+        )
+
+        # ツール呼び出しを処理
+        summary = "会話の要約が生成されませんでした。"
+        for block in response.content:
+            if block.type == "tool_use":
+                if block.name == "respond_to_user":
+                    summary = block.input.get("response", summary)
+                elif block.name == "update_workspace":
+                    # update_workspaceを実行
+                    from app.agent.v2.tools import execute_tool, parse_tool_name
+                    parsed = parse_tool_name(block.name)
+                    if parsed:
+                        skill_name, action = parsed
+                        await execute_tool(
+                            tool_call={
+                                "tool_use_id": block.id,
+                                "skill": skill_name,
+                                "action": action,
+                                "params": block.input,
+                            },
+                            user_id=self.session.user_id,
+                        )
+
+        return summary
 
     async def _trigger_learning_analysis(self) -> None:
         """

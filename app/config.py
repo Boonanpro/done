@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     # Anthropic (Claude)
     ANTHROPIC_API_KEY: str = ""
 
+    # OpenAI (Embeddings for memory search)
+    OPENAI_API_KEY: str = ""
+
     # Google Gemini (learning inference)
     GOOGLE_GEMINI_API_KEY: str = ""
     
