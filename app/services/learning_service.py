@@ -1200,31 +1200,6 @@ async def trigger_auto_analysis(
                     )
                     basic_result["rules_created"] = basic_result.get("rules_created", 0) + 1
 
-        # ルールが作成/更新された場合、スキル更新を自動適用
-        if basic_result.get("rules_created", 0) > 0 or basic_result.get("rules_updated", 0) > 0:
-            try:
-                from app.services import skill_updater
-
-                # 提案を生成して自動適用（dry_run=False）
-                update_result = await skill_updater.auto_update_skills(
-                    min_confidence=0.3,  # 低い閾値で全て適用
-                    dry_run=False,       # 実際に適用
-                )
-
-                basic_result["skill_updates"] = {
-                    "proposals_generated": update_result.get("proposals_generated", 0),
-                    "proposals_applied": update_result.get("proposals_applied", 0),
-                    "errors": update_result.get("errors", []),
-                }
-
-                if update_result.get("proposals_applied", 0) > 0:
-                    logger.info(
-                        f"Auto-applied {update_result['proposals_applied']} skill updates"
-                    )
-            except Exception as e:
-                logger.warning(f"Skill auto-update failed: {e}")
-                basic_result["skill_update_error"] = str(e)
-
         # 低信頼度ルールを無効化（十分な証拠がある場合のみ）
         deactivated = await _deactivate_low_confidence_rules(threshold=0.3, min_evidence=5)
         basic_result["rules_deactivated"] = deactivated
