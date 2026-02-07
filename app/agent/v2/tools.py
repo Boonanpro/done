@@ -334,7 +334,8 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         BROWSER_SCROLL_TOOL,
         BROWSER_BACK_TOOL,
         BROWSER_SELECT_TOOL,
-        TAVILY_SEARCH_TOOL,
+        READ_URL_TOOL,
+        DEEP_RESEARCH_TOOL,
         SKILL_GENERATE_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
@@ -435,30 +436,42 @@ BROWSER_SELECT_TOOL = {
 }
 
 # ============================================
-# Tavily Web検索ツール
+# URL読み込みツール（Jina Reader）
 # ============================================
 
-TAVILY_SEARCH_TOOL = {
-    "name": "tavily_search",
-    "description": """Web検索を実行して最新情報を取得する。
-リアルタイムの情報（天気、価格、ニュース等）が必要な場合に使用。
-
-使用例:
-- 「今日の東京の天気」
-- 「iPhone 16の価格」
-- 「最新のニュース」""",
+READ_URL_TOOL = {
+    "name": "read_url",
+    "description": """URLのページ内容を取得する。
+検索結果のURLを実際に読んで詳細を確認したい時に使用。
+Markdown形式でページ全文を返す。""",
     "input_schema": {
         "type": "object",
         "properties": {
-            "query": {
-                "type": "string",
-                "description": "検索クエリ"
-            },
-            "search_depth": {
-                "type": "string",
-                "enum": ["basic", "advanced"],
-                "description": "basic: 高速（デフォルト）、advanced: 詳細"
-            }
+            "url": {"type": "string", "description": "読み込むURL"}
+        },
+        "required": ["url"]
+    }
+}
+
+# ============================================
+# ディープリサーチツール
+# ============================================
+
+DEEP_RESEARCH_TOOL = {
+    "name": "deep_research",
+    "description": """複数ソースを検索・読み込み・検証して総合的な調査レポートを作成する。
+比較、分析、推薦、真偽確認など、複数の情報源が必要な質問に使用。
+内部で複数回の検索とページ読み込みを自動実行する（1-2分かかる）。
+
+使用例:
+- 「iPhone 16 vs Pixel 9 どちらが良いか」
+- 「来月大阪旅行、おすすめの観光プラン」
+- 「RAGの最新ベストプラクティス」""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "調査テーマ（自然言語）"},
+            "context": {"type": "string", "description": "補足情報（任意）"}
         },
         "required": ["query"]
     }
@@ -718,8 +731,11 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
         action = tool_name[len("browser_"):]  # open, screenshot, click, type, scroll, select
         return ("_browser", action)
 
-    if tool_name == "tavily_search":
-        return ("_tavily", "search")
+    if tool_name == "read_url":
+        return ("_jina", "read")
+
+    if tool_name == "deep_research":
+        return ("_deep_research", "research")
 
     if tool_name == "read_workspace":
         return ("_read_workspace", "read")
@@ -870,7 +886,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in ("_tavily", "_skill_generate"):
+        if skill_name in ("_skill_generate", "_jina", "_deep_research"):
             return
 
         error_type = result.get("error_type")
@@ -1807,10 +1823,13 @@ async def execute_tool(
     if skill_name == "_browser":
         return await _execute_browser_tool(action, params)
 
-    # ★★★ Tavily Web検索 ★★★
-    # リアルタイム情報（天気、価格、ニュース等）を取得
-    if skill_name == "_tavily":
-        return await _execute_tavily_search(params)
+    # ★★★ URL読み込み（Jina Reader）★★★
+    if skill_name == "_jina":
+        return await _execute_read_url(params)
+
+    # ★★★ ディープリサーチ ★★★
+    if skill_name == "_deep_research":
+        return await _execute_deep_research(params)
 
     # ★★★ 最初にスキルの存在を確認（認証チェックより先）★★★
     # 存在しないスキルに対して「認証が必要」と誤った応答を返さないため
@@ -2539,49 +2558,79 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
 
 
 # ============================================
-# Tavily Web検索
+# URL読み込み（Jina Reader）
 # ============================================
 
-async def _execute_tavily_search(params: Dict[str, Any]) -> Dict[str, Any]:
+async def _execute_read_url(params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Tavily APIでWeb検索を実行
+    Jina ReaderでURLの内容を取得
 
     Args:
-        params: {query, search_depth}
+        params: {url}
 
     Returns:
-        検索結果
+        ページ内容（Markdown）
     """
-    from app.tools.tavily_search import tavily_search_raw
+    from app.tools.jina_reader import read_url
 
-    query = params.get("query", "")
-    search_depth = params.get("search_depth", "basic")
+    url = params.get("url", "")
+    if not url:
+        return {"success": False, "error": "URLが指定されていません"}
 
-    if not query:
+    logger.info(f"[JINA] Reading: {url}")
+
+    result = await read_url(url)
+
+    if not result.get("success"):
         return {
             "success": False,
-            "error": "検索クエリが指定されていません",
+            "error": result.get("error", "ページの読み込みに失敗しました"),
+            "url": url,
         }
 
-    logger.info(f"[TAVILY] Searching: {query}")
-
-    result = await tavily_search_raw(query, search_depth=search_depth)
-
-    if result.get("error"):
-        return {
-            "success": False,
-            "error": result["error"],
-        }
+    content = result.get("content", "")
+    # 長い場合は先頭8000文字に切り詰め
+    if len(content) > 8000:
+        content = content[:8000] + "\n\n... (以降省略)"
 
     return {
         "success": True,
-        "answer": result.get("answer"),
-        "results": [
-            {
-                "title": r.get("title", ""),
-                "url": r.get("url", ""),
-                "content": r.get("content", "")[:500],
-            }
-            for r in result.get("results", [])[:5]
-        ],
+        "url": url,
+        "content": content,
+        "message": f"ページを読み込みました（{len(content)}文字）",
     }
+
+
+# ============================================
+# ディープリサーチ
+# ============================================
+
+async def _execute_deep_research(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    ディープリサーチパイプラインを実行
+
+    Args:
+        params: {query, context}
+
+    Returns:
+        調査レポート
+    """
+    from app.tools.deep_research import run_deep_research
+
+    query = params.get("query", "")
+    context = params.get("context", "")
+
+    if not query:
+        return {"success": False, "error": "調査テーマが指定されていません"}
+
+    logger.info(f"[DEEP_RESEARCH] Starting: {query}")
+
+    try:
+        result = await run_deep_research(query, context=context)
+        return result
+    except Exception as e:
+        logger.exception(f"Deep research failed: {e}")
+        return {
+            "success": False,
+            "error": f"調査中にエラーが発生しました: {e}",
+        }

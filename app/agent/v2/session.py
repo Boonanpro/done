@@ -153,7 +153,7 @@ class Session:
         Args:
             response: anthropic.types.Message オブジェクト
         """
-        # content blocksをそのまま保存（text, tool_use両方を含む）
+        # content blocksをそのまま保存（text, tool_use, server_tool_use, web_search_tool_result を含む）
         content_blocks = []
         for block in response.content:
             if block.type == "text":
@@ -167,6 +167,19 @@ class Session:
                     "id": block.id,
                     "name": block.name,
                     "input": block.input,
+                })
+            elif block.type == "server_tool_use":
+                content_blocks.append({
+                    "type": "server_tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input if hasattr(block, 'input') else {},
+                })
+            elif block.type == "web_search_tool_result":
+                content_blocks.append({
+                    "type": "web_search_tool_result",
+                    "tool_use_id": block.tool_use_id,
+                    "content": block.content if hasattr(block, 'content') else [],
                 })
 
         self.messages.append({

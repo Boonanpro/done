@@ -218,7 +218,6 @@ class AgentRunner:
                 # レスポンスを処理
                 parsed = await self._process_llm_response(response)
 
-
                 # アシスタントメッセージを追加
                 self.session.add_assistant_message_from_response(response)
 
@@ -227,10 +226,16 @@ class AgentRunner:
                     user_response = parsed["user_response"]
                 # ツール呼び出しがない、または最大ループに達した場合は終了
                 if not parsed["tool_calls"] or loop_count >= MAX_TOOL_LOOPS:
+                    # ツールなしの場合でもreasoning_textがあればSSEに流す
+                    if parsed["reasoning_text"] and self._on_reasoning_step:
+                        await self._on_reasoning_step(parsed["reasoning_text"])
                     print(f"[RUNNER_DEBUG] No more tool calls or max loops reached")
                     break
 
                 # ツールを実行
+                reasoning_text = parsed["reasoning_text"] or ""
+                first_tool = True
+
                 for tool_call in parsed["tool_calls"]:
                     # ツール実行前にもキャンセルチェック
                     if CancellationRegistry.is_cancelled(self.session.session_id):
@@ -253,6 +258,12 @@ class AgentRunner:
                     action = tool_call["action"]
                     params = tool_call["params"]
 
+                    # ツール名を整形（browser_open, check_skill等）
+                    if skill_name.startswith("_"):
+                        tool_label = f"{skill_name[1:]}_{action}" if action else skill_name[1:]
+                    else:
+                        tool_label = f"{skill_name}_{action}" if action else skill_name
+
                     # check_skillはスキル名もログに含める
                     if skill_name == "_check_skill":
                         log_msg = f"Executing tool: check_skill({params.get('skill_name', '?')})"
@@ -268,8 +279,13 @@ class AgentRunner:
                             f.write(f"[{datetime.now().isoformat()}] {log_msg} params={params}\n")
                     except Exception:
                         pass
+                    # SSE表示: 「LLMの独り言 ツール名」or フォールバック「ツール名」
                     if self._on_reasoning_step:
-                        await self._on_reasoning_step(f"🔧 {skill_name} {action}...")
+                        if first_tool and reasoning_text:
+                            await self._on_reasoning_step(f"{reasoning_text} {tool_label}")
+                        else:
+                            await self._on_reasoning_step(tool_label)
+                    first_tool = False
 
                     result = await execute_tool(
                         tool_call=tool_call,
@@ -372,16 +388,13 @@ class AgentRunner:
                     )
 
                     if self._on_reasoning_step:
-                        status = "✅" if result.get("success") else "❌"
-                        vision_indicator = " 👁️" if formatted.has_images() else ""
-                        # 具体的な結果メッセージを表示
                         message = result.get("message", "")
-                        if message and len(message) < 100:
-                            await self._on_reasoning_step(f"{status} {message}{vision_indicator}")
-                        else:
-                            # 長いメッセージは要約
-                            action_label = f"{skill_name} {action}"
-                            await self._on_reasoning_step(f"{status} {action_label} 完了{vision_indicator}")
+                        if not result.get("success"):
+                            # エラー時だけ表示
+                            await self._on_reasoning_step(message or f"{skill_name} {action} 失敗")
+                        elif message and len(message) < 100:
+                            # 具体的な結果メッセージがあればそのまま表示
+                            await self._on_reasoning_step(message)
 
             # 4. セッションを保存
             store = get_session_store()
@@ -505,6 +518,10 @@ class AgentRunner:
         tools = self._get_tools()
         lines = ["## 利用可能なツール"]
         for tool in tools:
+            # サーバーサイドツール（web_search等）はtype fieldで識別
+            if tool.get("type", "").startswith("web_search"):
+                lines.append(f"- `web_search`: Web検索（自動実行。回答に最新情報が必要な場合にClaudeが自動で使用）")
+                continue
             name = tool.get("name", "")
             desc = tool.get("description", "").split("\n")[0]  # 1行目のみ
             lines.append(f"- `{name}`: {desc}")
@@ -645,9 +662,21 @@ class AgentRunner:
         LLMに渡すツール一覧を取得
 
         Returns:
-            全スキルツール
+            クライアントサイドツール + サーバーサイドツール（web_search）
         """
-        return get_all_skill_tools()
+        tools = get_all_skill_tools()
+        # Anthropic server-side web search
+        tools.append({
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5,
+            "user_location": {
+                "type": "approximate",
+                "country": "JP",
+                "timezone": "Asia/Tokyo",
+            },
+        })
+        return tools
 
     async def _call_llm_with_tools(self) -> "anthropic.types.Message":
         """
@@ -687,36 +716,57 @@ class AgentRunner:
         """
         LLMレスポンスのcontent blocksを処理
 
-        - text blocks → ユーザーへの返答として収集
-        - tool_use blocks → ツール実行
+        textブロックをツールブロックとの位置関係で分類:
+        - ツールより前のtext → reasoning_text（プロセスモニター向け）
+        - ツールより後のtext → user_response（ユーザーへの回答）
+        - ツールがない場合 → 全textがuser_response
 
         Returns:
             {
-                "user_response": ユーザー回答（テキストブロックから）,
+                "user_response": ユーザー回答（最後のツール以降のテキスト）,
+                "reasoning_text": 推論テキスト（ツール前のテキスト、SSE向け）,
                 "tool_calls": 実行すべきスキルツール呼び出しリスト,
                 "stop_reason": LLMの停止理由,
             }
         """
-        text_parts = []
         tool_calls = []
 
-        for block in response.content:
+        # Pass 1: 全ブロックをインデックス付きで分類
+        # 最後のツール系ブロックの位置を特定する
+        last_tool_index = -1
+        for i, block in enumerate(response.content):
+            if block.type in ("tool_use", "server_tool_use", "web_search_tool_result"):
+                last_tool_index = i
+
+        # Pass 2: textブロックを位置で振り分け
+        reasoning_parts = []
+        response_parts = []
+
+        for i, block in enumerate(response.content):
             if block.type == "text":
-                # テキストブロック → ユーザーへの返答
                 text = block.text.strip()
-                if text:
-                    text_parts.append(text)
-                    safe_print(f"[LLM_DEBUG] Text block: {text[:50]}...")
+                if not text:
+                    continue
+
+                if last_tool_index < 0:
+                    # ツールなし → 全textがresponse
+                    response_parts.append(text)
+                elif i <= last_tool_index:
+                    # ツールより前 → reasoning
+                    reasoning_parts.append(text)
+                else:
+                    # ツールより後 → response
+                    response_parts.append(text)
+
+                safe_print(f"[LLM_DEBUG] Text block ({'reasoning' if i <= last_tool_index and last_tool_index >= 0 else 'response'}): {text[:50]}...")
 
             elif block.type == "tool_use":
-                # ツール呼び出しブロック
                 tool_name = block.name
                 tool_input = block.input
                 tool_use_id = block.id
 
                 print(f"[LLM_DEBUG] Tool use: {tool_name}")
 
-                # スキルツール呼び出し
                 parsed = parse_tool_name(tool_name)
                 if parsed:
                     skill_name, action = parsed
@@ -728,11 +778,18 @@ class AgentRunner:
                     })
                     print(f"[LLM_DEBUG] Skill tool: {skill_name} {action}")
 
-        # テキストブロックを結合してユーザー返答とする
-        user_response = "\n\n".join(text_parts) if text_parts else None
+            elif block.type == "server_tool_use":
+                print(f"[LLM_DEBUG] Server tool use: {block.name}")
+
+            elif block.type == "web_search_tool_result":
+                print(f"[LLM_DEBUG] Web search result received")
+
+        user_response = "\n\n".join(response_parts) if response_parts else None
+        reasoning_text = "\n".join(reasoning_parts) if reasoning_parts else None
 
         return {
             "user_response": user_response,
+            "reasoning_text": reasoning_text,
             "tool_calls": tool_calls,
             "stop_reason": response.stop_reason,
         }
