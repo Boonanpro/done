@@ -332,6 +332,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         BROWSER_CLICK_TOOL,
         BROWSER_TYPE_TOOL,
         BROWSER_SCROLL_TOOL,
+        BROWSER_BACK_TOOL,
         BROWSER_SELECT_TOOL,
         TAVILY_SEARCH_TOOL,
         SKILL_GENERATE_TOOL,
@@ -406,6 +407,16 @@ BROWSER_SCROLL_TOOL = {
             "direction": {"type": "string", "enum": ["down", "up"], "description": "スクロール方向"}
         },
         "required": ["direction"]
+    }
+}
+
+BROWSER_BACK_TOOL = {
+    "name": "browser_back",
+    "description": "ブラウザの「戻る」で1つ前のページに戻る。操作後にスクリーンショットと要素一覧を返す。",
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
     }
 }
 
@@ -2393,6 +2404,11 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             delta = 500 if direction == "down" else -500
             await page.evaluate(f"window.scrollBy(0, {delta})")
             await page.wait_for_timeout(300)
+            return await _get_browser_state(page)
+
+        elif action == "back":
+            await page.go_back()
+            await page.wait_for_load_state("domcontentloaded")
             return await _get_browser_state(page)
 
         elif action == "select":
