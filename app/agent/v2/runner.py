@@ -374,11 +374,12 @@ class AgentRunner:
                 user_response = "処理が完了しました。"
 
             # ブラウザセッションIDを抽出（スキル化用）
+            # browser_* ツールが使われた場合、session_id をブラウザセッションIDとして返す
             browser_session_id = None
             for tool_result in tool_results:
-                result = tool_result.get("result", {})
-                if result.get("browser_session_id"):
-                    browser_session_id = result["browser_session_id"]
+                tool_call_data = tool_result.get("tool", {})
+                if tool_call_data.get("skill") == "_browser":
+                    browser_session_id = self.session.session_id
                     break
 
             return {
