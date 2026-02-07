@@ -283,22 +283,38 @@ class AgentRunner:
                     if skill_name == "_browser":
                         try:
                             from app.services import learning_service
-                            # URLからサイトドメインを抽出
+                            from urllib.parse import urlparse
+
+                            # 結果テキストからページ情報と要素情報を抽出
                             url = params.get("url", "")
                             page_url = ""
-                            site = None
+                            page_title = ""
+                            element_tag = ""
+                            element_text = ""
+                            ref = params.get("ref", "")
+
                             for block in result.get("content", []):
-                                if isinstance(block, dict) and block.get("type") == "text":
-                                    for line in block["text"].split("\n"):
-                                        if line.startswith("URL: "):
-                                            page_url = line[5:].strip()
-                                            break
-                                    break
+                                if not (isinstance(block, dict) and block.get("type") == "text"):
+                                    continue
+                                for line in block["text"].split("\n"):
+                                    if line.startswith("URL: "):
+                                        page_url = line[5:].strip()
+                                    elif line.startswith("タイトル: "):
+                                        page_title = line[len("タイトル: "):].strip()
+                                    elif ref and line.strip().startswith(f"{ref}:"):
+                                        # "@e3: [button] カートに入れる" から要素情報を抽出
+                                        after_ref = line.split(":", 1)[1].strip()
+                                        if after_ref.startswith("["):
+                                            bracket_end = after_ref.find("]")
+                                            if bracket_end > 0:
+                                                element_tag = after_ref[1:bracket_end]
+                                                element_text = after_ref[bracket_end + 1:].strip()[:100]
+                                break
+
+                            site = None
                             if page_url:
-                                from urllib.parse import urlparse
                                 site = urlparse(page_url).netloc
                             elif url:
-                                from urllib.parse import urlparse
                                 site = urlparse(url).netloc
 
                             await learning_service.record_action_event(
@@ -307,7 +323,9 @@ class AgentRunner:
                                 technical_success=result.get("success", False),
                                 context={
                                     "page_url": page_url,
-                                    "params": params,
+                                    "page_title": page_title,
+                                    "element_tag": element_tag,
+                                    "element_text": element_text,
                                 },
                                 user_id=self.session.user_id,
                                 site=site,
