@@ -279,6 +279,44 @@ class AgentRunner:
                         "result": result,
                     })
 
+                    # ブラウザ操作のログを記録（学習システム用）
+                    if skill_name == "_browser":
+                        try:
+                            from app.services import learning_service
+                            # URLからサイトドメインを抽出
+                            url = params.get("url", "")
+                            page_url = ""
+                            site = None
+                            for block in result.get("content", []):
+                                if isinstance(block, dict) and block.get("type") == "text":
+                                    for line in block["text"].split("\n"):
+                                        if line.startswith("URL: "):
+                                            page_url = line[5:].strip()
+                                            break
+                                    break
+                            if page_url:
+                                from urllib.parse import urlparse
+                                site = urlparse(page_url).netloc
+                            elif url:
+                                from urllib.parse import urlparse
+                                site = urlparse(url).netloc
+
+                            await learning_service.record_action_event(
+                                session_id=self.session.session_id,
+                                action_name=f"browser_{action}",
+                                technical_success=result.get("success", False),
+                                context={
+                                    "page_url": page_url,
+                                    "params": params,
+                                },
+                                user_id=self.session.user_id,
+                                site=site,
+                                skill_name="_browser",
+                                action_params=params,
+                            )
+                        except Exception as e:
+                            logger.debug(f"Failed to record browser event: {e}")
+
                     # ツール結果をtool_result形式でメッセージに追加
                     # Progressive Disclosure: スキル情報を渡してマニュアルを注入
                     skill = SkillRegistry.get(skill_name)
