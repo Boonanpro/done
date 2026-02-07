@@ -490,11 +490,15 @@ class AgentRunner:
             return ""
 
         lines = ["## 利用可能なスキル"]
+        lines.append("")
         for skill in skills:
             lines.append(f"- `{skill.name}`: {skill.description}")
         lines.append("")
-        lines.append("※ スキルを使う場合は check_skill で手順書を確認し、browser_open/click/type 等で操作")
-        lines.append("※ 詳細が必要な場合は check_skill ツールで SKILL.md を取得")
+        lines.append("### スキル使用ルール（必須）")
+        lines.append("")
+        lines.append("1. ユーザーの依頼が上記スキルに該当する場合、**必ず最初に `check_skill` ツールで手順書を取得すること**。手順書なしで自己流で操作してはいけない。")
+        lines.append("2. 手順書を取得したら、その手順に従って `browser_open`/`browser_click`/`browser_type` 等で操作する。")
+        lines.append("3. 該当するスキルがない場合は、自分の判断でブラウザ操作して構わない。")
         return "\n".join(lines)
 
 
