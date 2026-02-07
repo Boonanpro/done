@@ -565,14 +565,14 @@ READ_WORKSPACE_TOOL = {
 読み取り可能なファイル:
 - RULES.md: 運用ルール
 - USER.md: ユーザー情報と好み
-- MEMORY.md: 長期記憶""",
+- MEMORY.md: 長期記憶
+- memory/YYYY-MM-DD.md: 日付別の会話ログ""",
     "input_schema": {
         "type": "object",
         "properties": {
             "filename": {
                 "type": "string",
-                "enum": ["RULES.md", "USER.md", "MEMORY.md"],
-                "description": "読み取るファイル名"
+                "description": "読み取るファイル名（例: RULES.md, memory/2026-02-07.md）"
             }
         },
         "required": ["filename"]
@@ -1376,9 +1376,11 @@ async def execute_tool(
         if not filename:
             return {"success": False, "error": "filename が必要です"}
 
-        allowed_files = ["RULES.md", "USER.md", "MEMORY.md"]
-        if filename not in allowed_files:
-            return {"success": False, "error": f"許可されていないファイル: {filename}。読み取り可能: {allowed_files}"}
+        allowed_root = ["RULES.md", "USER.md", "MEMORY.md"]
+        is_memory_file = filename.startswith("memory/") and filename.endswith(".md")
+
+        if filename not in allowed_root and not is_memory_file:
+            return {"success": False, "error": f"許可されていないファイル: {filename}"}
 
         filepath = WORKSPACE_DIR / filename
         if not filepath.exists():

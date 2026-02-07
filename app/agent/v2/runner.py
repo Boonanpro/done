@@ -92,12 +92,24 @@ def load_all_bootstrap_files() -> str:
     if memory:
         parts.append(f"## 長期記憶\n\n{memory}")
 
-    # 3. SOUL.md - ペルソナ
+    # 3. 直近の日別メモリ（yesterday + today）
+    from datetime import datetime, timedelta
+    today = datetime.now().strftime("%Y-%m-%d")
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    for date_str in [yesterday, today]:
+        daily = load_bootstrap_file(f"memory/{date_str}.md")
+        if daily:
+            # サイズ上限: 1ファイルあたり最大4000文字（末尾=最新部分を優先）
+            if len(daily) > 4000:
+                daily = daily[-4000:]
+            parts.append(f"## 会話ログ ({date_str})\n\n{daily}")
+
+    # 4. SOUL.md - ペルソナ
     soul = load_bootstrap_file("SOUL.md")
     if soul:
         parts.append(f"## ペルソナ\n\n{soul}")
 
-    # 4. RULES.md - 運用ルール（最後に配置 = recency bias で効きやすい）
+    # 5. RULES.md - 運用ルール（最後に配置 = recency bias で効きやすい）
     rules = load_bootstrap_file("RULES.md")
     if rules:
         parts.append(rules)  # RULES.md は既にタイトル含むのでそのまま
@@ -241,7 +253,21 @@ class AgentRunner:
                     action = tool_call["action"]
                     params = tool_call["params"]
 
-                    logger.info(f"Executing tool: {skill_name} {action}")
+                    # check_skillはスキル名もログに含める
+                    if skill_name == "_check_skill":
+                        log_msg = f"Executing tool: check_skill({params.get('skill_name', '?')})"
+                    else:
+                        log_msg = f"Executing tool: {skill_name} {action}"
+                    logger.info(log_msg)
+                    # ツール実行ログをファイルにも記録
+                    try:
+                        from datetime import datetime
+                        from pathlib import Path
+                        _log_path = Path(__file__).parent.parent.parent.parent / "logs" / "tool_calls.log"
+                        with open(_log_path, "a", encoding="utf-8") as f:
+                            f.write(f"[{datetime.now().isoformat()}] {log_msg} params={params}\n")
+                    except Exception:
+                        pass
                     if self._on_reasoning_step:
                         await self._on_reasoning_step(f"🔧 {skill_name} {action}...")
 
@@ -436,7 +462,7 @@ class AgentRunner:
         2. 現在の日時
         3. 利用可能なツール一覧
         4. 利用可能なスキル一覧
-        5. ブートストラップファイル（USER → MEMORY → SOUL → RULES）
+        5. ブートストラップファイル（USER → MEMORY → yesterday/today → SOUL → RULES）
         """
         print("[RUNNER_DEBUG] Building system prompt...")
         parts = []
@@ -820,8 +846,9 @@ class AgentRunner:
 
 以下を行ってください:
 1. これまでの会話から重要な情報（ユーザーの好み、決定事項、進行中のタスク等）を抽出
-2. update_workspace ツールで memory/{date}.md に保存
-3. 会話の要約をテキストで出力（この要約は会話履歴に残ります）
+2. update_workspace ツールで memory/{date}.md に **追記（appendパラメータを使用）** する。contentではなくappendを使うこと。
+3. 長期的に重要な情報（ユーザーの好みの変化、重要な決定事項、繰り返し参照される事実）があれば、MEMORY.md にも追記する
+4. 会話の要約をテキストで出力（この要約は会話履歴に残ります）
 
 要約は簡潔に、箇条書きで、重要なポイントのみ含めてください。
 """.format(date=datetime.now().strftime("%Y-%m-%d"))
