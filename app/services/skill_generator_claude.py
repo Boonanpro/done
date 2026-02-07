@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
+import json
 import yaml
 
 from app.services import learning_service
@@ -255,6 +256,88 @@ def _analyze_step_for_hybrid(step: dict) -> str:
     return "unknown"
 
 
+def _format_events_as_session_log(events: list) -> str:
+    """
+    learning_eventsをセッションログテキストに変換
+
+    スキル分析/生成のプロンプトに埋め込む用。
+    """
+    if not events:
+        return "（イベントなし）"
+
+    lines = []
+    for i, event in enumerate(events, 1):
+        action = event.get("action_name", "unknown")
+        params = event.get("action_params") or {}
+        success = event.get("technical_success", False)
+        context = event.get("context") or {}
+
+        lines.append(f"ステップ {i}: {action}")
+
+        # パラメータ
+        param_parts = []
+        for k, v in params.items():
+            if v is not None and v != "":
+                param_parts.append(f"{k}={v}")
+        if param_parts:
+            lines.append(f"  パラメータ: {', '.join(param_parts)}")
+
+        lines.append(f"  結果: {'成功' if success else '失敗'}")
+
+        page_url = context.get("page_url", "")
+        page_title = context.get("page_title", "")
+        element_tag = context.get("element_tag", "")
+        element_text = context.get("element_text", "")
+
+        if page_url:
+            lines.append(f"  URL: {page_url}")
+        if page_title:
+            lines.append(f"  タイトル: {page_title}")
+        if element_tag:
+            el_info = f"[{element_tag}]"
+            if element_text:
+                el_info += f" {element_text}"
+            lines.append(f"  要素: {el_info}")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _filter_successful_events(events: list) -> list:
+    """成功したイベントのみを抽出し、連続重複を除去"""
+    filtered = []
+    last_action = None
+    last_ref = None
+
+    for event in events:
+        if not event.get("technical_success", False):
+            continue
+
+        action = event.get("action_name", "")
+        params = event.get("action_params") or {}
+        ref = params.get("ref", "")
+
+        # 同じアクション+refの連続を除去
+        if action == last_action and ref == last_ref and ref:
+            continue
+
+        last_action = action
+        last_ref = ref
+        filtered.append(event)
+
+    return filtered
+
+
+def _extract_site_from_events(events: list) -> Optional[str]:
+    """イベントリストからサイトドメインを抽出"""
+    for event in events:
+        site = event.get("site")
+        if site:
+            return site
+    return None
+
+
 def _run_claude_cli_sync(prompt: str, timeout: int, debug_log: Path, project_root: Path) -> tuple[bool, str, str]:
     """
     Claude Code CLIを同期的に実行（スレッドプール用）
@@ -473,8 +556,9 @@ def _parse_single_proposal(text: str) -> Optional[dict]:
 
 
 async def analyze_session_for_skill(
-    yaml_log_path: str,
+    yaml_log_path: Optional[str] = None,
     instruction: Optional[str] = None,
+    events: Optional[list] = None,
 ) -> list[SkillProposal]:
     """
     セッションログを分析してスキル提案を生成
@@ -483,8 +567,9 @@ async def analyze_session_for_skill(
     1つのセッションから複数のスキル提案を返す可能性がある。
 
     Args:
-        yaml_log_path: YAMLログファイルのパス
+        yaml_log_path: YAMLログファイルのパス（レガシー）
         instruction: 追加の指示（任意）
+        events: learning_eventsのリスト（新方式）
 
     Returns:
         SkillProposalのリスト（0件の場合もあり）
@@ -492,34 +577,55 @@ async def analyze_session_for_skill(
     from pathlib import Path
     debug_log = Path("D:/done/skill_analyze_debug.log")
 
-    logger.info(f"Analyzing session for skill: {yaml_log_path}")
-    with open(debug_log, "a", encoding="utf-8") as f:
-        f.write(f"[CLAUDE_CLI] Starting analysis for: {yaml_log_path}\n")
+    # ログセクションを入力タイプに応じて構築
+    if events:
+        logger.info(f"Analyzing session from {len(events)} learning events")
+        with open(debug_log, "a", encoding="utf-8") as f:
+            f.write(f"[CLAUDE_CLI] Starting analysis from {len(events)} events\n")
 
-    filtered_yaml_path = _filter_successful_path(yaml_log_path)
-    with open(debug_log, "a", encoding="utf-8") as f:
-        f.write(f"[CLAUDE_CLI] Filtered YAML path: {filtered_yaml_path}\n")
+        filtered_events = _filter_successful_events(events)
+        session_log_text = _format_events_as_session_log(filtered_events)
+        site = _extract_site_from_events(events)
 
-    hybrid_summary = ""
-    try:
-        filtered_data = yaml.safe_load(Path(filtered_yaml_path).read_text(encoding="utf-8"))
-        steps = filtered_data.get("steps", []) if isinstance(filtered_data, dict) else []
-        counts = {"selector": 0, "visual": 0, "unknown": 0}
-        visual_steps = []
-        for step in steps:
-            mode = _analyze_step_for_hybrid(step)
-            counts[mode] = counts.get(mode, 0) + 1
-            if mode == "visual":
-                idx = step.get("index")
-                if idx is not None:
-                    visual_steps.append(str(idx))
-        hybrid_summary = (
-            f"Hybrid判定: selector={counts['selector']}, visual={counts['visual']}, unknown={counts['unknown']}"
-        )
-        if visual_steps:
-            hybrid_summary += f"\nVisual推定ステップ: {', '.join(visual_steps[:10])}"
-    except Exception:
+        log_section = f"""## セッションログ（browser_* ツール操作記録）
+サイト: {site or '不明'}
+操作数: {len(filtered_events)}件（成功のみ、フィルタ後）
+
+{session_log_text}"""
+    elif yaml_log_path:
+        logger.info(f"Analyzing session for skill: {yaml_log_path}")
+        with open(debug_log, "a", encoding="utf-8") as f:
+            f.write(f"[CLAUDE_CLI] Starting analysis for: {yaml_log_path}\n")
+
+        filtered_yaml_path = _filter_successful_path(yaml_log_path)
+        with open(debug_log, "a", encoding="utf-8") as f:
+            f.write(f"[CLAUDE_CLI] Filtered YAML path: {filtered_yaml_path}\n")
+
         hybrid_summary = ""
+        try:
+            filtered_data = yaml.safe_load(Path(filtered_yaml_path).read_text(encoding="utf-8"))
+            steps = filtered_data.get("steps", []) if isinstance(filtered_data, dict) else []
+            counts = {"selector": 0, "visual": 0, "unknown": 0}
+            visual_steps = []
+            for step in steps:
+                mode = _analyze_step_for_hybrid(step)
+                counts[mode] = counts.get(mode, 0) + 1
+                if mode == "visual":
+                    idx = step.get("index")
+                    if idx is not None:
+                        visual_steps.append(str(idx))
+            hybrid_summary = (
+                f"Hybrid判定: selector={counts['selector']}, visual={counts['visual']}, unknown={counts['unknown']}"
+            )
+            if visual_steps:
+                hybrid_summary += f"\nVisual推定ステップ: {', '.join(visual_steps[:10])}"
+        except Exception:
+            hybrid_summary = ""
+
+        log_section = f"ログファイル: {filtered_yaml_path}\n{hybrid_summary}"
+    else:
+        logger.warning("analyze_session_for_skill called with no input")
+        return []
 
     instruction_block = ""
     if instruction:
@@ -533,7 +639,7 @@ async def analyze_session_for_skill(
     existing_skills_summary = _get_existing_skills_summary()
 
     prompt = f"""
-以下のYAMLログを分析し、スキル化の判断を行ってください。
+以下のセッションログを分析し、スキル化の判断を行ってください。
 
 {existing_skills_summary}
 
@@ -547,9 +653,6 @@ async def analyze_session_for_skill(
 - 単体では使われないアクション（ログインのみ等）は独立スキルにしない
 - ユースケース単位（購入、予約、検索+購入等）でまとめる
 - SKILL.md は 5,000 words 以下
-
-- 参考: stepsには decision_type（selector/visual/direct）や page_url が含まれる場合がある
-- eventsには plan/thinking/step の進行ログが含まれる場合がある
 {instruction_block}
 
 重要:
@@ -561,8 +664,7 @@ async def analyze_session_for_skill(
 - **ACTIONSにはセッションログに実際に記録された操作のみを含める。推測や一般的な機能を追加しない**
   - 例: ログイン→カート確認のログなら ACTIONS: login, view-cart のみ。searchは含めない
 
-ログファイル: {filtered_yaml_path}
-{hybrid_summary}
+{log_section}
 
 ## 出力形式（複数スキル対応）
 
@@ -972,12 +1074,13 @@ def _ensure_skill_md_structure(skill_dir: Path, yaml_log_path: str, skill_name: 
 
 
 async def generate_skill(
-    yaml_log_path: str,
-    skill_name: str,
+    yaml_log_path: Optional[str] = None,
+    skill_name: str = "",
     description: Optional[str] = None,
     analysis: Optional[Dict[str, Any]] = None,
     steps: Optional[list[str]] = None,
     instruction: Optional[str] = None,
+    session_log_text: Optional[str] = None,
 ) -> SkillGenerationResult:
     """
     スキルを生成
@@ -985,18 +1088,18 @@ async def generate_skill(
     Claude Code CLIを使って高品質なスキルを生成。
 
     Args:
-        yaml_log_path: YAMLログファイルのパス
-        instruction: 追加の修正指示（任意）
+        yaml_log_path: YAMLログファイルのパス（レガシー）
         skill_name: スキル名
         description: スキルの説明（省略時はログから推測）
         analysis: 成功要因や再現条件の分析
         steps: 実行手順（短文の配列）
         instruction: 追加の修正指示（任意）
+        session_log_text: セッションログテキスト（events方式、yaml_log_pathの代替）
 
     Returns:
         SkillGenerationResult
     """
-    logger.info(f"Generating skill: {skill_name} from {yaml_log_path}")
+    logger.info(f"Generating skill: {skill_name}")
 
     skill_dir = SKILLS_DIR / skill_name
 
@@ -1010,22 +1113,34 @@ async def generate_skill(
         skill_dir = SKILLS_DIR / skill_name
         logger.info(f"Skill already exists, using: {skill_name}")
 
-    filtered_yaml_path = _filter_successful_path(yaml_log_path)
+    # ログセクション構築
+    if session_log_text:
+        log_input_section = f"- セッションログ: 下記に埋め込み"
+        log_embed_section = f"\n## セッションログ\n{session_log_text}\n"
+    elif yaml_log_path:
+        filtered_yaml_path = _filter_successful_path(yaml_log_path)
+        log_input_section = f"- ログファイル: {filtered_yaml_path}"
+        log_embed_section = ""
+    else:
+        return SkillGenerationResult(
+            success=False,
+            skill_name=skill_name,
+            error="No log source provided (yaml_log_path or session_log_text required)",
+        )
 
     # 学習済みルールを取得（スキル生成の参考情報として）
     learned_rules_text = ""
     try:
-        # サイトドメインをログファイルから推測
         site_domain = None
-        try:
-            with open(yaml_log_path, "r", encoding="utf-8") as f:
-                yaml_content = yaml.safe_load(f)
-                if yaml_content and isinstance(yaml_content, dict):
-                    site_domain = yaml_content.get("site")
-        except Exception:
-            pass
+        if yaml_log_path:
+            try:
+                with open(yaml_log_path, "r", encoding="utf-8") as f:
+                    yaml_content = yaml.safe_load(f)
+                    if yaml_content and isinstance(yaml_content, dict):
+                        site_domain = yaml_content.get("site")
+            except Exception:
+                pass
 
-        # 関連するルールを取得
         rules = await learning_service.get_rules_for_skill(
             site=site_domain,
             skill_name=skill_name,
@@ -1042,13 +1157,11 @@ async def generate_skill(
     instruction_text = instruction or ""
     if analysis:
         try:
-            import json
             analysis_json = json.dumps(analysis, ensure_ascii=False)
         except Exception:
             analysis_json = str(analysis)
     if steps:
         try:
-            import json
             steps_json = json.dumps(steps, ensure_ascii=False)
         except Exception:
             steps_json = str(steps)
@@ -1068,7 +1181,7 @@ async def generate_skill(
 以下のタスクを実行してください：
 
 ## 入力
-- ログファイル: {filtered_yaml_path}
+{log_input_section}
 - スキル名: {skill_name}
 - 保存先: {skill_dir}
 - 説明: {description or "（未指定）"}
@@ -1140,7 +1253,7 @@ domain: amazon.co.jp
 ## 重要な制約
 - executor.py は生成しない
 - selectors.py は生成しない
-- 手順書は VisualAgent（視覚ベースAI）が読んで実行する前提で書く
+- 手順書はブラウザ操作AI（browser_open/click/type等のツールを使用）が読んで実行する前提で書く
 - CSSセレクタではなく、視覚的な特徴で要素を説明する
 - 「○○ボタンをクリック」ではなく「画面右上の青い『ログイン』ボタンをクリック」のように具体的に
 
@@ -1148,7 +1261,7 @@ domain: amazon.co.jp
 - 人間が読んでも手順が分かる
 - 画面を見たことがない人でも操作できる詳細さ
 - エッジケースや注意点を記載
-"""
+{log_embed_section}"""
 
     success, stdout, stderr = await _run_claude_cli(prompt, timeout=TIMEOUT_GENERATE)
 
@@ -1300,29 +1413,33 @@ domain: {domain}
 
 
 async def extend_skill(
-    yaml_log_path: str,
-    target_skill: str,
-    new_actions: list[str],
+    yaml_log_path: Optional[str] = None,
+    target_skill: str = "",
+    new_actions: list[str] = None,
     description: Optional[str] = None,
     analysis: Optional[Dict[str, Any]] = None,
     steps: Optional[list[str]] = None,
     instruction: Optional[str] = None,
+    session_log_text: Optional[str] = None,
 ) -> SkillGenerationResult:
     """
     既存スキルにアクションを追加
 
     Args:
-        yaml_log_path: YAMLログファイルのパス
+        yaml_log_path: YAMLログファイルのパス（レガシー）
         target_skill: 追加先の既存スキル名
         new_actions: 追加するアクション名のリスト
         description: アクションの説明
         analysis: 成功要因や再現条件の分析
         steps: 実行手順
         instruction: 追加の修正指示
+        session_log_text: セッションログテキスト（events方式）
 
     Returns:
         SkillGenerationResult
     """
+    if new_actions is None:
+        new_actions = []
     logger.info(f"Extending skill: {target_skill} with actions: {new_actions}")
 
     # 1. 既存スキルディレクトリを特定
@@ -1353,12 +1470,24 @@ async def extend_skill(
             error=f"Failed to read SKILL.md: {e}",
         )
 
-    filtered_yaml_path = _filter_successful_path(yaml_log_path)
+    # ログセクション構築
+    if session_log_text:
+        log_input_line = "- セッションログ: 下記に埋め込み"
+        log_embed_section = f"\n## セッションログ\n{session_log_text}\n"
+    elif yaml_log_path:
+        filtered_yaml_path = _filter_successful_path(yaml_log_path)
+        log_input_line = f"- ログファイル: {filtered_yaml_path}"
+        log_embed_section = ""
+    else:
+        return SkillGenerationResult(
+            success=False,
+            skill_name=target_skill,
+            error="No log source provided",
+        )
 
     # 学習済みルールを取得
     learned_rules_text = ""
     try:
-        # スキルのドメインを取得
         site_domain = None
         try:
             from app.agent.v2.tools import SkillRegistry
@@ -1385,13 +1514,11 @@ async def extend_skill(
     instruction_text = instruction or ""
     if analysis:
         try:
-            import json
             analysis_json = json.dumps(analysis, ensure_ascii=False)
         except Exception:
             analysis_json = str(analysis)
     if steps:
         try:
-            import json
             steps_json = json.dumps(steps, ensure_ascii=False)
         except Exception:
             steps_json = str(steps)
@@ -1412,7 +1539,7 @@ async def extend_skill(
 以下のタスクを実行してください：
 
 ## 入力
-- ログファイル: {filtered_yaml_path}
+{log_input_line}
 - 既存スキル: {target_skill}
 - 既存SKILL.md: {skill_md_path}
 - 追加アクション: {actions_list}
@@ -1450,14 +1577,14 @@ async def extend_skill(
 - actions/ ディレクトリに新しいアクションファイルのみ追加する
 - executor.py は生成しない
 - selectors.py は生成しない
-- 手順書は VisualAgent（視覚ベースAI）が読んで実行する前提で書く
+- 手順書はブラウザ操作AI（browser_open/click/type等のツールを使用）が読んで実行する前提で書く
 - CSSセレクタではなく、視覚的な特徴で要素を説明する
 
 ## 品質基準
 - 人間が読んでも手順が分かる
 - 画面を見たことがない人でも操作できる詳細さ
 - エッジケースや注意点を記載
-"""
+{log_embed_section}"""
 
     success, stdout, stderr = await _run_claude_cli(prompt, timeout=TIMEOUT_GENERATE)
 
@@ -1684,20 +1811,24 @@ def _update_skill_md_actions(skill_md_path: Path, new_actions: list[str]) -> Non
     skill_md_path.write_text(content, encoding="utf-8")
 
 
-async def generate_skill_from_session(yaml_log_path: str) -> SkillGenerationResult:
+async def generate_skill_from_session(
+    yaml_log_path: Optional[str] = None,
+    events: Optional[list] = None,
+) -> SkillGenerationResult:
     """
     セッションからスキルを生成（分析→生成を一括実行）
 
     複数提案がある場合、最初のcreate/extend提案のみを生成する。
 
     Args:
-        yaml_log_path: YAMLログファイルのパス
+        yaml_log_path: YAMLログファイルのパス（レガシー）
+        events: learning_eventsのリスト（新方式）
 
     Returns:
         SkillGenerationResult
     """
     # 1. 分析
-    proposals = await analyze_session_for_skill(yaml_log_path)
+    proposals = await analyze_session_for_skill(yaml_log_path=yaml_log_path, events=events)
 
     if not proposals:
         return SkillGenerationResult(

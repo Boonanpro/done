@@ -38,11 +38,17 @@ from app.services.skill_generator_claude import (
 
     SkillGenerationResult,
 
+    _format_events_as_session_log,
+
+    _filter_successful_events,
+
 )
 
 from app.services.supabase_client import get_supabase_client
 
 from app.services.auth_service import decode_access_token
+
+from app.services import learning_service
 
 from app.agent.v2.tools import SkillRegistry
 
@@ -529,15 +535,31 @@ async def analyze_skill(
 
 
 
-    # YAMLファイルを検索
+    # learning_eventsからイベントを取得（新方式）
+    events_list = await learning_service.get_events_for_session(request.session_id)
+    events_data = [
+        {
+            "action_name": e.action_name,
+            "action_params": e.action_params,
+            "technical_success": e.technical_success,
+            "context": e.context,
+            "site": e.site,
+            "skill_name": e.skill_name,
+        }
+        for e in events_list
+    ] if events_list else []
 
+    with open(debug_log, "a", encoding="utf-8") as f:
+        f.write(f"[SKILL_ANALYZE] Found {len(events_data)} learning events\n")
+
+    # YAMLファイルも検索（フォールバック）
     yaml_path = find_yaml_by_session_id(request.session_id)
 
     with open(debug_log, "a", encoding="utf-8") as f:
 
         f.write(f"[SKILL_ANALYZE] YAML path: {yaml_path}\n")
 
-    if not yaml_path:
+    if not events_data and not yaml_path:
 
         raise HTTPException(
 
@@ -547,7 +569,14 @@ async def analyze_skill(
 
         )
 
-    session_success = _yaml_is_successful(yaml_path)
+    # セッション成功判定
+    if yaml_path:
+        session_success = _yaml_is_successful(yaml_path)
+    elif events_data:
+        # events の場合は全て成功していれば成功とみなす
+        session_success = any(e["technical_success"] for e in events_data)
+    else:
+        session_success = None
 
 
 
@@ -609,9 +638,11 @@ async def analyze_skill(
 
         proposals = await analyze_session_for_skill(
 
-            str(yaml_path),
+            yaml_log_path=str(yaml_path) if yaml_path and not events_data else None,
 
             instruction=request.instruction,
+
+            events=events_data if events_data else None,
 
         )
 
@@ -774,9 +805,27 @@ async def generate_skill_endpoint(
 
     session_id = proposal_row.get("session_id")
 
+    # learning_eventsからイベントを取得（新方式）
+    events_list = await learning_service.get_events_for_session(session_id)
+    session_log_text = None
+    if events_list:
+        events_data = [
+            {
+                "action_name": e.action_name,
+                "action_params": e.action_params,
+                "technical_success": e.technical_success,
+                "context": e.context,
+                "site": e.site,
+            }
+            for e in events_list
+        ]
+        filtered = _filter_successful_events(events_data)
+        session_log_text = _format_events_as_session_log(filtered)
+
+    # YAMLもフォールバックとして検索
     yaml_path = find_yaml_by_session_id(session_id)
 
-    if not yaml_path:
+    if not session_log_text and not yaml_path:
 
         raise HTTPException(
 
@@ -786,17 +835,14 @@ async def generate_skill_endpoint(
 
         )
 
-    session_success = _yaml_is_successful(yaml_path)
-
-    if session_success is False:
-
-        raise HTTPException(
-
-            status_code=409,
-
-            detail="Success log not found; re-run a successful session."
-
-        )
+    # 成功判定
+    if yaml_path and not session_log_text:
+        session_success = _yaml_is_successful(yaml_path)
+        if session_success is False:
+            raise HTTPException(
+                status_code=409,
+                detail="Success log not found; re-run a successful session."
+            )
 
 
 
@@ -832,7 +878,7 @@ async def generate_skill_endpoint(
 
         result = await extend_skill(
 
-            yaml_log_path=str(yaml_path),
+            yaml_log_path=str(yaml_path) if yaml_path and not session_log_text else None,
 
             target_skill=target_skill,
 
@@ -846,6 +892,8 @@ async def generate_skill_endpoint(
 
             instruction=proposal_row.get("instruction"),
 
+            session_log_text=session_log_text,
+
         )
 
     else:
@@ -854,7 +902,7 @@ async def generate_skill_endpoint(
 
         result = await generate_skill(
 
-            yaml_log_path=str(yaml_path),
+            yaml_log_path=str(yaml_path) if yaml_path and not session_log_text else None,
 
             skill_name=skill_name,
 
@@ -865,6 +913,8 @@ async def generate_skill_endpoint(
             steps=proposal_row.get("steps") or [],
 
             instruction=proposal_row.get("instruction"),
+
+            session_log_text=session_log_text,
 
         )
 
