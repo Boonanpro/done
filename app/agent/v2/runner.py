@@ -50,7 +50,7 @@ COMPACTION_THRESHOLD = 80000  # この文字数を超えたらコンパクショ
 COMPACTION_KEEP_RECENT = 10   # コンパクション時に残す最新メッセージ数
 
 # 使用するモデル
-MODEL = "claude-sonnet-4-5-20250929"  # Sonnet 4.5
+MODEL = "claude-haiku-4-5-20251001"  # Haiku 4.5
 
 # ============================================
 # Native Tool Use: ツール定義

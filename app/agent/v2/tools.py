@@ -337,6 +337,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         TAVILY_SEARCH_TOOL,
         SKILL_GENERATE_TOOL,
         SAVE_CREDENTIALS_TOOL,
+        GET_CREDENTIALS_TOOL,
         CHECK_SKILL_TOOL,
         READ_WORKSPACE_TOOL,
         UPDATE_WORKSPACE_TOOL,
@@ -484,6 +485,33 @@ SKILL_GENERATE_TOOL = {
 }
 
 # ============================================
+# 認証情報: サービス名正規化
+# ============================================
+
+def _normalize_service_name(service: str) -> str:
+    """
+    サービス名を正規化して表記揺れを吸収する。
+
+    例:
+        "Amazon" → "amazon"
+        "amazon.co.jp" → "amazon"
+        "Amazon.co.jp" → "amazon"
+        "rakuten" → "rakuten"
+        "www.mercari.com" → "mercari"
+    """
+    s = service.strip().lower()
+    # ドメイン形式の場合、ベース名を抽出
+    if "." in s:
+        # www.を除去
+        if s.startswith("www."):
+            s = s[4:]
+        # 最初のドットより前をサービス名とする
+        s = s.split(".")[0]
+    # スペースやハイフンをアンダースコアに
+    s = s.replace(" ", "_").replace("-", "_")
+    return s
+
+# ============================================
 # 認証情報保存ツール
 # ============================================
 
@@ -517,6 +545,26 @@ SAVE_CREDENTIALS_TOOL = {
                 "type": "string",
                 "description": "コピー元のサービス名。「○○と同じ」という指示の場合に使用（例: amazon）"
             },
+        },
+        "required": ["service"],
+    },
+}
+
+GET_CREDENTIALS_TOOL = {
+    "name": "get_credentials",
+    "description": """サービスの認証情報をDBから取得する。
+ログインが必要なサイトを操作する前に、認証情報が保存済みか確認する時に使用。
+
+返される内容:
+- 保存済みの場合: ログインID と パスワード
+- 未保存の場合: 認証情報が見つからない旨のメッセージ（ユーザーに聞くこと）""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "service": {
+                "type": "string",
+                "description": "サービス名（例: amazon, rakuten, mercari）"
+            }
         },
         "required": ["service"],
     },
@@ -659,6 +707,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "save_credentials":
         return ("_save_credentials", "save")
+
+    if tool_name == "get_credentials":
+        return ("_get_credentials", "get")
 
     if tool_name == "check_skill":
         return ("_check_skill", "check")
@@ -1504,6 +1555,38 @@ async def execute_tool(
     # リトライハンドラをインポート
     from app.agent.v2.retry_handler import with_session_retry
 
+    # ★★★ 認証情報取得 ★★★
+    if skill_name == "_get_credentials":
+        service = params.get("service")
+        if not service:
+            return {"success": False, "error": "service が必要です"}
+
+        # サービス名を正規化（小文字、ドメイン部分除去）
+        service_normalized = _normalize_service_name(service)
+
+        from app.services.credentials_service import get_credentials_service
+        creds_service = get_credentials_service()
+
+        # 正規化名で検索 → 元の名前でフォールバック
+        stored_creds = await creds_service.get_credential(user_id, service_normalized)
+        if not stored_creds and service_normalized != service:
+            stored_creds = await creds_service.get_credential(user_id, service)
+
+        if stored_creds:
+            return {
+                "success": True,
+                "service": service_normalized,
+                "login_id": stored_creds.get("id", ""),
+                "password": stored_creds.get("password", ""),
+                "message": f"{service} の認証情報が見つかりました",
+            }
+        else:
+            return {
+                "success": False,
+                "service": service_normalized,
+                "message": f"{service} の認証情報は保存されていません。ユーザーに聞いてください。",
+            }
+
     # ★★★ 認証情報保存 ★★★
     if skill_name == "_save_credentials":
         service = params.get("service")
@@ -1516,6 +1599,11 @@ async def execute_tool(
                 "success": False,
                 "error": "service が必要です",
             }
+
+        # サービス名を正規化（小文字、ドメイン部分除去）
+        service = _normalize_service_name(service)
+        if copy_from:
+            copy_from = _normalize_service_name(copy_from)
 
         from app.services.credentials_service import get_credentials_service
         creds_service = get_credentials_service()
@@ -2027,6 +2115,13 @@ def format_tool_result(
             if browser_state.get("page_type"):
                 lines.append(f"  現在のページ: {browser_state['page_type']}")
 
+        return FormattedToolResult(text="\n".join(lines), images=images)
+
+    # 認証情報取得結果: login_id と password を明示的に含める
+    if skill_name == "_get_credentials" and result.get("login_id"):
+        lines.append(f"サービス: {result.get('service', '?')}")
+        lines.append(f"ログインID: {result['login_id']}")
+        lines.append(f"パスワード: {result.get('password', '（なし）')}")
         return FormattedToolResult(text="\n".join(lines), images=images)
 
     # その他の結果
