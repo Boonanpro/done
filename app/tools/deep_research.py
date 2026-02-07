@@ -16,6 +16,7 @@ from typing import Dict, Any, List, Optional
 
 import anthropic
 
+from app.config import settings
 from app.tools.source_evaluator import evaluate_source
 from app.tools.jina_reader import read_url
 
@@ -47,7 +48,7 @@ async def _call_sonnet(
     Returns:
         テキストレスポンス
     """
-    client = anthropic.AsyncAnthropic()
+    client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
     kwargs = {
         "model": RESEARCH_MODEL,
@@ -90,7 +91,7 @@ async def _call_sonnet_with_search(
     Returns:
         {"text": "...", "urls": ["url1", "url2", ...]}
     """
-    client = anthropic.AsyncAnthropic()
+    client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
     response = await client.messages.create(
         model=RESEARCH_MODEL,
