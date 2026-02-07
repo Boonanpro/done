@@ -234,8 +234,89 @@ class Session:
         self.reasoning_steps = []
 
     def get_messages_for_llm(self) -> List[Dict[str, Any]]:
-        """LLMに渡すメッセージ配列を取得"""
-        return self.messages.copy()
+        """LLMに渡すメッセージ配列を取得（壊れたペアを自動修復）"""
+        return self._sanitize_tool_pairs(self.messages.copy())
+
+    @staticmethod
+    def _sanitize_tool_pairs(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        操作(tool_use)と結果(tool_result)のペアが壊れている場合に修復する。
+
+        - 結果だけあって操作がない → その結果を除去
+        - 操作だけあって結果がない → ダミーの結果を挿入
+        """
+        # Pass 1: 全assistantメッセージからtool_use IDを収集
+        tool_use_ids = set()
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        tool_use_ids.add(block.get("id"))
+
+        # Pass 2: 全userメッセージからtool_result IDを収集
+        tool_result_ids = set()
+        for msg in messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        tool_result_ids.add(block.get("tool_use_id"))
+
+        # 孤立した結果（操作が見つからない）のID
+        orphaned_results = tool_result_ids - tool_use_ids
+        # 孤立した操作（結果が見つからない）のID
+        orphaned_uses = tool_use_ids - tool_result_ids
+
+        if not orphaned_results and not orphaned_uses:
+            return messages
+
+        result = []
+        for msg in messages:
+            content = msg.get("content", "")
+
+            # userメッセージ: 孤立した結果を除去
+            if msg.get("role") == "user" and isinstance(content, list):
+                filtered = [
+                    block for block in content
+                    if not (
+                        isinstance(block, dict)
+                        and block.get("type") == "tool_result"
+                        and block.get("tool_use_id") in orphaned_results
+                    )
+                ]
+                if filtered:
+                    result.append({"role": "user", "content": filtered})
+                # filteredが空なら（結果だけのメッセージだった場合）メッセージごと除去
+                continue
+
+            # assistantメッセージの後にダミー結果を挿入する必要があるかチェック
+            result.append(msg)
+
+            if msg.get("role") == "assistant" and isinstance(content, list):
+                needs_dummy = []
+                for block in content:
+                    if (isinstance(block, dict)
+                            and block.get("type") == "tool_use"
+                            and block.get("id") in orphaned_uses):
+                        needs_dummy.append(block["id"])
+
+                if needs_dummy:
+                    dummy_blocks = [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tid,
+                            "content": "[操作が中断されました]",
+                        }
+                        for tid in needs_dummy
+                    ]
+                    result.append({"role": "user", "content": dummy_blocks})
+
+        return result
 
     def estimate_token_count(self) -> int:
         """
@@ -283,8 +364,23 @@ class Session:
         if len(self.messages) <= keep_recent:
             return 0
 
-        # 削除対象のメッセージ数
-        to_remove = len(self.messages) - keep_recent
+        # 最新のkeep_recent件を残す
+        recent_messages = self.messages[-keep_recent:]
+
+        # 先頭に孤立した操作結果（対応する操作が削除済み）が残っていたら除去
+        while recent_messages:
+            msg = recent_messages[0]
+            content = msg.get("content", "")
+            has_orphan = False
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        has_orphan = True
+                        break
+            if has_orphan:
+                recent_messages.pop(0)
+            else:
+                break
 
         # 要約メッセージを先頭に挿入
         summary_message = {
@@ -292,8 +388,7 @@ class Session:
             "content": f"[会話の要約]\n{summary}\n\n---\n以下は最近の会話です。"
         }
 
-        # 最新のkeep_recent件を残す
-        recent_messages = self.messages[-keep_recent:]
+        to_remove = len(self.messages) - len(recent_messages)
 
         # 新しいメッセージ配列を構築
         self.messages = [summary_message] + recent_messages

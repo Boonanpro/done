@@ -223,6 +223,12 @@ class AgentRunner:
                     # ツール実行前にもキャンセルチェック
                     if CancellationRegistry.is_cancelled(self.session.session_id):
                         logger.info(f"Session {self.session.session_id} cancelled before tool execution")
+                        # 未実行の操作にダミー結果を挿入（ペア崩れ防止）
+                        for remaining in parsed["tool_calls"]:
+                            self.session.add_tool_result(
+                                remaining["tool_use_id"],
+                                "[操作が中断されました]",
+                            )
                         return {
                             "response": "処理が中断されました。",
                             "state": self.session.current_state.value,
@@ -236,8 +242,7 @@ class AgentRunner:
                     params = tool_call["params"]
 
                     logger.info(f"Executing tool: {skill_name} {action}")
-                    # visual_browseは独自の進捗通知を行うのでDan側は出力しない
-                    if self._on_reasoning_step and skill_name != "_visual":
+                    if self._on_reasoning_step:
                         await self._on_reasoning_step(f"🔧 {skill_name} {action}...")
 
                     result = await execute_tool(
@@ -284,8 +289,7 @@ class AgentRunner:
                         images=formatted.images if formatted.has_images() else None,
                     )
 
-                    # visual_browseは独自の進捗通知を行うのでDan側は出力しない
-                    if self._on_reasoning_step and skill_name != "_visual":
+                    if self._on_reasoning_step:
                         status = "✅" if result.get("success") else "❌"
                         vision_indicator = " 👁️" if formatted.has_images() else ""
                         # 具体的な結果メッセージを表示
@@ -433,7 +437,7 @@ class AgentRunner:
         for skill in skills:
             lines.append(f"- `{skill.name}`: {skill.description}")
         lines.append("")
-        lines.append("※ スキルを使う場合は visual_browse の skill_name に指定")
+        lines.append("※ スキルを使う場合は check_skill で手順書を確認し、browser_open/click/type 等で操作")
         lines.append("※ 詳細が必要な場合は check_skill ツールで SKILL.md を取得")
         return "\n".join(lines)
 
@@ -669,6 +673,13 @@ class AgentRunner:
             # メモリフラッシュ: LLMに重要情報を保存させる
             summary = await self._flush_to_memory()
 
+            # 要約生成に失敗した場合はコンパクション中止（文脈喪失を防ぐ）
+            if not summary or summary == "会話の要約が生成されませんでした。":
+                logger.warning("Summary generation failed, aborting compaction to preserve context")
+                if self._on_reasoning_step:
+                    await self._on_reasoning_step("⚠️ 要約生成に失敗したため、記憶整理をスキップしました")
+                return
+
             # 古いメッセージを削除し、要約を残す
             removed = self.session.compact(summary, keep_recent=COMPACTION_KEEP_RECENT)
             logger.info(f"Compacted: removed {removed} messages, kept {COMPACTION_KEEP_RECENT}")
@@ -683,6 +694,54 @@ class AgentRunner:
         except Exception as e:
             logger.exception(f"Compaction failed: {e}")
             # コンパクション失敗は致命的ではない、続行
+
+    @staticmethod
+    def _strip_images_for_summary(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        メッセージから画像を除外し、テキストのみのコピーを返す。
+
+        要約生成にスクリーンショットは不要。画像を除外することで
+        トークン消費を大幅に削減し、要約LLM呼び出しの成功率を上げる。
+        """
+        import copy
+        stripped = []
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                stripped.append(msg)
+            elif isinstance(content, list):
+                new_blocks = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        new_blocks.append(block)
+                        continue
+                    btype = block.get("type", "")
+                    # 画像ブロックをスキップ
+                    if btype == "image":
+                        continue
+                    # tool_result内の画像もスキップ
+                    if btype == "tool_result":
+                        inner = block.get("content", "")
+                        if isinstance(inner, list):
+                            filtered = [b for b in inner if not (isinstance(b, dict) and b.get("type") == "image")]
+                            if filtered:
+                                new_block = copy.copy(block)
+                                new_block["content"] = filtered
+                                new_blocks.append(new_block)
+                            else:
+                                # テキストもない場合はプレースホルダー
+                                new_block = copy.copy(block)
+                                new_block["content"] = "[スクリーンショット]"
+                                new_blocks.append(new_block)
+                            continue
+                        new_blocks.append(block)
+                        continue
+                    new_blocks.append(block)
+                if new_blocks:
+                    stripped.append({"role": msg["role"], "content": new_blocks})
+            else:
+                stripped.append(msg)
+        return stripped
 
     async def _flush_to_memory(self) -> str:
         """
@@ -706,8 +765,10 @@ class AgentRunner:
 要約は簡潔に、箇条書きで、重要なポイントのみ含めてください。
 """.format(date=datetime.now().strftime("%Y-%m-%d"))
 
-        # フラッシュ用のメッセージ
-        flush_messages = self.session.get_messages_for_llm()
+        # フラッシュ用のメッセージ（画像を除外してトークン節約）
+        flush_messages = self._strip_images_for_summary(
+            self.session.get_messages_for_llm()
+        )
         flush_messages.append({
             "role": "user",
             "content": "【システム】会話が長くなりました。重要な情報を memory/ に保存し、会話の要約を作成してください。"

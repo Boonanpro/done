@@ -321,13 +321,18 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
 
     スキルはツール化しない（Progressive Disclosure に基づく設計）。
     スキル一覧はシステムプロンプトに description のみで表示される。
-    スキルを使う場合は visual_browse の skill_name パラメータで指定。
+    スキルを使う場合は check_skill で手順書を確認し、browser_* ツールで直接操作。
 
     Returns:
         コアツールのリスト
     """
     return [
-        VISUAL_BROWSE_TOOL,
+        BROWSER_OPEN_TOOL,
+        BROWSER_SCREENSHOT_TOOL,
+        BROWSER_CLICK_TOOL,
+        BROWSER_TYPE_TOOL,
+        BROWSER_SCROLL_TOOL,
+        BROWSER_SELECT_TOOL,
         TAVILY_SEARCH_TOOL,
         SKILL_GENERATE_TOOL,
         SAVE_CREDENTIALS_TOOL,
@@ -339,43 +344,82 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
 
 
 # ============================================
-# 視覚ベースブラウザ操作ツール
+# ブラウザ操作ツール（Dan直接操作）
 # ============================================
 
-VISUAL_BROWSE_TOOL = {
-    "name": "visual_browse",
-    "description": """Webサイトを視覚的に操作する。
-スクリーンショットを見ながらAIが自律的にブラウザを操作する。
-
-使い方:
-1. スキルがある場合: skill_name を指定（手順書が自動で読み込まれる）
-2. スキルがない場合: site と task を指定して自律的に操作
-
-例:
-- skill_name: "rakuten", task: "ログインする"
-- site: "example.com", task: "問い合わせフォームを送信する" """,
+BROWSER_OPEN_TOOL = {
+    "name": "browser_open",
+    "description": "URLを開く。操作後にスクリーンショットと要素一覧を返す。",
     "input_schema": {
         "type": "object",
         "properties": {
-            "task": {
-                "type": "string",
-                "description": "実行するタスク（例: 'ログインする', '商品を検索する'）"
-            },
-            "skill_name": {
-                "type": "string",
-                "description": "使用するスキル名（例: 'rakuten'）。指定すると SKILL.md が自動で読み込まれ、read_manual で詳細手順を参照できる"
-            },
-            "site": {
-                "type": "string",
-                "description": "対象サイトのドメイン（例: 'rakuten.co.jp'）。skill_name 指定時は省略可"
-            },
-            "initial_url": {
-                "type": "string",
-                "description": "開始URL（省略時はサイトのトップページ）"
-            },
+            "url": {"type": "string", "description": "開くURL"}
         },
-        "required": ["task"],
-    },
+        "required": ["url"]
+    }
+}
+
+BROWSER_SCREENSHOT_TOOL = {
+    "name": "browser_screenshot",
+    "description": "現在のページのスクリーンショットと要素一覧を取得する（操作なし）",
+    "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+}
+
+BROWSER_CLICK_TOOL = {
+    "name": "browser_click",
+    "description": "要素をクリックする。refまたは座標を指定。操作後にスクリーンショットと要素一覧を返す。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "ref": {"type": "string", "description": "クリック対象の要素ref（例: @e1）"},
+            "x": {"type": "integer", "description": "X座標（refが使えない場合）"},
+            "y": {"type": "integer", "description": "Y座標（refが使えない場合）"}
+        },
+        "required": []
+    }
+}
+
+BROWSER_TYPE_TOOL = {
+    "name": "browser_type",
+    "description": "テキストを入力する。操作後にスクリーンショットと要素一覧を返す。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "ref": {"type": "string", "description": "入力対象の要素ref（例: @e3）"},
+            "text": {"type": "string", "description": "入力するテキスト"},
+            "press_enter": {"type": "boolean", "description": "入力後にEnterを押すか（デフォルト: false）"}
+        },
+        "required": ["ref", "text"]
+    }
+}
+
+BROWSER_SCROLL_TOOL = {
+    "name": "browser_scroll",
+    "description": "ページをスクロールする。操作後にスクリーンショットと要素一覧を返す。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "direction": {"type": "string", "enum": ["down", "up"], "description": "スクロール方向"}
+        },
+        "required": ["direction"]
+    }
+}
+
+BROWSER_SELECT_TOOL = {
+    "name": "browser_select",
+    "description": "ドロップダウンの選択肢を選ぶ。操作後にスクリーンショットと要素一覧を返す。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "ref": {"type": "string", "description": "セレクトボックスの要素ref"},
+            "value": {"type": "string", "description": "選択する値"}
+        },
+        "required": ["ref", "value"]
+    }
 }
 
 # ============================================
@@ -479,7 +523,7 @@ CHECK_SKILL_TOOL = {
 使用タイミング:
 - ユーザーが「○○を予約/購入/キャンセルして」と言った時
 - 利用可能なツール一覧に関連しそうなスキルがある時
-- visual_browse を実行する前に手順書を確認したい時
+- ブラウザ操作の前に手順書を確認したい時
 
 返される内容:
 - SKILL.mdの本文（スキルの概要、使用方法）
@@ -608,8 +652,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     if tool_name == "check_skill":
         return ("_check_skill", "check")
 
-    if tool_name == "visual_browse":
-        return ("_visual", "browse")
+    if tool_name.startswith("browser_"):
+        action = tool_name[len("browser_"):]  # open, screenshot, click, type, scroll, select
+        return ("_browser", action)
 
     if tool_name == "tavily_search":
         return ("_tavily", "search")
@@ -784,9 +829,9 @@ async def _record_issue_for_failure(
         elif action == "search":
             issue_type = IssueType.SEARCH_FAILED
 
-        if skill_name == "_visual":
-            service_type = "visual_browse"
-            service_name = params.get("site")
+        if skill_name == "_browser":
+            service_type = "browser"
+            service_name = params.get("url", "browser")
             domain = params.get("site")
             parent_skill = None
         else:
@@ -1657,12 +1702,9 @@ async def execute_tool(
             "message": f"スキル '{gen_result.skill_name}' を生成しました",
         }
 
-    # ★★★ 視覚ベースブラウザ操作 ★★★
-    # スキルが存在しないサイトを視覚的に操作
-    if skill_name == "_visual":
-        result = await _execute_visual_browse(params, user_id, credentials, session_id)
-        await _record_issue_for_failure(result, skill_name, action, params, user_id, None)
-        return result
+    # ★★★ ブラウザ直接操作ツール ★★★
+    if skill_name == "_browser":
+        return await _execute_browser_tool(action, params)
 
     # ★★★ Tavily Web検索 ★★★
     # リアルタイム情報（天気、価格、ニュース等）を取得
@@ -1677,7 +1719,7 @@ async def execute_tool(
         available_skills = [s.name for s in SkillRegistry.list_all()]
         return {
             "success": False,
-            "error": f"スキル '{skill_name}' は存在しません。利用可能なスキル: {', '.join(available_skills) or 'visual_browse'}",
+            "error": f"スキル '{skill_name}' は存在しません。利用可能なスキル: {', '.join(available_skills) or 'なし'}",
             "error_type": "unknown",
         }
 
@@ -1758,16 +1800,12 @@ async def execute_tool(
         # DBに認証情報がなければ credentials=None のままExecutorに渡す
         # Executor が credentials_required を返し、LLMが自然にユーザーに聞いて save_credentials で保存
 
-    # ★★★ 全てのスキル呼び出しを手順書ベースで実行 ★★★
+    # ★★★ スキル呼び出し ★★★
     #
     # 設計思想:
-    # - ハードコードされたアクションハンドラは廃止
-    # - 全てのスキル呼び出しは手順書（SKILL.md + actions/*.md）を VisualAgent に渡して実行
-    # - VisualAgent が手順書を読んで視覚操作 or run_script で実行
-    # - 新しいアクション追加は手順書に書くだけで対応可能
-    #
-    # 例外:
+    # - Dan が check_skill で手順書を取得し、browser_* ツールで自分で操作
     # - generated スキル: 独自の executor.py を持っているのでそのまま使用
+    # - それ以外のスキル: Dan に手順書を返して browser_* で操作を促す
 
     # 自動生成されたスキルは独自のexecutor.pyを使用（例外）
     if skill.service_type == "generated":
@@ -1775,33 +1813,18 @@ async def execute_tool(
         await _record_issue_for_failure(result, skill_name, action, params, user_id, skill)
         return result
 
-    # 手順書を構築
+    # 手順書ベースのスキル → check_skill + browser_* で操作する設計
+    # ここに到達するのはスキルツールが直接呼ばれた場合（レガシー互換）
     skill_manual = _build_skill_manual(skill, action)
-
-    logger.info(f"[EXECUTE_TOOL] Executing {skill_name}/{action} via VisualAgent with manual")
+    logger.info(f"[EXECUTE_TOOL] Skill {skill_name}/{action} called directly, returning manual for browser_* usage")
 
     try:
-        # VisualAgent に手順書を渡して実行
-        result = await _execute_visual_browse(
-            params={
-                "task": f"{skill.display_name} の {action} を実行",
-                "site": skill.domain if skill and skill.domain else "",
-                "skill_manual": skill_manual,
-                **params,
-            },
-            user_id=user_id,
-            credentials=credentials,
-            session_id=session_id,
-        )
-        await _record_issue_for_failure(result, skill_name, action, params, user_id, skill)
-        return result
-
-    except CancelledError as e:
-        logger.info(f"Tool execution cancelled: {e.session_id}")
         return {
-            "success": False,
-            "error": "処理がキャンセルされました",
-            "cancelled": True,
+            "success": True,
+            "message": f"スキル '{skill.display_name}' の手順書を取得しました。browser_open, browser_click, browser_type 等のツールで操作してください。",
+            "manual": skill_manual,
+            "domain": skill.domain,
+            "available_actions": skill.list_available_actions(),
         }
     except Exception as e:
         logger.exception(f"Tool execution error: {e}")
@@ -1859,6 +1882,19 @@ def format_tool_result(
         FormattedToolResult: テキストメッセージと画像のリスト
     """
     images = []
+
+    # ★ ブラウザツール: content blocks形式で画像+テキストを直接返す
+    if skill_name == "_browser" and "content" in result:
+        text_parts = []
+        for block in result["content"]:
+            if block.get("type") == "image":
+                images.append(block)
+            elif block.get("type") == "text":
+                text_parts.append(block["text"])
+        error = result.get("error")
+        if error:
+            text_parts.insert(0, f"エラー: {error}")
+        return FormattedToolResult(text="\n".join(text_parts), images=images)
 
     # スクリーンショットがあればVision API形式に変換
     screenshot_base64 = result.get("screenshot_base64")
@@ -2029,7 +2065,7 @@ async def _execute_generated_skill(
     if not executor_path.exists():
         return {
             "success": False,
-            "error": f"スキル '{skill.name}' の executor.py が見つかりません。visual_browse を使用してください。",
+            "error": f"スキル '{skill.name}' の executor.py が見つかりません。check_skill で手順書を確認し、browser_* ツールで操作してください。",
         }
 
     try:
@@ -2175,7 +2211,7 @@ def _build_skill_manual(skill: Optional["Skill"], action: str) -> str:
     """
     スキルの手順書を構築
 
-    SKILL.md と actions/*.md を結合して VisualAgent に渡す手順書を作成する。
+    SKILL.md と actions/*.md を結合して手順書を作成する。
 
     Args:
         skill: Skillオブジェクト
@@ -2204,208 +2240,189 @@ def _build_skill_manual(skill: Optional["Skill"], action: str) -> str:
 
 
 # ============================================
-# 視覚ベースブラウザ操作
+# ブラウザ直接操作（Dan → browser.py）
 # ============================================
 
-async def _execute_visual_browse(
-    params: Dict[str, Any],
-    user_id: str,
-    credentials: Optional[Dict[str, str]] = None,
-    session_id: Optional[str] = None,
-) -> Dict[str, Any]:
+async def _get_browser_state(page) -> Dict[str, Any]:
     """
-    視覚ベースでブラウザを操作
+    操作後のページ状態を取得（スクリーンショット + 要素リスト）
 
-    スキルが存在しないサイトを、スクリーンショットを見ながら
-    AIが自律的に操作する。
+    全ブラウザツールがこの関数を呼んで結果を返す。
+    Danは常にページを「見ている」状態になる。
+    """
+    # ページのロード完了を待つ（ナビゲーション中のエラー防止）
+    try:
+        await page.wait_for_load_state("domcontentloaded")
+    except Exception:
+        # タイムアウトしてもスクショは試みる
+        await page.wait_for_timeout(1000)
 
-    学習済みスキルがある場合は、セレクタヒントを自動適用して
-    操作の精度を向上させる。
+    screenshot = await page.screenshot_base64(full_page=False)
+    elements = await page.get_interactive_elements()
+    url = page.url
+    title = await page.evaluate("document.title")
+
+    # テキスト部分: URL + タイトル + 要素一覧
+    text_parts = [f"URL: {url}", f"タイトル: {title}", "", "要素一覧:"]
+    for el in elements:
+        ref = el.get("ref", "")
+        tag = el.get("tag", "")
+        text = el.get("text", "")
+        el_type = el.get("type", "")
+        role = el.get("role", "")
+        label = []
+        if tag:
+            label.append(tag)
+        if el_type:
+            label.append(f'type={el_type}')
+        if role and role != tag:
+            label.append(f'role={role}')
+        tag_info = ", ".join(label) if label else "element"
+        text_parts.append(f"  {ref}: [{tag_info}] {text}")
+
+    return {
+        "success": True,
+        "content": [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": screenshot["media_type"],
+                    "data": screenshot["base64"],
+                },
+            },
+            {
+                "type": "text",
+                "text": "\n".join(text_parts),
+            },
+        ],
+    }
+
+
+async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    ブラウザツールを実行
 
     Args:
-        params: {task, site, initial_url}
-        user_id: ユーザーID
-        credentials: 認証情報
-        session_id: セッションID
+        action: open, screenshot, click, type, scroll, select
+        params: ツールパラメータ
 
     Returns:
-        実行結果
+        content blocks（画像+テキスト）を含む結果
     """
-    from app.executors.visual.agent import VisualAgent
-    from app.executors.visual.recorder import BrowserRecorder
-    from app.services.progress_callback import notify_progress
-    from app.services.skill_loader import get_skill_loader
-
-    task = params.get("task", "")
-    site = params.get("site", "")
-    skill_name = params.get("skill_name")
-    initial_url = params.get("initial_url")
-
-    # skill_name が指定されていたらスキルを取得
-    skill = None
-    skill_manual = None
-    if skill_name:
-        skill = SkillRegistry.get(skill_name)
-        if skill:
-            # SKILL.md を渡す（目次）
-            # 詳細な actions/*.md は VisualAgent が read_manual で取得
-            skill_manual = skill.markdown_content or skill.raw_content
-            logger.info(f"[VISUAL_BROWSE] Loaded skill manual for: {skill_name}")
-
-            # site が未指定なら skill.domain を使用
-            if not site and skill.domain:
-                site = skill.domain
-        else:
-            logger.warning(f"[VISUAL_BROWSE] Skill not found: {skill_name}")
-
-    # 学習済みスキルからセレクタヒントを取得
-    skill_loader = get_skill_loader()
-    selector_hints = skill_loader.get_hints_for_site(site) if site else None
-    if selector_hints:
-        logger.info(f"[VISUAL_BROWSE] Found learned skill for site: {site}")
-
-    if not task:
-        return {
-            "success": False,
-            "error": "task パラメータが必要です",
-        }
-
-    if not site:
-        return {
-            "success": False,
-            "error": "site パラメータが必要です（skill_name を指定した場合は自動で設定されます）",
-        }
-
-    if credentials is None and site:
-        try:
-            from app.services.credentials_service import get_credentials_service
-            creds_service = get_credentials_service()
-            candidates = [site]
-            if site.startswith("www."):
-                candidates.append(site[4:])
-            if "." in site:
-                candidates.append(site.split(".")[0])
-            for candidate in dict.fromkeys(candidates):
-                stored_creds = await creds_service.get_credential(user_id, candidate)
-                if stored_creds:
-                    credentials = {
-                        "id": stored_creds.get("id"),
-                        "password": stored_creds.get("password"),
-                    }
-                    logger.info(f"[VISUAL_BROWSE] Loaded stored credentials for {candidate}")
-                    break
-        except Exception as e:
-            logger.warning(f"[VISUAL_BROWSE] Failed to load stored credentials: {e}")
-
-    logger.info(f"[VISUAL_BROWSE] Starting visual browse: task={task}, site={site}")
-
-    # コールバック関数を定義（notify_progressを使用してフロントエンドに進捗を送信）
-    async def on_plan(plan: Dict[str, Any]):
-        """計画作成時のコールバック"""
-        summary = plan.get("summary", "計画を作成中...")
-        await notify_progress("visual_plan", f"[計画] {summary}", "running")
-        steps = plan.get("steps", [])
-        for i, step in enumerate(steps[:5], 1):  # 最大5ステップ表示
-            await notify_progress("visual_plan_step", f"  {i}. {step}", "running")
-
-    async def on_thinking(reasoning: str):
-        """思考中のコールバック"""
-        if reasoning:
-            # 最初の80文字だけ表示
-            preview = reasoning[:80] + "..." if len(reasoning) > 80 else reasoning
-            await notify_progress("visual_thinking", f"[思考] {preview}", "running")
-
-    async def on_step(step_num: int, action_name: str, result):
-        """ステップ完了時のコールバック（1行で完結）"""
-        # ActionResult オブジェクトまたは dict から成功/失敗を取得
-        if isinstance(result, dict):
-            success = result.get("success", True)
-        else:
-            success = getattr(result, "success", True)
-
-        icon = "[OK]" if success else "[NG]"
-        status_str = "completed" if success else "error"
-        await notify_progress(
-            f"visual_step_{step_num}",
-            f"Step {step_num}: {action_name} {icon}",
-            status_str
-        )
+    from app.tools.browser import get_executor_page
 
     try:
-        # レコーダーとエージェントを作成（コールバック付き）
-        recorder = BrowserRecorder(user_id=user_id)
-        # AgentRunner のセッションIDを記録（学習データのリンク用）
-        recorder.agent_session_id = session_id
-        agent = VisualAgent(
-            recorder=recorder,
-            on_thinking=on_thinking,
-            on_step=on_step,
-            on_plan=on_plan,
-        )
+        page = await get_executor_page()
 
-        # タスクを実行（スキル情報があれば渡す）
-        result = await agent.execute_task(
-            task=task,
-            site=site,
-            initial_url=initial_url,
-            credentials=credentials,
-            selector_hints=selector_hints,
-            skill_manual=skill_manual,
-            skill_name=skill_name,  # read_manual で使用
-        )
+        if action == "open":
+            url = params.get("url")
+            if not url:
+                return {"success": False, "error": "url が必要です"}
+            await page.goto(url)
+            await page.wait_for_load_state("domcontentloaded")
+            return await _get_browser_state(page)
 
-        # 結果をフォーマット
-        if result.get("success"):
-            message = result.get("message", "タスクが完了しました")
-            extracted_data = result.get("extracted_data", {})
+        elif action == "screenshot":
+            return await _get_browser_state(page)
 
-            # ブラウザセッションIDを取得（スキル化用）
-            browser_session_id = None
-            if recorder.session:
-                browser_session_id = recorder.session.id
+        elif action == "click":
+            ref = params.get("ref")
+            x = params.get("x")
+            y = params.get("y")
 
-            return {
-                "success": True,
-                "message": f"【視覚ベース操作完了】\n{message}",
-                "details": {
-                    "steps": result.get("steps", 0),
-                    "tokens_used": result.get("total_tokens", 0),
-                    "extracted_data": extracted_data,
-                },
-                "browser_session_id": browser_session_id,  # スキル化用
-            }
+            # クリック前のタブ数を記録
+            try:
+                tab_before = await page.get_tab_count()
+                tab_count_before = tab_before.get("count", 1)
+            except Exception:
+                tab_count_before = 1
+
+            if ref:
+                # force=True: Amazonカルーセル等のオーバーレイによるクリック妨害を回避
+                # data-dan-refで特定済みの要素なのでforceで安全
+                await page.click_by_ref(ref, force=True)
+            elif x is not None and y is not None:
+                await page.mouse.click(x, y)
+            else:
+                return {"success": False, "error": "ref または x,y座標が必要です"}
+
+            # クリック後、新タブが開いたか確認
+            await page.wait_for_timeout(500)
+            try:
+                tab_after = await page.get_tab_count()
+                tab_count_after = tab_after.get("count", 1)
+            except Exception:
+                tab_count_after = tab_count_before
+
+            if tab_count_after > tab_count_before:
+                # 新タブが開いた → 自動で切り替え
+                try:
+                    switch_result = await page.switch_to_latest_tab()
+                    if switch_result.get("switched"):
+                        logger.info(f"[BROWSER] Auto-switched to new tab: {switch_result.get('url')}")
+                except Exception as e:
+                    logger.warning(f"[BROWSER] Failed to switch tab: {e}")
+            else:
+                # 同じタブでのページ遷移を待つ
+                try:
+                    await page.wait_for_load_state("domcontentloaded")
+                except Exception:
+                    pass
+            return await _get_browser_state(page)
+
+        elif action == "type":
+            ref = params.get("ref")
+            text = params.get("text")
+            press_enter = params.get("press_enter", False)
+            if not ref or not text:
+                return {"success": False, "error": "ref と text が必要です"}
+            await page.fill_by_ref(ref, text)
+            if press_enter:
+                await page.keyboard.press("Enter")
+                # Enter後のナビゲーション完了を待つ（"load"でリソース読み込みまで待機）
+                try:
+                    await page.wait_for_load_state("load")
+                except Exception:
+                    # タイムアウト時はフォールバック
+                    await page.wait_for_timeout(2000)
+            return await _get_browser_state(page)
+
+        elif action == "scroll":
+            direction = params.get("direction", "down")
+            delta = 500 if direction == "down" else -500
+            await page.evaluate(f"window.scrollBy(0, {delta})")
+            await page.wait_for_timeout(300)
+            return await _get_browser_state(page)
+
+        elif action == "select":
+            ref = params.get("ref")
+            value = params.get("value")
+            if not ref or not value:
+                return {"success": False, "error": "ref と value が必要です"}
+            # refからセレクタを構築して select_option を呼ぶ
+            selector = f'[data-dan-ref="{ref}"]'
+            await page.locator(selector).select_option(value)
+            return await _get_browser_state(page)
+
         else:
-            error = result.get("error", "不明なエラー")
-
-            # ユーザー入力が必要な場合
-            if result.get("requires_user_input"):
-                return {
-                    "success": False,
-                    "message": f"確認が必要です: {result.get('question', '')}",
-                    "requires_user_input": True,
-                    "options": result.get("options", []),
-                    "issue_recorded": True,
-                }
-
-            # 進捗サマリを取得（あれば）
-            progress = result.get("progress", {})
-
-            return {
-                "success": False,
-                "error": f"視覚ベース操作エラー: {error}",
-                "details": {
-                    "steps": result.get("steps", 0),
-                },
-                "progress": progress,  # 進捗サマリを追加
-                "issue_recorded": True,
-            }
+            return {"success": False, "error": f"不明なブラウザアクション: {action}"}
 
     except Exception as e:
-        logger.error(f"[VISUAL_BROWSE] Error: {e}", exc_info=True)
-        return {
-            "success": False,
-            "error": f"視覚ベース操作で例外が発生: {str(e)}",
-        }
+        logger.error(f"[BROWSER] Error in {action}: {e}", exc_info=True)
+        # エラー時もスクリーンショットを取得できれば返す
+        try:
+            page = await get_executor_page()
+            state = await _get_browser_state(page)
+            # エラー情報をテキストに追加
+            for item in state.get("content", []):
+                if item.get("type") == "text":
+                    item["text"] = f"エラー: {str(e)}\n\n{item['text']}"
+            state["success"] = False
+            state["error"] = str(e)
+            return state
+        except Exception:
+            return {"success": False, "error": f"ブラウザ操作エラー: {str(e)}"}
 
 
 # ============================================
