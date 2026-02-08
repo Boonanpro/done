@@ -156,7 +156,13 @@ class Session:
         # content blocksをそのまま保存（text, tool_use, server_tool_use, web_search_tool_result を含む）
         content_blocks = []
         for block in response.content:
-            if block.type == "text":
+            if block.type == "thinking":
+                content_blocks.append({
+                    "type": "thinking",
+                    "thinking": block.thinking,
+                    "signature": block.signature,
+                })
+            elif block.type == "text":
                 content_blocks.append({
                     "type": "text",
                     "text": block.text,

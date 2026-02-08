@@ -702,6 +702,10 @@ class AgentRunner:
             system=system_prompt,
             messages=messages,
             tools=tools,
+            thinking={
+                "type": "enabled",
+                "budget_tokens": 1024,
+            },
         )
 
         print(f"[LLM_DEBUG] Response stop_reason: {response.stop_reason}")
@@ -743,7 +747,12 @@ class AgentRunner:
         response_parts = []
 
         for i, block in enumerate(response.content):
-            if block.type == "text":
+            if block.type == "thinking":
+                # Extended Thinking: 内部推論（分析・計画）。表示せずスキップ
+                print(f"[LLM_DEBUG] Thinking block: {block.thinking[:80]}...")
+                continue
+
+            elif block.type == "text":
                 text = block.text.strip()
                 if not text:
                     continue
