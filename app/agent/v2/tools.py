@@ -343,6 +343,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         READ_WORKSPACE_TOOL,
         UPDATE_WORKSPACE_TOOL,
         SEARCH_MEMORY_TOOL,
+        EXEC_CODE_TOOL,
     ]
 
 
@@ -704,6 +705,33 @@ MEMORY.md、USER.md、memory/*.md を横断検索する。
     }
 }
 
+# ============================================
+# コード実行ツール
+# ============================================
+
+EXEC_CODE_TOOL = {
+    "name": "exec_code",
+    "description": """Pythonコードを実行する。
+API呼び出し、データ処理、計算、ファイル操作など、既存ツールでは対応できない操作に使用。
+作業ディレクトリ: ~/.dan/sandbox/
+タイムアウト: 30秒
+pip install済みのライブラリが使用可能。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "code": {
+                "type": "string",
+                "description": "実行するPythonコード"
+            },
+            "description": {
+                "type": "string",
+                "description": "コードの目的（ログ用）"
+            }
+        },
+        "required": ["code"]
+    }
+}
+
 
 def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     """
@@ -745,6 +773,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "search_memory":
         return ("_search_memory", "search")
+
+    if tool_name == "exec_code":
+        return ("_exec_code", "run")
 
     # Prefer the longest matching skill prefix to avoid collisions.
     all_skills = SkillRegistry.list_all()
@@ -1544,6 +1575,15 @@ async def execute_tool(
         except Exception as e:
             logger.exception(f"Memory search failed: {e}")
             return {"success": False, "error": f"検索エラー: {e}"}
+
+    # ★★★ コード実行（外部依存なし）★★★
+    if skill_name == "_exec_code":
+        code = params.get("code", "")
+        desc = params.get("description", "")
+        if desc:
+            logger.info(f"[EXEC] {desc[:80]}")
+        from app.tools.code_executor import execute_python
+        return await execute_python(code)
 
     # 以下は外部依存あり
     from app.services.cancellation import CancellationRegistry, CancelledError

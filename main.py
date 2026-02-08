@@ -3,6 +3,7 @@ AI Secretary System - Main Entry Point (Phase 6 reload)
 """
 import sys
 import asyncio
+from contextlib import asynccontextmanager
 
 # Windows: ProactorEventLoopPolicy（デフォルト）を使用
 # 注: WindowsSelectorEventLoopPolicyはPlaywrightのsubprocess起動を壊すので使わない
@@ -25,10 +26,20 @@ from app.api.skill_routes import router as skill_router
 
 # v3: Executorは不使用（汎用ツールで処理）
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from app.services.heartbeat_service import heartbeat_loop
+    task = asyncio.create_task(heartbeat_loop())
+    yield
+    task.cancel()
+
+
 app = FastAPI(
     title="AI Secretary System",
     description="AI秘書システム - メール・LINE仲介、物品購入、支払い自動化",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # CORS設定

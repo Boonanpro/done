@@ -827,8 +827,13 @@ async def get_dan_sessions(
     """
     try:
         result = await service.get_dan_sessions(current_user.user_id)
+        # heartbeatセッションを除外
+        sessions = [
+            s for s in result["sessions"]
+            if not s["id"].startswith("heartbeat-")
+        ]
         return SessionsListResponse(
-            sessions=[SessionResponse(**s) for s in result["sessions"]],
+            sessions=[SessionResponse(**s) for s in sessions],
             current_session_id=result["current_session_id"],
         )
     except Exception as e:
