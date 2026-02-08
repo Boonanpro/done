@@ -898,26 +898,28 @@ class AgentRunner:
 
     async def _flush_to_memory(self) -> str:
         """
-        メモリフラッシュ: LLMに重要情報を memory/ に保存させる
+        メモリフラッシュ: 会話の全トピックを圧縮してメモリファイルに保存
+
+        LLMの役割は「選別」ではなく「圧縮」。全てのやり取りを漏れなく要約する。
 
         Returns:
             会話の要約テキスト
         """
         from datetime import datetime
 
-        # フラッシュ用のシステムプロンプト
-        flush_system = """あなたはDan、パーソナルAIアシスタントです。
+        # フラッシュ用のシステムプロンプト（圧縮機として指示）
+        flush_system = """あなたは会話ログの圧縮係です。
 
-会話が長くなったので、重要な情報を保存する必要があります。
+以下の会話の全内容を箇条書きで要約してください。
 
-以下を行ってください:
-1. これまでの会話から重要な情報（ユーザーの好み、決定事項、進行中のタスク等）を抽出
-2. update_workspace ツールで memory/{date}.md に **追記（appendパラメータを使用）** する。contentではなくappendを使うこと。
-3. 長期的に重要な情報（ユーザーの好みの変化、重要な決定事項、繰り返し参照される事実）があれば、MEMORY.md にも追記する
-4. 会話の要約をテキストで出力（この要約は会話履歴に残ります）
-
-要約は簡潔に、箇条書きで、重要なポイントのみ含めてください。
-""".format(date=datetime.now().strftime("%Y-%m-%d"))
+ルール:
+- 全てのトピック・やり取りを漏れなく含める。省略禁止。
+- 各トピックは1-2行で簡潔に。
+- ユーザーの質問・相談内容、それに対する回答・結果を両方含める。
+- 具体的な固有名詞（店名、商品名、URL、金額等）は省略せず残す。
+- 「重要かどうか」の判断はしない。全て記録する。
+- テキスト出力のみ。ツールは使わない。
+"""
 
         # フラッシュ用のメッセージ（画像を除外してトークン節約）
         flush_messages = self._strip_images_for_summary(
@@ -925,45 +927,38 @@ class AgentRunner:
         )
         flush_messages.append({
             "role": "user",
-            "content": "【システム】会話が長くなりました。重要な情報を memory/ に保存し、会話の要約を作成してください。"
+            "content": "上記の会話の全内容を箇条書きで要約してください。省略禁止。"
         })
 
-        # LLM呼び出し
-        tools = self._get_tools()
+        # LLM呼び出し（ツールなし、テキスト出力のみ）
         response = await self.llm_client.messages.create(
             model=self._get_model(),
-            max_tokens=2000,
+            max_tokens=4000,
             system=flush_system,
             messages=flush_messages,
-            tools=tools,
         )
 
-        # レスポンスを処理
+        # テキスト出力を要約として使用
         summary = "会話の要約が生成されませんでした。"
         text_parts = []
         for block in response.content:
             if block.type == "text":
                 text_parts.append(block.text.strip())
-            elif block.type == "tool_use":
-                if block.name == "update_workspace":
-                    # update_workspaceを実行
-                    from app.agent.v2.tools import execute_tool, parse_tool_name
-                    parsed = parse_tool_name(block.name)
-                    if parsed:
-                        skill_name, action = parsed
-                        await execute_tool(
-                            tool_call={
-                                "tool_use_id": block.id,
-                                "skill": skill_name,
-                                "action": action,
-                                "params": block.input,
-                            },
-                            user_id=self.session.user_id,
-                        )
 
-        # テキスト出力を要約として使用
         if text_parts:
             summary = "\n\n".join(text_parts)
+
+        # 要約を日付ファイルに上書き保存（ブートストラップ + search_memory 両方で利用可能）
+        if summary and summary != "会話の要約が生成されませんでした。":
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            memory_dir = WORKSPACE_DIR / "memory"
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            filepath = memory_dir / f"{date_str}.md"
+            filepath.write_text(
+                f"# {date_str} 会話ログ（最終更新: {datetime.now().strftime('%H:%M')}）\n\n{summary}",
+                encoding="utf-8",
+            )
+            logger.info(f"Compaction summary saved to {filepath}")
 
         return summary
 
