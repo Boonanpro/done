@@ -960,7 +960,70 @@ class AgentRunner:
             )
             logger.info(f"Compaction summary saved to {filepath}")
 
+        # MEMORY.md（長期記憶）の自動更新
+        if summary and summary != "会話の要約が生成されませんでした。":
+            await self._update_long_term_memory(summary)
+
         return summary
+
+    async def _update_long_term_memory(self, conversation_summary: str) -> None:
+        """
+        MEMORY.mdを自動更新する。
+
+        現在のMEMORY.mdの内容と会話要約を渡し、
+        長期記憶として残すべき情報を統合した更新版を生成する。
+        """
+        memory_file = WORKSPACE_DIR / "MEMORY.md"
+        current_memory = ""
+        if memory_file.exists():
+            current_memory = memory_file.read_text(encoding="utf-8")
+
+        system = """あなたは長期記憶の管理係です。
+
+「現在の長期記憶」と「今回の会話要約」を見て、長期記憶の更新版を出力してください。
+
+長期記憶に残すべき情報:
+- ユーザーの好み・習慣（よく使うサービス、好きなブランド等）
+- アカウント情報（メールアドレス、住所、ユーザー名等）
+- 繰り返し参照される事実（家族構成、仕事、定期的な予定等）
+- 重要な決定事項（購入したもの、契約したサービス等）
+- Danの動作に関するフィードバック（こうしてほしい、これはやめて等）
+
+ルール:
+- 現在の長期記憶にある情報は保持する（消さない）
+- 新しい情報があれば追加する
+- 古い情報が更新された場合は最新に書き換える
+- 一時的な話題（天気、一回きりの質問等）は含めない
+- Markdown形式で、セクション分けして整理する
+- テキスト出力のみ。ツールは使わない。
+"""
+
+        messages = [
+            {
+                "role": "user",
+                "content": f"## 現在の長期記憶\n\n{current_memory}\n\n---\n\n## 今回の会話要約\n\n{conversation_summary}\n\n---\n\n上記を統合した、更新版の長期記憶をMarkdownで出力してください。",
+            }
+        ]
+
+        try:
+            response = await self.llm_client.messages.create(
+                model=self._get_model(),
+                max_tokens=2000,
+                system=system,
+                messages=messages,
+            )
+
+            text_parts = []
+            for block in response.content:
+                if block.type == "text":
+                    text_parts.append(block.text.strip())
+
+            if text_parts:
+                updated_memory = "\n\n".join(text_parts)
+                memory_file.write_text(updated_memory, encoding="utf-8")
+                logger.info("MEMORY.md updated with long-term memory")
+        except Exception as e:
+            logger.warning(f"Failed to update MEMORY.md: {e}")
 
     async def _trigger_learning_analysis(self) -> None:
         """
