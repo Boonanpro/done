@@ -27,6 +27,7 @@ interface UseSpeechRecognitionOptions {
   lang?: string;
   interimResults?: boolean;
   continuous?: boolean;
+  onFinalTranscript?: (text: string) => void;
 }
 
 interface UseSpeechRecognitionResult {
@@ -44,15 +45,21 @@ interface UseSpeechRecognitionResult {
 export function useSpeechRecognition(
   options: UseSpeechRecognitionOptions = {}
 ): UseSpeechRecognitionResult {
-  const { lang = 'ja-JP', interimResults = true, continuous = false } = options;
+  const { lang = 'ja-JP', interimResults = true, continuous = false, onFinalTranscript } = options;
 
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const onFinalTranscriptRef = useRef(onFinalTranscript);
   const [isSupported, setIsSupported] = useState(true);
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
   const [finalTranscript, setFinalTranscript] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  // Keep callback ref updated
+  useEffect(() => {
+    onFinalTranscriptRef.current = onFinalTranscript;
+  }, [onFinalTranscript]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -109,6 +116,10 @@ export function useSpeechRecognition(
         setFinalTranscript(cleaned);
         setTranscript(cleaned);
         setInterimTranscript('');
+        // 直接コールバックを呼ぶ（effect経由のタイミング問題を回避）
+        if (cleaned && onFinalTranscriptRef.current) {
+          onFinalTranscriptRef.current(cleaned);
+        }
       }
     };
 

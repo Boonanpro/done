@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
 
@@ -13,6 +13,7 @@ import { useAuthStore } from '@/stores/auth-store';
  */
 export default function ChatRedirectPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   const isLoading = useAuthStore((state) => state.isLoading);
 
@@ -33,12 +34,13 @@ export default function ChatRedirectPage() {
     retry: 2,
   });
 
-  // ルームが取得できたらリダイレクト
+  // ルームが取得できたらリダイレクト（query paramsを維持）
   useEffect(() => {
     if (danRoom?.id) {
-      router.replace(`/chat/${danRoom.id}`);
+      const params = searchParams.toString();
+      router.replace(`/chat/${danRoom.id}${params ? `?${params}` : ''}`);
     }
-  }, [danRoom, router]);
+  }, [danRoom, router, searchParams]);
 
   // ローディング表示
   return (

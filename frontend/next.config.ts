@@ -3,6 +3,16 @@ import withPWA from 'next-pwa';
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  async rewrites() {
+    return [
+      {
+        // API リクエストをバックエンドにプロキシ
+        // スマホ HTTPS → Next.js HTTPS → バックエンド HTTP（混合コンテンツ回避）
+        source: '/api/:path*',
+        destination: 'http://127.0.0.1:8000/api/:path*',
+      },
+    ];
+  },
 };
 
 const withPwa = withPWA({

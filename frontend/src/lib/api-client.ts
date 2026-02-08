@@ -6,7 +6,8 @@
 import { useAuthStore } from '@/stores/auth-store';
 
 // API Base URL - use environment variable or default to localhost
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// 空文字列の場合は同一オリジン（Next.js rewrites経由でバックエンドにプロキシ）
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
 // ==================== Types ====================
 
@@ -720,6 +721,26 @@ export const api = {
       }),
   },
 
+  // Voice endpoints
+  voice: {
+    tts: async (text: string): Promise<ArrayBuffer> => {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
+      const baseUrl = API_BASE_URL;
+      const response = await fetch(`${baseUrl}/api/v1/voice/tts`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ text }),
+      });
+      if (!response.ok) {
+        throw new ApiError(response.status, response.statusText, null);
+      }
+      return response.arrayBuffer();
+    },
+  },
+
   // Alias: invites points to invite for compatibility
   get invites() {
     return this.invite;
@@ -760,7 +781,7 @@ export const api = {
       } catch (e) {
         console.error('[SSE] Failed to get token', e);
       }
-      const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+      const baseUrl = API_BASE_URL;
 
       console.log('[SSE] Starting stream request', { data, baseUrl, hasToken: !!token });
 

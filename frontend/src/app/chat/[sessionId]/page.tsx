@@ -1,9 +1,9 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp, Square, Sparkles, X } from 'lucide-react';
+import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp, Square, Sparkles, X, Mic, MicOff, SkipForward } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -18,6 +18,7 @@ import { api, type MessageResponse, type ProcessStep, type StateMachineResponse,
 import { useAuthStore } from '@/stores/auth-store';
 import { useSessionStateStore, PENDING_PROCESS_ID } from '@/stores/session-state-store';
 import { cn } from '@/lib/utils';
+import { useVoiceChat } from '@/hooks/useVoiceChat';
 
 // プロセスステップの表示コンポーネント
 interface ProcessDisplayProps {
@@ -73,6 +74,7 @@ function ProcessDisplay({ steps, isCollapsed, onToggle, isProcessing = false }: 
 export default function ChatSessionPage() {
   const router = useRouter();
   const params = useParams();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
 
   // URLからセッションIDを取得（唯一の真実源）
@@ -134,6 +136,15 @@ export default function ChatSessionPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Voice chat integration
+  const voiceSendRef = useRef<((text: string) => void) | null>(null);
+  const voice = useVoiceChat({
+    onFinalTranscript: (text: string) => {
+      // Set message and trigger send via ref (avoids stale closure)
+      voiceSendRef.current?.(text);
+    },
+  });
+
   const hasToken = typeof window !== 'undefined' && !!localStorage.getItem('done-token');
 
   // 認証チェック
@@ -142,6 +153,14 @@ export default function ChatSessionPage() {
       router.push('/login');
     }
   }, [isLoading, isAuthenticated, hasToken, router]);
+
+  // Auto-activate voice mode from ?voice=true query param
+  useEffect(() => {
+    if (searchParams.get('voice') === 'true' && !voice.isActive) {
+      voice.toggleVoice();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Run once on mount
 
   // セッションIDが変わったらアクティブセッションを更新
   useEffect(() => {
@@ -174,6 +193,7 @@ export default function ChatSessionPage() {
     queryFn: () => api.rooms.getMessages(sessionId, { limit: 50 }),
     enabled: !!sessionId,
     staleTime: 5 * 1000,
+    refetchInterval: 3000, // 3秒ごとにポーリング（別デバイスからの会話を反映）
     retry: 2,
   });
 
@@ -185,11 +205,12 @@ export default function ChatSessionPage() {
     initializeProcessesFromMessages(sessionId, messages);
   }, [messages, sessionId, initializeProcessesFromMessages]);
 
-  // メッセージ送信
-  const handleSendMessage = useCallback(async () => {
-    if (!message.trim() || isSending || !sessionId) return;
+  // メッセージ送信 (textOverride: voice mode等から直接テキストを渡す場合)
+  const handleSendMessage = useCallback(async (textOverride?: string) => {
+    const text = textOverride || message;
+    if (!text.trim() || isSending || !sessionId) return;
 
-    const content = message.trim();
+    const content = text.trim();
     setMessage('');
     setIsSending(sessionId, true);
 
@@ -289,6 +310,11 @@ export default function ChatSessionPage() {
                   error: null,
                 });
               }
+
+              // Voice mode: speak AI response via TTS
+              if (voice.isActive && msg.content) {
+                voice.speakResponse(msg.content);
+              }
             }
           },
 
@@ -329,7 +355,14 @@ export default function ChatSessionPage() {
     } finally {
       setIsSending(sessionId, false);
     }
-  }, [message, isSending, sessionId, queryClient, messagesData, user?.id, user?.display_name, setIsSending, setProcess, addProcessStep, getSessionState, deleteProcess, setPendingConfirmation, incrementUnread]);
+  }, [message, isSending, sessionId, queryClient, messagesData, user?.id, user?.display_name, setIsSending, setProcess, addProcessStep, getSessionState, deleteProcess, setPendingConfirmation, incrementUnread, voice.isActive, voice.speakResponse]);
+
+  // Voice send ref: allows voice hook to trigger message send
+  useEffect(() => {
+    voiceSendRef.current = (text: string) => {
+      handleSendMessage(text);
+    };
+  }, [handleSendMessage]);
 
   // 提案を承認
   const handleConfirm = useCallback(async () => {
@@ -1104,6 +1137,29 @@ export default function ChatSessionPage() {
           </div>
         )}
 
+        {/* Voice listening indicator */}
+        {voice.isActive && (voice.isListening || voice.isSpeaking) && (
+          <div className="shrink-0 px-4 py-2 bg-muted/30 border-t border-border">
+            <div className="max-w-3xl mx-auto flex items-center gap-2 text-xs text-muted-foreground">
+              {voice.isSpeaking ? (
+                <>
+                  <div className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
+                  <span>ダンが話しています...</span>
+                  <Button size="sm" variant="ghost" className="h-6 px-2 ml-auto text-xs" onClick={voice.skipSpeaking}>
+                    <SkipForward className="h-3 w-3 mr-1" />
+                    スキップ
+                  </Button>
+                </>
+              ) : voice.isListening ? (
+                <>
+                  <div className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+                  <span>{voice.interimTranscript || '聞いています...'}</span>
+                </>
+              ) : null}
+            </div>
+          </div>
+        )}
+
         {/* Input Area */}
         <div className="shrink-0 border-t border-border p-4">
           <div className="max-w-3xl mx-auto">
@@ -1111,21 +1167,43 @@ export default function ChatSessionPage() {
               <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground">
                 <Paperclip className="h-4 w-4" />
               </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  'h-9 w-9 shrink-0 transition-colors',
+                  voice.isActive
+                    ? 'text-red-500 hover:text-red-600 bg-red-50 hover:bg-red-100'
+                    : 'text-muted-foreground hover:text-foreground'
+                )}
+                onClick={voice.toggleVoice}
+                title={voice.isActive ? '音声モード OFF' : '音声モード ON'}
+              >
+                {voice.isActive ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+              </Button>
               <textarea
                 ref={textareaRef}
-                value={message}
+                value={voice.isActive && voice.interimTranscript ? voice.interimTranscript : message}
                 onChange={(e) => setMessage(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="メッセージを入力..."
+                placeholder={voice.isActive ? '音声入力中...' : 'メッセージを入力...'}
                 rows={1}
-                className="flex-1 resize-none bg-transparent text-sm focus:outline-none min-h-[36px] max-h-[200px] py-2"
+                readOnly={voice.isActive}
+                className={cn(
+                  'flex-1 resize-none bg-transparent text-sm focus:outline-none min-h-[36px] max-h-[200px] py-2',
+                  voice.isActive && 'text-muted-foreground'
+                )}
               />
               {isSending ? (
                 <Button size="icon" variant="destructive" className="h-9 w-9 shrink-0" onClick={handleCancel} title="停止 (Escキー)">
                   <Square className="h-4 w-4" />
                 </Button>
+              ) : voice.isSpeaking ? (
+                <Button size="icon" variant="outline" className="h-9 w-9 shrink-0" onClick={voice.skipSpeaking} title="スキップ">
+                  <SkipForward className="h-4 w-4" />
+                </Button>
               ) : (
-                <Button size="icon" className="h-9 w-9 shrink-0" onClick={handleSendMessage} disabled={!message.trim()}>
+                <Button size="icon" className="h-9 w-9 shrink-0" onClick={() => handleSendMessage()} disabled={!message.trim() && !voice.isActive}>
                   <Send className="h-4 w-4" />
                 </Button>
               )}

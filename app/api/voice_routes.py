@@ -26,6 +26,30 @@ DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001"
 
 
 # ========================================
+# TTS REST Endpoint
+# ========================================
+
+from pydantic import BaseModel
+
+class TTSRequest(BaseModel):
+    text: str
+
+@router.post("/tts")
+async def text_to_speech_api(request: TTSRequest):
+    """
+    テキストを音声に変換（REST版）
+
+    テキストを受け取り、MP3形式の音声データを返す。
+    チャットページの音声モードから使用される。
+    """
+    service = get_voice_service()
+    mp3_bytes = await service.text_to_speech(request.text)
+    if not mp3_bytes:
+        raise HTTPException(status_code=500, detail="TTS failed")
+    return Response(content=mp3_bytes, media_type="audio/mpeg")
+
+
+# ========================================
 # Voice Companion WebSocket (Phase 1-3)
 # ========================================
 
@@ -58,6 +82,7 @@ async def voice_companion_websocket(websocket: WebSocket):
 
         token = auth_payload.get("token")
         session_id = auth_payload.get("session_id") or str(uuid.uuid4())
+        companion_mode = auth_payload.get("companion_mode", False)
 
         user_id = DEFAULT_USER_ID
         if token:
@@ -126,10 +151,22 @@ async def voice_companion_websocket(websocket: WebSocket):
                     on_reasoning_step=on_reasoning_step,
                 )
                 result = await runner.process_message(text)
+                response_text = result.get("response") or ""
+
+                audio_base64 = None
+                if response_text and companion_mode:
+                    try:
+                        voice_svc = get_voice_service()
+                        mp3_bytes = await voice_svc.text_to_speech(response_text)
+                        if mp3_bytes:
+                            audio_base64 = base64.b64encode(mp3_bytes).decode("utf-8")
+                    except Exception as exc:
+                        logger.warning("Companion TTS failed: %s", exc)
 
                 await websocket.send_json({
                     "type": "assistant_message",
-                    "text": result.get("response") or "",
+                    "text": response_text,
+                    "audio_base64": audio_base64,
                     "session_id": session_id,
                     "reasoning_steps": result.get("reasoning_steps", []),
                 })
