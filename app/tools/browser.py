@@ -189,7 +189,11 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
         return {}
 
     elif cmd == "wait_for_load_state":
-        await page.wait_for_load_state(args.get("state", "domcontentloaded"))
+        timeout = args.get("timeout")
+        if timeout:
+            await page.wait_for_load_state(args.get("state", "domcontentloaded"), timeout=timeout)
+        else:
+            await page.wait_for_load_state(args.get("state", "domcontentloaded"))
         return {}
 
     elif cmd == "wait_for_timeout":
@@ -368,7 +372,8 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
     elif cmd == "click_by_ref":
         # data-dan-ref属性でクリック
         ref = args["ref"].replace("@", "")
-        await page.locator(f'[data-dan-ref="{ref}"]').click(force=args.get("force", False))
+        timeout = args.get("timeout", 30000)
+        await page.locator(f'[data-dan-ref="{ref}"]').click(force=args.get("force", False), timeout=timeout)
         return {}
 
     elif cmd == "fill_by_ref":
@@ -467,7 +472,7 @@ def _send_executor_command(cmd: str, **args) -> dict:
 
         # 結果を待機（短いタイムアウトでループし、キャンセルをチェック）
         wait_timeout = 2.0  # 2秒ごとにキャンセルチェック
-        total_timeout = 120.0  # 全体のタイムアウト
+        total_timeout = 60.0  # 全体のタイムアウト
         elapsed = 0.0
 
         while elapsed < total_timeout:
@@ -700,17 +705,18 @@ class ExecutorPageProxy:
         )
         return result.get("elements", [])
 
-    async def click_by_ref(self, ref: str, force: bool = False):
+    async def click_by_ref(self, ref: str, force: bool = False, timeout: int = 30000):
         """
         data-dan-ref属性でクリック
 
         Args:
             ref: 参照ID（@e1 形式）
             force: 強制クリック
+            timeout: タイムアウト（ミリ秒）
         """
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, lambda: _send_executor_command("click_by_ref", ref=ref, force=force)
+            None, lambda: _send_executor_command("click_by_ref", ref=ref, force=force, timeout=timeout)
         )
 
     async def fill_by_ref(self, ref: str, value: str):

@@ -2370,6 +2370,11 @@ def _build_skill_manual(skill: Optional["Skill"], action: str) -> str:
 # ブラウザ直接操作（Dan → browser.py）
 # ============================================
 
+# ブラウザ操作のタイムアウト設定（ミリ秒）
+BROWSER_CLICK_TIMEOUT = 10000       # クリック要素検出
+BROWSER_LOAD_TIMEOUT = 10000        # ページ遷移後のロード完了待ち
+BROWSER_STATE_TIMEOUT = 5000        # スクショ前のロード完了待ち
+
 async def _get_browser_state(page) -> Dict[str, Any]:
     """
     操作後のページ状態を取得（スクリーンショット + 要素リスト）
@@ -2379,7 +2384,7 @@ async def _get_browser_state(page) -> Dict[str, Any]:
     """
     # ページのロード完了を待つ（ナビゲーション中のエラー防止）
     try:
-        await page.wait_for_load_state("domcontentloaded")
+        await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_STATE_TIMEOUT)
     except Exception:
         # タイムアウトしてもスクショは試みる
         await page.wait_for_timeout(1000)
@@ -2447,7 +2452,7 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             if not url:
                 return {"success": False, "error": "url が必要です"}
             await page.goto(url)
-            await page.wait_for_load_state("domcontentloaded")
+            await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
             return await _get_browser_state(page)
 
         elif action == "screenshot":
@@ -2468,7 +2473,7 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             if ref:
                 # force=True: Amazonカルーセル等のオーバーレイによるクリック妨害を回避
                 # data-dan-refで特定済みの要素なのでforceで安全
-                await page.click_by_ref(ref, force=True)
+                await page.click_by_ref(ref, force=True, timeout=BROWSER_CLICK_TIMEOUT)
             elif x is not None and y is not None:
                 await page.mouse.click(x, y)
             else:
@@ -2493,7 +2498,7 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             else:
                 # 同じタブでのページ遷移を待つ
                 try:
-                    await page.wait_for_load_state("domcontentloaded")
+                    await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
                 except Exception:
                     pass
             return await _get_browser_state(page)
@@ -2509,7 +2514,7 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                 await page.keyboard.press("Enter")
                 # Enter後のナビゲーション完了を待つ（"load"でリソース読み込みまで待機）
                 try:
-                    await page.wait_for_load_state("load")
+                    await page.wait_for_load_state("load", timeout=BROWSER_LOAD_TIMEOUT)
                 except Exception:
                     # タイムアウト時はフォールバック
                     await page.wait_for_timeout(2000)
@@ -2524,7 +2529,7 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
 
         elif action == "back":
             await page.go_back()
-            await page.wait_for_load_state("domcontentloaded")
+            await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
             return await _get_browser_state(page)
 
         elif action == "select":
