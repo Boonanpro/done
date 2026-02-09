@@ -21,6 +21,7 @@ Protocol:
     JSON  {"type":"tool_result","tool":"...","success":bool}
     JSON  {"type":"turn_complete"}
     JSON  {"type":"error","message":"..."}
+    JSON  {"type":"session_ended"}
 """
 
 import uuid
@@ -67,12 +68,10 @@ async def gemini_voice_websocket(websocket: WebSocket):
         user_id = DEFAULT_USER_ID
         if token:
             token_data = decode_access_token(token)
-            if not token_data:
-                logger.warning("Gemini voice WS: invalid token")
-                await websocket.send_json({"type": "error", "message": "Invalid or expired token"})
-                await websocket.close()
-                return
-            user_id = token_data.user_id
+            if token_data:
+                user_id = token_data.user_id
+            else:
+                logger.warning("Gemini voice WS: invalid token, falling back to default user")
 
         logger.info("Gemini voice WS: auth success, user=%s, session=%s", user_id, session_id)
         await websocket.send_json({
@@ -106,6 +105,8 @@ async def gemini_voice_websocket(websocket: WebSocket):
                     await websocket.close()
                     return
 
+            # Cancel any pending delayed stop (voice client reconnected)
+            runner.cancel_delayed_stop()
             runner.add_voice_client(websocket)
             await websocket.send_json({"type": "ready", "mode": "voice"})
 
@@ -169,8 +170,8 @@ async def gemini_voice_websocket(websocket: WebSocket):
         if runner:
             if mode == "voice":
                 runner.remove_voice_client(websocket)
-                # If no more voice clients, stop the runner
+                # If no more voice clients, schedule delayed stop (30s grace period)
                 if not runner._voice_clients:
-                    await runner.stop()
+                    runner.schedule_delayed_stop(delay=30.0)
             elif mode == "observer":
                 runner.remove_observer_client(websocket)

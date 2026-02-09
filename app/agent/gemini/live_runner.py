@@ -72,6 +72,7 @@ class GeminiLiveRunner:
         self._observer_clients: Set[WebSocket] = set()
         self._running = False
         self._response_task: Optional[asyncio.Task] = None
+        self._delayed_stop_task: Optional[asyncio.Task] = None
         self._conversation_log: List[Dict[str, Any]] = []
 
     @property
@@ -93,6 +94,32 @@ class GeminiLiveRunner:
     def remove_observer_client(self, ws: WebSocket) -> None:
         self._observer_clients.discard(ws)
         logger.info("Observer client removed (session=%s, remaining=%d)", self.session_id, len(self._observer_clients))
+
+    def schedule_delayed_stop(self, delay: float = 30.0) -> None:
+        """Schedule a stop after `delay` seconds unless a voice client reconnects."""
+        if self._delayed_stop_task and not self._delayed_stop_task.done():
+            return  # Already scheduled
+        self._delayed_stop_task = asyncio.create_task(self._delayed_stop(delay))
+        logger.info("Delayed stop scheduled in %.0fs (session=%s)", delay, self.session_id)
+
+    def cancel_delayed_stop(self) -> None:
+        """Cancel a pending delayed stop (voice client reconnected)."""
+        if self._delayed_stop_task and not self._delayed_stop_task.done():
+            self._delayed_stop_task.cancel()
+            self._delayed_stop_task = None
+            logger.info("Delayed stop cancelled (session=%s)", self.session_id)
+
+    async def _delayed_stop(self, delay: float) -> None:
+        """Wait, then stop if no voice clients have reconnected."""
+        try:
+            await asyncio.sleep(delay)
+            if not self._voice_clients:
+                logger.info("No voice clients after %.0fs, stopping (session=%s)", delay, self.session_id)
+                await self.stop()
+            else:
+                logger.info("Voice client reconnected, delayed stop aborted (session=%s)", self.session_id)
+        except asyncio.CancelledError:
+            pass
 
     async def start(self) -> None:
         """Build system prompt, convert tools, connect to Gemini Live API."""
@@ -116,6 +143,19 @@ class GeminiLiveRunner:
         """Shut down the session and persist conversation."""
         self._running = False
         _active_runners.pop(self.session_id, None)
+
+        # Cancel any pending delayed stop
+        if self._delayed_stop_task and not self._delayed_stop_task.done():
+            self._delayed_stop_task.cancel()
+            self._delayed_stop_task = None
+
+        # Notify all clients that the session is ending
+        end_msg = json.dumps({"type": "session_ended"})
+        for ws in list(self._observer_clients) + list(self._voice_clients):
+            try:
+                await ws.send_text(end_msg)
+            except Exception:
+                pass
 
         if self._response_task and not self._response_task.done():
             self._response_task.cancel()
@@ -188,14 +228,15 @@ class GeminiLiveRunner:
                 if part.inline_data and part.inline_data.data:
                     await self._broadcast_audio(part.inline_data.data)
 
-                # Text output (thinking/transcript from native audio model)
+                # Text output = model's internal reasoning (NOT spoken audio)
+                # Send as process_step so it shows in process monitor, not chat
                 if part.text:
                     text = part.text.strip()
                     if text:
-                        self._log_conversation("assistant", text)
+                        self._log_conversation("thinking", text)
                         await self._notify_observers({
-                            "type": "assistant_text",
-                            "text": text,
+                            "type": "process_step",
+                            "step": text,
                         })
 
         # --- Input transcription (user's speech → text) ---

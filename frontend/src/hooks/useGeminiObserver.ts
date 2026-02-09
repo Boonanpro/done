@@ -59,7 +59,9 @@ export function useGeminiObserver({
   const [messages, setMessages] = useState<ObserverMessage[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const autoConnectTriedRef = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const maxReconnectAttempts = 5;
 
   // Callback refs
   const onAssistantTextRef = useRef(onAssistantText);
@@ -77,12 +79,39 @@ export function useGeminiObserver({
   useEffect(() => { onUserTextRef.current = onUserText; }, [onUserText]);
 
   const disconnect = useCallback(() => {
+    // Cancel any pending reconnect
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    reconnectAttemptRef.current = 0;
     if (wsRef.current) {
       try { wsRef.current.close(); } catch {}
       wsRef.current = null;
     }
     setState('disconnected');
   }, []);
+
+  const scheduleReconnect = useCallback(() => {
+    if (!sessionId) return;
+    if (reconnectAttemptRef.current >= maxReconnectAttempts) {
+      reconnectAttemptRef.current = 0;
+      setState('disconnected');
+      return;
+    }
+
+    const attempt = reconnectAttemptRef.current;
+    const delay = Math.min(2000 * Math.pow(2, attempt), 32000); // 2s, 4s, 8s, 16s, 32s
+    reconnectAttemptRef.current = attempt + 1;
+
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      // connectRef is used to avoid stale closure — set below
+      connectRef.current?.();
+    }, delay);
+  }, [sessionId]);
+
+  const connectRef = useRef<(() => void) | null>(null);
 
   const connect = useCallback(async () => {
     if (!sessionId) return;
@@ -121,11 +150,19 @@ export function useGeminiObserver({
 
       const configResp = await waitForJson(ws);
       if (configResp.type === 'error') {
-        // No active voice session - silently stay disconnected
-        setState('disconnected');
+        // No active voice session - schedule reconnect if we were reconnecting
         ws.close();
+        wsRef.current = null;
+        if (reconnectAttemptRef.current > 0) {
+          scheduleReconnect();
+        } else {
+          setState('disconnected');
+        }
         return;
       }
+
+      // Successfully connected — reset reconnect counter
+      reconnectAttemptRef.current = 0;
 
       // Message handler
       ws.onmessage = (event: MessageEvent) => {
@@ -133,6 +170,16 @@ export function useGeminiObserver({
 
         try {
           const data: ObserverMessage = JSON.parse(event.data);
+
+          // session_ended: server is shutting down, try to reconnect
+          if (data.type === 'session_ended') {
+            wsRef.current = null;
+            try { ws.close(); } catch {}
+            setState('disconnected');
+            scheduleReconnect();
+            return;
+          }
+
           setMessages(prev => [...prev, data]);
 
           switch (data.type) {
@@ -173,11 +220,22 @@ export function useGeminiObserver({
       setState('connected');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Connection failed';
-      setError(msg);
-      setState('error');
-      disconnect();
+      // If reconnecting, keep trying silently
+      if (reconnectAttemptRef.current > 0) {
+        scheduleReconnect();
+      } else {
+        setError(msg);
+        setState('error');
+      }
+      if (wsRef.current) {
+        try { wsRef.current.close(); } catch {}
+        wsRef.current = null;
+      }
     }
-  }, [sessionId, disconnect]);
+  }, [sessionId, scheduleReconnect]);
+
+  // Keep connectRef in sync so scheduleReconnect can call it without stale closure
+  useEffect(() => { connectRef.current = connect; }, [connect]);
 
   const sendText = useCallback((text: string) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -188,10 +246,11 @@ export function useGeminiObserver({
     }
   }, []);
 
-  // Auto-connect (once per mount, silently fails if no active voice session)
+  // Auto-connect on mount; scheduleReconnect handles retries after session_ended
+  const autoConnectDoneRef = useRef(false);
   useEffect(() => {
-    if (autoConnect && sessionId && !autoConnectTriedRef.current) {
-      autoConnectTriedRef.current = true;
+    if (autoConnect && sessionId && !autoConnectDoneRef.current) {
+      autoConnectDoneRef.current = true;
       connect();
     }
   }, [autoConnect, sessionId, connect]);
