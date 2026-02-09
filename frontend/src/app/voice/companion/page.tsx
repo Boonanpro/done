@@ -1,16 +1,17 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useVoiceChat } from '@/hooks/useVoiceChat';
-import { api, type MessageResponse, type ProcessStep } from '@/lib/api-client';
+import { useGeminiVoice, type GeminiVoiceState } from '@/hooks/useGeminiVoice';
+import { api } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth-store';
 
-type CompanionState = 'loading' | 'idle' | 'listening' | 'processing' | 'speaking' | 'error';
+type CompanionState = 'loading' | 'idle' | 'connecting' | 'listening' | 'processing' | 'speaking' | 'error';
 
 const stateConfig: Record<CompanionState, { color: string; pulse: boolean; label: string }> = {
   loading: { color: '#666', pulse: true, label: '接続中...' },
   idle: { color: '#666', pulse: false, label: 'タップで開始' },
+  connecting: { color: '#f59e0b', pulse: true, label: '接続中...' },
   listening: { color: '#22c55e', pulse: true, label: '聞いています...' },
   processing: { color: '#f59e0b', pulse: true, label: '考え中...' },
   speaking: { color: '#3b82f6', pulse: false, label: 'ダンが話しています...' },
@@ -21,25 +22,21 @@ export default function CompanionPage() {
   const router = useRouter();
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   const isLoading = useAuthStore((state) => state.isLoading);
-  const user = useAuthStore((state) => state.user);
   const hasToken = typeof window !== 'undefined' && !!localStorage.getItem('done-token');
 
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [lastDanMessage, setLastDanMessage] = useState<string | null>(null);
-  const [currentTranscript, setCurrentTranscript] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [toolLabel, setToolLabel] = useState<string | null>(null);
 
-  const isProcessingRef = useRef(false);
-
-  // 認証チェック
+  // Auth check
   useEffect(() => {
     if (!isLoading && !isAuthenticated && !hasToken) {
       router.push('/login');
     }
   }, [isLoading, isAuthenticated, hasToken, router]);
 
-  // セッションID取得
+  // Get session ID
   useEffect(() => {
     if (!isAuthenticated && !hasToken) return;
     let cancelled = false;
@@ -55,84 +52,50 @@ export default function CompanionPage() {
     return () => { cancelled = true; };
   }, [isAuthenticated, hasToken]);
 
-  // SSE経由でメッセージ送信（チャットページと同じフロー）
-  const sendMessage = useCallback(async (text: string) => {
-    if (!sessionId || isProcessingRef.current) return;
-    isProcessingRef.current = true;
-    setIsProcessing(true);
-    setCurrentTranscript(text);
-
-    try {
-      await api.sm.sendMessageStream(
-        {
-          message: text,
-          session_id: sessionId,
-          user_id: user?.id,
-        },
-        {
-          onAIMessage: (msg: MessageResponse) => {
-            setLastDanMessage(msg.content || '');
-            // Voice hookのspeakResponseはonAIMessageで呼ばれる（下のeffectで）
-          },
-          onComplete: () => {
-            isProcessingRef.current = false;
-            setIsProcessing(false);
-            setCurrentTranscript(null);
-          },
-          onError: (error: string) => {
-            console.error('SSE error:', error);
-            isProcessingRef.current = false;
-            setIsProcessing(false);
-            setCurrentTranscript(null);
-          },
-        }
-      );
-    } catch (err) {
-      console.error('Send failed:', err);
-      isProcessingRef.current = false;
-      setIsProcessing(false);
-      setCurrentTranscript(null);
-    }
-  }, [sessionId, user?.id]);
-
-  // AI応答メッセージをRefで追跡してTTS再生するため
-  const lastDanMessageRef = useRef<string | null>(null);
-
-  const voice = useVoiceChat({
-    onFinalTranscript: (text: string) => {
-      sendMessage(text);
-    },
+  const voice = useGeminiVoice({
+    sessionId,
+    onText: useCallback((text: string) => {
+      setLastDanMessage(text);
+    }, []),
+    onToolStart: useCallback((tool: string) => {
+      setToolLabel(tool);
+    }, []),
+    onToolResult: useCallback(() => {
+      setToolLabel(null);
+    }, []),
+    onTurnComplete: useCallback(() => {
+      setToolLabel(null);
+    }, []),
   });
 
-  // AI応答が来たらTTS再生
-  useEffect(() => {
-    if (lastDanMessage && lastDanMessage !== lastDanMessageRef.current && voice.isActive) {
-      lastDanMessageRef.current = lastDanMessage;
-      voice.speakResponse(lastDanMessage);
-    }
-  }, [lastDanMessage, voice.isActive, voice.speakResponse]);
-
-  // 状態の統合
+  // Map Gemini voice state to companion state
   let state: CompanionState;
   if (!sessionId) {
     state = errorMessage ? 'error' : 'loading';
-  } else if (!voice.isActive) {
+  } else if (voice.state === 'idle') {
     state = 'idle';
-  } else if (voice.isSpeaking) {
+  } else if (voice.state === 'connecting') {
+    state = 'connecting';
+  } else if (voice.state === 'speaking') {
     state = 'speaking';
-  } else if (isProcessing) {
+  } else if (voice.state === 'processing') {
     state = 'processing';
+  } else if (voice.state === 'error') {
+    state = 'error';
   } else {
     state = 'listening';
   }
 
-  const { color, pulse, label } = stateConfig[state];
+  const config = stateConfig[state];
+  const displayLabel = state === 'processing' && toolLabel
+    ? `${toolLabel}...`
+    : config.label;
 
   const handleToggle = () => {
-    if (voice.isActive) {
-      voice.toggleVoice();
+    if (voice.state === 'idle' || voice.state === 'error') {
+      voice.connect();
     } else {
-      voice.toggleVoice();
+      voice.disconnect();
     }
   };
 
@@ -155,43 +118,34 @@ export default function CompanionPage() {
     >
       {/* Status dot */}
       <div
-        onClick={state === 'speaking' ? () => voice.skipSpeaking() : undefined}
         style={{
           width: 80,
           height: 80,
           borderRadius: '50%',
-          background: color,
-          boxShadow: pulse ? `0 0 40px ${color}, 0 0 80px ${color}40` : `0 0 20px ${color}60`,
-          animation: pulse ? 'pulse 2s ease-in-out infinite' : 'none',
+          background: config.color,
+          boxShadow: config.pulse ? `0 0 40px ${config.color}, 0 0 80px ${config.color}40` : `0 0 20px ${config.color}60`,
+          animation: config.pulse ? 'pulse 2s ease-in-out infinite' : 'none',
           transition: 'background 0.3s, box-shadow 0.3s',
           marginBottom: 32,
-          cursor: state === 'speaking' ? 'pointer' : 'default',
         }}
       />
 
       {/* State label */}
       <div style={{ fontSize: 18, color: '#999', marginBottom: 16 }}>
-        {label}
+        {displayLabel}
       </div>
 
       {/* Error display */}
       {voice.error && (
         <div style={{ fontSize: 12, color: '#ef4444', marginBottom: 8, maxWidth: '80%', textAlign: 'center' }}>
-          Error: {voice.error}
+          {voice.error}
         </div>
       )}
 
-      {/* Debug info (development only) */}
-      <div style={{ fontSize: 10, color: '#555', marginBottom: 16, maxWidth: '80%', textAlign: 'center' }}>
-        {voice.isActive ? (voice.isListening ? 'MIC ON' : 'MIC OFF') : ''} {isProcessing ? '| SENDING' : ''} {sessionId ? '' : '| NO SESSION'}
+      {/* Debug info */}
+      <div style={{ fontSize: 10, color: '#555', marginBottom: 8, maxWidth: '90%', textAlign: 'center', wordBreak: 'break-all' }}>
+        {voice.debugUrl || `state: ${voice.state} | sid: ${sessionId?.slice(0, 8) || 'none'}`}
       </div>
-
-      {/* Current transcript / interim */}
-      {(currentTranscript || voice.interimTranscript) && (
-        <div style={{ fontSize: 14, color: '#666', marginBottom: 24, maxWidth: '80%', textAlign: 'center' }}>
-          {voice.interimTranscript || currentTranscript}
-        </div>
-      )}
 
       {/* Last Dan message */}
       {lastDanMessage && (
@@ -228,13 +182,13 @@ export default function CompanionPage() {
             fontWeight: 600,
             border: 'none',
             borderRadius: 28,
-            background: voice.isActive ? '#333' : '#fff',
-            color: voice.isActive ? '#fff' : '#000',
+            background: voice.state !== 'idle' && voice.state !== 'error' ? '#333' : '#fff',
+            color: voice.state !== 'idle' && voice.state !== 'error' ? '#fff' : '#000',
             cursor: 'pointer',
             transition: 'background 0.2s, color 0.2s',
           }}
         >
-          {voice.isActive ? '停止' : '開始'}
+          {voice.state !== 'idle' && voice.state !== 'error' ? '停止' : '開始'}
         </button>
       )}
 

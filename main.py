@@ -23,6 +23,7 @@ from app.api.bank_account_routes import router as bank_account_router
 from app.api.otp_routes import router as otp_router
 from app.api.voice_routes import router as voice_router, ws_router as voice_ws_router
 from app.api.skill_routes import router as skill_router
+from app.api.gemini_voice_routes import router as gemini_voice_router
 
 # v3: Executorは不使用（汎用ツールで処理）
 
@@ -31,8 +32,21 @@ from app.api.skill_routes import router as skill_router
 async def lifespan(app: FastAPI):
     from app.services.heartbeat_service import heartbeat_loop
     task = asyncio.create_task(heartbeat_loop())
+
+    # Start WSS proxy for mobile WebSocket access (port 8443)
+    wss_server = None
+    try:
+        from app.wss_proxy import start_wss_proxy
+        wss_server = await start_wss_proxy()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("WSS proxy failed to start: %s", e)
+
     yield
+
     task.cancel()
+    if wss_server:
+        wss_server.close()
 
 
 app = FastAPI(
@@ -71,6 +85,7 @@ app.include_router(otp_router, prefix="/api/v1")
 app.include_router(voice_router)  # Already has /api/v1/voice prefix
 app.include_router(voice_ws_router)
 app.include_router(skill_router, prefix="/api/v1")
+app.include_router(gemini_voice_router)
 
 
 @app.get("/")

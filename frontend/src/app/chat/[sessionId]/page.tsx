@@ -19,6 +19,7 @@ import { useAuthStore } from '@/stores/auth-store';
 import { useSessionStateStore, PENDING_PROCESS_ID } from '@/stores/session-state-store';
 import { cn } from '@/lib/utils';
 import { useVoiceChat } from '@/hooks/useVoiceChat';
+import { useGeminiObserver } from '@/hooks/useGeminiObserver';
 
 // プロセスステップの表示コンポーネント
 interface ProcessDisplayProps {
@@ -146,6 +147,22 @@ export default function ChatSessionPage() {
   });
 
   const hasToken = typeof window !== 'undefined' && !!localStorage.getItem('done-token');
+
+  // Gemini voice observer (connects to active voice session if available)
+  const [observerLiveText, setObserverLiveText] = useState<string | null>(null);
+  const observer = useGeminiObserver({
+    sessionId: sessionId || null,
+    autoConnect: false,
+    onAssistantText: useCallback((text: string) => {
+      setObserverLiveText(text);
+      // Refetch messages to sync DB state
+      setTimeout(() => refetchMessages(), 1000);
+    }, []),
+    onTurnComplete: useCallback(() => {
+      // Refetch after turn completes to get persisted messages
+      setTimeout(() => refetchMessages(), 500);
+    }, []),
+  });
 
   // 認証チェック
   useEffect(() => {
@@ -1133,6 +1150,37 @@ export default function ChatSessionPage() {
                   </div>
                 </>
               ) : null}
+            </div>
+          </div>
+        )}
+
+        {/* Gemini voice observer banner */}
+        {observer.state === 'connected' && (
+          <div className="shrink-0 px-4 py-2 bg-green-50 dark:bg-green-950/30 border-t border-green-200 dark:border-green-800">
+            <div className="max-w-3xl mx-auto flex items-center gap-2 text-xs">
+              <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+              <span className="text-green-700 dark:text-green-300 font-medium">音声セッション接続中</span>
+              {observerLiveText && (
+                <span className="text-green-600 dark:text-green-400 truncate flex-1 ml-2">{observerLiveText}</span>
+              )}
+              <button
+                onClick={observer.disconnect}
+                className="text-green-600 dark:text-green-400 hover:text-green-800 dark:hover:text-green-200 ml-auto"
+              >
+                切断
+              </button>
+            </div>
+          </div>
+        )}
+        {observer.state === 'disconnected' && sessionId && (
+          <div className="shrink-0 px-4 py-1 border-t border-border">
+            <div className="max-w-3xl mx-auto flex items-center justify-end">
+              <button
+                onClick={observer.connect}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
+              >
+                音声セッションに接続
+              </button>
             </div>
           </div>
         )}

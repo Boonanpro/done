@@ -114,7 +114,7 @@ def check_health(timeout: int = 5) -> bool:
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status == 200
-    except (urllib.error.URLError, urllib.error.HTTPError, socket.timeout):
+    except Exception:
         return False
 
 
@@ -155,9 +155,11 @@ def start_uvicorn() -> subprocess.Popen:
     """Start uvicorn server with subprocess.Popen."""
     print("[start] Step 4: Starting uvicorn...")
 
+    cmd = [sys.executable, "-m", "uvicorn", "main:app",
+           "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
     process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "main:app",
-         "--host", "127.0.0.1", "--port", "8000", "--reload"],
+        cmd,
         cwd="D:/done",
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
