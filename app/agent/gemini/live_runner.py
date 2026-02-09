@@ -264,13 +264,21 @@ class GeminiLiveRunner:
 
             function_responses.append(
                 genai_types.FunctionResponse(
+                    id=fc.id,
                     name=tool_name,
                     response={"result": result_text},
                 )
             )
 
         # Send all responses back to Gemini
-        await self._gemini.send_tool_response(function_responses)
+        try:
+            await self._gemini.send_tool_response(function_responses)
+        except Exception as e:
+            logger.exception("Failed to send tool response to Gemini: %s", e)
+            await self._notify_observers({
+                "type": "error",
+                "message": f"Tool response error: {e}",
+            })
 
     # ----------------------------------------------------------------
     # Broadcasting helpers
