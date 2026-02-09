@@ -59,6 +59,7 @@ export function useGeminiObserver({
   const [messages, setMessages] = useState<ObserverMessage[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
+  const autoConnectTriedRef = useRef(false);
 
   // Callback refs
   const onAssistantTextRef = useRef(onAssistantText);
@@ -120,8 +121,7 @@ export function useGeminiObserver({
 
       const configResp = await waitForJson(ws);
       if (configResp.type === 'error') {
-        // No active voice session - not necessarily an error
-        setError(configResp.message || 'No active session');
+        // No active voice session - silently stay disconnected
         setState('disconnected');
         ws.close();
         return;
@@ -188,12 +188,13 @@ export function useGeminiObserver({
     }
   }, []);
 
-  // Auto-connect
+  // Auto-connect (once per mount, silently fails if no active voice session)
   useEffect(() => {
-    if (autoConnect && sessionId && state === 'disconnected') {
+    if (autoConnect && sessionId && !autoConnectTriedRef.current) {
+      autoConnectTriedRef.current = true;
       connect();
     }
-  }, [autoConnect, sessionId, state, connect]);
+  }, [autoConnect, sessionId, connect]);
 
   // Cleanup
   useEffect(() => {

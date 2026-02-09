@@ -42,6 +42,8 @@ class GeminiLiveClient:
                 parts=[genai_types.Part(text=system_instruction)]
             ),
             tools=tools,
+            input_audio_transcription=genai_types.AudioTranscriptionConfig(),
+            output_audio_transcription=genai_types.AudioTranscriptionConfig(),
         )
 
         # connect() returns an async context manager

@@ -42,6 +42,14 @@ def get_runner(session_id: str) -> Optional["GeminiLiveRunner"]:
     return _active_runners.get(session_id)
 
 
+def get_runner_for_user(user_id: str) -> Optional["GeminiLiveRunner"]:
+    """Get any active runner for a given user (for observer auto-discovery)."""
+    for runner in _active_runners.values():
+        if runner.user_id == user_id:
+            return runner
+    return None
+
+
 VOICE_SYSTEM_RULES = """
 ## 音声会話ルール
 1. 応答は簡潔に。長文を避け、自然な会話調で。
@@ -189,6 +197,26 @@ class GeminiLiveRunner:
                             "type": "assistant_text",
                             "text": text,
                         })
+
+        # --- Input transcription (user's speech → text) ---
+        if message.server_content and message.server_content.input_transcription:
+            text = (message.server_content.input_transcription.text or "").strip()
+            if text:
+                self._log_conversation("user", text)
+                await self._notify_observers({
+                    "type": "user_text",
+                    "text": text,
+                })
+
+        # --- Output transcription (model's audio → text) ---
+        if message.server_content and message.server_content.output_transcription:
+            text = (message.server_content.output_transcription.text or "").strip()
+            if text:
+                self._log_conversation("assistant", text)
+                await self._notify_observers({
+                    "type": "assistant_text",
+                    "text": text,
+                })
 
         # --- Turn complete ---
         if message.server_content and message.server_content.turn_complete:

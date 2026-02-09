@@ -149,19 +149,55 @@ export default function ChatSessionPage() {
   const hasToken = typeof window !== 'undefined' && !!localStorage.getItem('done-token');
 
   // Gemini voice observer (connects to active voice session if available)
-  const [observerLiveText, setObserverLiveText] = useState<string | null>(null);
+  const [voiceMessages, setVoiceMessages] = useState<MessageResponse[]>([]);
+  const userTextBufRef = useRef('');
+  const assistantTextBufRef = useRef('');
+
+  const flushUserTextBuffer = useCallback(() => {
+    if (userTextBufRef.current) {
+      const content = userTextBufRef.current;
+      userTextBufRef.current = '';
+      setVoiceMessages(prev => [...prev, {
+        id: `voice-user-${Date.now()}`,
+        room_id: sessionId,
+        sender_id: user?.id || '',
+        sender_name: user?.display_name || 'You',
+        sender_type: 'human',
+        content,
+        created_at: new Date().toISOString(),
+      }]);
+    }
+  }, [sessionId, user?.id, user?.display_name]);
+
   const observer = useGeminiObserver({
     sessionId: sessionId || null,
-    autoConnect: false,
+    autoConnect: true,
+    onUserText: useCallback((text: string) => {
+      userTextBufRef.current += text;
+    }, []),
     onAssistantText: useCallback((text: string) => {
-      setObserverLiveText(text);
-      // Refetch messages to sync DB state
-      setTimeout(() => refetchMessages(), 1000);
-    }, []),
+      flushUserTextBuffer();
+      assistantTextBufRef.current += text;
+    }, [flushUserTextBuffer]),
+    onToolStart: useCallback(() => {
+      flushUserTextBuffer();
+    }, [flushUserTextBuffer]),
     onTurnComplete: useCallback(() => {
-      // Refetch after turn completes to get persisted messages
-      setTimeout(() => refetchMessages(), 500);
-    }, []),
+      flushUserTextBuffer();
+      if (assistantTextBufRef.current) {
+        const content = assistantTextBufRef.current;
+        assistantTextBufRef.current = '';
+        setVoiceMessages(prev => [...prev, {
+          id: `voice-assistant-${Date.now()}`,
+          room_id: sessionId,
+          sender_id: 'dan',
+          sender_name: 'ダン',
+          sender_type: 'ai' as MessageResponse['sender_type'],
+          content,
+          created_at: new Date().toISOString(),
+        }]);
+      }
+    }, [sessionId, flushUserTextBuffer]),
   });
 
   // 認証チェック
@@ -215,6 +251,12 @@ export default function ChatSessionPage() {
   });
 
   const messages = messagesData?.messages || [];
+
+  // DB messages (newest-first) + voice messages (chronological) → oldest-first for display
+  const allMessages = useMemo(() => {
+    const dbMsgs = [...messages].reverse();
+    return [...dbMsgs, ...voiceMessages];
+  }, [messages, voiceMessages]);
 
   // DBから取得したメッセージのreasoning_stepsをprocessesに初期化
   useEffect(() => {
@@ -941,7 +983,7 @@ export default function ChatSessionPage() {
                   </div>
                 </div>
               ))
-            ) : messages.length === 0 && !pendingProcess ? (
+            ) : allMessages.length === 0 && !pendingProcess ? (
               <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -957,7 +999,7 @@ export default function ChatSessionPage() {
               </motion.div>
             ) : (
               <>
-                {[...messages].reverse().map((msg) => {
+                {allMessages.map((msg) => {
                   const isUser = msg.sender_type === 'human';
                   const processData = processes.get(msg.id);
 
@@ -1160,26 +1202,11 @@ export default function ChatSessionPage() {
             <div className="max-w-3xl mx-auto flex items-center gap-2 text-xs">
               <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
               <span className="text-green-700 dark:text-green-300 font-medium">音声セッション接続中</span>
-              {observerLiveText && (
-                <span className="text-green-600 dark:text-green-400 truncate flex-1 ml-2">{observerLiveText}</span>
-              )}
               <button
                 onClick={observer.disconnect}
                 className="text-green-600 dark:text-green-400 hover:text-green-800 dark:hover:text-green-200 ml-auto"
               >
                 切断
-              </button>
-            </div>
-          </div>
-        )}
-        {observer.state === 'disconnected' && sessionId && (
-          <div className="shrink-0 px-4 py-1 border-t border-border">
-            <div className="max-w-3xl mx-auto flex items-center justify-end">
-              <button
-                onClick={observer.connect}
-                className="text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
-              >
-                音声セッションに接続
               </button>
             </div>
           </div>

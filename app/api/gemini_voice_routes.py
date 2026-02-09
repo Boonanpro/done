@@ -30,7 +30,7 @@ from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.services.auth_service import decode_access_token
-from app.agent.gemini.live_runner import GeminiLiveRunner, get_runner, _active_runners
+from app.agent.gemini.live_runner import GeminiLiveRunner, get_runner, get_runner_for_user, _active_runners
 
 logger = logging.getLogger(__name__)
 
@@ -110,15 +110,16 @@ async def gemini_voice_websocket(websocket: WebSocket):
             await websocket.send_json({"type": "ready", "mode": "voice"})
 
         elif mode == "observer":
-            # Observer must join an existing session
-            runner = get_runner(session_id)
+            # Observer joins an existing session (try exact ID first, then any session for this user)
+            runner = get_runner(session_id) or get_runner_for_user(user_id)
             if not runner:
                 await websocket.send_json({
                     "type": "error",
-                    "message": "No active voice session for this session_id",
+                    "message": "No active voice session found",
                 })
                 await websocket.close()
                 return
+            logger.info("Gemini voice WS: observer joining runner session=%s", runner.session_id)
 
             runner.add_observer_client(websocket)
             await websocket.send_json({"type": "ready", "mode": "observer"})
