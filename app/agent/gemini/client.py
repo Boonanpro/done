@@ -86,12 +86,18 @@ class GeminiLiveClient:
         )
 
     async def receive(self) -> AsyncIterator[genai_types.LiveServerMessage]:
-        """Async iterator over server messages (audio, text, tool calls, etc.)."""
+        """Async iterator over server messages (audio, text, tool calls, etc.).
+
+        The SDK's session.receive() yields messages for a single turn and
+        terminates after turn_complete. We restart it in a loop so callers
+        get a seamless multi-turn stream.
+        """
         if not self._session:
             raise RuntimeError("Session not connected")
 
-        async for message in self._session.receive():
-            yield message
+        while self._session:
+            async for message in self._session.receive():
+                yield message
 
     async def close(self) -> None:
         """Close the Live API session."""
