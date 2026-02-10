@@ -157,6 +157,7 @@ export default function ChatSessionPage() {
   const [voiceMessages, setVoiceMessages] = useState<MessageResponse[]>([]);
   const voiceUserTextBufRef = useRef('');
   const voiceAssistantTextBufRef = useRef('');
+  const voiceContentToProcessIdRef = useRef<Map<string, string>>(new Map());
 
   const flushVoiceUserTextBuffer = useCallback(() => {
     if (voiceUserTextBufRef.current) {
@@ -224,26 +225,29 @@ export default function ChatSessionPage() {
     onTurnComplete: useCallback(() => {
       flushVoiceUserTextBuffer();
 
+      // Generate voice message ID upfront so process steps can be linked
+      const voiceMessageId = `voice-assistant-${Date.now()}`;
+
       if (sessionId) {
         const pending = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
-        if (pending) {
-          if (pending.steps.length > 0) {
-            setProcess(sessionId, PENDING_PROCESS_ID, {
-              steps: pending.steps,
-              isCollapsed: false,
-              isProcessing: false,
-            });
-          } else {
-            deleteProcess(sessionId, PENDING_PROCESS_ID);
-          }
+        if (pending && pending.steps.length > 0) {
+          // Move process from PENDING → voiceMessageId
+          setProcess(sessionId, voiceMessageId, {
+            steps: pending.steps,
+            isCollapsed: true,
+            isProcessing: false,
+          });
         }
+        deleteProcess(sessionId, PENDING_PROCESS_ID);
       }
 
       if (voiceAssistantTextBufRef.current) {
         const content = voiceAssistantTextBufRef.current;
         voiceAssistantTextBufRef.current = '';
+        // Track content → voiceMessageId for later DB migration
+        voiceContentToProcessIdRef.current.set(content.trim(), voiceMessageId);
         setVoiceMessages(prev => [...prev, {
-          id: `voice-assistant-${Date.now()}`,
+          id: voiceMessageId,
           room_id: sessionId,
           sender_id: 'dan',
           sender_name: 'ダン',
@@ -340,6 +344,28 @@ export default function ChatSessionPage() {
     if (!messages.length || !sessionId) return;
     initializeProcessesFromMessages(sessionId, messages);
   }, [messages, sessionId, initializeProcessesFromMessages]);
+
+  // Voice process migration: when DB messages arrive via polling,
+  // migrate process data from ephemeral voiceMessageId to the real DB message ID
+  useEffect(() => {
+    if (!messages.length || !sessionId) return;
+    const map = voiceContentToProcessIdRef.current;
+    if (map.size === 0) return;
+
+    for (const msg of messages) {
+      if (msg.sender_type !== 'ai') continue;
+      const content = (msg.content || '').trim();
+      const voiceId = map.get(content);
+      if (!voiceId) continue;
+
+      const processData = getSessionState(sessionId).processes.get(voiceId);
+      if (processData) {
+        setProcess(sessionId, msg.id, processData);
+        deleteProcess(sessionId, voiceId);
+      }
+      map.delete(content);
+    }
+  }, [messages, sessionId, getSessionState, setProcess, deleteProcess]);
 
   // メッセージ送信 (textOverride: voice mode等から直接テキストを渡す場合)
   const handleSendMessage = useCallback(async (textOverride?: string) => {

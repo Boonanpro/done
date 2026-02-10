@@ -6,6 +6,7 @@ LLMのテキスト出力がそのままユーザーへの返答になる。
 """
 
 import re
+import asyncio
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -2413,7 +2414,8 @@ def _build_skill_manual(skill: Optional["Skill"], action: str) -> str:
 # ブラウザ操作のタイムアウト設定（ミリ秒）
 BROWSER_CLICK_TIMEOUT = 10000       # クリック要素検出
 BROWSER_LOAD_TIMEOUT = 10000        # ページ遷移後のロード完了待ち
-BROWSER_STATE_TIMEOUT = 5000        # スクショ前のロード完了待ち
+BROWSER_STATE_TIMEOUT = 3000        # スクショ前のロード完了待ち
+BROWSER_SCREENSHOT_TIMEOUT = 5000   # スクリーンショット取得・要素リスト取得
 
 async def _get_browser_state(page) -> Dict[str, Any]:
     """
@@ -2427,10 +2429,27 @@ async def _get_browser_state(page) -> Dict[str, Any]:
         await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_STATE_TIMEOUT)
     except Exception:
         # タイムアウトしてもスクショは試みる
-        await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(500)
 
-    screenshot = await page.screenshot_base64(full_page=False)
-    elements = await page.get_interactive_elements()
+    # スクリーンショット取得（タイムアウト付き）
+    try:
+        screenshot = await asyncio.wait_for(
+            page.screenshot_base64(full_page=False),
+            timeout=BROWSER_SCREENSHOT_TIMEOUT / 1000,
+        )
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.warning(f"[BROWSER] Screenshot timed out or failed: {e}")
+        screenshot = None
+
+    # 要素リスト取得（タイムアウト付き）
+    try:
+        elements = await asyncio.wait_for(
+            page.get_interactive_elements(),
+            timeout=BROWSER_SCREENSHOT_TIMEOUT / 1000,
+        )
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.warning(f"[BROWSER] get_interactive_elements timed out or failed: {e}")
+        elements = []
     url = page.url
     title = await page.evaluate("document.title")
 
@@ -2452,22 +2471,24 @@ async def _get_browser_state(page) -> Dict[str, Any]:
         tag_info = ", ".join(label) if label else "element"
         text_parts.append(f"  {ref}: [{tag_info}] {text}")
 
+    content = []
+    if screenshot:
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": screenshot["media_type"],
+                "data": screenshot["base64"],
+            },
+        })
+    content.append({
+        "type": "text",
+        "text": "\n".join(text_parts),
+    })
+
     return {
         "success": True,
-        "content": [
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": screenshot["media_type"],
-                    "data": screenshot["base64"],
-                },
-            },
-            {
-                "type": "text",
-                "text": "\n".join(text_parts),
-            },
-        ],
+        "content": content,
     }
 
 

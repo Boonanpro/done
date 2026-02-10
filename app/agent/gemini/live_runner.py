@@ -64,6 +64,7 @@ class GeminiLiveRunner:
         # Turn-level buffers for DB persistence
         self._current_turn_user_text = ""
         self._current_turn_assistant_text = ""
+        self._current_turn_reasoning_steps: List[str] = []
 
     @property
     def is_active(self) -> bool:
@@ -233,6 +234,7 @@ class GeminiLiveRunner:
                     text = part.text.strip()
                     if text:
                         self._log_conversation("thinking", text)
+                        self._current_turn_reasoning_steps.append(text)
                         await self._notify_observers({
                             "type": "process_step",
                             "step": text,
@@ -278,6 +280,7 @@ class GeminiLiveRunner:
             params = dict(fc.args) if fc.args else {}
 
             logger.info("Gemini tool call: %s(%s)", tool_name, params)
+            self._current_turn_reasoning_steps.append(tool_name)
 
             # Notify observers
             await self._notify_observers({
@@ -326,6 +329,9 @@ class GeminiLiveRunner:
                 result = {"success": False, "error": str(e)}
 
             success = result.get("success", False)
+            self._current_turn_reasoning_steps.append(
+                f"{tool_name} {'完了' if success else '失敗'}"
+            )
 
             # Notify observers of result
             await self._notify_observers({
@@ -371,8 +377,10 @@ class GeminiLiveRunner:
         """Persist the current turn's user/assistant text to DB, then reset buffers."""
         user_text = self._current_turn_user_text.strip()
         assistant_text = self._current_turn_assistant_text.strip()
+        reasoning_steps = list(self._current_turn_reasoning_steps)
         self._current_turn_user_text = ""
         self._current_turn_assistant_text = ""
+        self._current_turn_reasoning_steps.clear()
 
         if not user_text and not assistant_text:
             return
@@ -380,7 +388,7 @@ class GeminiLiveRunner:
         room_id = self.session_id  # session_id == room_id in this system
 
         try:
-            await self._save_to_chat_messages(room_id, user_text, assistant_text)
+            await self._save_to_chat_messages(room_id, user_text, assistant_text, reasoning_steps)
         except Exception as e:
             logger.error("Failed to save voice turn to chat_messages: %s", e)
 
@@ -402,7 +410,10 @@ class GeminiLiveRunner:
             "ai_context": {"source": "text", "provider": "gemini"},
         }).execute()
 
-    async def _save_to_chat_messages(self, room_id: str, user_text: str, assistant_text: str) -> None:
+    async def _save_to_chat_messages(
+        self, room_id: str, user_text: str, assistant_text: str,
+        reasoning_steps: Optional[List[str]] = None,
+    ) -> None:
         """Insert turn messages into chat_messages table."""
         from app.services.supabase_client import get_supabase_client
         supabase = get_supabase_client().client
@@ -420,12 +431,15 @@ class GeminiLiveRunner:
                 "ai_context": {"source": source, "provider": "gemini"},
             })
         if assistant_text:
+            ai_context: Dict[str, Any] = {"source": source, "provider": "gemini"}
+            if reasoning_steps:
+                ai_context["reasoning_steps"] = reasoning_steps
             rows.append({
                 "room_id": room_id,
                 "sender_id": None,
                 "sender_type": "ai",
                 "content": assistant_text,
-                "ai_context": {"source": source, "provider": "gemini"},
+                "ai_context": ai_context,
             })
 
         for row in rows:
