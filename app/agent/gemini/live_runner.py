@@ -28,7 +28,6 @@ from app.agent.v2.tools import (
 from app.agent.v2.runner import (
     get_core_prompt, load_all_bootstrap_files, WORKSPACE_DIR,
 )
-from app.agent.gemini.session import get_gemini_session_store
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -74,6 +73,9 @@ class GeminiLiveRunner:
         self._response_task: Optional[asyncio.Task] = None
         self._delayed_stop_task: Optional[asyncio.Task] = None
         self._conversation_log: List[Dict[str, Any]] = []
+        # Turn-level buffers for DB persistence
+        self._current_turn_user_text = ""
+        self._current_turn_assistant_text = ""
 
     @property
     def is_active(self) -> bool:
@@ -166,17 +168,12 @@ class GeminiLiveRunner:
 
         await self._gemini.close()
 
-        # Persist conversation log
-        if self._conversation_log:
+        # Persist any remaining buffered turn (in case turn_complete wasn't received)
+        if self._current_turn_user_text or self._current_turn_assistant_text:
             try:
-                store = get_gemini_session_store()
-                await store.save_conversation(
-                    session_id=self.session_id,
-                    user_id=self.user_id,
-                    conversation_log=self._conversation_log,
-                )
+                await self._persist_turn()
             except Exception as e:
-                logger.error("Failed to persist conversation: %s", e)
+                logger.error("Failed to persist final turn: %s", e)
 
         logger.info("GeminiLiveRunner stopped (session=%s)", self.session_id)
 
@@ -243,6 +240,7 @@ class GeminiLiveRunner:
         if message.server_content and message.server_content.input_transcription:
             text = (message.server_content.input_transcription.text or "").strip()
             if text:
+                self._current_turn_user_text += text
                 self._log_conversation("user", text)
                 await self._notify_observers({
                     "type": "user_text",
@@ -253,6 +251,7 @@ class GeminiLiveRunner:
         if message.server_content and message.server_content.output_transcription:
             text = (message.server_content.output_transcription.text or "").strip()
             if text:
+                self._current_turn_assistant_text += text
                 self._log_conversation("assistant", text)
                 await self._notify_observers({
                     "type": "assistant_text",
@@ -261,6 +260,7 @@ class GeminiLiveRunner:
 
         # --- Turn complete ---
         if message.server_content and message.server_content.turn_complete:
+            await self._persist_turn()
             await self._notify_observers({"type": "turn_complete"})
 
         # --- Tool calls ---
@@ -348,6 +348,72 @@ class GeminiLiveRunner:
                 "type": "error",
                 "message": f"Tool response error: {e}",
             })
+
+    # ----------------------------------------------------------------
+    # Persistence: save voice turns to DB
+    # ----------------------------------------------------------------
+
+    async def _persist_turn(self) -> None:
+        """Persist the current turn's user/assistant text to DB, then reset buffers."""
+        user_text = self._current_turn_user_text.strip()
+        assistant_text = self._current_turn_assistant_text.strip()
+        self._current_turn_user_text = ""
+        self._current_turn_assistant_text = ""
+
+        if not user_text and not assistant_text:
+            return
+
+        room_id = self.session_id  # session_id == room_id in this system
+
+        try:
+            await self._save_to_chat_messages(room_id, user_text, assistant_text)
+        except Exception as e:
+            logger.error("Failed to save voice turn to chat_messages: %s", e)
+
+        try:
+            await self._inject_into_agent_session(room_id, user_text, assistant_text)
+        except Exception as e:
+            logger.error("Failed to inject voice turn into agent session: %s", e)
+
+    async def _save_to_chat_messages(self, room_id: str, user_text: str, assistant_text: str) -> None:
+        """Insert voice turn messages into chat_messages table."""
+        from app.services.supabase_client import get_supabase_client
+        supabase = get_supabase_client().client
+
+        rows = []
+        if user_text:
+            rows.append({
+                "room_id": room_id,
+                "sender_id": self.user_id,
+                "sender_type": "human",
+                "content": user_text,
+                "ai_context": {"source": "voice", "provider": "gemini"},
+            })
+        if assistant_text:
+            rows.append({
+                "room_id": room_id,
+                "sender_id": None,
+                "sender_type": "ai",
+                "content": assistant_text,
+                "ai_context": {"source": "voice", "provider": "gemini"},
+            })
+
+        for row in rows:
+            supabase.table("chat_messages").insert(row).execute()
+
+    async def _inject_into_agent_session(self, room_id: str, user_text: str, assistant_text: str) -> None:
+        """Inject voice conversation into the Claude agent session for context continuity."""
+        from app.agent.v2.session import get_session_store
+
+        store = get_session_store()
+        session = await store.get_or_create(room_id, self.user_id)
+
+        if user_text:
+            session.add_user_message(f"[音声会話] {user_text}")
+        if assistant_text:
+            session.add_assistant_message(f"[音声会話] {assistant_text}")
+
+        await store.save(session)
 
     # ----------------------------------------------------------------
     # Broadcasting helpers

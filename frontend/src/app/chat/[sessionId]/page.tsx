@@ -255,7 +255,26 @@ export default function ChatSessionPage() {
   // DB messages (newest-first) + voice messages (chronological) → oldest-first for display
   const allMessages = useMemo(() => {
     const dbMsgs = [...messages].reverse();
-    return [...dbMsgs, ...voiceMessages];
+
+    // Content-based dedup: voice messages have ephemeral IDs (voice-user-xxx)
+    // while DB messages have UUIDs, so ID-based dedup won't catch duplicates.
+    // Once DB messages arrive via polling, filter out matching voice messages.
+    const dbContentSet = new Set(
+      dbMsgs.map(m => `${m.sender_type}:${m.content.trim()}`)
+    );
+
+    const pendingVoice = voiceMessages.filter(vm =>
+      !dbContentSet.has(`${vm.sender_type}:${vm.content.trim()}`)
+    );
+
+    const combined = [...dbMsgs, ...pendingVoice];
+    // Also deduplicate by ID for SSE optimistic messages
+    const seen = new Set<string>();
+    return combined.filter(m => {
+      if (seen.has(m.id)) return false;
+      seen.add(m.id);
+      return true;
+    });
   }, [messages, voiceMessages]);
 
   // DBから取得したメッセージのreasoning_stepsをprocessesに初期化
