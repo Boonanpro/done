@@ -2,7 +2,6 @@
 Celery Application Configuration
 """
 from celery import Celery
-from celery.schedules import crontab
 
 from app.config import settings
 
@@ -11,7 +10,7 @@ celery_app = Celery(
     "ai_secretary",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["app.tasks.task_handlers", "app.tasks.payment_tasks"],
+    include=["app.tasks.task_handlers"],
 )
 
 # Celery設定
@@ -59,16 +58,6 @@ celery_app.conf.update(
     # タスクルーティング
     task_routes={
         "app.tasks.task_handlers.execute_browser_task": {"queue": "browser_tasks"},
-        "app.tasks.payment_tasks.execute_single_payment": {"queue": "browser_tasks"},
-    },
-    
-    # Celery Beat スケジュール（定期実行タスク）
-    beat_schedule={
-        # 5分毎にスケジュールされた支払いをチェック
-        "check-scheduled-payments": {
-            "task": "app.tasks.payment_tasks.check_scheduled_payments",
-            "schedule": crontab(minute="*/5"),  # 5分毎
-        },
     },
 )
 
