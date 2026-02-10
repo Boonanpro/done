@@ -179,11 +179,52 @@ export default function ChatSessionPage() {
       flushUserTextBuffer();
       assistantTextBufRef.current += text;
     }, [flushUserTextBuffer]),
-    onToolStart: useCallback(() => {
+    onToolStart: useCallback((tool: string) => {
       flushUserTextBuffer();
-    }, [flushUserTextBuffer]),
+      if (sessionId) {
+        if (!getSessionState(sessionId).processes.get(PENDING_PROCESS_ID)) {
+          setProcess(sessionId, PENDING_PROCESS_ID, { steps: [], isCollapsed: false, isProcessing: true });
+        }
+        addProcessStep(sessionId, PENDING_PROCESS_ID, {
+          id: `voice-tool-${tool}-${Date.now()}`,
+          label: `${tool}`,
+          status: 'running',
+        });
+      }
+    }, [sessionId, flushUserTextBuffer, getSessionState, setProcess, addProcessStep]),
+    onProcessStep: useCallback((stepLabel: string) => {
+      if (sessionId) {
+        if (!getSessionState(sessionId).processes.get(PENDING_PROCESS_ID)) {
+          setProcess(sessionId, PENDING_PROCESS_ID, { steps: [], isCollapsed: false, isProcessing: true });
+        }
+        addProcessStep(sessionId, PENDING_PROCESS_ID, {
+          id: `voice-step-${Date.now()}`,
+          label: stepLabel,
+          status: 'running',
+        });
+      }
+    }, [sessionId, getSessionState, setProcess, addProcessStep]),
+    onToolResult: useCallback((tool: string, success: boolean) => {
+      if (sessionId) {
+        addProcessStep(sessionId, PENDING_PROCESS_ID, {
+          id: `voice-result-${tool}-${Date.now()}`,
+          label: success ? `${tool} 完了` : `${tool} 失敗`,
+          status: success ? 'completed' : 'error',
+        });
+      }
+    }, [sessionId, addProcessStep]),
     onTurnComplete: useCallback(() => {
       flushUserTextBuffer();
+
+      // プロセスモニターの完了
+      if (sessionId) {
+        const pending = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
+        if (pending) {
+          deleteProcess(sessionId, PENDING_PROCESS_ID);
+        }
+      }
+
+      // 音声メッセージの蓄積
       if (assistantTextBufRef.current) {
         const content = assistantTextBufRef.current;
         assistantTextBufRef.current = '';
@@ -197,7 +238,7 @@ export default function ChatSessionPage() {
           created_at: new Date().toISOString(),
         }]);
       }
-    }, [sessionId, flushUserTextBuffer]),
+    }, [sessionId, flushUserTextBuffer, getSessionState, deleteProcess]),
   });
 
   // 認証チェック
