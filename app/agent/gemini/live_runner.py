@@ -21,14 +21,11 @@ from google.genai import types as genai_types
 
 from app.agent.gemini.client import GeminiLiveClient
 from app.agent.gemini.tool_converter import convert_all_tools
+from app.agent.gemini.prompt_builder import build_system_prompt
 from app.agent.v2.tools import (
     execute_tool, format_tool_result, parse_tool_name,
-    get_all_skill_tools, SkillRegistry,
+    get_all_skill_tools,
 )
-from app.agent.v2.runner import (
-    get_core_prompt, load_all_bootstrap_files, WORKSPACE_DIR,
-)
-from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -49,24 +46,15 @@ def get_runner_for_user(user_id: str) -> Optional["GeminiLiveRunner"]:
     return None
 
 
-VOICE_SYSTEM_RULES = """
-## 音声会話ルール
-1. 応答は簡潔に。長文を避け、自然な会話調で。
-2. ツール実行前に一言声をかける（「確認しますね」「調べてみますね」）
-3. ツール結果は要約で報告。詳細HTMLやURL一覧は読み上げない。
-4. 長い作業の後は「報告してもよろしいですか？」と確認。
-5. 重要な操作（予約、購入）の前は必ず確認。
-6. ユーザーの言語に合わせて返答する。
-"""
-
 
 class GeminiLiveRunner:
     """Orchestrates a Gemini Live API voice session with tool execution."""
 
-    def __init__(self, user_id: str, session_id: str):
+    def __init__(self, user_id: str, session_id: str, text_mode: bool = False):
         self.user_id = user_id
         self.session_id = session_id
-        self._gemini = GeminiLiveClient()
+        self.text_mode = text_mode
+        self._gemini = GeminiLiveClient(text_mode=text_mode)
         self._voice_clients: Set[WebSocket] = set()
         self._observer_clients: Set[WebSocket] = set()
         self._running = False
@@ -112,14 +100,14 @@ class GeminiLiveRunner:
             logger.info("Delayed stop cancelled (session=%s)", self.session_id)
 
     async def _delayed_stop(self, delay: float) -> None:
-        """Wait, then stop if no voice clients have reconnected."""
+        """Wait, then stop if no clients have reconnected."""
         try:
             await asyncio.sleep(delay)
-            if not self._voice_clients:
-                logger.info("No voice clients after %.0fs, stopping (session=%s)", delay, self.session_id)
+            if not self._voice_clients and not self._observer_clients:
+                logger.info("No clients after %.0fs, stopping (session=%s)", delay, self.session_id)
                 await self.stop()
             else:
-                logger.info("Voice client reconnected, delayed stop aborted (session=%s)", self.session_id)
+                logger.info("Client reconnected, delayed stop aborted (session=%s)", self.session_id)
         except asyncio.CancelledError:
             pass
 
@@ -182,10 +170,23 @@ class GeminiLiveRunner:
         if self._running:
             await self._gemini.send_audio(pcm_bytes)
 
-    async def handle_text(self, text: str) -> None:
-        """Forward text input (from PC observer) to Gemini."""
+    async def handle_text(self, text: str, save_user_to_db: bool = False) -> None:
+        """Forward text input to Gemini.
+
+        Args:
+            text: User text message.
+            save_user_to_db: If True, save user message to chat_messages (text mode).
+        """
         if self._running:
             self._log_conversation("user", text)
+            self._current_turn_user_text += text
+
+            if save_user_to_db:
+                try:
+                    await self._save_user_message_to_db(text)
+                except Exception as e:
+                    logger.error("Failed to save user message to DB: %s", e)
+
             await self._notify_observers({
                 "type": "user_text",
                 "text": text,
@@ -218,15 +219,16 @@ class GeminiLiveRunner:
     async def _handle_server_message(self, message: genai_types.LiveServerMessage) -> None:
         """Process a single server message from Gemini."""
 
-        # --- Audio data + text ---
+        # --- Audio data + text (model_turn) ---
         if message.server_content and message.server_content.model_turn:
             for part in message.server_content.model_turn.parts:
-                # Audio chunk → broadcast to voice clients
+                # Audio chunk → broadcast to voice clients (only when voice clients connected)
                 if part.inline_data and part.inline_data.data:
-                    await self._broadcast_audio(part.inline_data.data)
+                    if self._voice_clients:
+                        await self._broadcast_audio(part.inline_data.data)
 
-                # Text output = model's internal reasoning (NOT spoken audio)
-                # Send as process_step so it shows in process monitor, not chat
+                # Text in model_turn is always thinking/reasoning (both modes).
+                # Actual response comes via output_transcription (audio→text).
                 if part.text:
                     text = part.text.strip()
                     if text:
@@ -286,6 +288,18 @@ class GeminiLiveRunner:
 
             # Parse tool name to get skill/action (reuse existing parser)
             parsed = parse_tool_name(tool_name)
+            if not parsed:
+                logger.warning("Unknown tool name from Gemini: %s", tool_name)
+                result = {"success": False, "error": f"Unknown tool: {tool_name}"}
+                function_responses.append(
+                    genai_types.FunctionResponse(
+                        id=fc.id,
+                        name=tool_name,
+                        response={"result": f"Error: unknown tool '{tool_name}'"},
+                    )
+                )
+                continue
+
             skill_name = parsed[0]
             action = parsed[1]
 
@@ -375,19 +389,35 @@ class GeminiLiveRunner:
         except Exception as e:
             logger.error("Failed to inject voice turn into agent session: %s", e)
 
-    async def _save_to_chat_messages(self, room_id: str, user_text: str, assistant_text: str) -> None:
-        """Insert voice turn messages into chat_messages table."""
+    async def _save_user_message_to_db(self, text: str) -> None:
+        """Save a user message to chat_messages immediately (text mode)."""
         from app.services.supabase_client import get_supabase_client
         supabase = get_supabase_client().client
 
+        supabase.table("chat_messages").insert({
+            "room_id": self.session_id,
+            "sender_id": self.user_id,
+            "sender_type": "human",
+            "content": text,
+            "ai_context": {"source": "text", "provider": "gemini"},
+        }).execute()
+
+    async def _save_to_chat_messages(self, room_id: str, user_text: str, assistant_text: str) -> None:
+        """Insert turn messages into chat_messages table."""
+        from app.services.supabase_client import get_supabase_client
+        supabase = get_supabase_client().client
+
+        source = "text" if self.text_mode else "voice"
+
         rows = []
-        if user_text:
+        # In text mode, user message is already saved by _save_user_message_to_db
+        if user_text and not self.text_mode:
             rows.append({
                 "room_id": room_id,
                 "sender_id": self.user_id,
                 "sender_type": "human",
                 "content": user_text,
-                "ai_context": {"source": "voice", "provider": "gemini"},
+                "ai_context": {"source": source, "provider": "gemini"},
             })
         if assistant_text:
             rows.append({
@@ -395,7 +425,7 @@ class GeminiLiveRunner:
                 "sender_id": None,
                 "sender_type": "ai",
                 "content": assistant_text,
-                "ai_context": {"source": "voice", "provider": "gemini"},
+                "ai_context": {"source": source, "provider": "gemini"},
             })
 
         for row in rows:
@@ -460,52 +490,11 @@ class GeminiLiveRunner:
     # ----------------------------------------------------------------
 
     def _build_system_prompt(self) -> str:
-        """Build the system prompt (reuses Claude's bootstrap files)."""
-        parts = []
-
-        # Core prompt
-        parts.append(get_core_prompt())
-
-        # Current datetime
-        now = datetime.now()
-        weekdays = ['月', '火', '水', '木', '金', '土', '日']
-        parts.append(f"""## 現在の日時
-- 今日: {now.strftime('%Y年%m月%d日')}（{weekdays[now.weekday()]}曜日）
-- 現在時刻: {now.strftime('%H:%M')}""")
-
-        # Tools list (for model awareness)
-        tools = get_all_skill_tools()
-        tool_lines = ["## 利用可能なツール"]
-        for tool in tools:
-            name = tool.get("name", "")
-            desc = tool.get("description", "").split("\n")[0]
-            tool_lines.append(f"- `{name}`: {desc}")
-        tool_lines.append("- `google_search`: Web検索（自動実行）")
-        parts.append("\n".join(tool_lines))
-
-        # Skill list
-        skills = SkillRegistry.list_all()
-        if skills:
-            skill_lines = ["## 利用可能なスキル", ""]
-            for skill in skills:
-                skill_lines.append(f"- `{skill.name}`: {skill.description}")
-            skill_lines.append("")
-            skill_lines.append("### スキル使用ルール（必須）")
-            skill_lines.append("")
-            skill_lines.append("1. ユーザーの依頼が上記スキルに該当する場合、**必ず最初に `check_skill` ツールで手順書を取得すること**。")
-            skill_lines.append("2. 手順書を取得したら、その手順に従って `browser_open`/`browser_click`/`browser_type` 等で操作する。")
-            skill_lines.append("3. 該当するスキルがない場合は、自分の判断でブラウザ操作して構わない。")
-            parts.append("\n".join(skill_lines))
-
-        # Bootstrap files (USER → MEMORY → SOUL → RULES)
-        bootstrap = load_all_bootstrap_files()
-        if bootstrap:
-            parts.append(bootstrap)
-
-        # Voice-specific rules (last for recency bias)
-        parts.append(VOICE_SYSTEM_RULES)
-
-        return "\n\n---\n\n".join(parts)
+        """Build the system prompt."""
+        return build_system_prompt(
+            include_voice_rules=not self.text_mode,
+            session_id=self.session_id,
+        )
 
     # ----------------------------------------------------------------
     # Conversation logging

@@ -2,8 +2,10 @@
 Gemini Native Audio WebSocket endpoint.
 
 Handles two client modes over a single /ws/gemini-voice endpoint:
-  - voice: sends/receives binary PCM audio
-  - observer: receives text + process steps, can send text input
+  - voice: sends/receives binary PCM audio (Gemini Live API)
+  - observer: receives text + process steps from active voice session (PC monitor)
+
+Text chat uses Claude SSE (not this endpoint).
 
 Protocol:
   Client→Server:
@@ -111,7 +113,7 @@ async def gemini_voice_websocket(websocket: WebSocket):
             await websocket.send_json({"type": "ready", "mode": "voice"})
 
         elif mode == "observer":
-            # Observer joins an existing session (try exact ID first, then any session for this user)
+            # Observer joins an existing voice session
             runner = get_runner(session_id) or get_runner_for_user(user_id)
             if not runner:
                 await websocket.send_json({

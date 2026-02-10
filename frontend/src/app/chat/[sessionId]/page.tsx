@@ -14,7 +14,7 @@ import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
-import { api, type MessageResponse, type ProcessStep, type StateMachineResponse, type StateMachineState, ApiError } from '@/lib/api-client';
+import { api, type MessageResponse, type ProcessStep } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth-store';
 import { useSessionStateStore, PENDING_PROCESS_ID } from '@/stores/session-state-store';
 import { cn } from '@/lib/utils';
@@ -130,12 +130,11 @@ export default function ChatSessionPage() {
   const setRevisionInput = useSessionStateStore((state) => state.setRevisionInput);
   const setShowRevisionInput = useSessionStateStore((state) => state.setShowRevisionInput);
   const initializeProcessesFromMessages = useSessionStateStore((state) => state.initializeProcessesFromMessages);
-  const incrementUnread = useSessionStateStore((state) => state.incrementUnread);
   const markAsRead = useSessionStateStore((state) => state.markAsRead);
 
-  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const refetchMessagesRef = useRef<(() => void) | null>(null);
 
   // Voice chat integration
   const voiceSendRef = useRef<((text: string) => void) | null>(null);
@@ -148,15 +147,21 @@ export default function ChatSessionPage() {
 
   const hasToken = typeof window !== 'undefined' && !!localStorage.getItem('done-token');
 
-  // Gemini voice observer (connects to active voice session if available)
-  const [voiceMessages, setVoiceMessages] = useState<MessageResponse[]>([]);
-  const userTextBufRef = useRef('');
-  const assistantTextBufRef = useRef('');
+  // AbortController for SSE cancellation
+  const abortControllerRef = useRef<AbortController | null>(null);
 
-  const flushUserTextBuffer = useCallback(() => {
-    if (userTextBufRef.current) {
-      const content = userTextBufRef.current;
-      userTextBufRef.current = '';
+  // Ref for skill proposal callback (defined later, used in SSE callbacks)
+  const handleShowSkillProposalRef = useRef<((sessId: string) => void) | null>(null);
+
+  // Voice observer (connects to active voice session from another device)
+  const [voiceMessages, setVoiceMessages] = useState<MessageResponse[]>([]);
+  const voiceUserTextBufRef = useRef('');
+  const voiceAssistantTextBufRef = useRef('');
+
+  const flushVoiceUserTextBuffer = useCallback(() => {
+    if (voiceUserTextBufRef.current) {
+      const content = voiceUserTextBufRef.current;
+      voiceUserTextBufRef.current = '';
       setVoiceMessages(prev => [...prev, {
         id: `voice-user-${Date.now()}`,
         room_id: sessionId,
@@ -171,18 +176,20 @@ export default function ChatSessionPage() {
 
   const observer = useGeminiObserver({
     sessionId: sessionId || null,
+    mode: 'observer',
     autoConnect: true,
     onUserText: useCallback((text: string) => {
-      userTextBufRef.current += text;
+      voiceUserTextBufRef.current += text;
     }, []),
     onAssistantText: useCallback((text: string) => {
-      flushUserTextBuffer();
-      assistantTextBufRef.current += text;
-    }, [flushUserTextBuffer]),
+      flushVoiceUserTextBuffer();
+      voiceAssistantTextBufRef.current += text;
+    }, [flushVoiceUserTextBuffer]),
     onToolStart: useCallback((tool: string) => {
-      flushUserTextBuffer();
+      flushVoiceUserTextBuffer();
       if (sessionId) {
-        if (!getSessionState(sessionId).processes.get(PENDING_PROCESS_ID)) {
+        const existing = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
+        if (!existing || !existing.isProcessing) {
           setProcess(sessionId, PENDING_PROCESS_ID, { steps: [], isCollapsed: false, isProcessing: true });
         }
         addProcessStep(sessionId, PENDING_PROCESS_ID, {
@@ -191,10 +198,11 @@ export default function ChatSessionPage() {
           status: 'running',
         });
       }
-    }, [sessionId, flushUserTextBuffer, getSessionState, setProcess, addProcessStep]),
+    }, [sessionId, flushVoiceUserTextBuffer, getSessionState, setProcess, addProcessStep]),
     onProcessStep: useCallback((stepLabel: string) => {
       if (sessionId) {
-        if (!getSessionState(sessionId).processes.get(PENDING_PROCESS_ID)) {
+        const existing = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
+        if (!existing || !existing.isProcessing) {
           setProcess(sessionId, PENDING_PROCESS_ID, { steps: [], isCollapsed: false, isProcessing: true });
         }
         addProcessStep(sessionId, PENDING_PROCESS_ID, {
@@ -214,20 +222,26 @@ export default function ChatSessionPage() {
       }
     }, [sessionId, addProcessStep]),
     onTurnComplete: useCallback(() => {
-      flushUserTextBuffer();
+      flushVoiceUserTextBuffer();
 
-      // プロセスモニターの完了
       if (sessionId) {
         const pending = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
         if (pending) {
-          deleteProcess(sessionId, PENDING_PROCESS_ID);
+          if (pending.steps.length > 0) {
+            setProcess(sessionId, PENDING_PROCESS_ID, {
+              steps: pending.steps,
+              isCollapsed: false,
+              isProcessing: false,
+            });
+          } else {
+            deleteProcess(sessionId, PENDING_PROCESS_ID);
+          }
         }
       }
 
-      // 音声メッセージの蓄積
-      if (assistantTextBufRef.current) {
-        const content = assistantTextBufRef.current;
-        assistantTextBufRef.current = '';
+      if (voiceAssistantTextBufRef.current) {
+        const content = voiceAssistantTextBufRef.current;
+        voiceAssistantTextBufRef.current = '';
         setVoiceMessages(prev => [...prev, {
           id: `voice-assistant-${Date.now()}`,
           room_id: sessionId,
@@ -238,7 +252,7 @@ export default function ChatSessionPage() {
           created_at: new Date().toISOString(),
         }]);
       }
-    }, [sessionId, flushUserTextBuffer, getSessionState, deleteProcess]),
+    }, [sessionId, flushVoiceUserTextBuffer, getSessionState, setProcess, deleteProcess]),
   });
 
   // 認証チェック
@@ -291,6 +305,9 @@ export default function ChatSessionPage() {
     retry: 2,
   });
 
+  // Keep ref in sync for use in callbacks
+  useEffect(() => { refetchMessagesRef.current = refetchMessages; }, [refetchMessages]);
+
   const messages = messagesData?.messages || [];
 
   // DB messages (newest-first) + voice messages (chronological) → oldest-first for display
@@ -333,6 +350,7 @@ export default function ChatSessionPage() {
     setMessage('');
     setIsSending(sessionId, true);
 
+    // Optimistic user message
     const tempUserMessageId = `temp-user-${Date.now()}`;
     const optimisticUserMessage: MessageResponse = {
       id: tempUserMessageId,
@@ -354,127 +372,94 @@ export default function ChatSessionPage() {
       isProcessing: true,
     });
 
+    // Send via SSE (Claude)
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     try {
-      const controller = new AbortController();
-      abortControllersRef.current.set(sessionId, controller);
-
       await api.sm.sendMessageStream(
+        { message: content, session_id: sessionId },
         {
-          message: content,
-          session_id: sessionId,
-          user_id: user?.id,
-        },
-        {
-          onProcessStep: (step: ProcessStep, eventSessionId?: string) => {
-            const targetSessionId = eventSessionId || sessionId;
-            addProcessStep(targetSessionId, PENDING_PROCESS_ID, step);
+          onProcessStep: (step) => {
+            if (sessionId) {
+              const existing = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
+              if (!existing || !existing.isProcessing) {
+                setProcess(sessionId, PENDING_PROCESS_ID, { steps: [], isCollapsed: false, isProcessing: true });
+              }
+              addProcessStep(sessionId, PENDING_PROCESS_ID, step);
+            }
           },
-
-          onUserMessage: (msg, eventSessionId?: string) => {
-            const targetSessionId = eventSessionId || sessionId;
-            queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => {
-              const filtered = (old?.messages || []).filter(m => !m.id.startsWith('temp-user-'));
-              return { messages: [msg, ...filtered] };
-            });
+          onUserMessage: (msg) => {
+            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
+              messages: [msg, ...(old?.messages || []).filter((m: MessageResponse) => m.id !== tempUserMessageId)],
+            }));
           },
+          onAIMessage: (msg) => {
+            if (sessionId) {
+              const pending = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
+              if (pending && pending.steps.length > 0) {
+                setProcess(sessionId, msg.id, {
+                  steps: pending.steps,
+                  isCollapsed: true,
+                  isProcessing: false,
+                });
+              }
+              deleteProcess(sessionId, PENDING_PROCESS_ID);
+            }
 
-          onAIMessage: (msg, eventSessionId?: string) => {
-            const targetSessionId = eventSessionId || sessionId;
-            const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
-            const isCurrentSession = targetSessionId === currentActiveSessionId;
-
-            // 常に正しいセッションのキャッシュに追加
-            queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => ({
+            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
               messages: [msg, ...(old?.messages || [])],
             }));
 
-            // 別セッションの場合は未読カウントを増やす
-            if (!isCurrentSession) {
-              incrementUnread(targetSessionId);
+            // TTS: if voice mode is active, speak the response
+            if (voice.isActive && msg.content) {
+              voice.speakResponse(msg.content);
             }
 
-            // プロセスを確定
-            const pendingProcess = getSessionState(targetSessionId).processes.get(PENDING_PROCESS_ID);
-            deleteProcess(targetSessionId, PENDING_PROCESS_ID);
-            if (pendingProcess) {
-              setProcess(targetSessionId, msg.id, {
-                steps: pendingProcess.steps,
-                isCollapsed: false,
-                isProcessing: false,
+            // Check for confirmation request
+            if (msg.ai_context && 'needs_confirmation' in (msg.ai_context as Record<string, unknown>) && (msg.ai_context as Record<string, unknown>).needs_confirmation) {
+              setPendingConfirmation(sessionId, {
+                session_id: sessionId,
+                state: 'confirm' as const,
+                response: msg.content,
+                reasoning_steps: [],
+                needs_confirmation: true,
+                is_chat: false,
+                proposal: null,
+                error: null,
               });
             }
-
-            // 提案パネル表示（現在のセッションのみ）
-            if (isCurrentSession) {
-              const msgContent = msg.content || '';
-              const isProposeState = msgContent.includes('[STATE: PROPOSE]');
-              const hasConfirmationQuestion =
-                msgContent.includes('確定しますか') ||
-                msgContent.includes('よろしいですか') ||
-                msgContent.includes('この内容で進め') ||
-                msgContent.includes('予約を実行しますか') ||
-                msgContent.includes('予約しますか') ||
-                msgContent.includes('購入しますか') ||
-                msgContent.includes('実行しますか');
-
-              if (isProposeState || hasConfirmationQuestion) {
-                setPendingConfirmation(targetSessionId, {
-                  session_id: targetSessionId,
-                  state: 'propose' as StateMachineState,
-                  response: msgContent,
-                  reasoning_steps: [],
-                  needs_confirmation: true,
-                  is_chat: false,
-                  proposal: null,
-                  error: null,
-                });
-              }
-
-              // Voice mode: speak AI response via TTS
-              if (voice.isActive && msg.content) {
-                voice.speakResponse(msg.content);
-              }
+          },
+          onComplete: () => {
+            if (sessionId) {
+              deleteProcess(sessionId, PENDING_PROCESS_ID);
+              setIsSending(sessionId, false);
             }
+            refetchMessagesRef.current?.();
           },
-
-          onComplete: (eventSessionId?: string) => {
-            const targetSessionId = eventSessionId || sessionId;
-            setIsSending(targetSessionId, false);
-          },
-
-          onError: (error: string, eventSessionId?: string) => {
-            const targetSessionId = eventSessionId || sessionId;
-            toast.error(`エラー: ${error}`);
-            deleteProcess(targetSessionId, PENDING_PROCESS_ID);
-            setIsSending(targetSessionId, false);
-          },
-
-          onSkillAvailable: (browserSessId: string, eventSessionId?: string) => {
-            const targetSessionId = eventSessionId || sessionId;
-            const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
-            // アクティブなセッションの場合のみダイアログを表示（分析→提案）
-            if (targetSessionId === currentActiveSessionId) {
-              handleShowSkillProposal(browserSessId);
+          onError: (error) => {
+            if (sessionId) {
+              deleteProcess(sessionId, PENDING_PROCESS_ID);
+              setIsSending(sessionId, false);
             }
+            toast.error(error || 'エラーが発生しました');
+          },
+          onSkillAvailable: (browserSessId) => {
+            handleShowSkillProposalRef.current?.(browserSessId);
           },
         },
         controller.signal
       );
     } catch (error) {
-      if (error instanceof ApiError) {
-        if (error.status === 401) {
-          toast.error('セッションが切れました。再度ログインしてください。');
-        } else {
-          toast.error('メッセージの送信に失敗しました');
-        }
-      } else {
-        toast.error('ネットワークエラーが発生しました');
+      if (sessionId) {
+        deleteProcess(sessionId, PENDING_PROCESS_ID);
+        setIsSending(sessionId, false);
       }
-      deleteProcess(sessionId, PENDING_PROCESS_ID);
-    } finally {
-      setIsSending(sessionId, false);
+      if (error instanceof Error && error.name !== 'AbortError') {
+        toast.error('メッセージの送信に失敗しました');
+      }
     }
-  }, [message, isSending, sessionId, queryClient, messagesData, user?.id, user?.display_name, setIsSending, setProcess, addProcessStep, getSessionState, deleteProcess, setPendingConfirmation, incrementUnread, voice.isActive, voice.speakResponse]);
+  }, [message, isSending, sessionId, queryClient, messagesData, user?.id, user?.display_name, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, setPendingConfirmation, voice]);
 
   // Voice send ref: allows voice hook to trigger message send
   useEffect(() => {
@@ -490,85 +475,96 @@ export default function ChatSessionPage() {
     setPendingConfirmation(sessionId, null);
     const confirmMessage = 'はい、この内容で確定してください。';
 
-    setTimeout(async () => {
-      setIsSending(sessionId, true);
+    setIsSending(sessionId, true);
 
-      const tempUserMessageId = `temp-user-${Date.now()}`;
-      const optimisticUserMessage: MessageResponse = {
-        id: tempUserMessageId,
-        room_id: sessionId,
-        sender_id: user?.id || '',
-        sender_name: user?.display_name || 'You',
-        sender_type: 'human',
-        content: confirmMessage,
-        created_at: new Date().toISOString(),
-      };
+    const tempUserMessageId = `temp-user-${Date.now()}`;
+    const optimisticUserMessage: MessageResponse = {
+      id: tempUserMessageId,
+      room_id: sessionId,
+      sender_id: user?.id || '',
+      sender_name: user?.display_name || 'You',
+      sender_type: 'human',
+      content: confirmMessage,
+      created_at: new Date().toISOString(),
+    };
 
-      queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
-        messages: [optimisticUserMessage, ...(old?.messages || [])],
-      }));
+    queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
+      messages: [optimisticUserMessage, ...(old?.messages || [])],
+    }));
 
-      setProcess(sessionId, PENDING_PROCESS_ID, {
-        steps: [],
-        isCollapsed: false,
-        isProcessing: true,
-      });
+    setProcess(sessionId, PENDING_PROCESS_ID, {
+      steps: [],
+      isCollapsed: false,
+      isProcessing: true,
+    });
 
-      try {
-        const controller = new AbortController();
-        abortControllersRef.current.set(sessionId, controller);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
-        await api.sm.sendMessageStream(
-          { message: confirmMessage, session_id: sessionId, user_id: user?.id },
-          {
-            onProcessStep: (step, eventSessionId) => {
-              addProcessStep(eventSessionId || sessionId, PENDING_PROCESS_ID, step);
-            },
-            onUserMessage: (msg, eventSessionId) => {
-              const targetSessionId = eventSessionId || sessionId;
-              queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => {
-                const filtered = (old?.messages || []).filter(m => !m.id.startsWith('temp-user-'));
-                return { messages: [msg, ...filtered] };
-              });
-            },
-            onAIMessage: (msg, eventSessionId) => {
-              const targetSessionId = eventSessionId || sessionId;
-              const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
-              const isCurrentSession = targetSessionId === currentActiveSessionId;
-              queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => ({
-                messages: [msg, ...(old?.messages || [])],
-              }));
-              if (!isCurrentSession) {
-                incrementUnread(targetSessionId);
+    try {
+      await api.sm.sendMessageStream(
+        { message: confirmMessage, session_id: sessionId },
+        {
+          onProcessStep: (step) => {
+            if (sessionId) {
+              const existing = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
+              if (!existing || !existing.isProcessing) {
+                setProcess(sessionId, PENDING_PROCESS_ID, { steps: [], isCollapsed: false, isProcessing: true });
               }
-              const proc = getSessionState(targetSessionId).processes.get(PENDING_PROCESS_ID);
-              deleteProcess(targetSessionId, PENDING_PROCESS_ID);
-              if (proc) {
-                setProcess(targetSessionId, msg.id, { steps: proc.steps, isCollapsed: false, isProcessing: false });
-              }
-            },
-            onComplete: (eventSessionId) => setIsSending(eventSessionId || sessionId, false),
-            onError: (error, eventSessionId) => {
-              toast.error(`エラー: ${error}`);
-              deleteProcess(eventSessionId || sessionId, PENDING_PROCESS_ID);
-              setIsSending(eventSessionId || sessionId, false);
-            },
-            onSkillAvailable: (browserSessId: string, eventSessionId?: string) => {
-              const targetSessionId = eventSessionId || sessionId;
-              const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
-              if (targetSessionId === currentActiveSessionId) {
-                handleShowSkillProposal(browserSessId);
-              }
-            },
+              addProcessStep(sessionId, PENDING_PROCESS_ID, step);
+            }
           },
-          controller.signal
-        );
-      } catch {
-        toast.error('確認処理に失敗しました');
+          onUserMessage: (msg) => {
+            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
+              messages: [msg, ...(old?.messages || []).filter((m: MessageResponse) => m.id !== tempUserMessageId)],
+            }));
+          },
+          onAIMessage: (msg) => {
+            if (sessionId) {
+              const pending = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
+              if (pending && pending.steps.length > 0) {
+                setProcess(sessionId, msg.id, {
+                  steps: pending.steps,
+                  isCollapsed: true,
+                  isProcessing: false,
+                });
+              }
+              deleteProcess(sessionId, PENDING_PROCESS_ID);
+            }
+            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
+              messages: [msg, ...(old?.messages || [])],
+            }));
+            if (voice.isActive && msg.content) {
+              voice.speakResponse(msg.content);
+            }
+          },
+          onComplete: () => {
+            if (sessionId) {
+              deleteProcess(sessionId, PENDING_PROCESS_ID);
+              setIsSending(sessionId, false);
+            }
+            refetchMessagesRef.current?.();
+          },
+          onError: (error) => {
+            if (sessionId) {
+              deleteProcess(sessionId, PENDING_PROCESS_ID);
+              setIsSending(sessionId, false);
+            }
+            toast.error(error || 'エラーが発生しました');
+          },
+          onSkillAvailable: (browserSessId) => {
+            handleShowSkillProposalRef.current?.(browserSessId);
+          },
+        },
+        controller.signal
+      );
+    } catch (error) {
+      if (sessionId) {
+        deleteProcess(sessionId, PENDING_PROCESS_ID);
         setIsSending(sessionId, false);
       }
-    }, 0);
-  }, [pendingConfirmation, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setIsSending, setProcess, addProcessStep, getSessionState, deleteProcess, incrementUnread]);
+    }
+  }, [pendingConfirmation, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, voice]);
 
   // 提案を修正
   const handleRevise = useCallback(async () => {
@@ -579,107 +575,96 @@ export default function ChatSessionPage() {
     setRevisionInput(sessionId, '');
     setShowRevisionInput(sessionId, false);
 
-    setTimeout(async () => {
-      setIsSending(sessionId, true);
+    setIsSending(sessionId, true);
 
-      const tempUserMessageId = `temp-user-${Date.now()}`;
-      const optimisticUserMessage: MessageResponse = {
-        id: tempUserMessageId,
-        room_id: sessionId,
-        sender_id: user?.id || '',
-        sender_name: user?.display_name || 'You',
-        sender_type: 'human',
-        content: revisionMessage,
-        created_at: new Date().toISOString(),
-      };
+    const tempUserMessageId = `temp-user-${Date.now()}`;
+    const optimisticUserMessage: MessageResponse = {
+      id: tempUserMessageId,
+      room_id: sessionId,
+      sender_id: user?.id || '',
+      sender_name: user?.display_name || 'You',
+      sender_type: 'human',
+      content: revisionMessage,
+      created_at: new Date().toISOString(),
+    };
 
-      queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
-        messages: [optimisticUserMessage, ...(old?.messages || [])],
-      }));
+    queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
+      messages: [optimisticUserMessage, ...(old?.messages || [])],
+    }));
 
-      setProcess(sessionId, PENDING_PROCESS_ID, {
-        steps: [],
-        isCollapsed: false,
-        isProcessing: true,
-      });
+    setProcess(sessionId, PENDING_PROCESS_ID, {
+      steps: [],
+      isCollapsed: false,
+      isProcessing: true,
+    });
 
-      try {
-        const controller = new AbortController();
-        abortControllersRef.current.set(sessionId, controller);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
-        await api.sm.sendMessageStream(
-          { message: revisionMessage, session_id: sessionId, user_id: user?.id },
-          {
-            onProcessStep: (step, eventSessionId) => {
-              addProcessStep(eventSessionId || sessionId, PENDING_PROCESS_ID, step);
-            },
-            onUserMessage: (msg, eventSessionId) => {
-              const targetSessionId = eventSessionId || sessionId;
-              queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => {
-                const filtered = (old?.messages || []).filter(m => !m.id.startsWith('temp-user-'));
-                return { messages: [msg, ...filtered] };
-              });
-            },
-            onAIMessage: (msg, eventSessionId) => {
-              const targetSessionId = eventSessionId || sessionId;
-              const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
-              const isCurrentSession = targetSessionId === currentActiveSessionId;
-              queryClient.setQueryData(['messages', targetSessionId], (old: typeof messagesData) => ({
-                messages: [msg, ...(old?.messages || [])],
-              }));
-              if (!isCurrentSession) {
-                incrementUnread(targetSessionId);
+    try {
+      await api.sm.sendMessageStream(
+        { message: revisionMessage, session_id: sessionId },
+        {
+          onProcessStep: (step) => {
+            if (sessionId) {
+              const existing = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
+              if (!existing || !existing.isProcessing) {
+                setProcess(sessionId, PENDING_PROCESS_ID, { steps: [], isCollapsed: false, isProcessing: true });
               }
-              const proc = getSessionState(targetSessionId).processes.get(PENDING_PROCESS_ID);
-              deleteProcess(targetSessionId, PENDING_PROCESS_ID);
-              if (proc) {
-                setProcess(targetSessionId, msg.id, { steps: proc.steps, isCollapsed: false, isProcessing: false });
-              }
-              // 新しい提案検出
-              if (isCurrentSession) {
-                const msgContent = msg.content || '';
-                const isProposeState = msgContent.includes('[STATE: PROPOSE]');
-                const hasConfirmationQuestion =
-                  msgContent.includes('確定しますか') || msgContent.includes('よろしいですか') ||
-                  msgContent.includes('この内容で進め') || msgContent.includes('予約を実行しますか') ||
-                  msgContent.includes('予約しますか') || msgContent.includes('購入しますか') ||
-                  msgContent.includes('実行しますか');
-                if (isProposeState || hasConfirmationQuestion) {
-                  setPendingConfirmation(targetSessionId, {
-                    session_id: targetSessionId,
-                    state: 'propose' as StateMachineState,
-                    response: msgContent,
-                    reasoning_steps: [],
-                    needs_confirmation: true,
-                    is_chat: false,
-                    proposal: null,
-                    error: null,
-                  });
-                }
-              }
-            },
-            onComplete: (eventSessionId) => setIsSending(eventSessionId || sessionId, false),
-            onError: (error, eventSessionId) => {
-              toast.error(`エラー: ${error}`);
-              deleteProcess(eventSessionId || sessionId, PENDING_PROCESS_ID);
-              setIsSending(eventSessionId || sessionId, false);
-            },
-            onSkillAvailable: (browserSessId: string, eventSessionId?: string) => {
-              const targetSessionId = eventSessionId || sessionId;
-              const currentActiveSessionId = useSessionStateStore.getState().activeSessionId;
-              if (targetSessionId === currentActiveSessionId) {
-                handleShowSkillProposal(browserSessId);
-              }
-            },
+              addProcessStep(sessionId, PENDING_PROCESS_ID, step);
+            }
           },
-          controller.signal
-        );
-      } catch {
-        toast.error('修正処理に失敗しました');
+          onUserMessage: (msg) => {
+            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
+              messages: [msg, ...(old?.messages || []).filter((m: MessageResponse) => m.id !== tempUserMessageId)],
+            }));
+          },
+          onAIMessage: (msg) => {
+            if (sessionId) {
+              const pending = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
+              if (pending && pending.steps.length > 0) {
+                setProcess(sessionId, msg.id, {
+                  steps: pending.steps,
+                  isCollapsed: true,
+                  isProcessing: false,
+                });
+              }
+              deleteProcess(sessionId, PENDING_PROCESS_ID);
+            }
+            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
+              messages: [msg, ...(old?.messages || [])],
+            }));
+            if (voice.isActive && msg.content) {
+              voice.speakResponse(msg.content);
+            }
+          },
+          onComplete: () => {
+            if (sessionId) {
+              deleteProcess(sessionId, PENDING_PROCESS_ID);
+              setIsSending(sessionId, false);
+            }
+            refetchMessagesRef.current?.();
+          },
+          onError: (error) => {
+            if (sessionId) {
+              deleteProcess(sessionId, PENDING_PROCESS_ID);
+              setIsSending(sessionId, false);
+            }
+            toast.error(error || 'エラーが発生しました');
+          },
+          onSkillAvailable: (browserSessId) => {
+            handleShowSkillProposalRef.current?.(browserSessId);
+          },
+        },
+        controller.signal
+      );
+    } catch (error) {
+      if (sessionId) {
+        deleteProcess(sessionId, PENDING_PROCESS_ID);
         setIsSending(sessionId, false);
       }
-    }, 0);
-  }, [revisionInput, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setRevisionInput, setShowRevisionInput, setIsSending, setProcess, addProcessStep, getSessionState, deleteProcess, incrementUnread]);
+    }
+  }, [revisionInput, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setRevisionInput, setShowRevisionInput, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, voice]);
 
   // スクロール
   useEffect(() => {
@@ -712,21 +697,20 @@ export default function ChatSessionPage() {
   const handleCancel = useCallback(async () => {
     if (!sessionId) return;
 
-    // 1. AbortControllerでfetchを中止（既存）
-    const controller = abortControllersRef.current.get(sessionId);
-    if (controller) {
-      controller.abort();
-      abortControllersRef.current.delete(sessionId);
+    // 1. Abort SSE stream
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
     }
 
-    // 2. バックエンドにキャンセルをリクエスト（新規）
+    // 2. バックエンドにキャンセルをリクエスト
     try {
       await api.sm.cancelSession(sessionId);
     } catch (e) {
       console.error('Failed to cancel session:', e);
     }
 
-    // 3. UI更新（既存）
+    // 3. UI更新
     setIsSending(sessionId, false);
     deleteProcess(sessionId, PENDING_PROCESS_ID);
     toast.info('処理を停止しました');
@@ -815,6 +799,9 @@ export default function ChatSessionPage() {
       setIsAnalyzingSkill(false);
     }
   }, [sessionId]);
+
+  // Keep ref in sync for SSE callbacks
+  useEffect(() => { handleShowSkillProposalRef.current = handleShowSkillProposal; }, [handleShowSkillProposal]);
 
   // 現在表示中の提案
   const currentProposal = skillProposals[currentProposalIndex] || null;
