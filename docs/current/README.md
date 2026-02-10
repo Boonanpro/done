@@ -67,22 +67,19 @@ app/agent/v2/           # メインロジック
 
 **注意**: Phase 1-3は実装済みだが、実際のユースケースでの動作確認は未実施。
 
-## 次のステップ
+## 次のステップ（Gemini統一計画）
 
-1. **DeveloperExecutorの実ケーステスト** - 実際に使って動作確認
-2. **他サービスのSKILL.md作成** - Amazon、高速バス、銀行振込など
-3. **Phase 4: 自己改善ループ** - 自律的なエラー検知→Issue作成→修正→クローズ
-4. **agent-browser検討** - コンテキスト削減のため
+詳細: [plan_gemini_unification.md](./plan_gemini_unification.md)
 
-## 将来の設計方針
+| Phase | 内容 | 状態 |
+|-------|------|------|
+| Phase 1 | 音声体験の統一（プロセスモニター + Thinking） | ❌ 未着手 |
+| Phase 2 | テキストチャットをGemini 2.5 Flashに統一 | ❌ 未着手 |
+| Phase 3 | Claude Codeツール（Developerスキル） | ❌ 未着手 |
+| Phase 4 | ハートビート有効化 | ❌ 未着手 |
+| Phase 5 | ビジネス実行基盤（Stripe, アプリ公開等） | ❌ 未着手 |
 
-### スキルの自己拡張（Self-Healing）
-最重要。ダン自身のコードやSKILL.mdを書き換えるスキルを持たせる。
-- 最初は最小限のSKILL.md（種）だけ用意
-- 実行しながらダン自身にマニュアル（SKILL.md）を完成させていく
-- エラーや新しいパターンを学習してスキルを自己改善
-
-### ツール呼び出し方式
-**B方式（キーワード検出）** を採用。
-- LLMが `[TOOL: skill-name action]` と宣言
-- コードが検出してExecutorを呼び出し
+### 設計方針
+- **脳は1つ（Gemini 2.5 Flash）** — 音声/テキスト/ハートビート全て同じLLM
+- **重い仕事は専門ツールに委譲** — 開発=Claude Code(Opus), 調査=Sonnet
+- **ユーザーから見るとDan 1人** — どの入力方法でも同じ人格、同じ能力
