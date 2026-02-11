@@ -1099,20 +1099,6 @@ class AgentRunner:
             # エラーはログに記録するだけ（ユーザー体験に影響しない）
             logger.warning(f"Learning analysis failed: {e}")
 
-    # Legacy: 旧方式との互換性のため残す（将来削除予定）
-    async def _call_llm(self) -> str:
-        """LLMを呼び出す（レガシー：テキスト形式で返す）"""
-        try:
-            response = await self._call_llm_with_tools()
-            # テキストブロックを結合して返す
-            text_parts = []
-            for block in response.content:
-                if block.type == "text":
-                    text_parts.append(block.text)
-            return "\n".join(text_parts)
-        except Exception as e:
-            logger.exception(f"LLM call failed: {e}")
-            return f"エラーが発生しました: {e}"
 
 
 async def create_runner(
