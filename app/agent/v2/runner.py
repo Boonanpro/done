@@ -60,7 +60,7 @@ COMPACTION_THRESHOLD = 80000  # この文字数を超えたらコンパクショ
 COMPACTION_KEEP_RECENT = 10   # コンパクション時に残す最新メッセージ数
 
 # 使用するモデル
-MODEL = "claude-opus-4-6"  # Opus 4.6
+MODEL = "claude-sonnet-4-5-20250929"  # Sonnet 4.5（コスト削減）
 
 # ============================================
 # Native Tool Use: ツール定義
@@ -425,10 +425,6 @@ class AgentRunner:
 
             # 5. コンパクションチェック
             await self._check_and_compact()
-
-            # 6. 自動分析をトリガー（バックグラウンドで実行）
-            if tool_results:  # ツールを使った場合のみ分析
-                asyncio.create_task(self._trigger_learning_analysis())
 
             # フォールバック: テキスト出力がなかった場合
             if not user_response:
@@ -1071,33 +1067,6 @@ class AgentRunner:
                 logger.info("MEMORY.md updated with long-term memory")
         except Exception as e:
             logger.warning(f"Failed to update MEMORY.md: {e}")
-
-    async def _trigger_learning_analysis(self) -> None:
-        """
-        学習分析をバックグラウンドで実行
-
-        ツール実行後に非同期で呼び出される。
-        エラーが発生してもユーザー体験に影響しない。
-        """
-        try:
-            from app.services import learning_service
-            result = await learning_service.trigger_auto_analysis(
-                session_id=self.session.session_id,
-                site=None,  # 全サイト対象
-            )
-            if result.get("skipped"):
-                logger.debug(f"Learning analysis skipped: {result.get('reason')}")
-            elif result.get("error"):
-                logger.warning(f"Learning analysis error: {result.get('error')}")
-            else:
-                logger.info(
-                    f"Learning analysis complete: "
-                    f"{result.get('retry_patterns_detected', 0)} patterns, "
-                    f"{result.get('rules_created', 0)} rules"
-                )
-        except Exception as e:
-            # エラーはログに記録するだけ（ユーザー体験に影響しない）
-            logger.warning(f"Learning analysis failed: {e}")
 
 
 
