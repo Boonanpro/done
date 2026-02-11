@@ -45,12 +45,22 @@ CORE_PROMPT = "You are Dan, a personal AI assistant."
 # ツール実行の最大ループ回数（安全弁として100回を超えたら強制終了）
 MAX_TOOL_LOOPS = 100
 
+# 音声アナウンス: ツール種別ごとのフォールバックメッセージ
+# Claude が reasoning_text を出力している場合はそちらを優先する
+VOICE_ANNOUNCEMENTS: Dict[str, str] = {
+    "_browser": "サイトを確認しますね",
+    "_check_skill": "確認しますね",
+    "_deep_research": "詳しく調べてみますね",
+    "_jina": "ページを読んでいます",
+    "_exec_code": "コードを実行しています",
+}
+
 # コンパクション設定
 COMPACTION_THRESHOLD = 80000  # この文字数を超えたらコンパクション発動
 COMPACTION_KEEP_RECENT = 10   # コンパクション時に残す最新メッセージ数
 
 # 使用するモデル
-MODEL = "claude-haiku-4-5-20251001"  # Haiku 4.5
+MODEL = "claude-opus-4-6"  # Opus 4.6
 
 # ============================================
 # Native Tool Use: ツール定義
@@ -132,9 +142,11 @@ class AgentRunner:
         self,
         session: Session,
         on_reasoning_step: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_voice_announcement: Optional[Callable[[str], Awaitable[None]]] = None,
     ):
         self.session = session
         self._on_reasoning_step = on_reasoning_step
+        self._on_voice_announcement = on_voice_announcement
 
         # LLMクライアント
         if settings.ANTHROPIC_API_KEY:
@@ -235,6 +247,17 @@ class AgentRunner:
                 # ツールを実行
                 reasoning_text = parsed["reasoning_text"] or ""
                 first_tool = True
+
+                # 音声アナウンス: 最初のツール実行前にユーザー向けメッセージを送出
+                if self._on_voice_announcement and parsed["tool_calls"]:
+                    first_skill = parsed["tool_calls"][0]["skill"]
+                    if reasoning_text:
+                        # Claude が出力したテキストの最初の一文を使う
+                        voice_text = self._extract_first_sentence(reasoning_text)
+                    else:
+                        # フォールバック: ツール種別から定型メッセージ
+                        voice_text = VOICE_ANNOUNCEMENTS.get(first_skill, "少々お待ちください")
+                    await self._on_voice_announcement(voice_text)
 
                 for tool_call in parsed["tool_calls"]:
                     # ツール実行前にもキャンセルチェック
@@ -653,6 +676,18 @@ class AgentRunner:
 
         return None
 
+    @staticmethod
+    def _extract_first_sentence(text: str) -> str:
+        """テキストから最初の一文を抽出（音声アナウンス用）"""
+        # 日本語・英語の文末を検出
+        for i, ch in enumerate(text):
+            if ch in ("。", "！", "？", "!", "?", "\n"):
+                sentence = text[:i + 1].strip()
+                if len(sentence) >= 2:
+                    return sentence
+        # 文末が見つからない場合はそのまま（ただし100文字で切る）
+        return text[:100].strip()
+
     def _get_model(self) -> str:
         """使用するモデルを返す"""
         return MODEL
@@ -680,7 +715,7 @@ class AgentRunner:
 
     async def _call_llm_with_tools(self) -> "anthropic.types.Message":
         """
-        LLMをTool Use APIで呼び出す
+        LLMをTool Use APIで呼び出す（529/overloaded時は自動リトライ）
 
         Returns:
             Anthropic Message オブジェクト（content blocksを含む）
@@ -696,22 +731,34 @@ class AgentRunner:
         print(f"[LLM_DEBUG] Calling LLM with {len(tools)} tools")
         print(f"[LLM_DEBUG] Tool names: {[t['name'] for t in tools]}")
 
-        response = await self.llm_client.messages.create(
-            model=model,
-            max_tokens=4000,
-            system=system_prompt,
-            messages=messages,
-            tools=tools,
-            thinking={
-                "type": "enabled",
-                "budget_tokens": 1024,
-            },
-        )
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = await self.llm_client.messages.create(
+                    model=model,
+                    max_tokens=4000,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=tools,
+                    thinking={
+                        "type": "enabled",
+                        "budget_tokens": 1024,
+                    },
+                )
 
-        print(f"[LLM_DEBUG] Response stop_reason: {response.stop_reason}")
-        print(f"[LLM_DEBUG] Response content blocks: {len(response.content)}")
+                print(f"[LLM_DEBUG] Response stop_reason: {response.stop_reason}")
+                print(f"[LLM_DEBUG] Response content blocks: {len(response.content)}")
 
-        return response
+                return response
+            except anthropic.APIStatusError as e:
+                if e.status_code == 529 and attempt < max_retries - 1:
+                    wait_sec = 2 ** attempt  # 1s, 2s, 4s
+                    logger.warning(f"[LLM] API overloaded (529), retrying in {wait_sec}s (attempt {attempt + 1}/{max_retries})")
+                    if self.on_reasoning_step:
+                        await self.on_reasoning_step(f"APIが混雑中です。{wait_sec}秒後にリトライします...")
+                    await asyncio.sleep(wait_sec)
+                    continue
+                raise
 
     async def _process_llm_response(
         self,
@@ -1072,6 +1119,7 @@ async def create_runner(
     session_id: str,
     user_id: str,
     on_reasoning_step: Optional[Callable[[str], Awaitable[None]]] = None,
+    on_voice_announcement: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> AgentRunner:
     """
     AgentRunnerを作成（セッションを自動取得）
@@ -1086,4 +1134,5 @@ async def create_runner(
     return AgentRunner(
         session=session,
         on_reasoning_step=on_reasoning_step,
+        on_voice_announcement=on_voice_announcement,
     )

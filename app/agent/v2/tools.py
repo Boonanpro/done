@@ -2450,17 +2450,77 @@ async def _get_browser_state(page) -> Dict[str, Any]:
     except (asyncio.TimeoutError, Exception) as e:
         logger.warning(f"[BROWSER] get_interactive_elements timed out or failed: {e}")
         elements = []
+
+    # ページコンテキスト取得（タイムアウト付き）
+    page_context = {}
+    try:
+        page_context = await asyncio.wait_for(
+            page.get_page_context(),
+            timeout=BROWSER_SCREENSHOT_TIMEOUT / 1000,
+        )
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.warning(f"[BROWSER] get_page_context timed out or failed: {e}")
+
     url = page.url
     title = await page.evaluate("document.title")
 
-    # テキスト部分: URL + タイトル + 要素一覧
-    text_parts = [f"URL: {url}", f"タイトル: {title}", "", "要素一覧:"]
+    # テキスト部分: URL + タイトル + ページ状態 + 要素一覧
+    text_parts = [f"URL: {url}", f"タイトル: {title}"]
+
+    # ページ状態セクション
+    if page_context:
+        text_parts.append("")
+        text_parts.append("ページ状態:")
+
+        # 見出し
+        headings = page_context.get("headings", [])
+        if headings:
+            for h in headings:
+                text_parts.append(f"  見出し: [{h.get('level', '')}] {h.get('text', '')}")
+        else:
+            text_parts.append("  見出し: なし")
+
+        # フィードバック
+        feedback = page_context.get("feedback", [])
+        if feedback:
+            for fb in feedback:
+                text_parts.append(f"  フィードバック: 「{fb}」")
+        else:
+            text_parts.append("  フィードバック: なし")
+
+        # モーダル
+        modal = page_context.get("modal")
+        if modal:
+            text_parts.append(f"  モーダル: 「{modal}」")
+        else:
+            text_parts.append("  モーダル: なし")
+
+        # ローディング
+        is_loading = page_context.get("isLoading", False)
+        text_parts.append(f"  ローディング: {'あり' if is_loading else 'なし'}")
+
+        # バッジ
+        badges = page_context.get("badges", [])
+        if badges:
+            badge_strs = [f"{b.get('context', '')}({b.get('value', '')})" for b in badges]
+            text_parts.append(f"  バッジ: {', '.join(badge_strs)}")
+
+        # 入力済みフォーム値
+        filled = page_context.get("filledInputs", [])
+        if filled:
+            filled_strs = [f"{f.get('label', '?')}={f.get('value', '')}" for f in filled]
+            text_parts.append(f"  入力済み: {', '.join(filled_strs)}")
+
+    # 要素一覧
+    text_parts.append("")
+    text_parts.append("要素一覧:")
     for el in elements:
         ref = el.get("ref", "")
         tag = el.get("tag", "")
         text = el.get("text", "")
         el_type = el.get("type", "")
         role = el.get("role", "")
+        states = el.get("states", [])
         label = []
         if tag:
             label.append(tag)
@@ -2469,7 +2529,8 @@ async def _get_browser_state(page) -> Dict[str, Any]:
         if role and role != tag:
             label.append(f'role={role}')
         tag_info = ", ".join(label) if label else "element"
-        text_parts.append(f"  {ref}: [{tag_info}] {text}")
+        states_str = f" ({', '.join(states)})" if states else ""
+        text_parts.append(f"  {ref}: [{tag_info}]{states_str} {text}")
 
     content = []
     if screenshot:

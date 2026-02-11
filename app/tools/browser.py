@@ -350,6 +350,15 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
                     const name = el.getAttribute('name') || '';
                     const id = el.id || '';
 
+                    // ARIA状態を収集
+                    const states = [];
+                    if (el.disabled || el.getAttribute('aria-disabled') === 'true') states.push('disabled');
+                    if (el.getAttribute('aria-checked') === 'true') states.push('checked');
+                    if (el.getAttribute('aria-expanded') === 'true') states.push('expanded');
+                    if (el.getAttribute('aria-expanded') === 'false') states.push('collapsed');
+                    if (el.getAttribute('aria-selected') === 'true') states.push('selected');
+                    if (el.required || el.getAttribute('aria-required') === 'true') states.push('required');
+
                     elements.push({
                         ref: '@' + ref,
                         tag: tagName,
@@ -358,6 +367,7 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
                         text: text,
                         name: name,
                         id: id,
+                        states: states,
                         rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) }
                     });
                 }
@@ -405,6 +415,80 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
             "url": url,
             "main_text": main_text
         }
+
+    elif cmd == "get_page_context":
+        # ページ状態の汎用スナップショット（OpenClaw方式）
+        script = """
+        () => {
+            const ctx = {};
+
+            // 1. 見出し（ページの文脈理解）
+            ctx.headings = [...document.querySelectorAll('h1, h2, h3')]
+                .slice(0, 5)
+                .map(el => ({ level: el.tagName, text: el.innerText.trim().slice(0, 80) }))
+                .filter(h => h.text);
+
+            // 2. フィードバックメッセージ（成功/エラー/警告/情報）
+            const feedbackSelectors = [
+                '[role="alert"]', '[role="status"]',
+                '[class*="error"]', '[class*="success"]', '[class*="warning"]', '[class*="info"]',
+                '[class*="notification"]', '[class*="toast"]', '[class*="banner"]', '[class*="message"]'
+            ];
+            const feedbackEls = document.querySelectorAll(feedbackSelectors.join(','));
+            const seen = new Set();
+            ctx.feedback = [];
+            feedbackEls.forEach(el => {
+                const text = (el.innerText || '').trim().slice(0, 120);
+                if (text && !seen.has(text) && text.length > 2) {
+                    seen.add(text);
+                    ctx.feedback.push(text);
+                }
+            });
+            ctx.feedback = ctx.feedback.slice(0, 5);
+
+            // 3. モーダル/ダイアログの有無と内容
+            const modal = document.querySelector('dialog[open], [role="dialog"], [class*="modal"][class*="show"]');
+            if (modal) {
+                ctx.modal = (modal.innerText || '').trim().slice(0, 200);
+            } else {
+                ctx.modal = null;
+            }
+
+            // 4. ローディング状態
+            ctx.isLoading = document.querySelectorAll(
+                '[class*="spinner"], [class*="loading"], [aria-busy="true"], [class*="skeleton"]'
+            ).length > 0;
+
+            // 5. バッジ/カウンター
+            const badges = [];
+            document.querySelectorAll('[class*="badge"], [class*="count"], [class*="cart-count"]')
+                .forEach(el => {
+                    const text = (el.innerText || '').trim();
+                    const parent = el.closest('a, button, [role="link"]');
+                    const context = parent ? (parent.getAttribute('aria-label') || parent.innerText || '').trim().slice(0, 30) : '';
+                    if (text && /^\\d+$/.test(text)) {
+                        badges.push({ value: text, context: context || 'unknown' });
+                    }
+                });
+            ctx.badges = badges.slice(0, 5);
+
+            // 6. 入力済みフォーム値（パスワードは除外）
+            const filledInputs = [];
+            document.querySelectorAll('input, textarea, select').forEach(el => {
+                if (el.type === 'password' || el.type === 'hidden') return;
+                const val = el.value || '';
+                if (!val) return;
+                const label = el.getAttribute('aria-label') || el.placeholder
+                    || (el.labels && el.labels[0] ? el.labels[0].innerText : '') || el.name || '';
+                filledInputs.push({ label: label.trim().slice(0, 40), value: val.trim().slice(0, 50) });
+            });
+            ctx.filledInputs = filledInputs.slice(0, 10);
+
+            return ctx;
+        }
+        """
+        result = await page.evaluate(script)
+        return {"context": result}
 
     else:
         raise ValueError(f"Unknown command: {cmd}")
@@ -743,6 +827,22 @@ class ExecutorPageProxy:
         return await loop.run_in_executor(
             None, lambda: _send_executor_command("get_page_summary")
         )
+
+    async def get_page_context(self) -> dict:
+        """
+        ページ状態の汎用スナップショット（OpenClaw方式）
+
+        見出し、フィードバックメッセージ、モーダル、ローディング状態、
+        バッジ、入力済みフォーム値を収集する。
+
+        Returns:
+            dict: {headings, feedback, modal, isLoading, badges, filledInputs}
+        """
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: _send_executor_command("get_page_context")
+        )
+        return result.get("context", {})
 
     async def get_page_state(self) -> dict:
         """
