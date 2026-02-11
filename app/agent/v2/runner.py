@@ -42,8 +42,8 @@ def safe_print(msg: str) -> None:
 # コアプロンプト（不変）
 CORE_PROMPT = "You are Dan, a personal AI assistant."
 
-# ツール実行の最大ループ回数（安全弁として100回を超えたら強制終了）
-MAX_TOOL_LOOPS = 100
+# ツール実行の最大ループ回数（安全弁として30回を超えたら強制終了）
+MAX_TOOL_LOOPS = 30
 
 # 音声アナウンス: ツール種別ごとのフォールバックメッセージ
 # Claude が reasoning_text を出力している場合はそちらを優先する

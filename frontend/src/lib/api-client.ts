@@ -723,7 +723,7 @@ export const api = {
 
   // Voice endpoints
   voice: {
-    tts: async (text: string): Promise<ArrayBuffer> => {
+    tts: async (text: string, language?: string): Promise<ArrayBuffer> => {
       const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
       const baseUrl = API_BASE_URL;
       const response = await fetch(`${baseUrl}/api/v1/voice/tts`, {
@@ -732,7 +732,7 @@ export const api = {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, language }),
       });
       if (!response.ok) {
         throw new ApiError(response.status, response.statusText, null);
@@ -768,6 +768,7 @@ export const api = {
         onProcessStep?: (step: ProcessStep, sessionId?: string) => void;
         onUserMessage?: (message: MessageResponse, sessionId?: string) => void;
         onAIMessage?: (message: MessageResponse, sessionId?: string) => void;
+        onVoiceAnnouncement?: (text: string, sessionId?: string) => void;
         onComplete?: (sessionId?: string) => void;
         onError?: (error: string, sessionId?: string) => void;
         onSkillAvailable?: (browserSessionId: string, sessionId?: string) => void;
@@ -823,6 +824,7 @@ export const api = {
 
         const decoder = new TextDecoder();
         let buffer = '';
+        let completeCalled = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -845,6 +847,8 @@ export const api = {
 
                 if (parsed.type === 'process' && callbacks.onProcessStep) {
                   callbacks.onProcessStep(parsed.step, eventSessionId);
+                } else if (parsed.type === 'voice_announcement' && callbacks.onVoiceAnnouncement) {
+                  callbacks.onVoiceAnnouncement(parsed.text, eventSessionId);
                 } else if (parsed.type === 'user_message' && callbacks.onUserMessage) {
                   callbacks.onUserMessage(parsed.message, eventSessionId);
                 } else if (parsed.type === 'ai_message' && callbacks.onAIMessage) {
@@ -855,10 +859,12 @@ export const api = {
                     callbacks.onSkillAvailable(parsed.browser_session_id, eventSessionId);
                   }
                   if (callbacks.onComplete) {
+                    completeCalled = true;
                     callbacks.onComplete(eventSessionId);
                   }
                 } else if (parsed.type === 'cancelled' && callbacks.onComplete) {
                   // キャンセルも完了として処理
+                  completeCalled = true;
                   callbacks.onComplete(eventSessionId);
                 } else if (parsed.type === 'error' && callbacks.onError) {
                   callbacks.onError(parsed.message, eventSessionId);
@@ -869,14 +875,28 @@ export const api = {
             }
           }
         }
+
+        // ストリーム終了時の安全弁: done イベントなしで終了した場合もクリーンアップ
+        if (!completeCalled && callbacks.onComplete) {
+          console.warn('[SSE] Stream ended without done event, forcing cleanup');
+          callbacks.onComplete();
+        }
       } catch (error) {
         // AbortErrorは意図的なキャンセルなのでエラーとして扱わない
         if (error instanceof DOMException && error.name === 'AbortError') {
           console.log('[SSE] Request cancelled by user');
+          // キャンセル時もクリーンアップ
+          if (callbacks.onComplete) {
+            callbacks.onComplete();
+          }
           return;
         }
         if (callbacks.onError) {
           callbacks.onError(error instanceof Error ? error.message : String(error));
+        }
+        // エラー時もスピナー停止のためクリーンアップ
+        if (callbacks.onComplete) {
+          callbacks.onComplete();
         }
       }
     },

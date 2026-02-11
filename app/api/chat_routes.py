@@ -605,6 +605,7 @@ async def send_dan_message_stream(
         # キャンセルフラグを登録
         from app.services.cancellation import CancellationRegistry
         room_id_for_cancel = None  # 後で設定
+        done_sent = False  # done イベント送信済みフラグ
 
         try:
             # Step 1: ユーザーメッセージを保存
@@ -665,11 +666,16 @@ async def send_dan_message_stream(
             # 推論ステップを収集するためのリストとキュー
             reasoning_steps = []
             reasoning_queue = asyncio.Queue()
+            voice_queue = asyncio.Queue()
 
             # 推論ステップをキューに追加するコールバック
             async def on_reasoning_step(step: str):
                 reasoning_steps.append(step)
                 await reasoning_queue.put(step)
+
+            # 音声アナウンスをキューに追加するコールバック
+            async def on_voice_announcement(text: str):
+                await voice_queue.put(text)
 
             # ========================================
             # Agent v2: Bootstrap files + Native Tool Use
@@ -677,11 +683,12 @@ async def send_dan_message_stream(
             result = {}  # デフォルト初期化
             from app.agent.v2.runner import create_runner
 
-            # Agent v2 Runner作成
+            # Agent v2 Runner作成（SSEフォールバック用）
             runner = await create_runner(
                 session_id=room_id,
                 user_id=current_user.user_id,
                 on_reasoning_step=on_reasoning_step,
+                on_voice_announcement=on_voice_announcement,
             )
 
             # メッセージ処理をバックグラウンドで実行
@@ -712,6 +719,13 @@ async def send_dan_message_stream(
                 except asyncio.QueueEmpty:
                     pass
 
+                # voice_queueもチェック（音声アナウンス）
+                try:
+                    voice_text = voice_queue.get_nowait()
+                    yield f"data: {json.dumps({'type': 'voice_announcement', 'session_id': room_id, 'text': voice_text})}\n\n"
+                except asyncio.QueueEmpty:
+                    pass
+
             # 残りのステップを送信
             while not reasoning_queue.empty():
                 try:
@@ -727,6 +741,14 @@ async def send_dan_message_stream(
                     progress_update = progress_queue.get_nowait()
                     yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'visual-{step_counter}', 'label': progress_update.label, 'status': 'completed'}})}\n\n"
                     step_counter += 1
+                except asyncio.QueueEmpty:
+                    break
+
+            # 残りのvoice更新も送信
+            while not voice_queue.empty():
+                try:
+                    voice_text = voice_queue.get_nowait()
+                    yield f"data: {json.dumps({'type': 'voice_announcement', 'session_id': room_id, 'text': voice_text})}\n\n"
                 except asyncio.QueueEmpty:
                     break
 
@@ -773,13 +795,20 @@ async def send_dan_message_stream(
                 done_data['browser_session_id'] = browser_session_id
                 done_data['can_create_skill'] = True
             yield f"data: {json.dumps(done_data)}\n\n"
-            
+            done_sent = True
+
         except Exception as e:
             import logging
             import traceback
             logging.error(f"Failed to stream dan message: {e}\n{traceback.format_exc()}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
         finally:
+            # done 未送信の場合のみ送信（フロントエンドのスピナー停止保証）
+            if not done_sent:
+                try:
+                    yield f"data: {json.dumps({'type': 'done', 'session_id': room_id_for_cancel or ''})}\n\n"
+                except Exception:
+                    pass
             # クリーンアップ: リクエストIDとコールバックを解除
             ProgressCallbackRegistry.unregister(request_id)
             set_current_request_id(None)
@@ -1104,11 +1133,11 @@ class ConnectionManager:
         await websocket.send_json(message)
 
     def get_connection(self, room_id: str, user_id: str) -> Optional[WebSocket]:
-        """????????????"""
+        """指定ユーザーの接続を取得"""
         return self.active_connections.get(room_id, {}).get(user_id)
 
     def is_connected(self, room_id: str, user_id: str) -> bool:
-        """?????????????"""
+        """ユーザーが接続中か確認"""
         return self.get_connection(room_id, user_id) is not None
     
     async def broadcast_to_room(self, room_id: str, message: dict, exclude_user_id: str = None):
