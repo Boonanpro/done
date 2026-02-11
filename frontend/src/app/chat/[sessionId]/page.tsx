@@ -33,40 +33,59 @@ function ProcessDisplay({ steps, isCollapsed, onToggle, isProcessing = false }: 
   const hasSteps = steps.length > 0;
 
   return (
-    <div className="flex gap-3 mb-2">
-      <div className="w-10 shrink-0" />
-      <div className="flex-1 px-4 py-2 rounded-xl bg-muted/50 border border-border">
-        <button
-          onClick={onToggle}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors w-full"
-        >
-          {isCollapsed ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
-          <span>プロセス</span>
-        </button>
-        {!isCollapsed && (
-          <div className="mt-2 pl-2 border-l-2 border-primary/30 space-y-1">
-            {isProcessing && !hasSteps && (
-              <div className="flex items-center gap-2 text-xs">
-                <Loader2 className="h-3 w-3 text-primary animate-spin" />
-                <span>考え中...</span>
-              </div>
-            )}
-            {steps.map((step, index) => {
-              const isLatest = index === steps.length - 1;
-              const shouldSpin = isLatest && isProcessing;
-              return (
-                <div key={step.id} className="flex items-center gap-2 text-xs">
-                  {shouldSpin ? (
-                    <Loader2 className="h-3 w-3 text-primary animate-spin" />
-                  ) : (
-                    <span className="h-3 w-3" />
-                  )}
-                  <span className="text-muted-foreground">{step.label}</span>
-                </div>
-              );
-            })}
-          </div>
-        )}
+    <div className="flex gap-3 mb-3">
+      <Avatar className="h-10 w-10 shrink-0">
+        <AvatarFallback className="bg-primary/10">
+          <Bot className="h-5 w-5 text-primary" />
+        </AvatarFallback>
+      </Avatar>
+      <div className="flex-1 space-y-1">
+        <p className="text-xs text-muted-foreground">ダン</p>
+        <div className="px-4 py-3 rounded-2xl rounded-bl-md bg-muted/50 border border-border">
+          <button
+            onClick={onToggle}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors w-full mb-2"
+          >
+            {isCollapsed ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
+            <span className="font-medium">実行中のプロセス</span>
+          </button>
+          {!isCollapsed && (
+            <div className="pl-2 border-l-2 border-primary/30 space-y-2">
+              {isProcessing && !hasSteps && (
+                <motion.div
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="flex items-center gap-2 text-xs"
+                >
+                  <Loader2 className="h-3 w-3 text-primary animate-spin" />
+                  <span className="text-foreground">考え中...</span>
+                </motion.div>
+              )}
+              {steps.map((step, index) => {
+                const isLatest = index === steps.length - 1;
+                const shouldSpin = isLatest && isProcessing;
+                return (
+                  <motion.div
+                    key={step.id}
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex items-center gap-2 text-xs"
+                  >
+                    {shouldSpin ? (
+                      <Loader2 className="h-3 w-3 text-primary animate-spin" />
+                    ) : (
+                      <Check className="h-3 w-3 text-green-500" />
+                    )}
+                    <span className={cn(
+                      shouldSpin ? "text-foreground font-medium" : "text-muted-foreground"
+                    )}>{step.label}</span>
+                  </motion.div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -692,10 +711,11 @@ export default function ChatSessionPage() {
     }
   }, [revisionInput, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setRevisionInput, setShowRevisionInput, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, voice]);
 
-  // スクロール
+  // スクロール（メッセージ変更時 + プロセスステップ追加時）
+  const pendingStepCount = pendingProcess?.steps?.length ?? 0;
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, pendingStepCount]);
 
   // テキストエリア自動リサイズ
   useEffect(() => {
@@ -1078,7 +1098,8 @@ export default function ChatSessionPage() {
 
                   return (
                     <div key={msg.id}>
-                      {!isUser && processData && (
+                      {/* AIメッセージの場合、プロセスを先に表示 */}
+                      {!isUser && processData && processData.steps.length > 0 && (
                         <ProcessDisplay
                           steps={processData.steps}
                           isCollapsed={processData.isCollapsed}
@@ -1086,38 +1107,47 @@ export default function ChatSessionPage() {
                           isProcessing={processData.isProcessing}
                         />
                       )}
-                      <div className={cn('flex gap-3', isUser && 'justify-end')}>
-                        {!isUser && (
-                          <Avatar className="h-10 w-10 shrink-0">
-                            <AvatarFallback className="bg-primary/10">
-                              <Bot className="h-5 w-5 text-primary" />
-                            </AvatarFallback>
-                          </Avatar>
-                        )}
-                        <div className={cn('max-w-[70%] space-y-1 flex flex-col', isUser && 'items-end')}>
-                          <p className="text-xs text-muted-foreground">{isUser ? 'あなた' : 'ダン'}</p>
-                          <div
-                            className={cn(
-                              'px-4 py-3 rounded-2xl text-sm leading-relaxed text-left',
-                              isUser
-                                ? 'bg-primary text-primary-foreground rounded-br-md'
-                                : 'bg-muted rounded-bl-md prose prose-sm prose-dan max-w-none'
-                            )}
-                          >
-                            {isUser ? msg.content : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>}
+                      {/* プロセス実行中でない場合のみメッセージを表示 */}
+                      {(isUser || !processData || !processData.isProcessing) && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.3 }}
+                          className={cn('flex gap-3', isUser && 'justify-end')}
+                        >
+                          {!isUser && (
+                            <Avatar className="h-10 w-10 shrink-0">
+                              <AvatarFallback className="bg-primary/10">
+                                <Bot className="h-5 w-5 text-primary" />
+                              </AvatarFallback>
+                            </Avatar>
+                          )}
+                          <div className={cn('max-w-[70%] space-y-1 flex flex-col', isUser && 'items-end')}>
+                            <p className="text-xs text-muted-foreground">{isUser ? 'あなた' : 'ダン'}</p>
+                            <div
+                              className={cn(
+                                'px-4 py-3 rounded-2xl text-sm leading-relaxed text-left',
+                                isUser
+                                  ? 'bg-primary text-primary-foreground rounded-br-md'
+                                  : 'bg-muted rounded-bl-md prose prose-sm prose-dan max-w-none'
+                              )}
+                            >
+                              {isUser ? msg.content : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>}
+                            </div>
                           </div>
-                        </div>
-                        {isUser && (
-                          <Avatar className="h-10 w-10 shrink-0">
-                            <AvatarFallback className="bg-secondary text-secondary-foreground">
-                              {user?.display_name?.charAt(0) || 'U'}
-                            </AvatarFallback>
-                          </Avatar>
-                        )}
-                      </div>
+                          {isUser && (
+                            <Avatar className="h-10 w-10 shrink-0">
+                              <AvatarFallback className="bg-secondary text-secondary-foreground">
+                                {user?.display_name?.charAt(0) || 'U'}
+                              </AvatarFallback>
+                            </Avatar>
+                          )}
+                        </motion.div>
+                      )}
                     </div>
                   );
                 })}
+                {/* 実行中のプロセスがある場合は表示 */}
                 {pendingProcess && (
                   <ProcessDisplay
                     steps={pendingProcess.steps}

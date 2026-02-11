@@ -222,6 +222,10 @@ class AgentRunner:
                         "cancelled": True,
                     }
 
+                # 2回目以降のLLM呼び出し前に「考え中...」を表示
+                if loop_count > 0 and self._on_reasoning_step:
+                    await self._on_reasoning_step("考え中...")
+
                 print(f"[RUNNER_DEBUG] Calling LLM with tools (loop {loop_count})...")
 
                 # LLMをTool Use APIで呼び出し
