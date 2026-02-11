@@ -544,6 +544,12 @@ class AgentRunner:
             name = tool.get("name", "")
             desc = tool.get("description", "").split("\n")[0]  # 1行目のみ
             lines.append(f"- `{name}`: {desc}")
+        lines.append("")
+        lines.append("### コード操作のツール選択ルール（必須）")
+        lines.append("- ファイルを探す → `bash`（例: `find D:/done/frontend -name '*.tsx'`）")
+        lines.append("- ファイル内容を検索 → `bash`（例: `grep -rn 'useState' D:/done/frontend/src/`）")
+        lines.append("- ファイルを読む → `read_file`")
+        lines.append("- ファイルを書く/編集 → `write_file` / `edit_file`")
         return "\n".join(lines)
 
     def _build_skill_list_section(self) -> str:
@@ -605,27 +611,27 @@ class AgentRunner:
 
     def _build_skill_list_response(self, skills: List["Skill"]) -> str:
         limit = 30
-        lines = [f"????????: {len(skills)}?"]
+        lines = [f"スキル一覧: {len(skills)}件"]
         lines.append("")
         for skill in skills[:limit]:
             lines.append(f"- {skill.display_name} (`{skill.name}`)")
         if len(skills) > limit:
-            lines.append(f"... ?? {len(skills) - limit} ?")
+            lines.append(f"... 他 {len(skills) - limit} 件")
         lines.append("")
-        lines.append("????<skill_name>?????????????")
+        lines.append("詳細は<skill_name>で確認できます。")
         return "\n".join(lines)
 
     def _build_skill_detail_response(self, skill: "Skill") -> str:
-        actions = self._extract_actions_from_skill(skill.raw_content) or skill.list_available_actions()
+        actions = skill.list_available_actions()
         tools = []
         for action in actions:
             tools.append(f"`{skill.name.replace('-', '_')}_{action}`")
 
         lines = [f"{skill.display_name} (`{skill.name}`)"]
         if skill.description:
-            lines.append(f"- ??: {skill.description}")
+            lines.append(f"- 説明: {skill.description}")
         if tools:
-            lines.append(f"- ???: {', '.join(tools)}")
+            lines.append(f"- ツール: {', '.join(tools)}")
         return "\n".join(lines)
 
 
@@ -643,7 +649,7 @@ class AgentRunner:
             "list skills",
             "available skills",
         ]
-        if any(t in lower for t in list_triggers) or "?????" in message or "??????" in message:
+        if any(t in lower for t in list_triggers) or "スキル一覧" in message or "スキルリスト" in message:
             skills = SkillRegistry.list_all()
             return self._build_skill_list_response(skills)
 
@@ -655,18 +661,18 @@ class AgentRunner:
             "details",
         ]
         has_lookup_trigger = any(t in lower for t in lookup_triggers)
-        if "??" in message or "???" in message or "????" in message or "???" in message or "??" in message:
+        if "詳細" in message or "使い方" in message or "ヘルプ" in message or "教えて" in message or "説明" in message:
             has_lookup_trigger = True
 
         ascii_short = (len(message) <= 40 and len(message) >= 4 and all(ord(c) < 128 for c in message) and ("_" in message or "-" in message or message.isalnum()))
-        if not has_lookup_trigger and not ascii_short and "???" not in message and "skill" not in lower:
+        if not has_lookup_trigger and not ascii_short and "スキル" not in message and "skill" not in lower:
             return None
 
         skill = self._find_skill_for_lookup(message, allow_substring=has_lookup_trigger)
         if skill:
             return self._build_skill_detail_response(skill)
 
-        if has_lookup_trigger and ("???" in message or "skill" in lower):
+        if has_lookup_trigger and ("スキル" in message or "skill" in lower):
             skills = SkillRegistry.list_all()
             return self._build_skill_list_response(skills)
 

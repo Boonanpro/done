@@ -5,8 +5,10 @@ import sys
 import asyncio
 from contextlib import asynccontextmanager
 
-# Windows: ProactorEventLoopPolicy（デフォルト）を使用
-# 注: WindowsSelectorEventLoopPolicyはPlaywrightのsubprocess起動を壊すので使わない
+# Windows: ProactorEventLoop を明示的に設定（subprocess 生成に必須）
+# SelectorEventLoop だと asyncio.create_subprocess_exec が NotImplementedError になる
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import uvicorn
 from fastapi import FastAPI

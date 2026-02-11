@@ -344,7 +344,10 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         READ_WORKSPACE_TOOL,
         UPDATE_WORKSPACE_TOOL,
         SEARCH_MEMORY_TOOL,
-        EXEC_CODE_TOOL,
+        READ_FILE_TOOL,
+        WRITE_FILE_TOOL,
+        EDIT_FILE_TOOL,
+        BASH_TOOL,
     ]
 
 
@@ -733,6 +736,93 @@ pip install済みのライブラリが使用可能。""",
     }
 }
 
+# ============================================
+# ファイル操作・コマンド実行ツール
+# ============================================
+
+READ_FILE_TOOL = {
+    "name": "read_file",
+    "description": "ファイルの内容を読み込む。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "ファイルパス"}
+        },
+        "required": ["path"]
+    }
+}
+
+WRITE_FILE_TOOL = {
+    "name": "write_file",
+    "description": "ファイルに内容を書き込む（上書きまたは新規作成）。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "ファイルパス"},
+            "content": {"type": "string", "description": "書き込む内容"}
+        },
+        "required": ["path", "content"]
+    }
+}
+
+EDIT_FILE_TOOL = {
+    "name": "edit_file",
+    "description": "ファイル内の文字列を置換して編集する。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "ファイルパス"},
+            "old_string": {"type": "string", "description": "置換前の文字列"},
+            "new_string": {"type": "string", "description": "置換後の文字列"}
+        },
+        "required": ["path", "old_string", "new_string"]
+    }
+}
+
+BASH_TOOL = {
+    "name": "bash",
+    "description": "シェルコマンドを実行する。git操作、npm、pip install等に使用。ls/find/grep/cat等のUnixコマンドが使える。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "実行するコマンド"}
+        },
+        "required": ["command"]
+    }
+}
+
+# ============================================
+# コード探索ツール
+# ============================================
+
+GLOB_TOOL = {
+    "name": "glob",
+    "description": "ファイルをパターンで検索する。例: '**/*.tsx', 'src/**/*.py', '*.md'。ファイル名や拡張子でファイルを探す時に使う。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "globパターン（例: **/*.tsx, src/**/*.py）"},
+            "path": {"type": "string", "description": "検索開始ディレクトリ（省略時: D:/done）"}
+        },
+        "required": ["pattern"]
+    }
+}
+
+GREP_TOOL = {
+    "name": "grep",
+    "description": "ファイル内容をテキスト/正規表現で検索する。関数定義、クラス名、文字列の使用箇所などを探す時に使う。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "検索パターン（正規表現対応）"},
+            "path": {"type": "string", "description": "検索対象のディレクトリまたはファイル（省略時: D:/done）"},
+            "glob": {"type": "string", "description": "対象ファイルのフィルタ（例: *.py, *.tsx）"},
+            "context": {"type": "integer", "description": "前後に表示する行数（デフォルト: 2）"}
+        },
+        "required": ["pattern"]
+    }
+}
+
 
 def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     """
@@ -775,8 +865,17 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     if tool_name == "search_memory":
         return ("_search_memory", "search")
 
-    if tool_name == "exec_code":
-        return ("_exec_code", "run")
+    if tool_name == "read_file":
+        return ("_read_file", "read")
+
+    if tool_name == "write_file":
+        return ("_write_file", "write")
+
+    if tool_name == "edit_file":
+        return ("_edit_file", "edit")
+
+    if tool_name == "bash":
+        return ("_bash", "run")
 
     # Prefer the longest matching skill prefix to avoid collisions.
     all_skills = SkillRegistry.list_all()
@@ -1586,6 +1685,187 @@ async def execute_tool(
         from app.tools.code_executor import execute_python
         return await execute_python(code)
 
+    # ★★★ ファイル読み込み ★★★
+    if skill_name == "_read_file":
+        path = params.get("path", "")
+        if not path:
+            return {"success": False, "error": "path が必要です"}
+        try:
+            p = Path(path)
+            if not p.exists():
+                return {"success": False, "error": f"ファイルが存在しません: {path}"}
+            content = p.read_text(encoding="utf-8")
+            return {"success": True, "path": path, "content": content}
+        except Exception as e:
+            return {"success": False, "error": f"読み取りエラー: {e}"}
+
+    # ★★★ ファイル書き込み ★★★
+    if skill_name == "_write_file":
+        path = params.get("path", "")
+        content = params.get("content", "")
+        if not path:
+            return {"success": False, "error": "path が必要です"}
+        try:
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            return {"success": True, "path": path, "message": f"書き込み完了 ({len(content)} chars)"}
+        except Exception as e:
+            return {"success": False, "error": f"書き込みエラー: {e}"}
+
+    # ★★★ ファイル編集（文字列置換）★★★
+    if skill_name == "_edit_file":
+        path = params.get("path", "")
+        old_string = params.get("old_string", "")
+        new_string = params.get("new_string", "")
+        if not path:
+            return {"success": False, "error": "path が必要です"}
+        if not old_string:
+            return {"success": False, "error": "old_string が必要です"}
+        try:
+            p = Path(path)
+            if not p.exists():
+                return {"success": False, "error": f"ファイルが存在しません: {path}"}
+            content = p.read_text(encoding="utf-8")
+            if old_string not in content:
+                return {"success": False, "error": "old_string が見つかりません"}
+            new_content = content.replace(old_string, new_string, 1)
+            p.write_text(new_content, encoding="utf-8")
+            return {"success": True, "path": path, "message": "編集完了"}
+        except Exception as e:
+            return {"success": False, "error": f"編集エラー: {e}"}
+
+    # ★★★ シェルコマンド実行 ★★★
+    if skill_name == "_bash":
+        command = params.get("command", "")
+        if not command:
+            return {"success": False, "error": "command が必要です"}
+        try:
+            import subprocess
+            import sys as _sys
+            # Windows: Git Bash で実行（ls, find, grep 等が使える）
+            if _sys.platform == "win32":
+                git_bash = r"C:\Program Files\Git\usr\bin\bash.exe"
+                result = subprocess.run(
+                    [git_bash, "-c", command],
+                    capture_output=True, timeout=120,
+                    cwd="D:/done",
+                )
+                # Git Bash は UTF-8 で出力するので明示的にデコード
+                result = subprocess.CompletedProcess(
+                    result.args, result.returncode,
+                    stdout=result.stdout.decode("utf-8", errors="replace") if result.stdout else "",
+                    stderr=result.stderr.decode("utf-8", errors="replace") if result.stderr else "",
+                )
+            else:
+                result = subprocess.run(
+                    command, shell=True, capture_output=True, text=True, timeout=120,
+                )
+            output = result.stdout
+            if result.stderr:
+                output += "\n[STDERR]\n" + result.stderr
+            return {
+                "success": result.returncode == 0,
+                "command": command,
+                "exit_code": result.returncode,
+                "output": output[:10000],
+            }
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": f"タイムアウト (120秒): {command}"}
+        except Exception as e:
+            return {"success": False, "error": f"実行エラー: {e}"}
+
+    # ★★★ ファイル検索（glob）★★★
+    if skill_name == "_glob":
+        pattern = params.get("pattern", "")
+        search_path = params.get("path", "D:/done")
+        if not pattern:
+            return {"success": False, "error": "pattern が必要です"}
+        try:
+            import re as _re
+            base = Path(search_path)
+            if not base.exists():
+                return {"success": False, "error": f"ディレクトリが存在しません: {search_path}"}
+
+            # Python glob はブレース展開 {tsx,jsx} をサポートしないので手動展開
+            brace_match = _re.search(r'\{([^}]+)\}', pattern)
+            if brace_match:
+                alternatives = brace_match.group(1).split(",")
+                all_matches = []
+                for alt in alternatives:
+                    expanded = pattern[:brace_match.start()] + alt.strip() + pattern[brace_match.end():]
+                    all_matches.extend(str(p) for p in base.glob(expanded))
+                matches = sorted(set(all_matches))
+            else:
+                matches = sorted(str(p) for p in base.glob(pattern))
+
+            # node_modules, .git, __pycache__ 等を除外
+            exclude_dirs = {"node_modules", ".git", "__pycache__", ".next", "venv", ".venv"}
+            filtered = [
+                m for m in matches
+                if not any(ex in m.replace("\\", "/").split("/") for ex in exclude_dirs)
+            ]
+            return {
+                "success": True,
+                "pattern": pattern,
+                "path": search_path,
+                "count": len(filtered),
+                "files": filtered[:200],
+                "truncated": len(filtered) > 200,
+            }
+        except Exception as e:
+            return {"success": False, "error": f"glob エラー: {e}"}
+
+    # ★★★ 内容検索（grep）★★★
+    if skill_name == "_grep":
+        pattern = params.get("pattern", "")
+        search_path = params.get("path", "D:/done")
+        file_glob = params.get("glob", "")
+        context_lines = params.get("context", 2)
+        if not pattern:
+            return {"success": False, "error": "pattern が必要です"}
+        try:
+            import subprocess as sp
+            import shutil
+            # ripgrep (rg) のパスを検出
+            rg_path = shutil.which("rg")
+            if not rg_path:
+                # winget インストール先を直接チェック
+                winget_rg = Path.home() / "AppData/Local/Microsoft/WinGet/Links/rg.exe"
+                if winget_rg.exists():
+                    rg_path = str(winget_rg)
+            if rg_path:
+                cmd = [rg_path, "--no-heading", "-n", f"-C{context_lines}", "--max-count=50"]
+                if file_glob:
+                    cmd.extend(["--glob", file_glob])
+                for ex in ["node_modules", ".git", "__pycache__", ".next", "venv"]:
+                    cmd.extend(["--glob", f"!{ex}"])
+                cmd.append(pattern)
+                cmd.append(search_path)
+                result = sp.run(cmd, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
+                output = result.stdout
+            else:
+                # findstr フォールバック
+                fallback_cmd = f'findstr /S /N /R /C:"{pattern}" "{search_path}\\*"'
+                if file_glob:
+                    ext = file_glob.replace("*", "")
+                    fallback_cmd = f'findstr /S /N /R /C:"{pattern}" "{search_path}\\*{ext}"'
+                result = sp.run(fallback_cmd, shell=True, capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
+                output = result.stdout
+            # 出力を制限
+            lines = output.splitlines()
+            truncated = len(lines) > 500
+            return {
+                "success": True,
+                "pattern": pattern,
+                "path": search_path,
+                "match_lines": len(lines),
+                "output": "\n".join(lines[:500]),
+                "truncated": truncated,
+            }
+        except Exception as e:
+            return {"success": False, "error": f"grep エラー: {e}"}
+
     # 以下は外部依存あり
     from app.services.cancellation import CancellationRegistry, CancelledError
 
@@ -2184,8 +2464,15 @@ def format_tool_result(
         lines.append(f"パスワード: {result.get('password', '（なし）')}")
         return FormattedToolResult(text="\n".join(lines), images=images)
 
-    # その他の結果
-    lines.append(result.get('message', '完了'))
+    # bash / read_file / write_file / edit_file: output を直接返す
+    output = result.get("output")
+    if output:
+        lines.append(output)
+    elif result.get("content"):
+        # read_file の content
+        lines.append(result["content"])
+    else:
+        lines.append(result.get('message', '完了'))
 
     # 差分があれば追加
     deviation = result.get("deviation")
