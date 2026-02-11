@@ -2532,6 +2532,12 @@ async def _get_browser_state(page) -> Dict[str, Any]:
         states_str = f" ({', '.join(states)})" if states else ""
         text_parts.append(f"  {ref}: [{tag_info}]{states_str} {text}")
 
+    # 検証リマインダー（モデルが毎回必ず読む位置に配置）
+    text_parts.append("")
+    text_parts.append("---")
+    text_parts.append("確認義務: 上記のURL・タイトル・ページ状態・要素を見て、操作が成功したか判断せよ。")
+    text_parts.append("証拠なく「完了しました」と報告してはならない。期待と異なるなら次の操作で修正せよ。")
+
     content = []
     if screenshot:
         content.append({

@@ -754,8 +754,8 @@ class AgentRunner:
                 if e.status_code == 529 and attempt < max_retries - 1:
                     wait_sec = 2 ** attempt  # 1s, 2s, 4s
                     logger.warning(f"[LLM] API overloaded (529), retrying in {wait_sec}s (attempt {attempt + 1}/{max_retries})")
-                    if self.on_reasoning_step:
-                        await self.on_reasoning_step(f"APIが混雑中です。{wait_sec}秒後にリトライします...")
+                    if self._on_reasoning_step:
+                        await self._on_reasoning_step(f"APIが混雑中です。{wait_sec}秒後にリトライします...")
                     await asyncio.sleep(wait_sec)
                     continue
                 raise
