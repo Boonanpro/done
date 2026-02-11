@@ -29,17 +29,22 @@ DEFAULT_CONFIG = {
 
 HEARTBEAT_PROMPT_TEMPLATE = """[Heartbeat] 自動チェックイン。現在時刻: {now}
 
-あなたは自律的に起動しました。以下を確認し、必要に応じて行動してください:
+あなたは自律的に起動しました。以下を順に確認し、必要に応じて行動してください:
 
-1. MEMORY.mdと直近の会話ログを確認。期限のあるタスクやリマインダーがあればメモを残す。
-2. 最近のスキル利用パターンを確認。改善提案があればworkspaceにメモを残す。
-3. 自己拡張: 既存ツールで対応できないが頻繁に必要になりそうな機能があれば、
-   exec_codeで実装してテストし、結果をworkspaceに記録する。
+1. リマインダー確認: MEMORY.mdと直近の会話ログ(memory/*.md)を読み、期限のあるタスクやリマインダーがあればメモを残す。
+2. ワークスペース整理: RULES.md を読み、以下を実施する:
+   - 重複・矛盾するルールを統合する
+   - 実態と合わなくなった古いルールを削除する
+   - 50行を超えていたら要約・圧縮する
+   - contentモードで全体を書き直してよい（有効なルールは保持すること）
+3. スキル改善: 最近のブラウザ操作ログを確認。繰り返し失敗しているパターンがあればSKILL.mdに対策を追記する。
+4. 自己拡張: 既存ツールで対応できないが頻繁に必要になりそうな機能があれば、exec_codeで実装してテストし、結果をworkspaceに記録する。
 
 ルール:
 - 不可逆操作（購入、送信、削除）は行わない
-- exec_codeで新しい機能を試すのはOK。ただしテスト目的のみ。
-- 発見・成果があればupdate_workspaceでメモに残す
+- 追加だけでなく整理・削除も行う。ファイルは常にシンプルで読みやすい状態を保つ
+- 変更する場合はread_workspaceで現在の内容を読んでからcontentモードで全体を書く
+- exec_codeで新しい機能を試すのはOK。ただしテスト目的のみ
 - 特に何もなければ「特記事項なし」とだけ返す
 """
 
@@ -185,6 +190,16 @@ async def run_heartbeat() -> dict:
         )
         result = await runner.process_message(prompt)
         await _log_run(user_id, result)
+
+        # 非trivialな結果をcompanionセッションに音声プッシュ
+        response_text = result.get("response", "")
+        if response_text and "特記事項なし" not in response_text:
+            try:
+                from app.services.voice_push import push_voice_message
+                await push_voice_message(user_id, response_text)
+            except Exception:
+                pass
+
         logger.info("Heartbeat completed successfully")
         return result
     except Exception as e:
