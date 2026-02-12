@@ -803,6 +803,7 @@ export const api = {
         onComplete?: (sessionId?: string) => void;
         onError?: (error: string, sessionId?: string) => void;
         onSkillAvailable?: (browserSessionId: string, sessionId?: string) => void;
+        onProjectCreated?: (projectId: string) => void;
       },
       signal?: AbortSignal
     ): Promise<void> => {
@@ -888,6 +889,10 @@ export const api = {
                   // スキル化可能な場合、コールバックを呼び出す
                   if (parsed.can_create_skill && parsed.browser_session_id && callbacks.onSkillAvailable) {
                     callbacks.onSkillAvailable(parsed.browser_session_id, eventSessionId);
+                  }
+                  // プロジェクト作成通知
+                  if (parsed.created_project_id && callbacks.onProjectCreated) {
+                    callbacks.onProjectCreated(parsed.created_project_id);
                   }
                   if (callbacks.onComplete) {
                     completeCalled = true;

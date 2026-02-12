@@ -19,6 +19,7 @@ import { useSessionStateStore, PENDING_PROCESS_ID } from '@/stores/session-state
 import { cn } from '@/lib/utils';
 import { useVoiceChat } from '@/hooks/useVoiceChat';
 import { useGeminiObserver } from '@/hooks/useGeminiObserver';
+import { useProjectStore } from '@/stores/project-store';
 
 // プロセスステップの表示コンポーネント
 interface ProcessDisplayProps {
@@ -100,6 +101,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
   const queryClient = useQueryClient();
 
   const user = useAuthStore((state) => state.user);
+  const selectProject = useProjectStore((s) => s.selectProject);
   const [message, setMessage] = useState('');
 
   // スキル化ダイアログ用の状態（複数提案対応）
@@ -519,6 +521,10 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
           onSkillAvailable: (browserSessId) => {
             handleShowSkillProposalRef.current?.(browserSessId);
           },
+          onProjectCreated: (projectId) => {
+            queryClient.invalidateQueries({ queryKey: ['projects'] });
+            selectProject(projectId);
+          },
         },
         controller.signal
       );
@@ -531,7 +537,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
         toast.error('メッセージの送信に失敗しました');
       }
     }
-  }, [message, isSending, sessionId, queryClient, messagesData, user?.id, user?.display_name, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, setPendingConfirmation, voice, queueProcessStep, flushStepQueue]);
+  }, [message, isSending, sessionId, queryClient, messagesData, user?.id, user?.display_name, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, setPendingConfirmation, voice, queueProcessStep, flushStepQueue, selectProject]);
 
   // Voice send ref
   useEffect(() => {
@@ -624,6 +630,10 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
           onSkillAvailable: (browserSessId) => {
             handleShowSkillProposalRef.current?.(browserSessId);
           },
+          onProjectCreated: (projectId) => {
+            queryClient.invalidateQueries({ queryKey: ['projects'] });
+            selectProject(projectId);
+          },
         },
         controller.signal
       );
@@ -633,7 +643,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
         setIsSending(sessionId, false);
       }
     }
-  }, [pendingConfirmation, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, voice, queueProcessStep, flushStepQueue]);
+  }, [pendingConfirmation, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, voice, queueProcessStep, flushStepQueue, selectProject]);
 
   // 提案を修正
   const handleRevise = useCallback(async () => {
@@ -721,6 +731,10 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
           onSkillAvailable: (browserSessId) => {
             handleShowSkillProposalRef.current?.(browserSessId);
           },
+          onProjectCreated: (projectId) => {
+            queryClient.invalidateQueries({ queryKey: ['projects'] });
+            selectProject(projectId);
+          },
         },
         controller.signal
       );
@@ -730,7 +744,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
         setIsSending(sessionId, false);
       }
     }
-  }, [revisionInput, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setRevisionInput, setShowRevisionInput, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, voice, queueProcessStep, flushStepQueue]);
+  }, [revisionInput, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setRevisionInput, setShowRevisionInput, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, voice, queueProcessStep, flushStepQueue, selectProject]);
 
   const pendingProcess = processes.get(PENDING_PROCESS_ID);
 

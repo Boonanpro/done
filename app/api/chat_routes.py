@@ -791,6 +791,9 @@ async def send_dan_message_stream(
             if browser_session_id:
                 done_data['browser_session_id'] = browser_session_id
                 done_data['can_create_skill'] = True
+            created_project_id = result.get("created_project_id")
+            if created_project_id:
+                done_data['created_project_id'] = created_project_id
             yield f"data: {json.dumps(done_data)}\n\n"
             done_sent = True
 

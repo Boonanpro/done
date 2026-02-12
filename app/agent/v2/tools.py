@@ -348,6 +348,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         WRITE_FILE_TOOL,
         EDIT_FILE_TOOL,
         BASH_TOOL,
+        CREATE_PROJECT_TOOL,
     ]
 
 
@@ -792,6 +793,23 @@ BASH_TOOL = {
 }
 
 # ============================================
+# プロジェクト管理ツール
+# ============================================
+
+CREATE_PROJECT_TOOL = {
+    "name": "create_project",
+    "description": "ユーザーの依頼をプロジェクトとして登録する。複数ステップが必要なタスク、調査、計画が必要な案件に使用。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "プロジェクトのタイトル（簡潔に）"},
+            "description": {"type": "string", "description": "何を達成するかの説明"}
+        },
+        "required": ["title", "description"]
+    }
+}
+
+# ============================================
 # コード探索ツール
 # ============================================
 
@@ -855,6 +873,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "deep_research":
         return ("_deep_research", "research")
+
+    if tool_name == "create_project":
+        return ("_create_project", "create")
 
     if tool_name == "read_workspace":
         return ("_read_workspace", "read")
@@ -1567,6 +1588,32 @@ async def execute_tool(
     skill_name = tool_call["skill"]
     action = tool_call["action"]
     params = tool_call["params"]
+
+    # ★★★ プロジェクト作成 ★★★
+    if skill_name == "_create_project":
+        title = params.get("title", "")
+        description = params.get("description", "")
+        if not title:
+            return {"success": False, "error": "title が必要です"}
+        try:
+            from app.services.project_service import ProjectService
+            service = ProjectService()
+            project = await service.create_project(
+                user_id=user_id,
+                title=title,
+                description=description,
+                origin_room_id=session_id,
+            )
+            return {
+                "success": True,
+                "project_id": project["id"],
+                "title": project["title"],
+                "room_id": project.get("room_id"),
+                "message": f"プロジェクト「{project['title']}」を作成しました。",
+            }
+        except Exception as e:
+            logger.exception(f"Failed to create project: {e}")
+            return {"success": False, "error": f"プロジェクト作成エラー: {e}"}
 
     # ★★★ ワークスペース読み取り（外部依存なし）★★★
     if skill_name == "_read_workspace":

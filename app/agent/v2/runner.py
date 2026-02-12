@@ -434,11 +434,15 @@ class AgentRunner:
             # ブラウザセッションIDを抽出（スキル化用）
             # browser_* ツールが使われた場合、session_id をブラウザセッションIDとして返す
             browser_session_id = None
+            created_project_id = None
             for tool_result in tool_results:
                 tool_call_data = tool_result.get("tool", {})
                 if tool_call_data.get("skill") == "_browser":
                     browser_session_id = self.session.session_id
-                    break
+                if tool_call_data.get("skill") == "_create_project":
+                    result_data = tool_result.get("result", {})
+                    if result_data.get("success"):
+                        created_project_id = result_data.get("project_id")
 
             return {
                 "response": user_response,
@@ -446,6 +450,7 @@ class AgentRunner:
                 "reasoning_steps": self.session.reasoning_steps,
                 "tool_results": tool_results,
                 "browser_session_id": browser_session_id,  # スキル化用
+                "created_project_id": created_project_id,
             }
 
         except Exception as e:
@@ -544,6 +549,7 @@ class AgentRunner:
             name = tool.get("name", "")
             desc = tool.get("description", "").split("\n")[0]  # 1行目のみ
             lines.append(f"- `{name}`: {desc}")
+        lines.append("- `create_project`: ユーザーの依頼をプロジェクトとして登録（複数ステップのタスクに使用）")
         lines.append("")
         lines.append("### コード操作のツール選択ルール（必須）")
         lines.append("- ファイルを探す → `bash`（例: `find D:/done/frontend -name '*.tsx'`）")
