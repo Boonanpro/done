@@ -178,6 +178,10 @@ export default function ChatSessionPage() {
   const voiceAssistantTextBufRef = useRef('');
   const voiceContentToProcessIdRef = useRef<Map<string, string>>(new Map());
 
+  // Process step staggered queue - prevents batch rendering when multiple SSE events arrive in one chunk
+  const stepQueueRef = useRef<ProcessStep[]>([]);
+  const stepDrainTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const flushVoiceUserTextBuffer = useCallback(() => {
     if (voiceUserTextBufRef.current) {
       const content = voiceUserTextBufRef.current;
@@ -386,6 +390,66 @@ export default function ChatSessionPage() {
     }
   }, [messages, sessionId, getSessionState, setProcess, deleteProcess]);
 
+  // Flush all queued steps into the store immediately (call before reading final steps)
+  const flushStepQueue = useCallback(() => {
+    if (stepDrainTimerRef.current) {
+      clearTimeout(stepDrainTimerRef.current);
+      stepDrainTimerRef.current = null;
+    }
+    if (!sessionId) return;
+    const queue = stepQueueRef.current;
+    while (queue.length > 0) {
+      addProcessStep(sessionId, PENDING_PROCESS_ID, queue.shift()!);
+    }
+  }, [sessionId, addProcessStep]);
+
+  // Queue a process step and drain one-by-one with delay for real-time feel
+  const queueProcessStep = useCallback((step: ProcessStep) => {
+    if (!sessionId) return;
+    const existing = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
+    if (!existing || !existing.isProcessing) {
+      setProcess(sessionId, PENDING_PROCESS_ID, { steps: [], isCollapsed: false, isProcessing: true });
+    }
+
+    stepQueueRef.current.push(step);
+
+    // If already draining, the timer will pick up the new step
+    if (stepDrainTimerRef.current) return;
+
+    // Check if this is the first visible step (show immediately) or subsequent (delay)
+    const currentProcess = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
+    const hasVisibleSteps = (currentProcess?.steps.length ?? 0) > 0;
+
+    const drain = () => {
+      if (!sessionId || stepQueueRef.current.length === 0) {
+        stepDrainTimerRef.current = null;
+        return;
+      }
+      addProcessStep(sessionId, PENDING_PROCESS_ID, stepQueueRef.current.shift()!);
+      if (stepQueueRef.current.length > 0) {
+        stepDrainTimerRef.current = setTimeout(drain, 200);
+      } else {
+        stepDrainTimerRef.current = null;
+      }
+    };
+
+    if (!hasVisibleSteps) {
+      drain(); // First step: show immediately
+    } else {
+      stepDrainTimerRef.current = setTimeout(drain, 200);
+    }
+  }, [sessionId, getSessionState, setProcess, addProcessStep]);
+
+  // Clean up drain timer on unmount or session change
+  useEffect(() => {
+    return () => {
+      if (stepDrainTimerRef.current) {
+        clearTimeout(stepDrainTimerRef.current);
+        stepDrainTimerRef.current = null;
+      }
+    };
+  }, [sessionId]);
+
   // メッセージ送信 (textOverride: voice mode等から直接テキストを渡す場合)
   const handleSendMessage = useCallback(async (textOverride?: string) => {
     const text = textOverride || message;
@@ -426,13 +490,7 @@ export default function ChatSessionPage() {
         { message: content, session_id: sessionId },
         {
           onProcessStep: (step) => {
-            if (sessionId) {
-              const existing = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
-              if (!existing || !existing.isProcessing) {
-                setProcess(sessionId, PENDING_PROCESS_ID, { steps: [], isCollapsed: false, isProcessing: true });
-              }
-              addProcessStep(sessionId, PENDING_PROCESS_ID, step);
-            }
+            queueProcessStep(step);
           },
           onUserMessage: (msg) => {
             queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
@@ -440,6 +498,7 @@ export default function ChatSessionPage() {
             }));
           },
           onAIMessage: (msg) => {
+            flushStepQueue(); // Ensure all queued steps are in store before moving to permanent process
             if (sessionId) {
               const pending = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
               if (pending && pending.steps.length > 0) {
@@ -476,6 +535,7 @@ export default function ChatSessionPage() {
             }
           },
           onComplete: () => {
+            flushStepQueue();
             if (sessionId) {
               deleteProcess(sessionId, PENDING_PROCESS_ID);
               setIsSending(sessionId, false);
@@ -483,6 +543,7 @@ export default function ChatSessionPage() {
             refetchMessagesRef.current?.();
           },
           onError: (error) => {
+            flushStepQueue();
             if (sessionId) {
               deleteProcess(sessionId, PENDING_PROCESS_ID);
               setIsSending(sessionId, false);
@@ -504,7 +565,7 @@ export default function ChatSessionPage() {
         toast.error('メッセージの送信に失敗しました');
       }
     }
-  }, [message, isSending, sessionId, queryClient, messagesData, user?.id, user?.display_name, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, setPendingConfirmation, voice]);
+  }, [message, isSending, sessionId, queryClient, messagesData, user?.id, user?.display_name, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, setPendingConfirmation, voice, queueProcessStep, flushStepQueue]);
 
   // Voice send ref: allows voice hook to trigger message send
   useEffect(() => {
@@ -551,13 +612,7 @@ export default function ChatSessionPage() {
         { message: confirmMessage, session_id: sessionId },
         {
           onProcessStep: (step) => {
-            if (sessionId) {
-              const existing = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
-              if (!existing || !existing.isProcessing) {
-                setProcess(sessionId, PENDING_PROCESS_ID, { steps: [], isCollapsed: false, isProcessing: true });
-              }
-              addProcessStep(sessionId, PENDING_PROCESS_ID, step);
-            }
+            queueProcessStep(step);
           },
           onUserMessage: (msg) => {
             queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
@@ -565,6 +620,7 @@ export default function ChatSessionPage() {
             }));
           },
           onAIMessage: (msg) => {
+            flushStepQueue(); // Ensure all queued steps are in store before moving to permanent process
             if (sessionId) {
               const pending = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
               if (pending && pending.steps.length > 0) {
@@ -584,6 +640,7 @@ export default function ChatSessionPage() {
             }
           },
           onComplete: () => {
+            flushStepQueue();
             if (sessionId) {
               deleteProcess(sessionId, PENDING_PROCESS_ID);
               setIsSending(sessionId, false);
@@ -591,6 +648,7 @@ export default function ChatSessionPage() {
             refetchMessagesRef.current?.();
           },
           onError: (error) => {
+            flushStepQueue();
             if (sessionId) {
               deleteProcess(sessionId, PENDING_PROCESS_ID);
               setIsSending(sessionId, false);
@@ -609,7 +667,7 @@ export default function ChatSessionPage() {
         setIsSending(sessionId, false);
       }
     }
-  }, [pendingConfirmation, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, voice]);
+  }, [pendingConfirmation, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, voice, queueProcessStep, flushStepQueue]);
 
   // 提案を修正
   const handleRevise = useCallback(async () => {
@@ -651,13 +709,7 @@ export default function ChatSessionPage() {
         { message: revisionMessage, session_id: sessionId },
         {
           onProcessStep: (step) => {
-            if (sessionId) {
-              const existing = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
-              if (!existing || !existing.isProcessing) {
-                setProcess(sessionId, PENDING_PROCESS_ID, { steps: [], isCollapsed: false, isProcessing: true });
-              }
-              addProcessStep(sessionId, PENDING_PROCESS_ID, step);
-            }
+            queueProcessStep(step);
           },
           onUserMessage: (msg) => {
             queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
@@ -665,6 +717,7 @@ export default function ChatSessionPage() {
             }));
           },
           onAIMessage: (msg) => {
+            flushStepQueue(); // Ensure all queued steps are in store before moving to permanent process
             if (sessionId) {
               const pending = getSessionState(sessionId).processes.get(PENDING_PROCESS_ID);
               if (pending && pending.steps.length > 0) {
@@ -684,6 +737,7 @@ export default function ChatSessionPage() {
             }
           },
           onComplete: () => {
+            flushStepQueue();
             if (sessionId) {
               deleteProcess(sessionId, PENDING_PROCESS_ID);
               setIsSending(sessionId, false);
@@ -691,6 +745,7 @@ export default function ChatSessionPage() {
             refetchMessagesRef.current?.();
           },
           onError: (error) => {
+            flushStepQueue();
             if (sessionId) {
               deleteProcess(sessionId, PENDING_PROCESS_ID);
               setIsSending(sessionId, false);
@@ -709,7 +764,9 @@ export default function ChatSessionPage() {
         setIsSending(sessionId, false);
       }
     }
-  }, [revisionInput, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setRevisionInput, setShowRevisionInput, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, voice]);
+  }, [revisionInput, sessionId, queryClient, messagesData, user?.id, user?.display_name, setPendingConfirmation, setRevisionInput, setShowRevisionInput, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, voice, queueProcessStep, flushStepQueue]);
+
+  const pendingProcess = processes.get(PENDING_PROCESS_ID);
 
   // スクロール（メッセージ変更時 + プロセスステップ追加時）
   const pendingStepCount = pendingProcess?.steps?.length ?? 0;
@@ -737,8 +794,6 @@ export default function ChatSessionPage() {
       toggleProcessCollapse(sessionId, processId);
     }
   }, [sessionId, toggleProcessCollapse]);
-
-  const pendingProcess = processes.get(PENDING_PROCESS_ID);
 
   const handleCancel = useCallback(async () => {
     if (!sessionId) return;

@@ -9,6 +9,9 @@ import { useAuthStore } from '@/stores/auth-store';
 // 空文字列の場合は同一オリジン（Next.js rewrites経由でバックエンドにプロキシ）
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
 
+// SSE streaming requires direct backend connection (Next.js proxy buffers SSE responses)
+const SSE_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+
 // ==================== Types ====================
 
 export interface UserResponse {
@@ -466,7 +469,7 @@ export const api = {
     ) => {
       const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
       
-      const response = await fetch(`${API_BASE_URL}/api/v1/chat/dan/messages/stream`, {
+      const response = await fetch(`${SSE_BASE_URL}/api/v1/chat/dan/messages/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -782,7 +785,7 @@ export const api = {
       } catch (e) {
         console.error('[SSE] Failed to get token', e);
       }
-      const baseUrl = API_BASE_URL;
+      const baseUrl = SSE_BASE_URL;
 
       console.log('[SSE] Starting stream request', { data, baseUrl, hasToken: !!token });
 

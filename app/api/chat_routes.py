@@ -622,9 +622,6 @@ async def send_dan_message_stream(
             room_id_for_cancel = room_id
             CancellationRegistry.register(room_id)
 
-            # 最初のプロセスステップ（session_id付き）
-            yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': 'receive', 'label': '考え中...', 'status': 'running'}})}\n\n"
-
             user_message = {
                 "id": message["id"],
                 "room_id": room_id,
