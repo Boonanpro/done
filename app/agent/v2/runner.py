@@ -55,6 +55,23 @@ VOICE_ANNOUNCEMENTS: Dict[str, str] = {
     "_exec_code": "コードを実行しています",
 }
 
+# プロジェクトコンテキストテンプレート
+PROJECT_CONTEXT_TEMPLATE = """## プロジェクトモード
+
+これはプロジェクト専用チャットです。通常の雑談ではありません。
+
+### プロジェクト情報
+- タイトル: {title}
+- 説明: {description}
+- ステータス: {status}
+
+### プロジェクトモードの行動指針
+1. 仮説ドリブン: 不明点はユーザーに質問せず、仮説を立てて進める
+2. 調査と計画: 必要に応じてweb_search/deep_researchで調査
+3. 構造化された出力: Markdownで構造的に書く
+4. 反復改善: フィードバックを受けて計画を差分で更新
+5. 実行可能性重視: 抽象的なアドバイスではなく具体的なステップ"""
+
 # コンパクション設定
 COMPACTION_THRESHOLD = 80000  # この文字数を超えたらコンパクション発動
 COMPACTION_KEEP_RECENT = 10   # コンパクション時に残す最新メッセージ数
@@ -517,6 +534,12 @@ class AgentRunner:
 - 現在時刻: {now.strftime('%H:%M')}"""
         parts.append(datetime_section)
 
+        # 2.5. プロジェクトコンテキスト（プロジェクトチャットの場合のみ）
+        project_context = self._get_project_context()
+        if project_context:
+            parts.append(project_context)
+            print(f"[RUNNER_DEBUG] Project context injected")
+
         # 3. 利用可能なツール一覧
         tools_section = self._build_tools_list_section()
         if tools_section:
@@ -576,6 +599,29 @@ class AgentRunner:
         lines.append("3. 該当するスキルがない場合は、自分の判断でブラウザ操作して構わない。")
         return "\n".join(lines)
 
+
+    def _get_project_context(self) -> Optional[str]:
+        """session_idでprojectsテーブルを引き、プロジェクトコンテキストを返す"""
+        try:
+            from app.services.project_service import ProjectService
+            service = ProjectService()
+            # synchronous Supabase call (no await needed)
+            result = (
+                service.supabase.table("projects")
+                .select("title, description, status")
+                .eq("room_id", self.session.session_id)
+                .execute()
+            )
+            if result.data:
+                project = result.data[0]
+                return PROJECT_CONTEXT_TEMPLATE.format(
+                    title=project.get("title", ""),
+                    description=project.get("description", "") or "(なし)",
+                    status=project.get("status", "planning"),
+                )
+        except Exception as e:
+            logger.warning(f"Failed to get project context: {e}")
+        return None
 
     def _normalize_skill_token(self, text: str) -> str:
         """Normalize skill tokens for lookup (ASCII-only, stable matching)."""

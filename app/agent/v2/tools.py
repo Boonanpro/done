@@ -1604,6 +1604,18 @@ async def execute_tool(
                 description=description,
                 origin_room_id=session_id,
             )
+            # バックグラウンド自動提案を起動（非ブロック）
+            if project.get("room_id"):
+                import asyncio
+                from app.services.project_auto_proposal import run_project_auto_proposal
+                asyncio.create_task(run_project_auto_proposal(
+                    project_id=project["id"],
+                    room_id=project["room_id"],
+                    user_id=user_id,
+                    title=title,
+                    description=description or "",
+                ))
+
             return {
                 "success": True,
                 "project_id": project["id"],

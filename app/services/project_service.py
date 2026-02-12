@@ -117,6 +117,16 @@ class ProjectService:
         )
         return bool(result.data)
 
+    async def get_project_by_room_id(self, room_id: str) -> Optional[dict]:
+        """room_idからプロジェクトを取得（runner.pyのコンテキスト注入用）"""
+        result = (
+            self.supabase.table("projects")
+            .select("*")
+            .eq("room_id", room_id)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
     # ==================== Proposals ====================
 
     async def create_proposal(
