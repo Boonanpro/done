@@ -26,6 +26,7 @@ from app.api.otp_routes import router as otp_router
 from app.api.voice_routes import router as voice_router, ws_router as voice_ws_router
 from app.api.skill_routes import router as skill_router
 from app.api.gemini_voice_routes import router as gemini_voice_router
+from app.api.project_routes import router as project_router
 
 # v3: Executorは不使用（汎用ツールで処理）
 
@@ -88,6 +89,7 @@ app.include_router(voice_router)  # Already has /api/v1/voice prefix
 app.include_router(voice_ws_router)
 app.include_router(skill_router, prefix="/api/v1")
 app.include_router(gemini_voice_router)
+app.include_router(project_router, prefix="/api/v1")
 
 
 @app.get("/")
