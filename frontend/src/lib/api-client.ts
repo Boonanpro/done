@@ -298,6 +298,34 @@ export interface ExecutionStatusResponse {
   error_message?: string | null;
 }
 
+// Project types
+export type ProjectStatusType =
+  | 'planning'
+  | 'proposed'
+  | 'approved'
+  | 'in_progress'
+  | 'completed'
+  | 'paused'
+  | 'cancelled';
+
+export interface ProjectResponse {
+  id: string;
+  user_id: string;
+  title: string;
+  description: string | null;
+  status: ProjectStatusType;
+  room_id: string | null;
+  origin_room_id: string | null;
+  summary: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface ProjectListResponse {
+  projects: ProjectResponse[];
+}
+
 // ==================== API Error Class ====================
 
 export class ApiError extends Error {
@@ -927,6 +955,36 @@ export const api = {
       request<{ success: boolean; session_id: string }>('/chat/dan/cancel', {
         method: 'POST',
         body: JSON.stringify({ session_id: sessionId }),
+      }),
+  },
+
+  // Projects endpoints
+  projects: {
+    list: (status?: ProjectStatusType) => {
+      const query = new URLSearchParams();
+      if (status) query.set('status', status);
+      const qs = query.toString();
+      return request<ProjectListResponse>(`/projects${qs ? `?${qs}` : ''}`);
+    },
+
+    get: (projectId: string) =>
+      request<ProjectResponse>(`/projects/${projectId}`),
+
+    create: (data: { title: string; description?: string; origin_room_id?: string }) =>
+      request<ProjectResponse>('/projects', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    update: (projectId: string, data: { title?: string; status?: ProjectStatusType; summary?: string }) =>
+      request<ProjectResponse>(`/projects/${projectId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+
+    delete: (projectId: string) =>
+      request<void>(`/projects/${projectId}`, {
+        method: 'DELETE',
       }),
   },
 
