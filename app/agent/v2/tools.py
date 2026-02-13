@@ -1614,6 +1614,7 @@ async def execute_tool(
                     user_id=user_id,
                     title=title,
                     description=description or "",
+                    origin_room_id=session_id,
                 ))
 
             return {
@@ -2394,6 +2395,8 @@ def format_tool_result(
         error = result.get("error")
         if error:
             text_parts.insert(0, f"エラー: {error}")
+        # ゾーン判定リマインダー
+        text_parts.append("[Zone] 次の操作前にGreen/Yellow/Red判定を行うこと。個人情報入力・購入確定はRed（確認必須）。ただしUSER.mdに保存済みの情報はそのまま使ってよい。")
         return FormattedToolResult(text="\n".join(text_parts), images=images)
 
     # スクリーンショットがあればVision API形式に変換

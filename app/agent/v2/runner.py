@@ -66,18 +66,38 @@ PROJECT_CONTEXT_TEMPLATE = """## プロジェクトモード
 - ステータス: {status}
 
 ### プロジェクトモードの行動指針
-1. 仮説ドリブン: 不明点はユーザーに質問せず、仮説を立てて進める
-2. 調査と計画: 必要に応じてweb_search/deep_researchで調査
-3. 構造化された出力: Markdownで構造的に書く
-4. 反復改善: フィードバックを受けて計画を差分で更新
-5. 実行可能性重視: 抽象的なアドバイスではなく具体的なステップ"""
+1. 自律実行: 下記のゾーン判断に従い自律的に実行する
+2. 障害自力解決: 障害に遭遇したら自分のツール（bash, write_file, browser等）で解決を試みる
+3. 調査と計画: 必要に応じてweb_search/deep_researchで調査
+4. 構造化された出力: Markdownで構造的に書く
+5. 反復改善: フィードバックを受けて計画を差分で更新
+6. 実行可能性重視: 抽象的なアドバイスではなく具体的なステップ
+
+### ゾーン判断（各操作の実行前に必ず判定）
+- **Green（即実行）**: 検索、閲覧、ツール作成、bashコマンド、ファイル操作、パッケージインストール
+- **Yellow（実行→報告）**: フォーム入力（非個人情報）、カート追加、設定変更
+- **Red（確認→実行）**: 個人情報入力、購入確定、取消不可操作 → 必ずユーザーに内容を示して確認を待つ
+
+#### Red判定の具体例（推測で入力してはいけない）
+- 氏名・住所・電話番号・生年月日・メールアドレスの入力（※USER.mdに保存済みの情報はYellow扱い＝そのまま使ってよい）
+- クレジットカード情報の入力
+- 「注文を確定する」「購入する」ボタンのクリック
+- アカウント削除、解約、退会の実行
+
+#### 障害対応（「できません」と止まることは禁止）
+- エラー → まず自分のツール（bash, browser, exec_code等）で解決を試みる
+- OTP/2段階認証 → 「認証コードを教えてください」とユーザーに聞く
+- CAPTCHA → スクリーンショットを見せて「この画像の文字を教えてください」と聞く
+- ログイン要求 → 「ログインが必要です。ID/パスワードを教えてください」と聞く
+- 必ず代替案を提示するか、ユーザーに助けを求めること"""
 
 # コンパクション設定
 COMPACTION_THRESHOLD = 80000  # この文字数を超えたらコンパクション発動
 COMPACTION_KEEP_RECENT = 10   # コンパクション時に残す最新メッセージ数
 
 # 使用するモデル
-MODEL = "claude-sonnet-4-5-20250929"  # Sonnet 4.5（コスト削減）
+MODEL_DEFAULT = "claude-sonnet-4-5-20250929"      # 日常チャット（$3/$15）
+MODEL_HEAVY = "claude-opus-4-6"                   # プロジェクト実行（$5/$25）
 
 # ============================================
 # Native Tool Use: ツール定義
@@ -742,9 +762,42 @@ class AgentRunner:
         # 文末が見つからない場合はそのまま（ただし100文字で切る）
         return text[:100].strip()
 
-    def _get_model(self) -> str:
-        """使用するモデルを返す"""
-        return MODEL
+    def _get_model(self, task: str = "default") -> str:
+        """
+        タスクに応じたモデルを返す。
+
+        - "default": 日常チャット → Haiku / プロジェクトチャット → Opus
+        - "heavy": 強制Opus
+        - "compaction": 強制Haiku（要約は簡単）
+
+        プロジェクトチャット内の場合は自動的にOpusを使う（結果はキャッシュ）。
+        """
+        if task == "compaction":
+            return MODEL_DEFAULT
+
+        if task == "heavy":
+            return MODEL_HEAVY
+
+        # プロジェクトチャット判定（キャッシュ）
+        if not hasattr(self, "_is_project_chat"):
+            self._is_project_chat = False
+            try:
+                from app.services.project_service import ProjectService
+                service = ProjectService()
+                result = (
+                    service.supabase.table("projects")
+                    .select("id")
+                    .eq("room_id", self.session.session_id)
+                    .execute()
+                )
+                self._is_project_chat = bool(result.data)
+            except Exception:
+                pass
+
+        if self._is_project_chat:
+            return MODEL_HEAVY
+
+        return MODEL_DEFAULT
 
     def _get_tools(self) -> List[Dict[str, Any]]:
         """
@@ -1031,9 +1084,9 @@ class AgentRunner:
             "content": "上記の会話の全内容を箇条書きで要約してください。省略禁止。"
         })
 
-        # LLM呼び出し（ツールなし、テキスト出力のみ）
+        # LLM呼び出し（ツールなし、テキスト出力のみ）— 圧縮はHaikuで十分
         response = await self.llm_client.messages.create(
-            model=self._get_model(),
+            model=self._get_model(task="compaction"),
             max_tokens=4000,
             system=flush_system,
             messages=flush_messages,
@@ -1108,7 +1161,7 @@ class AgentRunner:
 
         try:
             response = await self.llm_client.messages.create(
-                model=self._get_model(),
+                model=self._get_model(task="compaction"),
                 max_tokens=2000,
                 system=system,
                 messages=messages,

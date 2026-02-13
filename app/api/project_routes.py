@@ -149,9 +149,74 @@ async def proposal_action(
 
     if request.action == "approve":
         result = await service.approve_proposal(proposal_id, project_id)
+        if result:
+            # 承認成功 → ステータスをin_progressに更新
+            await service.update_project(
+                project_id, current_user.user_id, status="in_progress"
+            )
+
+            # SDK実行をバックグラウンドで開始
+            import asyncio
+            asyncio.create_task(_start_project_execution(
+                project=project,
+                proposal=result,
+                user_id=current_user.user_id,
+            ))
     else:
         result = await service.reject_proposal(proposal_id, project_id)
 
     if not result:
         raise HTTPException(status_code=404, detail="Proposal not found or already actioned")
     return result
+
+
+async def _start_project_execution(project: dict, proposal: dict, user_id: str):
+    """承認された提案をSDK Runnerで実行開始"""
+    import logging
+    logger = logging.getLogger(__name__)
+
+    room_id = project["room_id"]
+    proposal_content = proposal.get("content", "")
+
+    execution_prompt = f"""以下の計画が承認されました。実行を開始してください。
+
+## 承認された計画
+{proposal_content}
+
+## 実行指示
+- 上記の実行計画のステップを順番に実行してください
+- 各ステップの完了時に進捗を報告してください
+- Redゾーン操作（決済、個人情報入力等）は必ずユーザーに確認してください
+"""
+
+    try:
+        from app.agent.sdk_runner import process_message_sdk
+        from app.services.chat_service import ChatService
+
+        final_text = ""
+        async for event in process_message_sdk(
+            room_id=room_id,
+            user_id=user_id,
+            content=execution_prompt,
+            project_title=project.get("title", ""),
+            project_description=project.get("description", ""),
+            project_status="in_progress",
+        ):
+            if event["type"] == "text":
+                final_text = event["text"]
+            elif event["type"] == "result":
+                final_text = event.get("text", final_text)
+            elif event["type"] == "error":
+                final_text = f"エラーが発生しました: {event['message']}"
+
+        # 実行結果をチャットメッセージとして保存
+        if final_text:
+            chat_service = ChatService()
+            await chat_service.send_dan_ai_message(
+                user_id=user_id,
+                content=final_text,
+                room_id=room_id,
+            )
+
+    except Exception as e:
+        logger.exception(f"[ProjectExecution] Failed for project {project.get('id')}: {e}")
