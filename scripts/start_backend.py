@@ -158,11 +158,17 @@ def start_uvicorn() -> subprocess.Popen:
     cmd = [sys.executable, "-m", "uvicorn", "main:app",
            "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
+    # CLAUDECODE を除外した環境変数を渡す
+    # （Claude Code セッション内から起動しても SDK が動くようにする）
+    import os
+    clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+
     process = subprocess.Popen(
         cmd,
         cwd="D:/done",
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=clean_env,
     )
 
     print(f"[start] uvicorn started with PID {process.pid}")
