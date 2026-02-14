@@ -1622,7 +1622,8 @@ async def execute_tool(
                 "project_id": project["id"],
                 "title": project["title"],
                 "room_id": project.get("room_id"),
-                "message": f"プロジェクト「{project['title']}」を作成しました。",
+                "message": f"プロジェクト「{project['title']}」を作成しました。事業部が自動で提案を作成中です。",
+                "instruction": "プロジェクト作成完了を簡潔に伝えてください。「事業部に回しました。提案をお待ちください。」程度の一言で十分です。プロジェクトの内容について詳細な説明や提案をしないでください。それは事業部の役割です。",
             }
         except Exception as e:
             logger.exception(f"Failed to create project: {e}")
