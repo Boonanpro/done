@@ -1,14 +1,14 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { X, FolderKanban, Loader2, Clock, MessageSquare, Send, Square } from 'lucide-react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { X, FolderKanban, Loader2, MessageSquare, Send, Square, CheckCircle2, XCircle } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { Button } from '@/components/ui/button';
-import { api, type MessageResponse, type ProjectStatusType } from '@/lib/api-client';
+import { api, type MessageResponse, type ProjectStatusType, type ProjectProposalResponse } from '@/lib/api-client';
 import { useProjectStore } from '@/stores/project-store';
 import { useAuthStore } from '@/stores/auth-store';
 
@@ -44,6 +44,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     queryKey: ['project', projectId],
     queryFn: () => api.projects.get(projectId),
     enabled: !!projectId,
+    refetchInterval: 3000,
   });
 
   const { data: messagesData, isLoading: isLoadingMessages, refetch: refetchMessages } = useQuery({
@@ -55,6 +56,123 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   });
 
   useEffect(() => { refetchMessagesRef.current = refetchMessages; }, [refetchMessages]);
+
+  // Proposals query (status=proposed のときのみ)
+  const { data: proposals } = useQuery({
+    queryKey: ['project-proposals', projectId],
+    queryFn: () => api.projects.proposals.list(projectId),
+    enabled: !!projectId && project?.status === 'proposed',
+    refetchInterval: 5000,
+  });
+
+  const pendingProposal = proposals?.find((p: ProjectProposalResponse) => p.status === 'pending');
+
+  // 実行プロンプトを組み立てるヘルパー
+  const buildExecutionPrompt = useCallback((
+    title: string,
+    description: string,
+    steps: Array<{ step_number: number; description: string }> | null,
+  ): string => {
+    const stepsText = steps?.map((s) => `${s.step_number}. ${s.description}`).join('\n') || '(ステップなし)';
+    return `[Project Execution] 承認された計画を実行してください。
+
+## プロジェクト情報
+- タイトル: ${title}
+- 説明: ${description || '(説明なし)'}
+
+## 承認された実行計画
+${stepsText}
+
+上記の計画を順番に実行してください。`;
+  }, []);
+
+  // 実行プロンプトをSSE経由で送信
+  const triggerExecution = useCallback(async (executionPrompt: string) => {
+    const roomId = project?.room_id;
+    if (!roomId) return;
+
+    setIsSending(true);
+    setIsProcessing(true);
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const queryKey = ['project-messages', roomId];
+
+    try {
+      await api.sm.sendMessageStream(
+        { message: executionPrompt, session_id: roomId },
+        {
+          onUserMessage: (msg) => {
+            queryClient.setQueryData(queryKey, (old: typeof messagesData) => ({
+              messages: [msg, ...(old?.messages || [])],
+            }));
+          },
+          onAIMessage: (msg) => {
+            setIsProcessing(false);
+            queryClient.setQueryData(queryKey, (old: typeof messagesData) => ({
+              messages: [msg, ...(old?.messages || [])],
+            }));
+          },
+          onProcessStep: () => {},
+          onComplete: () => {
+            setIsSending(false);
+            setIsProcessing(false);
+            refetchMessagesRef.current?.();
+            queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+          },
+          onError: (error) => {
+            setIsSending(false);
+            setIsProcessing(false);
+            toast.error(error || '実行中にエラーが発生しました');
+          },
+        },
+        controller.signal,
+      );
+    } catch (error) {
+      setIsSending(false);
+      setIsProcessing(false);
+      if (error instanceof Error && error.name !== 'AbortError') {
+        toast.error('実行の開始に失敗しました');
+      }
+    }
+  }, [project?.room_id, queryClient, messagesData, projectId]);
+
+  // Approve/Reject mutations
+  const approveMutation = useMutation({
+    mutationFn: (proposalId: string) =>
+      api.projects.proposals.action(projectId, proposalId, 'approve'),
+    onSuccess: (data: ProjectProposalResponse) => {
+      toast.success('提案を承認しました。実行を開始します...');
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
+
+      // 承認後、自動的に実行プロンプトをSSE経由で送信
+      if (project) {
+        const prompt = buildExecutionPrompt(
+          project.title,
+          project.description || '',
+          data.steps || [],
+        );
+        triggerExecution(prompt);
+      }
+    },
+    onError: () => {
+      toast.error('提案の承認に失敗しました');
+    },
+  });
+
+  const rejectMutation = useMutation({
+    mutationFn: (proposalId: string) =>
+      api.projects.proposals.action(projectId, proposalId, 'reject'),
+    onSuccess: () => {
+      toast.info('提案を却下しました');
+      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+      queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
+    },
+    onError: () => {
+      toast.error('提案の却下に失敗しました');
+    },
+  });
 
   const status = project?.status ? STATUS_LABELS[project.status] : null;
   const messages = messagesData?.messages || [];
@@ -69,10 +187,15 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   // テキストエリア自動リサイズ
   useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 120)}px`;
+    const ta = textareaRef.current;
+    if (!ta) return;
+    if (!message.trim()) {
+      // 空のときは固定高さにリセット（突然広がるバグ防止）
+      ta.style.height = '32px';
+      return;
     }
+    ta.style.height = '32px'; // 一度最小に戻してからscrollHeightを測る
+    ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
   }, [message]);
 
   // メッセージ送信
@@ -206,11 +329,18 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           ) : (
             <>
               <h2 className="font-semibold text-sm truncate">{project?.title}</h2>
-              {status && (
-                <span className={`inline-block text-[10px] px-1.5 py-0.5 rounded-full font-medium mt-0.5 ${status.color}`}>
-                  {status.label}
-                </span>
-              )}
+              <div className="flex items-center gap-2 mt-0.5">
+                {status && (
+                  <span className={`inline-block text-[10px] px-1.5 py-0.5 rounded-full font-medium ${status.color}`}>
+                    {status.label}
+                  </span>
+                )}
+                {project?.created_at && (
+                  <span className="text-[10px] text-muted-foreground/60">
+                    {new Date(project.created_at).toLocaleDateString('ja-JP')}
+                  </span>
+                )}
+              </div>
             </>
           )}
         </div>
@@ -224,20 +354,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </Button>
       </div>
 
-      {/* Project info */}
-      {project?.description && (
-        <div className="shrink-0 px-4 py-3 border-b border-border">
-          <p className="text-xs text-muted-foreground leading-relaxed">
-            {project.description}
-          </p>
-          {project.created_at && (
-            <div className="flex items-center gap-1 mt-2 text-[10px] text-muted-foreground/60">
-              <Clock className="h-3 w-3" />
-              <span>{new Date(project.created_at).toLocaleDateString('ja-JP')}</span>
-            </div>
-          )}
-        </div>
-      )}
+      {/* Project info - removed: description and date moved to header */}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">
@@ -286,6 +403,41 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           </div>
         )}
       </div>
+
+      {/* Proposal Action Bar */}
+      {pendingProposal && project?.status === 'proposed' && (
+        <div className="shrink-0 border-t border-border px-4 py-2 bg-yellow-500/5">
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              className="h-8 text-xs gap-1.5"
+              onClick={() => approveMutation.mutate(pendingProposal.id)}
+              disabled={approveMutation.isPending || rejectMutation.isPending}
+            >
+              {approveMutation.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <CheckCircle2 className="h-3.5 w-3.5" />
+              )}
+              承認して実行
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 text-xs gap-1.5"
+              onClick={() => rejectMutation.mutate(pendingProposal.id)}
+              disabled={approveMutation.isPending || rejectMutation.isPending}
+            >
+              {rejectMutation.isPending ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <XCircle className="h-3.5 w-3.5" />
+              )}
+              却下
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Input Area */}
       {project?.room_id && (

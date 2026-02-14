@@ -20,8 +20,8 @@ export function MainLayout({
 
   const gridCols = selectedProjectId
     ? isCollapsed
-      ? '64px 400px 1fr'
-      : '280px 400px 1fr'
+      ? '64px 520px 1fr'
+      : '280px 520px 1fr'
     : isCollapsed
       ? '64px 0px 1fr'
       : '280px 0px 1fr';
