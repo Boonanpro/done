@@ -69,9 +69,9 @@ def _build_system_prompt(title: str, description: str, status: str) -> str:
     秘書部のRULES.md等は読み込まない。
     CLIは元々高品質な判断力を持つので、最小限の指示だけ追加する。
     """
-    from app.agent.v2.runner import get_core_prompt, load_bootstrap_file
+    from app.agent.v2.runner import load_bootstrap_file
 
-    parts = [get_core_prompt()]
+    parts = ["You are Dan's business division. You plan, research, and execute projects."]
 
     # ユーザー情報のみ読み込む（個人情報の判断に必要）
     user = load_bootstrap_file("USER.md")
@@ -105,8 +105,6 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 - 個人情報の入力（知らなければ必ず聞く。推測禁止）
 - 外部への送信（メール、メッセージ、SNS投稿）
 - アカウント削除・パスワード変更
-
-上記以外の操作は自律的に進めてよい。
 
 ### ブラウザ操作
 - @e参照は直前の操作結果でのみ有効。ページ遷移後は使わない
