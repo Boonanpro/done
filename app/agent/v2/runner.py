@@ -42,6 +42,36 @@ def safe_print(msg: str) -> None:
 # コアプロンプト（不変）
 CORE_PROMPT = "You are Dan, a personal AI assistant."
 
+
+def detect_language(text: str) -> str:
+    """
+    テキストの言語を簡易判定する。
+    ユーザーのメッセージに合わせてダンの思考・回答言語を決定するために使用。
+    """
+    import unicodedata
+    counts = {"ja": 0, "zh": 0, "ko": 0, "latin": 0}
+    for ch in text:
+        try:
+            name = unicodedata.name(ch, "")
+        except ValueError:
+            continue
+        if "HIRAGANA" in name or "KATAKANA" in name:
+            counts["ja"] += 3  # かな文字は日本語の強い指標
+        elif "CJK" in name:
+            counts["zh"] += 1  # 漢字は日中共通なので弱い指標
+        elif "HANGUL" in name:
+            counts["ko"] += 1
+        elif "LATIN" in name:
+            counts["latin"] += 1
+    # かな文字があれば日本語（漢字混じりでも）
+    if counts["ja"] > 0:
+        return "Japanese"
+    if counts["ko"] > 0:
+        return "Korean"
+    if counts["zh"] > 0:
+        return "Chinese"
+    return "English"
+
 # ツール実行の最大ループ回数（安全弁として30回を超えたら強制終了）
 MAX_TOOL_LOOPS = 30
 
@@ -233,6 +263,9 @@ class AgentRunner:
             # normal conversation about installing/finding external skills.
             # The LLM already knows the skill list via the system prompt.
 
+            # 0.9. ユーザーメッセージの言語を検出（思考・回答言語の決定用）
+            self._user_language = detect_language(user_message)
+
             # 1. 推論ステップをクリア（新しいターン）
             self.session.clear_reasoning_steps()
 
@@ -289,6 +322,8 @@ class AgentRunner:
 
                 # ツールを実行
                 reasoning_text = parsed["reasoning_text"] or ""
+                if reasoning_text and self._on_reasoning_step:
+                    await self._on_reasoning_step(reasoning_text)
                 first_tool = True
 
                 # 音声アナウンス: 最初のツール実行前にユーザー向けメッセージを送出
@@ -606,8 +641,17 @@ class AgentRunner:
             parts.append(bootstrap)
             print(f"[RUNNER_DEBUG] Bootstrap files loaded: {len(bootstrap)} chars")
 
+        # 6. 言語指示（最後 = recency biasで最も効く位置）
+        lang = getattr(self, "_user_language", "Japanese")
+        parts.append(
+            f"## CRITICAL: Language Rule\n\n"
+            f"The user is speaking {lang}. "
+            f"You MUST think and respond ONLY in {lang}. "
+            f"Never switch to another language in your thinking or response."
+        )
+
         system = "\n\n---\n\n".join(parts)
-        print(f"[RUNNER_DEBUG] Total system prompt: {len(system)} chars")
+        print(f"[RUNNER_DEBUG] Total system prompt: {len(system)} chars (lang={lang})")
         return system
 
     def _build_tools_list_section(self) -> str:
@@ -833,7 +877,10 @@ class AgentRunner:
 
     async def _call_llm_with_tools(self) -> "anthropic.types.Message":
         """
-        LLMをストリーミングで呼び出し、thinking をリアルタイムにプロセスモニターへ送信
+        LLMをストリーミングで呼び出し、thinkingをプロセスモニターへ送信
+
+        thinkingは段落単位（空行区切り）でまとめて送信する。
+        一文ずつ細かく分割はしない。
 
         Returns:
             Anthropic Message オブジェクト（content blocksを含む）
@@ -865,7 +912,6 @@ class AgentRunner:
                 if tools:
                     kwargs["tools"] = tools
 
-                # ストリーミング: thinking をリアルタイムにプロセスモニターへ送信
                 thinking_buffer = ""
 
                 async with self.llm_client.messages.stream(**kwargs) as stream:
@@ -873,27 +919,19 @@ class AgentRunner:
                         if event.type == "content_block_delta":
                             if event.delta.type == "thinking_delta":
                                 thinking_buffer += event.delta.thinking
-                                # 文末（。！？\n）で区切ってプロセスモニターに送信
-                                while True:
-                                    flush_pos = -1
-                                    for idx, ch in enumerate(thinking_buffer):
-                                        if ch in ("。", "！", "？", "!", "?", "\n"):
-                                            flush_pos = idx
-                                            break
-                                    if flush_pos >= 0:
-                                        chunk = thinking_buffer[:flush_pos + 1].strip()
-                                        thinking_buffer = thinking_buffer[flush_pos + 1:]
-                                        if chunk and self._on_reasoning_step:
-                                            await self._on_reasoning_step(chunk)
-                                    else:
-                                        break
+                                # 段落区切り（空行）でまとめて送信
+                                while "\n\n" in thinking_buffer:
+                                    chunk, thinking_buffer = thinking_buffer.split("\n\n", 1)
+                                    chunk = chunk.strip()
+                                    if chunk and self._on_reasoning_step:
+                                        await self._on_reasoning_step(chunk)
                         elif event.type == "content_block_stop":
-                            # ブロック終了時にバッファ残りをフラッシュ
+                            # thinkingブロック終了時に残りをフラッシュ
                             if thinking_buffer.strip() and self._on_reasoning_step:
                                 await self._on_reasoning_step(thinking_buffer.strip())
                             thinking_buffer = ""
 
-                    response = stream.get_final_message()
+                    response = await stream.get_final_message()
 
                 safe_print(f"[LLM_DEBUG] Response stop_reason: {response.stop_reason}")
                 safe_print(f"[LLM_DEBUG] Response content blocks: {len(response.content)}")

@@ -26,7 +26,8 @@ export default function ChatPage() {
     if (!isLoading && !isAuthenticated && !hasToken) {
       router.push('/login');
     }
-  }, [isLoading, isAuthenticated, hasToken, router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading, isAuthenticated, hasToken]);
 
   // DANルームを取得
   const { data: danRoom, isLoading: isLoadingRoom } = useQuery({

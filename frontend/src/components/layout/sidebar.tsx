@@ -4,19 +4,7 @@ import { useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import {
-  MessageSquare,
-  Users,
-  Settings,
-  LogOut,
-  Plus,
-  Search,
-  ChevronLeft,
-  ChevronRight,
-  Loader2,
-  MessageCircle,
-  X,
-} from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Plus, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, MessageCircle, X, Briefcase, FileEdit } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -51,6 +39,12 @@ interface SidebarProps {
 
 const navItems = [
   {
+    title: 'チャット',
+    href: '/chat',
+    icon: MessageSquare,
+    description: 'ダンとの会話',
+  },
+  {
     title: '友達',
     href: '/friends',
     icon: Users,
@@ -64,6 +58,15 @@ const navItems = [
   },
 ];
 
+const businessItems = [
+  {
+    title: 'note投稿',
+    href: '/notes',
+    icon: FileEdit,
+    description: 'note記事の下書き・投稿管理',
+  },
+];
+
 export function Sidebar({ className }: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
@@ -72,6 +75,7 @@ export function Sidebar({ className }: SidebarProps) {
   const { user, logout, isLoggingOut } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [isBusinessOpen, setIsBusinessOpen] = useState(false);
   const hasToken = useHasToken();
 
   // URLから現在のセッションIDを取得（唯一の真実源）
@@ -373,10 +377,116 @@ export function Sidebar({ className }: SidebarProps) {
           <Separator className="my-3 bg-sidebar-border" />
 
           <nav className="space-y-1">
-            {navItems.map((item) => {
+            {/* チャット */}
+            {navItems.filter(item => item.href === '/chat').map((item) => {
               const isActive = pathname.startsWith(item.href);
               const Icon = item.icon;
+              return (
+                <Tooltip key={item.href}>
+                  <TooltipTrigger asChild>
+                    <Link href={item.href}>
+                      <motion.div
+                        whileHover={{ scale: 1.02 }}
+                        whileTap={{ scale: 0.98 }}
+                        className={cn(
+                          'flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors',
+                          isActive
+                            ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                            : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
+                          isCollapsed && 'justify-center px-0'
+                        )}
+                      >
+                        <Icon className="h-4 w-4 shrink-0" />
+                        {!isCollapsed && <span>{item.title}</span>}
+                      </motion.div>
+                    </Link>
+                  </TooltipTrigger>
+                  {isCollapsed && (
+                    <TooltipContent side="right">
+                      <p className="font-medium">{item.title}</p>
+                      <p className="text-xs text-muted-foreground">{item.description}</p>
+                    </TooltipContent>
+                  )}
+                </Tooltip>
+              );
+            })}
 
+            {/* ビジネス */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <motion.div
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  className={cn(
+                    'flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer',
+                    (isBusinessOpen || pathname.startsWith('/notes'))
+                      ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                      : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
+                    isCollapsed && 'justify-center px-0'
+                  )}
+                  onClick={() => setIsBusinessOpen(!isBusinessOpen)}
+                >
+                  <Briefcase className="h-4 w-4 shrink-0" />
+                  {!isCollapsed && (
+                    <>
+                      <span className="flex-1">ビジネス</span>
+                      <ChevronDown className={cn(
+                        'h-3.5 w-3.5 transition-transform',
+                        isBusinessOpen && 'rotate-180'
+                      )} />
+                    </>
+                  )}
+                </motion.div>
+              </TooltipTrigger>
+              {isCollapsed && (
+                <TooltipContent side="right">
+                  <p className="font-medium">ビジネス</p>
+                  <p className="text-xs text-muted-foreground">ビジネスツール</p>
+                </TooltipContent>
+              )}
+            </Tooltip>
+
+            <AnimatePresence>
+              {isBusinessOpen && !isCollapsed && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="overflow-hidden"
+                >
+                  {businessItems.map((item) => {
+                    const isActive = pathname.startsWith(item.href);
+                    const Icon = item.icon;
+                    return (
+                      <Tooltip key={item.href}>
+                        <TooltipTrigger asChild>
+                          <Link href={item.href}>
+                            <motion.div
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              className={cn(
+                                'flex items-center gap-3 pl-8 pr-3 py-2 rounded-lg text-sm transition-colors',
+                                isActive
+                                  ? 'bg-sidebar-accent text-sidebar-accent-foreground'
+                                  : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'
+                              )}
+                            >
+                              <Icon className="h-4 w-4 shrink-0" />
+                              <span>{item.title}</span>
+                            </motion.div>
+                          </Link>
+                        </TooltipTrigger>
+                      </Tooltip>
+                    );
+                  })}
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* 友達・設定 */}
+            {navItems.filter(item => item.href !== '/chat').map((item) => {
+              const isActive = pathname.startsWith(item.href);
+              const Icon = item.icon;
               return (
                 <Tooltip key={item.href}>
                   <TooltipTrigger asChild>

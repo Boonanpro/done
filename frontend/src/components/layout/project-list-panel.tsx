@@ -4,16 +4,7 @@ import { useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import {
-  Users,
-  Settings,
-  LogOut,
-  Search,
-  ChevronLeft,
-  ChevronRight,
-  Loader2,
-  FolderKanban,
-} from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, Loader2, FolderKanban } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -62,6 +53,12 @@ const STATUS_LABELS: Record<ProjectStatusType, string> = {
 };
 
 const navItems = [
+  {
+    title: 'チャット',
+    href: '/chat',
+    icon: MessageSquare,
+    description: 'ダンとの会話',
+  },
   {
     title: '友達',
     href: '/friends',

@@ -2,19 +2,7 @@
 
 import { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import {
-  Bell,
-  ChevronDown,
-  ChevronUp,
-  FileText,
-  Mail,
-  Zap,
-  X,
-  Check,
-  Edit,
-  Loader2,
-  Send,
-} from 'lucide-react';
+import { Bell, ChevronDown, ChevronUp, FileText, Mail, Zap, X, Check, Edit, Loader2, Send } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 

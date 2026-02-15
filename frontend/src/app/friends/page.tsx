@@ -2,19 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import {
-  Users,
-  Plus,
-  Search,
-  Copy,
-  Check,
-  ToggleLeft,
-  ToggleRight,
-  MessageCircle,
-  Send,
-  Loader2,
-  Bot,
-} from 'lucide-react';
+import { Users, Plus, Search, Copy, Check, ToggleLeft, ToggleRight, MessageCircle, Send, Loader2, Bot } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 

@@ -1,14 +1,14 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { X, FolderKanban, Loader2, MessageSquare, Send, Square, CheckCircle2, XCircle, ChevronDown, ChevronUp, Check, FileText } from 'lucide-react';
+import { X, FolderKanban, Loader2, MessageSquare, Send, Square, CheckCircle2, XCircle, ChevronDown, ChevronRight, Check, FileText, Terminal, Brain, AlertCircle } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { Button } from '@/components/ui/button';
-import { api, type MessageResponse, type ProjectStatusType, type ProjectProposalResponse } from '@/lib/api-client';
+import { api, type MessageResponse, type ProjectStatusType, type ProjectProposalResponse, type ProcessStep } from '@/lib/api-client';
 import { useProjectStore } from '@/stores/project-store';
 import { useAuthStore } from '@/stores/auth-store';
 
@@ -26,6 +26,128 @@ const STATUS_LABELS: Record<ProjectStatusType, { label: string; color: string }>
   cancelled: { label: 'キャンセル', color: 'bg-red-500/15 text-red-600' },
 };
 
+// --- Inline Process Block ---
+function InlineProcessBlock({
+  steps,
+  isLive = false,
+  defaultCollapsed = true,
+}: {
+  steps: { label: string; type: 'tool' | 'reasoning' | 'error' }[];
+  isLive?: boolean;
+  defaultCollapsed?: boolean;
+}) {
+  const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Live block: auto-expand and auto-scroll
+  useEffect(() => {
+    if (isLive && steps.length > 0) {
+      setIsCollapsed(false);
+    }
+  }, [isLive, steps.length]);
+
+  useEffect(() => {
+    if (!isCollapsed && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [steps.length, isCollapsed]);
+
+  if (steps.length === 0 && !isLive) return null;
+
+  return (
+    <div className="my-1">
+      <div className="max-w-[90%] rounded-lg border border-border/40 bg-muted/20 overflow-hidden">
+        {/* Header */}
+        <button
+          onClick={() => setIsCollapsed((v) => !v)}
+          className="flex items-center gap-1.5 w-full px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-muted/30 transition-colors"
+        >
+          {isCollapsed ? (
+            <ChevronRight className="h-3 w-3 shrink-0" />
+          ) : (
+            <ChevronDown className="h-3 w-3 shrink-0" />
+          )}
+          <Terminal className="h-3 w-3 shrink-0 text-primary/60" />
+          <span className="font-medium">
+            {isLive && steps.length === 0
+              ? '処理を開始中...'
+              : `実行ログ (${steps.length}件)`}
+          </span>
+          {isLive && (
+            <Loader2 className="h-3 w-3 animate-spin text-primary ml-auto shrink-0" />
+          )}
+          {!isLive && steps.some((s) => s.type === 'error') && (
+            <AlertCircle className="h-3 w-3 text-red-500 ml-auto shrink-0" />
+          )}
+          {!isLive && !steps.some((s) => s.type === 'error') && steps.length > 0 && (
+            <Check className="h-3 w-3 text-green-500 ml-auto shrink-0" />
+          )}
+        </button>
+
+        {/* Steps */}
+        {!isCollapsed && (
+          <div
+            ref={scrollRef}
+            className="max-h-[200px] overflow-y-auto px-3 pb-2"
+          >
+            <div className="border-l-2 border-primary/20 pl-2.5 space-y-0.5">
+              {steps.map((step, i) => {
+                const isLastLive = isLive && i === steps.length - 1;
+                return (
+                  <div key={i} className="flex items-start gap-1.5 text-[10px] leading-relaxed">
+                    {step.type === 'error' ? (
+                      <AlertCircle className="h-2.5 w-2.5 text-red-500 shrink-0 mt-0.5" />
+                    ) : step.type === 'reasoning' ? (
+                      isLastLive ? (
+                        <Loader2 className="h-2.5 w-2.5 animate-spin text-primary shrink-0 mt-0.5" />
+                      ) : (
+                        <Brain className="h-2.5 w-2.5 text-yellow-500/70 shrink-0 mt-0.5" />
+                      )
+                    ) : isLastLive ? (
+                      <Loader2 className="h-2.5 w-2.5 animate-spin text-primary shrink-0 mt-0.5" />
+                    ) : (
+                      <Check className="h-2.5 w-2.5 text-green-500 shrink-0 mt-0.5" />
+                    )}
+                    <span
+                      className={
+                        step.type === 'error'
+                          ? 'text-red-500'
+                          : step.type === 'reasoning'
+                            ? 'text-muted-foreground/70 italic'
+                            : 'text-muted-foreground'
+                      }
+                    >
+                      {step.label}
+                    </span>
+                  </div>
+                );
+              })}
+              {isLive && steps.length === 0 && (
+                <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                  <Loader2 className="h-2.5 w-2.5 animate-spin text-primary" />
+                  <span>接続中...</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- Helper: reasoning_steps を分類 ---
+function classifyStep(label: string): 'tool' | 'reasoning' | 'error' {
+  if (label.startsWith('🔧') || label.startsWith('[tool]')) return 'tool';
+  if (label.startsWith('[error]') || label.startsWith('❌')) return 'error';
+  return 'reasoning';
+}
+
+// --- Display item types ---
+type DisplayItem =
+  | { kind: 'message'; msg: MessageResponse }
+  | { kind: 'process-block'; steps: { label: string; type: 'tool' | 'reasoning' | 'error' }[]; id: string };
+
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const selectProject = useProjectStore((s) => s.selectProject);
@@ -34,6 +156,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const [message, setMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [liveSteps, setLiveSteps] = useState<{ label: string; type: 'tool' | 'reasoning' | 'error' }[]>([]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -57,7 +180,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   useEffect(() => { refetchMessagesRef.current = refetchMessages; }, [refetchMessages]);
 
-  // Proposals query (提案中はポーリング、それ以外は一度だけ取得)
+  // Proposals query
   const isProposed = project?.status === 'proposed';
   const { data: proposals } = useQuery({
     queryKey: ['project-proposals', projectId],
@@ -77,7 +200,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       toast.success('提案を承認しました。実行を開始します...');
       queryClient.invalidateQueries({ queryKey: ['project', projectId] });
       queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
-      // 実行はバックエンド側で自動開始される（二重実行防止）
     },
     onError: () => {
       toast.error('提案の承認に失敗しました');
@@ -100,67 +222,56 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const status = project?.status ? STATUS_LABELS[project.status] : null;
   const messages = messagesData?.messages || [];
 
-  // メッセージを時系列に並べ、連続する[実行中]/[思考中]をグループ化
-  type ProcessStep = { type: 'action' | 'thought'; text: string };
-  type DisplayItem =
-    | { kind: 'message'; msg: MessageResponse }
-    | { kind: 'process-group'; steps: ProcessStep[]; id: string };
-
+  // Build display items: messages + inline process blocks from ai_context
   const displayItems: DisplayItem[] = (() => {
     const chronological = [...messages].reverse();
     const items: DisplayItem[] = [];
-    let currentGroup: ProcessStep[] = [];
-    let groupId = '';
-
-    const flushGroup = () => {
-      if (currentGroup.length > 0) {
-        items.push({ kind: 'process-group', steps: [...currentGroup], id: groupId });
-        currentGroup = [];
-      }
-    };
 
     for (const msg of chronological) {
       const content = msg.content || '';
-      if (msg.sender_type !== 'human' && content.startsWith('[実行中]')) {
-        if (currentGroup.length === 0) groupId = `pg-${msg.id}`;
-        currentGroup.push({ type: 'action', text: content.replace('[実行中] ', '') });
-      } else if (msg.sender_type !== 'human' && content.startsWith('[思考中]')) {
-        if (currentGroup.length === 0) groupId = `pg-${msg.id}`;
-        currentGroup.push({ type: 'thought', text: content.replace('[思考中] ', '') });
-      } else {
-        flushGroup();
-        items.push({ kind: 'message', msg });
+
+      // Skip legacy [実行中]/[思考中] prefixed messages
+      if (msg.sender_type !== 'human' && (content.startsWith('[実行中]') || content.startsWith('[思考中]'))) {
+        continue;
       }
+
+      // For AI messages: insert process block from ai_context before the message
+      if (msg.sender_type === 'ai' && msg.ai_context?.reasoning_steps?.length) {
+        const steps = msg.ai_context.reasoning_steps.map((s: string) => ({
+          label: s,
+          type: classifyStep(s),
+        }));
+        items.push({ kind: 'process-block', steps, id: `pb-${msg.id}` });
+      }
+
+      items.push({ kind: 'message', msg });
     }
-    flushGroup();
+
     return items;
   })();
 
   const hasAnyContent = displayItems.length > 0;
 
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
-  const toggleGroup = (id: string) => setCollapsedGroups((prev) => ({ ...prev, [id]: !prev[id] }));
   const [proposalCollapsed, setProposalCollapsed] = useState(true);
 
-  // 自動スクロール
+  // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isProcessing]);
+  }, [displayItems.length, liveSteps.length, isProcessing]);
 
-  // テキストエリア自動リサイズ
+  // Textarea auto-resize
   useEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
     if (!message.trim()) {
-      // 空のときは固定高さにリセット（突然広がるバグ防止）
       ta.style.height = '32px';
       return;
     }
-    ta.style.height = '32px'; // 一度最小に戻してからscrollHeightを測る
+    ta.style.height = '32px';
     ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
   }, [message]);
 
-  // メッセージ送信
+  // Send message
   const handleSendMessage = useCallback(async () => {
     if (!message.trim() || isSending || !project?.room_id) return;
 
@@ -169,8 +280,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     setMessage('');
     setIsSending(true);
     setIsProcessing(true);
+    setLiveSteps([]);
 
-    // 楽観的更新: ユーザーメッセージを即座に表示
+    // Optimistic update
     const tempUserMessageId = `temp-user-${Date.now()}`;
     const optimisticUserMessage: MessageResponse = {
       id: tempUserMessageId,
@@ -201,12 +313,19 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           },
           onAIMessage: (msg) => {
             setIsProcessing(false);
+            setLiveSteps([]);
             queryClient.setQueryData(queryKey, (old: typeof messagesData) => ({
               messages: [msg, ...(old?.messages || [])],
             }));
           },
-          onProcessStep: () => {
-            // 簡易版: 処理中フラグのみ（詳細ステップ表示は省略）
+          onProcessStep: (step: ProcessStep) => {
+            setLiveSteps((prev) => [
+              ...prev,
+              {
+                label: step.label,
+                type: step.label.startsWith('🔧') ? 'tool' : 'reasoning',
+              },
+            ]);
           },
           onComplete: () => {
             setIsSending(false);
@@ -220,7 +339,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           },
           onProjectCreated: (createdProjectId) => {
             queryClient.invalidateQueries({ queryKey: ['projects'] });
-            // プロジェクトチャット内で別プロジェクトが作られた場合のみ切り替え
             if (createdProjectId !== projectId) {
               selectProject(createdProjectId);
             }
@@ -237,7 +355,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     }
   }, [message, isSending, project?.room_id, user?.id, user?.display_name, queryClient, messagesData, projectId, selectProject]);
 
-  // キャンセル
+  // Cancel
   const handleCancel = useCallback(async () => {
     if (!project?.room_id) return;
 
@@ -257,7 +375,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     toast.info('処理を停止しました');
   }, [project?.room_id]);
 
-  // キーボード操作
+  // Keyboard
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -265,7 +383,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     }
   };
 
-  // Escでキャンセル
+  // Esc to cancel
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isSending) {
@@ -278,7 +396,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   }, [isSending, handleCancel]);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden border-r border-border bg-background">
+    <div className="flex flex-col h-full overflow-hidden bg-background">
       {/* Header */}
       <div className="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-border">
         <FolderKanban className="h-5 w-5 text-primary shrink-0" />
@@ -316,14 +434,14 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </Button>
       </div>
 
-      {/* 承認済み提案（折りたたみ表示） */}
+      {/* Approved proposal (collapsible) */}
       {approvedProposal && (
         <div className="shrink-0 border-b border-border">
           <button
             onClick={() => setProposalCollapsed((v) => !v)}
             className="flex items-center gap-2 w-full px-4 py-2 text-xs hover:bg-muted/50 transition-colors"
           >
-            {proposalCollapsed ? <ChevronDown className="h-3 w-3 text-muted-foreground" /> : <ChevronUp className="h-3 w-3 text-muted-foreground" />}
+            {proposalCollapsed ? <ChevronRight className="h-3 w-3 text-muted-foreground" /> : <ChevronDown className="h-3 w-3 text-muted-foreground" />}
             <FileText className="h-3 w-3 text-green-500" />
             <span className="text-muted-foreground">承認済みの提案</span>
             <CheckCircle2 className="h-3 w-3 text-green-500" />
@@ -338,7 +456,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       )}
 
-      {/* Messages */}
+      {/* Messages (with inline process blocks) */}
       <div className="flex-1 overflow-y-auto">
         {isLoadingMessages ? (
           <div className="flex items-center justify-center p-6">
@@ -352,71 +470,50 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             </p>
           </div>
         ) : (
-          <div className="flex flex-col gap-3 p-4">
+          <div className="flex flex-col gap-2 p-4">
             {displayItems.map((item) => {
-              if (item.kind === 'message') {
-                const msg = item.msg;
+              if (item.kind === 'process-block') {
                 return (
-                  <div
-                    key={msg.id}
-                    className={`flex ${msg.sender_type === 'human' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div
-                      className={`max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
-                        msg.sender_type === 'human'
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-muted text-foreground prose prose-xs prose-dan max-w-none'
-                      }`}
-                    >
-                      {msg.sender_type === 'human'
-                        ? msg.content
-                        : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>
-                      }
-                    </div>
-                  </div>
+                  <InlineProcessBlock
+                    key={item.id}
+                    steps={item.steps}
+                    isLive={false}
+                    defaultCollapsed={true}
+                  />
                 );
               }
-              // process-group: 連続する[実行中]/[思考中]の折りたたみブロック
-              const isCollapsed = collapsedGroups[item.id] !== false; // デフォルト折りたたみ
+
+              const msg = item.msg;
               return (
-                <div key={item.id} className="flex justify-start">
-                  <div className="max-w-[85%] bg-muted rounded-lg px-3 py-2 space-y-1">
-                    <button
-                      onClick={() => toggleGroup(item.id)}
-                      className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors w-full"
-                    >
-                      {isCollapsed ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
-                      <span>実行ログ ({item.steps.length}件)</span>
-                    </button>
-                    {!isCollapsed && (
-                      <div className="pl-2 border-l-2 border-primary/30 space-y-1 mt-1">
-                        {item.steps.map((step, i) => (
-                          <div key={i} className={`flex items-start gap-1.5 text-[10px] ${step.type === 'thought' ? 'mt-1' : ''}`}>
-                            {step.type === 'thought' ? (
-                              <span className="shrink-0 text-yellow-500">💭</span>
-                            ) : (
-                              <Check className="h-2.5 w-2.5 text-green-500 shrink-0 mt-0.5" />
-                            )}
-                            <span className={`${step.type === 'thought' ? 'text-muted-foreground/80 italic' : 'text-muted-foreground'}`}>{step.text}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                <div
+                  key={msg.id}
+                  className={`flex ${msg.sender_type === 'human' ? 'justify-end' : 'justify-start'}`}
+                >
+                  <div
+                    className={`max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
+                      msg.sender_type === 'human'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-muted text-foreground prose prose-xs prose-dan max-w-none'
+                    }`}
+                  >
+                    {msg.sender_type === 'human'
+                      ? msg.content
+                      : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>
+                    }
                   </div>
                 </div>
               );
             })}
-            {/* 処理中インジケーター */}
+
+            {/* Live process block (during streaming) */}
             {isProcessing && (
-              <div className="flex justify-start">
-                <div className="bg-muted rounded-lg px-3 py-2">
-                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <Loader2 className="h-3 w-3 animate-spin text-primary" />
-                    <span>調査・分析中...</span>
-                  </div>
-                </div>
-              </div>
+              <InlineProcessBlock
+                steps={liveSteps}
+                isLive={true}
+                defaultCollapsed={false}
+              />
             )}
+
             <div ref={messagesEndRef} />
           </div>
         )}
