@@ -32,14 +32,21 @@ CREDENTIALS = json.loads(os.environ.get("DAN_CREDENTIALS", "{}"))
 app = Server("dan-tools")
 
 
+# CLI組込ツールと重複するため MCP では公開しないツール
+# CLI の Read/Write/Edit/Bash の方が高品質なのでそちらを使わせる
+_CLI_BUILTIN_TOOLS = {"read_file", "write_file", "edit_file", "bash"}
+
+
 @app.list_tools()
 async def list_tools() -> list[types.Tool]:
-    """既存のツール定義を MCP 形式に変換して返す"""
+    """既存のツール定義を MCP 形式に変換して返す（CLI重複分は除外）"""
     from app.agent.v2.tools import get_all_skill_tools
 
     anthropic_tools = get_all_skill_tools()
     mcp_tools = []
     for tool in anthropic_tools:
+        if tool["name"] in _CLI_BUILTIN_TOOLS:
+            continue
         mcp_tools.append(
             types.Tool(
                 name=tool["name"],
