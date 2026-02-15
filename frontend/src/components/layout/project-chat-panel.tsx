@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { X, FolderKanban, Loader2, MessageSquare, Send, Square, CheckCircle2, XCircle } from 'lucide-react';
+import { X, FolderKanban, Loader2, MessageSquare, Send, Square, CheckCircle2, XCircle, ChevronDown, ChevronUp, Check, FileText } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import ReactMarkdown from 'react-markdown';
@@ -49,7 +49,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const { data: messagesData, isLoading: isLoadingMessages, refetch: refetchMessages } = useQuery({
     queryKey: ['project-messages', project?.room_id],
-    queryFn: () => api.rooms.getMessages(project!.room_id!, { limit: 50 }),
+    queryFn: () => api.rooms.getMessages(project!.room_id!, { limit: 500 }),
     enabled: !!project?.room_id,
     staleTime: 5 * 1000,
     refetchInterval: 3000,
@@ -57,104 +57,27 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   useEffect(() => { refetchMessagesRef.current = refetchMessages; }, [refetchMessages]);
 
-  // Proposals query (status=proposed のときのみ)
+  // Proposals query (提案中はポーリング、それ以外は一度だけ取得)
+  const isProposed = project?.status === 'proposed';
   const { data: proposals } = useQuery({
     queryKey: ['project-proposals', projectId],
     queryFn: () => api.projects.proposals.list(projectId),
-    enabled: !!projectId && project?.status === 'proposed',
-    refetchInterval: 5000,
+    enabled: !!projectId && !!project?.status,
+    refetchInterval: isProposed ? 5000 : false,
   });
 
   const pendingProposal = proposals?.find((p: ProjectProposalResponse) => p.status === 'pending');
-
-  // 実行プロンプトを組み立てるヘルパー
-  const buildExecutionPrompt = useCallback((
-    title: string,
-    description: string,
-    steps: Array<{ step_number: number; description: string }> | null,
-  ): string => {
-    const stepsText = steps?.map((s) => `${s.step_number}. ${s.description}`).join('\n') || '(ステップなし)';
-    return `[Project Execution] 承認された計画を実行してください。
-
-## プロジェクト情報
-- タイトル: ${title}
-- 説明: ${description || '(説明なし)'}
-
-## 承認された実行計画
-${stepsText}
-
-上記の計画を順番に実行してください。`;
-  }, []);
-
-  // 実行プロンプトをSSE経由で送信
-  const triggerExecution = useCallback(async (executionPrompt: string) => {
-    const roomId = project?.room_id;
-    if (!roomId) return;
-
-    setIsSending(true);
-    setIsProcessing(true);
-
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    const queryKey = ['project-messages', roomId];
-
-    try {
-      await api.sm.sendMessageStream(
-        { message: executionPrompt, session_id: roomId },
-        {
-          onUserMessage: (msg) => {
-            queryClient.setQueryData(queryKey, (old: typeof messagesData) => ({
-              messages: [msg, ...(old?.messages || [])],
-            }));
-          },
-          onAIMessage: (msg) => {
-            setIsProcessing(false);
-            queryClient.setQueryData(queryKey, (old: typeof messagesData) => ({
-              messages: [msg, ...(old?.messages || [])],
-            }));
-          },
-          onProcessStep: () => {},
-          onComplete: () => {
-            setIsSending(false);
-            setIsProcessing(false);
-            refetchMessagesRef.current?.();
-            queryClient.invalidateQueries({ queryKey: ['project', projectId] });
-          },
-          onError: (error) => {
-            setIsSending(false);
-            setIsProcessing(false);
-            toast.error(error || '実行中にエラーが発生しました');
-          },
-        },
-        controller.signal,
-      );
-    } catch (error) {
-      setIsSending(false);
-      setIsProcessing(false);
-      if (error instanceof Error && error.name !== 'AbortError') {
-        toast.error('実行の開始に失敗しました');
-      }
-    }
-  }, [project?.room_id, queryClient, messagesData, projectId]);
+  const approvedProposal = proposals?.find((p: ProjectProposalResponse) => p.status === 'approved');
 
   // Approve/Reject mutations
   const approveMutation = useMutation({
     mutationFn: (proposalId: string) =>
       api.projects.proposals.action(projectId, proposalId, 'approve'),
-    onSuccess: (data: ProjectProposalResponse) => {
+    onSuccess: () => {
       toast.success('提案を承認しました。実行を開始します...');
       queryClient.invalidateQueries({ queryKey: ['project', projectId] });
       queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
-
-      // 承認後、自動的に実行プロンプトをSSE経由で送信
-      if (project) {
-        const prompt = buildExecutionPrompt(
-          project.title,
-          project.description || '',
-          data.steps || [],
-        );
-        triggerExecution(prompt);
-      }
+      // 実行はバックエンド側で自動開始される（二重実行防止）
     },
     onError: () => {
       toast.error('提案の承認に失敗しました');
@@ -177,8 +100,47 @@ ${stepsText}
   const status = project?.status ? STATUS_LABELS[project.status] : null;
   const messages = messagesData?.messages || [];
 
-  // メッセージを古い順に表示
-  const displayMessages = [...messages].reverse();
+  // メッセージを時系列に並べ、連続する[実行中]/[思考中]をグループ化
+  type ProcessStep = { type: 'action' | 'thought'; text: string };
+  type DisplayItem =
+    | { kind: 'message'; msg: MessageResponse }
+    | { kind: 'process-group'; steps: ProcessStep[]; id: string };
+
+  const displayItems: DisplayItem[] = (() => {
+    const chronological = [...messages].reverse();
+    const items: DisplayItem[] = [];
+    let currentGroup: ProcessStep[] = [];
+    let groupId = '';
+
+    const flushGroup = () => {
+      if (currentGroup.length > 0) {
+        items.push({ kind: 'process-group', steps: [...currentGroup], id: groupId });
+        currentGroup = [];
+      }
+    };
+
+    for (const msg of chronological) {
+      const content = msg.content || '';
+      if (msg.sender_type !== 'human' && content.startsWith('[実行中]')) {
+        if (currentGroup.length === 0) groupId = `pg-${msg.id}`;
+        currentGroup.push({ type: 'action', text: content.replace('[実行中] ', '') });
+      } else if (msg.sender_type !== 'human' && content.startsWith('[思考中]')) {
+        if (currentGroup.length === 0) groupId = `pg-${msg.id}`;
+        currentGroup.push({ type: 'thought', text: content.replace('[思考中] ', '') });
+      } else {
+        flushGroup();
+        items.push({ kind: 'message', msg });
+      }
+    }
+    flushGroup();
+    return items;
+  })();
+
+  const hasAnyContent = displayItems.length > 0;
+
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const toggleGroup = (id: string) => setCollapsedGroups((prev) => ({ ...prev, [id]: !prev[id] }));
+  const [proposalCollapsed, setProposalCollapsed] = useState(true);
 
   // 自動スクロール
   useEffect(() => {
@@ -354,7 +316,27 @@ ${stepsText}
         </Button>
       </div>
 
-      {/* Project info - removed: description and date moved to header */}
+      {/* 承認済み提案（折りたたみ表示） */}
+      {approvedProposal && (
+        <div className="shrink-0 border-b border-border">
+          <button
+            onClick={() => setProposalCollapsed((v) => !v)}
+            className="flex items-center gap-2 w-full px-4 py-2 text-xs hover:bg-muted/50 transition-colors"
+          >
+            {proposalCollapsed ? <ChevronDown className="h-3 w-3 text-muted-foreground" /> : <ChevronUp className="h-3 w-3 text-muted-foreground" />}
+            <FileText className="h-3 w-3 text-green-500" />
+            <span className="text-muted-foreground">承認済みの提案</span>
+            <CheckCircle2 className="h-3 w-3 text-green-500" />
+          </button>
+          {!proposalCollapsed && (
+            <div className="px-4 pb-3 max-h-[40vh] overflow-y-auto">
+              <div className="bg-muted rounded-lg px-3 py-2 text-xs leading-relaxed prose prose-xs prose-dan max-w-none">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{approvedProposal.content || ''}</ReactMarkdown>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">
@@ -362,7 +344,7 @@ ${stepsText}
           <div className="flex items-center justify-center p-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
-        ) : displayMessages.length === 0 && !isProcessing ? (
+        ) : !hasAnyContent && !isProcessing ? (
           <div className="flex flex-col items-center justify-center p-6 h-full">
             <MessageSquare className="h-10 w-10 text-muted-foreground/20 mb-3" />
             <p className="text-xs text-muted-foreground">
@@ -371,31 +353,67 @@ ${stepsText}
           </div>
         ) : (
           <div className="flex flex-col gap-3 p-4">
-            {displayMessages.map((msg: MessageResponse) => (
-              <div
-                key={msg.id}
-                className={`flex ${msg.sender_type === 'human' ? 'justify-end' : 'justify-start'}`}
-              >
-                <div
-                  className={`max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
-                    msg.sender_type === 'human'
-                      ? 'bg-primary text-primary-foreground'
-                      : 'bg-muted text-foreground prose prose-xs prose-dan max-w-none'
-                  }`}
-                >
-                  {msg.sender_type === 'human'
-                    ? msg.content
-                    : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>
-                  }
+            {displayItems.map((item) => {
+              if (item.kind === 'message') {
+                const msg = item.msg;
+                return (
+                  <div
+                    key={msg.id}
+                    className={`flex ${msg.sender_type === 'human' ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div
+                      className={`max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
+                        msg.sender_type === 'human'
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-muted text-foreground prose prose-xs prose-dan max-w-none'
+                      }`}
+                    >
+                      {msg.sender_type === 'human'
+                        ? msg.content
+                        : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>
+                      }
+                    </div>
+                  </div>
+                );
+              }
+              // process-group: 連続する[実行中]/[思考中]の折りたたみブロック
+              const isCollapsed = collapsedGroups[item.id] !== false; // デフォルト折りたたみ
+              return (
+                <div key={item.id} className="flex justify-start">
+                  <div className="max-w-[85%] bg-muted rounded-lg px-3 py-2 space-y-1">
+                    <button
+                      onClick={() => toggleGroup(item.id)}
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors w-full"
+                    >
+                      {isCollapsed ? <ChevronDown className="h-3 w-3" /> : <ChevronUp className="h-3 w-3" />}
+                      <span>実行ログ ({item.steps.length}件)</span>
+                    </button>
+                    {!isCollapsed && (
+                      <div className="pl-2 border-l-2 border-primary/30 space-y-1 mt-1">
+                        {item.steps.map((step, i) => (
+                          <div key={i} className={`flex items-start gap-1.5 text-[10px] ${step.type === 'thought' ? 'mt-1' : ''}`}>
+                            {step.type === 'thought' ? (
+                              <span className="shrink-0 text-yellow-500">💭</span>
+                            ) : (
+                              <Check className="h-2.5 w-2.5 text-green-500 shrink-0 mt-0.5" />
+                            )}
+                            <span className={`${step.type === 'thought' ? 'text-muted-foreground/80 italic' : 'text-muted-foreground'}`}>{step.text}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
-            {/* 処理中インジケータ */}
+              );
+            })}
+            {/* 処理中インジケーター */}
             {isProcessing && (
               <div className="flex justify-start">
-                <div className="flex items-center gap-2 bg-muted rounded-lg px-3 py-2">
-                  <Loader2 className="h-3 w-3 animate-spin text-primary" />
-                  <span className="text-xs text-muted-foreground">処理中...</span>
+                <div className="bg-muted rounded-lg px-3 py-2">
+                  <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Loader2 className="h-3 w-3 animate-spin text-primary" />
+                    <span>調査・分析中...</span>
+                  </div>
                 </div>
               </div>
             )}

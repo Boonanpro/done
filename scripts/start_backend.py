@@ -118,8 +118,56 @@ def check_health(timeout: int = 5) -> bool:
         return False
 
 
+def get_sdk_processes() -> list[tuple[int, str]]:
+    """
+    Get all SDK-related processes (claude.exe and mcp_server.py).
+
+    These are spawned by the Agent SDK during project execution
+    and must be cleaned up on backend restart.
+    """
+    processes = []
+    try:
+        # claude.exe (SDK agent processes)
+        result = subprocess.run(
+            ["wmic", "process", "where", "name='claude.exe'", "get", "processid,commandline"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.split("\n"):
+            line = line.strip()
+            if not line or "CommandLine" in line:
+                continue
+            parts = line.split()
+            if parts:
+                try:
+                    pid = int(parts[-1])
+                    processes.append((pid, "claude.exe"))
+                except ValueError:
+                    pass
+
+        # mcp_server.py (MCP server processes spawned by SDK)
+        result = subprocess.run(
+            ["wmic", "process", "where", "name='python.exe'", "get", "processid,commandline"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.split("\n"):
+            line = line.strip()
+            if not line or "CommandLine" in line:
+                continue
+            if "mcp_server.py" in line:
+                parts = line.split()
+                if parts:
+                    try:
+                        pid = int(parts[-1])
+                        processes.append((pid, "mcp_server.py"))
+                    except ValueError:
+                        pass
+    except Exception as e:
+        print(f"[start] Error getting SDK processes: {e}")
+    return processes
+
+
 def cleanup() -> bool:
-    """Kill all uvicorn processes and wait for port to be free."""
+    """Kill all uvicorn processes, SDK processes, and wait for port to be free."""
     print("[start] Step 1: Finding uvicorn processes with wmic...")
 
     processes = get_uvicorn_processes()
@@ -137,6 +185,21 @@ def cleanup() -> bool:
                 print(f"  [OK] Killed PID {pid}")
             else:
                 print(f"  [FAIL] Could not kill PID {pid}")
+
+    # Kill leftover SDK processes (claude.exe, mcp_server.py)
+    print("[start] Step 2b: Cleaning up SDK processes (claude.exe, mcp_server.py)...")
+    sdk_procs = get_sdk_processes()
+    if not sdk_procs:
+        print("[start] No SDK processes found.")
+    else:
+        print(f"[start] Found {len(sdk_procs)} SDK process(es):")
+        for pid, name in sdk_procs:
+            print(f"  PID {pid}: {name}")
+        for pid, name in sdk_procs:
+            if kill_process(pid):
+                print(f"  [OK] Killed {name} PID {pid}")
+            else:
+                print(f"  [FAIL] Could not kill {name} PID {pid}")
 
     # Wait for port to be free
     print("[start] Step 3: Waiting for port 8000 to be free...")
@@ -163,11 +226,12 @@ def start_uvicorn() -> subprocess.Popen:
     import os
     clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
+    log_file = open("D:/done/backend.log", "w", encoding="utf-8")
     process = subprocess.Popen(
         cmd,
         cwd="D:/done",
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=log_file,
         env=clean_env,
     )
 
