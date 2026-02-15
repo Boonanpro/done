@@ -28,6 +28,10 @@ _cli_sessions: Dict[str, str] = {}
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent  # app/agent/ → app/ → D:\done\
 
+# 事業部の作業ディレクトリ（D:\done の外に置くことで開発者向け CLAUDE.md の混入を防ぐ）
+CLI_WORKSPACE = Path("D:/dan-workspace")
+CLI_WORKSPACE.mkdir(parents=True, exist_ok=True)
+
 _SENTINEL = object()  # キュー終了シグナル
 
 
@@ -99,6 +103,7 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 - タイトル: {title}
 - 説明: {description}
 - ステータス: {status}
+- コードベース: D:/done（ファイル操作は絶対パスで指定すること）
 
 ### 安全確認（実行前にユーザーに確認が必要な操作）
 - お金が動く操作（購入、送金、契約）
@@ -297,7 +302,7 @@ def _run_cli_in_thread(
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            cwd=str(PROJECT_ROOT),
+            cwd=str(CLI_WORKSPACE),
             env=env,
             encoding="utf-8",
             errors="replace",
