@@ -96,8 +96,8 @@ COMPACTION_THRESHOLD = 80000  # この文字数を超えたらコンパクショ
 COMPACTION_KEEP_RECENT = 10   # コンパクション時に残す最新メッセージ数
 
 # 使用するモデル
-MODEL_DEFAULT = "claude-sonnet-4-5-20250929"      # 日常チャット（$3/$15）
-MODEL_HEAVY = "claude-opus-4-6"                   # プロジェクト実行（$5/$25）
+MODEL_DEFAULT = "MiniMax-M2.5"                    # 日常チャット（$0.30/$1.20）
+MODEL_HEAVY = "MiniMax-M2.5"                      # MiniMaxは1モデル。事業部はCLI Runner経由でOpusを使うので影響なし
 
 # ============================================
 # Native Tool Use: ツール定義
@@ -185,14 +185,19 @@ class AgentRunner:
         self._on_reasoning_step = on_reasoning_step
         self._on_voice_announcement = on_voice_announcement
 
-        # LLMクライアント
-        if settings.ANTHROPIC_API_KEY:
+        # LLMクライアント（MiniMax優先、Anthropicフォールバック）
+        if settings.MINIMAX_API_KEY:
+            self.llm_client = anthropic.AsyncAnthropic(
+                api_key=settings.MINIMAX_API_KEY,
+                base_url="https://api.minimax.io/anthropic",
+            )
+        elif settings.ANTHROPIC_API_KEY:
             self.llm_client = anthropic.AsyncAnthropic(
                 api_key=settings.ANTHROPIC_API_KEY
             )
         else:
             self.llm_client = None
-            logger.warning("ANTHROPIC_API_KEY not set")
+            logger.warning("Neither MINIMAX_API_KEY nor ANTHROPIC_API_KEY set")
 
     async def process_message(
         self,
@@ -222,19 +227,11 @@ class AgentRunner:
             from app.services.cancellation import CancellationRegistry
             CancellationRegistry.set_current_session(self.session.session_id)
 
-            # 0.5. Deterministic skill lookup routing (bypass LLM)
-            skill_lookup_response = self._maybe_handle_skill_lookup(user_message)
-            if skill_lookup_response:
-                self.session.clear_reasoning_steps()
-                self.session.add_user_message(user_message)
-                self.session.add_assistant_message(skill_lookup_response)
-                store = get_session_store()
-                await store.save(self.session)
-                return {
-                    "response": skill_lookup_response,
-                    "state": self.session.current_state.value,
-                    "reasoning_steps": self.session.reasoning_steps,
-                }
+            # 0.5. Deterministic skill lookup routing — REMOVED
+            # Previously intercepted messages containing "skills" etc. and returned
+            # a hardcoded skill list without going through the LLM. This prevented
+            # normal conversation about installing/finding external skills.
+            # The LLM already knows the skill list via the system prompt.
 
             # 1. 推論ステップをクリア（新しいターン）
             self.session.clear_reasoning_steps()
@@ -273,12 +270,21 @@ class AgentRunner:
                 # ユーザー回答を抽出
                 if parsed["user_response"]:
                     user_response = parsed["user_response"]
-                # ツール呼び出しがない、または最大ループに達した場合は終了
-                if not parsed["tool_calls"] or loop_count >= MAX_TOOL_LOOPS:
-                    # ツールなしの場合でもreasoning_textがあればSSEに流す
+                # ツール呼び出しがない場合は終了
+                if not parsed["tool_calls"]:
                     if parsed["reasoning_text"] and self._on_reasoning_step:
                         await self._on_reasoning_step(parsed["reasoning_text"])
-                    print(f"[RUNNER_DEBUG] No more tool calls or max loops reached")
+                    print(f"[RUNNER_DEBUG] No more tool calls")
+                    break
+                # 最大ループに達した場合は明示的に中断メッセージ
+                if loop_count >= MAX_TOOL_LOOPS:
+                    logger.warning(f"MAX_TOOL_LOOPS ({MAX_TOOL_LOOPS}) reached, forcing stop")
+                    if self._on_reasoning_step:
+                        await self._on_reasoning_step("操作回数の上限に達したため中断します")
+                    # ユーザーに中断を伝える（LLMのテキスト出力がなかった場合のみ上書き）
+                    if not user_response:
+                        user_response = f"操作回数の上限（{MAX_TOOL_LOOPS}回）に達したため、途中で中断しました。続きが必要な場合は指示してください。"
+                    print(f"[RUNNER_DEBUG] Max loops reached, breaking")
                     break
 
                 # ツールを実行
@@ -296,7 +302,7 @@ class AgentRunner:
                         voice_text = VOICE_ANNOUNCEMENTS.get(first_skill, "少々お待ちください")
                     await self._on_voice_announcement(voice_text)
 
-                for tool_call in parsed["tool_calls"]:
+                for i, tool_call in enumerate(parsed["tool_calls"]):
                     # ツール実行前にもキャンセルチェック
                     if CancellationRegistry.is_cancelled(self.session.session_id):
                         logger.info(f"Session {self.session.session_id} cancelled before tool execution")
@@ -447,6 +453,30 @@ class AgentRunner:
                         images=formatted.images if formatted.has_images() else None,
                     )
 
+                    # create_project成功後: 固定メッセージを返してターン終了
+                    if skill_name == "_create_project" and result.get("success"):
+                        project_title = result.get("title", "プロジェクト")
+                        fixed_response = f"プロジェクト「{project_title}」を作成しました。事業部からの提案をお待ちください。"
+
+                        # 残りのツール呼び出しにダミー結果を挿入
+                        for remaining in parsed["tool_calls"][i+1:]:
+                            self.session.add_tool_result(
+                                remaining["tool_use_id"],
+                                "[プロジェクト作成済み。実行は事業部が担当します。]",
+                            )
+
+                        # 固定メッセージをセッションに追加して即return
+                        self.session.add_assistant_message(fixed_response)
+                        store = get_session_store()
+                        await store.save(self.session)
+                        return {
+                            "response": fixed_response,
+                            "state": self.session.current_state.value,
+                            "reasoning_steps": self.session.reasoning_steps,
+                            "tool_results": tool_results,
+                            "created_project_id": result.get("project_id"),
+                        }
+
                     if self._on_reasoning_step:
                         message = result.get("message", "")
                         if not result.get("success"):
@@ -466,7 +496,7 @@ class AgentRunner:
             # フォールバック: テキスト出力がなかった場合
             if not user_response:
                 logger.warning("No text response from LLM, using fallback")
-                user_response = "処理が完了しました。"
+                user_response = "すみません、うまく応答を生成できませんでした。もう一度お願いできますか？"
 
             # ブラウザセッションIDを抽出（スキル化用）
             # browser_* ツールが使われた場合、session_id をブラウザセッションIDとして返す
@@ -505,8 +535,8 @@ class AgentRunner:
                 }
 
             error_details = traceback.format_exc()
-            print(f"[RUNNER_ERROR] Exception in process_message:")
-            print(f"[RUNNER_ERROR] {error_details}")
+            safe_print(f"[RUNNER_ERROR] Exception in process_message:")
+            safe_print(f"[RUNNER_ERROR] {error_details}")
             logger.exception(f"Error in process_message: {e}")
 
             # ★★★ 重要: エラー発生時はキャッシュをクリア ★★★
@@ -585,20 +615,10 @@ class AgentRunner:
         tools = self._get_tools()
         lines = ["## 利用可能なツール"]
         for tool in tools:
-            # サーバーサイドツール（web_search等）はtype fieldで識別
-            if tool.get("type", "").startswith("web_search"):
-                lines.append(f"- `web_search`: Web検索（自動実行。回答に最新情報が必要な場合にClaudeが自動で使用）")
-                continue
             name = tool.get("name", "")
             desc = tool.get("description", "").split("\n")[0]  # 1行目のみ
             lines.append(f"- `{name}`: {desc}")
         lines.append("- `create_project`: ユーザーの依頼をプロジェクトとして登録（複数ステップのタスクに使用）")
-        lines.append("")
-        lines.append("### コード操作のツール選択ルール（必須）")
-        lines.append("- ファイルを探す → `bash`（例: `find D:/done/frontend -name '*.tsx'`）")
-        lines.append("- ファイル内容を検索 → `bash`（例: `grep -rn 'useState' D:/done/frontend/src/`）")
-        lines.append("- ファイルを読む → `read_file`")
-        lines.append("- ファイルを書く/編集 → `write_file` / `edit_file`")
         return "\n".join(lines)
 
     def _build_skill_list_section(self) -> str:
@@ -804,25 +824,16 @@ class AgentRunner:
         LLMに渡すツール一覧を取得
 
         Returns:
-            クライアントサイドツール + サーバーサイドツール（web_search）
+            クライアントサイドツール一覧
         """
         tools = get_all_skill_tools()
-        # Anthropic server-side web search
-        tools.append({
-            "type": "web_search_20250305",
-            "name": "web_search",
-            "max_uses": 5,
-            "user_location": {
-                "type": "approximate",
-                "country": "JP",
-                "timezone": "Asia/Tokyo",
-            },
-        })
+        # web_search サーバーツールはMiniMaxでは使えないため削除
+        # 検索が必要な場合は deep_research ツール経由 (Anthropic API)
         return tools
 
     async def _call_llm_with_tools(self) -> "anthropic.types.Message":
         """
-        LLMをTool Use APIで呼び出す（529/overloaded時は自動リトライ）
+        LLMをストリーミングで呼び出し、thinking をリアルタイムにプロセスモニターへ送信
 
         Returns:
             Anthropic Message オブジェクト（content blocksを含む）
@@ -833,34 +844,65 @@ class AgentRunner:
         messages = self.session.get_messages_for_llm()
         system_prompt = self._build_system_prompt()
         model = self._get_model()
+
         tools = self._get_tools()
 
-        print(f"[LLM_DEBUG] Calling LLM with {len(tools)} tools")
-        print(f"[LLM_DEBUG] Tool names: {[t['name'] for t in tools]}")
+        safe_print(f"[LLM_DEBUG] Calling LLM with {len(tools)} tools")
 
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = await self.llm_client.messages.create(
+                kwargs = dict(
                     model=model,
                     max_tokens=4000,
                     system=system_prompt,
                     messages=messages,
-                    tools=tools,
                     thinking={
                         "type": "enabled",
-                        "budget_tokens": 1024,
+                        "budget_tokens": 10000,
                     },
                 )
+                if tools:
+                    kwargs["tools"] = tools
 
-                print(f"[LLM_DEBUG] Response stop_reason: {response.stop_reason}")
-                print(f"[LLM_DEBUG] Response content blocks: {len(response.content)}")
+                # ストリーミング: thinking をリアルタイムにプロセスモニターへ送信
+                thinking_buffer = ""
+
+                async with self.llm_client.messages.stream(**kwargs) as stream:
+                    async for event in stream:
+                        if event.type == "content_block_delta":
+                            if event.delta.type == "thinking_delta":
+                                thinking_buffer += event.delta.thinking
+                                # 文末（。！？\n）で区切ってプロセスモニターに送信
+                                while True:
+                                    flush_pos = -1
+                                    for idx, ch in enumerate(thinking_buffer):
+                                        if ch in ("。", "！", "？", "!", "?", "\n"):
+                                            flush_pos = idx
+                                            break
+                                    if flush_pos >= 0:
+                                        chunk = thinking_buffer[:flush_pos + 1].strip()
+                                        thinking_buffer = thinking_buffer[flush_pos + 1:]
+                                        if chunk and self._on_reasoning_step:
+                                            await self._on_reasoning_step(chunk)
+                                    else:
+                                        break
+                        elif event.type == "content_block_stop":
+                            # ブロック終了時にバッファ残りをフラッシュ
+                            if thinking_buffer.strip() and self._on_reasoning_step:
+                                await self._on_reasoning_step(thinking_buffer.strip())
+                            thinking_buffer = ""
+
+                    response = stream.get_final_message()
+
+                safe_print(f"[LLM_DEBUG] Response stop_reason: {response.stop_reason}")
+                safe_print(f"[LLM_DEBUG] Response content blocks: {len(response.content)}")
 
                 return response
             except anthropic.APIStatusError as e:
-                if e.status_code == 529 and attempt < max_retries - 1:
+                if e.status_code in (429, 529) and attempt < max_retries - 1:
                     wait_sec = 2 ** attempt  # 1s, 2s, 4s
-                    logger.warning(f"[LLM] API overloaded (529), retrying in {wait_sec}s (attempt {attempt + 1}/{max_retries})")
+                    logger.warning(f"[LLM] API overloaded ({e.status_code}), retrying in {wait_sec}s (attempt {attempt + 1}/{max_retries})")
                     if self._on_reasoning_step:
                         await self._on_reasoning_step(f"APIが混雑中です。{wait_sec}秒後にリトライします...")
                     await asyncio.sleep(wait_sec)
@@ -902,9 +944,10 @@ class AgentRunner:
 
         for i, block in enumerate(response.content):
             if block.type == "thinking":
-                # Extended Thinking: 内部推論（分析・計画）。表示せずスキップ
-                print(f"[LLM_DEBUG] Thinking block: {block.thinking[:80]}...")
-                continue
+                # ストリーミング中にプロセスモニターへ送信済み
+                thinking_text = block.thinking if hasattr(block, 'thinking') else ""
+                safe_print(f"[LLM_DEBUG] Thinking block: {thinking_text[:80]}...")
+                continue  # thinking はツール位置判定に影響させない
 
             elif block.type == "text":
                 text = block.text.strip()

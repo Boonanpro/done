@@ -146,6 +146,11 @@ class Session:
         })
         self.updated_at = datetime.utcnow()
 
+    def add_assistant_message_from_blocks(self, blocks: List[Dict[str, Any]]) -> None:
+        """Gemini応答をAnthropic形式ブロックとして保存"""
+        self.messages.append({"role": "assistant", "content": blocks})
+        self.updated_at = datetime.utcnow()
+
     def add_assistant_message_from_response(self, response: Any) -> None:
         """
         Anthropic Message responseからアシスタントメッセージを追加（Native Tool Use対応）
@@ -160,7 +165,7 @@ class Session:
                 content_blocks.append({
                     "type": "thinking",
                     "thinking": block.thinking,
-                    "signature": block.signature,
+                    "signature": getattr(block, 'signature', ''),
                 })
             elif block.type == "text":
                 content_blocks.append({

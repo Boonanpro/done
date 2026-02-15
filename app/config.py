@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     # Anthropic (Claude)
     ANTHROPIC_API_KEY: str = ""
 
+    # MiniMax (M2.5 - main chat LLM)
+    MINIMAX_API_KEY: str = ""
+
     # OpenAI (Embeddings for memory search)
     OPENAI_API_KEY: str = ""
 
