@@ -2,7 +2,7 @@
 Chat API Routes for Done Chat
 Supports both Bearer token and HttpOnly Cookie authentication
 """
-from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Response, Request, Cookie, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Response, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 from datetime import datetime
@@ -474,6 +474,46 @@ async def send_message(
         raise HTTPException(status_code=403, detail=str(e))
 
 
+@router.post("/rooms/{room_id}/dry-run")
+async def dry_run_message(
+    room_id: str,
+    request: MessageSendRequest,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """
+    Dry-run: 認証・ルーム存在・メンバーシップを検証するが、DBには何も書き込まない。
+    事業部CLIのデバッグ用。履歴を汚さずに接続テストができる。
+    """
+    # ルーム存在 & メンバーシップ確認
+    room = await service.get_room(room_id, current_user.user_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found or not a member")
+
+    # プロジェクトルームかどうか判定
+    is_project = False
+    try:
+        from app.services.project_service import ProjectService
+        ps = ProjectService()
+        proj_result = (
+            ps.supabase.table("projects")
+            .select("id")
+            .eq("room_id", room_id)
+            .execute()
+        )
+        if proj_result.data:
+            is_project = True
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "room_id": room_id,
+        "content_received": request.content,
+        "is_project": is_project,
+    }
+
+
 @router.post("/rooms/{room_id}/read", response_model=ReadMarkResponse)
 async def mark_as_read(
     room_id: str,
@@ -678,15 +718,17 @@ async def send_dan_message_stream(
 
             if is_project:
                 # ========================================
-                # SDK Runner（Maxプラン定額）でプロジェクト実行
+                # CLI Runner でプロジェクト実行（SDK は親子タスクでフリーズするため）
                 # ========================================
-                from app.agent.sdk_runner import process_message_sdk
+                from app.agent.cli_runner import process_message_cli
+                from app.api.project_routes import _format_tool_label, _summarize_reasoning
 
+                project_service = ProjectService()
                 final_text = ""
                 reasoning_steps = []
                 step_counter = 0
 
-                async for event in process_message_sdk(
+                async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
                     content=request.content,
@@ -695,36 +737,74 @@ async def send_dan_message_stream(
                     project_status=project_info.get("status", "in_progress"),
                 ):
                     if event["type"] == "reasoning":
-                        label = event["text"][:100]
+                        text = event.get("text", "")
+                        label = text[:100]
                         reasoning_steps.append(label)
-                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'sdk-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
+                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
                         step_counter += 1
+                        # execution_events に保存（ProcessMonitor用）
+                        if text.strip():
+                            try:
+                                summary = _summarize_reasoning(text)
+                                await project_service.save_execution_event(
+                                    project_id=project_info["id"],
+                                    room_id=room_id,
+                                    event_type="reasoning",
+                                    content=summary or text[:200],
+                                )
+                            except Exception:
+                                pass
 
                     elif event["type"] == "tool_use":
-                        label = f"🔧 {event['name']}"
-                        reasoning_steps.append(label)
-                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'sdk-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
+                        tool_label = _format_tool_label(event.get("name", ""), event.get("input", {}))
+                        reasoning_steps.append(f"🔧 {tool_label}")
+                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': f'🔧 {tool_label}', 'status': 'running'}})}\n\n"
                         step_counter += 1
+                        # execution_events に保存（ProcessMonitor用）
+                        try:
+                            await project_service.save_execution_event(
+                                project_id=project_info["id"],
+                                room_id=room_id,
+                                event_type="tool_use",
+                                tool_name=event.get("name", ""),
+                                tool_label=tool_label,
+                            )
+                        except Exception:
+                            pass
 
                     elif event["type"] == "text":
                         final_text = event["text"]
-
-                    elif event["type"] == "text_delta":
-                        # ストリーミング中のテキスト差分（将来のリアルタイム表示用）
-                        pass
+                        # テキストの先頭をモニターに表示（思考内容として）
+                        text_preview = event["text"].strip()
+                        if text_preview and len(text_preview) > 10:
+                            label = f"💭 {text_preview[:80]}"
+                            reasoning_steps.append(label)
+                            yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
+                            step_counter += 1
 
                     elif event["type"] == "result":
-                        final_text = event.get("text", final_text)
-                        sdk_cost = event.get("cost")
-                        if sdk_cost and sdk_cost > 0:
-                            import logging
-                            logging.warning(f"[SDKRunner] API cost detected: ${sdk_cost} - check ANTHROPIC_API_KEY separation")
+                        result_text = event.get("text", "")
+                        if result_text:
+                            final_text = result_text
+                        elif event.get("is_error"):
+                            # CLIがエラーで終了し応答テキストがない場合、エラー内容を表示
+                            final_text = result_text  # エラー内容（cli_runnerが組み立て済み）
 
                     elif event["type"] == "error":
                         yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': event['message']})}\n\n"
+                        # エラーも execution_events に保存
+                        try:
+                            await project_service.save_execution_event(
+                                project_id=project_info["id"],
+                                room_id=room_id,
+                                event_type="error",
+                                content=event.get("message", "")[:500],
+                            )
+                        except Exception:
+                            pass
 
-                # DBに保存
-                ai_response_content = final_text or "処理が完了しました。"
+                # DBに保存（空の場合のフォールバックはエラー内容を含む）
+                ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
                 ai_message_data = await service.send_dan_ai_message(
                     current_user.user_id, ai_response_content, reasoning_steps, room_id=room_id
                 )
@@ -743,6 +823,8 @@ async def send_dan_message_stream(
                     "content": ai_message_data["content"],
                     "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
                 }
+                if ai_message_data.get("ai_context"):
+                    ai_message["ai_context"] = ai_message_data["ai_context"]
 
                 yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
                 yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
@@ -871,6 +953,8 @@ async def send_dan_message_stream(
                     "content": ai_message_data["content"],
                     "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
                 }
+                if ai_message_data.get("ai_context"):
+                    ai_message["ai_context"] = ai_message_data["ai_context"]
 
                 # 完了（session_id付き）
                 yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"

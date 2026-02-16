@@ -119,7 +119,12 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 
 ### 認証情報
 - ログインが必要 → まず get_credentials で保存済みか確認
-- なければユーザーに聞く → save_credentials で保存"""
+- なければユーザーに聞く → save_credentials で保存
+
+### チャットAPI テスト
+- 接続テストには `POST /api/v1/chat/rooms/{{room_id}}/dry-run` を使うこと
+- dry-run は認証・ルーム検証のみ行い、DBに書き込まない
+- 本番の送信エンドポイント (`/messages`, `/dan/messages/stream`) をテスト目的で使わないこと"""
 
 
 def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = None) -> str:
@@ -254,6 +259,7 @@ def _build_cli_cmd(
     cmd.extend([
         "-p",
         "--output-format", "stream-json",
+        "--include-partial-messages",
         "--verbose",
         "--dangerously-skip-permissions",
         "--model", "opus",
@@ -285,6 +291,10 @@ def _run_cli_process(
     final_text_parts = []
     result_data = None
 
+    # --include-partial-messages による重複を防ぐ
+    # メッセージIDごとに「既に処理済みのブロック数」を記録
+    processed_block_count: Dict[str, int] = {}
+
     process = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -309,6 +319,9 @@ def _run_cli_process(
         if not line:
             continue
 
+        # RAW stdout ログは冗長なため通常無効
+        # _cli_debug(f"RAW stdout: {line[:300]}")
+
         try:
             data = json.loads(line)
         except json.JSONDecodeError:
@@ -319,10 +332,26 @@ def _run_cli_process(
 
         if msg_type == "assistant":
             message_data = data.get("message", {})
+            msg_id = message_data.get("id", "unknown")
             blocks = message_data.get("content", [])
-            classified = _classify_content_blocks(blocks)
+            block_types = [b.get("type", "?") for b in blocks]
+            _cli_debug(f"Assistant msg_id={msg_id} blocks: {block_types} (count={len(blocks)})")
+
+            # partial messages では同じ msg_id で徐々にブロックが増える
+            # 前回処理済みのブロック数以降の新しいブロックだけ処理する
+            prev_count = processed_block_count.get(msg_id, 0)
+            new_blocks = blocks[prev_count:]
+            processed_block_count[msg_id] = len(blocks)
+
+            if not new_blocks:
+                _cli_debug(f"  No new blocks (prev={prev_count}, now={len(blocks)})")
+                continue
+
+            _cli_debug(f"  Processing {len(new_blocks)} new blocks (from index {prev_count})")
+            classified = _classify_content_blocks(new_blocks)
 
             for ev in classified:
+                _cli_debug(f"  Event: type={ev['type']}, text_len={len(ev.get('text', ''))}")
                 if ev["type"] == "text":
                     final_text_parts.append(ev["text"])
                 event_queue.put(ev)
