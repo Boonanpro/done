@@ -27,6 +27,8 @@ DEFAULT_CONFIG = {
     "quiet_hours": "23:00-07:00",
     "max_runs_per_day": 20,
     "max_tool_calls": 10,
+    "opus_enabled": True,
+    "opus_interval_hours": 12,
 }
 
 HEARTBEAT_PROMPT_PATH = WORKSPACE_DIR / "HEARTBEAT_PROMPT.md"
@@ -65,6 +67,10 @@ def _load_config() -> dict:
                 config["max_runs_per_day"] = int(value)
             elif key == "max_tool_calls":
                 config["max_tool_calls"] = int(value)
+            elif key == "opus_enabled":
+                config["opus_enabled"] = value.lower() == "true"
+            elif key == "opus_interval_hours":
+                config["opus_interval_hours"] = int(value)
     except Exception as e:
         logger.warning(f"Failed to load heartbeat config: {e}")
 
@@ -264,5 +270,160 @@ async def heartbeat_loop():
                 logger.debug(f"Heartbeat skipped: {result['skipped']}")
         except Exception as e:
             logger.error(f"Heartbeat loop error: {e}")
+
+        await asyncio.sleep(interval)
+
+
+# ---------------------------------------------------------------------------
+# Opus 自己改善 (Self-Improvement via Claude CLI)
+# ---------------------------------------------------------------------------
+
+SELF_IMPROVEMENT_PROMPT = """\
+あなたはコードベース D:/done の自己改善エージェントです。
+12時間ごとに自動起動し、コードの健康診断と小規模修正を行います。
+
+## タスク
+
+1. **健康診断**: コードベースを走査し、以下を検出する
+   - 未使用のimport
+   - デッドコード（参照されていない関数・変数）
+   - 明らかなバグ（typo、論理エラー）
+   - セキュリティリスク（ハードコードされた秘密鍵など）
+   - 非推奨パターン
+
+2. **小規模修正**: 安全に直せるものはその場で修正する
+   - 修正前に必ず grep で参照箇所を確認すること
+   - 1回の実行で変更するファイルは最大5つまで
+
+3. **大規模改善の提案**: 自分では直さず、提案として報告する
+   - 提案は最後のメッセージにまとめること
+
+## 削除ルール（3段階）
+
+### 直接OK（確認後すぐ削除してよい）
+- 未使用import（エディタ警告レベル）
+- デッドコード: grep で参照ゼロを確認した関数・変数
+- 空ファイル、重複ファイル
+
+### 承認待ち（提案のみ、実行しない）
+- サービス単位の削除（ファイルごと消す）
+- DBマイグレーション（DROP TABLE等）
+- 画面・ルートの削除
+
+### 絶対禁止（提案もしない）
+- ユーザーデータの削除・変更
+- 認証情報・環境変数の変更
+- git history の改変（rebase, force push等）
+- 外部リソース（API、DB本体）への破壊的操作
+
+## 出力形式
+
+最後のメッセージで以下をまとめる:
+- 実施した修正の一覧（ファイル名 + 変更内容）
+- 提案事項（あれば）
+- 「問題なし」の場合はその旨を報告
+"""
+
+
+async def run_opus_self_improvement() -> dict:
+    """
+    Opus CLIを起動してコードベースの自己改善を1回実行する。
+
+    Returns:
+        {"result": str, "cost": float, ...} or {"skipped": str} or {"error": str}
+    """
+    config = _load_config()
+
+    if not config.get("opus_enabled", False):
+        return {"skipped": "opus_disabled"}
+
+    if _in_quiet_hours(config):
+        return {"skipped": "quiet_hours"}
+
+    user_id = await _get_user_id()
+    if not user_id:
+        logger.warning("Opus self-improvement skipped: no user found")
+        return {"skipped": "no_user"}
+
+    logger.info("Starting Opus self-improvement run")
+
+    try:
+        from app.agent.cli_runner import process_message_cli
+
+        room_id = f"opus-selfimprove-{user_id}"
+        prompt = (
+            "コードベース D:/done の健康診断と小規模修正を実行してください。"
+            "指示はシステムプロンプトに従ってください。"
+        )
+
+        result_text = ""
+        cost = 0.0
+        turns = 0
+        errors = []
+
+        async for event in process_message_cli(
+            room_id=room_id,
+            user_id=user_id,
+            content=prompt,
+            system_prompt=SELF_IMPROVEMENT_PROMPT,
+        ):
+            etype = event.get("type", "")
+            if etype == "text":
+                result_text += event.get("text", "") + "\n"
+            elif etype == "result":
+                result_text = event.get("text", result_text)
+                cost = event.get("cost", 0.0)
+                turns = event.get("turns", 0)
+            elif etype == "error":
+                errors.append(event.get("message", "unknown error"))
+
+        result = {
+            "response": result_text.strip(),
+            "cost_usd": cost,
+            "turns": turns,
+        }
+
+        if errors:
+            result["errors"] = errors
+
+        # ログ記録
+        await _log_run(user_id, {
+            "response": f"[Opus Self-Improvement] {result_text[:4000]}",
+            "error": "; ".join(errors) if errors else None,
+        })
+
+        logger.info(
+            f"Opus self-improvement completed: {turns} turns, "
+            f"${cost:.4f}, {len(result_text)} chars"
+        )
+        return result
+
+    except Exception as e:
+        logger.error(f"Opus self-improvement failed: {e}")
+        return {"error": str(e)}
+
+
+async def opus_improvement_loop():
+    """
+    Opus自己改善メインループ（バックグラウンドタスク）
+
+    起動後5分待機してから、設定されたinterval（デフォルト12時間）で繰り返す。
+    """
+    # 起動直後は待機（他のサービスの初期化を待つ）
+    await asyncio.sleep(300)  # 5分
+    logger.info("Opus self-improvement loop started")
+
+    while True:
+        config = _load_config()
+        interval = config.get("opus_interval_hours", 12) * 3600
+
+        try:
+            result = await run_opus_self_improvement()
+            if "skipped" in result:
+                logger.debug(f"Opus self-improvement skipped: {result['skipped']}")
+            elif "error" in result:
+                logger.error(f"Opus self-improvement error: {result['error']}")
+        except Exception as e:
+            logger.error(f"Opus improvement loop error: {e}")
 
         await asyncio.sleep(interval)

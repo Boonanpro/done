@@ -27,14 +27,17 @@ from app.api.voice_routes import router as voice_router, ws_router as voice_ws_r
 from app.api.skill_routes import router as skill_router
 from app.api.gemini_voice_routes import router as gemini_voice_router
 from app.api.project_routes import router as project_router
+from app.api.note_routes import router as note_router
+
 
 # v3: Executorは不使用（汎用ツールで処理）
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.services.heartbeat_service import heartbeat_loop
-    task = asyncio.create_task(heartbeat_loop())
+    from app.services.heartbeat_service import heartbeat_loop, opus_improvement_loop
+    heartbeat_task = asyncio.create_task(heartbeat_loop())
+    opus_task = asyncio.create_task(opus_improvement_loop())
 
     # Start WSS proxy for mobile WebSocket access (port 8443)
     wss_server = None
@@ -47,7 +50,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    task.cancel()
+    heartbeat_task.cancel()
+    opus_task.cancel()
     if wss_server:
         wss_server.close()
 
@@ -90,6 +94,8 @@ app.include_router(voice_ws_router)
 app.include_router(skill_router, prefix="/api/v1")
 app.include_router(gemini_voice_router)
 app.include_router(project_router, prefix="/api/v1")
+app.include_router(note_router, prefix="/api/v1")
+
 
 
 @app.get("/")

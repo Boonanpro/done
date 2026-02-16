@@ -238,6 +238,153 @@ def _resolve_claude_cli() -> tuple[Optional[str], Optional[str]]:
     return claude_path, None
 
 
+def _build_cli_cmd(
+    claude_cmd: str,
+    cli_js: Optional[str],
+    mcp_config_path: str,
+    system_prompt: str,
+    resume_session_id: Optional[str] = None,
+) -> list[str]:
+    """CLIコマンドライン引数を組み立てる"""
+    if cli_js:
+        cmd = [claude_cmd, cli_js]
+    else:
+        cmd = [claude_cmd]
+
+    cmd.extend([
+        "-p",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--dangerously-skip-permissions",
+        "--model", "opus",
+        "--max-turns", "200",
+        "--mcp-config", mcp_config_path,
+        "--system-prompt", system_prompt,
+    ])
+
+    if resume_session_id:
+        cmd.extend(["--resume", resume_session_id])
+
+    return cmd
+
+
+def _run_cli_process(
+    cmd: list[str],
+    content: str,
+    env: dict,
+    room_id: str,
+    event_queue: thread_queue.Queue,
+) -> Optional[dict]:
+    """
+    CLIプロセスを1回実行し、イベントをキューに送る。
+
+    Returns:
+        result データ（リトライ判定用）。プロセスが結果を返さなかった場合は None。
+    """
+    session_id_captured = None
+    final_text_parts = []
+    result_data = None
+
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(CLI_WORKSPACE),
+        env=env,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    _cli_debug(f"CLI process started: PID={process.pid}")
+
+    try:
+        process.stdin.write(content)
+        process.stdin.close()
+    except Exception as e:
+        _cli_debug(f"stdin write error: {e}")
+
+    for line in process.stdout:
+        line = line.strip()
+        if not line:
+            continue
+
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            _cli_debug(f"Non-JSON line: {line[:100]}")
+            continue
+
+        msg_type = data.get("type", "")
+
+        if msg_type == "assistant":
+            message_data = data.get("message", {})
+            blocks = message_data.get("content", [])
+            classified = _classify_content_blocks(blocks)
+
+            for ev in classified:
+                if ev["type"] == "text":
+                    final_text_parts.append(ev["text"])
+                event_queue.put(ev)
+
+        elif msg_type == "result":
+            session_id_captured = data.get("session_id")
+            cost_usd = data.get("cost_usd", 0)
+            duration_ms = data.get("duration_ms", 0)
+            num_turns = data.get("num_turns", 0)
+            is_error = data.get("is_error", False)
+            result_text = data.get("result", "")
+            errors = data.get("errors", [])
+
+            result_data = {
+                "session_id": session_id_captured,
+                "is_error": is_error,
+                "num_turns": num_turns,
+                "errors": errors,
+                "result_text": result_text,
+                "final_text_parts": final_text_parts,
+                "cost": cost_usd,
+                "duration_ms": duration_ms,
+            }
+
+            _cli_debug(
+                f"ResultMessage: cost={cost_usd}, turns={num_turns}, "
+                f"error={is_error}, text_len={len(result_text or '')}, "
+                f"errors={errors}"
+            )
+
+        elif msg_type == "error":
+            error_msg = data.get("error", {})
+            error_text = error_msg.get("message", str(error_msg)) if isinstance(error_msg, dict) else str(error_msg)
+            _cli_debug(f"CLI error event: {error_text[:200]}")
+            event_queue.put({"type": "error", "message": error_text})
+
+        elif msg_type == "system":
+            session_id_captured = data.get("session_id", session_id_captured)
+            _cli_debug(f"System message: session_id={session_id_captured}")
+
+    return_code = process.wait(timeout=30)
+    _cli_debug(f"CLI process exited with code {return_code}")
+
+    if return_code != 0 and result_data is None:
+        stderr_output = process.stderr.read() if process.stderr else ""
+        if stderr_output:
+            _cli_debug(f"CLI stderr: {stderr_output[:500]}")
+            event_queue.put({"type": "error", "message": f"CLI exited with code {return_code}: {stderr_output[:300]}"})
+
+    return result_data
+
+
+def _is_resume_error(result_data: Optional[dict]) -> bool:
+    """resultがセッション再開失敗かどうかを判定する"""
+    if not result_data:
+        return False
+    if not result_data.get("is_error"):
+        return False
+    errors = result_data.get("errors", [])
+    return any("No conversation found" in e for e in errors)
+
+
 def _run_cli_in_thread(
     content: str,
     system_prompt: str,
@@ -249,149 +396,80 @@ def _run_cli_in_thread(
     """
     別スレッドでCLI subprocessを実行する。
     JSON streamを1行ずつ読み、イベントをキューに入れる。
+
+    セッション再開が失敗した場合（セッションが見つからない等）、
+    保存済みセッションIDをクリアして新規会話として自動リトライする。
     """
     _cli_debug(f"Thread started for room {room_id}")
 
-    # CLIコマンド構築
-    # Windows では claude.CMD (バッチファイル) 経由だと日本語や特殊文字が壊れるため、
-    # node + cli.js を直接呼び出す
     claude_cmd, cli_js = _resolve_claude_cli()
     if not claude_cmd:
         event_queue.put({"type": "error", "message": "claude CLI が見つかりません。npm i -g @anthropic-ai/claude-code でインストールしてください。"})
         event_queue.put(_SENTINEL)
         return
 
-    if cli_js:
-        # node で直接実行 (.CMD を経由しない)
-        cmd = [claude_cmd, cli_js]
-    else:
-        # claude.exe など .CMD 以外ならそのまま使う
-        cmd = [claude_cmd]
-
-    cmd.extend([
-        "-p",
-        "--output-format", "stream-json",
-        "--verbose",
-        "--dangerously-skip-permissions",
-        "--model", "opus",
-        "--max-turns", "200",
-        "--mcp-config", mcp_config_path,
-    ])
-
-    # システムプロンプト
-    cmd.extend(["--system-prompt", system_prompt])
-
-    # セッション再開
-    if resume_session_id:
-        cmd.extend(["--resume", resume_session_id])
-
-    # ユーザーのメッセージは stdin 経由で渡す（コマンドライン文字数制限を回避）
-
-    # 環境変数: CLAUDECODE を除外
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    # CLAUDECODE: Claude Code の再帰起動を防止
+    # ANTHROPIC_API_KEY: CLIがMax planサブスク（定額）ではなくAPI従量課金を使うのを防止
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
     env["DAN_SESSION_ID"] = room_id
 
-    _cli_debug(f"CLI command: {cmd[0]}{'...' + os.path.basename(cmd[1]) if cli_js else ''} (prompt len={len(content)})")
-
-    session_id_captured = None
-    final_text_parts = []
-
     try:
-        process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(CLI_WORKSPACE),
-            env=env,
-            encoding="utf-8",
-            errors="replace",
-        )
+        # 1回目: セッション再開を試みる
+        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id)
+        _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, prompt len={len(content)})")
 
-        _cli_debug(f"CLI process started: PID={process.pid}")
+        result_data = _run_cli_process(cmd, content, env, room_id, event_queue)
 
-        # ユーザーのメッセージを stdin 経由で送信して閉じる
-        try:
-            process.stdin.write(content)
-            process.stdin.close()
-        except Exception as e:
-            _cli_debug(f"stdin write error: {e}")
+        # セッション再開失敗 → セッションをクリアしてリトライ
+        if _is_resume_error(result_data) and resume_session_id:
+            errors = result_data.get("errors", [])
+            _cli_debug(f"Resume failed: {errors}. Clearing session and retrying without resume.")
 
-        # stdoutを1行ずつ読む
-        for line in process.stdout:
-            line = line.strip()
-            if not line:
-                continue
-
+            # 古いセッションIDをクリア
+            _cli_sessions.pop(room_id, None)
             try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                _cli_debug(f"Non-JSON line: {line[:100]}")
-                continue
+                from app.services.supabase_client import get_supabase_client
+                sb = get_supabase_client().client
+                proj = sb.table("projects").select("id, metadata").eq("room_id", room_id).execute()
+                if proj.data:
+                    meta = proj.data[0].get("metadata") or {}
+                    meta.pop("cli_session_id", None)
+                    sb.table("projects").update({"metadata": meta}).eq("id", proj.data[0]["id"]).execute()
+            except Exception as e:
+                _cli_debug(f"Failed to clear session from DB: {e}")
 
-            msg_type = data.get("type", "")
+            # 2回目: 新規会話として実行
+            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id=None)
+            _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(content)})")
 
-            if msg_type == "assistant":
-                # assistantメッセージ: content blocksを分類
-                message_data = data.get("message", {})
-                blocks = message_data.get("content", [])
-                classified = _classify_content_blocks(blocks)
+            result_data = _run_cli_process(cmd, content, env, room_id, event_queue)
 
-                for ev in classified:
-                    if ev["type"] == "text":
-                        final_text_parts.append(ev["text"])
-                    event_queue.put(ev)
+        # 最終結果をキューに送る
+        if result_data:
+            session_id = result_data.get("session_id")
+            is_error = result_data.get("is_error", False)
+            result_text = result_data.get("result_text", "")
+            final_text_parts = result_data.get("final_text_parts", [])
+            errors = result_data.get("errors", [])
 
-            elif msg_type == "result":
-                # 最終結果
-                session_id_captured = data.get("session_id")
-                cost_usd = data.get("cost_usd", 0)
-                duration_ms = data.get("duration_ms", 0)
-                num_turns = data.get("num_turns", 0)
-                is_error = data.get("is_error", False)
-                result_text = data.get("result", "")
+            # 成功時のみセッションIDを保存
+            if session_id and not is_error:
+                _save_session(room_id, session_id)
 
-                if session_id_captured:
-                    _save_session(room_id, session_id_captured)
+            # エラー時はerrorsの内容をテキストに含める
+            text = result_text or "\n".join(final_text_parts)
+            if is_error and not text and errors:
+                text = f"CLIエラー: {'; '.join(errors)}"
 
-                event_queue.put({
-                    "type": "result",
-                    "text": result_text or "\n".join(final_text_parts),
-                    "session_id": session_id_captured,
-                    "cost": cost_usd,
-                    "turns": num_turns,
-                    "duration_ms": duration_ms,
-                    "is_error": is_error,
-                })
-
-                _cli_debug(
-                    f"ResultMessage: cost={cost_usd}, turns={num_turns}, "
-                    f"error={is_error}, text_len={len(result_text or '')}"
-                )
-
-            elif msg_type == "error":
-                error_msg = data.get("error", {})
-                error_text = error_msg.get("message", str(error_msg)) if isinstance(error_msg, dict) else str(error_msg)
-                _cli_debug(f"CLI error event: {error_text[:200]}")
-                event_queue.put({"type": "error", "message": error_text})
-
-            elif msg_type == "system":
-                # システムメッセージ（セッションID等）
-                session_id_captured = data.get("session_id", session_id_captured)
-                _cli_debug(f"System message: session_id={session_id_captured}")
-
-            # その他 (tool_result, content_block_delta等) はスキップ
-
-        # プロセス終了を待つ
-        return_code = process.wait(timeout=30)
-        _cli_debug(f"CLI process exited with code {return_code}")
-
-        if return_code != 0:
-            stderr_output = process.stderr.read() if process.stderr else ""
-            if stderr_output:
-                _cli_debug(f"CLI stderr: {stderr_output[:500]}")
-                # resultイベントがまだ送られていない場合のみエラーを出す
-                event_queue.put({"type": "error", "message": f"CLI exited with code {return_code}: {stderr_output[:300]}"})
+            event_queue.put({
+                "type": "result",
+                "text": text,
+                "session_id": session_id,
+                "cost": result_data.get("cost", 0),
+                "turns": result_data.get("num_turns", 0),
+                "duration_ms": result_data.get("duration_ms", 0),
+                "is_error": is_error,
+            })
 
     except Exception as e:
         import traceback
@@ -411,6 +489,7 @@ async def process_message_cli(
     project_description: str = "",
     project_status: str = "in_progress",
     credentials: Optional[Dict] = None,
+    system_prompt: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Claude CLI経由でメッセージを処理し、分類済みイベントを返す。
@@ -424,10 +503,14 @@ async def process_message_cli(
 
     CLIは別スレッドで実行（Windows の SelectorEventLoop 制約を回避）。
     イベントはスレッドセーフなキュー経由で受け取る。
+
+    Args:
+        system_prompt: カスタムシステムプロンプト。指定時は _build_system_prompt() をスキップ。
     """
-    system_prompt = _build_system_prompt(
-        project_title, project_description, project_status,
-    )
+    if system_prompt is None:
+        system_prompt = _build_system_prompt(
+            project_title, project_description, project_status,
+        )
     mcp_config_path = _build_mcp_config(room_id, user_id, credentials)
     resume_session_id = _load_session(room_id)
 
