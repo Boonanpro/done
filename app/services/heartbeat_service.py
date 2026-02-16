@@ -14,6 +14,8 @@ from datetime import datetime, time
 from pathlib import Path
 from typing import Optional
 
+import aiohttp
+
 logger = logging.getLogger(__name__)
 
 WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
@@ -27,26 +29,19 @@ DEFAULT_CONFIG = {
     "max_tool_calls": 10,
 }
 
-HEARTBEAT_PROMPT_TEMPLATE = """[Heartbeat] 自動チェックイン。現在時刻: {now}
+HEARTBEAT_PROMPT_PATH = WORKSPACE_DIR / "HEARTBEAT_PROMPT.md"
 
-あなたは自律的に起動しました。以下を順に確認し、必要に応じて行動してください:
+HEARTBEAT_PROMPT_FALLBACK = """あなたは自律的に起動しました。MEMORY.mdを確認し、特記事項があればメモを残してください。なければ「特記事項なし」と返してください。"""
 
-1. リマインダー確認: MEMORY.mdと直近の会話ログ(memory/*.md)を読み、期限のあるタスクやリマインダーがあればメモを残す。
-2. ワークスペース整理: RULES.md を読み、以下を実施する:
-   - 重複・矛盾するルールを統合する
-   - 実態と合わなくなった古いルールを削除する
-   - 50行を超えていたら要約・圧縮する
-   - contentモードで全体を書き直してよい（有効なルールは保持すること）
-3. スキル改善: 最近のブラウザ操作ログを確認。繰り返し失敗しているパターンがあればSKILL.mdに対策を追記する。
-4. 自己拡張: 既存ツールで対応できないが頻繁に必要になりそうな機能があれば、exec_codeで実装してテストし、結果をworkspaceに記録する。
 
-ルール:
-- 不可逆操作（購入、送信、削除）は行わない
-- 追加だけでなく整理・削除も行う。ファイルは常にシンプルで読みやすい状態を保つ
-- 変更する場合はread_workspaceで現在の内容を読んでからcontentモードで全体を書く
-- exec_codeで新しい機能を試すのはOK。ただしテスト目的のみ
-- 特に何もなければ「特記事項なし」とだけ返す
-"""
+def _load_heartbeat_prompt() -> str:
+    """HEARTBEAT_PROMPT.mdから指示を読み込む。なければフォールバック。"""
+    if HEARTBEAT_PROMPT_PATH.exists():
+        try:
+            return HEARTBEAT_PROMPT_PATH.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to load heartbeat prompt: {e}")
+    return HEARTBEAT_PROMPT_FALLBACK
 
 
 def _load_config() -> dict:
@@ -146,10 +141,47 @@ async def _log_run(user_id: str, result: dict):
         logger.warning(f"Failed to log heartbeat run: {e}")
 
 
-def _build_prompt() -> str:
+async def _check_frontend_health() -> Optional[str]:
+    """フロントエンド(localhost:3000)の状態を確認。正常ならNone、異常ならエラー情報を返す"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("http://localhost:3000", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status >= 500:
+                    body = await resp.text()
+                    return f"HTTP {resp.status}: {body[:500]}"
+                # 200でもエラーページの可能性をチェック
+                body = await resp.text()
+                if "Build Error" in body or "Module not found" in body or "Unhandled Runtime Error" in body:
+                    return f"ビルドエラー検出: {body[:500]}"
+                return None
+    except aiohttp.ClientConnectorError:
+        return "フロントエンド(localhost:3000)に接続できません。プロセスが停止している可能性があります。"
+    except asyncio.TimeoutError:
+        return "フロントエンド(localhost:3000)が応答しません（タイムアウト）。"
+    except Exception as e:
+        return f"フロントエンド確認中にエラー: {e}"
+
+
+def _build_prompt(frontend_error: Optional[str] = None) -> str:
     """Heartbeatプロンプトを構築"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return HEARTBEAT_PROMPT_TEMPLATE.format(now=now)
+    instructions = _load_heartbeat_prompt()
+    prompt = f"[Heartbeat] 自動チェックイン。現在時刻: {now}\n\n{instructions}"
+
+    if frontend_error:
+        prompt += f"""
+
+⚠️ フロントエンド異常検出:
+{frontend_error}
+
+最優先で対応してください:
+1. bash で frontend/src/ 内の最近変更されたファイルを確認する（git diff, git log）
+2. エラー原因を特定する
+3. 修正して画面を復旧させる
+4. 修正後、画面が正常に表示されることを確認する
+"""
+
+    return prompt
 
 
 async def run_heartbeat() -> dict:
@@ -178,7 +210,11 @@ async def run_heartbeat() -> dict:
         logger.warning("Heartbeat skipped: no user found")
         return {"skipped": "no_user"}
 
-    prompt = _build_prompt()
+    frontend_error = await _check_frontend_health()
+    if frontend_error:
+        logger.warning(f"Frontend health check failed: {frontend_error}")
+
+    prompt = _build_prompt(frontend_error=frontend_error)
 
     try:
         from app.agent.v2.runner import create_runner

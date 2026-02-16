@@ -14,6 +14,9 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+# バックグラウンドタスクの参照を保持（GC防止）
+_background_tasks: set = set()
+
 # ============================================
 # スキル定義（動的読み込み方式）
 # ============================================
@@ -1608,7 +1611,7 @@ async def execute_tool(
             if project.get("room_id"):
                 import asyncio
                 from app.services.project_auto_proposal import run_project_auto_proposal
-                asyncio.create_task(run_project_auto_proposal(
+                task = asyncio.create_task(run_project_auto_proposal(
                     project_id=project["id"],
                     room_id=project["room_id"],
                     user_id=user_id,
@@ -1616,6 +1619,8 @@ async def execute_tool(
                     description=description or "",
                     origin_room_id=session_id,
                 ))
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
 
             return {
                 "success": True,
@@ -1635,7 +1640,7 @@ async def execute_tool(
         if not filename:
             return {"success": False, "error": "filename が必要です"}
 
-        allowed_root = ["RULES.md", "USER.md", "MEMORY.md"]
+        allowed_root = ["RULES.md", "USER.md", "MEMORY.md", "HEARTBEAT_PROMPT.md"]
         is_memory_file = filename.startswith("memory/") and filename.endswith(".md")
 
         if filename not in allowed_root and not is_memory_file:
@@ -1661,7 +1666,7 @@ async def execute_tool(
             return {"success": False, "error": "filename が必要です"}
 
         # 許可されたファイル: ルートの.mdファイル または memory/*.md
-        allowed_root_files = ["RULES.md", "USER.md", "MEMORY.md"]
+        allowed_root_files = ["RULES.md", "USER.md", "MEMORY.md", "HEARTBEAT_PROMPT.md"]
         is_memory_file = filename.startswith("memory/") and filename.endswith(".md")
 
         if filename not in allowed_root_files and not is_memory_file:
@@ -2536,6 +2541,11 @@ def format_tool_result(
         lines.append(result["content"])
     else:
         lines.append(result.get('message', '完了'))
+
+    # instructionがあれば追加（ツールからLLMへの指示）
+    instruction = result.get("instruction")
+    if instruction:
+        lines.append(f"\n[指示] {instruction}")
 
     # 差分があれば追加
     deviation = result.get("deviation")
