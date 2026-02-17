@@ -1,12 +1,12 @@
 {
-  "name": "Done Voice Companion",
-  "short_name": "Done Voice",
-  "description": "Dan voice companion PWA",
-  "start_url": "/voice/companion",
+  "name": "Done - AI Secretary",
+  "short_name": "Done",
+  "description": "Your AI-powered personal secretary",
+  "start_url": "/chat",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#000000",
-  "theme_color": "#000000",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
   "lang": "ja-JP",
   "icons": [
     {
