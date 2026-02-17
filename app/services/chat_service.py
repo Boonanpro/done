@@ -787,6 +787,7 @@ class ChatService:
         content: str,
         reasoning_steps: list[str] = None,
         room_id: str = None,
+        reasoning_full: list[str] = None,
     ) -> dict:
         """
         ダンからユーザーにメッセージを送信（AI側）
@@ -794,8 +795,9 @@ class ChatService:
         Args:
             user_id: 対象ユーザーID
             content: メッセージ内容
-            reasoning_steps: 推論過程（プロセス/ナレーション）
+            reasoning_steps: 推論過程の短いラベル（プロセスモニター表示用）
             room_id: 送信先ルームID（指定しない場合は現在のDanルーム）
+            reasoning_full: 推論過程の全文（展開表示用）
 
         Returns:
             送信されたメッセージ
@@ -805,11 +807,13 @@ class ChatService:
         else:
             dan_room = await self.get_or_create_dan_room(user_id)
             target_room_id = dan_room["id"]
-        
+
         # ai_contextを構築
         ai_context = None
         if reasoning_steps:
             ai_context = {"reasoning_steps": reasoning_steps}
+            if reasoning_full:
+                ai_context["reasoning_full"] = reasoning_full
         
         # AIからのメッセージとして送信
         insert_data = {
@@ -1302,6 +1306,3 @@ def get_chat_service() -> ChatService:
     """ChatServiceのシングルトンインスタンスを取得"""
     return ChatService()
 
-
-# Import timedelta for invite expiration
-from datetime import timedelta

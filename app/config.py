@@ -40,6 +40,7 @@ class Settings(BaseSettings):
 
     # Gmail App Password (Phase 9: SMS OTP via Gmail)
     GMAIL_APP_PASSWORD: str = ""
+    GMAIL_ADDRESS: str = ""
     
     # Attachment Storage (Phase 5C)
     ATTACHMENT_STORAGE_PATH: str = "./data/attachments"

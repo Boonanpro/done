@@ -725,7 +725,8 @@ async def send_dan_message_stream(
 
                 project_service = ProjectService()
                 final_text = ""
-                reasoning_steps = []
+                reasoning_steps = []   # 短いラベル（プロセスモニター表示用）
+                reasoning_full = []    # 全文（DB保存用、フロントで展開表示）
                 step_counter = 0
 
                 async for event in process_message_cli(
@@ -738,8 +739,10 @@ async def send_dan_message_stream(
                 ):
                     if event["type"] == "reasoning":
                         text = event.get("text", "")
-                        label = text[:100]
+                        label = _summarize_reasoning(text, max_len=300) or text[:300]
                         reasoning_steps.append(label)
+                        if text.strip():
+                            reasoning_full.append(text)
                         yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
                         step_counter += 1
                         # execution_events に保存（ProcessMonitor用）
@@ -773,12 +776,13 @@ async def send_dan_message_stream(
                             pass
 
                     elif event["type"] == "text":
+                        # textイベントは暫定的に記録（最終回答はresultイベントで確定する）
                         final_text = event["text"]
-                        # テキストの先頭をモニターに表示（思考内容として）
                         text_preview = event["text"].strip()
                         if text_preview and len(text_preview) > 10:
-                            label = f"💭 {text_preview[:80]}"
+                            label = f"💭 {_summarize_reasoning(text_preview, max_len=300) or text_preview[:300]}"
                             reasoning_steps.append(label)
+                            reasoning_full.append(text_preview)
                             yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
                             step_counter += 1
 
@@ -806,7 +810,8 @@ async def send_dan_message_stream(
                 # DBに保存（空の場合のフォールバックはエラー内容を含む）
                 ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
                 ai_message_data = await service.send_dan_ai_message(
-                    current_user.user_id, ai_response_content, reasoning_steps, room_id=room_id
+                    current_user.user_id, ai_response_content, reasoning_steps,
+                    room_id=room_id, reasoning_full=reasoning_full,
                 )
 
                 if not ai_message_data:
