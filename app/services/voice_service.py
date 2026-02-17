@@ -4,7 +4,6 @@ Phase 10: Voice Communication Service
 """
 import logging
 import audioop
-import struct
 import io
 from typing import Optional, List, Tuple
 from datetime import datetime
@@ -33,7 +32,7 @@ class VoiceService:
         # ElevenLabs設定（環境変数から取得）
         self.elevenlabs_api_key = getattr(settings, 'ELEVENLABS_API_KEY', None)
         self.elevenlabs_voice_id = getattr(settings, 'ELEVENLABS_VOICE_ID', None)
-        self.elevenlabs_model_id = getattr(settings, 'ELEVENLABS_MODEL_ID', 'eleven_turbo_v2_5')
+        self.elevenlabs_model_id = getattr(settings, 'ELEVENLABS_MODEL_ID', 'eleven_v3')
         
         # Twilio設定（環境変数から取得）
         self.twilio_account_sid = getattr(settings, 'TWILIO_ACCOUNT_SID', None)
@@ -835,9 +834,10 @@ class VoiceService:
             return None
     
     async def text_to_speech(
-        self, 
-        text: str, 
-        voice_id: Optional[str] = None
+        self,
+        text: str,
+        voice_id: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> Optional[bytes]:
         """
         ElevenLabs TTSでテキストを音声に変換
@@ -873,11 +873,13 @@ class VoiceService:
                         "similarity_boost": 0.75,
                     }
                 }
-                
+                if language:
+                    payload["language_code"] = language
+
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status == 200:
                         audio_data = await response.read()
-                        logger.debug(f"TTS generated {len(audio_data)} bytes")
+                        logger.debug(f"TTS generated {len(audio_data)} bytes (lang={language}, model={self.elevenlabs_model_id})")
                         return audio_data
                     else:
                         error_text = await response.text()

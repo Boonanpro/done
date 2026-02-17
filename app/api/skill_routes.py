@@ -8,7 +8,7 @@ Claude Code CLIを使って高品質なスキルを生成する。
 
 """
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends
 
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 

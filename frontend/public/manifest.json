@@ -1,0 +1,19 @@
+{
+  "name": "Done Voice Companion",
+  "short_name": "Done Voice",
+  "description": "Dan voice companion PWA",
+  "start_url": "/voice/companion",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "lang": "ja-JP",
+  "icons": [
+    {
+      "src": "/favicon.ico",
+      "sizes": "64x64",
+      "type": "image/x-icon",
+      "purpose": "any"
+    }
+  ]
+}

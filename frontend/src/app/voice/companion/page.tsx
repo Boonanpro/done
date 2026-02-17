@@ -34,7 +34,8 @@ export default function CompanionPage() {
     if (!isLoading && !isAuthenticated && !hasToken) {
       router.push('/login');
     }
-  }, [isLoading, isAuthenticated, hasToken, router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoading, isAuthenticated, hasToken]);
 
   // Get session ID
   useEffect(() => {

@@ -17,8 +17,8 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-GMAIL_ADDRESS = "0aw325171@gmail.com"
-GMAIL_APP_PASSWORD = os.getenv('GMAIL_APP_PASSWORD')
+GMAIL_ADDRESS = os.getenv('GMAIL_ADDRESS', '')
+GMAIL_APP_PASSWORD = os.getenv('GMAIL_APP_PASSWORD', '')
 
 
 def get_sms_otp_from_gmail(
@@ -90,13 +90,13 @@ def get_sms_otp_from_gmail(
                     if part.get_content_type() == "text/plain":
                         try:
                             body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                        except:
+                        except Exception:
                             continue
                         break
             else:
                 try:
                     body = email_message.get_payload(decode=True).decode('utf-8', errors='ignore')
-                except:
+                except Exception:
                     continue
 
             # OTPパターンを探す（優先度順）

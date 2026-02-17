@@ -12,9 +12,12 @@
 5. セッション終了時: CancellationRegistry.unregister(session_id)
 """
 
+import logging
 import threading
 import contextvars
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # コンテキスト変数で現在のセッションIDを追跡（async対応）
@@ -51,9 +54,9 @@ class CancellationRegistry:
         with cls._lock:
             if session_id in cls._instances:
                 cls._instances[session_id].set()
-                print(f"[CANCEL] Session {session_id} cancelled")
+                logger.info("Session %s cancelled", session_id)
                 return True
-            print(f"[CANCEL] Session {session_id} not found in registry")
+            logger.warning("Session %s not found in registry", session_id)
             return False
 
     @classmethod

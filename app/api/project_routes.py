@@ -1,7 +1,7 @@
 """
 Project API Routes - プロジェクト管理
 """
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import Optional
 
 from app.api.chat_routes import get_current_user, TokenData
@@ -14,6 +14,7 @@ from app.models.project_schemas import (
     ProjectProposalCreateRequest,
     ProjectProposalResponse,
     ProjectProposalActionRequest,
+    ExecutionEventResponse,
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -175,6 +176,24 @@ async def proposal_action(
     return result
 
 
+# ==================== Execution Events ====================
+
+@router.get("/{project_id}/execution-events", response_model=list[ExecutionEventResponse])
+async def get_execution_events(
+    project_id: str,
+    limit: int = Query(default=100, le=500),
+    after: Optional[str] = Query(default=None),
+    current_user: TokenData = Depends(get_current_user),
+    service: ProjectService = Depends(get_project_service),
+):
+    """プロジェクトの実行イベント一覧"""
+    project = await service.get_project(project_id, current_user.user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return await service.get_execution_events(project_id, limit=limit, after=after)
+
+
 def _summarize_reasoning(text: str, max_len: int = 120) -> str:
     """思考テキストを1文に要約（先頭の意味のある文を抽出）"""
     if not text or not text.strip():
@@ -260,7 +279,7 @@ def _format_tool_label(name: str, tool_input: dict) -> str:
 
 
 async def _start_project_execution(project: dict, proposal: dict, user_id: str):
-    """承認された提案をSDK Runnerで実行開始"""
+    """承認された提案をCLI Runnerで実行開始"""
     import logging
     logger = logging.getLogger(__name__)
 
@@ -281,12 +300,12 @@ async def _start_project_execution(project: dict, proposal: dict, user_id: str):
 """
 
     try:
-        from app.agent.sdk_runner import process_message_sdk
+        from app.agent.cli_runner import process_message_cli
         from app.services.chat_service import ChatService
 
         chat_service = ChatService()
+        service = ProjectService()
         final_text = ""
-        pending_reasoning = ""  # tool_use 直前に出力するバッファ
 
         # 開始メッセージ
         await chat_service.send_dan_ai_message(
@@ -295,7 +314,7 @@ async def _start_project_execution(project: dict, proposal: dict, user_id: str):
             room_id=room_id,
         )
 
-        async for event in process_message_sdk(
+        async for event in process_message_cli(
             room_id=room_id,
             user_id=user_id,
             content=execution_prompt,
@@ -304,41 +323,52 @@ async def _start_project_execution(project: dict, proposal: dict, user_id: str):
             project_status="in_progress",
         ):
             etype = event["type"]
+
             if etype == "text":
+                # ユーザー向けメッセージ → chat_messagesに保存
                 final_text = event["text"]
-                # テキストブロック = アシスタントの自然言語応答 → チャットに表示
                 if event["text"].strip():
                     await chat_service.send_dan_ai_message(
                         user_id=user_id,
                         content=event["text"],
                         room_id=room_id,
                     )
-            elif etype == "text_delta":
-                pass
-            elif etype == "reasoning":
-                # 拡張思考モード時のみ発火（現在は未使用）
-                pending_reasoning = event.get("text", "")
+
             elif etype == "tool_use":
-                if pending_reasoning:
-                    summary = _summarize_reasoning(pending_reasoning)
-                    if summary:
-                        await chat_service.send_dan_ai_message(
-                            user_id=user_id,
-                            content=f"[思考中] {summary}",
-                            room_id=room_id,
-                        )
-                    pending_reasoning = ""
+                # 内部実行 → execution_eventsに保存
                 label = _format_tool_label(event.get("name", ""), event.get("input", {}))
-                await chat_service.send_dan_ai_message(
-                    user_id=user_id,
-                    content=f"[実行中] {label}",
+                await service.save_execution_event(
+                    project_id=project_id,
                     room_id=room_id,
+                    event_type="tool_use",
+                    tool_name=event.get("name", ""),
+                    tool_label=label,
                 )
+
+            elif etype == "reasoning":
+                # 内部思考 → execution_eventsに保存
+                text = event.get("text", "")
+                if text.strip():
+                    summary = _summarize_reasoning(text)
+                    await service.save_execution_event(
+                        project_id=project_id,
+                        room_id=room_id,
+                        event_type="reasoning",
+                        content=summary or text[:200],
+                    )
+
             elif etype == "result":
                 final_text = event.get("text", final_text)
+
             elif etype == "error":
                 had_error = True
                 final_text = f"エラーが発生しました: {event['message']}"
+                await service.save_execution_event(
+                    project_id=project_id,
+                    room_id=room_id,
+                    event_type="error",
+                    content=event["message"][:500],
+                )
 
         # エラー時のみ最終メッセージを送信（正常時はtextイベントで既に送信済み）
         if had_error and final_text:

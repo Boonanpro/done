@@ -19,8 +19,11 @@ logger = logging.getLogger(__name__)
 class GeminiLiveClient:
     """Wraps a Gemini Live API session for audio + function-calling."""
 
-    def __init__(self, model: str = "gemini-2.5-flash-native-audio-latest"):
-        self._model = model
+    def __init__(self, model: str = None, text_mode: bool = False):
+        self._text_mode = text_mode
+        # Live API only supports native-audio model; text mode uses the same model
+        # but discards audio output and reads output_transcription instead.
+        self._model = model or "gemini-2.5-flash-native-audio-latest"
         self._client = genai.Client(api_key=settings.GOOGLE_GEMINI_API_KEY)
         self._session: Optional[genai.live.AsyncSession] = None
         self._ctx = None  # async context manager
@@ -36,14 +39,21 @@ class GeminiLiveClient:
             system_instruction: System prompt text.
             tools: List of Gemini Tool objects (function declarations + google_search).
         """
+        system_content = genai_types.Content(
+            parts=[genai_types.Part(text=system_instruction)]
+        )
+
+        # Both text and voice modes use AUDIO modality (only option for native-audio model).
+        # Text mode discards audio bytes and uses output_transcription for text.
         config = genai_types.LiveConnectConfig(
             response_modalities=["AUDIO"],
-            system_instruction=genai_types.Content(
-                parts=[genai_types.Part(text=system_instruction)]
-            ),
+            system_instruction=system_content,
             tools=tools,
             input_audio_transcription=genai_types.AudioTranscriptionConfig(),
             output_audio_transcription=genai_types.AudioTranscriptionConfig(),
+            thinking_config=genai_types.ThinkingConfig(
+                thinking_budget=2048,
+            ),
         )
 
         # connect() returns an async context manager

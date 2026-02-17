@@ -13,8 +13,6 @@ import base64
 import os
 import pickle
 
-from app.config import settings
-
 # Gmail APIのスコープ
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",

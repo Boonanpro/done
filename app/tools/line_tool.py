@@ -1,7 +1,6 @@
 """
 LINE Messaging API Tools
 """
-from typing import Optional
 from langchain_core.tools import tool
 from linebot.v3 import WebhookHandler
 from linebot.v3.messaging import (
@@ -12,7 +11,6 @@ from linebot.v3.messaging import (
     PushMessageRequest,
     ReplyMessageRequest,
 )
-from linebot.v3.exceptions import InvalidSignatureError
 
 from app.config import settings
 

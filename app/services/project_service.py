@@ -195,6 +195,47 @@ class ProjectService:
 
         return result.data[0] if result.data else None
 
+    async def update_step_status(
+        self,
+        proposal_id: str,
+        step_number: Optional[int],
+        status: str,
+    ) -> None:
+        """
+        提案のステップ状況を更新。
+
+        step_number=None → 全ステップ更新
+        step_number=N → 特定ステップ更新
+        """
+        # 現在のproposalを取得
+        result = (
+            self.supabase.table("project_proposals")
+            .select("steps")
+            .eq("id", proposal_id)
+            .execute()
+        )
+        if not result.data:
+            return
+
+        steps = result.data[0].get("steps") or []
+        if not steps:
+            return
+
+        if step_number is None:
+            # 全ステップを更新
+            for step in steps:
+                step["status"] = status
+        else:
+            # 特定ステップを更新
+            for step in steps:
+                if step.get("step_number") == step_number:
+                    step["status"] = status
+                    break
+
+        self.supabase.table("project_proposals").update({
+            "steps": steps,
+        }).eq("id", proposal_id).execute()
+
     async def reject_proposal(self, proposal_id: str, project_id: str) -> Optional[dict]:
         """提案を却下"""
         result = (
@@ -214,3 +255,44 @@ class ProjectService:
             }).eq("id", project_id).execute()
 
         return result.data[0] if result.data else None
+
+    # ==================== Execution Events ====================
+
+    async def save_execution_event(
+        self,
+        project_id: str,
+        room_id: str,
+        event_type: str,
+        tool_name: Optional[str] = None,
+        tool_label: Optional[str] = None,
+        content: Optional[str] = None,
+        metadata: Optional[dict] = None,
+    ) -> dict:
+        """実行イベントを記録"""
+        result = self.supabase.table("execution_events").insert({
+            "project_id": project_id,
+            "room_id": room_id,
+            "event_type": event_type,
+            "tool_name": tool_name,
+            "tool_label": tool_label,
+            "content": content,
+            "metadata": metadata or {},
+        }).execute()
+        return result.data[0] if result.data else {}
+
+    async def get_execution_events(
+        self,
+        project_id: str,
+        limit: int = 100,
+        after: Optional[str] = None,
+    ) -> list[dict]:
+        """プロジェクトの実行イベント一覧を取得"""
+        query = (
+            self.supabase.table("execution_events")
+            .select("*")
+            .eq("project_id", project_id)
+        )
+        if after:
+            query = query.gt("created_at", after)
+        result = query.order("created_at", desc=False).limit(limit).execute()
+        return result.data or []

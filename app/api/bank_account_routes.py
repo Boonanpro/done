@@ -2,7 +2,6 @@
 Bank Account API Routes - Phase 8B: 振込先管理
 """
 from fastapi import APIRouter, HTTPException, Depends
-from typing import Optional
 import logging
 
 from app.models.payment_schemas import (

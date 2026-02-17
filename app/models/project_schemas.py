@@ -93,3 +93,18 @@ class ProjectProposalResponse(BaseModel):
 class ProjectProposalActionRequest(BaseModel):
     """提案承認/却下リクエスト"""
     action: str = Field(..., pattern="^(approve|reject)$")
+
+
+# ==================== Execution Event Schemas ====================
+
+class ExecutionEventResponse(BaseModel):
+    """実行イベントレスポンス"""
+    id: str
+    project_id: str
+    room_id: str
+    event_type: str  # 'tool_use', 'reasoning', 'phase', 'error'
+    tool_name: Optional[str] = None
+    tool_label: Optional[str] = None
+    content: Optional[str] = None
+    metadata: Optional[dict] = None
+    created_at: datetime

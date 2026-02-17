@@ -16,6 +16,7 @@ interface ObserverMessage {
 
 interface UseGeminiObserverOptions {
   sessionId: string | null;
+  mode?: 'observer' | 'active';
   autoConnect?: boolean;
   onAssistantText?: (text: string) => void;
   onProcessStep?: (step: string) => void;

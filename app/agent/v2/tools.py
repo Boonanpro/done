@@ -1539,7 +1539,7 @@ def parse_tool_call(response: str) -> Optional[Dict[str, Any]]:
     skill_name = match.group(1)
     action = match.group(2)
 
-    print(f"[PARSE_DEBUG] Found tool call: {skill_name} {action}")
+    logger.debug("Found tool call: %s %s", skill_name, action)
 
     # パラメータを抽出（key: value 形式）
     params = {}
@@ -1549,7 +1549,7 @@ def parse_tool_call(response: str) -> Optional[Dict[str, Any]]:
     # 次の[TOOL:]または[STATE:]または空行2つまでをパラメータとして扱う
     param_section = re.split(r'\n\n|\[TOOL:|\[STATE:', remaining)[0]
 
-    print(f"[PARSE_DEBUG] Param section:\n{param_section[:300]}...")
+    logger.debug("Param section:\n%s...", param_section[:300])
 
     for line in param_section.split('\n'):
         line = line.strip()
@@ -1559,9 +1559,9 @@ def parse_tool_call(response: str) -> Optional[Dict[str, Any]]:
             value = value.strip()
             if key and value:
                 params[key] = value
-                print(f"[PARSE_DEBUG] Extracted param: {key}={value[:20] if len(value) > 20 else value}")
+                logger.debug("Extracted param: %s=%s", key, value[:20] if len(value) > 20 else value)
 
-    print(f"[PARSE_DEBUG] Total params extracted: {len(params)}")
+    logger.debug("Total params extracted: %d", len(params))
 
     return {
         "skill": skill_name,

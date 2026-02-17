@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "dan-tools": {
+      "command": "python",
+      "args": [
+        "D:\\done\\app\\mcp_server.py"
+      ],
+      "env": {
+        "DAN_USER_ID": "test-user",
+        "DAN_SESSION_ID": "test-005",
+        "DAN_CREDENTIALS": "{}"
+      }
+    }
+  }
+}

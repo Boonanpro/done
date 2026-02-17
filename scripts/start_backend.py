@@ -118,16 +118,139 @@ def check_health(timeout: int = 5) -> bool:
         return False
 
 
+def _get_own_process_tree() -> set[int]:
+    """
+    Get PIDs of the entire Claude Code session: ancestors AND all descendants
+    of the claude.exe root process.
+
+    Previous bug: only ancestors were protected, so sibling/child processes
+    of claude.exe (workers, language servers, etc.) got killed, crashing
+    the Claude Code session.
+
+    Fix: find claude.exe in ancestor chain, then protect ALL its descendants.
+    """
+    import os
+    pids = set()
+
+    try:
+        # Step 1: Get ALL processes in one wmic call (efficient)
+        proc_parent = {}  # pid -> parent_pid
+        proc_name = {}    # pid -> process name (lowercase)
+        result = subprocess.run(
+            ["wmic", "process", "get", "processid,parentprocessid,name", "/format:csv"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.split("\n"):
+            line = line.strip()
+            if not line or line.startswith("Node"):
+                continue
+            # CSV format: Node,Name,ParentProcessId,ProcessId
+            parts = line.split(",")
+            if len(parts) >= 4:
+                try:
+                    name = parts[1].strip().lower()
+                    parent_pid = int(parts[2].strip())
+                    pid_val = int(parts[3].strip())
+                    proc_parent[pid_val] = parent_pid
+                    proc_name[pid_val] = name
+                except (ValueError, IndexError):
+                    pass
+
+        if not proc_parent:
+            print("[start] Warning: wmic CSV returned no processes, falling back to ancestor-only")
+            return _get_ancestors_only()
+
+        # Step 2: Trace ancestors from current PID
+        claude_root = None
+        pid = os.getpid()
+        for _ in range(30):
+            pids.add(pid)
+            # Check if this ancestor is claude.exe
+            if proc_name.get(pid) == "claude.exe":
+                claude_root = pid
+            parent = proc_parent.get(pid)
+            if parent is None or parent == 0 or parent in pids:
+                break
+            pid = parent
+
+        # Step 2b: If no claude.exe found, check if any ancestor node.exe is Claude Code
+        if claude_root is None:
+            for ancestor_pid in list(pids):
+                if proc_name.get(ancestor_pid) == "node.exe":
+                    try:
+                        cmd_result = subprocess.run(
+                            ["wmic", "process", "where", f"processid={ancestor_pid}",
+                             "get", "commandline"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        if "claude" in cmd_result.stdout.lower():
+                            claude_root = ancestor_pid
+                            break
+                    except Exception:
+                        pass
+
+        # Step 3: If we found claude.exe/node-claude, protect ALL its descendants
+        if claude_root is not None:
+            queue = [claude_root]
+            visited = {claude_root}
+            while queue:
+                p = queue.pop()
+                pids.add(p)
+                for child_pid, parent_pid in proc_parent.items():
+                    if parent_pid == p and child_pid not in visited:
+                        visited.add(child_pid)
+                        queue.append(child_pid)
+            print(f"  [INFO] Protecting Claude Code session (root PID {claude_root}, {len(pids)} processes)")
+        else:
+            print(f"  [INFO] No claude.exe ancestor found, protecting {len(pids)} ancestor processes only")
+
+    except Exception as e:
+        print(f"[start] Warning: could not get process tree: {e}")
+        return _get_ancestors_only()
+
+    return pids
+
+
+def _get_ancestors_only() -> set[int]:
+    """Fallback: trace only ancestor PIDs (old behavior)."""
+    import os
+    pids = set()
+    try:
+        pid = os.getpid()
+        for _ in range(30):
+            pids.add(pid)
+            result = subprocess.run(
+                ["wmic", "process", "where", f"processid={pid}", "get", "parentprocessid"],
+                capture_output=True, text=True, timeout=5,
+            )
+            parent_pid = None
+            for line in result.stdout.split("\n"):
+                line = line.strip()
+                if line and not line.startswith("ParentProcessId"):
+                    try:
+                        parent_pid = int(line)
+                    except ValueError:
+                        pass
+            if parent_pid is None or parent_pid == 0 or parent_pid in pids:
+                break
+            pid = parent_pid
+    except Exception as e:
+        print(f"[start] Warning: ancestor trace failed: {e}")
+    return pids
+
+
 def get_sdk_processes() -> list[tuple[int, str]]:
     """
-    Get all SDK-related processes (claude.exe and mcp_server.py).
+    Get SDK/CLI-related processes (claude.exe, node claude, and mcp_server.py)
+    spawned by project execution.
 
-    These are spawned by the Agent SDK during project execution
-    and must be cleaned up on backend restart.
+    IMPORTANT: Excludes the current process tree (ancestors) so we don't kill
+    Claude Code itself or the shell that launched this script.
     """
+    own_pids = _get_own_process_tree()
     processes = []
     try:
-        # claude.exe (SDK agent processes)
+        # claude.exe (SDK agent processes - native binary)
         result = subprocess.run(
             ["wmic", "process", "where", "name='claude.exe'", "get", "processid,commandline"],
             capture_output=True, text=True, timeout=10,
@@ -140,11 +263,41 @@ def get_sdk_processes() -> list[tuple[int, str]]:
             if parts:
                 try:
                     pid = int(parts[-1])
-                    processes.append((pid, "claude.exe"))
+                    if pid not in own_pids:
+                        processes.append((pid, "claude.exe"))
+                    else:
+                        print(f"  [SKIP] claude.exe PID {pid} (own process tree)")
                 except ValueError:
                     pass
 
-        # mcp_server.py (MCP server processes spawned by SDK)
+        # Node.js-based claude CLI processes
+        # These run as node.exe with "claude" in the command line
+        # Exclude: ancestor processes, and frontend dev servers (next, react-scripts, etc.)
+        result = subprocess.run(
+            ["wmic", "process", "where", "name='node.exe'", "get", "processid,commandline"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for line in result.stdout.split("\n"):
+            line = line.strip()
+            if not line or "CommandLine" in line:
+                continue
+            line_lower = line.lower()
+            # Skip frontend dev servers (next dev, react-scripts, etc.)
+            if any(kw in line_lower for kw in ["next", "react-scripts", "webpack", "vite", "turbopack"]):
+                continue
+            if "claude" in line_lower:
+                parts = line.split()
+                if parts:
+                    try:
+                        pid = int(parts[-1])
+                        if pid not in own_pids:
+                            processes.append((pid, "node claude"))
+                        else:
+                            print(f"  [SKIP] node claude PID {pid} (own process tree)")
+                    except ValueError:
+                        pass
+
+        # mcp_server.py (MCP server processes spawned by SDK/CLI)
         result = subprocess.run(
             ["wmic", "process", "where", "name='python.exe'", "get", "processid,commandline"],
             capture_output=True, text=True, timeout=10,
@@ -158,7 +311,10 @@ def get_sdk_processes() -> list[tuple[int, str]]:
                 if parts:
                     try:
                         pid = int(parts[-1])
-                        processes.append((pid, "mcp_server.py"))
+                        if pid not in own_pids:
+                            processes.append((pid, "mcp_server.py"))
+                        else:
+                            print(f"  [SKIP] mcp_server.py PID {pid} (own process tree)")
                     except ValueError:
                         pass
     except Exception as e:
@@ -186,8 +342,8 @@ def cleanup() -> bool:
             else:
                 print(f"  [FAIL] Could not kill PID {pid}")
 
-    # Kill leftover SDK processes (claude.exe, mcp_server.py)
-    print("[start] Step 2b: Cleaning up SDK processes (claude.exe, mcp_server.py)...")
+    # Kill leftover SDK/CLI processes (claude.exe, node claude, mcp_server.py)
+    print("[start] Step 2b: Cleaning up SDK/CLI processes...")
     sdk_procs = get_sdk_processes()
     if not sdk_procs:
         print("[start] No SDK processes found.")

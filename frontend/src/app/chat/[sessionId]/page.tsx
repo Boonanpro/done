@@ -12,7 +12,8 @@ export default function ChatSessionRedirect() {
 
   useEffect(() => {
     router.replace('/chat');
-  }, [router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return null;
 }

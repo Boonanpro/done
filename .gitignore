@@ -116,3 +116,16 @@ dmypy.json
 # Temporary test files (screenshots, audio)
 *.png
 *.mp3
+
+# Test tokens and credentials
+test_token.txt
+test_*.txt
+
+# Node modules (all subdirectories)
+**/node_modules/
+
+# Next.js build output (all subdirectories)
+**/.next/
+
+# Windows invalid file
+nul

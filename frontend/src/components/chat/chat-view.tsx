@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp, Square, Sparkles, X, Mic, MicOff, SkipForward } from 'lucide-react';
+import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp, Square, Sparkles, X, Mic, MicOff, SkipForward, File, FileText, Image, FileAudio, FileVideo } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -13,7 +13,7 @@ import remarkGfm from 'remark-gfm';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Skeleton } from '@/components/ui/skeleton';
-import { api, type MessageResponse, type ProcessStep } from '@/lib/api-client';
+import { api, type MessageResponse, type ProcessStep, type FileUploadResponse } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth-store';
 import { useSessionStateStore, PENDING_PROCESS_ID } from '@/stores/session-state-store';
 import { cn } from '@/lib/utils';
@@ -109,6 +109,11 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
   const [browserSessionId, setBrowserSessionId] = useState<string | null>(null);
   const [isAnalyzingSkill, setIsAnalyzingSkill] = useState(false);
   const [isCreatingSkill, setIsCreatingSkill] = useState(false);
+  
+  // ファイル添付の状態
+  const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [skillProposals, setSkillProposals] = useState<Array<{
     proposal_id: string;
     skill_name: string;
@@ -425,10 +430,18 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
   // メッセージ送信
   const handleSendMessage = useCallback(async (textOverride?: string) => {
     const text = textOverride || message;
-    if (!text.trim() || isSending || !sessionId) return;
+    if (!text.trim() && attachedFiles.length === 0) return;
+    if (isSending || !sessionId) return;
 
-    const content = text.trim();
+    // ファイル付きメッセージの場合はファイル情報を含める
+    let content = text.trim();
+    if (attachedFiles.length > 0) {
+      const fileList = attachedFiles.map(f => `[ファイル] ${f.filename} (${f.url})`).join('\n');
+      content = content ? `${content}\n\n${fileList}` : fileList;
+    }
+
     setMessage('');
+    setAttachedFiles([]); // 送信後に添付ファイルをクリア
     setIsSending(sessionId, true);
 
     const tempUserMessageId = `temp-user-${Date.now()}`;
@@ -793,6 +806,45 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
     deleteProcess(sessionId, PENDING_PROCESS_ID);
     toast.info('処理を停止しました');
   }, [sessionId, setIsSending, deleteProcess]);
+
+  // ファイル添付の処理
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    setIsUploading(true);
+    try {
+      const uploadedFiles: FileUploadResponse[] = [];
+      for (const file of Array.from(files)) {
+        // ファイルサイズ制限 (10MB)
+        if (file.size > 10 * 1024 * 1024) {
+          toast.error(`${file.name} は10MB以上のファイルは添付できません`);
+          continue;
+        }
+        const uploaded = await api.files.upload(file);
+        uploadedFiles.push(uploaded);
+      }
+      setAttachedFiles(prev => [...prev, ...uploadedFiles]);
+      toast.success(`${uploadedFiles.length}件のファイルを添付しました`);
+    } catch (error) {
+      console.error('File upload failed:', error);
+      toast.error('ファイルのアップロードに失敗しました');
+    } finally {
+      setIsUploading(false);
+      // 同じファイルを選択できるように入力をリセット
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  }, []);
+
+  const handleRemoveFile = useCallback((fileId: string) => {
+    setAttachedFiles(prev => prev.filter(f => f.id !== fileId));
+  }, []);
+
+  const handleClickAttach = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
 
   // スキル提案を表示（複数提案対応）
   const handleShowSkillProposal = useCallback(async (sessId: string) => {
@@ -1335,9 +1387,45 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
       {/* Input Area */}
       <div className="shrink-0 border-t border-border p-4">
         <div className="max-w-3xl mx-auto">
+          {/* 添付ファイル一覧 */}
+          {attachedFiles.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-2">
+              {attachedFiles.map((file) => (
+                <div
+                  key={file.id}
+                  className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted border border-border text-xs"
+                >
+                  <File className="h-3 w-3 text-muted-foreground" />
+                  <span className="max-w-[150px] truncate">{file.filename}</span>
+                  <button
+                    onClick={() => handleRemoveFile(file.id)}
+                    className="ml-1 hover:text-destructive"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          
           <div className="flex items-end gap-2 p-2 rounded-2xl border border-border bg-input/30 focus-within:border-primary/50 transition-colors">
-            <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground">
-              <Paperclip className="h-4 w-4" />
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={handleFileSelect}
+              accept="image/*,.pdf,.txt,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.rar,.7z,.tar,.gz,.mp3,.wav,.ogg,.m4a,.flac,.mp4,.avi,.mov,.mkv,.webm"
+            />
+            <Button 
+              variant="ghost" 
+              size="icon" 
+              className="h-9 w-9 shrink-0 text-muted-foreground hover:text-foreground"
+              onClick={handleClickAttach}
+              disabled={isUploading}
+              title="ファイルを添付"
+            >
+              {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
             </Button>
             <Button
               variant="ghost"
@@ -1375,7 +1463,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
                 <SkipForward className="h-4 w-4" />
               </Button>
             ) : (
-              <Button size="icon" className="h-9 w-9 shrink-0" onClick={() => handleSendMessage()} disabled={!message.trim() && !voice.isActive}>
+              <Button size="icon" className="h-9 w-9 shrink-0" onClick={() => handleSendMessage()} disabled={!message.trim() && attachedFiles.length === 0}>
                 <Send className="h-4 w-4" />
               </Button>
             )}

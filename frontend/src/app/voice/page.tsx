@@ -47,36 +47,40 @@ export default function VoicePage() {
       if ('type' in message) {
         switch (message.type) {
           case 'progress':
-            setProgressSteps((prev) => [...prev.slice(-4), message.step]);
+            setProgressSteps((prev) => [...prev.slice(-4), String(message.step)]);
             return;
-          case 'assistant_message':
-            if (message.text?.trim()) {
+          case 'assistant_message': {
+            const text = String((message as { text?: unknown }).text ?? '');
+            if (text.trim()) {
               setMessages((prev) => [
                 ...prev,
                 {
                   id: `${Date.now()}-dan`,
                   role: 'dan',
-                  text: message.text,
+                  text,
                 },
               ]);
-              speak(message.text, { lang: 'ja-JP' });
+              speak(text, { lang: 'ja-JP' });
             }
             return;
+          }
           case 'processing':
-            setProcessing(message.status === 'start');
+            setProcessing(String((message as { status?: unknown }).status) === 'start');
             return;
-          case 'notify':
+          case 'notify': {
+            const notifyMsg = String((message as { message?: unknown }).message ?? '');
             setMessages((prev) => [
               ...prev,
               {
                 id: `${Date.now()}-notify`,
                 role: 'system',
-                text: message.message,
+                text: notifyMsg,
               },
             ]);
             return;
+          }
           case 'error':
-            setUiError(message.message);
+            setUiError(String((message as { message?: unknown }).message ?? ''));
             return;
           default:
             return;

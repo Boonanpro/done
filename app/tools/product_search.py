@@ -9,7 +9,7 @@ import asyncio
 import re
 import urllib.parse
 
-from app.models.schemas import SearchResult, SearchResultCategory
+from app.models.schemas import SearchResultCategory
 
 
 # ブラウザインスタンス管理

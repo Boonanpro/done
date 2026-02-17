@@ -1,12 +1,11 @@
 """
 Attachment Service - Phase 5C: 添付ファイル取得・管理
 """
-import os
 import hashlib
 import logging
 from pathlib import Path
 from typing import Optional, List, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.config import settings
 from app.services.supabase_client import get_supabase_client
@@ -254,7 +253,7 @@ class AttachmentService:
         """古い添付ファイルを削除"""
         from datetime import timedelta
         
-        cutoff_date = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         
         # 古いレコードを取得
         result = self.supabase.table("message_attachments").select("*").lt(
@@ -282,10 +281,6 @@ def get_attachment_service() -> AttachmentService:
     if _attachment_service is None:
         _attachment_service = AttachmentService()
     return _attachment_service
-
-
-
-
 
 
 

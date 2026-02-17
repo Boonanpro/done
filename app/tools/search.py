@@ -1,7 +1,6 @@
 """
 Web Search Tools
 """
-from typing import Optional
 from langchain_core.tools import tool
 import httpx
 

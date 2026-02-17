@@ -2,9 +2,15 @@
 Phase 10: Voice Communication API Routes
 音声通話関連のAPIエンドポイント
 """
+import asyncio
+import base64
+import json
+import logging
 from typing import Optional
 import uuid
 from fastapi import APIRouter, HTTPException, Query, Form, Request, Response, WebSocket, WebSocketDisconnect
+
+logger = logging.getLogger(__name__)
 
 from app.services.voice_service import get_voice_service
 from app.services.auth_service import decode_access_token
@@ -33,6 +39,7 @@ from pydantic import BaseModel
 
 class TTSRequest(BaseModel):
     text: str
+    language: str | None = None
 
 @router.post("/tts")
 async def text_to_speech_api(request: TTSRequest):
@@ -41,9 +48,10 @@ async def text_to_speech_api(request: TTSRequest):
 
     テキストを受け取り、MP3形式の音声データを返す。
     チャットページの音声モードから使用される。
+    languageパラメータで言語を指定可能（例: "ja", "zh", "en"）。
     """
     service = get_voice_service()
-    mp3_bytes = await service.text_to_speech(request.text)
+    mp3_bytes = await service.text_to_speech(request.text, language=request.language)
     if not mp3_bytes:
         raise HTTPException(status_code=500, detail="TTS failed")
     return Response(content=mp3_bytes, media_type="audio/mpeg")
@@ -496,12 +504,6 @@ async def twilio_incoming_webhook(
 # Media Streams WebSocket (10E)
 # ========================================
 
-import json
-import base64
-import asyncio
-import logging
-
-logger = logging.getLogger(__name__)
 
 
 class MediaStreamHandler:
