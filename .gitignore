@@ -129,3 +129,6 @@ test_*.txt
 
 # Windows invalid file
 nul
+
+# Claude Code local settings (may contain API keys)
+.claude/settings.local.json
