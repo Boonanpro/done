@@ -23,6 +23,7 @@ import {
 import { useAuth } from '@/hooks/use-auth';
 import { api, type ProjectResponse, type ProjectStatusType } from '@/lib/api-client';
 import { useProjectStore } from '@/stores/project-store';
+import { useIsMobile } from '@/hooks/useIsMobile';
 
 function useHasToken() {
   return useSyncExternalStore(
@@ -95,6 +96,7 @@ export function ProjectListPanel({ className, isCollapsed, onToggleCollapse }: P
   const [searchQuery, setSearchQuery] = useState('');
   const [isBusinessOpen, setIsBusinessOpen] = useState(false);
   const hasToken = useHasToken();
+  const isMobile = useIsMobile();
 
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
   const selectProject = useProjectStore((s) => s.selectProject);
@@ -285,7 +287,10 @@ export function ProjectListPanel({ className, isCollapsed, onToggleCollapse }: P
               return (
                 <Tooltip key={item.href}>
                   <TooltipTrigger asChild>
-                    <Link href={item.href}>
+                    <Link
+                      href={item.href}
+                      onClick={() => { if (isMobile) selectProject(null); }}
+                    >
                       <motion.div
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}

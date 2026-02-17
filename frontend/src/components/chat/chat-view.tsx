@@ -494,9 +494,11 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
               deleteProcess(sessionId, PENDING_PROCESS_ID);
             }
 
-            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
-              messages: [msg, ...(old?.messages || [])],
-            }));
+            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => {
+              const existing = old?.messages || [];
+              if (existing.some((m: MessageResponse) => m.id === msg.id)) return { messages: existing };
+              return { messages: [msg, ...existing] };
+            });
 
             if (voice.isActive && msg.content) {
               voice.speakResponse(msg.content);
@@ -617,9 +619,11 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
               }
               deleteProcess(sessionId, PENDING_PROCESS_ID);
             }
-            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
-              messages: [msg, ...(old?.messages || [])],
-            }));
+            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => {
+              const existing = old?.messages || [];
+              if (existing.some((m: MessageResponse) => m.id === msg.id)) return { messages: existing };
+              return { messages: [msg, ...existing] };
+            });
             if (voice.isActive && msg.content) {
               voice.speakResponse(msg.content);
             }
@@ -718,9 +722,11 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
               }
               deleteProcess(sessionId, PENDING_PROCESS_ID);
             }
-            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => ({
-              messages: [msg, ...(old?.messages || [])],
-            }));
+            queryClient.setQueryData(['messages', sessionId], (old: typeof messagesData) => {
+              const existing = old?.messages || [];
+              if (existing.some((m: MessageResponse) => m.id === msg.id)) return { messages: existing };
+              return { messages: [msg, ...existing] };
+            });
             if (voice.isActive && msg.content) {
               voice.speakResponse(msg.content);
             }
