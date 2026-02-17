@@ -47,6 +47,7 @@ export interface MessageResponse {
   created_at: string;
   ai_context?: {
     reasoning_steps?: string[];
+    reasoning_full?: string[];
   };
 }
 
@@ -326,6 +327,94 @@ export interface ProjectListResponse {
   projects: ProjectResponse[];
 }
 
+export interface ProjectProposalResponse {
+  id: string;
+  project_id: string;
+  content: string;
+  proposal_type: string;
+  status: 'pending' | 'approved' | 'rejected' | 'superseded';
+  steps: Record<string, unknown>[] | null;
+  metadata: Record<string, unknown> | null;
+  approved_at: string | null;
+  created_at: string;
+}
+
+export interface ExecutionEvent {
+  id: string;
+  project_id: string;
+  room_id: string;
+  event_type: 'tool_use' | 'reasoning' | 'phase' | 'error';
+  tool_name: string | null;
+  tool_label: string | null;
+  content: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+// Note types
+export interface NoteDraftResponse {
+  id: string;
+  title: string;
+  content: string;
+  tags: string[];
+  status: string;
+  created_at: string;
+}
+
+export interface NotePolishedResponse {
+  draft_id: string;
+  title: string;
+  tags: string[];
+  full_text: string;
+  hook: string | null;
+  summary: string | null;
+  polished_at: string;
+  status: string;
+}
+
+export interface NotePostResponse {
+  draft_id: string;
+  note_url: string;
+  title: string;
+  published: boolean;
+  posted_at: string;
+  status: string;
+}
+
+export interface NoteScheduleResponse {
+  id: string;
+  draft_id: string;
+  scheduled_at: string;
+  status: string;
+  article_type: string;
+  price: number | null;
+  error_message: string | null;
+  published_url: string | null;
+  draft_title: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NoteStatsResponse {
+  total_drafts: number;
+  total_posts: number;
+  published: number;
+  draft_on_note: number;
+  pending_drafts: number;
+  polished_drafts: number;
+  scheduled: number;
+}
+
+// File upload types
+export interface FileUploadResponse {
+  id: string;
+  filename: string;
+  url: string;
+  content_type: string;
+  size: number;
+  created_at: string;
+}
+
 // ==================== API Error Class ====================
 
 export class ApiError extends Error {
@@ -351,6 +440,32 @@ const TOKEN_KEY = 'done-token';
 function getStoredToken(): string | null {
   if (typeof window === 'undefined') return null;
   return localStorage.getItem(TOKEN_KEY);
+}
+
+// File upload function
+async function uploadFile(
+  endpoint: string,
+  file: File
+): Promise<FileUploadResponse> {
+  const url = `${API_BASE_URL}/api/v1${endpoint}`;
+  const token = immediateToken || getStoredToken();
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    throw new ApiError(response.status, response.statusText, null);
+  }
+
+  return response.json();
 }
 
 // Set token in localStorage
@@ -991,6 +1106,22 @@ export const api = {
       request<void>(`/projects/${projectId}`, {
         method: 'DELETE',
       }),
+
+    proposals: {
+      list: (projectId: string) =>
+        request<ProjectProposalResponse[]>(`/projects/${projectId}/proposals`),
+
+      action: (projectId: string, proposalId: string, action: 'approve' | 'reject') =>
+        request<ProjectProposalResponse>(`/projects/${projectId}/proposals/${proposalId}/action`, {
+          method: 'POST',
+          body: JSON.stringify({ action }),
+        }),
+    },
+
+    executionEvents: {
+      list: (projectId: string, limit = 100) =>
+        request<ExecutionEvent[]>(`/projects/${projectId}/execution-events?limit=${limit}`),
+    },
   },
 
   // Skills endpoints
@@ -1158,5 +1289,103 @@ export const api = {
       request<{ success: boolean; message: string }>(`/skills/${skillName}`, {
         method: 'DELETE',
       }),
+  },
+
+  // Notes endpoints
+  notes: {
+    // Drafts
+    listDrafts: () =>
+      request<{ drafts: NoteDraftResponse[] }>('/notes/drafts'),
+
+    createDraft: (data: { title: string; content: string; tags?: string[] }) =>
+      request<NoteDraftResponse>('/notes/drafts', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    getDraft: (draftId: string) =>
+      request<NoteDraftResponse>(`/notes/drafts/${draftId}`),
+
+    updateDraft: (draftId: string, data: { title?: string; content?: string; tags?: string[] }) =>
+      request<NoteDraftResponse>(`/notes/drafts/${draftId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+
+    deleteDraft: (draftId: string) =>
+      request<{ ok: boolean }>(`/notes/drafts/${draftId}`, {
+        method: 'DELETE',
+      }),
+
+    // Polish
+    getPolishPrompt: (draftId: string) =>
+      request<{ draft_id: string; prompt: string; draft_title: string; draft_content: string }>(
+        '/notes/polish',
+        {
+          method: 'POST',
+          body: JSON.stringify({ draft_id: draftId }),
+        }
+      ),
+
+    executePolish: (draftId: string, options?: { article_type?: 'free' | 'paid'; price?: number }) =>
+      request<NotePolishedResponse>(`/notes/polish/${draftId}/execute`, {
+        method: 'POST',
+        body: JSON.stringify(options || {}),
+      }),
+
+    getPolished: (draftId: string) =>
+      request<NotePolishedResponse>(`/notes/polish/${draftId}`),
+
+    // Posts
+    recordPost: (data: { draft_id: string; note_url: string; published?: boolean }) =>
+      request<NotePostResponse>('/notes/posts', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    listPosts: () =>
+      request<{ posts: NotePostResponse[] }>('/notes/posts'),
+
+    // Schedules
+    createSchedule: (data: {
+      draft_id: string;
+      scheduled_at: string;
+      article_type?: 'free' | 'paid';
+      price?: number;
+    }) =>
+      request<NoteScheduleResponse>('/notes/schedules', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    listSchedules: () =>
+      request<{ schedules: NoteScheduleResponse[] }>('/notes/schedules'),
+
+    getSchedule: (scheduleId: string) =>
+      request<NoteScheduleResponse>(`/notes/schedules/${scheduleId}`),
+
+    updateSchedule: (scheduleId: string, data: {
+      scheduled_at?: string;
+      article_type?: 'free' | 'paid';
+      price?: number;
+    }) =>
+      request<NoteScheduleResponse>(`/notes/schedules/${scheduleId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+
+    cancelSchedule: (scheduleId: string) =>
+      request<NoteScheduleResponse>(`/notes/schedules/${scheduleId}`, {
+        method: 'DELETE',
+      }),
+
+    // Stats
+    getStats: () =>
+      request<NoteStatsResponse>('/notes/stats'),
+  },
+
+  // File upload endpoint
+  files: {
+    upload: (file: File) => uploadFile('/files/upload', file),
   },
 };

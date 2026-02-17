@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import { X, FolderKanban, Loader2, MessageSquare, Send, Square, CheckCircle2, XCircle, ChevronDown, ChevronRight, Check, FileText, Terminal, Brain, AlertCircle } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -9,7 +9,7 @@ import remarkGfm from 'remark-gfm';
 
 import { Button } from '@/components/ui/button';
 import { api, type MessageResponse, type ProjectStatusType, type ProjectProposalResponse, type ProcessStep } from '@/lib/api-client';
-import { useProjectStore } from '@/stores/project-store';
+import { useProjectStore, useProcessState, useProcessActions } from '@/stores/project-store';
 import { useAuthStore } from '@/stores/auth-store';
 
 interface ProjectChatPanelProps {
@@ -29,10 +29,12 @@ const STATUS_LABELS: Record<ProjectStatusType, { label: string; color: string }>
 // --- Inline Process Block ---
 function InlineProcessBlock({
   steps,
+  fullTexts,
   isLive = false,
   defaultCollapsed = true,
 }: {
   steps: { label: string; type: 'tool' | 'reasoning' | 'error' }[];
+  fullTexts?: string[];
   isLive?: boolean;
   defaultCollapsed?: boolean;
 }) {
@@ -53,6 +55,24 @@ function InlineProcessBlock({
   }, [steps.length, isCollapsed]);
 
   if (steps.length === 0 && !isLive) return null;
+
+  // reasoning ステップを全文テキストにマッピング（インデックスベース）
+  // fullTexts は reasoning/text イベントのみの全文配列
+  const reasoningFullMap = (() => {
+    if (!fullTexts || fullTexts.length === 0) return {};
+    const map: Record<number, string> = {};
+    let fullIdx = 0;
+    for (let i = 0; i < steps.length; i++) {
+      if (steps[i].type === 'reasoning' && fullIdx < fullTexts.length) {
+        // ラベルと全文が異なる場合のみマッピング（展開する意味がある場合のみ）
+        if (fullTexts[fullIdx] && fullTexts[fullIdx] !== steps[i].label) {
+          map[i] = fullTexts[fullIdx];
+        }
+        fullIdx++;
+      }
+    }
+    return map;
+  })();
 
   return (
     <div className="my-1">
@@ -88,38 +108,19 @@ function InlineProcessBlock({
         {!isCollapsed && (
           <div
             ref={scrollRef}
-            className="max-h-[200px] overflow-y-auto px-3 pb-2"
+            className="max-h-[400px] overflow-y-auto px-3 pb-2"
           >
             <div className="border-l-2 border-primary/20 pl-2.5 space-y-0.5">
               {steps.map((step, i) => {
                 const isLastLive = isLive && i === steps.length - 1;
+                const fullText = reasoningFullMap[i];
                 return (
-                  <div key={i} className="flex items-start gap-1.5 text-[10px] leading-relaxed">
-                    {step.type === 'error' ? (
-                      <AlertCircle className="h-2.5 w-2.5 text-red-500 shrink-0 mt-0.5" />
-                    ) : step.type === 'reasoning' ? (
-                      isLastLive ? (
-                        <Loader2 className="h-2.5 w-2.5 animate-spin text-primary shrink-0 mt-0.5" />
-                      ) : (
-                        <Brain className="h-2.5 w-2.5 text-yellow-500/70 shrink-0 mt-0.5" />
-                      )
-                    ) : isLastLive ? (
-                      <Loader2 className="h-2.5 w-2.5 animate-spin text-primary shrink-0 mt-0.5" />
-                    ) : (
-                      <Check className="h-2.5 w-2.5 text-green-500 shrink-0 mt-0.5" />
-                    )}
-                    <span
-                      className={
-                        step.type === 'error'
-                          ? 'text-red-500'
-                          : step.type === 'reasoning'
-                            ? 'text-muted-foreground/70 italic'
-                            : 'text-muted-foreground'
-                      }
-                    >
-                      {step.label}
-                    </span>
-                  </div>
+                  <ProcessStepItem
+                    key={i}
+                    step={step}
+                    fullText={fullText}
+                    isLastLive={isLastLive}
+                  />
                 );
               })}
               {isLive && steps.length === 0 && (
@@ -136,6 +137,53 @@ function InlineProcessBlock({
   );
 }
 
+// --- Process Step Item (with expandable full text) ---
+function ProcessStepItem({
+  step,
+  fullText,
+  isLastLive,
+}: {
+  step: { label: string; type: 'tool' | 'reasoning' | 'error' };
+  fullText?: string;
+  isLastLive: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const displayText = expanded && fullText ? fullText : step.label;
+
+  return (
+    <div className="flex items-start gap-1.5 text-[10px] leading-relaxed">
+      {step.type === 'error' ? (
+        <AlertCircle className="h-2.5 w-2.5 text-red-500 shrink-0 mt-0.5" />
+      ) : step.type === 'reasoning' ? (
+        isLastLive ? (
+          <Loader2 className="h-2.5 w-2.5 animate-spin text-primary shrink-0 mt-0.5" />
+        ) : (
+          <Brain className="h-2.5 w-2.5 text-yellow-500/70 shrink-0 mt-0.5" />
+        )
+      ) : isLastLive ? (
+        <Loader2 className="h-2.5 w-2.5 animate-spin text-primary shrink-0 mt-0.5" />
+      ) : (
+        <Check className="h-2.5 w-2.5 text-green-500 shrink-0 mt-0.5" />
+      )}
+      <span
+        className={`${
+          step.type === 'error'
+            ? 'text-red-500'
+            : step.type === 'reasoning'
+              ? 'text-muted-foreground/70 italic'
+              : 'text-muted-foreground'
+        } ${fullText ? 'cursor-pointer hover:text-foreground/70' : ''} whitespace-pre-wrap`}
+        onClick={fullText ? () => setExpanded((v) => !v) : undefined}
+      >
+        {displayText}
+        {fullText && !expanded && (
+          <span className="text-primary/50 ml-1">...</span>
+        )}
+      </span>
+    </div>
+  );
+}
+
 // --- Helper: reasoning_steps を分類 ---
 function classifyStep(label: string): 'tool' | 'reasoning' | 'error' {
   if (label.startsWith('🔧') || label.startsWith('[tool]')) return 'tool';
@@ -146,22 +194,221 @@ function classifyStep(label: string): 'tool' | 'reasoning' | 'error' {
 // --- Display item types ---
 type DisplayItem =
   | { kind: 'message'; msg: MessageResponse }
-  | { kind: 'process-block'; steps: { label: string; type: 'tool' | 'reasoning' | 'error' }[]; id: string };
+  | { kind: 'process-block'; steps: { label: string; type: 'tool' | 'reasoning' | 'error' }[]; fullTexts?: string[]; id: string };
+
+// --- Message bubble (memo化で不要な再描画を防ぐ) ---
+const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageResponse }) {
+  return (
+    <div className={`flex ${msg.sender_type === 'human' ? 'justify-end' : 'justify-start'}`}>
+      <div
+        className={`max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
+          msg.sender_type === 'human'
+            ? 'bg-primary text-primary-foreground'
+            : 'bg-muted text-foreground prose prose-xs prose-dan max-w-none'
+        }`}
+      >
+        {msg.sender_type === 'human'
+          ? msg.content
+          : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>
+        }
+      </div>
+    </div>
+  );
+});
+
+// --- Input area (分離して入力変更が他に影響しないようにする) ---
+function ChatInput({
+  projectId,
+  roomId,
+}: {
+  projectId: string;
+  roomId: string;
+}) {
+  const [message, setMessage] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const queryClient = useQueryClient();
+  const user = useAuthStore((state) => state.user);
+  const selectProject = useProjectStore((s) => s.selectProject);
+
+  const { isSending } = useProcessState(projectId);
+  const { setSending, setProcessing, clearLiveSteps, addLiveStep, resetProcess } = useProcessActions();
+
+  // Textarea auto-resize
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    if (!message.trim()) {
+      ta.style.height = '32px';
+      return;
+    }
+    ta.style.height = '32px';
+    ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
+  }, [message]);
+
+  // Send message
+  const handleSendMessage = useCallback(async () => {
+    if (!message.trim() || isSending) return;
+
+    const content = message.trim();
+    setMessage('');
+    setSending(projectId, true);
+    setProcessing(projectId, true);
+    clearLiveSteps(projectId);
+
+    // Optimistic update
+    const tempUserMessageId = `temp-user-${Date.now()}`;
+    const optimisticUserMessage: MessageResponse = {
+      id: tempUserMessageId,
+      room_id: roomId,
+      sender_id: user?.id || '',
+      sender_name: user?.display_name || 'You',
+      sender_type: 'human',
+      content,
+      created_at: new Date().toISOString(),
+    };
+
+    const queryKey = ['project-messages', roomId];
+    queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
+      messages: [optimisticUserMessage, ...(old?.messages || [])],
+    }));
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    try {
+      await api.sm.sendMessageStream(
+        { message: content, session_id: roomId },
+        {
+          onUserMessage: (msg) => {
+            queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
+              messages: [msg, ...(old?.messages || []).filter((m: MessageResponse) => m.id !== tempUserMessageId)],
+            }));
+          },
+          onAIMessage: (msg) => {
+            setProcessing(projectId, false);
+            clearLiveSteps(projectId);
+            queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
+              messages: [msg, ...(old?.messages || [])],
+            }));
+          },
+          onProcessStep: (step: ProcessStep) => {
+            addLiveStep(projectId, {
+              label: step.label,
+              type: step.label.startsWith('🔧') ? 'tool' : 'reasoning',
+            });
+          },
+          onComplete: () => {
+            setSending(projectId, false);
+            setProcessing(projectId, false);
+            queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+          },
+          onError: (error) => {
+            setSending(projectId, false);
+            setProcessing(projectId, false);
+            toast.error(error || 'エラーが発生しました');
+          },
+          onProjectCreated: (createdProjectId) => {
+            queryClient.invalidateQueries({ queryKey: ['projects'] });
+            if (createdProjectId !== projectId) {
+              selectProject(createdProjectId);
+            }
+          },
+        },
+        controller.signal
+      );
+    } catch (error) {
+      setSending(projectId, false);
+      setProcessing(projectId, false);
+      if (error instanceof Error && error.name !== 'AbortError') {
+        toast.error('メッセージの送信に失敗しました');
+      }
+    }
+  }, [message, isSending, roomId, user?.id, user?.display_name, queryClient, projectId, selectProject, setSending, setProcessing, clearLiveSteps, addLiveStep]);
+
+  // Cancel
+  const handleCancel = useCallback(async () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
+    try {
+      await api.sm.cancelSession(roomId);
+    } catch (e) {
+      console.error('Failed to cancel session:', e);
+    }
+
+    resetProcess(projectId);
+    toast.info('処理を停止しました');
+  }, [roomId, projectId, resetProcess]);
+
+  // Keyboard
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  }, [handleSendMessage]);
+
+  // Esc to cancel
+  useEffect(() => {
+    if (!isSending) return;
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleCancel();
+      }
+    };
+    window.addEventListener('keydown', handleEsc);
+    return () => window.removeEventListener('keydown', handleEsc);
+  }, [isSending, handleCancel]);
+
+  return (
+    <div className="shrink-0 border-t border-border p-3">
+      <div className="flex items-end gap-2 p-2 rounded-xl border border-border bg-input/30 focus-within:border-primary/50 transition-colors">
+        <textarea
+          ref={textareaRef}
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="メッセージを入力..."
+          rows={1}
+          className="flex-1 resize-none bg-transparent text-xs focus:outline-none min-h-[32px] max-h-[120px] py-1.5"
+        />
+        {isSending ? (
+          <Button
+            size="icon"
+            variant="destructive"
+            className="h-7 w-7 shrink-0"
+            onClick={handleCancel}
+            title="停止 (Escキー)"
+          >
+            <Square className="h-3.5 w-3.5" />
+          </Button>
+        ) : (
+          <Button
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            onClick={handleSendMessage}
+            disabled={!message.trim()}
+          >
+            <Send className="h-3.5 w-3.5" />
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const selectProject = useProjectStore((s) => s.selectProject);
-  const user = useAuthStore((state) => state.user);
 
-  const [message, setMessage] = useState('');
-  const [isSending, setIsSending] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [liveSteps, setLiveSteps] = useState<{ label: string; type: 'tool' | 'reasoning' | 'error' }[]>([]);
+  // プロセス状態は個別プロパティとして取得（変わった部分だけで再描画）
+  const { isProcessing, liveSteps } = useProcessState(projectId);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const refetchMessagesRef = useRef<(() => void) | null>(null);
 
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
@@ -170,15 +417,13 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: 3000,
   });
 
-  const { data: messagesData, isLoading: isLoadingMessages, refetch: refetchMessages } = useQuery({
+  const { data: messagesData, isLoading: isLoadingMessages } = useQuery({
     queryKey: ['project-messages', project?.room_id],
     queryFn: () => api.rooms.getMessages(project!.room_id!, { limit: 500 }),
     enabled: !!project?.room_id,
     staleTime: 5 * 1000,
     refetchInterval: 3000,
   });
-
-  useEffect(() => { refetchMessagesRef.current = refetchMessages; }, [refetchMessages]);
 
   // Proposals query
   const isProposed = project?.status === 'proposed';
@@ -222,8 +467,8 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const status = project?.status ? STATUS_LABELS[project.status] : null;
   const messages = messagesData?.messages || [];
 
-  // Build display items: messages + inline process blocks from ai_context
-  const displayItems: DisplayItem[] = (() => {
+  // Build display items: メモ化でメッセージが変わったときだけ再計算
+  const displayItems = useMemo(() => {
     const chronological = [...messages].reverse();
     const items: DisplayItem[] = [];
 
@@ -241,14 +486,15 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           label: s,
           type: classifyStep(s),
         }));
-        items.push({ kind: 'process-block', steps, id: `pb-${msg.id}` });
+        const fullTexts = msg.ai_context?.reasoning_full as string[] | undefined;
+        items.push({ kind: 'process-block', steps, fullTexts, id: `pb-${msg.id}` });
       }
 
       items.push({ kind: 'message', msg });
     }
 
     return items;
-  })();
+  }, [messages]);
 
   const hasAnyContent = displayItems.length > 0;
 
@@ -258,142 +504,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [displayItems.length, liveSteps.length, isProcessing]);
-
-  // Textarea auto-resize
-  useEffect(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    if (!message.trim()) {
-      ta.style.height = '32px';
-      return;
-    }
-    ta.style.height = '32px';
-    ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
-  }, [message]);
-
-  // Send message
-  const handleSendMessage = useCallback(async () => {
-    if (!message.trim() || isSending || !project?.room_id) return;
-
-    const content = message.trim();
-    const roomId = project.room_id;
-    setMessage('');
-    setIsSending(true);
-    setIsProcessing(true);
-    setLiveSteps([]);
-
-    // Optimistic update
-    const tempUserMessageId = `temp-user-${Date.now()}`;
-    const optimisticUserMessage: MessageResponse = {
-      id: tempUserMessageId,
-      room_id: roomId,
-      sender_id: user?.id || '',
-      sender_name: user?.display_name || 'You',
-      sender_type: 'human',
-      content,
-      created_at: new Date().toISOString(),
-    };
-
-    const queryKey = ['project-messages', roomId];
-    queryClient.setQueryData(queryKey, (old: typeof messagesData) => ({
-      messages: [optimisticUserMessage, ...(old?.messages || [])],
-    }));
-
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    try {
-      await api.sm.sendMessageStream(
-        { message: content, session_id: roomId },
-        {
-          onUserMessage: (msg) => {
-            queryClient.setQueryData(queryKey, (old: typeof messagesData) => ({
-              messages: [msg, ...(old?.messages || []).filter((m: MessageResponse) => m.id !== tempUserMessageId)],
-            }));
-          },
-          onAIMessage: (msg) => {
-            setIsProcessing(false);
-            setLiveSteps([]);
-            queryClient.setQueryData(queryKey, (old: typeof messagesData) => ({
-              messages: [msg, ...(old?.messages || [])],
-            }));
-          },
-          onProcessStep: (step: ProcessStep) => {
-            setLiveSteps((prev) => [
-              ...prev,
-              {
-                label: step.label,
-                type: step.label.startsWith('🔧') ? 'tool' : 'reasoning',
-              },
-            ]);
-          },
-          onComplete: () => {
-            setIsSending(false);
-            setIsProcessing(false);
-            refetchMessagesRef.current?.();
-          },
-          onError: (error) => {
-            setIsSending(false);
-            setIsProcessing(false);
-            toast.error(error || 'エラーが発生しました');
-          },
-          onProjectCreated: (createdProjectId) => {
-            queryClient.invalidateQueries({ queryKey: ['projects'] });
-            if (createdProjectId !== projectId) {
-              selectProject(createdProjectId);
-            }
-          },
-        },
-        controller.signal
-      );
-    } catch (error) {
-      setIsSending(false);
-      setIsProcessing(false);
-      if (error instanceof Error && error.name !== 'AbortError') {
-        toast.error('メッセージの送信に失敗しました');
-      }
-    }
-  }, [message, isSending, project?.room_id, user?.id, user?.display_name, queryClient, messagesData, projectId, selectProject]);
-
-  // Cancel
-  const handleCancel = useCallback(async () => {
-    if (!project?.room_id) return;
-
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
-
-    try {
-      await api.sm.cancelSession(project.room_id);
-    } catch (e) {
-      console.error('Failed to cancel session:', e);
-    }
-
-    setIsSending(false);
-    setIsProcessing(false);
-    toast.info('処理を停止しました');
-  }, [project?.room_id]);
-
-  // Keyboard
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
-  };
-
-  // Esc to cancel
-  useEffect(() => {
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isSending) {
-        e.preventDefault();
-        handleCancel();
-      }
-    };
-    window.addEventListener('keydown', handleEsc);
-    return () => window.removeEventListener('keydown', handleEsc);
-  }, [isSending, handleCancel]);
 
   return (
     <div className="flex flex-col h-full overflow-hidden bg-background">
@@ -477,32 +587,14 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                   <InlineProcessBlock
                     key={item.id}
                     steps={item.steps}
+                    fullTexts={item.fullTexts}
                     isLive={false}
                     defaultCollapsed={true}
                   />
                 );
               }
 
-              const msg = item.msg;
-              return (
-                <div
-                  key={msg.id}
-                  className={`flex ${msg.sender_type === 'human' ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div
-                    className={`max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
-                      msg.sender_type === 'human'
-                        ? 'bg-primary text-primary-foreground'
-                        : 'bg-muted text-foreground prose prose-xs prose-dan max-w-none'
-                    }`}
-                  >
-                    {msg.sender_type === 'human'
-                      ? msg.content
-                      : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>
-                    }
-                  </div>
-                </div>
-              );
+              return <MessageBubble key={item.msg.id} msg={item.msg} />;
             })}
 
             {/* Live process block (during streaming) */}
@@ -556,39 +648,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
       {/* Input Area */}
       {project?.room_id && (
-        <div className="shrink-0 border-t border-border p-3">
-          <div className="flex items-end gap-2 p-2 rounded-xl border border-border bg-input/30 focus-within:border-primary/50 transition-colors">
-            <textarea
-              ref={textareaRef}
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="メッセージを入力..."
-              rows={1}
-              className="flex-1 resize-none bg-transparent text-xs focus:outline-none min-h-[32px] max-h-[120px] py-1.5"
-            />
-            {isSending ? (
-              <Button
-                size="icon"
-                variant="destructive"
-                className="h-7 w-7 shrink-0"
-                onClick={handleCancel}
-                title="停止 (Escキー)"
-              >
-                <Square className="h-3.5 w-3.5" />
-              </Button>
-            ) : (
-              <Button
-                size="icon"
-                className="h-7 w-7 shrink-0"
-                onClick={handleSendMessage}
-                disabled={!message.trim()}
-              >
-                <Send className="h-3.5 w-3.5" />
-              </Button>
-            )}
-          </div>
-        </div>
+        <ChatInput projectId={projectId} roomId={project.room_id} />
       )}
     </div>
   );
