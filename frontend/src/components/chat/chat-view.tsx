@@ -1100,7 +1100,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="shrink-0 flex items-center gap-3 px-6 py-4 border-b border-border">
+      <div className="shrink-0 flex items-center gap-3 pl-12 pr-3 md:px-6 py-4 border-b border-border">
         <Avatar className="h-10 w-10">
           <AvatarFallback className="bg-primary/10">
             <Bot className="h-5 w-5 text-primary" />
@@ -1113,7 +1113,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
       </div>
 
       {/* Messages Area */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-6">
+      <div className="flex-1 min-h-0 overflow-y-auto px-3 md:px-6">
         <div className="max-w-3xl mx-auto py-6 space-y-4">
           {isLoadingMessages ? (
             Array.from({ length: 3 }).map((_, i) => (
@@ -1169,7 +1169,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
                             </AvatarFallback>
                           </Avatar>
                         )}
-                        <div className={cn('max-w-[70%] space-y-1 flex flex-col', isUser && 'items-end')}>
+                        <div className={cn('max-w-[85%] md:max-w-[70%] space-y-1 flex flex-col', isUser && 'items-end')}>
                           <p className="text-xs text-muted-foreground">{isUser ? 'あなた' : 'ダン'}</p>
                           <div
                             className={cn(
@@ -1385,7 +1385,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
       )}
 
       {/* Input Area */}
-      <div className="shrink-0 border-t border-border p-4">
+      <div className="shrink-0 border-t border-border p-2 md:p-4">
         <div className="max-w-3xl mx-auto">
           {/* 添付ファイル一覧 */}
           {attachedFiles.length > 0 && (

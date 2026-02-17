@@ -503,7 +503,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   return (
     <div className="flex flex-col h-full overflow-hidden bg-background">
       {/* Header */}
-      <div className="shrink-0 flex items-center gap-3 px-4 py-3 border-b border-border">
+      <div className="shrink-0 flex items-center gap-3 pl-12 pr-4 md:px-4 py-3 border-b border-border">
         <FolderKanban className="h-5 w-5 text-primary shrink-0" />
         <div className="flex-1 min-w-0">
           {isLoading ? (

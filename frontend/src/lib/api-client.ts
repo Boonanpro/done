@@ -5,12 +5,11 @@
 
 import { useAuthStore } from '@/stores/auth-store';
 
-// API Base URL - use environment variable or default to localhost
-// 空文字列の場合は同一オリジン（Next.js rewrites経由でバックエンドにプロキシ）
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000';
+// API Base URL - use environment variable or empty string (relative URL via Next.js rewrites proxy)
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
-// SSE streaming requires direct backend connection (Next.js proxy buffers SSE responses)
-const SSE_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
+// SSE streaming - use relative URL so requests go through Next.js proxy (works from any device)
+const SSE_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 // ==================== Types ====================
 

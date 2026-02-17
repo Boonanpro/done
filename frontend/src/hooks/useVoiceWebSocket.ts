@@ -34,10 +34,13 @@ interface UseVoiceWebSocketResult {
 }
 
 const buildWsUrl = () => {
-  const base = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-  const normalized = base.replace(/\/$/, '');
-  const wsBase = normalized.replace(/^http/, 'ws');
-  return `${wsBase}/ws/voice`;
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    const base = process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, '');
+    return `${base.replace(/^http/, 'ws')}/ws/voice`;
+  }
+  if (typeof window === 'undefined') return 'ws://localhost:8000/ws/voice';
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}/ws/voice`;
 };
 
 export function useVoiceWebSocket(
