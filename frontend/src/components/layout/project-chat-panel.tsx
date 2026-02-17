@@ -137,7 +137,7 @@ function InlineProcessBlock({
   );
 }
 
-// --- Process Step Item (with expandable full text) ---
+// --- Process Step Item ---
 function ProcessStepItem({
   step,
   fullText,
@@ -147,8 +147,7 @@ function ProcessStepItem({
   fullText?: string;
   isLastLive: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const displayText = expanded && fullText ? fullText : step.label;
+  const displayText = fullText || step.label;
 
   return (
     <div className="flex items-start gap-1.5 text-[10px] leading-relaxed">
@@ -172,13 +171,9 @@ function ProcessStepItem({
             : step.type === 'reasoning'
               ? 'text-muted-foreground/70 italic'
               : 'text-muted-foreground'
-        } ${fullText ? 'cursor-pointer hover:text-foreground/70' : ''} whitespace-pre-wrap`}
-        onClick={fullText ? () => setExpanded((v) => !v) : undefined}
+        } whitespace-pre-wrap`}
       >
         {displayText}
-        {fullText && !expanded && (
-          <span className="text-primary/50 ml-1">...</span>
-        )}
       </span>
     </div>
   );

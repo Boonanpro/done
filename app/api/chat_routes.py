@@ -780,7 +780,7 @@ async def send_dan_message_stream(
                         final_text = event["text"]
                         text_preview = event["text"].strip()
                         if text_preview and len(text_preview) > 10:
-                            label = f"💭 {_summarize_reasoning(text_preview, max_len=300) or text_preview[:300]}"
+                            label = f"{_summarize_reasoning(text_preview, max_len=300) or text_preview[:300]}"
                             reasoning_steps.append(label)
                             reasoning_full.append(text_preview)
                             yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
