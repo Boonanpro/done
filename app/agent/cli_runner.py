@@ -265,7 +265,7 @@ def _build_cli_cmd(
         "--model", "opus",
         "--max-turns", "200",
         "--mcp-config", mcp_config_path,
-        "--system-prompt", system_prompt,
+        "--append-system-prompt", system_prompt,
     ])
 
     if resume_session_id:
