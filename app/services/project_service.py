@@ -135,6 +135,7 @@ class ProjectService:
         content: str,
         proposal_type: str = "plan",
         steps: Optional[list] = None,
+        metadata: Optional[dict] = None,
     ) -> dict:
         """プロジェクトに提案を作成"""
         # 既存のpending提案をsupersededに
@@ -142,13 +143,17 @@ class ProjectService:
             "status": "superseded",
         }).eq("project_id", project_id).eq("status", "pending").execute()
 
-        result = self.supabase.table("project_proposals").insert({
+        insert_data = {
             "project_id": project_id,
             "content": content,
             "proposal_type": proposal_type,
             "steps": steps or [],
             "status": "pending",
-        }).execute()
+        }
+        if metadata:
+            insert_data["metadata"] = metadata
+
+        result = self.supabase.table("project_proposals").insert(insert_data).execute()
 
         if not result.data:
             raise ValueError("Failed to create proposal")
