@@ -7,9 +7,11 @@
  * 1. バックエンドがまだ処理中かチェック (active session API)
  * 2. 処理中なら execution_events をポーリングしてプロセスモニタを復元
  * 3. 完了を検知したらポーリング停止 + メッセージ再取得
+ * 4. 既に完了済みでも、ページ復帰時にメッセージを再取得（SSE切断で逃した回答を取得）
  *
  * これにより、タブを閉じてもブラウザを切り替えても
  * 戻ってきた時に「接続中...」→ 進捗表示が復元される。
+ * または既に完了済みなら最終回答がすぐ表示される。
  */
 
 import { useEffect, useRef, useCallback } from 'react';
@@ -41,6 +43,7 @@ export function useSessionRecovery({
 
   /**
    * アクティブセッションをチェックし、必要ならポーリング開始
+   * active: false の場合でもメッセージを再取得（SSE切断で逃した回答を拾う）
    */
   const checkAndRecover = useCallback(async () => {
     if (!sessionId) return;
@@ -76,11 +79,16 @@ export function useSessionRecovery({
 
         // ポーリング開始
         startPolling();
+      } else {
+        // ★ バックエンドが非アクティブでも、メッセージを再取得する
+        // SSE切断中にバックエンドが回答を保存・完了した場合、
+        // フロントエンドはその回答を受け取れていないので、ここで拾う
+        refetchMessages();
       }
     } catch (err) {
       console.warn('[SessionRecovery] Failed to check active status:', err);
     }
-  }, [sessionId, setIsSending, setProcess]);
+  }, [sessionId, setIsSending, setProcess, refetchMessages]);
 
   /**
    * ポーリング: since_seq で差分取得
@@ -163,7 +171,7 @@ export function useSessionRecovery({
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        // タブが再びアクティブになった
+        // タブが再びアクティブになった → 即座にチェック + メッセージ再取得
         checkAndRecover();
       } else {
         // タブが非アクティブ → ポーリング停止（バッテリー節約）

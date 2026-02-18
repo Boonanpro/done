@@ -646,6 +646,7 @@ async def send_dan_message_stream(
         from app.services.cancellation import CancellationRegistry
         room_id_for_cancel = None  # 後で設定
         done_sent = False  # done イベント送信済みフラグ
+        result_saved = False  # AI回答DB保存済みフラグ
 
         try:
             # Step 1: ユーザーメッセージを保存
@@ -971,6 +972,7 @@ async def send_dan_message_stream(
 
                 # DBに保存（指定されたroom_idを使用）
                 ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content, reasoning_steps, room_id=room_id)
+                result_saved = True  # DB保存成功
 
                 if not ai_message_data:
                     import logging
@@ -1019,6 +1021,47 @@ async def send_dan_message_stream(
             logging.error(f"Failed to stream dan message: {e}\n{traceback.format_exc()}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
         finally:
+            # ★ SSE切断時: process_taskの結果をDBに確実に保存する
+            # モバイルでページを離れるとSSE接続が切れ、ジェネレータがここに来る。
+            # process_taskはバックグラウンドで走り続けるので、結果を待ってDBに保存する。
+            if not result_saved and 'process_task' in locals():
+                import logging as _log
+                _log.info(f"[SSE-DISCONNECT] Client disconnected, waiting for process_task to complete (room={room_id_for_cancel})")
+                try:
+                    if not process_task.done():
+                        # process_taskの完了を待つ（最大120秒）
+                        _result = await asyncio.wait_for(process_task, timeout=120)
+                    else:
+                        _result = process_task.result()
+
+                    if not _result.get("cancelled"):
+                        _ai_response = _result.get("response") or "申し訳ありません。処理中にエラーが発生しました。"
+                        _steps = reasoning_steps if 'reasoning_steps' in locals() else []
+
+                        # AI回答をDBに保存
+                        _saved = await service.send_dan_ai_message(
+                            current_user.user_id, _ai_response, _steps, room_id=room_id_for_cancel
+                        )
+                        _log.info(f"[SSE-DISCONNECT] AI response saved to DB (room={room_id_for_cancel}, msg_id={_saved['id'] if _saved else 'None'})")
+
+                        # done execution_event を保存（リカバリーフック用）
+                        if '_event_svc' in locals():
+                            try:
+                                await _event_svc.save_execution_event(
+                                    project_id=None, room_id=room_id_for_cancel,
+                                    event_type="done", content="completed",
+                                )
+                            except Exception:
+                                pass
+                    else:
+                        _log.info(f"[SSE-DISCONNECT] Task was cancelled, skipping save (room={room_id_for_cancel})")
+                except asyncio.TimeoutError:
+                    _log.error(f"[SSE-DISCONNECT] process_task timed out after 120s (room={room_id_for_cancel})")
+                except asyncio.CancelledError:
+                    _log.warning(f"[SSE-DISCONNECT] process_task was cancelled (room={room_id_for_cancel})")
+                except Exception as _e:
+                    _log.error(f"[SSE-DISCONNECT] Failed to save result: {_e} (room={room_id_for_cancel})")
+
             # done 未送信の場合のみ送信（フロントエンドのスピナー停止保証）
             if not done_sent:
                 try:
@@ -1028,7 +1071,7 @@ async def send_dan_message_stream(
             # クリーンアップ: リクエストIDとコールバックを解除
             ProgressCallbackRegistry.unregister(request_id)
             set_current_request_id(None)
-            # キャンセルフラグを解除
+            # キャンセルフラグを解除（process_task完了後に行う）
             if room_id_for_cancel:
                 CancellationRegistry.unregister(room_id_for_cancel)
     
