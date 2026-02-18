@@ -197,8 +197,8 @@ async def run_project_auto_proposal(
         else:
             user_messages_section = ""
 
-        # SDK Runner（定額）で提案を生成
-        from app.agent.sdk_runner import process_message_sdk
+        # CLI Runner（定額）で提案を生成
+        from app.agent.cli_runner import process_message_cli
         from app.services.chat_service import ChatService
 
         prompt = AUTO_PROPOSAL_PROMPT.format(
@@ -219,8 +219,8 @@ async def run_project_auto_proposal(
         logger.info(f"[AutoProposal] Sent start message for project {project_id}")
 
         event_count = 0
-        _debug(f"Starting SDK loop for project {project_id}")
-        async for event in process_message_sdk(
+        _debug(f"Starting CLI loop for project {project_id}")
+        async for event in process_message_cli(
             room_id=room_id,
             user_id=user_id,
             content=prompt,
