@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp, Square, Sparkles, X, Mic, MicOff, SkipForward, File, FileText, Image, FileAudio, FileVideo } from 'lucide-react';
+import { Send, Paperclip, Loader2, Bot, AlertCircle, RefreshCw, Check, ChevronDown, ChevronUp, Square, Sparkles, X, Mic, MicOff, SkipForward, File } from 'lucide-react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -34,11 +34,6 @@ function ProcessDisplay({ steps, isCollapsed, onToggle, isProcessing = false }: 
 
   return (
     <div className="flex gap-3 mb-3">
-      <Avatar className="h-10 w-10 shrink-0">
-        <AvatarFallback className="bg-primary/10">
-          <Bot className="h-5 w-5 text-primary" />
-        </AvatarFallback>
-      </Avatar>
       <div className="flex-1 space-y-1">
         <p className="text-xs text-muted-foreground">ダン</p>
         <div className="px-4 py-3 rounded-2xl rounded-bl-md bg-muted/50 border border-border">
@@ -126,16 +121,6 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
     new_actions?: string[] | null;
   }>>([]);
   const [currentProposalIndex, setCurrentProposalIndex] = useState(0);
-  const [skillProposal, setSkillProposal] = useState<{
-    proposal_id?: string;
-    status?: string;
-    skill_name: string;
-    description: string;
-    site: string;
-    actions: string[];
-    parameters: Array<{ name: string; type: string; required: boolean; description: string }>;
-    steps?: string[];
-  } | null>(null);
 
   // セッション別ストア
   const sessions = useSessionStateStore((state) => state.sessions);
@@ -859,7 +844,6 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
     setShowSkillDialog(true);
     setSkillProposals([]);
     setCurrentProposalIndex(0);
-    setSkillProposal(null);
 
     try {
       const result = await api.skills.analyze(sessId);
@@ -877,15 +861,6 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
         }
         setSkillProposals(result.proposals);
         setCurrentProposalIndex(0);
-        const first = result.proposals[0];
-        setSkillProposal({
-          proposal_id: first.proposal_id,
-          skill_name: first.skill_name,
-          description: first.description || '',
-          site: first.site || '',
-          actions: first.actions || [],
-          parameters: first.parameters || [],
-        });
       } else if (result.success && result.skill_name) {
         if (result.proposal_id && sessionId) {
           localStorage.setItem(`skill_proposal_ids:${sessionId}`, result.proposal_id);
@@ -899,16 +874,6 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
           parameters: result.parameters || [],
           decision: result.decision || 'create',
         }]);
-        setSkillProposal({
-          proposal_id: result.proposal_id || undefined,
-          status: result.status || undefined,
-          skill_name: result.skill_name,
-          description: result.description || '',
-          site: result.site || '',
-          actions: result.actions || [],
-          parameters: result.parameters || [],
-          steps: result.steps || undefined,
-        });
       } else {
         setShowSkillDialog(false);
         setBrowserSessionId(null);
@@ -960,7 +925,6 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
         setShowSkillDialog(false);
         setBrowserSessionId(null);
         setSkillProposals([]);
-        setSkillProposal(null);
       }
     }
   }, [browserSessionId, currentProposal, currentProposalIndex, skillProposals.length, sessionId]);
@@ -984,14 +948,12 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
     setShowSkillDialog(false);
     setBrowserSessionId(null);
     setSkillProposals([]);
-    setSkillProposal(null);
   }, [currentProposal, currentProposalIndex, skillProposals.length, sessionId]);
 
   const handleDismissSkillDialog = useCallback(async () => {
     setShowSkillDialog(false);
     setBrowserSessionId(null);
     setSkillProposals([]);
-    setSkillProposal(null);
 
     if (sessionId) {
       localStorage.removeItem(`skill_proposal_ids:${sessionId}`);
@@ -1047,14 +1009,6 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
 
         setSkillProposals(validProposals);
         setCurrentProposalIndex(0);
-        setSkillProposal({
-          proposal_id: validProposals[0].proposal_id,
-          skill_name: validProposals[0].skill_name,
-          description: validProposals[0].description,
-          site: validProposals[0].site,
-          actions: validProposals[0].actions,
-          parameters: validProposals[0].parameters,
-        });
         setShowSkillDialog(true);
       } catch (error) {
         console.error('Failed to restore skill proposals:', error);
@@ -1107,11 +1061,6 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
       <div className="shrink-0 flex items-center gap-3 pl-12 pr-3 md:px-6 py-4 border-b border-border">
-        <Avatar className="h-10 w-10">
-          <AvatarFallback className="bg-primary/10">
-            <Bot className="h-5 w-5 text-primary" />
-          </AvatarFallback>
-        </Avatar>
         <div>
           <h1 className="font-semibold">ダン</h1>
           <p className="text-xs text-muted-foreground">AI秘書</p>
@@ -1168,33 +1117,21 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
                         transition={{ duration: 0.3 }}
                         className={cn('flex gap-3', isUser && 'justify-end')}
                       >
-                        {!isUser && (
-                          <Avatar className="h-10 w-10 shrink-0">
-                            <AvatarFallback className="bg-primary/10">
-                              <Bot className="h-5 w-5 text-primary" />
-                            </AvatarFallback>
-                          </Avatar>
-                        )}
-                        <div className={cn('max-w-[85%] md:max-w-[70%] space-y-1 flex flex-col', isUser && 'items-end')}>
-                          <p className="text-xs text-muted-foreground">{isUser ? 'あなた' : 'ダン'}</p>
+                        <div className={cn(
+                          'space-y-1 flex flex-col',
+                          isUser ? 'max-w-[85%] md:max-w-[70%] items-end' : 'w-full'
+                        )}>
                           <div
                             className={cn(
                               'px-4 py-3 rounded-2xl text-sm leading-relaxed text-left',
                               isUser
-                                ? 'bg-primary text-primary-foreground rounded-br-md'
-                                : 'bg-muted rounded-bl-md prose prose-sm prose-dan max-w-none'
+                                ? 'bg-primary text-primary-foreground rounded-br-md w-full'
+                                : 'bg-transparent rounded-bl-md prose prose-sm prose-dan max-w-full'
                             )}
                           >
                             {isUser ? msg.content : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>}
                           </div>
                         </div>
-                        {isUser && (
-                          <Avatar className="h-10 w-10 shrink-0">
-                            <AvatarFallback className="bg-secondary text-secondary-foreground">
-                              {user?.display_name?.charAt(0) || 'U'}
-                            </AvatarFallback>
-                          </Avatar>
-                        )}
                       </motion.div>
                     )}
                   </div>

@@ -134,7 +134,7 @@ export function NotificationPanel() {
   return (
     <motion.div
       initial={false}
-      className="absolute bottom-4 right-4 z-50"
+      className="absolute z-50 md:top-4 md:right-4 top-4 right-4"
     >
       <AnimatePresence mode="wait">
         {selectedProposal ? (
