@@ -20,6 +20,7 @@ import { cn } from '@/lib/utils';
 import { useVoiceChat } from '@/hooks/useVoiceChat';
 import { useGeminiObserver } from '@/hooks/useGeminiObserver';
 import { useProjectStore } from '@/stores/project-store';
+import { useSessionRecovery } from '@/hooks/useSessionRecovery';
 
 // プロセスステップの表示コンポーネント
 interface ProcessDisplayProps {
@@ -306,6 +307,12 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
   });
 
   useEffect(() => { refetchMessagesRef.current = refetchMessages; }, [refetchMessages]);
+
+  // セッション復帰フック: タブ復帰時やページ読み込み時にバックエンド処理中を検知
+  useSessionRecovery({
+    sessionId: sessionId || null,
+    refetchMessages: () => refetchMessagesRef.current?.(),
+  });
 
   const messages = messagesData?.messages || [];
 

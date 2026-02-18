@@ -832,18 +832,30 @@ async def send_dan_message_stream(
                     ai_message["ai_context"] = ai_message_data["ai_context"]
 
                 yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+                # DB: done イベント保存（再接続時に「完了済み」を判定するため）
+                try:
+                    await project_service.save_execution_event(
+                        project_id=project_info["id"], room_id=room_id,
+                        event_type="done", content="completed",
+                    )
+                except Exception:
+                    pass
                 yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
                 done_sent = True
 
             else:
                 # ========================================
-                # 通常の Runner（既存コード、変更なし）
+                # 通常の Runner
                 # ========================================
 
                 # 推論ステップを収集するためのリストとキュー
                 reasoning_steps = []
                 reasoning_queue = asyncio.Queue()
                 voice_queue = asyncio.Queue()
+
+                # 通常チャットでもexecution_eventsに保存（再接続時の復元用）
+                from app.services.project_service import ProjectService
+                _event_svc = ProjectService()
 
                 # 推論ステップをキューに追加するコールバック
                 async def on_reasoning_step(step: str):
@@ -882,6 +894,14 @@ async def send_dan_message_stream(
                         step = await asyncio.wait_for(reasoning_queue.get(), timeout=0.05)
                         yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'reasoning-{step_counter}', 'label': step, 'status': 'running'}})}\n\n"
                         step_counter += 1
+                        # DB保存（再接続復元用）
+                        try:
+                            await _event_svc.save_execution_event(
+                                project_id=None, room_id=room_id,
+                                event_type="reasoning", content=step[:500],
+                            )
+                        except Exception:
+                            pass
                     except asyncio.TimeoutError:
                         pass
 
@@ -890,6 +910,14 @@ async def send_dan_message_stream(
                         progress_update = progress_queue.get_nowait()
                         yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'visual-{step_counter}', 'label': progress_update.label, 'status': progress_update.status}})}\n\n"
                         step_counter += 1
+                        # DB保存
+                        try:
+                            await _event_svc.save_execution_event(
+                                project_id=None, room_id=room_id,
+                                event_type="reasoning", content=progress_update.label[:500],
+                            )
+                        except Exception:
+                            pass
                     except asyncio.QueueEmpty:
                         pass
 
@@ -963,6 +991,15 @@ async def send_dan_message_stream(
 
                 # 完了（session_id付き）
                 yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+
+                # DB: done イベント保存（再接続時に「完了済み」を判定するため）
+                try:
+                    await _event_svc.save_execution_event(
+                        project_id=None, room_id=room_id,
+                        event_type="done", content="completed",
+                    )
+                except Exception:
+                    pass
 
                 # スキル化可能なブラウザセッションIDがあれば含める
                 done_data = {'type': 'done', 'session_id': room_id}
@@ -1196,6 +1233,56 @@ async def delete_dan_session(
 
 
 # ==================== Cancel Route ====================
+
+@router.get("/dan/sessions/{session_id}/execution-events")
+async def get_session_execution_events(
+    session_id: str,
+    limit: int = 100,
+    since_seq: Optional[int] = None,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """
+    セッション（room_id）の実行イベントを取得。
+
+    since_seq を指定すると、そのseq番号より後のイベントのみ返す。
+    フロントエンドのポーリング復帰時に差分取得に使う。
+    """
+    from app.services.project_service import ProjectService
+    service = ProjectService()
+    events = await service.get_execution_events_by_room(
+        room_id=session_id,
+        limit=limit,
+        since_seq=since_seq,
+    )
+    return events
+
+
+@router.get("/dan/sessions/{session_id}/active")
+async def get_active_session_status(
+    session_id: str,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """
+    セッションがバックエンドで実行中かどうかを返す。
+
+    フロントエンドがページ読み込み時やタブ復帰時に呼び出し、
+    実行中ならポーリングモードに切り替える。
+    """
+    from app.services.cancellation import CancellationRegistry
+
+    info = CancellationRegistry.get_active_info(session_id)
+    if info:
+        return {
+            "active": True,
+            "session_id": session_id,
+            "started_at": info["started_at"],
+        }
+    return {
+        "active": False,
+        "session_id": session_id,
+        "started_at": None,
+    }
+
 
 @router.post("/dan/cancel")
 async def cancel_dan_session(

@@ -38,14 +38,17 @@ class CancellationRegistry:
     """キャンセル状態を管理するレジストリ"""
 
     _instances: Dict[str, threading.Event] = {}
+    _started_at: Dict[str, float] = {}  # セッション開始時刻
     _lock = threading.Lock()
 
     @classmethod
     def register(cls, session_id: str) -> threading.Event:
         """セッションのキャンセルフラグを登録"""
+        import time
         with cls._lock:
             event = threading.Event()
             cls._instances[session_id] = event
+            cls._started_at[session_id] = time.time()
             return event
 
     @classmethod
@@ -72,12 +75,35 @@ class CancellationRegistry:
         """セッションを登録解除"""
         with cls._lock:
             cls._instances.pop(session_id, None)
+            cls._started_at.pop(session_id, None)
 
     @classmethod
     def clear_all(cls):
         """全てのセッションを登録解除（テスト用）"""
         with cls._lock:
             cls._instances.clear()
+            cls._started_at.clear()
+
+    @classmethod
+    def is_active(cls, session_id: str) -> bool:
+        """セッションが実行中か（登録済み かつ 未キャンセル）"""
+        with cls._lock:
+            if session_id not in cls._instances:
+                return False
+            return not cls._instances[session_id].is_set()
+
+    @classmethod
+    def get_active_info(cls, session_id: str) -> Optional[dict]:
+        """セッションの実行情報を返す（非アクティブならNone）"""
+        with cls._lock:
+            if session_id not in cls._instances:
+                return None
+            if cls._instances[session_id].is_set():
+                return None  # キャンセル済み
+            return {
+                "active": True,
+                "started_at": cls._started_at.get(session_id),
+            }
 
     # ========================================
     # 現在のセッション追跡（async対応）

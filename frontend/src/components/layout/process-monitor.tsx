@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Loader2, Check, AlertCircle, ChevronDown, ChevronUp, Brain, Terminal } from 'lucide-react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { api, type ExecutionEvent } from '@/lib/api-client';
 
@@ -14,13 +14,28 @@ interface ProcessMonitorProps {
 export function ProcessMonitor({ projectId, isExecuting }: ProcessMonitorProps) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
 
-  const { data: events = [] } = useQuery({
+  const { data: events = [], refetch } = useQuery({
     queryKey: ['execution-events', projectId],
     queryFn: () => api.projects.executionEvents.list(projectId),
     enabled: !!projectId,
     refetchInterval: isExecuting ? 2000 : false,
   });
+
+  // タブ復帰時に即座に再取得
+  const handleVisibilityChange = useCallback(() => {
+    if (document.visibilityState === 'visible' && projectId) {
+      refetch();
+    }
+  }, [projectId, refetch]);
+
+  useEffect(() => {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [handleVisibilityChange]);
 
   // 新しいイベントが来たら自動スクロール
   useEffect(() => {

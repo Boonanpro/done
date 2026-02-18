@@ -340,14 +340,21 @@ export interface ProjectProposalResponse {
 
 export interface ExecutionEvent {
   id: string;
-  project_id: string;
+  project_id: string | null;
   room_id: string;
-  event_type: 'tool_use' | 'reasoning' | 'phase' | 'error';
+  event_type: 'tool_use' | 'reasoning' | 'phase' | 'error' | 'text' | 'done';
   tool_name: string | null;
   tool_label: string | null;
   content: string | null;
   metadata: Record<string, unknown> | null;
+  seq: number | null;
   created_at: string;
+}
+
+export interface ActiveSessionStatus {
+  active: boolean;
+  session_id: string;
+  started_at: number | null;
 }
 
 // Note types
@@ -1075,6 +1082,24 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ session_id: sessionId }),
       }),
+
+    /**
+     * セッションがバックエンドで実行中かどうかを確認
+     * ページ読み込み時やタブ復帰時に呼び出す
+     */
+    getActiveStatus: (sessionId: string) =>
+      request<ActiveSessionStatus>(`/chat/dan/sessions/${sessionId}/active`),
+
+    /**
+     * セッションの実行イベントを取得（差分取得対応）
+     * since_seq を指定するとそれ以降のイベントのみ返す
+     */
+    getSessionEvents: (sessionId: string, sinceSeq?: number) => {
+      const params = new URLSearchParams();
+      if (sinceSeq !== undefined) params.set('since_seq', String(sinceSeq));
+      const qs = params.toString();
+      return request<ExecutionEvent[]>(`/chat/dan/sessions/${sessionId}/execution-events${qs ? `?${qs}` : ''}`);
+    },
   },
 
   // Projects endpoints

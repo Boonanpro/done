@@ -260,7 +260,7 @@ class ProjectService:
 
     async def save_execution_event(
         self,
-        project_id: str,
+        project_id: Optional[str],
         room_id: str,
         event_type: str,
         tool_name: Optional[str] = None,
@@ -268,16 +268,18 @@ class ProjectService:
         content: Optional[str] = None,
         metadata: Optional[dict] = None,
     ) -> dict:
-        """実行イベントを記録"""
-        result = self.supabase.table("execution_events").insert({
-            "project_id": project_id,
+        """実行イベントを記録（プロジェクト・通常チャット両対応）"""
+        row = {
             "room_id": room_id,
             "event_type": event_type,
             "tool_name": tool_name,
             "tool_label": tool_label,
             "content": content,
             "metadata": metadata or {},
-        }).execute()
+        }
+        if project_id:
+            row["project_id"] = project_id
+        result = self.supabase.table("execution_events").insert(row).execute()
         return result.data[0] if result.data else {}
 
     async def get_execution_events(
@@ -285,6 +287,7 @@ class ProjectService:
         project_id: str,
         limit: int = 100,
         after: Optional[str] = None,
+        since_seq: Optional[int] = None,
     ) -> list[dict]:
         """プロジェクトの実行イベント一覧を取得"""
         query = (
@@ -292,7 +295,26 @@ class ProjectService:
             .select("*")
             .eq("project_id", project_id)
         )
-        if after:
+        if since_seq is not None:
+            query = query.gt("seq", since_seq)
+        elif after:
             query = query.gt("created_at", after)
         result = query.order("created_at", desc=False).limit(limit).execute()
+        return result.data or []
+
+    async def get_execution_events_by_room(
+        self,
+        room_id: str,
+        limit: int = 100,
+        since_seq: Optional[int] = None,
+    ) -> list[dict]:
+        """room_idで実行イベント一覧を取得（通常チャット用）"""
+        query = (
+            self.supabase.table("execution_events")
+            .select("*")
+            .eq("room_id", room_id)
+        )
+        if since_seq is not None:
+            query = query.gt("seq", since_seq)
+        result = query.order("seq", desc=False).limit(limit).execute()
         return result.data or []

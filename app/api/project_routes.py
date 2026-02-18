@@ -183,15 +183,16 @@ async def get_execution_events(
     project_id: str,
     limit: int = Query(default=100, le=500),
     after: Optional[str] = Query(default=None),
+    since_seq: Optional[int] = Query(default=None),
     current_user: TokenData = Depends(get_current_user),
     service: ProjectService = Depends(get_project_service),
 ):
-    """プロジェクトの実行イベント一覧"""
+    """プロジェクトの実行イベント一覧（since_seqで差分取得可能）"""
     project = await service.get_project(project_id, current_user.user_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    return await service.get_execution_events(project_id, limit=limit, after=after)
+    return await service.get_execution_events(project_id, limit=limit, after=after, since_seq=since_seq)
 
 
 def _summarize_reasoning(text: str, max_len: int = 120) -> str:

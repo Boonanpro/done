@@ -100,11 +100,12 @@ class ProjectProposalActionRequest(BaseModel):
 class ExecutionEventResponse(BaseModel):
     """実行イベントレスポンス"""
     id: str
-    project_id: str
+    project_id: Optional[str] = None
     room_id: str
-    event_type: str  # 'tool_use', 'reasoning', 'phase', 'error'
+    event_type: str  # 'tool_use', 'reasoning', 'phase', 'error', 'text', 'done'
     tool_name: Optional[str] = None
     tool_label: Optional[str] = None
     content: Optional[str] = None
     metadata: Optional[dict] = None
+    seq: Optional[int] = None
     created_at: datetime
