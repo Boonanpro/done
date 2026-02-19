@@ -11,14 +11,13 @@ import json
 from app.config import settings
 
 from app.services.auth_service import (
-    decode_access_token, decode_refresh_token, 
-    create_access_token, create_token_pair, refresh_tokens,
+    decode_access_token, create_token_pair, refresh_tokens,
     TokenData
 )
 from app.services.chat_service import ChatService, parse_datetime
 from app.models.chat_schemas import (
     # Auth
-    RegisterRequest, LoginRequest, TokenResponse, TokenPairResponse, RefreshTokenRequest,
+    RegisterRequest, LoginRequest, TokenResponse,
     UserResponse, UserUpdateRequest,
     # Invite
     InviteCreateRequest, InviteResponse, InviteInfoResponse, InviteAcceptResponse,
@@ -29,7 +28,6 @@ from app.models.chat_schemas import (
     RoomMemberResponse, RoomMembersListResponse, AddMemberRequest,
     # Messages
     MessageSendRequest, MessageResponse, MessagesListResponse, ReadMarkResponse,
-    ProcessStep, DanMessageResponse, SenderType,
     # AI
     AISettingsResponse, AISettingsUpdateRequest, AISummaryResponse,
     # Dan Page & Proposals (2E & 2G)
@@ -502,7 +500,6 @@ async def mark_as_read(
     service: ChatService = Depends(get_chat_service),
 ):
     """Mark messages as read"""
-    from datetime import datetime
     success = await service.mark_as_read(room_id, current_user.user_id)
     return ReadMarkResponse(success=success, read_at=datetime.utcnow())
 
@@ -868,6 +865,12 @@ async def send_dan_message_stream(
                     # キャンセルチェック
                     if CancellationRegistry.is_cancelled(room_id):
                         process_task.cancel()
+                        # DBに中断メッセージを保存（孤児メッセージ防止）
+                        try:
+                            await service.send_dan_ai_message(current_user.user_id, "（中断されました）", [], room_id=room_id)
+                            result_saved = True
+                        except Exception:
+                            pass
                         yield f"data: {json.dumps({'type': 'cancelled', 'session_id': room_id})}\n\n"
                         return
 
@@ -937,27 +940,38 @@ async def send_dan_message_stream(
                         break
 
                 # 結果を取得
+                import logging as _sse_log
+                _sse_log.info(f"[SSE-TRACE] Awaiting process_task (room={room_id})")
                 result = await process_task
+                _sse_log.info(f"[SSE-TRACE] process_task returned (room={room_id}, keys={list(result.keys()) if result else 'None'})")
 
                 # キャンセルされた場合
                 if result.get("cancelled"):
+                    # DBに中断メッセージを保存（孤児メッセージ防止）
+                    try:
+                        await service.send_dan_ai_message(current_user.user_id, "（中断されました）", [], room_id=room_id)
+                        result_saved = True
+                    except Exception:
+                        pass
                     yield f"data: {json.dumps({'type': 'cancelled', 'session_id': room_id})}\n\n"
                     return
 
                 # 応答を取得（空文字列の場合もフォールバック）
                 ai_response_content = result.get("response") or "申し訳ありません。処理中にエラーが発生しました。"
+                _sse_log.info(f"[SSE-TRACE] Response length={len(ai_response_content)} (room={room_id})")
 
                 # エラーがあれば通知
                 if result.get("error"):
                     yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': result['error']})}\n\n"
 
                 # DBに保存（指定されたroom_idを使用）
+                _sse_log.info(f"[SSE-TRACE] Saving to DB (room={room_id})")
                 ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content, reasoning_steps, room_id=room_id)
+                _sse_log.info(f"[SSE-TRACE] DB save done (room={room_id}, msg_id={ai_message_data.get('id') if ai_message_data else 'None'})")
                 result_saved = True  # DB保存成功
 
                 if not ai_message_data:
-                    import logging
-                    logging.error(f"send_dan_ai_message returned None for user {current_user.user_id}")
+                    _sse_log.error(f"send_dan_ai_message returned None for user {current_user.user_id}")
                     raise ValueError("Failed to save AI message: returned None")
 
                 ai_message = {
@@ -973,7 +987,9 @@ async def send_dan_message_stream(
                     ai_message["ai_context"] = ai_message_data["ai_context"]
 
                 # 完了（session_id付き）
+                _sse_log.info(f"[SSE-TRACE] Yielding ai_message (room={room_id})")
                 yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+                _sse_log.info(f"[SSE-TRACE] ai_message yielded (room={room_id})")
 
                 # DB: done イベント保存（再接続時に「完了済み」を判定するため）
                 try:

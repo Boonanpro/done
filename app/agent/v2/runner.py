@@ -525,8 +525,8 @@ class AgentRunner:
             store = get_session_store()
             await store.save(self.session)
 
-            # 5. コンパクションチェック
-            await self._check_and_compact()
+            # 5. コンパクションチェック（バックグラウンド実行：応答を止めない）
+            asyncio.create_task(self._safe_compact())
 
             # フォールバック: テキスト出力がなかった場合
             if not user_response:
@@ -930,6 +930,15 @@ class AgentRunner:
             "tool_calls": tool_calls,
             "stop_reason": response.stop_reason,
         }
+
+    async def _safe_compact(self) -> None:
+        """コンパクションをバックグラウンドで安全に実行（例外を握りつぶす）"""
+        try:
+            await asyncio.wait_for(self._check_and_compact(), timeout=90)
+        except asyncio.TimeoutError:
+            logger.warning("Compaction timed out after 90s, skipping")
+        except Exception as e:
+            logger.exception(f"Background compaction failed: {e}")
 
     async def _check_and_compact(self) -> None:
         """

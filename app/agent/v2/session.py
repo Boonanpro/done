@@ -479,9 +479,10 @@ class Session:
 
         Claude APIの要件:
         - tool_useを含むassistantメッセージの後には、必ずtool_resultが必要
-        - この要件を満たさないメッセージは削除する
+        - userメッセージが連続してはいけない（user→assistant→user→...の交互）
+        - この要件を満たさないメッセージを修復する
 
-        エラー発生時にセッションが不整合な状態で残った場合の自動復旧用。
+        エラー発生時やキャンセル時にセッションが不整合な状態で残った場合の自動復旧用。
         """
         import logging
         logger = logging.getLogger(__name__)
@@ -513,6 +514,20 @@ class Session:
                         self.messages.pop()
                         repaired = True
                         continue  # 再度チェック
+
+            # 最後がuserメッセージの場合（キャンセル等でAI回答がない）
+            # → ダミーのassistantメッセージを挿入してペアを完成させる
+            if last_msg.get("role") == "user":
+                logger.warning(
+                    f"[Session._repair_messages] Trailing user message without assistant response "
+                    f"in session {self.session_id}, inserting interrupted marker"
+                )
+                self.messages.append({
+                    "role": "assistant",
+                    "content": "（中断されました）"
+                })
+                repaired = True
+                # 挿入後は再チェック不要（assistantで終わっている）
 
             # 問題なければ終了
             break
