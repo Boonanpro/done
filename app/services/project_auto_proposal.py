@@ -33,7 +33,24 @@ def _debug(msg: str):
 
 
 def _extract_steps(proposal_text: str) -> List[dict]:
-    """Markdownの実行計画セクションからステップを抽出（複数フォーマット対応）"""
+    """
+    Markdownの実行計画セクションからステップを抽出。
+
+    抽出順序:
+      1. Regex（3パターンフォールバック）
+      2. Regex全滅 → LLM（Haiku）で構造化抽出
+    """
+    steps = _extract_steps_regex(proposal_text)
+    if steps:
+        return steps
+
+    # Regex全滅 → LLMフォールバック
+    logger.warning("[AutoProposal] Regex step extraction failed, trying LLM fallback")
+    return _extract_steps_llm(proposal_text)
+
+
+def _extract_steps_regex(proposal_text: str) -> List[dict]:
+    """Regexベースのステップ抽出（3パターンフォールバック）"""
     steps = []
     step_num = 0
 
@@ -64,10 +81,8 @@ def _extract_steps(proposal_text: str) -> List[dict]:
     for phase_match in phase_matches:
         phase_name = phase_match.group(1).strip()
         phase_body = phase_match.group(2)
-        # テーブル行からステップを抽出: | ステップ番号 | 内容 | 担当 |
         for row in re.finditer(r"\|\s*[\d\-]+\s*\|\s*(.+?)\s*\|", phase_body):
             desc = row.group(1).strip()
-            # ヘッダー行やセパレーターをスキップ
             if desc.startswith('-') or desc in ('内容', 'ステップ', '説明'):
                 continue
             step_num += 1
@@ -89,6 +104,58 @@ def _extract_steps(proposal_text: str) -> List[dict]:
         })
 
     return steps
+
+
+def _extract_steps_llm(proposal_text: str) -> List[dict]:
+    """LLM（Haiku）でステップを構造化抽出する（Regexフォールバック）"""
+    import json
+    try:
+        import anthropic
+        from app.config import settings
+
+        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": f"""以下の提案書から実行ステップを抽出してJSON配列で返してください。
+
+提案書:
+{proposal_text[:4000]}
+
+出力形式（これだけを返すこと。説明は不要）:
+[
+  {{"step_number": 1, "description": "ステップの内容"}},
+  {{"step_number": 2, "description": "ステップの内容"}}
+]""",
+            }],
+        )
+
+        raw = response.content[0].text.strip()
+        # JSON部分を抽出（```json ... ``` で囲まれている可能性）
+        json_match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not json_match:
+            logger.warning(f"[AutoProposal] LLM step extraction: no JSON array found")
+            return []
+
+        parsed = json.loads(json_match.group())
+        steps = []
+        for i, item in enumerate(parsed, 1):
+            desc = item.get("description", "").strip()
+            if desc:
+                steps.append({
+                    "step_number": i,
+                    "description": desc,
+                    "status": "pending",
+                })
+
+        logger.info(f"[AutoProposal] LLM extracted {len(steps)} steps")
+        return steps
+
+    except Exception as e:
+        logger.warning(f"[AutoProposal] LLM step extraction failed: {e}")
+        return []
 
 
 def _fetch_user_messages(origin_room_id: str, limit: int = 10) -> str:
@@ -230,8 +297,8 @@ async def run_project_auto_proposal(
                 steps=steps,
                 metadata={
                     "team": team_result.metadata,
-                    "research_findings": team_result.research_findings[:2000],
-                    "critique": team_result.critique[:2000],
+                    "research_findings": team_result.research_findings[:5000],
+                    "critique": team_result.critique[:5000],
                 },
             )
             _debug(f"Proposal saved OK with team metadata")

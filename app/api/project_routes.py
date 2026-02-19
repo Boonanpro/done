@@ -289,15 +289,47 @@ async def _start_project_execution(project: dict, proposal: dict, user_id: str):
     proposal_content = proposal.get("content", "")
     had_error = False
 
+    # チーム議論のメタデータ（リサーチャー調査結果・クリティック検証）を取得
+    proposal_metadata = proposal.get("metadata") or {}
+    team_meta = proposal_metadata.get("team", {})
+    research_findings = proposal_metadata.get("research_findings", "")
+    critique = proposal_metadata.get("critique", "")
+
+    # チーム議論セクションの構築（情報がある場合のみ）
+    team_context = ""
+    if research_findings or critique:
+        team_context = "\n\n## チーム議論の参考情報（計画時の調査・検証結果）\n"
+        if research_findings:
+            team_context += f"\n### リサーチャーの調査結果\n{research_findings}\n"
+        if critique:
+            team_context += f"\n### クリティックの検証結果\n{critique}\n"
+        team_context += "\n上記を踏まえて、指摘されたリスクに注意しながら実行してください。\n"
+
     execution_prompt = f"""以下の計画が承認されました。実行を開始してください。
 
 ## 承認された計画
 {proposal_content}
+{team_context}
+## 実行ルール
 
-## 実行指示
-- 上記の実行計画のステップを順番に実行してください
-- 各ステップの完了時に進捗を報告してください
-- Redゾーン操作（決済、個人情報入力等）は必ずユーザーに確認してください
+### ステップ実行
+1. ステップを順番に1つずつ実行する
+2. 各ステップの開始時に「## ステップ N: ○○ を開始します」と宣言する
+3. 各ステップの完了時に結果を報告する
+4. 失敗した場合は理由を説明し、後続ステップへの影響を判断してから次に進む
+5. 全ステップ完了後に「## 完了報告」として全体をまとめる
+
+### ゾーン判断（各操作の実行前に必ず判定）
+- **Green（即実行）**: 検索、閲覧、ツール作成、bashコマンド、ファイル操作、パッケージインストール
+- **Yellow（実行→報告）**: フォーム入力（非個人情報）、カート追加、設定変更
+- **Red（確認→実行）**: 個人情報入力、購入確定、取消不可操作 → 必ずユーザーに内容を示して確認を待つ
+
+### 障害対応
+- エラー → まず自分のツール（bash, browser, exec_code等）で解決を試みる
+- ツール不足 → 必要なスクリプトを書いて実行する
+- OTP/2段階認証 → メールアプリやSMSをブラウザで開いてコードを自力取得する。取得できない場合のみユーザーに聞く
+- CAPTCHA → ユーザーにスクリーンショットを見せて「この画像の文字を教えてください」と聞く
+- 「できません」と止まることは禁止。必ず代替案を提示するか、ユーザーに助けを求める
 """
 
     try:
