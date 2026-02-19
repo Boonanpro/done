@@ -37,6 +37,8 @@ export function useSessionRecovery({
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastSeqRef = useRef<number>(0);
   const isPollingRef = useRef(false);
+  const refetchRef = useRef(refetchMessages);
+  refetchRef.current = refetchMessages;
 
   const { addProcessStep, setProcess, setIsSending, deleteProcess } =
     useSessionStateStore();
@@ -83,12 +85,12 @@ export function useSessionRecovery({
         // ★ バックエンドが非アクティブでも、メッセージを再取得する
         // SSE切断中にバックエンドが回答を保存・完了した場合、
         // フロントエンドはその回答を受け取れていないので、ここで拾う
-        refetchMessages();
+        refetchRef.current();
       }
     } catch (err) {
       console.warn('[SessionRecovery] Failed to check active status:', err);
     }
-  }, [sessionId, setIsSending, setProcess, refetchMessages]);
+  }, [sessionId, setIsSending, setProcess]);
 
   /**
    * ポーリング: since_seq で差分取得
@@ -112,7 +114,7 @@ export function useSessionRecovery({
             setIsSending(sessionId, false);
             deleteProcess(sessionId, PENDING_PROCESS_ID);
             // メッセージ再取得（最終回答をDBから取得）
-            refetchMessages();
+            refetchRef.current();
             return;
           }
 
@@ -140,7 +142,7 @@ export function useSessionRecovery({
             stopPolling();
             setIsSending(sessionId, false);
             deleteProcess(sessionId, PENDING_PROCESS_ID);
-            refetchMessages();
+            refetchRef.current();
           }
         } catch {
           // ignore
@@ -151,7 +153,7 @@ export function useSessionRecovery({
     } finally {
       isPollingRef.current = false;
     }
-  }, [sessionId, addProcessStep, setIsSending, deleteProcess, refetchMessages]);
+  }, [sessionId, addProcessStep, setIsSending, deleteProcess]);
 
   const startPolling = useCallback(() => {
     if (pollingRef.current) return;
@@ -165,16 +167,18 @@ export function useSessionRecovery({
     }
   }, []);
 
+  // checkAndRecoverをrefに保存（useEffectの依存を安定化）
+  const checkAndRecoverRef = useRef(checkAndRecover);
+  checkAndRecoverRef.current = checkAndRecover;
+
   /**
    * visibilitychange: タブ復帰時に即座にチェック
    */
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        // タブが再びアクティブになった → 即座にチェック + メッセージ再取得
-        checkAndRecover();
+        checkAndRecoverRef.current();
       } else {
-        // タブが非アクティブ → ポーリング停止（バッテリー節約）
         stopPolling();
       }
     };
@@ -183,25 +187,19 @@ export function useSessionRecovery({
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [checkAndRecover, stopPolling]);
+  }, [stopPolling]);
 
   /**
-   * 初回マウント時: アクティブセッションチェック
-   */
-  useEffect(() => {
-    checkAndRecover();
-    return () => {
-      stopPolling();
-    };
-  }, [sessionId, checkAndRecover, stopPolling]);
-
-  /**
-   * sessionId変更時にリセット
+   * 初回マウント時 & sessionId変更時
    */
   useEffect(() => {
     lastSeqRef.current = 0;
     isActiveRef.current = false;
     stopPolling();
+    checkAndRecoverRef.current();
+    return () => {
+      stopPolling();
+    };
   }, [sessionId, stopPolling]);
 
   return {

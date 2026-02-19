@@ -139,8 +139,10 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
   const markAsRead = useSessionStateStore((state) => state.markAsRead);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const refetchMessagesRef = useRef<(() => void) | null>(null);
+  const initialLoadRef = useRef(true);
 
   // Voice chat integration
   const voiceSendRef = useRef<((text: string) => void) | null>(null);
@@ -315,6 +317,14 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
   });
 
   const messages = messagesData?.messages || [];
+
+  // 初回ロード完了後にフラグを切り替え（Framer Motionアニメーション制御用）
+  useEffect(() => {
+    if (messages.length > 0 && initialLoadRef.current) {
+      // 次のレンダーサイクルでフラグを落とす
+      requestAnimationFrame(() => { initialLoadRef.current = false; });
+    }
+  }, [messages]);
 
   // DB messages + voice messages → oldest-first for display
   const allMessages = useMemo(() => {
@@ -759,10 +769,19 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
 
   const pendingProcess = processes.get(PENDING_PROCESS_ID);
 
-  // スクロール
+  // スクロール（即座に最下部へジャンプ、DOM描画完了後に実行）
   const pendingStepCount = pendingProcess?.steps?.length ?? 0;
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    // 2フレーム待ってからスクロール（ReactMarkdown等のレイアウト完了を保証）
+    const raf1 = requestAnimationFrame(() => {
+      const raf2 = requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+      });
+      return () => cancelAnimationFrame(raf2);
+    });
+    return () => cancelAnimationFrame(raf1);
   }, [messages, pendingStepCount]);
 
   // テキストエリア自動リサイズ
@@ -1075,7 +1094,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
       </div>
 
       {/* Messages Area */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-3 md:px-6">
+      <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto px-3 md:px-6">
         <div className="max-w-3xl mx-auto py-6 space-y-4">
           {isLoadingMessages ? (
             Array.from({ length: 3 }).map((_, i) => (
@@ -1119,9 +1138,9 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
                     )}
                     {(isUser || !processData || !processData.isProcessing) && (
                       <motion.div
-                        initial={{ opacity: 0, y: 10 }}
+                        initial={initialLoadRef.current ? false : { opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.3 }}
+                        transition={initialLoadRef.current ? { duration: 0 } : { duration: 0.3 }}
                         className={cn('flex gap-3', isUser && 'justify-end')}
                       >
                         <div className={cn(

@@ -21,13 +21,13 @@ export default function ChatPage() {
 
   const hasToken = typeof window !== 'undefined' && !!localStorage.getItem('done-token');
 
-  // 認証チェック
+  // 認証チェック: トークンがなければ即リダイレクト（isLoadingを待たない）
   useEffect(() => {
-    if (!isLoading && !isAuthenticated && !hasToken) {
+    if (!hasToken) {
       router.push('/login');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLoading, isAuthenticated, hasToken]);
+  }, [hasToken]);
 
   // DANルームを取得
   const { data: danRoom, isLoading: isLoadingRoom } = useQuery({
