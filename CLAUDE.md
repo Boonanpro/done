@@ -39,11 +39,31 @@ hookは完了を待たない可能性がある。
 
 `.claude/settings.local.json` に PreToolUse hook を設定済み。uvicornコマンド実行前に自動でポート8000をクリーンアップする。（Claude Code再起動後に有効になる場合がある）
 
+## ⚠️ リモート開発（Claude App コードタブ）のルール ⚠️
+
+Claude Appの「コード」タブはリモートサンドボックスで動作するため、以下の制約がある：
+
+- **自宅PCのプロセス（uvicorn, Next.js）は操作できない**
+- **サーバーの再起動は不可能**（「再起動しました」と言わないこと）
+- コード変更 → git push → 自宅PCの `auto_deploy.py` が自動検知・反映する
+
+### 必須ルール
+
+1. **ブランチを作らず、mainに直接pushすること**
+   - ❌ `git checkout -b claude/xxx` → ブランチ作成は禁止
+   - ✅ `git add ... && git commit && git push origin main`
+2. **「再起動しました」「反映しました」と言わないこと**
+   - 自宅PCの `auto_deploy.py` が30秒以内にpullして自動反映する
+   - 「mainにpushしました。約30秒で自動反映されます」と伝えること
+3. **DBマイグレーションはSQLファイル作成のみ**
+   - 実際の適用は自宅PCから手動で行う
+
 ## 開発環境
 
 - バックエンド: FastAPI (port 8000)
 - フロントエンド: Next.js (port 3000)
 - データベース: Supabase
+- 自動デプロイ: `python scripts/auto_deploy.py` （常駐スクリプト）
 
 ## 現在の実装計画
 
