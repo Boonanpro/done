@@ -29,15 +29,15 @@
 
 [ステップ1のプロンプトを送る]
      ↓
-[CLI Runnerが実行]
+[CLI Runner（Opus）が実行]
      ↓
-[完了検証（LLM判定）] → 失敗 → リトライ or 停止
+[同じCLIセッション内でOpusが自己検証] → 失敗 → リトライ or 停止
      ↓ 成功
-[DB更新: ステップ1 = completed]
+[検証結果JSONをPython側でパース → DB更新]
      ↓
 [次のステップがRedか？] → Yes → ユーザー確認を待つ
      ↓ No
-[ステップ2のプロンプトを送る]
+[ステップ2のプロンプトを送る（--resume）]
      ↓
   ... 繰り返し ...
      ↓
@@ -80,8 +80,8 @@ async def run_project_execution(...):
         # 3. CLI Runnerで実行
         response = await execute_step_via_cli(prompt, room_id, user_id)
 
-        # 4. 完了検証（LLM判定）
-        verification = await verify_step_completion(step, response)
+        # 4. 完了検証（CLI出力から自己検証JSONを抽出）
+        verification = parse_step_verification(response.text)
 
         # 5. 結果に応じて分岐
         if verification.status == "completed":
@@ -125,39 +125,65 @@ def build_step_prompt(step, previous_results, project_context):
 """
 ```
 
-### Step 3: 完了検証（LLM判定）
+### Step 3: 完了検証（CLIセッション内でOpusが自己検証）
 
-Regexの代わりにLLM（Haiku）で検証する。
+外部のLLM API（Haiku等）を呼ぶのではなく、**同じCLIセッション内でOpusに自己検証させる**。
+CLI RunnerはMaxプラン定額でOpus 4.6を使っているため、追加コストゼロ。
+
+**方式**: ステップ実行プロンプトの中に検証指示を含める。
+Opusがステップを実行した後、同じターン内で自分の結果を検証し、
+構造化されたJSONで報告する。Python側はそのJSONをパースしてDB更新するだけ。
 
 ```python
-async def verify_step_completion(step, cli_response):
-    """ステップが本当に完了したかLLMで検証"""
+# build_step_prompt の実行ルール部分に検証指示を組み込む
 
-    prompt = f"""以下のステップの実行結果を評価してください。
+STEP_PROMPT_TEMPLATE = """
+## 現在のタスク
+ステップ {step_number}: {description}
 
-## ステップ
-{step['description']}
+## これまでの実行結果
+{previous_results}
 
-## 実行ログ（CLIの出力）
-{cli_response.text[:3000]}
+## 実行ルール
+1. このステップだけを実行してください
+2. 実行が完了したら、以下のフォーマットで自己検証結果を報告してください
+3. 実際の成果物（スクショ、ファイル存在、画面のURL等）を確認した上で判定してください
+4. 「やったつもり」ではなく「証拠がある」場合のみ completed にしてください
 
-## 使用されたツール
-{format_tools_used(cli_response.tool_events)}
+## 検証報告フォーマット（必ずこの形式で最後に出力）
 
-## 判定基準
-以下のJSONで回答してください:
+```json
 {{
+  "step_number": {step_number},
   "status": "completed" | "failed" | "partial",
-  "confidence": 0.0-1.0,
   "summary": "何が達成されたかの1行要約",
-  "evidence": "成功/失敗の根拠",
-  "should_abort": true/false  // 後続ステップを中止すべきか
+  "evidence": "成功/失敗の根拠（URL、ファイルパス、画面の状態等）",
+  "should_abort": false
 }}
-"""
-    # Haiku で判定（安い・速い）
-    result = await call_llm(model="claude-haiku-4-5-20251001", prompt=prompt)
-    return parse_verification(result)
 ```
+"""
+
+# Python側でCLI出力から検証JSONを抽出
+def parse_step_verification(cli_output_text: str) -> dict:
+    """CLIの出力テキストから検証JSONブロックを抽出"""
+    import re, json
+    # ```json ... ``` ブロックを探す
+    match = re.search(r'```json\s*(\{.*?\})\s*```', cli_output_text, re.DOTALL)
+    if match:
+        return json.loads(match.group(1))
+    # フォールバック: テキスト中の最後のJSONオブジェクト
+    matches = re.findall(r'\{[^{}]*"status"\s*:\s*"[^"]+?"[^{}]*\}', cli_output_text)
+    if matches:
+        return json.loads(matches[-1])
+    # 抽出失敗 → 安全側に倒す
+    return {"status": "partial", "summary": "検証結果を抽出できず", "should_abort": False}
+```
+
+**なぜ外部LLM API（Haiku）ではなくCLI内自己検証か:**
+- CLI RunnerはMaxプラン定額（Opus 4.6）→ 検証に追加コストゼロ
+- 実行した本人が検証するので、ブラウザの状態やファイルの内容を直接確認できる
+- 外部API呼び出しの遅延やエラーハンドリングが不要
+- 実行と検証を別ターンに分ければ、「やりました」の思い込みを減らせる
 
 ### Step 4: Red操作の確認待ち
 
@@ -230,7 +256,7 @@ async def resume_execution(project_id, current_user):
 |---|------|------|
 | 1 | `project_execution.py` をステップループに書き換え | なし |
 | 2 | ステップ単位プロンプト（`build_step_prompt`） | #1 |
-| 3 | LLM完了検証（`verify_step_completion`） | #1 |
+| 3 | CLI内自己検証（プロンプト設計 + JSONパース） | #2 |
 | 4 | Red判定 + 確認待ちステータス | #1 |
 | 5 | 実行再開API（`/resume`） | #4 |
 | 6 | フロントエンド対応（ステップ進捗表示、確認UI） | #5 |
@@ -239,7 +265,8 @@ async def resume_execution(project_id, current_user):
 
 | リスク | 対策 |
 |--------|------|
-| ステップごとにCLI起動するとコスト増 | `--resume`でセッション継続、promptは最小限に |
-| Haiku検証が間違う | confidence閾値を設定、低い場合は人間に聞く |
+| ステップごとにCLI起動するとコスト増 | `--resume`でセッション継続、promptは最小限に。Maxプラン定額なのでLLMコストはゼロ |
+| 自己検証が甘い（自分で自分を甘く採点） | 検証プロンプトで「証拠がある場合のみcompleted」を明示。スクショ・URL・ファイル存在等の客観的根拠を要求 |
+| 検証JSONが出力されない/パースできない | フォールバックで `partial` 扱い → 安全側に倒す |
 | 確認待ちで放置される | タイムアウト設定（24h）、リマインド通知 |
 | ステップ間の文脈が切れる | previous_resultsで要約を渡す + CLIセッション継続 |
