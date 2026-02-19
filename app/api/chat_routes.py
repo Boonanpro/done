@@ -6,35 +6,16 @@ from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisco
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 from datetime import datetime
-import re
 import json
 
 from app.config import settings
-
-
-def parse_datetime(dt_str: str) -> datetime:
-    """Parse ISO format datetime string with variable microsecond precision"""
-    if not dt_str:
-        return None
-    # Replace Z with +00:00 for timezone
-    dt_str = dt_str.replace("Z", "+00:00")
-    # Normalize microseconds to 6 digits (Python requires exactly 6)
-    match = re.match(r"(.+\.\d{1,6})(\d*)(\+.*)?$", dt_str)
-    if match:
-        base, extra, tz = match.groups()
-        # Pad to 6 digits if needed
-        base_parts = base.rsplit(".", 1)
-        if len(base_parts) == 2:
-            microsec = base_parts[1].ljust(6, "0")[:6]
-            dt_str = f"{base_parts[0]}.{microsec}{tz or ''}"
-    return datetime.fromisoformat(dt_str)
 
 from app.services.auth_service import (
     decode_access_token, decode_refresh_token, 
     create_access_token, create_token_pair, refresh_tokens,
     TokenData
 )
-from app.services.chat_service import ChatService
+from app.services.chat_service import ChatService, parse_datetime
 from app.models.chat_schemas import (
     # Auth
     RegisterRequest, LoginRequest, TokenResponse, TokenPairResponse, RefreshTokenRequest,
@@ -1282,12 +1263,14 @@ async def get_session_execution_events(
     session_id: str,
     limit: int = 100,
     since_seq: Optional[int] = None,
+    current_only: bool = False,
     current_user: TokenData = Depends(get_current_user),
 ):
     """
     セッション（room_id）の実行イベントを取得。
 
     since_seq を指定すると、そのseq番号より後のイベントのみ返す。
+    current_only=True で最後のdoneイベント以降のみ返す（現在の実行分のみ）。
     フロントエンドのポーリング復帰時に差分取得に使う。
     """
     from app.services.project_service import ProjectService
@@ -1296,6 +1279,7 @@ async def get_session_execution_events(
         room_id=session_id,
         limit=limit,
         since_seq=since_seq,
+        current_only=current_only,
     )
     return events
 

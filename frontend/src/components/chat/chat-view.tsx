@@ -138,8 +138,6 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
   const initializeProcessesFromMessages = useSessionStateStore((state) => state.initializeProcessesFromMessages);
   const markAsRead = useSessionStateStore((state) => state.markAsRead);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const refetchMessagesRef = useRef<(() => void) | null>(null);
   const initialLoadRef = useRef(true);
@@ -303,18 +301,16 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
     queryKey: ['messages', sessionId],
     queryFn: () => api.rooms.getMessages(sessionId, { limit: 50 }),
     enabled: !!sessionId,
-    staleTime: 5 * 1000,
-    refetchInterval: 3000,
+    staleTime: 30 * 1000,
+    refetchInterval: false,
+    refetchOnWindowFocus: true,
     retry: 2,
   });
 
   useEffect(() => { refetchMessagesRef.current = refetchMessages; }, [refetchMessages]);
 
-  // セッション復帰フック: タブ復帰時やページ読み込み時にバックエンド処理中を検知
-  useSessionRecovery({
-    sessionId: sessionId || null,
-    refetchMessages: () => refetchMessagesRef.current?.(),
-  });
+  // セッション復帰フック: プロセスモニター復元のみ担当
+  useSessionRecovery({ sessionId: sessionId || null });
 
   const messages = messagesData?.messages || [];
 
@@ -769,21 +765,6 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
 
   const pendingProcess = processes.get(PENDING_PROCESS_ID);
 
-  // スクロール（即座に最下部へジャンプ、DOM描画完了後に実行）
-  const pendingStepCount = pendingProcess?.steps?.length ?? 0;
-  useEffect(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    // 2フレーム待ってからスクロール（ReactMarkdown等のレイアウト完了を保証）
-    const raf1 = requestAnimationFrame(() => {
-      const raf2 = requestAnimationFrame(() => {
-        el.scrollTop = el.scrollHeight;
-      });
-      return () => cancelAnimationFrame(raf2);
-    });
-    return () => cancelAnimationFrame(raf1);
-  }, [messages, pendingStepCount]);
-
   // テキストエリア自動リサイズ
   useEffect(() => {
     if (textareaRef.current) {
@@ -1093,8 +1074,8 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
         </div>
       </div>
 
-      {/* Messages Area */}
-      <div ref={scrollContainerRef} className="flex-1 min-h-0 overflow-y-auto px-3 md:px-6">
+      {/* Messages Area — flex-col-reverse でブラウザが自動的に最下部を表示 */}
+      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col-reverse px-3 md:px-6">
         <div className="max-w-3xl mx-auto py-6 space-y-4">
           {isLoadingMessages ? (
             Array.from({ length: 3 }).map((_, i) => (
@@ -1173,7 +1154,6 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
               )}
             </>
           )}
-          <div ref={messagesEndRef} />
         </div>
       </div>
 

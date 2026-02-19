@@ -307,8 +307,26 @@ class ProjectService:
         room_id: str,
         limit: int = 100,
         since_seq: Optional[int] = None,
+        current_only: bool = False,
     ) -> list[dict]:
-        """room_idで実行イベント一覧を取得（通常チャット用）"""
+        """room_idで実行イベント一覧を取得（通常チャット用）
+
+        current_only=True: 最後のdoneイベント以降のみ返す（現在の実行分のみ）
+        """
+        if current_only and since_seq is None:
+            # 最後のdoneイベントのseqを取得
+            done_query = (
+                self.supabase.table("execution_events")
+                .select("seq")
+                .eq("room_id", room_id)
+                .eq("event_type", "done")
+                .order("seq", desc=True)
+                .limit(1)
+            )
+            done_result = done_query.execute()
+            if done_result.data:
+                since_seq = done_result.data[0]["seq"]
+
         query = (
             self.supabase.table("execution_events")
             .select("*")

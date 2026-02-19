@@ -1,53 +1,37 @@
 'use client';
 
 /**
- * useSessionRecovery - セッション復帰・再接続フック
+ * useSessionRecovery - セッション復帰フック
  *
- * ページ読み込み時やタブ復帰時に：
- * 1. バックエンドがまだ処理中かチェック (active session API)
- * 2. 処理中なら execution_events をポーリングしてプロセスモニタを復元
- * 3. 完了を検知したらポーリング停止 + メッセージ再取得
- * 4. 既に完了済みでも、ページ復帰時にメッセージを再取得（SSE切断で逃した回答を取得）
+ * 役割: バックエンドで処理が進行中かを検知し、プロセスモニターを復元する。
  *
- * これにより、タブを閉じてもブラウザを切り替えても
- * 戻ってきた時に「接続中...」→ 進捗表示が復元される。
- * または既に完了済みなら最終回答がすぐ表示される。
+ * メッセージの再取得はReact Queryの refetchOnWindowFocus に任せる。
+ * このフックはプロセスモニター復帰と完了検知のみを担当する。
  */
 
 import { useEffect, useRef, useCallback } from 'react';
-import { api, type ExecutionEvent } from '@/lib/api-client';
+import { api } from '@/lib/api-client';
 import { useSessionStateStore, PENDING_PROCESS_ID } from '@/stores/session-state-store';
 
 interface UseSessionRecoveryOptions {
   sessionId: string | null;
-  /** メッセージ一覧を再取得する関数 */
-  refetchMessages: () => void;
-}
-
-interface UseSessionRecoveryReturn {
-  /** バックエンドが実行中か */
-  isBackendActive: boolean;
 }
 
 export function useSessionRecovery({
   sessionId,
-  refetchMessages,
-}: UseSessionRecoveryOptions): UseSessionRecoveryReturn {
+}: UseSessionRecoveryOptions) {
   const isActiveRef = useRef(false);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastSeqRef = useRef<number>(0);
   const isPollingRef = useRef(false);
-  const refetchRef = useRef(refetchMessages);
-  refetchRef.current = refetchMessages;
 
   const { addProcessStep, setProcess, setIsSending, deleteProcess } =
     useSessionStateStore();
 
   /**
-   * アクティブセッションをチェックし、必要ならポーリング開始
-   * active: false の場合でもメッセージを再取得（SSE切断で逃した回答を拾う）
+   * バックエンドの実行状態を確認し、処理中ならプロセスモニター復元 + ポーリング開始。
    */
-  const checkAndRecover = useCallback(async () => {
+  const checkActive = useCallback(async () => {
     if (!sessionId) return;
 
     try {
@@ -55,37 +39,31 @@ export function useSessionRecovery({
       isActiveRef.current = status.active;
 
       if (status.active) {
-        // バックエンドが処理中 → isSending=true にしてUIを「実行中」状態に
         setIsSending(sessionId, true);
 
-        // 既存のexecution_eventsを取得してプロセスモニタ復元
-        const events = await api.sm.getSessionEvents(sessionId);
-        if (events.length > 0) {
-          // プロセスモニタにステップを復元
+        // current_only=true でバックエンド側で最後のdone以降のみ取得
+        const events = await api.sm.getSessionEvents(sessionId, undefined, true);
+
+        const activeEvents = events.filter((e) => e.event_type !== 'done');
+        if (activeEvents.length > 0) {
           setProcess(sessionId, PENDING_PROCESS_ID, {
-            steps: events
-              .filter((e) => e.event_type !== 'done')
-              .map((e, idx) => ({
-                id: `recovery-${idx}`,
-                label: e.tool_label || e.content || e.event_type,
-                status: 'completed' as const,
-              })),
+            steps: activeEvents.map((e, idx) => ({
+              id: `recovery-${idx}`,
+              label: e.tool_label || e.content || e.event_type,
+              status: 'completed' as const,
+            })),
             isCollapsed: false,
             isProcessing: true,
           });
+        }
 
-          // 最後のseqを記録
+        // seqは取得イベントの最後尾を使う（差分ポーリング用）
+        if (events.length > 0) {
           const maxSeq = Math.max(...events.map((e) => e.seq || 0));
           lastSeqRef.current = maxSeq;
         }
 
-        // ポーリング開始
         startPolling();
-      } else {
-        // ★ バックエンドが非アクティブでも、メッセージを再取得する
-        // SSE切断中にバックエンドが回答を保存・完了した場合、
-        // フロントエンドはその回答を受け取れていないので、ここで拾う
-        refetchRef.current();
       }
     } catch (err) {
       console.warn('[SessionRecovery] Failed to check active status:', err);
@@ -93,7 +71,7 @@ export function useSessionRecovery({
   }, [sessionId, setIsSending, setProcess]);
 
   /**
-   * ポーリング: since_seq で差分取得
+   * ポーリング: 進行中プロセスの差分イベントを取得
    */
   const pollEvents = useCallback(async () => {
     if (!sessionId || isPollingRef.current) return;
@@ -108,17 +86,13 @@ export function useSessionRecovery({
       if (events.length > 0) {
         for (const event of events) {
           if (event.event_type === 'done') {
-            // 完了検知 → ポーリング停止 + 状態リセット
             isActiveRef.current = false;
             stopPolling();
             setIsSending(sessionId, false);
             deleteProcess(sessionId, PENDING_PROCESS_ID);
-            // メッセージ再取得（最終回答をDBから取得）
-            refetchRef.current();
             return;
           }
 
-          // プロセスステップを追加
           addProcessStep(sessionId, PENDING_PROCESS_ID, {
             id: `poll-${event.seq || event.id}`,
             label: event.tool_label || event.content || event.event_type,
@@ -126,14 +100,13 @@ export function useSessionRecovery({
           });
         }
 
-        // 最後のseqを更新
         const maxSeq = Math.max(...events.map((e) => e.seq || 0));
         if (maxSeq > lastSeqRef.current) {
           lastSeqRef.current = maxSeq;
         }
       }
 
-      // アクティブ状態を再確認（イベントがなくても完了チェック）
+      // イベントがなくても完了チェック
       if (events.length === 0) {
         try {
           const status = await api.sm.getActiveStatus(sessionId);
@@ -142,7 +115,6 @@ export function useSessionRecovery({
             stopPolling();
             setIsSending(sessionId, false);
             deleteProcess(sessionId, PENDING_PROCESS_ID);
-            refetchRef.current();
           }
         } catch {
           // ignore
@@ -167,17 +139,14 @@ export function useSessionRecovery({
     }
   }, []);
 
-  // checkAndRecoverをrefに保存（useEffectの依存を安定化）
-  const checkAndRecoverRef = useRef(checkAndRecover);
-  checkAndRecoverRef.current = checkAndRecover;
+  const checkActiveRef = useRef(checkActive);
+  checkActiveRef.current = checkActive;
 
-  /**
-   * visibilitychange: タブ復帰時に即座にチェック
-   */
+  // タブ復帰時: プロセスモニター復元チェック
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        checkAndRecoverRef.current();
+        checkActiveRef.current();
       } else {
         stopPolling();
       }
@@ -189,20 +158,12 @@ export function useSessionRecovery({
     };
   }, [stopPolling]);
 
-  /**
-   * 初回マウント時 & sessionId変更時
-   */
+  // 初回マウント & sessionId変更時
   useEffect(() => {
     lastSeqRef.current = 0;
     isActiveRef.current = false;
     stopPolling();
-    checkAndRecoverRef.current();
-    return () => {
-      stopPolling();
-    };
+    checkActiveRef.current();
+    return () => { stopPolling(); };
   }, [sessionId, stopPolling]);
-
-  return {
-    isBackendActive: isActiveRef.current,
-  };
 }

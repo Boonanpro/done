@@ -1093,10 +1093,12 @@ export const api = {
     /**
      * セッションの実行イベントを取得（差分取得対応）
      * since_seq を指定するとそれ以降のイベントのみ返す
+     * currentOnly=true で最後のdone以降のみ返す（現在の実行分のみ）
      */
-    getSessionEvents: (sessionId: string, sinceSeq?: number) => {
+    getSessionEvents: (sessionId: string, sinceSeq?: number, currentOnly?: boolean) => {
       const params = new URLSearchParams();
       if (sinceSeq !== undefined) params.set('since_seq', String(sinceSeq));
+      if (currentOnly) params.set('current_only', 'true');
       const qs = params.toString();
       return request<ExecutionEvent[]>(`/chat/dan/sessions/${sessionId}/execution-events${qs ? `?${qs}` : ''}`);
     },
