@@ -230,8 +230,8 @@ async def run_project_auto_proposal(
                 steps=steps,
                 metadata={
                     "team": team_result.metadata,
-                    "research_findings": team_result.research_findings[:2000],
-                    "critique": team_result.critique[:2000],
+                    "research_findings": team_result.research_findings[:5000],
+                    "critique": team_result.critique[:5000],
                 },
             )
             _debug(f"Proposal saved OK with team metadata")
