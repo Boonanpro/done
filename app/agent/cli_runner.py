@@ -166,13 +166,11 @@ def _classify_content_blocks(blocks: list) -> list[Dict[str, Any]]:
         list of events: {"type": "tool_use"|"reasoning"|"text", ...}
     """
     events = []
-    has_tool_use = False
 
     for block in blocks:
         block_type = block.get("type", "")
 
         if block_type == "tool_use":
-            has_tool_use = True
             events.append({
                 "type": "tool_use",
                 "name": block.get("name", ""),
@@ -186,10 +184,11 @@ def _classify_content_blocks(blocks: list) -> list[Dict[str, Any]]:
         elif block_type == "text":
             text = block.get("text", "")
             if text.strip():
+                # tool_useと同居していてもtextとして扱う
+                # coordinatorがresultイベントを最優先するので、途中テキストが混じっても問題ない
                 events.append({
                     "type": "text",
                     "text": text,
-                    "_pending": True,  # tool_useと組の場合は reasoning扱い
                 })
         elif block_type == "server_tool_use":
             # web_search等のサーバー側ツール
@@ -198,17 +197,6 @@ def _classify_content_blocks(blocks: list) -> list[Dict[str, Any]]:
                 "name": block.get("name", "server_tool"),
                 "input": block.get("input", {}),
             })
-
-    # text + tool_use が同じメッセージにある場合、textは内部思考扱い
-    if has_tool_use:
-        for ev in events:
-            if ev.get("_pending"):
-                ev["type"] = "reasoning"
-                del ev["_pending"]
-    else:
-        for ev in events:
-            if "_pending" in ev:
-                del ev["_pending"]
 
     return events
 
@@ -292,8 +280,9 @@ def _run_cli_process(
     result_data = None
 
     # --include-partial-messages による重複を防ぐ
-    # メッセージIDごとに「既に処理済みのブロック数」を記録
-    processed_block_count: Dict[str, int] = {}
+    # メッセージIDごとに「処理済みブロックのスナップショット」を記録
+    # ブロック数だけでなく内容変更も検出するため、各ブロックのハッシュを保持する
+    processed_block_snapshots: Dict[str, list] = {}
 
     process = subprocess.Popen(
         cmd,
@@ -338,16 +327,41 @@ def _run_cli_process(
             _cli_debug(f"Assistant msg_id={msg_id} blocks: {block_types} (count={len(blocks)})")
 
             # partial messages では同じ msg_id で徐々にブロックが増える
-            # 前回処理済みのブロック数以降の新しいブロックだけ処理する
-            prev_count = processed_block_count.get(msg_id, 0)
-            new_blocks = blocks[prev_count:]
-            processed_block_count[msg_id] = len(blocks)
+            # 各ブロックのハッシュを比較して、新規または変更されたブロックだけ処理する
+            def _block_hash(b: dict) -> str:
+                """ブロックの内容を識別するハッシュ"""
+                bt = b.get("type", "")
+                if bt == "text":
+                    return f"text:{b.get('text', '')}"
+                elif bt == "thinking":
+                    return f"thinking:{b.get('thinking', '')}"
+                elif bt == "tool_use":
+                    return f"tool_use:{b.get('id', '')}:{b.get('name', '')}"
+                elif bt == "server_tool_use":
+                    return f"server_tool_use:{b.get('name', '')}"
+                return f"{bt}:{str(b)[:100]}"
+
+            current_hashes = [_block_hash(b) for b in blocks]
+            prev_hashes = processed_block_snapshots.get(msg_id, [])
+
+            # 新規ブロック: インデックスがprev範囲外のもの
+            # 変更ブロック: 同じインデックスだがハッシュが異なるもの
+            new_blocks = []
+            for i, block in enumerate(blocks):
+                if i >= len(prev_hashes):
+                    # 新規追加されたブロック
+                    new_blocks.append(block)
+                elif current_hashes[i] != prev_hashes[i]:
+                    # 内容が変更されたブロック
+                    new_blocks.append(block)
+
+            processed_block_snapshots[msg_id] = current_hashes
 
             if not new_blocks:
-                _cli_debug(f"  No new blocks (prev={prev_count}, now={len(blocks)})")
+                _cli_debug(f"  No new/changed blocks (prev={len(prev_hashes)}, now={len(blocks)})")
                 continue
 
-            _cli_debug(f"  Processing {len(new_blocks)} new blocks (from index {prev_count})")
+            _cli_debug(f"  Processing {len(new_blocks)} new/changed blocks (total={len(blocks)}, prev={len(prev_hashes)})")
             classified = _classify_content_blocks(new_blocks)
 
             for ev in classified:

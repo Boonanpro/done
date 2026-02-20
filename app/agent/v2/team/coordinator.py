@@ -170,7 +170,8 @@ class TeamCoordinator:
         # ロール別の仮想room_id（セッション管理の衝突回避）
         member_room_id = f"{self.room_id}_team_{role}"
 
-        result_text = ""
+        text_parts = []       # ストリーミング中のtextイベントを蓄積
+        result_text = ""      # CLIのresultメッセージのテキスト（最優先）
         try:
             async for event in process_message_cli(
                 room_id=member_room_id,
@@ -183,9 +184,11 @@ class TeamCoordinator:
             ):
                 etype = event.get("type", "")
                 if etype == "text":
-                    result_text = event.get("text", "")
+                    text = event.get("text", "")
+                    if text.strip():
+                        text_parts.append(text)
                 elif etype == "result":
-                    result_text = event.get("text", result_text)
+                    result_text = event.get("text", "")
                 elif etype == "error":
                     error_msg = event.get("message", "")
                     logger.warning(f"[Team] {role} error: {error_msg[:200]}")
@@ -193,7 +196,12 @@ class TeamCoordinator:
         except Exception as e:
             logger.exception(f"[Team] {role} failed: {e}")
 
-        return result_text
+        # resultメッセージのテキストを最優先、なければストリーミング中のtext全てを結合
+        final = result_text or "\n".join(text_parts)
+        logger.info(f"[Team] {role} result: result_text={len(result_text)} chars, "
+                     f"text_parts={len(text_parts)} parts ({sum(len(t) for t in text_parts)} chars), "
+                     f"final={len(final)} chars")
+        return final
 
     async def _notify(self, message: str) -> None:
         """ステータスをコールバック経由で通知"""
