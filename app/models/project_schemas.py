@@ -14,6 +14,7 @@ class ProjectStatus(str, Enum):
     PROPOSED = "proposed"
     APPROVED = "approved"
     IN_PROGRESS = "in_progress"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
     COMPLETED = "completed"
     PAUSED = "paused"
     CANCELLED = "cancelled"
@@ -93,6 +94,15 @@ class ProjectProposalResponse(BaseModel):
 class ProjectProposalActionRequest(BaseModel):
     """提案承認/却下リクエスト"""
     action: str = Field(..., pattern="^(approve|reject)$")
+
+
+class ProjectResumeRequest(BaseModel):
+    """実行再開リクエスト（Red操作確認後）"""
+    action: str = Field(
+        default="confirm",
+        pattern="^(confirm|cancel)$",
+        description="confirm=続行, cancel=中止",
+    )
 
 
 # ==================== Execution Event Schemas ====================
