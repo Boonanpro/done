@@ -14,6 +14,7 @@ from app.models.project_schemas import (
     ProjectProposalCreateRequest,
     ProjectProposalResponse,
     ProjectProposalActionRequest,
+    ProjectResumeRequest,
     ExecutionEventResponse,
 )
 
@@ -194,6 +195,96 @@ async def get_execution_events(
     return await service.get_execution_events(project_id, limit=limit, after=after)
 
 
+# ==================== Execution Resume ====================
+
+@router.post("/{project_id}/resume", response_model=ProjectResponse)
+async def resume_execution(
+    project_id: str,
+    request: ProjectResumeRequest,
+    current_user: TokenData = Depends(get_current_user),
+    service: ProjectService = Depends(get_project_service),
+):
+    """Red操作確認後、実行を再開（または中止）"""
+    project = await service.get_project(project_id, current_user.user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if project["status"] != "awaiting_confirmation":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Project is not awaiting confirmation (current: {project['status']})",
+        )
+
+    metadata = project.get("metadata") or {}
+    pending_step = metadata.get("pending_step")
+    proposal_id = metadata.get("proposal_id", "")
+    previous_results = metadata.get("previous_results", [])
+
+    if not pending_step:
+        raise HTTPException(
+            status_code=400,
+            detail="No pending step found in project metadata",
+        )
+
+    if request.action == "cancel":
+        # 中止: ステータスをpausedに
+        updated = await service.update_project(
+            project_id, current_user.user_id, status="paused"
+        )
+        return updated
+
+    # confirm: 中断地点から実行を再開
+    # まず提案からステップ一覧を取得
+    proposals = await service.get_proposals(project_id)
+    proposal = next(
+        (p for p in proposals if p["id"] == proposal_id), None
+    )
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+
+    steps = proposal.get("steps") or []
+    proposal_content = proposal.get("content", "")
+    proposal_metadata = proposal.get("metadata") or {}
+
+    # チーム文脈を再構築
+    research_findings = proposal_metadata.get("research_findings", "")
+    critique = proposal_metadata.get("critique", "")
+    team_context = ""
+    if research_findings or critique:
+        team_context = "## チーム議論の参考情報\n"
+        if research_findings:
+            team_context += f"\n### リサーチャーの調査結果\n{research_findings}\n"
+        if critique:
+            team_context += f"\n### クリティックの検証結果\n{critique}\n"
+
+    # バックグラウンドで再開
+    import asyncio
+    from app.services.project_execution import run_stepwise_execution
+
+    task = asyncio.create_task(run_stepwise_execution(
+        project_id=project_id,
+        room_id=project["room_id"],
+        user_id=current_user.user_id,
+        proposal_id=proposal_id,
+        title=project.get("title", ""),
+        description=project.get("description", ""),
+        steps=steps,
+        plan_content=proposal_content,
+        team_context=team_context,
+        start_from_step=pending_step,
+    ))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+    # ステータスをin_progressに更新して返す
+    updated = await service.update_project(
+        project_id, current_user.user_id, status="in_progress"
+    )
+    return updated
+
+
+# ==================== Helpers ====================
+
 def _summarize_reasoning(text: str, max_len: int = 120) -> str:
     """思考テキストを1文に要約（先頭の意味のある文を抽出）"""
     if not text or not text.strip():
@@ -279,156 +370,36 @@ def _format_tool_label(name: str, tool_input: dict) -> str:
 
 
 async def _start_project_execution(project: dict, proposal: dict, user_id: str):
-    """承認された提案をCLI Runnerで実行開始"""
-    import logging
-    logger = logging.getLogger(__name__)
+    """承認された提案をステップごとに実行開始（段階的実行）"""
+    from app.services.project_execution import run_stepwise_execution
 
     project_id = project["id"]
     room_id = project["room_id"]
     proposal_content = proposal.get("content", "")
-    had_error = False
+    steps = proposal.get("steps") or []
 
-    # チーム議論のメタデータ（リサーチャー調査結果・クリティック検証）を取得
+    # チーム議論のメタデータ
     proposal_metadata = proposal.get("metadata") or {}
-    team_meta = proposal_metadata.get("team", {})
     research_findings = proposal_metadata.get("research_findings", "")
     critique = proposal_metadata.get("critique", "")
 
-    # チーム議論セクションの構築（情報がある場合のみ）
     team_context = ""
     if research_findings or critique:
-        team_context = "\n\n## チーム議論の参考情報（計画時の調査・検証結果）\n"
+        team_context = "## チーム議論の参考情報（計画時の調査・検証結果）\n"
         if research_findings:
             team_context += f"\n### リサーチャーの調査結果\n{research_findings}\n"
         if critique:
             team_context += f"\n### クリティックの検証結果\n{critique}\n"
         team_context += "\n上記を踏まえて、指摘されたリスクに注意しながら実行してください。\n"
 
-    execution_prompt = f"""以下の計画が承認されました。実行を開始してください。
-
-## 承認された計画
-{proposal_content}
-{team_context}
-## 実行ルール
-
-### ステップ実行
-1. ステップを順番に1つずつ実行する
-2. 各ステップの開始時に「## ステップ N: ○○ を開始します」と宣言する
-3. 各ステップの完了時に結果を報告する
-4. 失敗した場合は理由を説明し、後続ステップへの影響を判断してから次に進む
-5. 全ステップ完了後に「## 完了報告」として全体をまとめる
-
-### ゾーン判断（各操作の実行前に必ず判定）
-- **Green（即実行）**: 検索、閲覧、ツール作成、bashコマンド、ファイル操作、パッケージインストール
-- **Yellow（実行→報告）**: フォーム入力（非個人情報）、カート追加、設定変更
-- **Red（確認→実行）**: 個人情報入力、購入確定、取消不可操作 → 必ずユーザーに内容を示して確認を待つ
-
-### 障害対応
-- エラー → まず自分のツール（bash, browser, exec_code等）で解決を試みる
-- ツール不足 → 必要なスクリプトを書いて実行する
-- OTP/2段階認証 → メールアプリやSMSをブラウザで開いてコードを自力取得する。取得できない場合のみユーザーに聞く
-- CAPTCHA → ユーザーにスクリーンショットを見せて「この画像の文字を教えてください」と聞く
-- 「できません」と止まることは禁止。必ず代替案を提示するか、ユーザーに助けを求める
-"""
-
-    try:
-        from app.agent.cli_runner import process_message_cli
-        from app.services.chat_service import ChatService
-
-        chat_service = ChatService()
-        service = ProjectService()
-        final_text = ""
-
-        # 開始メッセージ
-        await chat_service.send_dan_ai_message(
-            user_id=user_id,
-            content="承認された計画の実行を開始します...",
-            room_id=room_id,
-        )
-
-        async for event in process_message_cli(
-            room_id=room_id,
-            user_id=user_id,
-            content=execution_prompt,
-            project_title=project.get("title", ""),
-            project_description=project.get("description", ""),
-            project_status="in_progress",
-        ):
-            etype = event["type"]
-
-            if etype == "text":
-                # ユーザー向けメッセージ → chat_messagesに保存
-                final_text = event["text"]
-                if event["text"].strip():
-                    await chat_service.send_dan_ai_message(
-                        user_id=user_id,
-                        content=event["text"],
-                        room_id=room_id,
-                    )
-
-            elif etype == "tool_use":
-                # 内部実行 → execution_eventsに保存
-                label = _format_tool_label(event.get("name", ""), event.get("input", {}))
-                await service.save_execution_event(
-                    project_id=project_id,
-                    room_id=room_id,
-                    event_type="tool_use",
-                    tool_name=event.get("name", ""),
-                    tool_label=label,
-                )
-
-            elif etype == "reasoning":
-                # 内部思考 → execution_eventsに保存
-                text = event.get("text", "")
-                if text.strip():
-                    summary = _summarize_reasoning(text)
-                    await service.save_execution_event(
-                        project_id=project_id,
-                        room_id=room_id,
-                        event_type="reasoning",
-                        content=summary or text[:200],
-                    )
-
-            elif etype == "result":
-                final_text = event.get("text", final_text)
-
-            elif etype == "error":
-                had_error = True
-                final_text = f"エラーが発生しました: {event['message']}"
-                await service.save_execution_event(
-                    project_id=project_id,
-                    room_id=room_id,
-                    event_type="error",
-                    content=event["message"][:500],
-                )
-
-        # エラー時のみ最終メッセージを送信（正常時はtextイベントで既に送信済み）
-        if had_error and final_text:
-            await chat_service.send_dan_ai_message(
-                user_id=user_id,
-                content=final_text,
-                room_id=room_id,
-            )
-
-    except Exception as e:
-        had_error = True
-        logger.exception(f"[ProjectExecution] Failed for project {project_id}: {e}")
-        try:
-            from app.services.chat_service import ChatService
-            chat_service = ChatService()
-            await chat_service.send_dan_ai_message(
-                user_id=user_id,
-                content=f"実行中にエラーが発生しました: {e}",
-                room_id=room_id,
-            )
-        except Exception:
-            pass
-    finally:
-        # 実行完了後、プロジェクトステータスを更新
-        try:
-            service = ProjectService()
-            new_status = "paused" if had_error else "completed"
-            await service.update_project(project_id, user_id, status=new_status)
-            logger.info(f"[ProjectExecution] Project {project_id} status → {new_status}")
-        except Exception as e:
-            logger.error(f"[ProjectExecution] Failed to update status for {project_id}: {e}")
+    await run_stepwise_execution(
+        project_id=project_id,
+        room_id=room_id,
+        user_id=user_id,
+        proposal_id=proposal.get("id", ""),
+        title=project.get("title", ""),
+        description=project.get("description", ""),
+        steps=steps,
+        plan_content=proposal_content,
+        team_context=team_context,
+    )
