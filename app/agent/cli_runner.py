@@ -15,7 +15,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import threading
 import queue as thread_queue
 from pathlib import Path
@@ -303,6 +302,20 @@ def _run_cli_process(
     except Exception as e:
         _cli_debug(f"stdin write error: {e}")
 
+    # stderrドレインスレッド: stderrを継続的に読み捨ててバッファ満杯によるデッドロックを防ぐ
+    # （stderrバッファが満杯になるとプロセスがwrite()でブロックし、stdoutも止まる）
+    def _drain_stderr():
+        try:
+            for line in process.stderr:
+                line = line.strip()
+                if line:
+                    _cli_debug(f"CLI stderr: {line[:200]}")
+        except Exception:
+            pass
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
     for line in process.stdout:
         line = line.strip()
         if not line:
@@ -410,10 +423,8 @@ def _run_cli_process(
     _cli_debug(f"CLI process exited with code {return_code}")
 
     if return_code != 0 and result_data is None:
-        stderr_output = process.stderr.read() if process.stderr else ""
-        if stderr_output:
-            _cli_debug(f"CLI stderr: {stderr_output[:500]}")
-            event_queue.put({"type": "error", "message": f"CLI exited with code {return_code}: {stderr_output[:300]}"})
+        # stderrはドレインスレッドが読んでいるので、ここではログのみ
+        event_queue.put({"type": "error", "message": f"CLI exited with code {return_code}"})
 
     return result_data
 
