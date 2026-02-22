@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 USER_ID = os.environ.get("DAN_USER_ID", "")
 SESSION_ID = os.environ.get("DAN_SESSION_ID", "")
 CREDENTIALS = json.loads(os.environ.get("DAN_CREDENTIALS", "{}"))
+IS_PLANNING = os.environ.get("DAN_IS_PLANNING", "") == "1"
 
 app = Server("dan-tools")
 
@@ -37,28 +38,13 @@ app = Server("dan-tools")
 _CLI_BUILTIN_TOOLS = {"read_file", "write_file", "edit_file", "bash"}
 
 
-def _is_planning_session() -> bool:
-    """セッション（room_id）がplanning状態のプロジェクトかどうかを判定"""
-    if not SESSION_ID:
-        return False
-    try:
-        from app.services.supabase_client import get_supabase_client
-        sb = get_supabase_client().client
-        result = sb.table("projects").select("status").eq("room_id", SESSION_ID).execute()
-        if result.data and result.data[0].get("status") == "planning":
-            return True
-    except Exception:
-        pass
-    return False
-
-
 @app.list_tools()
 async def list_tools() -> list[types.Tool]:
     """既存のツール定義を MCP 形式に変換して返す（CLI重複分は除外）"""
     from app.agent.v2.tools import get_all_skill_tools, get_team_leader_tools
 
-    # planning ステータスのプロジェクトではチームリーダーツールを追加
-    if _is_planning_session():
+    # planning モードではリーダーツールのみ（環境変数で判定、DB依存なし）
+    if IS_PLANNING:
         anthropic_tools = get_team_leader_tools()
     else:
         anthropic_tools = get_all_skill_tools()

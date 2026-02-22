@@ -148,7 +148,7 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 - 本番の送信エンドポイント (`/messages`, `/dan/messages/stream`) をテスト目的で使わないこと"""
 
 
-def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = None) -> str:
+def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = None, is_planning: bool = False) -> str:
     """MCP設定ファイルを書き出してパスを返す"""
     mcp_json = {
         "mcpServers": {
@@ -159,6 +159,7 @@ def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = 
                     "DAN_USER_ID": user_id,
                     "DAN_SESSION_ID": room_id,
                     "DAN_CREDENTIALS": json.dumps(credentials or {}),
+                    "DAN_IS_PLANNING": "1" if is_planning else "",
                 },
             }
         }
@@ -599,12 +600,9 @@ async def process_message_cli(
             project_title, project_description, project_status,
             user_messages=user_messages,
         )
-    mcp_config_path = _build_mcp_config(room_id, user_id, credentials)
-    resume_session_id = _load_session(room_id)
-
-    event_q: thread_queue.Queue = thread_queue.Queue()
-
     is_planning = project_status == "planning"
+    mcp_config_path = _build_mcp_config(room_id, user_id, credentials, is_planning=is_planning)
+    resume_session_id = _load_session(room_id)
 
     # CLI を別スレッドで実行
     cli_thread = threading.Thread(
