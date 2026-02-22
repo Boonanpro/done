@@ -66,14 +66,36 @@ def _save_session(room_id: str, session_id: str):
         logger.warning(f"Failed to save CLI session for {room_id}: {e}")
 
 
-def _build_system_prompt(title: str, description: str, status: str) -> str:
+def _build_system_prompt(title: str, description: str, status: str, user_messages: str = "") -> str:
     """事業部（CLIエージェント）のシステムプロンプトを組み立てる
 
     秘書部のRULES.md等は読み込まない。
     CLIは元々高品質な判断力を持つので、最小限の指示だけ追加する。
+
+    status が "planning" の場合はリーダー常駐プロンプトを使用する。
     """
     from app.agent.v2.runner import load_bootstrap_file
 
+    # planning ステータス → リーダー常駐プロンプトを使用
+    if status == "planning":
+        from app.agent.v2.team.prompts import get_leader_resident_prompt
+        leader_prompt = get_leader_resident_prompt(title, description, user_messages)
+
+        parts = [leader_prompt]
+
+        # ユーザー情報のみ読み込む（個人情報の判断に必要）
+        user = load_bootstrap_file("USER.md")
+        if user:
+            parts.append(f"## ユーザー情報\n\n{user}")
+
+        # ペルソナ（2行のみ）
+        soul = load_bootstrap_file("SOUL.md")
+        if soul:
+            parts.append(f"## ペルソナ\n\n{soul}")
+
+        return "\n\n".join(parts)
+
+    # 通常の事業部プロンプト
     parts = ["You are Dan's business division. You plan, research, and execute projects."]
 
     # ユーザー情報のみ読み込む（個人情報の判断に必要）
@@ -544,6 +566,7 @@ async def process_message_cli(
     project_status: str = "in_progress",
     credentials: Optional[Dict] = None,
     system_prompt: Optional[str] = None,
+    user_messages: str = "",
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Claude CLI経由でメッセージを処理し、分類済みイベントを返す。
@@ -560,10 +583,12 @@ async def process_message_cli(
 
     Args:
         system_prompt: カスタムシステムプロンプト。指定時は _build_system_prompt() をスキップ。
+        user_messages: ユーザーの依頼文原文（planning プロンプト用）。
     """
     if system_prompt is None:
         system_prompt = _build_system_prompt(
             project_title, project_description, project_status,
+            user_messages=user_messages,
         )
     mcp_config_path = _build_mcp_config(room_id, user_id, credentials)
     resume_session_id = _load_session(room_id)

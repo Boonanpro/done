@@ -32,6 +32,25 @@ def _debug(msg: str):
         pass
 
 
+def _record_proposal_failure(project_id: str, title: str, error: Exception):
+    """提案生成の全体失敗をファイルに記録する"""
+    from datetime import datetime
+    failures_file = Path("D:/dan-workspace/failures.md")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = (
+        f"\n## {timestamp} | auto_proposal | top_level_exception\n"
+        f"- プロジェクト: {title}\n"
+        f"- project_id: {project_id}\n"
+        f"- エラー: {type(error).__name__}: {str(error)[:500]}\n"
+    )
+    try:
+        failures_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(failures_file, "a", encoding="utf-8") as f:
+            f.write(entry)
+    except Exception:
+        pass
+
+
 def _extract_steps(proposal_text: str) -> List[dict]:
     """
     Markdownの実行計画セクションからステップを抽出。
@@ -158,8 +177,8 @@ def _extract_steps_llm(proposal_text: str) -> List[dict]:
         return []
 
 
-def _fetch_user_messages(origin_room_id: str, limit: int = 10) -> str:
-    """origin_room_idから直近のユーザーメッセージを取得し、テキストとして返す"""
+def _fetch_trigger_message(origin_room_id: str) -> str:
+    """origin_room_idからプロジェクト作成のきっかけとなったユーザーの依頼文を取得する"""
     try:
         from app.services.chat_service import ChatService
         chat_service = ChatService()
@@ -168,30 +187,18 @@ def _fetch_user_messages(origin_room_id: str, limit: int = 10) -> str:
             chat_service.supabase.table("chat_messages")
             .select("content, sender_type")
             .eq("room_id", origin_room_id)
+            .eq("sender_type", "user")
             .order("created_at", desc=True)
-            .limit(limit)
+            .limit(1)
             .execute()
         )
 
         if not result.data:
             return ""
 
-        # sender_type == "user" のメッセージだけ抽出し、時系列順に並べる
-        user_msgs = [
-            m["content"]
-            for m in reversed(result.data)
-            if m.get("sender_type") == "user" and m.get("content")
-        ]
-
-        if not user_msgs:
-            return ""
-
-        # 最大5件に絞る
-        user_msgs = user_msgs[-5:]
-
-        return "\n".join(f"- {msg}" for msg in user_msgs)
+        return result.data[0].get("content", "")
     except Exception as e:
-        logger.warning(f"[AutoProposal] Failed to fetch user messages: {e}")
+        logger.warning(f"[AutoProposal] Failed to fetch trigger message: {e}")
         return ""
 
 
@@ -204,69 +211,140 @@ async def run_project_auto_proposal(
     origin_room_id: Optional[str] = None,
 ) -> None:
     """
-    バックグラウンドでAgent Teamsによる自動提案を生成する。
+    バックグラウンドでリーダーCLI直接実行による自動提案を生成する。
 
     asyncio.create_task() で起動される。
-    3人のエージェント（リサーチャー、クリティック、リーダー）が
-    議論を経て高品質な提案書を作成する。
+    リーダーがプロジェクトチャットに常駐し、call_researcher / call_critic
+    ツールでサブエージェントを呼び出して高品質な提案書を作成する。
 
     フロー:
-      1. リサーチャーが調査
-      2. クリティックが調査結果を検証
-      3. リーダーが統合して最終提案書を作成
+      リーダーCLI起動 → リーダーが自律的に researcher/critic を呼ぶ → 提案書作成
     """
     try:
         # SSEレスポンス完了を待つ
         await asyncio.sleep(2)
 
-        _debug(f"Starting team proposal for project {project_id}")
-        logger.info(f"[AutoProposal] Starting team proposal for project {project_id}")
+        _debug(f"Starting leader proposal for project {project_id}")
+        logger.info(f"[AutoProposal] Starting leader proposal for project {project_id}")
 
-        # origin_room_idからユーザーメッセージを取得
+        # origin_room_idからプロジェクト作成のきっかけとなった依頼文を取得
         user_messages_text = ""
         if origin_room_id:
-            user_messages_text = _fetch_user_messages(origin_room_id)
+            user_messages_text = _fetch_trigger_message(origin_room_id)
 
         from app.services.chat_service import ChatService
+        from app.services.project_service import ProjectService
         chat_service = ChatService()
+        project_service = ProjectService()
 
-        # 開始メッセージを即座に送信
-        await chat_service.send_dan_ai_message(
-            user_id=user_id,
-            content="チームで提案を作成中です。リサーチャーが調査を開始しました...",
-            room_id=room_id,
-        )
-        logger.info(f"[AutoProposal] Sent start message for project {project_id}")
-
-        # ステータス通知コールバック
-        async def on_status(message: str):
-            await chat_service.send_dan_ai_message(
-                user_id=user_id,
-                content=message,
+        # ProcessMonitor用に開始イベントを保存
+        try:
+            await project_service.save_execution_event(
+                project_id=project_id,
                 room_id=room_id,
+                event_type="phase",
+                content="リーダーがチームを使って提案書を作成中です...",
+                metadata={"member": "leader"},
             )
+        except Exception:
+            pass
 
-        # TeamCoordinatorでチーム提案を実行
-        from app.agent.v2.team import TeamCoordinator
+        # リーダーCLI直接実行
+        from app.agent.cli_runner import process_message_cli
+        from app.api.project_routes import _format_tool_label, _summarize_reasoning
 
-        coordinator = TeamCoordinator(
-            project_id=project_id,
+        # リーダーへの最初のメッセージ
+        first_message = f"""以下のプロジェクトについて、チームを使って提案書を作成してください。
+
+## プロジェクト
+- タイトル: {title}
+- 説明: {description or "(なし)"}
+
+{f"## ユーザーの依頼文{chr(10)}{user_messages_text}" if user_messages_text else ""}
+
+## 指示
+1. まず call_researcher で調査を依頼してください
+2. 調査結果を call_critic で検証してください
+3. 必要に応じて追加調査を行ってください
+4. 最終提案書を作成してください（提案書フォーマットに従うこと）"""
+
+        _debug(f"Running leader CLI for project {project_id}")
+
+        text_parts = []
+        final_text = ""
+
+        async for event in process_message_cli(
             room_id=room_id,
             user_id=user_id,
-            title=title,
-            description=description or "",
+            content=first_message,
+            project_title=title,
+            project_description=description or "",
+            project_status="planning",
             user_messages=user_messages_text,
-            on_status=on_status,
-        )
+        ):
+            etype = event.get("type", "")
 
-        _debug(f"Running team coordinator for project {project_id}")
-        team_result = await coordinator.run()
-        proposal_text = team_result.proposal
+            if etype == "reasoning":
+                text = event.get("text", "")
+                if text.strip():
+                    try:
+                        summary = _summarize_reasoning(text)
+                        await project_service.save_execution_event(
+                            project_id=project_id,
+                            room_id=room_id,
+                            event_type="reasoning",
+                            content=summary or text[:200],
+                            metadata={"member": "leader"},
+                        )
+                    except Exception:
+                        pass
 
-        _debug(f"Team proposal completed: {len(proposal_text)} chars")
+            elif etype == "tool_use":
+                tool_label = _format_tool_label(event.get("name", ""), event.get("input", {}))
+                try:
+                    await project_service.save_execution_event(
+                        project_id=project_id,
+                        room_id=room_id,
+                        event_type="tool_use",
+                        tool_name=event.get("name", ""),
+                        tool_label=f"[リーダー] {tool_label}",
+                        metadata={"member": "leader"},
+                    )
+                except Exception:
+                    pass
+
+            elif etype == "text":
+                text = event.get("text", "")
+                if text.strip():
+                    text_parts.append(text)
+
+            elif etype == "result":
+                result_text = event.get("text", "")
+                if result_text:
+                    final_text = result_text
+                elif event.get("is_error"):
+                    final_text = result_text
+
+            elif etype == "error":
+                _debug(f"Leader error: {event.get('message', '')[:200]}")
+                try:
+                    await project_service.save_execution_event(
+                        project_id=project_id,
+                        room_id=room_id,
+                        event_type="error",
+                        content=event.get("message", "")[:500],
+                        metadata={"member": "leader"},
+                    )
+                except Exception:
+                    pass
+
+        # 最終テキスト（result 優先、なければ text_parts 結合）
+        proposal_text = final_text or "\n".join(text_parts)
+
+        _debug(f"Leader proposal completed: {len(proposal_text)} chars")
 
         if not proposal_text:
-            logger.warning(f"[AutoProposal] Empty team proposal for project {project_id}")
+            logger.warning(f"[AutoProposal] Empty leader proposal for project {project_id}")
             await chat_service.send_dan_ai_message(
                 user_id=user_id,
                 content="提案の生成に失敗しました。プロジェクトチャットで直接指示してください。",
@@ -276,7 +354,7 @@ async def run_project_auto_proposal(
 
         _debug(f"Saving chat message ({len(proposal_text)} chars)...")
 
-        # 1. チャットメッセージとして保存
+        # 1. チャットメッセージとして保存（提案書のみ）
         await chat_service.send_dan_ai_message(
             user_id=user_id,
             content=proposal_text,
@@ -284,10 +362,8 @@ async def run_project_auto_proposal(
         )
         _debug(f"Chat message saved")
 
-        # 2. proposalテーブルにも保存（チームメタデータ付き）
+        # 2. proposalテーブルにも保存
         try:
-            from app.services.project_service import ProjectService
-            project_service = ProjectService()
             steps = _extract_steps(proposal_text)
             _debug(f"Extracted {len(steps)} steps, saving proposal...")
             await project_service.create_proposal(
@@ -296,12 +372,10 @@ async def run_project_auto_proposal(
                 proposal_type="plan",
                 steps=steps,
                 metadata={
-                    "team": team_result.metadata,
-                    "research_findings": team_result.research_findings[:5000],
-                    "critique": team_result.critique[:5000],
+                    "team_type": "leader_resident",
                 },
             )
-            _debug(f"Proposal saved OK with team metadata")
+            _debug(f"Proposal saved OK")
         except Exception as e:
             _debug(f"PROPOSAL SAVE ERROR: {type(e).__name__}: {e}")
             import traceback
@@ -312,10 +386,36 @@ async def run_project_auto_proposal(
                 room_id=room_id,
             )
 
-        _debug(f"COMPLETED team proposal for project {project_id}")
+        # done イベント保存
+        try:
+            await project_service.save_execution_event(
+                project_id=project_id,
+                room_id=room_id,
+                event_type="done",
+                content="completed",
+            )
+        except Exception:
+            pass
+
+        _debug(f"COMPLETED leader proposal for project {project_id}")
 
     except Exception as e:
         _debug(f"EXCEPTION: {type(e).__name__}: {e}")
         import traceback
         _debug(traceback.format_exc())
         logger.exception(f"[AutoProposal] Failed for project {project_id}: {e}")
+
+        # 失敗をファイルに記録
+        _record_proposal_failure(project_id, title, e)
+
+        # ユーザーに通知
+        try:
+            from app.services.chat_service import ChatService
+            cs = ChatService()
+            await cs.send_dan_ai_message(
+                user_id=user_id,
+                content="提案の生成中にエラーが発生しました。再度お試しください。",
+                room_id=room_id,
+            )
+        except Exception:
+            pass

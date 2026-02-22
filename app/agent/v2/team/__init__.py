@@ -1,10 +1,8 @@
 """
-Agent Teams - チーム提案生成システム
+Agent Teams - リーダー常駐型チーム構造
 
-計画フェーズで複数のエージェント（リサーチャー、クリティック、リーダー）が
-議論を通じて高品質な提案を生成する。
+リーダーがプロジェクトチャットに常駐し、
+call_researcher / call_critic ツールでサブエージェントを呼び出す。
 """
 
-from app.agent.v2.team.coordinator import TeamCoordinator
-
-__all__ = ["TeamCoordinator"]
+__all__: list[str] = []

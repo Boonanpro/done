@@ -5,7 +5,7 @@ Supports both Bearer token and HttpOnly Cookie authentication
 from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Response, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 from app.config import settings
@@ -267,7 +267,7 @@ async def get_invite(
     is_valid = True
     if invite.get("expires_at"):
         expires_at = parse_datetime(invite["expires_at"])
-        if datetime.utcnow().replace(tzinfo=expires_at.tzinfo) > expires_at:
+        if datetime.now(timezone.utc).replace(tzinfo=expires_at.tzinfo) > expires_at:
             is_valid = False
     if invite["use_count"] >= invite["max_uses"]:
         is_valid = False
@@ -501,7 +501,7 @@ async def mark_as_read(
 ):
     """Mark messages as read"""
     success = await service.mark_as_read(room_id, current_user.user_id)
-    return ReadMarkResponse(success=success, read_at=datetime.utcnow())
+    return ReadMarkResponse(success=success, read_at=datetime.now(timezone.utc))
 
 
 # ==================== AI Settings Routes ====================
@@ -708,6 +708,27 @@ async def send_dan_message_stream(
                 reasoning_full = []    # 全文（DB保存用、フロントで展開表示）
                 step_counter = 0
 
+                # planning ステータスの場合、origin_room_id から依頼文を取得
+                user_messages_for_cli = ""
+                if project_info.get("status") == "planning":
+                    try:
+                        origin_room_id = project_info.get("origin_room_id", "")
+                        if not origin_room_id:
+                            # プロジェクトテーブルから origin_room_id を取得
+                            proj_full = (
+                                project_service.supabase.table("projects")
+                                .select("origin_room_id")
+                                .eq("id", project_info["id"])
+                                .execute()
+                            )
+                            if proj_full.data:
+                                origin_room_id = proj_full.data[0].get("origin_room_id", "")
+                        if origin_room_id:
+                            from app.services.project_auto_proposal import _fetch_trigger_message
+                            user_messages_for_cli = _fetch_trigger_message(origin_room_id)
+                    except Exception:
+                        pass
+
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
@@ -715,6 +736,7 @@ async def send_dan_message_stream(
                     project_title=project_info.get("title", ""),
                     project_description=project_info.get("description", ""),
                     project_status=project_info.get("status", "in_progress"),
+                    user_messages=user_messages_for_cli,
                 ):
                     if event["type"] == "reasoning":
                         text = event.get("text", "")
@@ -1092,7 +1114,7 @@ async def mark_dan_as_read(
     try:
         dan_room = await service.get_or_create_dan_room(current_user.user_id)
         success = await service.mark_as_read(dan_room["id"], current_user.user_id)
-        return ReadMarkResponse(success=success, read_at=datetime.utcnow())
+        return ReadMarkResponse(success=success, read_at=datetime.now(timezone.utc))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1232,7 +1254,7 @@ async def update_dan_session(
             id=result["id"],
             title=result["title"],
             message_count=0,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

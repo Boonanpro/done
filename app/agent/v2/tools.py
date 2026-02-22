@@ -355,6 +355,19 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     ]
 
 
+def get_team_leader_tools() -> List[Dict[str, Any]]:
+    """
+    チームリーダー用ツール（プロジェクト planning 時）
+
+    通常の事業部ツールに加え、call_researcher / call_critic を追加。
+    """
+    base_tools = get_all_skill_tools()
+    return base_tools + [
+        CALL_RESEARCHER_TOOL,
+        CALL_CRITIC_TOOL,
+    ]
+
+
 # ============================================
 # ブラウザ操作ツール（Dan直接操作）
 # ============================================
@@ -799,6 +812,36 @@ BASH_TOOL = {
 # プロジェクト管理ツール
 # ============================================
 
+# ============================================
+# サブエージェント呼び出しツール（チームリーダー用）
+# ============================================
+
+CALL_RESEARCHER_TOOL = {
+    "name": "call_researcher",
+    "description": "リサーチャーに調査を依頼する。web検索で事実に基づく調査結果を返す。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task": {"type": "string", "description": "調査タスク（何を調べてほしいか）"},
+            "context": {"type": "string", "description": "追加コンテキスト（前回の調査結果やクリティックの指摘など）"},
+        },
+        "required": ["task"]
+    }
+}
+
+CALL_CRITIC_TOOL = {
+    "name": "call_critic",
+    "description": "クリティックに検証を依頼する。論理の飛躍、リスク、代替案を指摘し、追加調査の要否を判定する。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "検証対象（調査結果や提案書）"},
+            "focus_areas": {"type": "string", "description": "特に検証してほしいポイント"},
+        },
+        "required": ["content"]
+    }
+}
+
 CREATE_PROJECT_TOOL = {
     "name": "create_project",
     "description": "ユーザーの依頼をプロジェクトとして登録する。複数ステップが必要なタスク、調査、計画が必要な案件に使用。",
@@ -876,6 +919,12 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "deep_research":
         return ("_deep_research", "research")
+
+    if tool_name == "call_researcher":
+        return ("_call_researcher", "call")
+
+    if tool_name == "call_critic":
+        return ("_call_critic", "call")
 
     if tool_name == "create_project":
         return ("_create_project", "create")
@@ -1570,6 +1619,291 @@ def parse_tool_call(response: str) -> Optional[Dict[str, Any]]:
     }
 
 
+# ============================================
+# サブエージェント実行（Anthropic SDK直接呼び出し）
+# ============================================
+
+# 安全弁としてのターン数上限（無限ループ防止のみ。調査品質のための制限ではない）
+MAX_SUB_AGENT_TURNS = 40
+
+
+async def _execute_sub_agent(
+    role: str,
+    params: Dict[str, Any],
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    サブエージェント（リサーチャー/クリティック）をAnthropic SDK で実行する。
+
+    CLIサブプロセスではなくSDK直接呼び出しにより、
+    CLI→MCP→CLIのネスト問題を回避する。
+
+    Args:
+        role: "researcher" or "critic"
+        params: ツールパラメータ（task/context or content/focus_areas）
+        session_id: 親セッションのroom_id（イベント保存用）
+    """
+    try:
+        import anthropic
+        from app.config import settings
+        from app.agent.v2.team.prompts import get_sub_agent_prompt, build_sub_agent_message
+
+        # プロジェクト情報の取得（サブエージェントに背景を共有するため）
+        project_title = ""
+        project_description = ""
+        if session_id:
+            try:
+                from app.services.supabase_client import get_supabase_client
+                sb = get_supabase_client().client
+                proj = sb.table("projects").select("title, description").eq("room_id", session_id).execute()
+                if proj.data:
+                    project_title = proj.data[0].get("title", "")
+                    project_description = proj.data[0].get("description", "")
+            except Exception:
+                pass
+
+        # パラメータ組み立て
+        if role == "researcher":
+            task = params.get("task", "")
+            context = params.get("context", "")
+            if not task:
+                return {"success": False, "error": "task が必要です"}
+            user_message = build_sub_agent_message(
+                role, task, context,
+                project_title=project_title, project_description=project_description,
+            )
+        elif role == "critic":
+            content = params.get("content", "")
+            focus_areas = params.get("focus_areas", "")
+            if not content:
+                return {"success": False, "error": "content が必要です"}
+            user_message = build_sub_agent_message(
+                role, content, focus_areas,
+                project_title=project_title, project_description=project_description,
+            )
+        else:
+            return {"success": False, "error": f"Unknown role: {role}"}
+
+        system_prompt = get_sub_agent_prompt(role)
+
+        # read_url カスタムツール定義（web_search + read_url のみ。deep_research は不要 —
+        # リサーチャー自身が web_search + read_url で同等の調査を自律的に行えるため）
+        custom_tools = [
+            {
+                "name": "read_url",
+                "description": "URLのページ内容を取得する。検索結果のURLを読んで詳細を確認したい時に使用。",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "読み込むURL"}
+                    },
+                    "required": ["url"]
+                }
+            },
+        ]
+
+        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        messages = [{"role": "user", "content": user_message}]
+
+        # プロジェクトIDの逆引き（session_id = room_id → project_id）
+        project_id = None
+        if session_id:
+            try:
+                from app.services.supabase_client import get_supabase_client
+                sb = get_supabase_client().client
+                proj = sb.table("projects").select("id").eq("room_id", session_id).execute()
+                if proj.data:
+                    project_id = proj.data[0].get("id")
+            except Exception:
+                pass
+
+        final_text = ""
+
+        # web_search サーバーツール（回数制限なし — エージェント自身が収束を判断する）
+        web_search_tool = {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "user_location": {
+                "type": "approximate",
+                "country": "JP",
+                "timezone": "Asia/Tokyo",
+            },
+        }
+
+        # ツールループ
+        for turn in range(MAX_SUB_AGENT_TURNS):
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=8192,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=[*custom_tools, web_search_tool],
+                ),
+            )
+
+            # レスポンスをイベントとして記録 & メッセージ履歴に追加
+            await _forward_sub_agent_events(role, response, session_id, project_id)
+
+            # アシスタントメッセージを履歴に追加
+            messages.append({"role": "assistant", "content": response.content})
+
+            # テキストブロックを収集
+            for block in response.content:
+                if hasattr(block, "text"):
+                    final_text = block.text  # 最終テキストを更新
+
+            # 停止条件
+            if response.stop_reason == "end_turn":
+                break
+
+            if response.stop_reason != "tool_use":
+                break
+
+            # ツール実行
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    tool_result = await _run_sub_agent_tool(block.name, block.input)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": tool_result,
+                    })
+                elif block.type == "server_tool_use":
+                    # server_tool_use は API 側で自動実行される
+                    # web_search_tool_result が content に含まれるため、そのまま通す
+                    pass
+
+            # web_search_tool_result をそのまま含むため、
+            # tool_use のみ手動で結果を返す
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
+
+        role_label = "リサーチャー" if role == "researcher" else "クリティック"
+        return {
+            "success": True,
+            "result": final_text,
+            "role": role,
+            "message": f"{role_label}の調査が完了しました。",
+        }
+
+    except Exception as e:
+        logger.exception(f"[SubAgent] {role} failed: {e}")
+        role_label = "リサーチャー" if role == "researcher" else "クリティック"
+        return {
+            "success": False,
+            "error": f"{role_label}の実行に失敗しました: {str(e)}",
+            "role": role,
+        }
+
+
+async def _run_sub_agent_tool(tool_name: str, tool_input: Dict[str, Any]) -> str:
+    """サブエージェントが使うカスタムツールを実行する"""
+    try:
+        if tool_name == "read_url":
+            url = tool_input.get("url", "")
+            if not url:
+                return "Error: URL is required"
+            from app.tools.jina_reader import read_url
+            result = await read_url(url)
+            if isinstance(result, dict):
+                return result.get("content", result.get("error", "読み込み失敗"))
+            return str(result)
+
+        else:
+            return f"Unknown tool: {tool_name}"
+
+    except Exception as e:
+        logger.warning(f"[SubAgent] Tool {tool_name} failed: {e}")
+        return f"Tool error: {str(e)}"
+
+
+async def _forward_sub_agent_events(
+    role: str,
+    response,
+    session_id: Optional[str],
+    project_id: Optional[str],
+) -> None:
+    """
+    SDK レスポンスの各ブロックを execution_events に保存する。
+    ProcessMonitor 用にロール付きラベルで記録。
+    """
+    if not session_id:
+        return
+
+    try:
+        from app.services.project_service import ProjectService
+        ps = ProjectService()
+
+        role_emoji = "🔬" if role == "researcher" else "🔍"
+        role_label = "リサーチャー" if role == "researcher" else "クリティック"
+
+        for block in response.content:
+            if block.type == "tool_use":
+                # カスタムツール呼び出し
+                tool_input_str = ""
+                if isinstance(block.input, dict):
+                    # 主要パラメータを短縮表示
+                    for key in ("url", "query", "task"):
+                        if key in block.input:
+                            val = str(block.input[key])[:80]
+                            tool_input_str = f': "{val}"'
+                            break
+
+                label = f"[{role_label}] {role_emoji} {block.name}{tool_input_str}"
+                await ps.save_execution_event(
+                    project_id=project_id,
+                    room_id=session_id,
+                    event_type="tool_use",
+                    tool_name=block.name,
+                    tool_label=label,
+                    metadata={"member": role},
+                )
+
+            elif block.type == "server_tool_use":
+                # web_search 等のサーバーツール
+                query_str = ""
+                if isinstance(block.input, dict) and "query" in block.input:
+                    query_str = f': "{str(block.input["query"])[:80]}"'
+                label = f"[{role_label}] {role_emoji} web_search{query_str}"
+                await ps.save_execution_event(
+                    project_id=project_id,
+                    room_id=session_id,
+                    event_type="tool_use",
+                    tool_name="web_search",
+                    tool_label=label,
+                    metadata={"member": role},
+                )
+
+            elif block.type == "text" and block.text.strip():
+                # テキスト出力 → reasoningとして短縮記録
+                summary = block.text.strip()[:200]
+                await ps.save_execution_event(
+                    project_id=project_id,
+                    room_id=session_id,
+                    event_type="reasoning",
+                    content=f"[{role_label}] {summary}",
+                    metadata={"member": role},
+                )
+
+            elif block.type == "thinking":
+                thinking_text = getattr(block, "thinking", "")
+                if thinking_text:
+                    summary = thinking_text.strip()[:150]
+                    await ps.save_execution_event(
+                        project_id=project_id,
+                        room_id=session_id,
+                        event_type="reasoning",
+                        content=f"[{role_label}] {summary}",
+                        metadata={"member": role},
+                    )
+
+    except Exception as e:
+        logger.warning(f"[SubAgent] Failed to forward events for {role}: {e}")
+
+
 async def execute_tool(
     tool_call: Dict[str, Any],
     user_id: str,
@@ -1591,6 +1925,13 @@ async def execute_tool(
     skill_name = tool_call["skill"]
     action = tool_call["action"]
     params = tool_call["params"]
+
+    # ★★★ サブエージェント呼び出し ★★★
+    if skill_name == "_call_researcher":
+        return await _execute_sub_agent("researcher", params, session_id)
+
+    if skill_name == "_call_critic":
+        return await _execute_sub_agent("critic", params, session_id)
 
     # ★★★ プロジェクト作成 ★★★
     if skill_name == "_create_project":

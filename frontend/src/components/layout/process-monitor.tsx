@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Loader2, Check, AlertCircle, ChevronDown, ChevronUp, Brain, Terminal } from 'lucide-react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 
 import { api, type ExecutionEvent } from '@/lib/api-client';
 
@@ -11,17 +11,48 @@ interface ProcessMonitorProps {
   isExecuting: boolean;
 }
 
+// メンバーロール判定
+type MemberRole = 'researcher' | 'critic' | 'leader' | null;
+
+function getMemberRole(event: ExecutionEvent): MemberRole {
+  const member = event.metadata?.member as string | undefined;
+  if (member === 'researcher') return 'researcher';
+  if (member === 'critic') return 'critic';
+  if (member === 'leader') return 'leader';
+  return null;
+}
+
+// ロール別の設定
+const ROLE_CONFIG = {
+  researcher: { emoji: '🔬', color: 'text-blue-500', label: 'リサーチャー' },
+  critic: { emoji: '🔍', color: 'text-orange-500', label: 'クリティック' },
+  leader: { emoji: '', color: '', label: '' },
+} as const;
+
 export function ProcessMonitor({ projectId, isExecuting }: ProcessMonitorProps) {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const queryClient = useQueryClient();
 
   const { data: events = [], refetch } = useQuery({
     queryKey: ['execution-events', projectId],
     queryFn: () => api.projects.executionEvents.list(projectId),
     enabled: !!projectId,
+    // isExecuting が true、またはイベントに done がなければポーリング
     refetchInterval: isExecuting ? 2000 : false,
   });
+
+  // done イベントがなければ自動ポーリング開始
+  const hasDoneEvent = events.some((e) => e.event_type === 'done');
+  const hasActiveEvents = events.length > 0 && !hasDoneEvent;
+
+  const { data: autoPolledEvents } = useQuery({
+    queryKey: ['execution-events-auto', projectId],
+    queryFn: () => api.projects.executionEvents.list(projectId),
+    enabled: !!projectId && !isExecuting && hasActiveEvents,
+    refetchInterval: hasActiveEvents ? 3000 : false,
+  });
+
+  const displayEvents = (isExecuting ? events : autoPolledEvents) || events;
 
   // タブ復帰時に即座に再取得
   const handleVisibilityChange = useCallback(() => {
@@ -42,14 +73,16 @@ export function ProcessMonitor({ projectId, isExecuting }: ProcessMonitorProps) 
     if (!isCollapsed && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [events.length, isCollapsed]);
+  }, [displayEvents.length, isCollapsed]);
 
-  if (events.length === 0 && !isExecuting) {
+  const isActive = isExecuting || hasActiveEvents;
+
+  if (displayEvents.length === 0 && !isActive) {
     return null;
   }
 
-  const toolEvents = events.filter((e) => e.event_type === 'tool_use');
-  const errorEvents = events.filter((e) => e.event_type === 'error');
+  const toolEvents = displayEvents.filter((e) => e.event_type === 'tool_use');
+  const errorEvents = displayEvents.filter((e) => e.event_type === 'error');
   const totalSteps = toolEvents.length;
 
   return (
@@ -71,13 +104,13 @@ export function ProcessMonitor({ projectId, isExecuting }: ProcessMonitorProps) 
         <span className="text-muted-foreground/60">
           ({totalSteps}ステップ{errorEvents.length > 0 ? ` / ${errorEvents.length}エラー` : ''})
         </span>
-        {isExecuting && (
+        {isActive && (
           <Loader2 className="h-3 w-3 animate-spin text-primary ml-auto" />
         )}
-        {!isExecuting && errorEvents.length === 0 && totalSteps > 0 && (
+        {!isActive && errorEvents.length === 0 && totalSteps > 0 && (
           <Check className="h-3 w-3 text-green-500 ml-auto" />
         )}
-        {!isExecuting && errorEvents.length > 0 && (
+        {!isActive && errorEvents.length > 0 && (
           <AlertCircle className="h-3 w-3 text-red-500 ml-auto" />
         )}
       </button>
@@ -89,10 +122,10 @@ export function ProcessMonitor({ projectId, isExecuting }: ProcessMonitorProps) 
           className="max-h-[200px] overflow-y-auto px-4 pb-3"
         >
           <div className="border-l-2 border-primary/30 pl-3 space-y-1">
-            {events.map((event) => (
+            {displayEvents.map((event) => (
               <EventItem key={event.id} event={event} />
             ))}
-            {isExecuting && (
+            {isActive && (
               <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
                 <Loader2 className="h-2.5 w-2.5 animate-spin text-primary" />
                 <span>実行中...</span>
@@ -105,11 +138,24 @@ export function ProcessMonitor({ projectId, isExecuting }: ProcessMonitorProps) 
   );
 }
 
+function MemberBadge({ role }: { role: MemberRole }) {
+  if (!role || role === 'leader') return null;
+  const config = ROLE_CONFIG[role];
+  return (
+    <span className={`inline-flex items-center gap-0.5 text-[9px] font-medium ${config.color} bg-opacity-10 rounded px-1`}>
+      {config.emoji} {config.label}
+    </span>
+  );
+}
+
 function EventItem({ event }: { event: ExecutionEvent }) {
+  const role = getMemberRole(event);
+
   if (event.event_type === 'tool_use') {
     return (
       <div className="flex items-start gap-1.5 text-[10px]">
         <Check className="h-2.5 w-2.5 text-green-500 shrink-0 mt-0.5" />
+        {role && role !== 'leader' && <MemberBadge role={role} />}
         <span className="text-muted-foreground">{event.tool_label || event.tool_name || 'ツール実行'}</span>
       </div>
     );
@@ -119,6 +165,7 @@ function EventItem({ event }: { event: ExecutionEvent }) {
     return (
       <div className="flex items-start gap-1.5 text-[10px]">
         <Brain className="h-2.5 w-2.5 text-yellow-500 shrink-0 mt-0.5" />
+        {role && role !== 'leader' && <MemberBadge role={role} />}
         <span className="text-muted-foreground/80 italic">
           {event.content || '思考中...'}
         </span>

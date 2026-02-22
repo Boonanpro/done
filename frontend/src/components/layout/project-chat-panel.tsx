@@ -8,7 +8,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 import { Button } from '@/components/ui/button';
-import { api, type MessageResponse, type ProjectStatusType, type ProjectProposalResponse, type ProcessStep } from '@/lib/api-client';
+import { api, type MessageResponse, type ProjectStatusType, type ProjectProposalResponse, type ProcessStep, type ExecutionEvent } from '@/lib/api-client';
 import { useProjectStore, useProcessState, useProcessActions } from '@/stores/project-store';
 import { useAuthStore } from '@/stores/auth-store';
 
@@ -26,6 +26,23 @@ const STATUS_LABELS: Record<ProjectStatusType, { label: string; color: string }>
   cancelled: { label: 'キャンセル', color: 'bg-red-500/15 text-red-600' },
 };
 
+// Step info with optional member role
+type StepInfo = { label: string; type: 'tool' | 'reasoning' | 'error'; role?: 'researcher' | 'critic' | 'leader' | null };
+
+// Member role badge
+function MemberBadge({ role }: { role: 'researcher' | 'critic' }) {
+  const config = {
+    researcher: { emoji: '🔬', color: 'text-blue-500' },
+    critic: { emoji: '🔍', color: 'text-orange-500' },
+  } as const;
+  const c = config[role];
+  return (
+    <span className={`inline-flex items-center text-[9px] font-medium ${c.color} shrink-0`}>
+      {c.emoji}
+    </span>
+  );
+}
+
 // --- Inline Process Block ---
 function InlineProcessBlock({
   steps,
@@ -33,7 +50,7 @@ function InlineProcessBlock({
   isLive = false,
   defaultCollapsed = true,
 }: {
-  steps: { label: string; type: 'tool' | 'reasoning' | 'error' }[];
+  steps: StepInfo[];
   fullTexts?: string[];
   isLive?: boolean;
   defaultCollapsed?: boolean;
@@ -143,7 +160,7 @@ function ProcessStepItem({
   fullText,
   isLastLive,
 }: {
-  step: { label: string; type: 'tool' | 'reasoning' | 'error' };
+  step: StepInfo;
   fullText?: string;
   isLastLive: boolean;
 }) {
@@ -164,6 +181,7 @@ function ProcessStepItem({
       ) : (
         <Check className="h-2.5 w-2.5 text-green-500 shrink-0 mt-0.5" />
       )}
+      {step.role && step.role !== 'leader' && <MemberBadge role={step.role} />}
       <span
         className={`${
           step.type === 'error'
@@ -189,7 +207,58 @@ function classifyStep(label: string): 'tool' | 'reasoning' | 'error' {
 // --- Display item types ---
 type DisplayItem =
   | { kind: 'message'; msg: MessageResponse }
-  | { kind: 'process-block'; steps: { label: string; type: 'tool' | 'reasoning' | 'error' }[]; fullTexts?: string[]; id: string };
+  | { kind: 'process-block'; steps: StepInfo[]; fullTexts?: string[]; id: string }
+  | { kind: 'execution-block'; steps: StepInfo[]; isLive: boolean; id: string };
+
+// --- Execution event helpers ---
+interface ExecutionRun {
+  events: ExecutionEvent[];
+  isDone: boolean;
+  startTime: string;
+}
+
+function groupExecutionRuns(events: ExecutionEvent[]): ExecutionRun[] {
+  const runs: ExecutionRun[] = [];
+  let currentRun: ExecutionEvent[] = [];
+
+  for (const event of events) {
+    if (event.event_type === 'done') {
+      if (currentRun.length > 0) {
+        runs.push({ events: currentRun, isDone: true, startTime: currentRun[0].created_at });
+      }
+      currentRun = [];
+    } else {
+      currentRun.push(event);
+    }
+  }
+
+  // Remaining events (no done yet)
+  if (currentRun.length > 0) {
+    runs.push({ events: currentRun, isDone: false, startTime: currentRun[0].created_at });
+  }
+
+  return runs;
+}
+
+function eventToStep(event: ExecutionEvent): StepInfo {
+  const member = event.metadata?.member as string | undefined;
+  const role = (member === 'researcher' || member === 'critic' || member === 'leader') ? member : null;
+
+  let label = '';
+  if (event.event_type === 'tool_use') {
+    label = event.tool_label || event.tool_name || 'ツール実行';
+  } else if (event.event_type === 'error') {
+    label = event.content || 'エラー';
+  } else {
+    label = event.content || event.event_type;
+  }
+
+  const type: StepInfo['type'] =
+    event.event_type === 'tool_use' ? 'tool' :
+    event.event_type === 'error' ? 'error' : 'reasoning';
+
+  return { label, type, role };
+}
 
 // --- Message bubble (memo化で不要な再描画を防ぐ) ---
 const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageResponse }) {
@@ -420,6 +489,15 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: 3000,
   });
 
+  // Execution events query (inline process monitor)
+  const isActiveExecution = isProcessing || project?.status === 'planning';
+  const { data: executionEvents = [] } = useQuery({
+    queryKey: ['execution-events', projectId],
+    queryFn: () => api.projects.executionEvents.list(projectId),
+    enabled: !!projectId,
+    refetchInterval: isActiveExecution ? 2000 : false,
+  });
+
   // Proposals query
   const isProposed = project?.status === 'proposed';
   const { data: proposals } = useQuery({
@@ -462,11 +540,13 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const status = project?.status ? STATUS_LABELS[project.status] : null;
   const messages = messagesData?.messages || [];
 
-  // Build display items: メモ化でメッセージが変わったときだけ再計算
+  // Build display items: messages + execution event runs merged chronologically
   const displayItems = useMemo(() => {
-    const chronological = [...messages].reverse();
-    const items: DisplayItem[] = [];
+    type TimedItem = { item: DisplayItem; sortKey: number; subKey: number };
+    const timedItems: TimedItem[] = [];
 
+    // Messages and their ai_context process blocks
+    const chronological = [...messages].reverse();
     for (const msg of chronological) {
       const content = msg.content || '';
 
@@ -475,21 +555,50 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         continue;
       }
 
+      const msgTime = new Date(msg.created_at).getTime();
+
       // For AI messages: insert process block from ai_context before the message
       if (msg.sender_type === 'ai' && msg.ai_context?.reasoning_steps?.length) {
-        const steps = msg.ai_context.reasoning_steps.map((s: string) => ({
+        const steps: StepInfo[] = msg.ai_context.reasoning_steps.map((s: string) => ({
           label: s,
           type: classifyStep(s),
         }));
         const fullTexts = msg.ai_context?.reasoning_full as string[] | undefined;
-        items.push({ kind: 'process-block', steps, fullTexts, id: `pb-${msg.id}` });
+        timedItems.push({
+          item: { kind: 'process-block', steps, fullTexts, id: `pb-${msg.id}` },
+          sortKey: msgTime,
+          subKey: 0, // Before the message
+        });
       }
 
-      items.push({ kind: 'message', msg });
+      timedItems.push({
+        item: { kind: 'message', msg },
+        sortKey: msgTime,
+        subKey: 1,
+      });
     }
 
-    return items;
-  }, [messages]);
+    // Execution event runs (from backend polling)
+    const runs = groupExecutionRuns(executionEvents);
+    for (const run of runs) {
+      const steps = run.events.map(eventToStep);
+      if (steps.length === 0) continue;
+
+      // Option B: isLive only when actively executing (old data without done = completed)
+      const isLive = !run.isDone && !!isActiveExecution;
+
+      timedItems.push({
+        item: { kind: 'execution-block', steps, isLive, id: `exec-${run.events[0].id}` },
+        sortKey: new Date(run.startTime).getTime(),
+        subKey: 0,
+      });
+    }
+
+    // Sort by time, then by subKey (process blocks before their messages)
+    timedItems.sort((a, b) => a.sortKey - b.sortKey || a.subKey - b.subKey);
+
+    return timedItems.map((t) => t.item);
+  }, [messages, executionEvents, isActiveExecution]);
 
   const hasAnyContent = displayItems.length > 0;
 
@@ -585,6 +694,17 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                     fullTexts={item.fullTexts}
                     isLive={false}
                     defaultCollapsed={true}
+                  />
+                );
+              }
+
+              if (item.kind === 'execution-block') {
+                return (
+                  <InlineProcessBlock
+                    key={item.id}
+                    steps={item.steps}
+                    isLive={item.isLive}
+                    defaultCollapsed={!item.isLive}
                   />
                 );
               }
