@@ -359,10 +359,10 @@ def get_team_leader_tools() -> List[Dict[str, Any]]:
     """
     チームリーダー用ツール（プロジェクト planning 時）
 
-    通常の事業部ツールに加え、call_researcher / call_critic を追加。
+    リーダーは指揮官であり作業者ではない。
+    調査・検証はチームに委譲するため、call_researcher / call_critic のみ。
     """
-    base_tools = get_all_skill_tools()
-    return base_tools + [
+    return [
         CALL_RESEARCHER_TOOL,
         CALL_CRITIC_TOOL,
     ]
