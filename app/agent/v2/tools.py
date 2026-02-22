@@ -1703,6 +1703,7 @@ async def _execute_sub_agent(
         cmd.extend([
             "-p",
             "--output-format", "stream-json",
+            "--verbose",
             "--model", "sonnet",
             "--tools", "WebSearch,WebFetch,Read",
             "--dangerously-skip-permissions",
@@ -1711,6 +1712,12 @@ async def _execute_sub_agent(
             "--append-system-prompt", system_prompt,
         ])
 
+        # 環境変数の準備
+        # CLAUDECODE: 親CLIの「二重起動防止」目印を消す（消さないと子CLIが起動拒否する）
+        # ANTHROPIC_API_KEY: 消さないとMax planではなくAPI従量課金が使われてしまう
+        import os as _os
+        sub_env = {k: v for k, v in _os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
+
         # サブプロセス起動
         logger.info(f"[SubAgent] Starting {role} CLI subprocess")
         process = await asyncio.create_subprocess_exec(
@@ -1718,6 +1725,7 @@ async def _execute_sub_agent(
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=sub_env,
         )
 
         # stdin にユーザーメッセージを書き込み
@@ -1726,10 +1734,14 @@ async def _execute_sub_agent(
         process.stdin.close()
 
         # stderr ドレイン（バッファ満杯によるデッドロック防止）
+        stderr_lines: list[str] = []
         async def _drain_stderr():
             try:
                 async for line in process.stderr:
-                    pass  # 読み捨て
+                    decoded = line.decode("utf-8", errors="replace").strip()
+                    if decoded:
+                        stderr_lines.append(decoded)
+                        logger.warning(f"[SubAgent] {role} stderr: {decoded[:300]}")
             except Exception:
                 pass
 
@@ -1777,12 +1789,15 @@ async def _execute_sub_agent(
         await process.wait()
         await stderr_task
 
+        stderr_output = "\n".join(stderr_lines[-10:])  # 末尾10行
         logger.info(f"[SubAgent] {role} completed: {len(final_text)} chars, exit={process.returncode}")
+        if stderr_lines:
+            logger.warning(f"[SubAgent] {role} stderr: {stderr_output[:500]}")
 
         if not final_text:
             return {
                 "success": False,
-                "error": f"{role_label}が結果を返しませんでした（exit code: {process.returncode}）",
+                "error": f"{role_label}が結果を返しませんでした（exit code: {process.returncode}）\nstderr: {stderr_output[:300]}",
                 "role": role,
             }
 
@@ -2844,7 +2859,9 @@ def format_tool_result(
     if skill_name == "_get_credentials" and result.get("login_id"):
         lines.append(f"サービス: {result.get('service', '?')}")
         lines.append(f"ログインID: {result['login_id']}")
-        lines.append(f"パスワード: {result.get('password', '（なし）')}")
+        pw = result.get('password', '')
+        masked_pw = f"{pw[:2]}{'*' * (len(pw) - 2)}" if pw and len(pw) > 2 else '（なし）'
+        lines.append(f"パスワード: {masked_pw}")
         return FormattedToolResult(text="\n".join(lines), images=images)
 
     # bash / read_file / write_file / edit_file: output を直接返す
