@@ -209,6 +209,7 @@ async def run_project_auto_proposal(
     title: str,
     description: str,
     origin_room_id: Optional[str] = None,
+    user_request: str = "",
 ) -> None:
     """
     バックグラウンドでリーダーCLI直接実行による自動提案を生成する。
@@ -219,6 +220,10 @@ async def run_project_auto_proposal(
 
     フロー:
       リーダーCLI起動 → リーダーが自律的に researcher/critic を呼ぶ → 提案書作成
+
+    Args:
+        user_request: LLMが会話コンテキストから抽出した依頼原文。
+                      空の場合は origin_room_id からフォールバック取得。
     """
     try:
         # SSEレスポンス完了を待つ
@@ -227,9 +232,9 @@ async def run_project_auto_proposal(
         _debug(f"Starting leader proposal for project {project_id}")
         logger.info(f"[AutoProposal] Starting leader proposal for project {project_id}")
 
-        # origin_room_idからプロジェクト作成のきっかけとなった依頼文を取得
-        user_messages_text = ""
-        if origin_room_id:
+        # 依頼原文: LLMが抽出した user_request を優先、なければ DB フォールバック
+        user_messages_text = user_request
+        if not user_messages_text and origin_room_id:
             user_messages_text = _fetch_trigger_message(origin_room_id)
 
         from app.services.chat_service import ChatService

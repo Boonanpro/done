@@ -849,9 +849,10 @@ CREATE_PROJECT_TOOL = {
         "type": "object",
         "properties": {
             "title": {"type": "string", "description": "プロジェクトのタイトル（簡潔に）"},
-            "description": {"type": "string", "description": "何を達成するかの説明"}
+            "description": {"type": "string", "description": "何を達成するかの説明"},
+            "user_request": {"type": "string", "description": "ユーザーの依頼原文。会話の中からプロジェクト化の元になった依頼メッセージをそのまま抜粋する（要約ではなく原文）。事業部チームに共有される。"}
         },
-        "required": ["title", "description"]
+        "required": ["title", "description", "user_request"]
     }
 }
 
@@ -1937,6 +1938,7 @@ async def execute_tool(
     if skill_name == "_create_project":
         title = params.get("title", "")
         description = params.get("description", "")
+        user_request = params.get("user_request", "")
         if not title:
             return {"success": False, "error": "title が必要です"}
         try:
@@ -1959,6 +1961,7 @@ async def execute_tool(
                     title=title,
                     description=description or "",
                     origin_room_id=session_id,
+                    user_request=user_request,
                 ))
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)
