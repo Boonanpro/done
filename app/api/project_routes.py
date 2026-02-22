@@ -366,6 +366,20 @@ def _format_tool_label(name: str, tool_input: dict) -> str:
     if name == "Task":
         desc = tool_input.get("description", "")
         return f"サブタスク: {desc[:30]}" if desc else "サブタスク実行"
+    if name == "WebSearch":
+        query = tool_input.get("query", "")
+        return f"WebSearch: {query[:50]}" if query else "WebSearch"
+    if name == "WebFetch":
+        url = tool_input.get("url", "")
+        return f"WebFetch: {url[:50]}" if url else "WebFetch"
+
+    # MCP ツール（call_researcher / call_critic）
+    if "call_researcher" in name:
+        task = tool_input.get("task", "")
+        return f"リサーチャーに調査依頼: {task[:40]}" if task else "リサーチャーに調査依頼"
+    if "call_critic" in name:
+        focus = tool_input.get("focus_areas", "")
+        return f"クリティックに検証依頼: {focus[:40]}" if focus else "クリティックに検証依頼"
 
     return name
 

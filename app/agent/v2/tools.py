@@ -1621,11 +1621,8 @@ def parse_tool_call(response: str) -> Optional[Dict[str, Any]]:
 
 
 # ============================================
-# サブエージェント実行（Anthropic SDK直接呼び出し）
+# サブエージェント実行（CLI subprocess — Max plan 定額内）
 # ============================================
-
-# 安全弁としてのターン数上限（無限ループ防止のみ。調査品質のための制限ではない）
-MAX_SUB_AGENT_TURNS = 40
 
 
 async def _execute_sub_agent(
@@ -1634,30 +1631,34 @@ async def _execute_sub_agent(
     session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    サブエージェント（リサーチャー/クリティック）をAnthropic SDK で実行する。
+    サブエージェント（リサーチャー/クリティック）を Claude CLI subprocess で実行する。
 
-    CLIサブプロセスではなくSDK直接呼び出しにより、
-    CLI→MCP→CLIのネスト問題を回避する。
+    Max plan 定額内で動作し、CLI 内蔵の WebSearch / WebFetch を使用する。
+    MCP 不要のためネスト問題は発生しない。
 
     Args:
         role: "researcher" or "critic"
         params: ツールパラメータ（task/context or content/focus_areas）
         session_id: 親セッションのroom_id（イベント保存用）
     """
+    import json as _json
+
+    role_label = "リサーチャー" if role == "researcher" else "クリティック"
+
     try:
-        import anthropic
-        from app.config import settings
         from app.agent.v2.team.prompts import get_sub_agent_prompt, build_sub_agent_message
 
         # プロジェクト情報の取得（サブエージェントに背景を共有するため）
         project_title = ""
         project_description = ""
+        project_id = None
         if session_id:
             try:
                 from app.services.supabase_client import get_supabase_client
                 sb = get_supabase_client().client
-                proj = sb.table("projects").select("title, description").eq("room_id", session_id).execute()
+                proj = sb.table("projects").select("id, title, description").eq("room_id", session_id).execute()
                 if proj.data:
+                    project_id = proj.data[0].get("id")
                     project_title = proj.data[0].get("title", "")
                     project_description = proj.data[0].get("description", "")
             except Exception:
@@ -1687,102 +1688,104 @@ async def _execute_sub_agent(
 
         system_prompt = get_sub_agent_prompt(role)
 
-        # read_url カスタムツール定義（web_search + read_url のみ。deep_research は不要 —
-        # リサーチャー自身が web_search + read_url で同等の調査を自律的に行えるため）
-        custom_tools = [
-            {
-                "name": "read_url",
-                "description": "URLのページ内容を取得する。検索結果のURLを読んで詳細を確認したい時に使用。",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "読み込むURL"}
-                    },
-                    "required": ["url"]
-                }
-            },
-        ]
+        # CLI パス解決
+        from app.agent.cli_runner import _resolve_claude_cli
+        claude_cmd, cli_js = _resolve_claude_cli()
+        if not claude_cmd:
+            return {"success": False, "error": "claude CLI が見つかりません", "role": role}
 
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        messages = [{"role": "user", "content": user_message}]
+        # コマンド組み立て
+        if cli_js:
+            cmd = [claude_cmd, cli_js]
+        else:
+            cmd = [claude_cmd]
 
-        # プロジェクトIDの逆引き（session_id = room_id → project_id）
-        project_id = None
-        if session_id:
+        cmd.extend([
+            "-p",
+            "--output-format", "stream-json",
+            "--model", "sonnet",
+            "--tools", "WebSearch,WebFetch,Read",
+            "--dangerously-skip-permissions",
+            "--no-session-persistence",
+            "--max-turns", "40",
+            "--append-system-prompt", system_prompt,
+        ])
+
+        # サブプロセス起動
+        logger.info(f"[SubAgent] Starting {role} CLI subprocess")
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        # stdin にユーザーメッセージを書き込み
+        process.stdin.write(user_message.encode("utf-8"))
+        await process.stdin.drain()
+        process.stdin.close()
+
+        # stderr ドレイン（バッファ満杯によるデッドロック防止）
+        async def _drain_stderr():
             try:
-                from app.services.supabase_client import get_supabase_client
-                sb = get_supabase_client().client
-                proj = sb.table("projects").select("id").eq("room_id", session_id).execute()
-                if proj.data:
-                    project_id = proj.data[0].get("id")
+                async for line in process.stderr:
+                    pass  # 読み捨て
             except Exception:
                 pass
 
+        stderr_task = asyncio.create_task(_drain_stderr())
+
+        # stdout から JSON stream を読み取り
         final_text = ""
+        processed_msg_ids: set = set()
 
-        # web_search サーバーツール（回数制限なし — エージェント自身が収束を判断する）
-        web_search_tool = {
-            "type": "web_search_20250305",
-            "name": "web_search",
-            "user_location": {
-                "type": "approximate",
-                "country": "JP",
-                "timezone": "Asia/Tokyo",
-            },
-        }
+        async for raw_line in process.stdout:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
 
-        # ツールループ
-        for turn in range(MAX_SUB_AGENT_TURNS):
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=8192,
-                    system=system_prompt,
-                    messages=messages,
-                    tools=[*custom_tools, web_search_tool],
-                ),
-            )
+            try:
+                data = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
 
-            # レスポンスをイベントとして記録 & メッセージ履歴に追加
-            await _forward_sub_agent_events(role, response, session_id, project_id)
+            msg_type = data.get("type", "")
 
-            # アシスタントメッセージを履歴に追加
-            messages.append({"role": "assistant", "content": response.content})
+            if msg_type == "assistant":
+                message_data = data.get("message", {})
+                msg_id = message_data.get("id", "")
+                blocks = message_data.get("content", [])
 
-            # テキストブロックを収集
-            for block in response.content:
-                if hasattr(block, "text"):
-                    final_text = block.text  # 最終テキストを更新
+                # 重複防止（stream-json は同じ msg_id を複数回出すことがある）
+                if msg_id in processed_msg_ids:
+                    continue
+                processed_msg_ids.add(msg_id)
 
-            # 停止条件
-            if response.stop_reason == "end_turn":
-                break
+                # イベント保存 & テキスト収集
+                await _forward_sub_agent_events(role, blocks, session_id, project_id)
+                for block in blocks:
+                    if block.get("type") == "text":
+                        text = block.get("text", "")
+                        if text.strip():
+                            final_text = text
 
-            if response.stop_reason != "tool_use":
-                break
+            elif msg_type == "result":
+                result_text = data.get("result", "")
+                if result_text:
+                    final_text = result_text
 
-            # ツール実行
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    tool_result = await _run_sub_agent_tool(block.name, block.input)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": tool_result,
-                    })
-                elif block.type == "server_tool_use":
-                    # server_tool_use は API 側で自動実行される
-                    # web_search_tool_result が content に含まれるため、そのまま通す
-                    pass
+        await process.wait()
+        await stderr_task
 
-            # web_search_tool_result をそのまま含むため、
-            # tool_use のみ手動で結果を返す
-            if tool_results:
-                messages.append({"role": "user", "content": tool_results})
+        logger.info(f"[SubAgent] {role} completed: {len(final_text)} chars, exit={process.returncode}")
 
-        role_label = "リサーチャー" if role == "researcher" else "クリティック"
+        if not final_text:
+            return {
+                "success": False,
+                "error": f"{role_label}が結果を返しませんでした（exit code: {process.returncode}）",
+                "role": role,
+            }
+
         return {
             "success": True,
             "result": final_text,
@@ -1792,7 +1795,6 @@ async def _execute_sub_agent(
 
     except Exception as e:
         logger.exception(f"[SubAgent] {role} failed: {e}")
-        role_label = "リサーチャー" if role == "researcher" else "クリティック"
         return {
             "success": False,
             "error": f"{role_label}の実行に失敗しました: {str(e)}",
@@ -1800,35 +1802,14 @@ async def _execute_sub_agent(
         }
 
 
-async def _run_sub_agent_tool(tool_name: str, tool_input: Dict[str, Any]) -> str:
-    """サブエージェントが使うカスタムツールを実行する"""
-    try:
-        if tool_name == "read_url":
-            url = tool_input.get("url", "")
-            if not url:
-                return "Error: URL is required"
-            from app.tools.jina_reader import read_url
-            result = await read_url(url)
-            if isinstance(result, dict):
-                return result.get("content", result.get("error", "読み込み失敗"))
-            return str(result)
-
-        else:
-            return f"Unknown tool: {tool_name}"
-
-    except Exception as e:
-        logger.warning(f"[SubAgent] Tool {tool_name} failed: {e}")
-        return f"Tool error: {str(e)}"
-
-
 async def _forward_sub_agent_events(
     role: str,
-    response,
+    blocks: list,
     session_id: Optional[str],
     project_id: Optional[str],
 ) -> None:
     """
-    SDK レスポンスの各ブロックを execution_events に保存する。
+    CLI JSON stream のコンテンツブロックを execution_events に保存する。
     ProcessMonitor 用にロール付きラベルで記録。
     """
     if not session_id:
@@ -1841,56 +1822,46 @@ async def _forward_sub_agent_events(
         role_emoji = "🔬" if role == "researcher" else "🔍"
         role_label = "リサーチャー" if role == "researcher" else "クリティック"
 
-        for block in response.content:
-            if block.type == "tool_use":
-                # カスタムツール呼び出し
-                tool_input_str = ""
-                if isinstance(block.input, dict):
-                    # 主要パラメータを短縮表示
-                    for key in ("url", "query", "task"):
-                        if key in block.input:
-                            val = str(block.input[key])[:80]
-                            tool_input_str = f': "{val}"'
+        for block in blocks:
+            block_type = block.get("type", "")
+
+            if block_type in ("tool_use", "server_tool_use"):
+                tool_name = block.get("name", "")
+                tool_input = block.get("input", {})
+
+                # 主要パラメータを短縮表示
+                detail_str = ""
+                if isinstance(tool_input, dict):
+                    for key in ("query", "url", "task"):
+                        if key in tool_input:
+                            val = str(tool_input[key])[:80]
+                            detail_str = f': "{val}"'
                             break
 
-                label = f"[{role_label}] {role_emoji} {block.name}{tool_input_str}"
+                label = f"[{role_label}] {role_emoji} {tool_name}{detail_str}"
                 await ps.save_execution_event(
                     project_id=project_id,
                     room_id=session_id,
                     event_type="tool_use",
-                    tool_name=block.name,
+                    tool_name=tool_name,
                     tool_label=label,
                     metadata={"member": role},
                 )
 
-            elif block.type == "server_tool_use":
-                # web_search 等のサーバーツール
-                query_str = ""
-                if isinstance(block.input, dict) and "query" in block.input:
-                    query_str = f': "{str(block.input["query"])[:80]}"'
-                label = f"[{role_label}] {role_emoji} web_search{query_str}"
-                await ps.save_execution_event(
-                    project_id=project_id,
-                    room_id=session_id,
-                    event_type="tool_use",
-                    tool_name="web_search",
-                    tool_label=label,
-                    metadata={"member": role},
-                )
+            elif block_type == "text":
+                text = block.get("text", "").strip()
+                if text:
+                    summary = text[:200]
+                    await ps.save_execution_event(
+                        project_id=project_id,
+                        room_id=session_id,
+                        event_type="reasoning",
+                        content=f"[{role_label}] {summary}",
+                        metadata={"member": role},
+                    )
 
-            elif block.type == "text" and block.text.strip():
-                # テキスト出力 → reasoningとして短縮記録
-                summary = block.text.strip()[:200]
-                await ps.save_execution_event(
-                    project_id=project_id,
-                    room_id=session_id,
-                    event_type="reasoning",
-                    content=f"[{role_label}] {summary}",
-                    metadata={"member": role},
-                )
-
-            elif block.type == "thinking":
-                thinking_text = getattr(block, "thinking", "")
+            elif block_type == "thinking":
+                thinking_text = block.get("thinking", "")
                 if thinking_text:
                     summary = thinking_text.strip()[:150]
                     await ps.save_execution_event(

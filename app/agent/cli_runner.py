@@ -258,6 +258,7 @@ def _build_cli_cmd(
     mcp_config_path: str,
     system_prompt: str,
     resume_session_id: Optional[str] = None,
+    is_planning: bool = False,
 ) -> list[str]:
     """CLIコマンドライン引数を組み立てる"""
     if cli_js:
@@ -276,6 +277,13 @@ def _build_cli_cmd(
         "--mcp-config", mcp_config_path,
         "--append-system-prompt", system_prompt,
     ])
+
+    # planning モード: リーダーが自分で作業せず MCP call_researcher/call_critic に委譲するよう
+    # CLI 内蔵の作業ツールを禁止する（公式 Agent Team の最小権限原則）
+    if is_planning:
+        cmd.extend([
+            "--disallowedTools", "WebSearch,WebFetch,Task,TodoWrite,TodoRead",
+        ])
 
     if resume_session_id:
         cmd.extend(["--resume", resume_session_id])
@@ -468,6 +476,7 @@ def _run_cli_in_thread(
     room_id: str,
     event_queue: thread_queue.Queue,
     resume_session_id: Optional[str] = None,
+    is_planning: bool = False,
 ):
     """
     別スレッドでCLI subprocessを実行する。
@@ -491,7 +500,7 @@ def _run_cli_in_thread(
 
     try:
         # 1回目: セッション再開を試みる
-        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id)
+        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id, is_planning=is_planning)
         _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, prompt len={len(content)})")
 
         result_data = _run_cli_process(cmd, content, env, room_id, event_queue)
@@ -515,7 +524,7 @@ def _run_cli_in_thread(
                 _cli_debug(f"Failed to clear session from DB: {e}")
 
             # 2回目: 新規会話として実行
-            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id=None)
+            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id=None, is_planning=is_planning)
             _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(content)})")
 
             result_data = _run_cli_process(cmd, content, env, room_id, event_queue)
@@ -595,10 +604,12 @@ async def process_message_cli(
 
     event_q: thread_queue.Queue = thread_queue.Queue()
 
+    is_planning = project_status == "planning"
+
     # CLI を別スレッドで実行
     cli_thread = threading.Thread(
         target=_run_cli_in_thread,
-        args=(content, system_prompt, mcp_config_path, room_id, event_q, resume_session_id),
+        args=(content, system_prompt, mcp_config_path, room_id, event_q, resume_session_id, is_planning),
         daemon=True,
     )
     cli_thread.start()
