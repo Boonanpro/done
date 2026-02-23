@@ -33,6 +33,23 @@ CLI_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 _SENTINEL = object()  # キュー終了シグナル
 
+# アクティブなCLIプロセスを追跡（room_id → Popen）
+_active_processes: Dict[str, subprocess.Popen] = {}
+_process_lock = threading.Lock()
+
+
+def kill_cli_process(room_id: str) -> bool:
+    """CLIサブプロセスを即座に終了する"""
+    with _process_lock:
+        process = _active_processes.pop(room_id, None)
+    if process is None:
+        return False
+    try:
+        process.terminate()  # Windows: TerminateProcess
+        return True
+    except Exception:
+        return False
+
 
 def _load_session(room_id: str) -> Optional[str]:
     """DBからCLIセッションIDを読み込む（インメモリキャッシュ優先）"""
@@ -325,6 +342,10 @@ def _run_cli_process(
         errors="replace",
     )
 
+    # プロセスを追跡dictに登録
+    with _process_lock:
+        _active_processes[room_id] = process
+
     _cli_debug(f"CLI process started: PID={process.pid}")
 
     try:
@@ -448,7 +469,14 @@ def _run_cli_process(
 
         elif msg_type == "system":
             session_id_captured = data.get("session_id", session_id_captured)
+            # セッションIDを即座にDBへ保存（プロセス強制終了時にresultが来なくても--resumeできるように）
+            if session_id_captured:
+                _save_session(room_id, session_id_captured)
             _cli_debug(f"System message: session_id={session_id_captured}")
+
+    # プロセスを追跡dictから削除
+    with _process_lock:
+        _active_processes.pop(room_id, None)
 
     return_code = process.wait(timeout=30)
     _cli_debug(f"CLI process exited with code {return_code}")
@@ -498,6 +526,17 @@ def _run_cli_in_thread(
     # ANTHROPIC_API_KEY: CLIがMax planサブスク（定額）ではなくAPI従量課金を使うのを防止
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
     env["DAN_SESSION_ID"] = room_id
+
+    # .env にしか定義されていない変数を settings から補完
+    # （os.environ には入らないため、CLIやMCPサーバーに渡らず Supabase アクセスが失敗する）
+    from app.config import settings
+    for key, val in [
+        ("SUPABASE_URL", settings.SUPABASE_URL),
+        ("SUPABASE_KEY", settings.SUPABASE_KEY),
+        ("SUPABASE_SERVICE_ROLE_KEY", settings.SUPABASE_SERVICE_ROLE_KEY),
+    ]:
+        if val and key not in env:
+            env[key] = val
 
     try:
         # 1回目: セッション再開を試みる
@@ -605,6 +644,7 @@ async def process_message_cli(
     resume_session_id = _load_session(room_id)
 
     # CLI を別スレッドで実行
+    event_q = thread_queue.Queue()
     cli_thread = threading.Thread(
         target=_run_cli_in_thread,
         args=(content, system_prompt, mcp_config_path, room_id, event_q, resume_session_id, is_planning),
@@ -613,16 +653,24 @@ async def process_message_cli(
     cli_thread.start()
 
     # キューからイベントを非同期に読み出してyield
+    # タイムアウトを2秒に短縮してキャンセル検出の応答性を向上
+    from app.services.cancellation import CancellationRegistry
     loop = asyncio.get_running_loop()
     idle_seconds = 0
     while True:
+        # キャンセル検出
+        if CancellationRegistry.is_cancelled(room_id):
+            kill_cli_process(room_id)
+            yield {"type": "cancelled"}
+            break
+
         try:
             event = await loop.run_in_executor(
-                None, lambda: event_q.get(timeout=10)
+                None, lambda: event_q.get(timeout=2)
             )
         except Exception:
             # queue.Empty (timeout)
-            idle_seconds += 10
+            idle_seconds += 2
             if not cli_thread.is_alive():
                 _cli_debug(f"CLI thread died unexpectedly after {idle_seconds}s idle")
                 yield {"type": "error", "message": "CLI process terminated unexpectedly"}
