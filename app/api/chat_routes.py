@@ -738,9 +738,20 @@ async def send_dan_message_stream(
                     project_status=project_info.get("status", "in_progress"),
                     user_messages=user_messages_for_cli,
                 ):
-                    if event["type"] == "reasoning":
+                    if event["type"] == "cancelled":
+                        await service.send_dan_ai_message(current_user.user_id, "（中断されました）", [], room_id=room_id)
+                        await project_service.save_execution_event(
+                            project_id=project_info["id"], room_id=room_id,
+                            event_type="done", content="cancelled",
+                        )
+                        yield f"data: {json.dumps({'type': 'cancelled', 'session_id': room_id})}\n\n"
+                        done_sent = True
+                        result_saved = True
+                        break
+
+                    elif event["type"] == "reasoning":
                         text = event.get("text", "")
-                        label = _summarize_reasoning(text, max_len=300) or text[:300]
+                        label = _summarize_reasoning(text) or text
                         reasoning_steps.append(label)
                         if text.strip():
                             reasoning_full.append(text)
@@ -754,7 +765,7 @@ async def send_dan_message_stream(
                                     project_id=project_info["id"],
                                     room_id=room_id,
                                     event_type="reasoning",
-                                    content=summary or text[:200],
+                                    content=summary or text,
                                 )
                             except Exception:
                                 pass
@@ -803,46 +814,48 @@ async def send_dan_message_stream(
                                 project_id=project_info["id"],
                                 room_id=room_id,
                                 event_type="error",
-                                content=event.get("message", "")[:500],
+                                content=event.get("message", ""),
                             )
                         except Exception:
                             pass
 
-                # DBに保存（空の場合のフォールバックはエラー内容を含む）
-                ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
-                ai_message_data = await service.send_dan_ai_message(
-                    current_user.user_id, ai_response_content, reasoning_steps,
-                    room_id=room_id, reasoning_full=reasoning_full,
-                )
-
-                if not ai_message_data:
-                    import logging
-                    logging.error(f"send_dan_ai_message returned None for user {current_user.user_id}")
-                    raise ValueError("Failed to save AI message: returned None")
-
-                ai_message = {
-                    "id": ai_message_data["id"],
-                    "room_id": ai_message_data["room_id"],
-                    "sender_id": ai_message_data.get("sender_id"),
-                    "sender_name": "ダン",
-                    "sender_type": "ai",
-                    "content": ai_message_data["content"],
-                    "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
-                }
-                if ai_message_data.get("ai_context"):
-                    ai_message["ai_context"] = ai_message_data["ai_context"]
-
-                yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
-                # DB: done イベント保存（再接続時に「完了済み」を判定するため）
-                try:
-                    await project_service.save_execution_event(
-                        project_id=project_info["id"], room_id=room_id,
-                        event_type="done", content="completed",
+                # キャンセル時はスキップ（cancelled ハンドラで保存済み）
+                if not result_saved:
+                    # DBに保存（空の場合のフォールバックはエラー内容を含む）
+                    ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
+                    ai_message_data = await service.send_dan_ai_message(
+                        current_user.user_id, ai_response_content, reasoning_steps,
+                        room_id=room_id, reasoning_full=reasoning_full,
                     )
-                except Exception:
-                    pass
-                yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
-                done_sent = True
+
+                    if not ai_message_data:
+                        import logging
+                        logging.error(f"send_dan_ai_message returned None for user {current_user.user_id}")
+                        raise ValueError("Failed to save AI message: returned None")
+
+                    ai_message = {
+                        "id": ai_message_data["id"],
+                        "room_id": ai_message_data["room_id"],
+                        "sender_id": ai_message_data.get("sender_id"),
+                        "sender_name": "ダン",
+                        "sender_type": "ai",
+                        "content": ai_message_data["content"],
+                        "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
+                    }
+                    if ai_message_data.get("ai_context"):
+                        ai_message["ai_context"] = ai_message_data["ai_context"]
+
+                    yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+                    # DB: done イベント保存（再接続時に「完了済み」を判定するため）
+                    try:
+                        await project_service.save_execution_event(
+                            project_id=project_info["id"], room_id=room_id,
+                            event_type="done", content="completed",
+                        )
+                    except Exception:
+                        pass
+                    yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
+                    done_sent = True
 
             else:
                 # ========================================
@@ -905,7 +918,7 @@ async def send_dan_message_stream(
                         try:
                             await _event_svc.save_execution_event(
                                 project_id=None, room_id=room_id,
-                                event_type="reasoning", content=step[:500],
+                                event_type="reasoning", content=step,
                             )
                         except Exception:
                             pass
@@ -1363,13 +1376,15 @@ async def cancel_dan_session(
     """
     from app.services.cancellation import CancellationRegistry
     from app.tools.browser import abort_executor_session
+    from app.agent.cli_runner import kill_cli_process
 
     success = CancellationRegistry.cancel(request.session_id)
+    cli_killed = kill_cli_process(request.session_id)
 
     # ブラウザセッションも停止
     abort_executor_session()
 
-    return {"success": success, "session_id": request.session_id}
+    return {"success": success or cli_killed, "session_id": request.session_id}
 
 
 # ==================== Proposal Routes (2G) ====================
