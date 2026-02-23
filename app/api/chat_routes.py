@@ -700,7 +700,7 @@ async def send_dan_message_stream(
                 # CLI Runner でプロジェクト実行（SDK は親子タスクでフリーズするため）
                 # ========================================
                 from app.agent.cli_runner import process_message_cli
-                from app.api.project_routes import _format_tool_label, _summarize_reasoning
+                from app.api.project_routes import _format_tool_label
 
                 project_service = ProjectService()
                 final_text = ""
@@ -751,7 +751,7 @@ async def send_dan_message_stream(
 
                     elif event["type"] == "reasoning":
                         text = event.get("text", "")
-                        label = _summarize_reasoning(text) or text
+                        label = text
                         reasoning_steps.append(label)
                         if text.strip():
                             reasoning_full.append(text)
@@ -760,12 +760,11 @@ async def send_dan_message_stream(
                         # execution_events に保存（ProcessMonitor用）
                         if text.strip():
                             try:
-                                summary = _summarize_reasoning(text)
                                 await project_service.save_execution_event(
                                     project_id=project_info["id"],
                                     room_id=room_id,
                                     event_type="reasoning",
-                                    content=summary or text,
+                                    content=text,
                                 )
                             except Exception:
                                 pass
@@ -792,7 +791,8 @@ async def send_dan_message_stream(
                         final_text = event["text"]
                         text_preview = event["text"].strip()
                         if text_preview and len(text_preview) > 10:
-                            label = f"{_summarize_reasoning(text_preview, max_len=300) or text_preview[:300]}"
+                            # Use full text preview without truncation.
+                            label = text_preview
                             reasoning_steps.append(label)
                             reasoning_full.append(text_preview)
                             yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
@@ -934,7 +934,7 @@ async def send_dan_message_stream(
                         try:
                             await _event_svc.save_execution_event(
                                 project_id=None, room_id=room_id,
-                                event_type="reasoning", content=progress_update.label[:500],
+                                event_type="reasoning", content=progress_update.label,
                             )
                         except Exception:
                             pass
