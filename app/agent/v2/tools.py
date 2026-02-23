@@ -1003,7 +1003,7 @@ def _find_yaml_by_session_id(session_id: str) -> Optional[Path]:
     if session_dir.exists():
         yaml_files = list(session_dir.glob("*.yaml"))
         if yaml_files:
-            success_files = [f for f in yaml_files if _yaml_is_successful(f) is True]
+            success_files = [f for f in yaml_files if _yaml_is_successful(f)]
             if success_files:
                 return max(success_files, key=lambda f: f.stat().st_mtime)
             return max(yaml_files, key=lambda f: f.stat().st_mtime)
@@ -1013,7 +1013,7 @@ def _find_yaml_by_session_id(session_id: str) -> Optional[Path]:
         if session_id in yaml_file.parent.name:
             candidates.append(yaml_file)
     if candidates:
-        success_files = [f for f in candidates if _yaml_is_successful(f) is True]
+        success_files = [f for f in candidates if _yaml_is_successful(f)]
         if success_files:
             return max(success_files, key=lambda f: f.stat().st_mtime)
         return max(candidates, key=lambda f: f.stat().st_mtime)
@@ -1809,7 +1809,7 @@ async def _execute_sub_agent(
 
         return {
             "success": True,
-            "result": final_text,
+            "output": final_text,
             "role": role,
             "message": f"{role_label}の調査が完了しました。",
         }
