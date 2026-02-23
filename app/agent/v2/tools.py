@@ -1749,7 +1749,10 @@ async def _execute_sub_agent(
 
         # stdout から JSON stream を読み取り
         final_text = ""
-        processed_msg_ids: set = set()
+        # --verbose の stream-json は同じ msg_id を段階的に複数回出力する
+        # （例: 1回目=thinking, 2回目=tool_use, 3回目=text）
+        # 処理済みブロック数を記録し、新しく増えた分だけ処理する
+        processed_block_counts: dict = {}  # msg_id → 処理済みブロック数
 
         async for raw_line in process.stdout:
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1768,14 +1771,17 @@ async def _execute_sub_agent(
                 msg_id = message_data.get("id", "")
                 blocks = message_data.get("content", [])
 
-                # 重複防止（stream-json は同じ msg_id を複数回出すことがある）
-                if msg_id in processed_msg_ids:
+                # 前回処理済みの数を取得し、新しく増えた分だけ処理
+                prev_count = processed_block_counts.get(msg_id, 0)
+                new_blocks = blocks[prev_count:]
+                processed_block_counts[msg_id] = len(blocks)
+
+                if not new_blocks:
                     continue
-                processed_msg_ids.add(msg_id)
 
                 # イベント保存 & テキスト収集
-                await _forward_sub_agent_events(role, blocks, session_id, project_id)
-                for block in blocks:
+                await _forward_sub_agent_events(role, new_blocks, session_id, project_id)
+                for block in new_blocks:
                     if block.get("type") == "text":
                         text = block.get("text", "")
                         if text.strip():
@@ -1866,12 +1872,11 @@ async def _forward_sub_agent_events(
             elif block_type == "text":
                 text = block.get("text", "").strip()
                 if text:
-                    summary = text[:200]
                     await ps.save_execution_event(
                         project_id=project_id,
                         room_id=session_id,
                         event_type="reasoning",
-                        content=f"[{role_label}] {summary}",
+                        content=f"[{role_label}] {text}",
                         metadata={"member": role},
                     )
 
