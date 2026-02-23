@@ -286,7 +286,7 @@ async def resume_execution(
 
 # ==================== Helpers ====================
 
-def _summarize_reasoning(text: str, max_len: int = 120) -> str:
+def _summarize_reasoning(text: str) -> str:
     """思考テキストを1文に要約（先頭の意味のある文を抽出）"""
     if not text or not text.strip():
         return ""
@@ -300,8 +300,6 @@ def _summarize_reasoning(text: str, max_len: int = 120) -> str:
         if sep in first:
             first = first[: first.index(sep) + len(sep)]
             break
-    if len(first) > max_len:
-        first = first[: max_len - 1] + "…"
     return first
 
 
@@ -337,7 +335,7 @@ def _format_tool_label(name: str, tool_input: dict) -> str:
         return f"ファイル読み取り: {filename}" if filename else "ファイル読み取り"
     if "execute_command" in name or "run_command" in name:
         cmd = tool_input.get("command", "")
-        return f"コマンド実行: {cmd[:40]}" if cmd else "コマンド実行"
+        return f"コマンド実行: {cmd}" if cmd else "コマンド実行"
 
     # Claude Code SDK 内部ツール
     if name == "Read":
@@ -354,32 +352,32 @@ def _format_tool_label(name: str, tool_input: dict) -> str:
         return f"ファイル編集: {filename}" if filename else "ファイル編集"
     if name == "Bash":
         cmd = tool_input.get("command", "")
-        return f"コマンド実行: {cmd[:40]}" if cmd else "コマンド実行"
+        return f"コマンド実行: {cmd}" if cmd else "コマンド実行"
     if name == "Glob":
         pattern = tool_input.get("pattern", "")
         return f"ファイル検索: {pattern}" if pattern else "ファイル検索"
     if name == "Grep":
         pattern = tool_input.get("pattern", "")
-        return f"コード検索: {pattern[:30]}" if pattern else "コード検索"
+        return f"コード検索: {pattern}" if pattern else "コード検索"
     if name == "TodoWrite":
         return "タスクリスト更新"
     if name == "Task":
         desc = tool_input.get("description", "")
-        return f"サブタスク: {desc[:30]}" if desc else "サブタスク実行"
+        return f"サブタスク: {desc}" if desc else "サブタスク実行"
     if name == "WebSearch":
         query = tool_input.get("query", "")
-        return f"WebSearch: {query[:50]}" if query else "WebSearch"
+        return f"WebSearch: {query}" if query else "WebSearch"
     if name == "WebFetch":
         url = tool_input.get("url", "")
-        return f"WebFetch: {url[:50]}" if url else "WebFetch"
+        return f"WebFetch: {url}" if url else "WebFetch"
 
     # MCP ツール（call_researcher / call_critic）
     if "call_researcher" in name:
         task = tool_input.get("task", "")
-        return f"リサーチャーに調査依頼: {task[:40]}" if task else "リサーチャーに調査依頼"
+        return f"リサーチャーに調査依頼: {task}" if task else "リサーチャーに調査依頼"
     if "call_critic" in name:
         focus = tool_input.get("focus_areas", "")
-        return f"クリティックに検証依頼: {focus[:40]}" if focus else "クリティックに検証依頼"
+        return f"クリティックに検証依頼: {focus}" if focus else "クリティックに検証依頼"
 
     return name
 
