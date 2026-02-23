@@ -1855,7 +1855,7 @@ async def _forward_sub_agent_events(
                 if isinstance(tool_input, dict):
                     for key in ("query", "url", "task"):
                         if key in tool_input:
-                            val = str(tool_input[key])[:80]
+                            val = str(tool_input[key])
                             detail_str = f': "{val}"'
                             break
 
@@ -1883,12 +1883,11 @@ async def _forward_sub_agent_events(
             elif block_type == "thinking":
                 thinking_text = block.get("thinking", "")
                 if thinking_text:
-                    summary = thinking_text.strip()[:150]
                     await ps.save_execution_event(
                         project_id=project_id,
                         room_id=session_id,
                         event_type="reasoning",
-                        content=f"[{role_label}] {summary}",
+                        content=f"[{role_label}] {thinking_text.strip()}",
                         metadata={"member": role},
                     )
 
