@@ -25,6 +25,7 @@ Last updated: 2026-02-24
 
 CLI prompt builder:
 - `app/agent/cli_runner.py` `_build_system_prompt(...)`
+- `app/agent/core_runtime_contract.md` (single runtime contract source)
 
 Current behavior:
 - Planning status:
