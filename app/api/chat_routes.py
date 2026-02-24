@@ -54,46 +54,133 @@ ACCESS_TOKEN_COOKIE = "done_access_token"
 REFRESH_TOKEN_COOKIE = "done_refresh_token"
 WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
 WORKSPACE_MEMORY_DIR = WORKSPACE_DIR / "memory"
+COMPACTION_SNAPSHOT_INTERVAL_MESSAGES = 40
 logger = logging.getLogger(__name__)
 
 
-def _append_chat_turn_to_memory(
+def _compact_text(text: str, limit: int = 220) -> str:
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = " ".join(line.strip() for line in text.split("\n") if line.strip())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "..."
+
+
+def _build_session_memory_summary_entry(
     *,
+    archive_type: str,
     room_id: str,
-    user_content: str,
-    ai_content: str,
+    messages: list[dict],
     is_project: bool,
     project_title: str = "",
     project_status: str = "",
-) -> None:
-    """Persist one chat turn into workspace daily memory log."""
-    user_text = (user_content or "").strip()
-    ai_text = (ai_content or "").strip()
-    if not user_text and not ai_text:
+    message_count: Optional[int] = None,
+) -> Optional[str]:
+    if not messages:
+        return None
+
+    chronological = list(reversed(messages))
+    created_values = []
+    for msg in chronological:
+        dt = parse_datetime(msg.get("created_at"))
+        if dt:
+            created_values.append(dt)
+
+    period_label = "-"
+    if created_values:
+        period_label = (
+            f"{created_values[0].strftime('%Y-%m-%d %H:%M:%S')} -> "
+            f"{created_values[-1].strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+    user_msgs = [m for m in chronological if m.get("sender_type") == "human"]
+    ai_msgs = [m for m in chronological if m.get("sender_type") == "ai"]
+    last_user = _compact_text(user_msgs[-1]["content"]) if user_msgs else "-"
+    last_ai = _compact_text(ai_msgs[-1]["content"]) if ai_msgs else "-"
+
+    recent = chronological[-8:]
+    excerpt_lines = []
+    for m in recent:
+        role = "User" if m.get("sender_type") == "human" else "Assistant"
+        excerpt_lines.append(f"- {role}: {_compact_text(m.get('content', ''), limit=160)}")
+
+    now = datetime.now()
+    ts = now.strftime("%Y-%m-%d %H:%M:%S")
+    project_label = project_title.strip() if project_title else "-"
+    status_label = project_status.strip() if project_status else "-"
+    total_count = message_count if message_count is not None else len(messages)
+
+    return (
+        f"### {ts} [{archive_type}] room={room_id}\n"
+        f"- mode: {'project' if is_project else 'chat'}\n"
+        f"- project_title: {project_label}\n"
+        f"- project_status: {status_label}\n"
+        f"- total_messages: {total_count}\n"
+        f"- sampled_messages: {len(messages)}\n"
+        f"- period: {period_label}\n\n"
+        f"#### Last User Intent\n{last_user}\n\n"
+        f"#### Last Assistant Response\n{last_ai}\n\n"
+        f"#### Recent Excerpts\n" + ("\n".join(excerpt_lines) if excerpt_lines else "- (none)") + "\n\n"
+    )
+
+
+def _append_memory_entry(entry: str) -> None:
+    if not entry:
         return
 
     try:
         WORKSPACE_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
         now = datetime.now()
         date_str = now.strftime("%Y-%m-%d")
-        ts = now.strftime("%Y-%m-%d %H:%M:%S")
         log_path = WORKSPACE_MEMORY_DIR / f"{date_str}.md"
-
-        project_label = project_title.strip() if project_title else "-"
-        status_label = project_status.strip() if project_status else "-"
-        entry = (
-            f"### {ts} room={room_id}\n"
-            f"- mode: {'project' if is_project else 'chat'}\n"
-            f"- project_title: {project_label}\n"
-            f"- project_status: {status_label}\n\n"
-            f"#### User\n{user_text}\n\n"
-            f"#### Assistant\n{ai_text}\n\n"
-        )
-
         with log_path.open("a", encoding="utf-8") as f:
             f.write(entry)
     except Exception as e:
-        logger.warning("Failed to append chat turn to memory log: %s", e)
+        logger.warning("Failed to append memory entry: %s", e)
+
+
+async def _archive_session_summary(
+    *,
+    service: ChatService,
+    user_id: str,
+    room_id: str,
+    archive_type: str,
+    is_project: bool,
+    project_title: str = "",
+    project_status: str = "",
+    force: bool = False,
+) -> None:
+    try:
+        count_result = (
+            service.supabase.table("chat_messages")
+            .select("id", count="exact")
+            .eq("room_id", room_id)
+            .execute()
+        )
+        total_messages = count_result.count or 0
+        if total_messages == 0:
+            return
+
+        if not force:
+            if total_messages < COMPACTION_SNAPSHOT_INTERVAL_MESSAGES:
+                return
+            if total_messages % COMPACTION_SNAPSHOT_INTERVAL_MESSAGES != 0:
+                return
+
+        sample_limit = min(120, total_messages)
+        messages = await service.get_messages(room_id, user_id, limit=sample_limit)
+        entry = _build_session_memory_summary_entry(
+            archive_type=archive_type,
+            room_id=room_id,
+            messages=messages,
+            is_project=is_project,
+            project_title=project_title,
+            project_status=project_status,
+            message_count=total_messages,
+        )
+        _append_memory_entry(entry or "")
+    except Exception as e:
+        logger.warning("Failed to archive session summary (%s): %s", archive_type, e)
 
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str, remember_me: bool = False):
@@ -871,10 +958,11 @@ async def send_dan_message_stream(
                         current_user.user_id, ai_response_content, reasoning_steps,
                         room_id=room_id, reasoning_full=reasoning_full,
                     )
-                    _append_chat_turn_to_memory(
+                    await _archive_session_summary(
+                        service=service,
+                        user_id=current_user.user_id,
                         room_id=room_id,
-                        user_content=request.content,
-                        ai_content=ai_response_content,
+                        archive_type="snapshot",
                         is_project=True,
                         project_title=project_info.get("title", ""),
                         project_status=project_info.get("status", ""),
@@ -981,10 +1069,11 @@ async def send_dan_message_stream(
                         room_id=room_id,
                         reasoning_full=reasoning_full,
                     )
-                    _append_chat_turn_to_memory(
+                    await _archive_session_summary(
+                        service=service,
+                        user_id=current_user.user_id,
                         room_id=room_id,
-                        user_content=request.content,
-                        ai_content=ai_response_content,
+                        archive_type="snapshot",
                         is_project=False,
                     )
                     result_saved = True
@@ -1034,10 +1123,11 @@ async def send_dan_message_stream(
                         _saved = await service.send_dan_ai_message(
                             current_user.user_id, _ai_response, _steps, room_id=room_id_for_cancel
                         )
-                        _append_chat_turn_to_memory(
+                        await _archive_session_summary(
+                            service=service,
+                            user_id=current_user.user_id,
                             room_id=room_id_for_cancel,
-                            user_content=request.content,
-                            ai_content=_ai_response,
+                            archive_type="snapshot",
                             is_project=is_project if "is_project" in locals() else False,
                             project_title=project_info.get("title", "") if "project_info" in locals() else "",
                             project_status=project_info.get("status", "") if "project_info" in locals() else "",
@@ -1260,6 +1350,15 @@ async def delete_dan_session(
         # キャンセル処理: 実行中のタスクとブラウザ操作を停止
         from app.services.cancellation import CancellationRegistry
         from app.tools.browser import abort_executor_session
+
+        await _archive_session_summary(
+            service=service,
+            user_id=current_user.user_id,
+            room_id=session_id,
+            archive_type="delete",
+            is_project=False,
+            force=True,
+        )
 
         CancellationRegistry.cancel(session_id)
         abort_executor_session()
