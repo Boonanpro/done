@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 _cli_sessions: Dict[str, str] = {}
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent  # app/agent/ → app/ → D:\done\
-CORE_RUNTIME_CONTRACT_PATH = PROJECT_ROOT / "app" / "agent" / "core_runtime_contract.md"
 
 # 事業部の作業ディレクトリ（D:\done の外に置くことで開発者向け CLAUDE.md の混入を防ぐ）
 CLI_WORKSPACE = Path("D:/dan-workspace")
@@ -91,45 +90,19 @@ def _build_runtime_contract_section(is_planning: bool) -> str:
         get_all_skill_tools,
         get_team_leader_tools,
     )
+    from app.agent.runtime_contract import render_runtime_contract
 
     cli_builtin_tools = ["read_file", "write_file", "edit_file", "bash"]
     mcp_tools = get_team_leader_tools() if is_planning else get_all_skill_tools()
     mcp_tool_names = [tool.get("name", "") for tool in mcp_tools if tool.get("name")]
     skill_names = sorted({skill.name for skill in SkillRegistry.list_all()})
 
-    default_template = (
-        "## Runtime Contract\n"
-        "- You are Dan core. Keep one consistent behavior in this chat.\n"
-        "- Use available tools first. If domain-specific procedure is needed, use check_skill.\n\n"
-        "### CLI Built-in Tools\n"
-        "{{CLI_BUILTIN_TOOLS}}\n\n"
-        "### MCP Tools\n"
-        "{{MCP_TOOLS}}\n\n"
-        "### Available Skills\n"
-        "{{AVAILABLE_SKILLS}}\n\n"
-        "### Skill Usage Policy\n"
-        "1. Call check_skill when a domain-specific flow is likely required.\n"
-        "2. If no relevant skill exists, proceed with generic tools.\n"
-        "3. Do not stop only because a skill is missing.\n"
+    return render_runtime_contract(
+        cli_builtin_tools=cli_builtin_tools,
+        mcp_tools=mcp_tool_names,
+        available_skills=skill_names,
+        logger=logger,
     )
-
-    template = default_template
-    try:
-        if CORE_RUNTIME_CONTRACT_PATH.exists():
-            template = CORE_RUNTIME_CONTRACT_PATH.read_text(encoding="utf-8")
-        else:
-            logger.warning("Runtime contract template not found: %s", CORE_RUNTIME_CONTRACT_PATH)
-    except Exception as e:
-        logger.warning("Failed to load runtime contract template: %s", e)
-
-    replacements = {
-        "{{CLI_BUILTIN_TOOLS}}": ", ".join(cli_builtin_tools) if cli_builtin_tools else "(none)",
-        "{{MCP_TOOLS}}": ", ".join(mcp_tool_names) if mcp_tool_names else "(none)",
-        "{{AVAILABLE_SKILLS}}": ", ".join(skill_names) if skill_names else "(none)",
-    }
-    for token, value in replacements.items():
-        template = template.replace(token, value)
-    return template
 
 
 def _build_system_prompt(title: str, description: str, status: str, user_messages: str = "") -> str:

@@ -223,19 +223,45 @@ async def run_heartbeat() -> dict:
     prompt = _build_prompt(frontend_error=frontend_error)
 
     try:
-        from app.agent.v2.runner import create_runner
+        from app.agent.cli_runner import process_message_cli
 
-        runner = await create_runner(
-            session_id=f"heartbeat-{user_id}",
+        room_id = f"heartbeat-{user_id}"
+        result_text = ""
+        cost = 0.0
+        turns = 0
+        errors = []
+
+        async for event in process_message_cli(
+            room_id=room_id,
             user_id=user_id,
-            on_reasoning_step=None,
-        )
-        result = await runner.process_message(prompt)
+            content=prompt,
+        ):
+            etype = event.get("type", "")
+            if etype == "text":
+                text = event.get("text", "")
+                if text:
+                    result_text += text + "\n"
+            elif etype == "result":
+                result_text = event.get("text", result_text)
+                cost = event.get("cost", 0.0)
+                turns = event.get("turns", 0)
+            elif etype == "error":
+                errors.append(event.get("message", "unknown error"))
+
+        result = {
+            "response": result_text.strip(),
+            "cost_usd": cost,
+            "turns": turns,
+        }
+        if errors:
+            result["errors"] = errors
+            result["error"] = "; ".join(errors)
+
         await _log_run(user_id, result)
 
-        # 非trivialな結果をcompanionセッションに音声プッシュ
+        # Skip voice push for trivial heartbeat result.
         response_text = result.get("response", "")
-        if response_text and "特記事項なし" not in response_text:
+        if response_text and "\u7279\u8a18\u4e8b\u9805\u306a\u3057" not in response_text:
             try:
                 from app.services.voice_push import push_voice_message
                 await push_voice_message(user_id, response_text)
