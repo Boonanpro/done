@@ -3,7 +3,7 @@
 ## Example 1: UI Refresh Request
 
 Request:
-"ダン自身のUIの色をリッチに変更して。"
+"Dan自身のUIの見た目をリッチに改善してください。"
 
 Typical result:
 - lane: A1
@@ -13,7 +13,7 @@ Typical result:
 ## Example 2: Gmail Notification Integration
 
 Request:
-"Gmailと連携し、返信や支払いが必要なメールを通知コンポーネントに表示して。"
+"Gmailと連携して、返信や支払いが必要なメールを通知コンポーネントに表示してください。"
 
 Typical result:
 - lane: A1 or B
@@ -27,7 +27,7 @@ Reason:
 ## Example 3: AI-First New Business Plan
 
 Request:
-"この事業を立ち上げる場合、今のAIでどこまでできるか調べて期間と費用を見積もって。"
+"新規事業として、見積返信メールの未返信放置を防ぐため、Outlook/Gmail向けに『返信必須メールの自動リマインド』を提供するツールを作りたい。プロジェクト化し、計画を立ててください。"
 
 Typical result:
 - lane: C

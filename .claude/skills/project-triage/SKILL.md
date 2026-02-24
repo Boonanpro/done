@@ -1,4 +1,4 @@
----
+﻿---
 name: project-triage
 description: Classify incoming requests into lane A0 (secretary direct), A1 (business direct), B (light planning), or C (deep capability scan). Use when deciding whether to execute immediately or route to business planning, especially for feature requests, integrations, scope changes, or ambiguous multi-step tasks.
 ---
@@ -78,8 +78,8 @@ Execution profile:
 
 ## Examples
 
-- "UIをリッチに改善して": usually `A1`
-- "Gmail連携して通知コンポーネントに反映": usually `A1` or `B`
-- "新規事業を最短で立ち上げ、AI実行範囲を見積もりたい": usually `C`
+- "Dan自身のUIの見た目をリッチに改善して": usually A1
+- "Gmailと連携して、返信や支払いが必要なメールを通知コンポーネントに表示して": usually A1 or B
+- "返信必須メールの自動リマインド事業を作りたい。プロジェクト化して計画化して": usually C
 
-Read `references/examples.md` for full examples.
+Read references/examples.md for full examples.
