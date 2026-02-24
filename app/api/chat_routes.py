@@ -7,6 +7,8 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 from datetime import datetime, timezone
 import json
+import logging
+from pathlib import Path
 
 from app.config import settings
 
@@ -50,6 +52,48 @@ security = HTTPBearer(auto_error=False)
 # Cookie names
 ACCESS_TOKEN_COOKIE = "done_access_token"
 REFRESH_TOKEN_COOKIE = "done_refresh_token"
+WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
+WORKSPACE_MEMORY_DIR = WORKSPACE_DIR / "memory"
+logger = logging.getLogger(__name__)
+
+
+def _append_chat_turn_to_memory(
+    *,
+    room_id: str,
+    user_content: str,
+    ai_content: str,
+    is_project: bool,
+    project_title: str = "",
+    project_status: str = "",
+) -> None:
+    """Persist one chat turn into workspace daily memory log."""
+    user_text = (user_content or "").strip()
+    ai_text = (ai_content or "").strip()
+    if not user_text and not ai_text:
+        return
+
+    try:
+        WORKSPACE_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        now = datetime.now()
+        date_str = now.strftime("%Y-%m-%d")
+        ts = now.strftime("%Y-%m-%d %H:%M:%S")
+        log_path = WORKSPACE_MEMORY_DIR / f"{date_str}.md"
+
+        project_label = project_title.strip() if project_title else "-"
+        status_label = project_status.strip() if project_status else "-"
+        entry = (
+            f"### {ts} room={room_id}\n"
+            f"- mode: {'project' if is_project else 'chat'}\n"
+            f"- project_title: {project_label}\n"
+            f"- project_status: {status_label}\n\n"
+            f"#### User\n{user_text}\n\n"
+            f"#### Assistant\n{ai_text}\n\n"
+        )
+
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(entry)
+    except Exception as e:
+        logger.warning("Failed to append chat turn to memory log: %s", e)
 
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str, remember_me: bool = False):
@@ -827,6 +871,14 @@ async def send_dan_message_stream(
                         current_user.user_id, ai_response_content, reasoning_steps,
                         room_id=room_id, reasoning_full=reasoning_full,
                     )
+                    _append_chat_turn_to_memory(
+                        room_id=room_id,
+                        user_content=request.content,
+                        ai_content=ai_response_content,
+                        is_project=True,
+                        project_title=project_info.get("title", ""),
+                        project_status=project_info.get("status", ""),
+                    )
 
                     if not ai_message_data:
                         import logging
@@ -929,6 +981,12 @@ async def send_dan_message_stream(
                         room_id=room_id,
                         reasoning_full=reasoning_full,
                     )
+                    _append_chat_turn_to_memory(
+                        room_id=room_id,
+                        user_content=request.content,
+                        ai_content=ai_response_content,
+                        is_project=False,
+                    )
                     result_saved = True
 
                     if not ai_message_data:
@@ -975,6 +1033,14 @@ async def send_dan_message_stream(
                         # AI回答をDBに保存
                         _saved = await service.send_dan_ai_message(
                             current_user.user_id, _ai_response, _steps, room_id=room_id_for_cancel
+                        )
+                        _append_chat_turn_to_memory(
+                            room_id=room_id_for_cancel,
+                            user_content=request.content,
+                            ai_content=_ai_response,
+                            is_project=is_project if "is_project" in locals() else False,
+                            project_title=project_info.get("title", "") if "project_info" in locals() else "",
+                            project_status=project_info.get("status", "") if "project_info" in locals() else "",
                         )
                         _log.info(f"[SSE-DISCONNECT] AI response saved to DB (room={room_id_for_cancel}, msg_id={_saved['id'] if _saved else 'None'})")
 
