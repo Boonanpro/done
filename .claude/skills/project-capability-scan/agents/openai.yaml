@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Capability Scan"
+  short_description: "Evaluate current AI automation limits for a project."
+  default_prompt: "Use $project-capability-scan to assess what current AI can execute now, what still needs humans, and produce AI-first USD estimates with sources."
