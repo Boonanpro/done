@@ -351,7 +351,6 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         WRITE_FILE_TOOL,
         EDIT_FILE_TOOL,
         BASH_TOOL,
-        CREATE_PROJECT_TOOL,
     ]
 
 

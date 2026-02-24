@@ -259,14 +259,9 @@ class AgentRunner:
 
     def _should_attempt_project_triage(self, user_message: str) -> bool:
         """プロジェクトtriageを行うべきか判定"""
-        if self._is_project_chat_room():
-            return False
-        text = (user_message or "").strip()
-        if not text:
-            return False
-        if len(text) < 6:
-            return False
-        return bool(ACTIONABLE_REQUEST_RE.search(text))
+        # Chat-first phase:
+        # Do not run automatic pre-triage from normal chat.
+        return False
 
     @staticmethod
     def _parse_project_triage_block(text: str) -> Optional[Dict[str, Any]]:
@@ -497,21 +492,8 @@ class AgentRunner:
             self.session.add_user_message(user_message)
 
             # 2.5 project-triage（秘書の一次ルーティング）
-            if self._should_attempt_project_triage(user_message):
-                triage = await self._run_project_triage(user_message)
-                if triage and self._on_reasoning_step:
-                    lane = triage.get("lane", "?")
-                    conf = triage.get("confidence", 0.0)
-                    await self._on_reasoning_step(f"project-triage: lane={lane} confidence={conf:.2f}")
-
-                if triage:
-                    delegated = await self._delegate_to_business(
-                        user_message=user_message,
-                        triage=triage,
-                        credentials=credentials,
-                    )
-                    if delegated:
-                        return delegated
+            
+            # project-triage is disabled in chat-first phase.
 
             # 3. LLM呼び出し→ツール実行ループ（Native Tool Use）
             tool_results = []
@@ -903,7 +885,6 @@ class AgentRunner:
             name = tool.get("name", "")
             desc = tool.get("description", "").split("\n")[0]  # 1行目のみ
             lines.append(f"- `{name}`: {desc}")
-        lines.append("- `create_project`: ユーザーの依頼をプロジェクトとして登録（複数ステップのタスクに使用）")
         return "\n".join(lines)
 
     def _build_skill_list_section(self) -> str:
