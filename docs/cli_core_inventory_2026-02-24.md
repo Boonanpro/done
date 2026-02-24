@@ -114,13 +114,13 @@ CLI runtime contract now injects:
 1. Project creation UX risk:
    - Chat cannot directly call `create_project` tool now.
 2. Contract sprawl risk:
-   - Runtime contract is in code; it should be kept as one versioned source.
+   - Runtime contract is now file-backed for CLI, but other channels should reuse the same source.
 3. Channel parity risk:
-   - Voice and heartbeat still use old runner path in some places.
+   - Voice still has separate prompt/runtime path and should be aligned with core contract.
 
 ## 8) Recommended next implementation order
 
 1. Keep one versioned core prompt contract as single source.
 2. Define project creation behavior in chat.
-3. Migrate heartbeat to the same contract after chat core is stable.
-4. Migrate voice path last, then remove old runner path.
+3. Reuse the same runtime contract in voice path with channel-specific capability limits.
+4. Remove remaining old runner-specific prompt paths.
