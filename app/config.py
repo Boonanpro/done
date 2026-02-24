@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # MiniMax (M2.5 - main chat LLM)
     MINIMAX_API_KEY: str = ""
 
+    # Secretary routing profile
+    # - quality_first: delegate implementation-heavy work to business by default
+    # - speed_first: keep more work in secretary unless planning uncertainty is high
+    EXECUTION_PROFILE: str = "quality_first"
+
     # OpenAI (Embeddings for memory search)
     OPENAI_API_KEY: str = ""
 

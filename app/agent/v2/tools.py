@@ -1929,16 +1929,37 @@ async def execute_tool(
         title = params.get("title", "")
         description = params.get("description", "")
         user_request = params.get("user_request", "")
+        triage_lane = params.get("triage_lane", "")
+        triage_confidence = params.get("triage_confidence")
+        triage_summary = params.get("triage_summary", "")
+        execution_profile = params.get("execution_profile", "")
         if not title:
             return {"success": False, "error": "title が必要です"}
         try:
             from app.services.project_service import ProjectService
             service = ProjectService()
+            metadata = {}
+            triage_meta = {}
+            if triage_lane:
+                triage_meta["lane"] = str(triage_lane)
+            if triage_confidence is not None:
+                try:
+                    triage_meta["confidence"] = float(triage_confidence)
+                except Exception:
+                    triage_meta["confidence_raw"] = str(triage_confidence)
+            if triage_summary:
+                triage_meta["summary"] = str(triage_summary)[:500]
+            if execution_profile:
+                triage_meta["execution_profile"] = str(execution_profile)
+            if triage_meta:
+                metadata["triage"] = triage_meta
+
             project = await service.create_project(
                 user_id=user_id,
                 title=title,
                 description=description,
                 origin_room_id=session_id,
+                metadata=metadata or None,
             )
             # バックグラウンド自動提案を起動（非ブロック）
             if project.get("room_id"):
@@ -1952,6 +1973,8 @@ async def execute_tool(
                     description=description or "",
                     origin_room_id=session_id,
                     user_request=user_request,
+                    triage_lane=triage_lane or "",
+                    execution_profile=execution_profile or "",
                 ))
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)

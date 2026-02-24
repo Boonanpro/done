@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Triage"
+  short_description: "Route requests into lanes A0/A1/B/C for execution."
+  default_prompt: "Use $project-triage to classify this request into lane A0, A1, B, or C and propose the next action."

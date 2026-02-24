@@ -2,7 +2,8 @@
 Project Service - プロジェクト管理のビジネスロジック
 """
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
+import asyncio
 import uuid
 import logging
 
@@ -25,6 +26,7 @@ class ProjectService:
         title: str,
         description: Optional[str] = None,
         origin_room_id: Optional[str] = None,
+        metadata: Optional[dict] = None,
     ) -> dict:
         """プロジェクトを作成し、専用チャットルームも作る"""
         project_id = str(uuid.uuid4())
@@ -46,7 +48,7 @@ class ProjectService:
             }).execute()
 
         # プロジェクトを作成
-        result = self.supabase.table("projects").insert({
+        insert_data = {
             "id": project_id,
             "user_id": user_id,
             "title": title,
@@ -54,7 +56,11 @@ class ProjectService:
             "status": "planning",
             "room_id": room_id,
             "origin_room_id": origin_room_id,
-        }).execute()
+        }
+        if metadata:
+            insert_data["metadata"] = metadata
+
+        result = self.supabase.table("projects").insert(insert_data).execute()
 
         if not result.data:
             raise ValueError("Failed to create project")
@@ -96,7 +102,7 @@ class ProjectService:
         **updates,
     ) -> Optional[dict]:
         """プロジェクトを更新"""
-        updates["updated_at"] = datetime.utcnow().isoformat()
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
         result = (
             self.supabase.table("projects")
             .update(updates)
@@ -161,7 +167,7 @@ class ProjectService:
         # プロジェクトステータスをproposedに
         self.supabase.table("projects").update({
             "status": "proposed",
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", project_id).execute()
 
         return result.data[0]
@@ -183,7 +189,7 @@ class ProjectService:
             self.supabase.table("project_proposals")
             .update({
                 "status": "approved",
-                "approved_at": datetime.utcnow().isoformat(),
+                "approved_at": datetime.now(timezone.utc).isoformat(),
             })
             .eq("id", proposal_id)
             .eq("project_id", project_id)
@@ -195,7 +201,7 @@ class ProjectService:
             # プロジェクトステータスをapprovedに
             self.supabase.table("projects").update({
                 "status": "approved",
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", project_id).execute()
 
         return result.data[0] if result.data else None
@@ -256,7 +262,7 @@ class ProjectService:
             # プロジェクトステータスをplanningに戻す
             self.supabase.table("projects").update({
                 "status": "planning",
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", project_id).execute()
 
         return result.data[0] if result.data else None
@@ -284,7 +290,9 @@ class ProjectService:
         }
         if project_id:
             row["project_id"] = project_id
-        result = self.supabase.table("execution_events").insert(row).execute()
+        # NOTE: supabase-py の .execute() は同期HTTPコール。SSE内で呼ばれるため別スレッドで実行。
+        query = self.supabase.table("execution_events").insert(row)
+        result = await asyncio.to_thread(query.execute)
         return result.data[0] if result.data else {}
 
     async def get_execution_events(
