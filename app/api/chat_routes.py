@@ -859,194 +859,96 @@ async def send_dan_message_stream(
 
             else:
                 # ========================================
-                # 通常の Runner
+                # 非プロジェクトチャットも CLI Runner に統一
                 # ========================================
+                from app.agent.cli_runner import process_message_cli
+                from app.api.project_routes import _format_tool_label
 
-                # 推論ステップを収集するためのリストとキュー
+                final_text = ""
                 reasoning_steps = []
-                reasoning_queue = asyncio.Queue()
-                voice_queue = asyncio.Queue()
-
-                # 通常チャットでもexecution_eventsに保存（再接続時の復元用）
-                from app.services.project_service import ProjectService
-                _event_svc = ProjectService()
-
-                # 推論ステップをキューに追加するコールバック
-                async def on_reasoning_step(step: str):
-                    reasoning_steps.append(step)
-                    await reasoning_queue.put(step)
-
-                # 音声アナウンスをキューに追加するコールバック
-                async def on_voice_announcement(text: str):
-                    await voice_queue.put(text)
-
-                result = {}  # デフォルト初期化
-                from app.agent.v2.runner import create_runner
-
-                # Agent v2 Runner作成
-                runner = await create_runner(
-                    session_id=room_id,
-                    user_id=current_user.user_id,
-                    on_reasoning_step=on_reasoning_step,
-                    on_voice_announcement=on_voice_announcement,
-                )
-
-                # メッセージ処理をバックグラウンドで実行
-                process_task = asyncio.create_task(runner.process_message(request.content))
-
-                # キューを監視してSSEで送信（reasoning_queueとprogress_queue両方）
+                reasoning_full = []
                 step_counter = 0
-                while not process_task.done():
-                    # キャンセルチェック
-                    if CancellationRegistry.is_cancelled(room_id):
-                        process_task.cancel()
-                        # DBに中断メッセージを保存（孤児メッセージ防止）
-                        try:
-                            await service.send_dan_ai_message(current_user.user_id, "（中断されました）", [], room_id=room_id)
-                            result_saved = True
-                        except Exception:
-                            pass
+
+                async for event in process_message_cli(
+                    room_id=room_id,
+                    user_id=current_user.user_id,
+                    content=request.content,
+                    project_title="",
+                    project_description="",
+                    project_status="in_progress",
+                ):
+                    if event["type"] == "cancelled":
+                        await service.send_dan_ai_message(
+                            current_user.user_id, "処理を中止しました。", [], room_id=room_id
+                        )
                         yield f"data: {json.dumps({'type': 'cancelled', 'session_id': room_id})}\n\n"
-                        return
-
-                    # reasoning_queueをチェック
-                    try:
-                        step = await asyncio.wait_for(reasoning_queue.get(), timeout=0.05)
-                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'reasoning-{step_counter}', 'label': step, 'status': 'running'}})}\n\n"
-                        step_counter += 1
-                        # DB保存（再接続復元用）
-                        try:
-                            await _event_svc.save_execution_event(
-                                project_id=None, room_id=room_id,
-                                event_type="reasoning", content=step,
-                            )
-                        except Exception:
-                            pass
-                    except asyncio.TimeoutError:
-                        pass
-
-                    # progress_queueもチェック（VisualAgent等の進捗）
-                    try:
-                        progress_update = progress_queue.get_nowait()
-                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'visual-{step_counter}', 'label': progress_update.label, 'status': progress_update.status}})}\n\n"
-                        step_counter += 1
-                        # DB保存
-                        try:
-                            await _event_svc.save_execution_event(
-                                project_id=None, room_id=room_id,
-                                event_type="reasoning", content=progress_update.label,
-                            )
-                        except Exception:
-                            pass
-                    except asyncio.QueueEmpty:
-                        pass
-
-                    # voice_queueもチェック（音声アナウンス）
-                    try:
-                        voice_text = voice_queue.get_nowait()
-                        yield f"data: {json.dumps({'type': 'voice_announcement', 'session_id': room_id, 'text': voice_text})}\n\n"
-                    except asyncio.QueueEmpty:
-                        pass
-
-                # 残りのステップを送信
-                while not reasoning_queue.empty():
-                    try:
-                        step = reasoning_queue.get_nowait()
-                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'reasoning-{step_counter}', 'label': step, 'status': 'completed'}})}\n\n"
-                        step_counter += 1
-                    except asyncio.QueueEmpty:
-                        break
-
-                # 残りのprogress更新も送信
-                while not progress_queue.empty():
-                    try:
-                        progress_update = progress_queue.get_nowait()
-                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'visual-{step_counter}', 'label': progress_update.label, 'status': 'completed'}})}\n\n"
-                        step_counter += 1
-                    except asyncio.QueueEmpty:
-                        break
-
-                # 残りのvoice更新も送信
-                while not voice_queue.empty():
-                    try:
-                        voice_text = voice_queue.get_nowait()
-                        yield f"data: {json.dumps({'type': 'voice_announcement', 'session_id': room_id, 'text': voice_text})}\n\n"
-                    except asyncio.QueueEmpty:
-                        break
-
-                # 結果を取得
-                import logging as _sse_log
-                _sse_log.info(f"[SSE-TRACE] Awaiting process_task (room={room_id})")
-                result = await process_task
-                _sse_log.info(f"[SSE-TRACE] process_task returned (room={room_id}, keys={list(result.keys()) if result else 'None'})")
-
-                # キャンセルされた場合
-                if result.get("cancelled"):
-                    # DBに中断メッセージを保存（孤児メッセージ防止）
-                    try:
-                        await service.send_dan_ai_message(current_user.user_id, "（中断されました）", [], room_id=room_id)
+                        done_sent = True
                         result_saved = True
-                    except Exception:
-                        pass
-                    yield f"data: {json.dumps({'type': 'cancelled', 'session_id': room_id})}\n\n"
-                    return
+                        break
 
-                # 応答を取得（空文字列の場合もフォールバック）
-                ai_response_content = result.get("response") or "申し訳ありません。処理中にエラーが発生しました。"
-                _sse_log.info(f"[SSE-TRACE] Response length={len(ai_response_content)} (room={room_id})")
+                    elif event["type"] == "reasoning":
+                        text = event.get("text", "")
+                        label = text
+                        reasoning_steps.append(label)
+                        if text.strip():
+                            reasoning_full.append(text)
+                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
+                        step_counter += 1
 
-                # エラーがあれば通知
-                if result.get("error"):
-                    yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': result['error']})}\n\n"
+                    elif event["type"] == "tool_use":
+                        tool_label = _format_tool_label(event.get("name", ""), event.get("input", {}))
+                        reasoning_steps.append(f"🛠 {tool_label}")
+                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': f'🛠 {tool_label}', 'status': 'running'}})}\n\n"
+                        step_counter += 1
 
-                # DBに保存（指定されたroom_idを使用）
-                _sse_log.info(f"[SSE-TRACE] Saving to DB (room={room_id})")
-                ai_message_data = await service.send_dan_ai_message(current_user.user_id, ai_response_content, reasoning_steps, room_id=room_id)
-                _sse_log.info(f"[SSE-TRACE] DB save done (room={room_id}, msg_id={ai_message_data.get('id') if ai_message_data else 'None'})")
-                result_saved = True  # DB保存成功
+                    elif event["type"] == "text":
+                        final_text = event["text"]
+                        text_preview = event["text"].strip()
+                        if text_preview and len(text_preview) > 10:
+                            reasoning_steps.append(text_preview)
+                            reasoning_full.append(text_preview)
+                            yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': text_preview, 'status': 'running'}})}\n\n"
+                            step_counter += 1
 
-                if not ai_message_data:
-                    _sse_log.error(f"send_dan_ai_message returned None for user {current_user.user_id}")
-                    raise ValueError("Failed to save AI message: returned None")
+                    elif event["type"] == "result":
+                        result_text = event.get("text", "")
+                        if result_text:
+                            final_text = result_text
+                        elif event.get("is_error"):
+                            final_text = result_text
 
-                ai_message = {
-                    "id": ai_message_data["id"],
-                    "room_id": ai_message_data["room_id"],
-                    "sender_id": ai_message_data.get("sender_id"),
-                    "sender_name": "ダン",
-                    "sender_type": "ai",
-                    "content": ai_message_data["content"],
-                    "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
-                }
-                if ai_message_data.get("ai_context"):
-                    ai_message["ai_context"] = ai_message_data["ai_context"]
+                    elif event["type"] == "error":
+                        yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': event['message']})}\n\n"
 
-                # 完了（session_id付き）
-                _sse_log.info(f"[SSE-TRACE] Yielding ai_message (room={room_id})")
-                yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
-                _sse_log.info(f"[SSE-TRACE] ai_message yielded (room={room_id})")
-
-                # DB: done イベント保存（再接続時に「完了済み」を判定するため）
-                try:
-                    await _event_svc.save_execution_event(
-                        project_id=None, room_id=room_id,
-                        event_type="done", content="completed",
+                if not result_saved:
+                    ai_response_content = final_text or "応答の生成に失敗しました。"
+                    ai_message_data = await service.send_dan_ai_message(
+                        current_user.user_id,
+                        ai_response_content,
+                        reasoning_steps,
+                        room_id=room_id,
+                        reasoning_full=reasoning_full,
                     )
-                except Exception:
-                    pass
+                    result_saved = True
 
-                # スキル化可能なブラウザセッションIDがあれば含める
-                done_data = {'type': 'done', 'session_id': room_id}
-                browser_session_id = result.get("browser_session_id")
-                if browser_session_id:
-                    done_data['browser_session_id'] = browser_session_id
-                    done_data['can_create_skill'] = True
-                created_project_id = result.get("created_project_id")
-                if created_project_id:
-                    done_data['created_project_id'] = created_project_id
-                yield f"data: {json.dumps(done_data)}\n\n"
-                done_sent = True
+                    if not ai_message_data:
+                        raise ValueError("Failed to save AI message: returned None")
 
+                    ai_message = {
+                        "id": ai_message_data["id"],
+                        "room_id": ai_message_data["room_id"],
+                        "sender_id": ai_message_data.get("sender_id"),
+                        "sender_name": "ダン",
+                        "sender_type": "ai",
+                        "content": ai_message_data["content"],
+                        "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
+                    }
+                    if ai_message_data.get("ai_context"):
+                        ai_message["ai_context"] = ai_message_data["ai_context"]
+
+                    yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
+                    done_sent = True
         except Exception as e:
             import logging
             import traceback
