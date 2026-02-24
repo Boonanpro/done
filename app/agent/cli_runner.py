@@ -83,59 +83,76 @@ def _save_session(room_id: str, session_id: str):
         logger.warning(f"Failed to save CLI session for {room_id}: {e}")
 
 
+def _build_runtime_contract_section(is_planning: bool) -> str:
+    """Build one compact runtime contract section for CLI chat."""
+    from app.agent.v2.tools import (
+        SkillRegistry,
+        get_all_skill_tools,
+        get_team_leader_tools,
+    )
+
+    cli_builtin_tools = ["read_file", "write_file", "edit_file", "bash"]
+    mcp_tools = get_team_leader_tools() if is_planning else get_all_skill_tools()
+    mcp_tool_names = [tool.get("name", "") for tool in mcp_tools if tool.get("name")]
+    skill_names = sorted({skill.name for skill in SkillRegistry.list_all()})
+
+    lines = [
+        "## Runtime Contract",
+        "- You are Dan core. Keep one consistent behavior in this chat.",
+        "- Use available tools first. If domain-specific procedure is needed, use check_skill.",
+        "",
+        "### CLI Built-in Tools",
+        ", ".join(cli_builtin_tools) if cli_builtin_tools else "(none)",
+        "",
+        "### MCP Tools",
+        ", ".join(mcp_tool_names) if mcp_tool_names else "(none)",
+        "",
+        "### Available Skills",
+        ", ".join(skill_names) if skill_names else "(none)",
+        "",
+        "### Skill Usage Policy",
+        "1. Call check_skill when a domain-specific flow is likely required.",
+        "2. If no relevant skill exists, proceed with generic tools.",
+        "3. Do not stop only because a skill is missing.",
+    ]
+    return "\n".join(lines)
+
+
 def _build_system_prompt(title: str, description: str, status: str, user_messages: str = "") -> str:
-    """事業部（CLIエージェント）のシステムプロンプトを組み立てる
-
-    秘書部のRULES.md等は読み込まない。
-    CLIは元々高品質な判断力を持つので、最小限の指示だけ追加する。
-
-    status が "planning" の場合はリーダー常駐プロンプトを使用する。
     """
-    from app.agent.v2.runner import load_bootstrap_file
+    Build CLI system prompt for both normal and planning turns.
 
-    # planning ステータス → リーダー常駐プロンプトを使用
-    if status == "planning":
+    This path is now chat-first core, so it should load shared bootstrap files
+    and runtime contract consistently.
+    """
+    from app.agent.v2.runner import load_all_bootstrap_files
+
+    is_planning = status == "planning"
+    parts = []
+
+    if is_planning:
         from app.agent.v2.team.prompts import get_leader_resident_prompt
-        leader_prompt = get_leader_resident_prompt(title, description, user_messages)
+        parts.append(get_leader_resident_prompt(title, description, user_messages))
+    else:
+        parts.append("You are Dan core assistant. You plan, research, implement, and explain clearly.")
 
-        parts = [leader_prompt]
+    # Shared memory/rules context used across chat turns.
+    bootstrap = load_all_bootstrap_files()
+    if bootstrap:
+        parts.append(bootstrap)
 
-        # ユーザー情報のみ読み込む（個人情報の判断に必要）
-        user = load_bootstrap_file("USER.md")
-        if user:
-            parts.append(f"## ユーザー情報\n\n{user}")
+    # Runtime contract: tool/skill visibility and behavior policy.
+    parts.append(_build_runtime_contract_section(is_planning=is_planning))
 
-        # ペルソナ（2行のみ）
-        soul = load_bootstrap_file("SOUL.md")
-        if soul:
-            parts.append(f"## ペルソナ\n\n{soul}")
-
-        return "\n\n".join(parts)
-
-    # 通常の事業部プロンプト
-    parts = ["You are Dan's business division. You plan, research, and execute projects."]
-
-    # ユーザー情報のみ読み込む（個人情報の判断に必要）
-    user = load_bootstrap_file("USER.md")
-    if user:
-        parts.append(f"## ユーザー情報\n\n{user}")
-
-    # ペルソナ（2行のみ）
-    soul = load_bootstrap_file("SOUL.md")
-    if soul:
-        parts.append(f"## ペルソナ\n\n{soul}")
-
-    # 事業部向けの最小限プロジェクトコンテキスト
-    parts.append(_CLI_PROJECT_TEMPLATE.format(
-        title=title,
-        description=description or "(なし)",
-        status=status,
-    ))
+    # Project context is appended only when project metadata exists.
+    if title.strip() or description.strip():
+        parts.append(_CLI_PROJECT_TEMPLATE.format(
+            title=title,
+            description=description or "(none)",
+            status=status,
+        ))
 
     return "\n\n".join(parts)
-
-
-# 事業部向けプロジェクトコンテキスト（最小限）
 _CLI_PROJECT_TEMPLATE = """## プロジェクト
 
 - タイトル: {title}
