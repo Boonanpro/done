@@ -12,18 +12,14 @@ import asyncio
 import logging
 from typing import List, Optional, Dict, Any
 
+from app.agent.risk_bands import is_red_action, render_zone_policy_for_prompt
+
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Red操作判定
-# ---------------------------------------------------------------------------
-RED_KEYWORDS = ["購入", "確定", "送金", "振込", "削除", "解約", "個人情報", "【要操作】"]
-
 
 def is_red_zone(step: dict) -> bool:
     """ステップがRed操作（ユーザー確認必須）かを判定"""
     desc = step.get("description", "")
-    return any(kw in desc for kw in RED_KEYWORDS)
+    return is_red_action(desc)
 
 
 # ---------------------------------------------------------------------------
@@ -41,9 +37,7 @@ STEP_EXECUTION_PROMPT = """## 現在のタスク
 4. 「やったつもり」ではなく「証拠がある」場合のみ completed にしてください
 
 ## ゾーン判断（各操作の実行前に必ず判定）
-- **Green（即実行）**: 検索、閲覧、ツール作成、bashコマンド、ファイル操作、パッケージインストール
-- **Yellow（実行→報告）**: フォーム入力（非個人情報）、カート追加、設定変更
-- **Red（確認→実行）**: 個人情報入力、購入確定、取消不可操作 → 必ずユーザーに内容を示して確認を待つ
+{zone_policy}
 
 ## 障害対応
 - エラー → まず自分のツール（bash, browser, exec_code等）で解決を試みる
@@ -105,6 +99,7 @@ def build_step_prompt(
         step_number=step.get("step_number", "?"),
         description=step.get("description", ""),
         previous_results_section=prev_section,
+        zone_policy=render_zone_policy_for_prompt(),
     )
 
     # 最初のステップにはプロジェクト全体の文脈を付加
