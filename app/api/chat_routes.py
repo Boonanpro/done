@@ -56,6 +56,31 @@ WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
 WORKSPACE_MEMORY_DIR = WORKSPACE_DIR / "memory"
 COMPACTION_SNAPSHOT_INTERVAL_MESSAGES = 40
 logger = logging.getLogger(__name__)
+REPLAN_KEYWORDS = (
+    "やっぱり",
+    "方針変更",
+    "方向転換",
+    "仕様変更",
+    "変更したい",
+    "見直し",
+    "再計画",
+    "再提案",
+    "再調査",
+    "別案",
+    "ピボット",
+    "change direction",
+    "replan",
+    "pivot",
+    "revise plan",
+)
+
+
+def _is_replan_request(text: str) -> bool:
+    """ユーザー入力が再計画リクエストかを緩く判定する。"""
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(keyword in text or keyword in lowered for keyword in REPLAN_KEYWORDS)
 
 
 def _compact_text(text: str, limit: int = 220) -> str:
@@ -768,6 +793,14 @@ async def send_dan_message_stream(
                 room_id = message["room_id"]
             user = await service.get_user_by_id(current_user.user_id)
 
+            # 方針変更要求時は、既存の同一ルーム実行を先に止める
+            replan_requested = _is_replan_request(request.content)
+            if replan_requested:
+                try:
+                    CancellationRegistry.cancel(room_id)
+                except Exception:
+                    pass
+
             # キャンセルフラグを登録（room_idが確定してから）
             room_id_for_cancel = room_id
             CancellationRegistry.register(room_id)
@@ -839,24 +872,56 @@ async def send_dan_message_stream(
                 reasoning_full = []    # 全文（DB保存用、フロントで展開表示）
                 step_counter = 0
 
+                # 方針変更要求が来たら、現在ステータスに関係なく planning へ戻して再計画
+                if replan_requested and project_info.get("status") != "planning":
+                    try:
+                        updated = await project_service.update_project(
+                            project_info["id"],
+                            current_user.user_id,
+                            status="planning",
+                        )
+                        if updated:
+                            project_info["status"] = updated.get("status", "planning")
+                        else:
+                            project_info["status"] = "planning"
+                        await project_service.save_execution_event(
+                            project_id=project_info["id"],
+                            room_id=room_id,
+                            event_type="phase",
+                            content="user requested direction change; switched to planning",
+                        )
+                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': 'replan-switch', 'label': '方針変更を受け、再計画モードに切り替えました', 'status': 'running'}})}\n\n"
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to switch project to planning for replan "
+                            "(project=%s, room=%s): %s",
+                            project_info.get("id"),
+                            room_id,
+                            e,
+                        )
+
                 # planning ステータスの場合、origin_room_id から依頼文を取得
                 user_messages_for_cli = ""
                 if project_info.get("status") == "planning":
+                    # 方針変更時は、直近のユーザー依頼を優先して計画に使う
+                    if replan_requested and request.content.strip():
+                        user_messages_for_cli = request.content
                     try:
-                        origin_room_id = project_info.get("origin_room_id", "")
-                        if not origin_room_id:
-                            # プロジェクトテーブルから origin_room_id を取得
-                            proj_full = (
-                                project_service.supabase.table("projects")
-                                .select("origin_room_id")
-                                .eq("id", project_info["id"])
-                                .execute()
-                            )
-                            if proj_full.data:
-                                origin_room_id = proj_full.data[0].get("origin_room_id", "")
-                        if origin_room_id:
-                            from app.services.project_auto_proposal import _fetch_trigger_message
-                            user_messages_for_cli = _fetch_trigger_message(origin_room_id)
+                        if not user_messages_for_cli:
+                            origin_room_id = project_info.get("origin_room_id", "")
+                            if not origin_room_id:
+                                # プロジェクトテーブルから origin_room_id を取得
+                                proj_full = (
+                                    project_service.supabase.table("projects")
+                                    .select("origin_room_id")
+                                    .eq("id", project_info["id"])
+                                    .execute()
+                                )
+                                if proj_full.data:
+                                    origin_room_id = proj_full.data[0].get("origin_room_id", "")
+                            if origin_room_id:
+                                from app.services.project_auto_proposal import _fetch_trigger_message
+                                user_messages_for_cli = _fetch_trigger_message(origin_room_id)
                     except Exception:
                         pass
 
@@ -1012,7 +1077,7 @@ async def send_dan_message_stream(
                                 content="planning output saved as proposal",
                             )
                         except Exception as proposal_error:
-                            _log.warning(
+                            logger.warning(
                                 "Failed to save planning output as proposal "
                                 "(project=%s, room=%s): %s",
                                 project_info.get("id"),
