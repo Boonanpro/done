@@ -91,6 +91,28 @@ def _compact_text(text: str, limit: int = 220) -> str:
     return text[: limit - 1] + "..."
 
 
+def _fetch_latest_user_message_from_room(service: ChatService, room_id: str) -> str:
+    """指定ルームの最新ユーザーメッセージを取得する（旧データ互換を含む）。"""
+    if not room_id:
+        return ""
+    try:
+        result = (
+            service.supabase.table("chat_messages")
+            .select("content, sender_type")
+            .eq("room_id", room_id)
+            .in_("sender_type", ["human", "user"])
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not result.data:
+            return ""
+        return result.data[0].get("content", "") or ""
+    except Exception as e:
+        logger.warning("Failed to fetch latest user message (room=%s): %s", room_id, e)
+        return ""
+
+
 def _build_session_memory_summary_entry(
     *,
     archive_type: str,
@@ -920,8 +942,9 @@ async def send_dan_message_stream(
                                 if proj_full.data:
                                     origin_room_id = proj_full.data[0].get("origin_room_id", "")
                             if origin_room_id:
-                                from app.services.project_auto_proposal import _fetch_trigger_message
-                                user_messages_for_cli = _fetch_trigger_message(origin_room_id)
+                                user_messages_for_cli = _fetch_latest_user_message_from_room(
+                                    service, origin_room_id
+                                )
                     except Exception:
                         pass
 
