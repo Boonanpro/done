@@ -116,7 +116,8 @@ CLI runtime contract now injects:
 2. Contract sprawl risk:
    - Runtime contract is file-backed and now reused by CLI + Gemini channels.
 3. Channel parity risk:
-   - Voice now shares runtime contract, but old `v2/runner.py` prompt path still exists and should be retired.
+   - Chat, heartbeat, Gemini, and `/ws/voice` now run on shared contract path.
+   - Remaining legacy `v2/runner.py` usage is mainly in old SDK/compat paths and should be retired.
 
 ## 8) Recommended next implementation order
 
