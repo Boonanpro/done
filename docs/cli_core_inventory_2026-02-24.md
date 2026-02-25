@@ -114,13 +114,13 @@ CLI runtime contract now injects:
 1. Project creation UX risk:
    - Chat cannot directly call `create_project` tool now.
 2. Contract sprawl risk:
-   - Runtime contract is now file-backed for CLI, but other channels should reuse the same source.
+   - Runtime contract is file-backed and now reused by CLI + Gemini channels.
 3. Channel parity risk:
-   - Voice still has separate prompt/runtime path and should be aligned with core contract.
+   - Voice now shares runtime contract, but old `v2/runner.py` prompt path still exists and should be retired.
 
 ## 8) Recommended next implementation order
 
 1. Keep one versioned core prompt contract as single source.
 2. Define project creation behavior in chat.
-3. Reuse the same runtime contract in voice path with channel-specific capability limits.
-4. Remove remaining old runner-specific prompt paths.
+3. Remove remaining old runner-specific prompt paths.
+4. Align any future channel additions to the same runtime contract renderer.
