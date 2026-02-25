@@ -120,9 +120,8 @@ CLI runtime contract now injects:
    - Remaining legacy `v2/runner.py` usage is mainly in old SDK/compat paths and should be retired.
    - Legacy pre-triage delegation code was removed from `v2/runner.py` to match chat-first behavior.
 4. Compatibility shim risk:
-   - `app/agent/__init__.py` still exposes legacy `AgentRunner/create_runner` for compatibility.
-   - This shim now emits deprecation warnings and should be removed after remaining callers are migrated.
-   - `app/agent/v2/__init__.py` also keeps a deprecated `AgentRunner` export for compatibility.
+   - Legacy compatibility exports were removed from `app/agent/__init__.py` and `app/agent/v2/__init__.py`.
+   - Old import paths should be considered unsupported.
    - Legacy `app/agent/sdk_runner.py` was removed (no in-repo callers).
 5. Legacy create path risk:
    - Legacy `create_project` tool handling has now been removed from `v2/tools.py` and `v2/runner.py`.
