@@ -9,8 +9,8 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+from app.agent.bootstrap_context import get_core_prompt, load_all_bootstrap_files
 from app.agent.runtime_contract import render_runtime_contract
-from app.agent.v2.runner import get_core_prompt, load_all_bootstrap_files
 from app.agent.v2.tools import SkillRegistry, get_all_skill_tools
 
 logger = logging.getLogger(__name__)

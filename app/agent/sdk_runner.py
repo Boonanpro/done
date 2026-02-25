@@ -76,10 +76,9 @@ _SENTINEL = object()  # キュー終了シグナル
 
 def _build_system_prompt(title: str, description: str, status: str) -> str:
     """SDKエージェントのシステムプロンプトを組み立てる"""
-    from app.agent.v2.runner import (
+    from app.agent.bootstrap_context import (
         get_core_prompt,
         load_all_bootstrap_files,
-        PROJECT_CONTEXT_TEMPLATE,
     )
 
     parts = [get_core_prompt()]
@@ -90,7 +89,7 @@ def _build_system_prompt(title: str, description: str, status: str) -> str:
         parts.append(bootstrap)
 
     # プロジェクトコンテキスト
-    project_ctx = PROJECT_CONTEXT_TEMPLATE.format(
+    project_ctx = _SDK_PROJECT_CONTEXT_TEMPLATE.format(
         title=title,
         description=description or "(なし)",
         status=status,
@@ -98,6 +97,24 @@ def _build_system_prompt(title: str, description: str, status: str) -> str:
     parts.append(project_ctx)
 
     return "\n\n".join(parts)
+
+
+_SDK_PROJECT_CONTEXT_TEMPLATE = """## プロジェクトモード
+
+これはプロジェクト専用チャットです。通常の雑談ではありません。
+
+### プロジェクト情報
+- タイトル: {title}
+- 説明: {description}
+- ステータス: {status}
+
+### プロジェクトモードの行動指針
+1. 仮説を立てて検証する
+2. 実行可能な具体案を優先する
+3. Green/Yellow/Red に従い自律実行する
+4. 障害時はツールで自己解決を試みる
+5. Red操作は必ず確認してから実行する
+"""
 
 
 def _build_sdk_options(

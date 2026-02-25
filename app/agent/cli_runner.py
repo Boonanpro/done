@@ -112,7 +112,7 @@ def _build_system_prompt(title: str, description: str, status: str, user_message
     This path is now chat-first core, so it should load shared bootstrap files
     and runtime contract consistently.
     """
-    from app.agent.v2.runner import load_all_bootstrap_files
+    from app.agent.bootstrap_context import load_all_bootstrap_files
 
     is_planning = status == "planning"
     parts = []

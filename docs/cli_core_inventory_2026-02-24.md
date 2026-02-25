@@ -39,7 +39,7 @@ Current behavior:
   - appends project context template only when metadata exists
 
 Shared bootstrap context is loaded via:
-- `app/agent/v2/runner.py` `load_all_bootstrap_files()`
+- `app/agent/bootstrap_context.py` `load_all_bootstrap_files()`
 
 Loaded files:
 - `USER.md`
