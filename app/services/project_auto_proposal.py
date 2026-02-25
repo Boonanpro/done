@@ -9,11 +9,12 @@ Agent Teams方式:
   の3段階で高品質な提案書を生成する。
 """
 
-import re
 import asyncio
 import logging
-from typing import Optional, List
+from typing import Optional
 from pathlib import Path
+
+from app.services.proposal_steps import extract_steps
 
 logger = logging.getLogger(__name__)
 
@@ -49,132 +50,6 @@ def _record_proposal_failure(project_id: str, title: str, error: Exception):
             f.write(entry)
     except Exception:
         pass
-
-
-def _extract_steps(proposal_text: str) -> List[dict]:
-    """
-    Markdownの実行計画セクションからステップを抽出。
-
-    抽出順序:
-      1. Regex（3パターンフォールバック）
-      2. Regex全滅 → LLM（Haiku）で構造化抽出
-    """
-    steps = _extract_steps_regex(proposal_text)
-    if steps:
-        return steps
-
-    # Regex全滅 → LLMフォールバック
-    logger.warning("[AutoProposal] Regex step extraction failed, trying LLM fallback")
-    return _extract_steps_llm(proposal_text)
-
-
-def _extract_steps_regex(proposal_text: str) -> List[dict]:
-    """Regexベースのステップ抽出（3パターンフォールバック）"""
-    steps = []
-    step_num = 0
-
-    # パターン1: 「実行計画」セクション内の番号リスト
-    plan_match = re.search(
-        r"#+\s*実行計画\s*\n(.*?)(?=\n#+\s|\Z)",
-        proposal_text,
-        re.DOTALL,
-    )
-    if plan_match:
-        plan_section = plan_match.group(1)
-        for match in re.finditer(r"(\d+)\.\s+(.+)", plan_section):
-            step_num += 1
-            steps.append({
-                "step_number": step_num,
-                "description": match.group(2).strip(),
-                "status": "pending",
-            })
-        if steps:
-            return steps
-
-    # パターン2: フェーズ見出し(### フェーズN: ...) + テーブル行(| N-M | 内容 | ...)
-    phase_matches = re.finditer(
-        r"#+\s*フェーズ\s*\d+[：:]\s*(.+?)(?:\s*[（(].+?[）)])?\s*\n(.*?)(?=\n#+\s*フェーズ|\n#+\s*[^#]|\Z)",
-        proposal_text,
-        re.DOTALL,
-    )
-    for phase_match in phase_matches:
-        phase_name = phase_match.group(1).strip()
-        phase_body = phase_match.group(2)
-        for row in re.finditer(r"\|\s*[\d\-]+\s*\|\s*(.+?)\s*\|", phase_body):
-            desc = row.group(1).strip()
-            if desc.startswith('-') or desc in ('内容', 'ステップ', '説明'):
-                continue
-            step_num += 1
-            steps.append({
-                "step_number": step_num,
-                "description": f"{phase_name}: {desc}",
-                "status": "pending",
-            })
-    if steps:
-        return steps
-
-    # パターン3: 番号付きリスト（セクション見出しなし、テキスト全体から）
-    for match in re.finditer(r"^(\d+)\.\s+(.+)", proposal_text, re.MULTILINE):
-        step_num += 1
-        steps.append({
-            "step_number": step_num,
-            "description": match.group(2).strip(),
-            "status": "pending",
-        })
-
-    return steps
-
-
-def _extract_steps_llm(proposal_text: str) -> List[dict]:
-    """LLM（Haiku）でステップを構造化抽出する（Regexフォールバック）"""
-    import json
-    try:
-        import anthropic
-        from app.config import settings
-
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            messages=[{
-                "role": "user",
-                "content": f"""以下の提案書から実行ステップを抽出してJSON配列で返してください。
-
-提案書:
-{proposal_text[:4000]}
-
-出力形式（これだけを返すこと。説明は不要）:
-[
-  {{"step_number": 1, "description": "ステップの内容"}},
-  {{"step_number": 2, "description": "ステップの内容"}}
-]""",
-            }],
-        )
-
-        raw = response.content[0].text.strip()
-        # JSON部分を抽出（```json ... ``` で囲まれている可能性）
-        json_match = re.search(r"\[.*\]", raw, re.DOTALL)
-        if not json_match:
-            logger.warning(f"[AutoProposal] LLM step extraction: no JSON array found")
-            return []
-
-        parsed = json.loads(json_match.group())
-        steps = []
-        for i, item in enumerate(parsed, 1):
-            desc = item.get("description", "").strip()
-            if desc:
-                steps.append({
-                    "step_number": i,
-                    "description": desc,
-                    "status": "pending",
-                })
-
-        logger.info(f"[AutoProposal] LLM extracted {len(steps)} steps")
-        return steps
-
-    except Exception as e:
-        logger.warning(f"[AutoProposal] LLM step extraction failed: {e}")
-        return []
 
 
 def _fetch_trigger_message(origin_room_id: str) -> str:
@@ -418,7 +293,7 @@ async def run_project_auto_proposal(
 
         # 2. proposalテーブルにも保存
         try:
-            steps = _extract_steps(proposal_text)
+            steps = extract_steps(proposal_text)
             _debug(f"Extracted {len(steps)} steps, saving proposal...")
             await project_service.create_proposal(
                 project_id=project_id,

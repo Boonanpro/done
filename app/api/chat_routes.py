@@ -986,11 +986,55 @@ async def send_dan_message_stream(
                         ai_message["ai_context"] = ai_message_data["ai_context"]
 
                     yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+
+                    proposal_created = False
+                    # planning 状態のプロジェクトチャットでは、生成結果を提案として保存する
+                    if project_info.get("status") == "planning":
+                        try:
+                            from app.services.proposal_steps import extract_steps
+
+                            proposal_steps = extract_steps(ai_response_content)
+                            await project_service.create_proposal(
+                                project_id=project_info["id"],
+                                content=ai_response_content,
+                                proposal_type="plan",
+                                steps=proposal_steps,
+                                metadata={
+                                    "source": "project_chat_planning",
+                                    "generated_by": "cli_runner",
+                                },
+                            )
+                            proposal_created = True
+                            await project_service.save_execution_event(
+                                project_id=project_info["id"],
+                                room_id=room_id,
+                                event_type="phase",
+                                content="planning output saved as proposal",
+                            )
+                        except Exception as proposal_error:
+                            _log.warning(
+                                "Failed to save planning output as proposal "
+                                "(project=%s, room=%s): %s",
+                                project_info.get("id"),
+                                room_id,
+                                proposal_error,
+                            )
+                            try:
+                                await project_service.save_execution_event(
+                                    project_id=project_info["id"],
+                                    room_id=room_id,
+                                    event_type="error",
+                                    content=f"proposal save failed: {proposal_error}",
+                                )
+                            except Exception:
+                                pass
+
                     # DB: done イベント保存（再接続時に「完了済み」を判定するため）
                     try:
                         await project_service.save_execution_event(
                             project_id=project_info["id"], room_id=room_id,
-                            event_type="done", content="completed",
+                            event_type="done",
+                            content="proposed" if proposal_created else "completed",
                         )
                     except Exception:
                         pass
