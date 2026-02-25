@@ -714,13 +714,16 @@ class AgentRunner:
                     # create_project成功後: 固定メッセージを返してターン終了
                     if skill_name == "_create_project" and result.get("success"):
                         project_title = result.get("title", "プロジェクト")
-                        fixed_response = f"プロジェクト「{project_title}」を作成しました。事業部からの提案をお待ちください。"
+                        fixed_response = (
+                            f"プロジェクト「{project_title}」を作成しました。"
+                            "続きはプロジェクトチャットで依頼内容を送って進めてください。"
+                        )
 
                         # 残りのツール呼び出しにダミー結果を挿入
                         for remaining in parsed["tool_calls"][i+1:]:
                             self.session.add_tool_result(
                                 remaining["tool_use_id"],
-                                "[プロジェクト作成済み。実行は事業部が担当します。]",
+                                "[プロジェクト作成済み。続きはプロジェクトチャットで実行します。]",
                             )
 
                         # 固定メッセージをセッションに追加して即return

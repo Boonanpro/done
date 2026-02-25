@@ -15,8 +15,6 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 # バックグラウンドタスクの参照を保持（GC防止）
-_background_tasks: set = set()
-
 # ============================================
 # スキル定義（動的読み込み方式）
 # ============================================
@@ -1960,31 +1958,20 @@ async def execute_tool(
                 origin_room_id=session_id,
                 metadata=metadata or None,
             )
-            # バックグラウンド自動提案を起動（非ブロック）
-            if project.get("room_id"):
-                import asyncio
-                from app.services.project_auto_proposal import run_project_auto_proposal
-                task = asyncio.create_task(run_project_auto_proposal(
-                    project_id=project["id"],
-                    room_id=project["room_id"],
-                    user_id=user_id,
-                    title=title,
-                    description=description or "",
-                    origin_room_id=session_id,
-                    user_request=user_request,
-                    triage_lane=triage_lane or "",
-                    execution_profile=execution_profile or "",
-                ))
-                _background_tasks.add(task)
-                task.add_done_callback(_background_tasks.discard)
-
             return {
                 "success": True,
                 "project_id": project["id"],
                 "title": project["title"],
                 "room_id": project.get("room_id"),
-                "message": f"プロジェクト「{project['title']}」を作成しました。事業部が自動で提案を作成中です。",
-                "instruction": "プロジェクト作成完了を簡潔に伝えてください。「事業部に回しました。提案をお待ちください。」程度の一言で十分です。プロジェクトの内容について詳細な説明や提案をしないでください。それは事業部の役割です。",
+                "message": (
+                    f"プロジェクト「{project['title']}」を作成しました。"
+                    "この旧ルートでは自動提案は開始しません。"
+                    "プロジェクトチャットで依頼内容を送って続行してください。"
+                ),
+                "instruction": (
+                    "プロジェクト作成完了のみを簡潔に伝えてください。"
+                    "続きはプロジェクトチャットで依頼してもらうよう案内してください。"
+                ),
             }
         except Exception as e:
             logger.exception(f"Failed to create project: {e}")
