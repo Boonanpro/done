@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useSyncExternalStore } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -87,9 +87,15 @@ interface ProjectListPanelProps {
   className?: string;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
+  forceOpenCreateToken?: number;
 }
 
-export function ProjectListPanel({ className, isCollapsed, onToggleCollapse }: ProjectListPanelProps) {
+export function ProjectListPanel({
+  className,
+  isCollapsed,
+  onToggleCollapse,
+  forceOpenCreateToken = 0,
+}: ProjectListPanelProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout, isLoggingOut } = useAuth();
@@ -131,6 +137,14 @@ export function ProjectListPanel({ className, isCollapsed, onToggleCollapse }: P
     p.title.toLowerCase().includes(searchQuery.toLowerCase())
   ) ?? [];
 
+  useEffect(() => {
+    if (forceOpenCreateToken <= 0) return;
+    if (isCollapsed) {
+      onToggleCollapse();
+    }
+    setIsCreateOpen(true);
+  }, [forceOpenCreateToken, isCollapsed, onToggleCollapse]);
+
   const handleProjectClick = (project: ProjectResponse) => {
     if (project.id === selectedProjectId) {
       selectProject(null);
@@ -153,6 +167,15 @@ export function ProjectListPanel({ className, isCollapsed, onToggleCollapse }: P
       title,
       description: description || undefined,
     });
+  };
+
+  const handleHeaderCreateClick = () => {
+    if (isCollapsed) {
+      onToggleCollapse();
+      setIsCreateOpen(true);
+      return;
+    }
+    setIsCreateOpen((prev) => !prev);
   };
 
   const handleLogout = async () => {
@@ -206,18 +229,28 @@ export function ProjectListPanel({ className, isCollapsed, onToggleCollapse }: P
             )}
           </AnimatePresence>
 
-          <Button
-            variant="ghost"
-            size="icon"
-            className="ml-auto h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent"
-            onClick={onToggleCollapse}
-          >
-            {isCollapsed ? (
-              <ChevronRight className="h-4 w-4" />
-            ) : (
-              <ChevronLeft className="h-4 w-4" />
-            )}
-          </Button>
+          <div className="ml-auto flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent"
+              onClick={handleHeaderCreateClick}
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent"
+              onClick={onToggleCollapse}
+            >
+              {isCollapsed ? (
+                <ChevronRight className="h-4 w-4" />
+              ) : (
+                <ChevronLeft className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
         </div>
 
         {/* Search */}
