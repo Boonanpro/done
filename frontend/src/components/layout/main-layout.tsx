@@ -32,10 +32,10 @@ export function MainLayout({
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(0);
 
-  // Close sidebar when selecting a project on mobile
+  // When switching from desktop to mobile, reset sidebar state once.
   useEffect(() => {
     if (isMobile) setSidebarOpen(false);
-  }, [selectedProjectId, isMobile]);
+  }, [isMobile]);
 
   useEffect(() => {
     if (isMobile && !hasOpenedMobileSidebar) {
