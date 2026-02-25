@@ -136,6 +136,9 @@ export function ProjectListPanel({ className, isCollapsed, onToggleCollapse }: P
       selectProject(null);
     } else {
       selectProject(project.id);
+      if (isMobile) {
+        onToggleCollapse();
+      }
     }
   };
 
