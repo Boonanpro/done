@@ -839,20 +839,6 @@ CALL_CRITIC_TOOL = {
     }
 }
 
-CREATE_PROJECT_TOOL = {
-    "name": "create_project",
-    "description": "ユーザーの依頼をプロジェクトとして登録する。複数ステップが必要なタスク、調査、計画が必要な案件に使用。",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "title": {"type": "string", "description": "プロジェクトのタイトル（簡潔に）"},
-            "description": {"type": "string", "description": "何を達成するかの説明"},
-            "user_request": {"type": "string", "description": "ユーザーの依頼原文。会話の中からプロジェクト化の元になった依頼メッセージをそのまま抜粋する（要約ではなく原文）。事業部チームに共有される。"}
-        },
-        "required": ["title", "description", "user_request"]
-    }
-}
-
 # ============================================
 # コード探索ツール
 # ============================================
@@ -923,9 +909,6 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "call_critic":
         return ("_call_critic", "call")
-
-    if tool_name == "create_project":
-        return ("_create_project", "create")
 
     if tool_name == "read_workspace":
         return ("_read_workspace", "read")
@@ -1920,62 +1903,6 @@ async def execute_tool(
 
     if skill_name == "_call_critic":
         return await _execute_sub_agent("critic", params, session_id)
-
-    # ★★★ プロジェクト作成 ★★★
-    if skill_name == "_create_project":
-        title = params.get("title", "")
-        description = params.get("description", "")
-        user_request = params.get("user_request", "")
-        triage_lane = params.get("triage_lane", "")
-        triage_confidence = params.get("triage_confidence")
-        triage_summary = params.get("triage_summary", "")
-        execution_profile = params.get("execution_profile", "")
-        if not title:
-            return {"success": False, "error": "title が必要です"}
-        try:
-            from app.services.project_service import ProjectService
-            service = ProjectService()
-            metadata = {}
-            triage_meta = {}
-            if triage_lane:
-                triage_meta["lane"] = str(triage_lane)
-            if triage_confidence is not None:
-                try:
-                    triage_meta["confidence"] = float(triage_confidence)
-                except Exception:
-                    triage_meta["confidence_raw"] = str(triage_confidence)
-            if triage_summary:
-                triage_meta["summary"] = str(triage_summary)[:500]
-            if execution_profile:
-                triage_meta["execution_profile"] = str(execution_profile)
-            if triage_meta:
-                metadata["triage"] = triage_meta
-
-            project = await service.create_project(
-                user_id=user_id,
-                title=title,
-                description=description,
-                origin_room_id=session_id,
-                metadata=metadata or None,
-            )
-            return {
-                "success": True,
-                "project_id": project["id"],
-                "title": project["title"],
-                "room_id": project.get("room_id"),
-                "message": (
-                    f"プロジェクト「{project['title']}」を作成しました。"
-                    "この旧ルートでは自動提案は開始しません。"
-                    "プロジェクトチャットで依頼内容を送って続行してください。"
-                ),
-                "instruction": (
-                    "プロジェクト作成完了のみを簡潔に伝えてください。"
-                    "続きはプロジェクトチャットで依頼してもらうよう案内してください。"
-                ),
-            }
-        except Exception as e:
-            logger.exception(f"Failed to create project: {e}")
-            return {"success": False, "error": f"プロジェクト作成エラー: {e}"}
 
     # ★★★ ワークスペース読み取り（外部依存なし）★★★
     if skill_name == "_read_workspace":
