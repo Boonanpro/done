@@ -123,7 +123,7 @@ CLI runtime contract now injects:
    - `app/agent/__init__.py` still exposes legacy `AgentRunner/create_runner` for compatibility.
    - This shim now emits deprecation warnings and should be removed after remaining callers are migrated.
    - `app/agent/v2/__init__.py` also keeps a deprecated `AgentRunner` export for compatibility.
-   - `app/agent/sdk_runner.py::process_message_sdk` is now explicitly deprecated and retained only as a legacy path.
+   - Legacy `app/agent/sdk_runner.py` was removed (no in-repo callers).
 5. Legacy create path risk:
    - Legacy `create_project` tool handling has now been removed from `v2/tools.py` and `v2/runner.py`.
    - Legacy `app/services/project_auto_proposal.py` has been removed.

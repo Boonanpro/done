@@ -32,7 +32,8 @@
 - 中断・失敗で停止なら `paused`
 
 6. 旧経路に依存しない
-- チャット起点の提案・実行フローで `app/agent/v2/runner.py` と `app/agent/sdk_runner.py` を呼ばない
+- チャット起点の提案・実行フローで旧 `app/agent/v2/runner.py` 経路に依存しない
+- `app/agent/sdk_runner.py` は削除済み
 
 ## 受け入れテスト（最低）
 1. 正常系
