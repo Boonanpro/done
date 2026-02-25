@@ -154,6 +154,14 @@ export function MainLayout({
         cursor: isDragging ? 'col-resize' : undefined,
       }}
     >
+      <button
+        onClick={openCreateProject}
+        className="fixed top-3 right-3 z-30 h-9 px-3 inline-flex items-center gap-1 rounded-lg bg-primary text-primary-foreground shadow-sm"
+        aria-label="新規プロジェクト作成"
+      >
+        <Plus className="h-4 w-4" />
+        <span className="text-xs font-medium">新規</span>
+      </button>
       <ProjectListPanel
         isCollapsed={isCollapsed}
         onToggleCollapse={() => setIsCollapsed(!isCollapsed)}
