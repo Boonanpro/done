@@ -11,7 +11,6 @@ Messages配列を維持しながらLLMと対話する。
 - 自己学習: ダンがワークスペースファイルを読み書きして学習
 """
 
-import re
 import logging
 import asyncio
 from typing import Optional, Dict, Any, Callable, Awaitable, List
@@ -128,14 +127,6 @@ COMPACTION_KEEP_RECENT = 10   # コンパクション時に残す最新メッセ
 # 使用するモデル
 MODEL_DEFAULT = "MiniMax-M2.5"                    # 日常チャット（$0.30/$1.20）
 MODEL_HEAVY = "MiniMax-M2.5"                      # MiniMaxは1モデル。事業部はCLI Runner経由でOpusを使うので影響なし
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-PROJECT_TRIAGE_SKILL_DIR = PROJECT_ROOT / ".claude" / "skills" / "project-triage"
-PROJECT_TRIAGE_BLOCK_RE = re.compile(r"\[TRIAGE\](.*?)\[/TRIAGE\]", re.DOTALL | re.IGNORECASE)
-ACTIONABLE_REQUEST_RE = re.compile(
-    r"(して|作って|実装|追加|変更|改善|連携|設計|計画|開発|build|implement|integrat|refactor|fix|update|connect)",
-    re.IGNORECASE,
-)
 
 # ============================================
 # Native Tool Use: ツール定義
@@ -257,197 +248,6 @@ class AgentRunner:
             self._is_project_chat_cached = False
         return bool(self._is_project_chat_cached)
 
-    def _should_attempt_project_triage(self, user_message: str) -> bool:
-        """プロジェクトtriageを行うべきか判定"""
-        # Chat-first phase:
-        # Do not run automatic pre-triage from normal chat.
-        return False
-
-    @staticmethod
-    def _parse_project_triage_block(text: str) -> Optional[Dict[str, Any]]:
-        """[TRIAGE] ブロックを辞書に変換"""
-        if not text:
-            return None
-        match = PROJECT_TRIAGE_BLOCK_RE.search(text)
-        if not match:
-            return None
-
-        block = match.group(1)
-        parsed: Dict[str, Any] = {}
-        for raw_line in block.splitlines():
-            line = raw_line.strip()
-            if not line or ":" not in line:
-                continue
-            key, value = line.split(":", 1)
-            parsed[key.strip().lower()] = value.strip()
-
-        lane_raw = str(parsed.get("lane", "")).upper()
-        if lane_raw not in {"A0", "A1", "A", "B", "C"}:
-            return None
-
-        needs_scan_raw = str(parsed.get("needs_capability_scan", "false")).lower()
-        needs_scan = needs_scan_raw in {"1", "true", "yes", "y"}
-
-        confidence = 0.5
-        conf_raw = parsed.get("confidence")
-        if conf_raw is not None:
-            try:
-                confidence = float(conf_raw)
-            except Exception:
-                confidence = 0.5
-        confidence = max(0.0, min(1.0, confidence))
-
-        next_action = str(parsed.get("next_action", "")).strip()
-        return {
-            "lane": lane_raw,
-            "needs_capability_scan": needs_scan,
-            "confidence": confidence,
-            "next_action": next_action,
-            "raw": text.strip(),
-        }
-
-    @staticmethod
-    def _resolve_lane_with_profile(lane: str, execution_profile: str) -> str:
-        """実行プロファイルに応じて lane を解決"""
-        lane_u = (lane or "").upper()
-        profile = (execution_profile or "quality_first").strip().lower()
-        if lane_u == "A":
-            return "A1" if profile == "quality_first" else "A0"
-        if lane_u in {"A0", "A1", "B", "C"}:
-            return lane_u
-        return "A0"
-
-    @staticmethod
-    def _build_project_title_from_request(user_message: str) -> str:
-        """依頼文から短いプロジェクトタイトルを作る"""
-        text = re.sub(r"\s+", " ", (user_message or "")).strip()
-        if not text:
-            return "依頼対応プロジェクト"
-        if len(text) > 36:
-            return text[:36].rstrip() + "..."
-        return text
-
-    async def _run_project_triage(self, user_message: str) -> Optional[Dict[str, Any]]:
-        """project-triage スキル内容を参照して lane を判定"""
-        if not self.llm_client:
-            return None
-
-        skill_md = ""
-        action_md = ""
-        try:
-            skill_path = PROJECT_TRIAGE_SKILL_DIR / "SKILL.md"
-            action_path = PROJECT_TRIAGE_SKILL_DIR / "actions" / "triage.md"
-            if skill_path.exists():
-                skill_md = skill_path.read_text(encoding="utf-8")
-            if action_path.exists():
-                action_md = action_path.read_text(encoding="utf-8")
-        except Exception as e:
-            logger.warning(f"Failed to read project-triage skill docs: {e}")
-
-        # スキルが無ければ従来動作にフォールバック
-        if not skill_md:
-            return None
-
-        execution_profile = settings.EXECUTION_PROFILE or "quality_first"
-        lang = getattr(self, "_user_language", "Japanese")
-        system_prompt = (
-            "You are running the project-triage skill. "
-            "Classify the request into lane A0, A1, B, or C. "
-            "Keep narrative short, then append a [TRIAGE] block.\n\n"
-            f"## Skill Manual\n{skill_md}\n\n"
-            f"## Action Manual\n{action_md}\n\n"
-            "Return values in the required format."
-        )
-        user_prompt = (
-            f"Execution profile: {execution_profile}\n"
-            f"User language: {lang}\n"
-            "Classify the request.\n\n"
-            f"Request:\n{user_message}"
-        )
-
-        try:
-            response = await self.llm_client.messages.create(
-                model=self._get_model(),
-                max_tokens=700,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-            text_blocks = []
-            for block in response.content:
-                if getattr(block, "type", "") == "text":
-                    text_blocks.append(getattr(block, "text", ""))
-            triage_text = "\n".join(text_blocks).strip()
-            parsed = self._parse_project_triage_block(triage_text)
-            if not parsed:
-                return None
-            parsed["lane"] = self._resolve_lane_with_profile(parsed["lane"], execution_profile)
-            parsed["execution_profile"] = execution_profile
-            return parsed
-        except Exception as e:
-            logger.warning(f"Project triage failed: {e}")
-            return None
-
-    async def _delegate_to_business(
-        self,
-        user_message: str,
-        triage: Dict[str, Any],
-        credentials: Optional[Dict[str, str]] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """triage 結果に応じて create_project を直接実行して事業部へ委譲"""
-        lane = triage.get("lane", "A0")
-        profile = triage.get("execution_profile", settings.EXECUTION_PROFILE or "quality_first")
-        # speed_first では A1 を秘書実行に寄せる
-        if (profile or "").strip().lower() == "speed_first" and lane == "A1":
-            return None
-        # A0 は秘書がそのまま処理
-        if lane == "A0":
-            return None
-
-        title = self._build_project_title_from_request(user_message)
-        description = f"[triage:{lane}] {user_message}"
-        tool_call = {
-            "tool_use_id": "triage_create_project",
-            "skill": "_create_project",
-            "action": "create",
-            "params": {
-                "title": title,
-                "description": description,
-                "user_request": user_message,
-                "triage_lane": lane,
-                "triage_confidence": triage.get("confidence"),
-                "triage_summary": triage.get("raw", "")[:500],
-                "execution_profile": profile,
-            },
-        }
-
-        result = await execute_tool(
-            tool_call=tool_call,
-            user_id=self.session.user_id,
-            credentials=credentials,
-            session_id=self.session.session_id,
-        )
-        if not result.get("success"):
-            return None
-
-        lane_note = {
-            "A1": "品質優先ルート（A1）として事業部に回しました。",
-            "B": "軽量計画ルート（B）として事業部に回しました。",
-            "C": "詳細調査ルート（C）として事業部に回しました。",
-        }.get(lane, "事業部に回しました。")
-        fixed_response = f"プロジェクト「{result.get('title', title)}」を作成しました。{lane_note}"
-
-        self.session.add_assistant_message(fixed_response)
-        store = get_session_store()
-        await store.save(self.session)
-        return {
-            "response": fixed_response,
-            "state": self.session.current_state.value,
-            "reasoning_steps": self.session.reasoning_steps,
-            "tool_results": [{"tool": tool_call, "result": result}],
-            "created_project_id": result.get("project_id"),
-            "triage": triage,
-        }
-
     async def process_message(
         self,
         user_message: str,
@@ -490,10 +290,6 @@ class AgentRunner:
 
             # 2. ユーザーメッセージを追加
             self.session.add_user_message(user_message)
-
-            # 2.5 project-triage（秘書の一次ルーティング）
-            
-            # project-triage is disabled in chat-first phase.
 
             # 3. LLM呼び出し→ツール実行ループ（Native Tool Use）
             tool_results = []
