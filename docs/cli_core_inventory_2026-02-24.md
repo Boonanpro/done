@@ -127,6 +127,8 @@ CLI runtime contract now injects:
 5. Legacy create path risk:
    - `app/agent/v2/tools.py::create_project` no longer triggers `project_auto_proposal` automatically.
    - This keeps legacy behavior aligned with project-chat-first routing, but old callers should migrate.
+   - Legacy `create_project` tool handling has now been removed from `v2/tools.py` and `v2/runner.py`.
+   - Project creation should go through project chat/API routes only.
 
 ## 8) Recommended next implementation order
 
