@@ -24,6 +24,7 @@ export function MainLayout({
   const isMobile = useIsMobile();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [hasOpenedMobileSidebar, setHasOpenedMobileSidebar] = useState(false);
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
 
   const [projectChatWidth, setProjectChatWidth] = useState(DEFAULT_PROJECT_CHAT_WIDTH);
@@ -35,6 +36,13 @@ export function MainLayout({
   useEffect(() => {
     if (isMobile) setSidebarOpen(false);
   }, [selectedProjectId, isMobile]);
+
+  useEffect(() => {
+    if (isMobile && !hasOpenedMobileSidebar) {
+      setSidebarOpen(true);
+      setHasOpenedMobileSidebar(true);
+    }
+  }, [isMobile, hasOpenedMobileSidebar]);
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
