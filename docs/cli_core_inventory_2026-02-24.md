@@ -118,11 +118,15 @@ CLI runtime contract now injects:
 3. Channel parity risk:
    - Chat, heartbeat, Gemini, and `/ws/voice` now run on shared contract path.
    - Remaining legacy `v2/runner.py` usage is mainly in old SDK/compat paths and should be retired.
+   - Legacy pre-triage delegation code was removed from `v2/runner.py` to match chat-first behavior.
 4. Compatibility shim risk:
    - `app/agent/__init__.py` still exposes legacy `AgentRunner/create_runner` for compatibility.
    - This shim now emits deprecation warnings and should be removed after remaining callers are migrated.
    - `app/agent/v2/__init__.py` also keeps a deprecated `AgentRunner` export for compatibility.
    - `app/agent/sdk_runner.py::process_message_sdk` is now explicitly deprecated and retained only as a legacy path.
+5. Legacy create path risk:
+   - `app/agent/v2/tools.py::create_project` no longer triggers `project_auto_proposal` automatically.
+   - This keeps legacy behavior aligned with project-chat-first routing, but old callers should migrate.
 
 ## 8) Recommended next implementation order
 
