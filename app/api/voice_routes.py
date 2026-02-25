@@ -151,15 +151,45 @@ async def voice_companion_websocket(websocket: WebSocket):
                     logger.debug("Progress send failed: %s", exc)
 
             try:
-                from app.agent.v2.runner import create_runner
+                from app.agent.cli_runner import process_message_cli
 
-                runner = await create_runner(
-                    session_id=session_id,
+                reasoning_steps = []
+                text_chunks = []
+                response_text = ""
+                errors = []
+                cancelled = False
+
+                async for event in process_message_cli(
+                    room_id=session_id,
                     user_id=user_id,
-                    on_reasoning_step=on_reasoning_step,
-                )
-                result = await runner.process_message(text)
-                response_text = result.get("response") or ""
+                    content=text,
+                ):
+                    event_type = event.get("type", "")
+
+                    if event_type == "reasoning":
+                        step = (event.get("text") or "").strip()
+                        if step:
+                            reasoning_steps.append(step)
+                            await on_reasoning_step(step)
+                    elif event_type == "text":
+                        chunk = event.get("text", "")
+                        if chunk:
+                            text_chunks.append(chunk)
+                    elif event_type == "result":
+                        response_text = (event.get("text") or "").strip()
+                    elif event_type == "error":
+                        errors.append(event.get("message", "Unknown error"))
+                    elif event_type == "cancelled":
+                        cancelled = True
+                        break
+
+                if cancelled:
+                    continue
+
+                if not response_text:
+                    response_text = "\n".join(text_chunks).strip()
+                if errors and not response_text:
+                    raise RuntimeError("; ".join(errors))
 
                 audio_base64 = None
                 if response_text and companion_mode:
@@ -176,7 +206,7 @@ async def voice_companion_websocket(websocket: WebSocket):
                     "text": response_text,
                     "audio_base64": audio_base64,
                     "session_id": session_id,
-                    "reasoning_steps": result.get("reasoning_steps", []),
+                    "reasoning_steps": reasoning_steps,
                 })
             except Exception as exc:
                 logger.error("Voice processing error: %s", exc)
