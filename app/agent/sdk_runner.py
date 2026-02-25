@@ -15,6 +15,7 @@ import json
 import logging
 import sys
 import threading
+import warnings
 import queue as thread_queue
 from pathlib import Path
 from typing import AsyncIterator, Optional, Dict, Any
@@ -289,6 +290,12 @@ async def process_message_sdk(
     SDK は別スレッドで実行（Windows の SelectorEventLoop 制約を回避）。
     イベントはスレッドセーフなキュー経由で受け取る。
     """
+    warnings.warn(
+        "app.agent.sdk_runner.process_message_sdk is deprecated. "
+        "Use CLI runner entrypoints for active chat/runtime flows.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     system_prompt = _build_system_prompt(
         project_title, project_description, project_status,
     )
