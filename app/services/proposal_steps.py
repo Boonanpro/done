@@ -1,8 +1,8 @@
 """
 Proposal step extraction helpers.
 
-This module is shared by planning flows so step parsing does not depend on
-the legacy project_auto_proposal entrypoint.
+This module is shared by planning flows so step parsing is decoupled from
+legacy proposal generators.
 """
 
 from __future__ import annotations
@@ -141,4 +141,3 @@ def _extract_steps_llm(proposal_text: str) -> List[dict]:
     except Exception as e:
         logger.warning("[ProposalSteps] LLM extraction failed: %s", e)
         return []
-

@@ -125,9 +125,8 @@ CLI runtime contract now injects:
    - `app/agent/v2/__init__.py` also keeps a deprecated `AgentRunner` export for compatibility.
    - `app/agent/sdk_runner.py::process_message_sdk` is now explicitly deprecated and retained only as a legacy path.
 5. Legacy create path risk:
-   - `app/agent/v2/tools.py::create_project` no longer triggers `project_auto_proposal` automatically.
-   - This keeps legacy behavior aligned with project-chat-first routing, but old callers should migrate.
    - Legacy `create_project` tool handling has now been removed from `v2/tools.py` and `v2/runner.py`.
+   - Legacy `app/services/project_auto_proposal.py` has been removed.
    - Project creation should go through project chat/API routes only.
 
 ## 8) Recommended next implementation order
