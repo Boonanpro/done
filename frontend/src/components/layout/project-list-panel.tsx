@@ -4,8 +4,8 @@ import { useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit } from 'lucide-react';
-import { useQuery } from '@tanstack/react-query';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus } from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
@@ -94,12 +94,31 @@ export function ProjectListPanel({ className, isCollapsed, onToggleCollapse }: P
   const router = useRouter();
   const { user, logout, isLoggingOut } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [newProjectTitle, setNewProjectTitle] = useState('');
+  const [newProjectDescription, setNewProjectDescription] = useState('');
   const [isBusinessOpen, setIsBusinessOpen] = useState(false);
   const hasToken = useHasToken();
   const isMobile = useIsMobile();
+  const queryClient = useQueryClient();
 
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
   const selectProject = useProjectStore((s) => s.selectProject);
+
+  const createProjectMutation = useMutation({
+    mutationFn: (payload: { title: string; description?: string }) => api.projects.create(payload),
+    onSuccess: (project) => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      setNewProjectTitle('');
+      setNewProjectDescription('');
+      setIsCreateOpen(false);
+      selectProject(project.id);
+      toast.success('プロジェクトを作成しました');
+    },
+    onError: () => {
+      toast.error('プロジェクト作成に失敗しました');
+    },
+  });
 
   const { data: projectsData, isLoading: isLoadingProjects } = useQuery({
     queryKey: ['projects'],
@@ -118,6 +137,19 @@ export function ProjectListPanel({ className, isCollapsed, onToggleCollapse }: P
     } else {
       selectProject(project.id);
     }
+  };
+
+  const handleCreateProject = () => {
+    const title = newProjectTitle.trim();
+    if (!title) {
+      toast.error('タイトルを入力してください');
+      return;
+    }
+    const description = newProjectDescription.trim();
+    createProjectMutation.mutate({
+      title,
+      description: description || undefined,
+    });
   };
 
   const handleLogout = async () => {
@@ -212,10 +244,72 @@ export function ProjectListPanel({ className, isCollapsed, onToggleCollapse }: P
         {/* Project List */}
         <ScrollArea className="flex-1 min-h-0 px-3 py-2">
           {!isCollapsed && (
-            <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground font-medium">
-              <FolderKanban className="h-3 w-3" />
-              <span>プロジェクト</span>
-            </div>
+            <>
+              <div className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs text-muted-foreground font-medium">
+                <div className="flex items-center gap-2">
+                  <FolderKanban className="h-3 w-3" />
+                  <span>プロジェクト</span>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 text-muted-foreground hover:text-sidebar-foreground"
+                  onClick={() => setIsCreateOpen((prev) => !prev)}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+
+              <AnimatePresence>
+                {isCreateOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="overflow-hidden px-2 pb-2"
+                  >
+                    <div className="space-y-2 rounded-lg border border-sidebar-border bg-sidebar-accent/20 p-2">
+                      <Input
+                        value={newProjectTitle}
+                        onChange={(e) => setNewProjectTitle(e.target.value)}
+                        placeholder="タイトル"
+                        className="h-8 bg-sidebar-background text-xs"
+                        maxLength={120}
+                      />
+                      <Input
+                        value={newProjectDescription}
+                        onChange={(e) => setNewProjectDescription(e.target.value)}
+                        placeholder="説明（任意）"
+                        className="h-8 bg-sidebar-background text-xs"
+                        maxLength={300}
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={handleCreateProject}
+                          disabled={createProjectMutation.isPending}
+                        >
+                          {createProjectMutation.isPending ? '作成中...' : '作成'}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => setIsCreateOpen(false)}
+                          disabled={createProjectMutation.isPending}
+                        >
+                          閉じる
+                        </Button>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </>
           )}
 
           <nav className="space-y-1">
