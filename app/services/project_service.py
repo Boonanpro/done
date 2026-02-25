@@ -8,6 +8,7 @@ import uuid
 import logging
 
 from app.services.supabase_client import get_supabase_client
+from app.services.execution_events import normalize_event_type
 
 logger = logging.getLogger(__name__)
 
@@ -280,13 +281,18 @@ class ProjectService:
         metadata: Optional[dict] = None,
     ) -> dict:
         """実行イベントを記録（プロジェクト・通常チャット両対応）"""
+        normalized_type, original_type = normalize_event_type(event_type)
+        normalized_metadata = dict(metadata or {})
+        if original_type is not None and original_type != normalized_type:
+            normalized_metadata["original_event_type"] = original_type
+
         row = {
             "room_id": room_id,
-            "event_type": event_type,
+            "event_type": normalized_type,
             "tool_name": tool_name,
             "tool_label": tool_label,
             "content": content,
-            "metadata": metadata or {},
+            "metadata": normalized_metadata,
         }
         if project_id:
             row["project_id"] = project_id
