@@ -21,6 +21,29 @@ export default function ChatPage() {
 
   const hasToken = typeof window !== 'undefined' && !!localStorage.getItem('done-token');
 
+  // On localhost, clear stale PWA cache/service-worker state that can hide new UI.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const host = window.location.hostname;
+    if (host !== 'localhost' && host !== '127.0.0.1') return;
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then((registrations) => {
+        registrations.forEach((registration) => {
+          registration.unregister();
+        });
+      });
+    }
+
+    if ('caches' in window) {
+      caches.keys().then((keys) => {
+        keys.forEach((key) => {
+          caches.delete(key);
+        });
+      });
+    }
+  }, []);
+
   // 認証チェック: トークンがなければ即リダイレクト（isLoadingを待たない）
   useEffect(() => {
     if (!hasToken) {
