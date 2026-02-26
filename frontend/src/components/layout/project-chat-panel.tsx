@@ -372,6 +372,8 @@ function ChatInput({
             queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
               messages: [msg, ...(old?.messages || [])],
             }));
+            // 実行ログをここでも即再取得（onCompleteを待つと遅延が生じる）
+            queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onProcessStep: (step: ProcessStep) => {
             addLiveStep(projectId, {
@@ -717,20 +719,25 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           </div>
         ) : (
           <div className="flex flex-col gap-2 p-4">
-            {displayItems.map((item) => {
-              if (item.kind === 'execution-block') {
-                return (
-                  <InlineProcessBlock
-                    key={item.id}
-                    steps={item.steps}
-                    isLive={item.isLive}
-                    defaultCollapsed={!item.isLive}
-                  />
-                );
-              }
-
-              return <MessageBubble key={item.msg.id} msg={item.msg} />;
-            })}
+            {(() => {
+              // 最後のexecution-blockのインデックスを求める（最新だけ展開）
+              const lastExecIdx = displayItems.reduce((last, item, i) =>
+                item.kind === 'execution-block' ? i : last, -1);
+              return displayItems.map((item, index) => {
+                if (item.kind === 'execution-block') {
+                  const isLatest = index === lastExecIdx;
+                  return (
+                    <InlineProcessBlock
+                      key={item.id}
+                      steps={item.steps}
+                      isLive={item.isLive}
+                      defaultCollapsed={!isLatest && !item.isLive}
+                    />
+                  );
+                }
+                return <MessageBubble key={item.msg.id} msg={item.msg} />;
+              });
+            })()}
 
             {/* Live process block (during streaming) */}
             {isProcessing && (
