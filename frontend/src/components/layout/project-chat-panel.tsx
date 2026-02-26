@@ -386,6 +386,8 @@ function ChatInput({
             // 提案が作成された可能性があるので project と proposals を即再取得
             queryClient.invalidateQueries({ queryKey: ['project', projectId] });
             queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
+            // 実行ログを確実に取得（応答が速い場合ポーリングが走らない問題の対処）
+            queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onError: (error) => {
             setSending(projectId, false);
@@ -532,6 +534,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     queryFn: () => api.projects.executionEvents.list(projectId),
     enabled: !!projectId,
     retry: 1,
+    staleTime: 30 * 1000, // 30秒はキャッシュを使う（完了後も表示を維持）
     refetchInterval: (query) => {
       if (!isActiveExecution) return false;
       return query.state.error ? 10000 : 2000;
