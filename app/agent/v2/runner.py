@@ -378,8 +378,11 @@ class AgentRunner:
                     action = tool_call["action"]
                     params = tool_call["params"]
 
-                    # ツール名を整形（browser_open, check_skill等）
-                    if skill_name.startswith("_"):
+                    # ツール名を整形（browser, check_skill等）
+                    if skill_name == "_browser" and action == "__from_params":
+                        browser_action = params.get("action", "browser")
+                        tool_label = f"browser_{browser_action}"
+                    elif skill_name.startswith("_"):
                         tool_label = f"{skill_name[1:]}_{action}" if action else skill_name[1:]
                     else:
                         tool_label = f"{skill_name}_{action}" if action else skill_name
@@ -667,7 +670,7 @@ class AgentRunner:
         lines.append("### スキル使用ルール（必須）")
         lines.append("")
         lines.append("1. ユーザーの依頼が上記スキルに該当する場合、**必ず最初に `check_skill` ツールで手順書を取得すること**。手順書なしで自己流で操作してはいけない。")
-        lines.append("2. 手順書を取得したら、その手順に従って `browser_open`/`browser_click`/`browser_type` 等で操作する。")
+        lines.append("2. 手順書を取得したら、その手順に従って `browser` ツール（action=open/click/type等）で操作する。")
         lines.append("3. 該当するスキルがない場合は、自分の判断でブラウザ操作して構わない。")
         return "\n".join(lines)
 

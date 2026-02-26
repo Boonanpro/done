@@ -323,19 +323,13 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
 
     スキルはツール化しない（Progressive Disclosure に基づく設計）。
     スキル一覧はシステムプロンプトに description のみで表示される。
-    スキルを使う場合は check_skill で手順書を確認し、browser_* ツールで直接操作。
+    スキルを使う場合は check_skill で手順書を確認し、browser ツールで直接操作。
 
     Returns:
         コアツールのリスト
     """
     return [
-        BROWSER_OPEN_TOOL,
-        BROWSER_SCREENSHOT_TOOL,
-        BROWSER_CLICK_TOOL,
-        BROWSER_TYPE_TOOL,
-        BROWSER_SCROLL_TOOL,
-        BROWSER_BACK_TOOL,
-        BROWSER_SELECT_TOOL,
+        BROWSER_TOOL,
         READ_URL_TOOL,
         DEEP_RESEARCH_TOOL,
         SKILL_GENERATE_TOOL,
@@ -356,101 +350,37 @@ def get_team_leader_tools() -> List[Dict[str, Any]]:
     """
     チームリーダー用ツール（プロジェクト planning 時）
 
-    リーダーは指揮官であり作業者ではない。
-    調査・検証はチームに委譲するため、call_researcher / call_critic のみ。
+    Task tool有効化に伴い、リーダーにも全ツールを渡す。
+    調査・検証はClaude Code組み込みのTask toolで自律的に行う。
     """
-    return [
-        CALL_RESEARCHER_TOOL,
-        CALL_CRITIC_TOOL,
-    ]
+    return get_all_skill_tools()
 
 
 # ============================================
 # ブラウザ操作ツール（Dan直接操作）
 # ============================================
 
-BROWSER_OPEN_TOOL = {
-    "name": "browser_open",
-    "description": "URLを開く。操作後にスクリーンショットと要素一覧を返す。",
+BROWSER_TOOL = {
+    "name": "browser",
+    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。",
     "input_schema": {
         "type": "object",
         "properties": {
-            "url": {"type": "string", "description": "開くURL"}
+            "action": {
+                "type": "string",
+                "enum": ["open", "screenshot", "click", "type", "scroll", "back", "select"],
+                "description": "実行するアクション",
+            },
+            "url": {"type": "string", "description": "開くURL（action=open）"},
+            "ref": {"type": "string", "description": "操作対象の要素ref（例: @e1）"},
+            "text": {"type": "string", "description": "入力テキスト（action=type）"},
+            "press_enter": {"type": "boolean", "description": "入力後にEnterを押すか（action=type, デフォルト: false）"},
+            "direction": {"type": "string", "enum": ["down", "up"], "description": "スクロール方向（action=scroll）"},
+            "x": {"type": "integer", "description": "X座標（action=click, refが使えない場合）"},
+            "y": {"type": "integer", "description": "Y座標（action=click, refが使えない場合）"},
+            "value": {"type": "string", "description": "選択する値（action=select）"},
         },
-        "required": ["url"]
-    }
-}
-
-BROWSER_SCREENSHOT_TOOL = {
-    "name": "browser_screenshot",
-    "description": "現在のページのスクリーンショットと要素一覧を取得する（操作なし）",
-    "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-}
-
-BROWSER_CLICK_TOOL = {
-    "name": "browser_click",
-    "description": "要素をクリックする。refまたは座標を指定。操作後にスクリーンショットと要素一覧を返す。",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "ref": {"type": "string", "description": "クリック対象の要素ref（例: @e1）"},
-            "x": {"type": "integer", "description": "X座標（refが使えない場合）"},
-            "y": {"type": "integer", "description": "Y座標（refが使えない場合）"}
-        },
-        "required": []
-    }
-}
-
-BROWSER_TYPE_TOOL = {
-    "name": "browser_type",
-    "description": "テキストを入力する。操作後にスクリーンショットと要素一覧を返す。",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "ref": {"type": "string", "description": "入力対象の要素ref（例: @e3）"},
-            "text": {"type": "string", "description": "入力するテキスト"},
-            "press_enter": {"type": "boolean", "description": "入力後にEnterを押すか（デフォルト: false）"}
-        },
-        "required": ["ref", "text"]
-    }
-}
-
-BROWSER_SCROLL_TOOL = {
-    "name": "browser_scroll",
-    "description": "ページをスクロールする。操作後にスクリーンショットと要素一覧を返す。",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "direction": {"type": "string", "enum": ["down", "up"], "description": "スクロール方向"}
-        },
-        "required": ["direction"]
-    }
-}
-
-BROWSER_BACK_TOOL = {
-    "name": "browser_back",
-    "description": "ブラウザの「戻る」で1つ前のページに戻る。操作後にスクリーンショットと要素一覧を返す。",
-    "input_schema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-}
-
-BROWSER_SELECT_TOOL = {
-    "name": "browser_select",
-    "description": "ドロップダウンの選択肢を選ぶ。操作後にスクリーンショットと要素一覧を返す。",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "ref": {"type": "string", "description": "セレクトボックスの要素ref"},
-            "value": {"type": "string", "description": "選択する値"}
-        },
-        "required": ["ref", "value"]
+        "required": ["action"]
     }
 }
 
@@ -809,35 +739,6 @@ BASH_TOOL = {
 # プロジェクト管理ツール
 # ============================================
 
-# ============================================
-# サブエージェント呼び出しツール（チームリーダー用）
-# ============================================
-
-CALL_RESEARCHER_TOOL = {
-    "name": "call_researcher",
-    "description": "リサーチャーに調査を依頼する。web検索で事実に基づく調査結果を返す。",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "task": {"type": "string", "description": "調査タスク（何を調べてほしいか）"},
-            "context": {"type": "string", "description": "追加コンテキスト（前回の調査結果やクリティックの指摘など）"},
-        },
-        "required": ["task"]
-    }
-}
-
-CALL_CRITIC_TOOL = {
-    "name": "call_critic",
-    "description": "クリティックに検証を依頼する。論理の飛躍、リスク、代替案を指摘し、追加調査の要否を判定する。",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "content": {"type": "string", "description": "検証対象（調査結果や提案書）"},
-            "focus_areas": {"type": "string", "description": "特に検証してほしいポイント"},
-        },
-        "required": ["content"]
-    }
-}
 
 # ============================================
 # コード探索ツール
@@ -894,8 +795,12 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     if tool_name == "check_skill":
         return ("_check_skill", "check")
 
+    if tool_name == "browser":
+        return ("_browser", "__from_params")
+
+    # Legacy fallback: browser_open, browser_click etc. (in-flight sessions)
     if tool_name.startswith("browser_"):
-        action = tool_name[len("browser_"):]  # open, screenshot, click, type, scroll, select
+        action = tool_name[len("browser_"):]
         return ("_browser", action)
 
     if tool_name == "read_url":
@@ -903,12 +808,6 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "deep_research":
         return ("_deep_research", "research")
-
-    if tool_name == "call_researcher":
-        return ("_call_researcher", "call")
-
-    if tool_name == "call_critic":
-        return ("_call_critic", "call")
 
     if tool_name == "read_workspace":
         return ("_read_workspace", "read")
@@ -1600,281 +1499,6 @@ def parse_tool_call(response: str) -> Optional[Dict[str, Any]]:
     }
 
 
-# ============================================
-# サブエージェント実行（CLI subprocess — Max plan 定額内）
-# ============================================
-
-
-async def _execute_sub_agent(
-    role: str,
-    params: Dict[str, Any],
-    session_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    サブエージェント（リサーチャー/クリティック）を Claude CLI subprocess で実行する。
-
-    Max plan 定額内で動作し、CLI 内蔵の WebSearch / WebFetch を使用する。
-    MCP 不要のためネスト問題は発生しない。
-
-    Args:
-        role: "researcher" or "critic"
-        params: ツールパラメータ（task/context or content/focus_areas）
-        session_id: 親セッションのroom_id（イベント保存用）
-    """
-    import json as _json
-
-    role_label = "リサーチャー" if role == "researcher" else "クリティック"
-
-    try:
-        from app.agent.v2.team.prompts import get_sub_agent_prompt, build_sub_agent_message
-
-        # プロジェクト情報の取得（サブエージェントに背景を共有するため）
-        project_title = ""
-        project_description = ""
-        project_id = None
-        if session_id:
-            try:
-                from app.services.supabase_client import get_supabase_client
-                sb = get_supabase_client().client
-                proj = sb.table("projects").select("id, title, description").eq("room_id", session_id).execute()
-                if proj.data:
-                    project_id = proj.data[0].get("id")
-                    project_title = proj.data[0].get("title", "")
-                    project_description = proj.data[0].get("description", "")
-            except Exception:
-                pass
-
-        # パラメータ組み立て
-        if role == "researcher":
-            task = params.get("task", "")
-            context = params.get("context", "")
-            if not task:
-                return {"success": False, "error": "task が必要です"}
-            user_message = build_sub_agent_message(
-                role, task, context,
-                project_title=project_title, project_description=project_description,
-            )
-        elif role == "critic":
-            content = params.get("content", "")
-            focus_areas = params.get("focus_areas", "")
-            if not content:
-                return {"success": False, "error": "content が必要です"}
-            user_message = build_sub_agent_message(
-                role, content, focus_areas,
-                project_title=project_title, project_description=project_description,
-            )
-        else:
-            return {"success": False, "error": f"Unknown role: {role}"}
-
-        system_prompt = get_sub_agent_prompt(role)
-
-        # CLI パス解決
-        from app.agent.cli_runner import _resolve_claude_cli
-        claude_cmd, cli_js = _resolve_claude_cli()
-        if not claude_cmd:
-            return {"success": False, "error": "claude CLI が見つかりません", "role": role}
-
-        # コマンド組み立て
-        if cli_js:
-            cmd = [claude_cmd, cli_js]
-        else:
-            cmd = [claude_cmd]
-
-        cmd.extend([
-            "-p",
-            "--output-format", "stream-json",
-            "--verbose",
-            "--model", "sonnet",
-            "--tools", "WebSearch,WebFetch,Read",
-            "--dangerously-skip-permissions",
-            "--no-session-persistence",
-            "--max-turns", "40",
-            "--append-system-prompt", system_prompt,
-        ])
-
-        # 環境変数の準備
-        # CLAUDECODE: 親CLIの「二重起動防止」目印を消す（消さないと子CLIが起動拒否する）
-        # ANTHROPIC_API_KEY: 消さないとMax planではなくAPI従量課金が使われてしまう
-        import os as _os
-        sub_env = {k: v for k, v in _os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
-
-        # サブプロセス起動
-        logger.info(f"[SubAgent] Starting {role} CLI subprocess")
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=sub_env,
-        )
-
-        # stdin にユーザーメッセージを書き込み
-        process.stdin.write(user_message.encode("utf-8"))
-        await process.stdin.drain()
-        process.stdin.close()
-
-        # stderr ドレイン（バッファ満杯によるデッドロック防止）
-        stderr_lines: list[str] = []
-        async def _drain_stderr():
-            try:
-                async for line in process.stderr:
-                    decoded = line.decode("utf-8", errors="replace").strip()
-                    if decoded:
-                        stderr_lines.append(decoded)
-                        logger.warning(f"[SubAgent] {role} stderr: {decoded[:300]}")
-            except Exception:
-                pass
-
-        stderr_task = asyncio.create_task(_drain_stderr())
-
-        # stdout から JSON stream を読み取り
-        final_text = ""
-        # --verbose の stream-json は同じ msg_id を段階的に複数回出力する
-        # （例: 1回目=thinking, 2回目=tool_use, 3回目=text）
-        # 処理済みブロック数を記録し、新しく増えた分だけ処理する
-        processed_block_counts: dict = {}  # msg_id → 処理済みブロック数
-
-        async for raw_line in process.stdout:
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line:
-                continue
-
-            try:
-                data = _json.loads(line)
-            except _json.JSONDecodeError:
-                continue
-
-            msg_type = data.get("type", "")
-
-            if msg_type == "assistant":
-                message_data = data.get("message", {})
-                msg_id = message_data.get("id", "")
-                blocks = message_data.get("content", [])
-
-                # 前回処理済みの数を取得し、新しく増えた分だけ処理
-                prev_count = processed_block_counts.get(msg_id, 0)
-                new_blocks = blocks[prev_count:]
-                processed_block_counts[msg_id] = len(blocks)
-
-                if not new_blocks:
-                    continue
-
-                # イベント保存 & テキスト収集
-                await _forward_sub_agent_events(role, new_blocks, session_id, project_id)
-                for block in new_blocks:
-                    if block.get("type") == "text":
-                        text = block.get("text", "")
-                        if text.strip():
-                            final_text = text
-
-            elif msg_type == "result":
-                result_text = data.get("result", "")
-                if result_text:
-                    final_text = result_text
-
-        await process.wait()
-        await stderr_task
-
-        stderr_output = "\n".join(stderr_lines[-10:])  # 末尾10行
-        logger.info(f"[SubAgent] {role} completed: {len(final_text)} chars, exit={process.returncode}")
-        if stderr_lines:
-            logger.warning(f"[SubAgent] {role} stderr: {stderr_output[:500]}")
-
-        if not final_text:
-            return {
-                "success": False,
-                "error": f"{role_label}が結果を返しませんでした（exit code: {process.returncode}）\nstderr: {stderr_output[:300]}",
-                "role": role,
-            }
-
-        return {
-            "success": True,
-            "output": final_text,
-            "role": role,
-            "message": f"{role_label}の調査が完了しました。",
-        }
-
-    except Exception as e:
-        logger.exception(f"[SubAgent] {role} failed: {e}")
-        return {
-            "success": False,
-            "error": f"{role_label}の実行に失敗しました: {str(e)}",
-            "role": role,
-        }
-
-
-async def _forward_sub_agent_events(
-    role: str,
-    blocks: list,
-    session_id: Optional[str],
-    project_id: Optional[str],
-) -> None:
-    """
-    CLI JSON stream のコンテンツブロックを execution_events に保存する。
-    ProcessMonitor 用にロール付きラベルで記録。
-    """
-    if not session_id:
-        return
-
-    try:
-        from app.services.project_service import ProjectService
-        ps = ProjectService()
-
-        role_emoji = "🔬" if role == "researcher" else "🔍"
-        role_label = "リサーチャー" if role == "researcher" else "クリティック"
-
-        for block in blocks:
-            block_type = block.get("type", "")
-
-            if block_type in ("tool_use", "server_tool_use"):
-                tool_name = block.get("name", "")
-                tool_input = block.get("input", {})
-
-                # 主要パラメータを短縮表示
-                detail_str = ""
-                if isinstance(tool_input, dict):
-                    for key in ("query", "url", "task"):
-                        if key in tool_input:
-                            val = str(tool_input[key])
-                            detail_str = f': "{val}"'
-                            break
-
-                label = f"[{role_label}] {role_emoji} {tool_name}{detail_str}"
-                await ps.save_execution_event(
-                    project_id=project_id,
-                    room_id=session_id,
-                    event_type="tool_use",
-                    tool_name=tool_name,
-                    tool_label=label,
-                    metadata={"member": role},
-                )
-
-            elif block_type == "text":
-                text = block.get("text", "").strip()
-                if text:
-                    await ps.save_execution_event(
-                        project_id=project_id,
-                        room_id=session_id,
-                        event_type="reasoning",
-                        content=f"[{role_label}] {text}",
-                        metadata={"member": role},
-                    )
-
-            elif block_type == "thinking":
-                thinking_text = block.get("thinking", "")
-                if thinking_text:
-                    await ps.save_execution_event(
-                        project_id=project_id,
-                        room_id=session_id,
-                        event_type="reasoning",
-                        content=f"[{role_label}] {thinking_text.strip()}",
-                        metadata={"member": role},
-                    )
-
-    except Exception as e:
-        logger.warning(f"[SubAgent] Failed to forward events for {role}: {e}")
-
-
 async def execute_tool(
     tool_call: Dict[str, Any],
     user_id: str,
@@ -1896,13 +1520,6 @@ async def execute_tool(
     skill_name = tool_call["skill"]
     action = tool_call["action"]
     params = tool_call["params"]
-
-    # ★★★ サブエージェント呼び出し ★★★
-    if skill_name == "_call_researcher":
-        return await _execute_sub_agent("researcher", params, session_id)
-
-    if skill_name == "_call_critic":
-        return await _execute_sub_agent("critic", params, session_id)
 
     # ★★★ ワークスペース読み取り（外部依存なし）★★★
     if skill_name == "_read_workspace":
@@ -2478,7 +2095,10 @@ async def execute_tool(
 
     # ★★★ ブラウザ直接操作ツール ★★★
     if skill_name == "_browser":
-        return await _execute_browser_tool(action, params)
+        real_action = action
+        if real_action == "__from_params":
+            real_action = params.pop("action", "screenshot")
+        return await _execute_browser_tool(real_action, params)
 
     # ★★★ URL読み込み（Jina Reader）★★★
     if skill_name == "_jina":
@@ -2598,7 +2218,7 @@ async def execute_tool(
     try:
         return {
             "success": True,
-            "message": f"スキル '{skill.display_name}' の手順書を取得しました。browser_open, browser_click, browser_type 等のツールで操作してください。",
+            "message": f"スキル '{skill.display_name}' の手順書を取得しました。browser ツールで操作してください。",
             "manual": skill_manual,
             "domain": skill.domain,
             "available_actions": skill.list_available_actions(),

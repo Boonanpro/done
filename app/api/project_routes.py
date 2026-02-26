@@ -286,26 +286,31 @@ async def resume_execution(
 
 # ==================== Helpers ====================
 
-def _summarize_reasoning(text: str) -> str:
-    """思考テキストを1文に要約（先頭の意味のある文を抽出）"""
-    if not text or not text.strip():
-        return ""
-    # 改行で分割して空行でない最初の行を取得
-    lines = [ln.strip() for ln in text.strip().split("\n") if ln.strip()]
-    if not lines:
-        return ""
-    first = lines[0]
-    # 句点で区切って最初の文を取得
-    for sep in ("。", "．", ". "):
-        if sep in first:
-            first = first[: first.index(sep) + len(sep)]
-            break
-    return first
-
 
 def _format_tool_label(name: str, tool_input: dict) -> str:
     """SDK ツール名 + input から人間向けラベルを生成"""
-    # MCP ツール（ブラウザ操作系）
+    # MCP ツール（統合 browser ツール）
+    if "browser" in name and "browser_" not in name:
+        action = tool_input.get("action", "")
+        if action == "open":
+            url = tool_input.get("url", "")
+            domain = url.split("//")[-1].split("/")[0] if "//" in url else url[:40]
+            return f"ブラウザで {domain} を開く"
+        if action == "click":
+            ref = tool_input.get("ref", "")
+            return f"要素 {ref} をクリック"
+        if action == "type":
+            return "テキスト入力"
+        if action == "screenshot":
+            return "画面を確認"
+        if action == "scroll":
+            return "スクロール"
+        if action == "select":
+            return "選択操作"
+        if action == "back":
+            return "ページを戻る"
+        return f"ブラウザ操作: {action}"
+    # Legacy fallback: browser_* (in-flight sessions)
     if "browser_open" in name:
         url = tool_input.get("url", "")
         domain = url.split("//")[-1].split("/")[0] if "//" in url else url[:40]
@@ -370,14 +375,6 @@ def _format_tool_label(name: str, tool_input: dict) -> str:
     if name == "WebFetch":
         url = tool_input.get("url", "")
         return f"WebFetch: {url}" if url else "WebFetch"
-
-    # MCP ツール（call_researcher / call_critic）
-    if "call_researcher" in name:
-        task = tool_input.get("task", "")
-        return f"リサーチャーに調査依頼: {task}" if task else "リサーチャーに調査依頼"
-    if "call_critic" in name:
-        focus = tool_input.get("focus_areas", "")
-        return f"クリティックに検証依頼: {focus}" if focus else "クリティックに検証依頼"
 
     return name
 
