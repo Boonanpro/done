@@ -55,7 +55,7 @@ async def _handle_client(client_reader: asyncio.StreamReader, client_writer: asy
     t1 = asyncio.create_task(_pipe(client_reader, backend_writer))
     t2 = asyncio.create_task(_pipe(backend_reader, client_writer))
 
-    await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
+    await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
 
     # Cancel the other task
     t1.cancel()

@@ -37,7 +37,6 @@ export default function FriendsPage() {
   const [selectedRoomId, setSelectedRoomId] = useState<string | null>(null);
   const [inviteCopied, setInviteCopied] = useState(false);
   const [message, setMessage] = useState('');
-  const [aiEnabled] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Fetch friends
@@ -72,7 +71,7 @@ export default function FriendsPage() {
   });
 
   // Sync AI enabled state with fetched settings
-  const currentAiEnabled = aiSettings?.enabled ?? aiEnabled;
+  const currentAiEnabled = aiSettings?.enabled ?? false;
 
   const messages = messagesData?.messages || [];
 

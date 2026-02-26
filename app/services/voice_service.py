@@ -5,8 +5,8 @@ Phase 10: Voice Communication Service
 import logging
 import audioop
 import io
-from typing import Optional, List, Tuple
-from datetime import datetime
+from typing import Optional, List
+from datetime import datetime, timezone
 import uuid
 import aiohttp
 
@@ -77,7 +77,7 @@ class VoiceService:
     
     async def _create_default_voice_settings(self, user_id: str) -> VoiceSettingsResponse:
         """デフォルトの音声設定を作成"""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         insert_data = {
             "user_id": user_id,
@@ -133,7 +133,7 @@ class VoiceService:
                 update_data["elevenlabs_voice_id"] = update.elevenlabs_voice_id
             
             if update_data:
-                update_data["updated_at"] = datetime.utcnow().isoformat()
+                update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
                 
                 self.supabase.client.table("voice_settings").update(update_data).eq(
                     "user_id", user_id
@@ -198,7 +198,7 @@ class VoiceService:
                 "rule_type": rule.rule_type.value,
                 "label": rule.label,
                 "notes": rule.notes,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
             
             result = self.supabase.client.table("phone_number_rules").insert(insert_data).execute()
@@ -336,7 +336,7 @@ class VoiceService:
     ) -> VoiceCallResponse:
         """通話レコードを作成"""
         try:
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             
             insert_data = {
                 "user_id": user_id,
@@ -376,13 +376,13 @@ class VoiceService:
         try:
             update_data = {
                 "status": status.value,
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }
             
             if status == CallStatus.IN_PROGRESS:
-                update_data["answered_at"] = datetime.utcnow().isoformat()
+                update_data["answered_at"] = datetime.now(timezone.utc).isoformat()
             elif status in [CallStatus.COMPLETED, CallStatus.FAILED, CallStatus.CANCELED]:
-                update_data["ended_at"] = datetime.utcnow().isoformat()
+                update_data["ended_at"] = datetime.now(timezone.utc).isoformat()
             
             if duration_seconds is not None:
                 update_data["duration_seconds"] = duration_seconds
@@ -429,7 +429,7 @@ class VoiceService:
     ) -> VoiceCallMessageResponse:
         """通話メッセージを追加"""
         try:
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             
             insert_data = {
                 "call_id": call_id,

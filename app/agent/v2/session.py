@@ -99,7 +99,7 @@ class Session:
             "role": "user",
             "content": content
         })
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
 
     def add_user_message_with_images(
         self,
@@ -136,7 +136,7 @@ class Session:
             "role": "user",
             "content": content_blocks,
         })
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
 
     def add_assistant_message(self, content: str) -> None:
         """アシスタントメッセージを追加"""
@@ -144,12 +144,12 @@ class Session:
             "role": "assistant",
             "content": content
         })
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
 
     def add_assistant_message_from_blocks(self, blocks: List[Dict[str, Any]]) -> None:
         """Gemini応答をAnthropic形式ブロックとして保存"""
         self.messages.append({"role": "assistant", "content": blocks})
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
 
     def add_assistant_message_from_response(self, response: Any) -> None:
         """
@@ -197,7 +197,7 @@ class Session:
             "role": "assistant",
             "content": content_blocks,
         })
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
 
     def add_tool_result(
         self,
@@ -236,7 +236,7 @@ class Session:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
                     if block.get("tool_use_id") == tool_use_id:
                         block["content"] = result_content
-                        self.updated_at = datetime.utcnow()
+                        self.updated_at = datetime.now(timezone.utc)
                         return
 
         self.messages.append({
@@ -247,7 +247,7 @@ class Session:
                 "content": result_content,
             }],
         })
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
 
     def add_reasoning_step(self, step: str) -> None:
         """推論ステップを追加（ナレーション用）"""
@@ -416,14 +416,14 @@ class Session:
 
         # 新しいメッセージ配列を構築
         self.messages = [summary_message] + recent_messages
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
 
         return to_remove
 
     def set_context(self, key: str, value: Any) -> None:
         """コンテキストに値を設定"""
         self.context[key] = value
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
 
     def get_context(self, key: str, default: Any = None) -> Any:
         """コンテキストから値を取得"""
@@ -432,7 +432,7 @@ class Session:
     def transition_to(self, new_state: State) -> None:
         """状態を遷移"""
         self.current_state = new_state
-        self.updated_at = datetime.utcnow()
+        self.updated_at = datetime.now(timezone.utc)
 
     def to_dict(self) -> Dict[str, Any]:
         """辞書に変換（永続化用）"""
@@ -657,7 +657,7 @@ class SessionStore:
                 "current_state": session.current_state.value,
                 "reasoning_steps": session.reasoning_steps,
                 "context": session.context,
-                "updated_at": datetime.utcnow().isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }
 
             # upsert

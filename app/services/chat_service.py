@@ -1,10 +1,13 @@
 """
 Chat Service - Business Logic for Done Chat
 """
-from typing import Optional
-from datetime import datetime, timedelta
+from typing import Optional, Callable, Any
+from datetime import datetime, timedelta, timezone
 import secrets
 import re
+import asyncio
+import random
+import logging
 
 from app.services.supabase_client import get_supabase_client
 from app.services.auth_service import get_password_hash, verify_password
@@ -38,6 +41,47 @@ class ChatService:
     
     def __init__(self):
         self.supabase = get_supabase_client().client  # Use the underlying supabase client
+        self.logger = logging.getLogger(__name__)
+
+    @staticmethod
+    def _is_transient_supabase_error(exc: Exception) -> bool:
+        """Return True for transport errors that can succeed on retry."""
+        text = str(exc).lower()
+        markers = (
+            "server disconnected",
+            "remoteprotocolerror",
+            "read timed out",
+            "connection reset",
+            "connection aborted",
+            "temporarily unavailable",
+        )
+        return any(marker in text for marker in markers)
+
+    async def _execute_with_retry(
+        self,
+        operation: str,
+        fn: Callable[[], Any],
+        retries: int = 2,
+        base_delay: float = 0.2,
+    ) -> Any:
+        """Execute a sync Supabase request with short retries for transient failures."""
+        attempt = 0
+        while True:
+            try:
+                return fn()
+            except Exception as exc:
+                if attempt >= retries or not self._is_transient_supabase_error(exc):
+                    raise
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 0.15)
+                self.logger.warning(
+                    "Transient Supabase error on %s (attempt %s/%s): %s",
+                    operation,
+                    attempt + 1,
+                    retries + 1,
+                    exc,
+                )
+                attempt += 1
+                await asyncio.sleep(delay)
     
     # ==================== User Management ====================
     
@@ -122,7 +166,7 @@ class ChatService:
         code = generate_invite_code()
         expires_at = None
         if expires_in_hours:
-            expires_at = (datetime.utcnow() + timedelta(hours=expires_in_hours)).isoformat()
+            expires_at = (datetime.now(timezone.utc) + timedelta(hours=expires_in_hours)).isoformat()
         
         result = self.supabase.table("chat_invites").insert({
             "code": code,
@@ -151,7 +195,7 @@ class ChatService:
         # Check if expired
         if invite.get("expires_at"):
             expires_at = parse_datetime(invite["expires_at"])
-            if datetime.utcnow().replace(tzinfo=expires_at.tzinfo) > expires_at:
+            if datetime.now(timezone.utc).replace(tzinfo=expires_at.tzinfo) > expires_at:
                 raise ValueError("Invite has expired")
         
         # Check if max uses reached
@@ -315,7 +359,10 @@ class ChatService:
     async def get_room(self, room_id: str, user_id: str) -> Optional[dict]:
         """Get room details (only if user is a member)"""
         # Verify membership
-        member = self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", user_id).execute()
+        member = await self._execute_with_retry(
+            "get_room.membership_check",
+            lambda: self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", user_id).execute(),
+        )
         if not member.data:
             return None
         
@@ -330,7 +377,10 @@ class ChatService:
     async def update_room(self, room_id: str, user_id: str, name: Optional[str] = None) -> Optional[dict]:
         """Update room settings"""
         # Verify membership and role
-        member = self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", user_id).execute()
+        member = await self._execute_with_retry(
+            "get_messages.membership_check",
+            lambda: self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", user_id).execute(),
+        )
         if not member.data:
             return None
         
@@ -396,21 +446,30 @@ class ChatService:
     async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human") -> dict:
         """Send a message to a room"""
         # Verify membership
-        member = self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", sender_id).execute()
+        member = await self._execute_with_retry(
+            "send_message.membership_check",
+            lambda: self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", sender_id).execute(),
+        )
         if not member.data:
             raise ValueError("Not a member of this room")
 
         # Get sender info
-        sender = self.supabase.table("users").select("display_name").eq("id", sender_id).execute()
+        sender = await self._execute_with_retry(
+            "send_message.get_sender",
+            lambda: self.supabase.table("users").select("display_name").eq("id", sender_id).execute(),
+        )
         sender_name = sender.data[0]["display_name"] if sender.data else "Unknown"
         # 統合後: sender_id = users.id（done_user_idは不要）
 
-        result = self.supabase.table("chat_messages").insert({
-            "room_id": room_id,
-            "sender_id": sender_id,
-            "sender_type": sender_type,
-            "content": content,
-        }).execute()
+        result = await self._execute_with_retry(
+            "send_message.insert_message",
+            lambda: self.supabase.table("chat_messages").insert({
+                "room_id": room_id,
+                "sender_id": sender_id,
+                "sender_type": sender_type,
+                "content": content,
+            }).execute(),
+        )
 
         if result.data:
             msg = result.data[0]
@@ -495,7 +554,10 @@ class ChatService:
         if before:
             query = query.lt("created_at", before)
         
-        result = query.execute()
+        result = await self._execute_with_retry(
+            "get_messages.fetch_messages",
+            lambda: query.execute(),
+        )
         
         messages = []
         for msg in result.data or []:
@@ -518,7 +580,7 @@ class ChatService:
     async def mark_as_read(self, room_id: str, user_id: str) -> bool:
         """Mark messages as read"""
         result = self.supabase.table("chat_room_members").update({
-            "last_read_at": datetime.utcnow().isoformat(),
+            "last_read_at": datetime.now(timezone.utc).isoformat(),
         }).eq("room_id", room_id).eq("user_id", user_id).execute()
         
         return bool(result.data)
@@ -825,7 +887,10 @@ class ChatService:
         if ai_context:
             insert_data["ai_context"] = ai_context
         
-        result = self.supabase.table("chat_messages").insert(insert_data).execute()
+        result = await self._execute_with_retry(
+            "send_dan_ai_message.insert_message",
+            lambda: self.supabase.table("chat_messages").insert(insert_data).execute(),
+        )
         
         if result.data:
             msg = result.data[0]
@@ -1265,7 +1330,7 @@ class ChatService:
         new_status = "approved" if action in ["approve", "edit"] else "rejected"
         update_data = {
             "status": new_status,
-            "responded_at": datetime.utcnow().isoformat(),
+            "responded_at": datetime.now(timezone.utc).isoformat(),
         }
         
         if action == "edit" and edited_content:

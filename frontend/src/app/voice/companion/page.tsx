@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useGeminiVoice, type GeminiVoiceState } from '@/hooks/useGeminiVoice';
+import { useGeminiVoice } from '@/hooks/useGeminiVoice';
 import { api } from '@/lib/api-client';
 import { useAuthStore } from '@/stores/auth-store';
 

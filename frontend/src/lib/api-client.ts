@@ -928,7 +928,6 @@ export const api = {
       },
       signal?: AbortSignal
     ): Promise<void> => {
-      console.log('[SSE] sendMessageStream called');
       let token: string | null = null;
       try {
         token = useAuthStore.getState().token;
@@ -936,8 +935,6 @@ export const api = {
         console.error('[SSE] Failed to get token', e);
       }
       const baseUrl = SSE_BASE_URL;
-
-      console.log('[SSE] Starting stream request', { data, baseUrl, hasToken: !!token });
 
       try {
         const response = await fetch(`${baseUrl}/api/v1/chat/dan/messages/stream`, {
@@ -949,8 +946,6 @@ export const api = {
           body: JSON.stringify({ content: data.message, session_id: data.session_id }),
           signal,  // AbortSignal追加
         });
-
-        console.log('[SSE] Response received', { status: response.status, ok: response.ok });
 
         // 401エラー時はログインページにリダイレクト
         if (response.status === 401) {
@@ -1041,7 +1036,6 @@ export const api = {
       } catch (error) {
         // AbortErrorは意図的なキャンセルなのでエラーとして扱わない
         if (error instanceof DOMException && error.name === 'AbortError') {
-          console.log('[SSE] Request cancelled by user');
           // キャンセル時もクリーンアップ
           if (callbacks.onComplete) {
             callbacks.onComplete();

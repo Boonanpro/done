@@ -604,6 +604,9 @@ async def get_messages(
         return MessagesListResponse(messages=[MessageResponse(**m) for m in messages])
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        logger.warning("Temporary failure in get_messages (room=%s): %s", room_id, e)
+        raise HTTPException(status_code=503, detail="Temporary backend error. Please retry.")
 
 
 @router.post("/rooms/{room_id}/messages", response_model=MessageResponse)
@@ -803,8 +806,35 @@ async def send_dan_message_stream(
         room_id_for_cancel = None  # 後で設定
         done_sent = False  # done イベント送信済みフラグ
         result_saved = False  # AI回答DB保存済みフラグ
+        replan_requested = _is_replan_request(request.content)
+
+        async def _save_project_event_safe(project_service, **kwargs):
+            """Best-effort event write; avoid blocking chat execution on log writes."""
+            try:
+                await asyncio.wait_for(
+                    project_service.save_execution_event(**kwargs),
+                    timeout=5,
+                )
+            except Exception as event_err:
+                logger.debug(
+                    "Skipped execution_event write (room=%s, type=%s): %s",
+                    kwargs.get("room_id"),
+                    kwargs.get("event_type"),
+                    event_err,
+                )
 
         try:
+            if (
+                request.session_id
+                and not replan_requested
+                and CancellationRegistry.is_active(request.session_id)
+            ):
+                busy_message = "前の実行がまだ進行中です。停止してから再送してください。"
+                yield f"data: {json.dumps({'type': 'error', 'session_id': request.session_id, 'message': busy_message})}\n\n"
+                done_sent = True
+                yield f"data: {json.dumps({'type': 'done', 'session_id': request.session_id})}\n\n"
+                return
+
             # Step 1: ユーザーメッセージを保存
             # session_idが指定されていればそのルームに、なければ現在のDanルームに送信
             if request.session_id:
@@ -816,7 +846,6 @@ async def send_dan_message_stream(
             user = await service.get_user_by_id(current_user.user_id)
 
             # 方針変更要求時は、既存の同一ルーム実行を先に止める
-            replan_requested = _is_replan_request(request.content)
             if replan_requested:
                 try:
                     CancellationRegistry.cancel(room_id)
@@ -906,7 +935,7 @@ async def send_dan_message_stream(
                             project_info["status"] = updated.get("status", "planning")
                         else:
                             project_info["status"] = "planning"
-                        await project_service.save_execution_event(
+                        await _save_project_event_safe(project_service,
                             project_id=project_info["id"],
                             room_id=room_id,
                             event_type="phase",
@@ -959,7 +988,7 @@ async def send_dan_message_stream(
                 ):
                     if event["type"] == "cancelled":
                         await service.send_dan_ai_message(current_user.user_id, "（中断されました）", [], room_id=room_id)
-                        await project_service.save_execution_event(
+                        await _save_project_event_safe(project_service,
                             project_id=project_info["id"], room_id=room_id,
                             event_type="done", content="cancelled",
                         )
@@ -979,7 +1008,7 @@ async def send_dan_message_stream(
                         # execution_events に保存（ProcessMonitor用）
                         if text.strip():
                             try:
-                                await project_service.save_execution_event(
+                                await _save_project_event_safe(project_service,
                                     project_id=project_info["id"],
                                     room_id=room_id,
                                     event_type="reasoning",
@@ -995,7 +1024,7 @@ async def send_dan_message_stream(
                         step_counter += 1
                         # execution_events に保存（ProcessMonitor用）
                         try:
-                            await project_service.save_execution_event(
+                            await _save_project_event_safe(project_service,
                                 project_id=project_info["id"],
                                 room_id=room_id,
                                 event_type="tool_use",
@@ -1029,7 +1058,7 @@ async def send_dan_message_stream(
                         yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': event['message']})}\n\n"
                         # エラーも execution_events に保存
                         try:
-                            await project_service.save_execution_event(
+                            await _save_project_event_safe(project_service,
                                 project_id=project_info["id"],
                                 room_id=room_id,
                                 event_type="error",
@@ -1082,18 +1111,21 @@ async def send_dan_message_stream(
                             from app.services.proposal_steps import extract_steps
 
                             proposal_steps = extract_steps(ai_response_content)
-                            await project_service.create_proposal(
-                                project_id=project_info["id"],
-                                content=ai_response_content,
-                                proposal_type="plan",
-                                steps=proposal_steps,
-                                metadata={
-                                    "source": "project_chat_planning",
-                                    "generated_by": "cli_runner",
-                                },
+                            await asyncio.wait_for(
+                                project_service.create_proposal(
+                                    project_id=project_info["id"],
+                                    content=ai_response_content,
+                                    proposal_type="plan",
+                                    steps=proposal_steps,
+                                    metadata={
+                                        "source": "project_chat_planning",
+                                        "generated_by": "cli_runner",
+                                    },
+                                ),
+                                timeout=10,
                             )
                             proposal_created = True
-                            await project_service.save_execution_event(
+                            await _save_project_event_safe(project_service,
                                 project_id=project_info["id"],
                                 room_id=room_id,
                                 event_type="phase",
@@ -1108,7 +1140,7 @@ async def send_dan_message_stream(
                                 proposal_error,
                             )
                             try:
-                                await project_service.save_execution_event(
+                                await _save_project_event_safe(project_service,
                                     project_id=project_info["id"],
                                     room_id=room_id,
                                     event_type="error",
@@ -1119,13 +1151,14 @@ async def send_dan_message_stream(
 
                     # DB: done イベント保存（再接続時に「完了済み」を判定するため）
                     try:
-                        await project_service.save_execution_event(
+                        await _save_project_event_safe(project_service,
                             project_id=project_info["id"], room_id=room_id,
                             event_type="done",
                             content="proposed" if proposal_created else "completed",
                         )
                     except Exception:
                         pass
+                    result_saved = True
                     yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
                     done_sent = True
 
@@ -1234,55 +1267,15 @@ async def send_dan_message_stream(
             logging.error(f"Failed to stream dan message: {e}\n{traceback.format_exc()}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
         finally:
-            # ★ SSE切断時: process_taskの結果をDBに確実に保存する
-            # モバイルでページを離れるとSSE接続が切れ、ジェネレータがここに来る。
-            # process_taskはバックグラウンドで走り続けるので、結果を待ってDBに保存する。
-            if not result_saved and 'process_task' in locals():
-                import logging as _log
-                _log.info(f"[SSE-DISCONNECT] Client disconnected, waiting for process_task to complete (room={room_id_for_cancel})")
-                try:
-                    if not process_task.done():
-                        # process_taskの完了を待つ（最大120秒）
-                        _result = await asyncio.wait_for(process_task, timeout=120)
-                    else:
-                        _result = process_task.result()
-
-                    if not _result.get("cancelled"):
-                        _ai_response = _result.get("response") or "申し訳ありません。処理中にエラーが発生しました。"
-                        _steps = reasoning_steps if 'reasoning_steps' in locals() else []
-
-                        # AI回答をDBに保存
-                        _saved = await service.send_dan_ai_message(
-                            current_user.user_id, _ai_response, _steps, room_id=room_id_for_cancel
-                        )
-                        await _archive_session_summary(
-                            service=service,
-                            user_id=current_user.user_id,
-                            room_id=room_id_for_cancel,
-                            archive_type="snapshot",
-                            is_project=is_project if "is_project" in locals() else False,
-                            project_title=project_info.get("title", "") if "project_info" in locals() else "",
-                            project_status=project_info.get("status", "") if "project_info" in locals() else "",
-                        )
-                        _log.info(f"[SSE-DISCONNECT] AI response saved to DB (room={room_id_for_cancel}, msg_id={_saved['id'] if _saved else 'None'})")
-
-                        # done execution_event を保存（リカバリーフック用）
-                        if '_event_svc' in locals():
-                            try:
-                                await _event_svc.save_execution_event(
-                                    project_id=None, room_id=room_id_for_cancel,
-                                    event_type="done", content="completed",
-                                )
-                            except Exception:
-                                pass
-                    else:
-                        _log.info(f"[SSE-DISCONNECT] Task was cancelled, skipping save (room={room_id_for_cancel})")
-                except asyncio.TimeoutError:
-                    _log.error(f"[SSE-DISCONNECT] process_task timed out after 120s (room={room_id_for_cancel})")
-                except asyncio.CancelledError:
-                    _log.warning(f"[SSE-DISCONNECT] process_task was cancelled (room={room_id_for_cancel})")
-                except Exception as _e:
-                    _log.error(f"[SSE-DISCONNECT] Failed to save result: {_e} (room={room_id_for_cancel})")
+            # CLI Runner 方式ではプロセスは別スレッドで完結しており、
+            # SSE切断時には async for ループが自然に終了して result_saved が
+            # 正常パスで設定される。ここでは UI の確実な停止だけ保証する。
+            if not result_saved and room_id_for_cancel:
+                # SSE切断等で正常パスを通れなかった場合のログ
+                logger.info(
+                    "[SSE-DISCONNECT] Stream ended without saving result (room=%s)",
+                    room_id_for_cancel,
+                )
 
             # done 未送信の場合のみ送信（フロントエンドのスピナー停止保証）
             if not done_sent:
@@ -1293,7 +1286,7 @@ async def send_dan_message_stream(
             # クリーンアップ: リクエストIDとコールバックを解除
             ProgressCallbackRegistry.unregister(request_id)
             set_current_request_id(None)
-            # キャンセルフラグを解除（process_task完了後に行う）
+            # キャンセルフラグを解除
             if room_id_for_cancel:
                 CancellationRegistry.unregister(room_id_for_cancel)
     
