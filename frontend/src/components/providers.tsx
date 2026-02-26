@@ -5,7 +5,6 @@
 'use client';
 
 import { QueryClientProvider } from '@tanstack/react-query';
-import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import { Toaster } from '@/components/ui/sonner';
 import { getQueryClient } from '@/lib/query-client';
 
@@ -29,7 +28,6 @@ export function Providers({ children }: ProvidersProps) {
           },
         }}
       />
-      <ReactQueryDevtools initialIsOpen={false} />
     </QueryClientProvider>
   );
 }
