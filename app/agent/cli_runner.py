@@ -307,7 +307,7 @@ def _build_cli_cmd(
         "--include-partial-messages",
         "--verbose",
         "--dangerously-skip-permissions",
-        "--model", "opus",
+        "--model", "sonnet",
         "--max-turns", "200",
         "--mcp-config", mcp_config_path,
         "--append-system-prompt", system_prompt,
