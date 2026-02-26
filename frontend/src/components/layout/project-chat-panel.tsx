@@ -383,6 +383,9 @@ function ChatInput({
             setSending(projectId, false);
             setProcessing(projectId, false);
             queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+            // 提案が作成された可能性があるので project と proposals を即再取得
+            queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+            queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
           },
           onError: (error) => {
             setSending(projectId, false);
