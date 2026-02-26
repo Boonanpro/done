@@ -1106,7 +1106,8 @@ async def send_dan_message_stream(
 
                     proposal_created = False
                     # planning 状態のプロジェクトチャットでは、生成結果を提案として保存する
-                    if project_info.get("status") == "planning":
+                    # 「## 実行計画」セクションを含む場合のみ提案として扱う（それ以外は通常の回答）
+                    if project_info.get("status") == "planning" and "## 実行計画" in ai_response_content:
                         try:
                             from app.services.proposal_steps import extract_steps
 
