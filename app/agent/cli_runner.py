@@ -157,7 +157,7 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 - @e参照は直前の操作結果でのみ有効。ページ遷移後は使わない
 - 操作後はURL・タイトル・見出しの変化で結果を確認する
 - 証拠なく「完了しました」と報告しない
-- ローディング中ならbrowser_screenshotで再確認
+- ローディング中ならbrowser(action=screenshot)で再確認
 
 ### 認証情報
 - ログインが必要 → まず get_credentials で保存済みか確認
@@ -170,7 +170,7 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 
 
 def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = None, is_planning: bool = False) -> str:
-    """MCP設定ファイルを書き出してパスを返す"""
+    """MCP設定ファイルをセッション固有のパスに書き出して返す"""
     mcp_json = {
         "mcpServers": {
             "dan-tools": {
@@ -187,9 +187,21 @@ def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = 
     }
     mcp_config_dir = PROJECT_ROOT / ".claude"
     mcp_config_dir.mkdir(parents=True, exist_ok=True)
-    mcp_config_path = mcp_config_dir / "mcp_sdk.json"
+    # セッションごとに個別ファイル（並行実行時の上書き競合を防止）
+    safe_name = room_id.replace("/", "_").replace("\\", "_")
+    mcp_config_path = mcp_config_dir / f"mcp_{safe_name}.json"
     mcp_config_path.write_text(json.dumps(mcp_json, indent=2), encoding="utf-8")
     return str(mcp_config_path)
+
+
+def _cleanup_mcp_config(room_id: str):
+    """セッション終了後にMCP設定ファイルを削除する"""
+    safe_name = room_id.replace("/", "_").replace("\\", "_")
+    config_path = PROJECT_ROOT / ".claude" / f"mcp_{safe_name}.json"
+    try:
+        config_path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _cli_debug(msg: str):
@@ -216,6 +228,7 @@ def _classify_content_blocks(blocks: list) -> list[Dict[str, Any]]:
         if block_type == "tool_use":
             events.append({
                 "type": "tool_use",
+                "id": block.get("id", ""),
                 "name": block.get("name", ""),
                 "input": block.get("input", {}),
             })
@@ -300,11 +313,10 @@ def _build_cli_cmd(
         "--append-system-prompt", system_prompt,
     ])
 
-    # planning モード: リーダーが自分で作業せず MCP call_researcher/call_critic に委譲するよう
-    # CLI 内蔵の作業ツールを禁止する（公式 Agent Team の最小権限原則）
+    # planning モード: 不要なツールを禁止（Task/WebSearch/WebFetch は解禁）
     if is_planning:
         cmd.extend([
-            "--disallowedTools", "WebSearch,WebFetch,Task,TodoWrite,TodoRead",
+            "--disallowedTools", "TodoWrite,TodoRead",
         ])
 
     if resume_session_id:
@@ -334,6 +346,8 @@ def _run_cli_process(
     # メッセージIDごとに「処理済みブロックのスナップショット」を記録
     # ブロック数だけでなく内容変更も検出するため、各ブロックのハッシュを保持する
     processed_block_snapshots: Dict[str, list] = {}
+    # tool_use は ID 単位で一度だけ送信（partial でハッシュが揺れても重複しない）
+    emitted_tool_use_ids: set = set()
 
     process = subprocess.Popen(
         cmd,
@@ -434,6 +448,13 @@ def _run_cli_process(
             classified = _classify_content_blocks(new_blocks)
 
             for ev in classified:
+                # tool_use は ID 単位で一度だけ送信
+                if ev["type"] == "tool_use":
+                    tool_id = ev.get("id", "")
+                    if tool_id and tool_id in emitted_tool_use_ids:
+                        continue
+                    if tool_id:
+                        emitted_tool_use_ids.add(tool_id)
                 _cli_debug(f"  Event: type={ev['type']}, text_len={len(ev.get('text', ''))}")
                 if ev["type"] == "text":
                     final_text_parts.append(ev["text"])
@@ -462,7 +483,7 @@ def _run_cli_process(
             _cli_debug(
                 f"ResultMessage: cost={cost_usd}, turns={num_turns}, "
                 f"error={is_error}, text_len={len(result_text or '')}, "
-                f"errors={errors}"
+                f"errors={errors}, result_text={result_text[:300] if result_text else '(empty)'}"
             )
 
         elif msg_type == "error":
@@ -530,6 +551,7 @@ def _run_cli_in_thread(
     # ANTHROPIC_API_KEY: CLIがMax planサブスク（定額）ではなくAPI従量課金を使うのを防止
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
     env["DAN_SESSION_ID"] = room_id
+    env["CLAUDE_CODE_ENABLE_TASKS"] = "true"
 
     # .env にしか定義されていない変数を settings から補完
     # （os.environ には入らないため、CLIやMCPサーバーに渡らず Supabase アクセスが失敗する）
@@ -606,6 +628,7 @@ def _run_cli_in_thread(
         _cli_debug(f"ERROR: {error_detail}")
         event_queue.put({"type": "error", "message": error_detail})
     finally:
+        _cleanup_mcp_config(room_id)
         _cli_debug("Sending sentinel")
         event_queue.put(_SENTINEL)
 

@@ -1253,7 +1253,7 @@ domain: amazon.co.jp
 ## 重要な制約
 - executor.py は生成しない
 - selectors.py は生成しない
-- 手順書はブラウザ操作AI（browser_open/click/type等のツールを使用）が読んで実行する前提で書く
+- 手順書はブラウザ操作AI（browserツールのaction=open/click/type等を使用）が読んで実行する前提で書く
 - CSSセレクタではなく、視覚的な特徴で要素を説明する
 - 「○○ボタンをクリック」ではなく「画面右上の青い『ログイン』ボタンをクリック」のように具体的に
 
@@ -1577,7 +1577,7 @@ async def extend_skill(
 - actions/ ディレクトリに新しいアクションファイルのみ追加する
 - executor.py は生成しない
 - selectors.py は生成しない
-- 手順書はブラウザ操作AI（browser_open/click/type等のツールを使用）が読んで実行する前提で書く
+- 手順書はブラウザ操作AI（browserツールのaction=open/click/type等を使用）が読んで実行する前提で書く
 - CSSセレクタではなく、視覚的な特徴で要素を説明する
 
 ## 品質基準
