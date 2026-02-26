@@ -298,6 +298,12 @@ function ChatInput({
   const { isSending } = useProcessState(projectId);
   const { setSending, setProcessing, clearLiveSteps, addLiveStep, resetProcess } = useProcessActions();
 
+  const isTransientNetworkError = (message?: string): boolean => {
+    if (!message) return false;
+    const m = message.toLowerCase();
+    return m.includes('networkerror') || m.includes('failed to fetch') || m.includes('network request failed');
+  };
+
   // Textarea auto-resize
   useEffect(() => {
     const ta = textareaRef.current;
@@ -370,6 +376,10 @@ function ChatInput({
           onError: (error) => {
             setSending(projectId, false);
             setProcessing(projectId, false);
+            if (isTransientNetworkError(error)) {
+              console.warn('[project-chat] transient stream error:', error);
+              return;
+            }
             toast.error(error || 'エラーが発生しました');
           },
           onProjectCreated: (createdProjectId) => {
@@ -478,7 +488,8 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     queryKey: ['project', projectId],
     queryFn: () => api.projects.get(projectId),
     enabled: !!projectId,
-    refetchInterval: 3000,
+    retry: 1,
+    refetchInterval: (query) => (query.state.error ? 15000 : 3000),
   });
 
   const { data: messagesData, isLoading: isLoadingMessages } = useQuery({
@@ -486,16 +497,30 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     queryFn: () => api.rooms.getMessages(project!.room_id!, { limit: 500 }),
     enabled: !!project?.room_id,
     staleTime: 5 * 1000,
-    refetchInterval: 3000,
+    retry: 1,
+    refetchInterval: (query) => (query.state.error ? 15000 : 3000),
+  });
+
+  // Active execution status from backend (authoritative)
+  const { data: activeStatus } = useQuery({
+    queryKey: ['session-active', project?.room_id],
+    queryFn: () => api.sm.getActiveStatus(project!.room_id!),
+    enabled: !!project?.room_id,
+    retry: 1,
+    refetchInterval: (query) => (query.state.error ? 10000 : 2000),
   });
 
   // Execution events query (inline process monitor)
-  const isActiveExecution = isProcessing || project?.status === 'planning';
+  const isActiveExecution = isProcessing || !!activeStatus?.active;
   const { data: executionEvents = [] } = useQuery({
     queryKey: ['execution-events', projectId],
     queryFn: () => api.projects.executionEvents.list(projectId),
     enabled: !!projectId,
-    refetchInterval: isActiveExecution ? 2000 : false,
+    retry: 1,
+    refetchInterval: (query) => {
+      if (!isActiveExecution) return false;
+      return query.state.error ? 10000 : 2000;
+    },
   });
 
   // Proposals query
@@ -581,6 +606,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     // Execution event runs (from backend polling)
     const runs = groupExecutionRuns(executionEvents);
     for (const run of runs) {
+      // While streaming in this tab, prefer liveSteps block to avoid duplicate monitors.
+      if (!run.isDone && isProcessing) continue;
+
       const steps = run.events.map(eventToStep);
       if (steps.length === 0) continue;
 
@@ -598,7 +626,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     timedItems.sort((a, b) => a.sortKey - b.sortKey || a.subKey - b.subKey);
 
     return timedItems.map((t) => t.item);
-  }, [messages, executionEvents, isActiveExecution]);
+  }, [messages, executionEvents, isActiveExecution, isProcessing]);
 
   const hasAnyContent = displayItems.length > 0;
 
@@ -768,3 +796,4 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     </div>
   );
 }
+

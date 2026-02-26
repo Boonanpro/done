@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { FileText, Sparkles, Send, Trash2, Loader2, Plus, BarChart3, ExternalLink, ArrowLeft, Eye, PenLine, Tag, X, Clock, Calendar, Ban, CheckCircle, AlertCircle } from 'lucide-react';
+import { FileText, Sparkles, Send, Trash2, Loader2, Plus, ExternalLink, ArrowLeft, PenLine, Tag, X, Clock, Calendar, Ban, CheckCircle, AlertCircle } from 'lucide-react';
 
 import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';

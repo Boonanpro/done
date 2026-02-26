@@ -105,11 +105,9 @@ export default function SettingsPage() {
     updateProfileMutation.mutate(data);
   };
 
-  const handlePasswordSubmit = (data: PasswordFormData) => {
-    // Note: Password change API not implemented in backend yet
-    // This is a placeholder for future implementation
-    console.log('Password change requested:', data);
-    toast.success('パスワードを変更しました');
+  const handlePasswordSubmit = (_data: PasswordFormData) => {
+    // TODO: Password change API not implemented in backend yet
+    toast.info('パスワード変更機能は準備中です');
     setShowPasswordDialog(false);
     resetPassword();
   };

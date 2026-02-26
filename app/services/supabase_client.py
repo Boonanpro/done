@@ -3,7 +3,7 @@ Supabase Client Service
 """
 from typing import Optional, Any
 from supabase import create_client, Client
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from app.config import settings
@@ -40,7 +40,7 @@ class SupabaseClient:
             "id": user_id,
             "email": email,
             "line_user_id": line_user_id,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         
         result = self.client.table("users").insert(data).execute()
@@ -74,7 +74,7 @@ class SupabaseClient:
             "status": "pending",
             "original_wish": original_wish,
             "proposed_actions": proposed_actions or [],
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         
         result = self.client.table("tasks").insert(data).execute()
@@ -91,7 +91,7 @@ class SupabaseClient:
         **updates,
     ) -> Optional[dict[str, Any]]:
         """タスクを更新"""
-        updates["updated_at"] = datetime.utcnow().isoformat()
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
         result = self.client.table("tasks").update(updates).eq("id", task_id).execute()
         return result.data[0] if result.data else None
     
@@ -137,7 +137,7 @@ class SupabaseClient:
             "user_id": user_id,
             "service_name": service_name,
             "encrypted_data": encrypted_data.decode(),  # Base64文字列として保存
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         
         result = self.client.table("credentials").insert(data).execute()
@@ -189,7 +189,7 @@ class SupabaseClient:
             "direction": direction,
             "content": content,
             "metadata": metadata,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         
         result = self.client.table("messages").insert(data).execute()

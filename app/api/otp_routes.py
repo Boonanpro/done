@@ -1,7 +1,7 @@
 """
 OTP API Routes - Phase 9: OTP Automation
 """
-from fastapi import APIRouter, HTTPException, Query, Header, Form, Request
+from fastapi import APIRouter, HTTPException, Query, Header, Request
 from fastapi.responses import Response
 from typing import Optional
 

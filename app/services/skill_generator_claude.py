@@ -63,17 +63,6 @@ class SkillGenerationResult:
     output: Optional[str] = None
 
 
-# _check_existing_skill は Phase 1 で LLM 判断に置き換えたため削除
-# 以下のルールベース判定は参考として残すがコメントアウト
-#
-# def _check_existing_skill(site: str, task_keywords: list[str]) -> Optional[tuple[str, str]]:
-#     """
-#     既存スキルとの重複をチェック（旧方式: ルールベース）
-#     Phase 1 以降は LLM がプロンプト内で判断する
-#     """
-#     pass
-
-
 def _get_existing_skills_summary() -> str:
     """
     既存スキルの簡潔なサマリを生成（LLMプロンプト用）
@@ -98,24 +87,6 @@ def _get_existing_skills_summary() -> str:
         lines.append("（スキルなし）")
 
     return "\n".join(lines)
-
-
-# _extract_task_keywords は Phase 1 で LLM 判断に置き換えたため未使用
-# 将来の参考用にコメントアウトして残す
-#
-# def _extract_task_keywords(description: str, steps: Optional[list[str]]) -> list[str]:
-#     """説明とステップからタスクキーワードを抽出（旧方式）"""
-#     keywords = []
-#     common_tasks = [
-#         "検索", "購入", "注文", "予約", "キャンセル", "払戻",
-#         "ログイン", "履歴", "カート", "チェックアウト",
-#         "追加", "削除", "編集", "確認", "支払い",
-#     ]
-#     text = f"{description} {' '.join(steps or [])}"
-#     for task in common_tasks:
-#         if task in text:
-#             keywords.append(task)
-#     return keywords
 
 
 def _filter_successful_path(yaml_log_path: str) -> str:

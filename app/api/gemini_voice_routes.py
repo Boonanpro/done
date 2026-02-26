@@ -33,7 +33,7 @@ from typing import Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.services.auth_service import decode_access_token
-from app.agent.gemini.live_runner import GeminiLiveRunner, get_runner, get_runner_for_user, _active_runners
+from app.agent.gemini.live_runner import GeminiLiveRunner, get_runner, get_runner_for_user
 
 logger = logging.getLogger(__name__)
 

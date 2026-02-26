@@ -2,8 +2,8 @@
 JWT Authentication Service for Done Chat
 Supports both Bearer token and HttpOnly Cookie authentication
 """
-from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 from jose import JWTError, jwt
 import bcrypt
 import secrets
@@ -53,9 +53,9 @@ def get_password_hash(password: str) -> str:
 def create_access_token(user_id: str, email: str, expires_delta: Optional[timedelta] = None) -> str:
     """Create a JWT access token"""
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
     
     to_encode = {
         "sub": user_id,
@@ -70,9 +70,9 @@ def create_access_token(user_id: str, email: str, expires_delta: Optional[timede
 def create_refresh_token(user_id: str, email: str, expires_delta: Optional[timedelta] = None) -> str:
     """Create a JWT refresh token (longer-lived)"""
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
+        expire = datetime.now(timezone.utc) + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
     
     to_encode = {
         "sub": user_id,
@@ -113,11 +113,11 @@ def decode_access_token(token: str) -> Optional[TokenData]:
         
         user_id: str = payload.get("sub")
         email: str = payload.get("email")
-        exp: datetime = datetime.fromtimestamp(payload.get("exp"))
-        
+        exp: datetime = datetime.fromtimestamp(payload.get("exp"), tz=timezone.utc)
+
         if user_id is None:
             return None
-        
+
         return TokenData(user_id=user_id, email=email, exp=exp)
     except JWTError:
         return None
@@ -127,14 +127,14 @@ def decode_refresh_token(token: str) -> Optional[TokenData]:
     """Decode and validate a JWT refresh token"""
     try:
         payload = jwt.decode(token, get_refresh_secret(), algorithms=[settings.JWT_ALGORITHM])
-        
+
         # Verify it's a refresh token
         if payload.get("type") != "refresh":
             return None
-        
+
         user_id: str = payload.get("sub")
         email: str = payload.get("email")
-        exp: datetime = datetime.fromtimestamp(payload.get("exp"))
+        exp: datetime = datetime.fromtimestamp(payload.get("exp"), tz=timezone.utc)
         
         if user_id is None:
             return None

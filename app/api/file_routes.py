@@ -3,13 +3,11 @@ File Upload API Routes
 Handles file uploads for chat attachments
 """
 
-import os
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 

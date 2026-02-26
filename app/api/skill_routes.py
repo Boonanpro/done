@@ -19,7 +19,6 @@ from typing import Optional, List, Dict, Any
 from pathlib import Path
 from datetime import datetime
 
-import asyncio
 import re
 
 import yaml
@@ -35,8 +34,6 @@ from app.services.skill_generator_claude import (
     extend_skill,
 
     SkillProposal,
-
-    SkillGenerationResult,
 
     _format_events_as_session_log,
 
