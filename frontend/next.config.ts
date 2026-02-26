@@ -5,6 +5,7 @@ const nextConfig: NextConfig = {
   reactStrictMode: true,
   compress: false, // SSE ストリーミングのバッファリング防止
   turbopack: {},
+  devIndicators: false,
   async rewrites() {
     return [
       {
