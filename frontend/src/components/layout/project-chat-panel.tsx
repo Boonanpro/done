@@ -197,17 +197,9 @@ function ProcessStepItem({
   );
 }
 
-// --- Helper: reasoning_steps を分類 ---
-function classifyStep(label: string): 'tool' | 'reasoning' | 'error' {
-  if (label.startsWith('🔧') || label.startsWith('[tool]')) return 'tool';
-  if (label.startsWith('[error]') || label.startsWith('❌')) return 'error';
-  return 'reasoning';
-}
-
 // --- Display item types ---
 type DisplayItem =
   | { kind: 'message'; msg: MessageResponse }
-  | { kind: 'process-block'; steps: StepInfo[]; fullTexts?: string[]; id: string }
   | { kind: 'execution-block'; steps: StepInfo[]; isLive: boolean; id: string };
 
 // --- Execution event helpers ---
@@ -582,20 +574,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
       const msgTime = new Date(msg.created_at).getTime();
 
-      // For AI messages: insert process block from ai_context before the message
-      if (msg.sender_type === 'ai' && msg.ai_context?.reasoning_steps?.length) {
-        const steps: StepInfo[] = msg.ai_context.reasoning_steps.map((s: string) => ({
-          label: s,
-          type: classifyStep(s),
-        }));
-        const fullTexts = msg.ai_context?.reasoning_full as string[] | undefined;
-        timedItems.push({
-          item: { kind: 'process-block', steps, fullTexts, id: `pb-${msg.id}` },
-          sortKey: msgTime,
-          subKey: 0, // Before the message
-        });
-      }
-
       timedItems.push({
         item: { kind: 'message', msg },
         sortKey: msgTime,
@@ -714,18 +692,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         ) : (
           <div className="flex flex-col gap-2 p-4">
             {displayItems.map((item) => {
-              if (item.kind === 'process-block') {
-                return (
-                  <InlineProcessBlock
-                    key={item.id}
-                    steps={item.steps}
-                    fullTexts={item.fullTexts}
-                    isLive={false}
-                    defaultCollapsed={true}
-                  />
-                );
-              }
-
               if (item.kind === 'execution-block') {
                 return (
                   <InlineProcessBlock
