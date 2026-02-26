@@ -773,8 +773,10 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
     }
   }, [message]);
 
+  // PCのみEnterで送信。モバイルは改行（送信ボタンのみ）
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    const isMobile = window.matchMedia('(max-width: 767px)').matches;
+    if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
       e.preventDefault();
       handleSendMessage();
     }
@@ -1136,7 +1138,31 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
                                 : 'bg-transparent rounded-bl-md prose prose-sm prose-dan max-w-full'
                             )}
                           >
-                            {isUser ? msg.content : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>}
+                            {isUser ? msg.content : (
+                              <ReactMarkdown
+                                remarkPlugins={[remarkGfm]}
+                                components={{
+                                  code({ className, children }) {
+                                    const lang = className?.replace('language-', '');
+                                    if (lang === 'proposal') {
+                                      const filename = String(children).trim();
+                                      return (
+                                        <iframe
+                                          src={`/api/v1/proposals/${filename}`}
+                                          className="w-full rounded-xl border border-border mt-2"
+                                          style={{ height: '600px' }}
+                                          sandbox="allow-scripts allow-same-origin"
+                                          title={filename}
+                                        />
+                                      );
+                                    }
+                                    return <code className={className}>{children}</code>;
+                                  }
+                                }}
+                              >
+                                {msg.content || ''}
+                              </ReactMarkdown>
+                            )}
                           </div>
                         </div>
                       </motion.div>

@@ -409,9 +409,10 @@ function ChatInput({
     toast.info('処理を停止しました');
   }, [roomId, projectId, resetProcess]);
 
-  // Keyboard
+  // Keyboard: PCのみEnterで送信。モバイルは改行（送信ボタンのみ）
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    const isMobile = window.matchMedia('(max-width: 767px)').matches;
+    if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
       e.preventDefault();
       handleSendMessage();
     }
