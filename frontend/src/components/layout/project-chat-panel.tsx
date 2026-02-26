@@ -254,6 +254,25 @@ function eventToStep(event: ExecutionEvent): StepInfo {
 
 // --- Message bubble (memo化で不要な再描画を防ぐ) ---
 const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageResponse }) {
+  // Proposal messages: render as full-width iframe
+  if (msg.sender_type !== 'human') {
+    const proposalMatch = (msg.content || '').match(/```proposal\n([^\n]+)\n```/);
+    if (proposalMatch) {
+      const filename = proposalMatch[1].trim();
+      return (
+        <div className="flex justify-start w-full px-1 py-1">
+          <iframe
+            src={`/api/v1/proposals/${filename}`}
+            className="w-full rounded-xl border border-border"
+            style={{ height: '600px' }}
+            sandbox="allow-scripts allow-same-origin"
+            title={filename}
+          />
+        </div>
+      );
+    }
+  }
+
   return (
     <div className={`flex ${msg.sender_type === 'human' ? 'justify-end' : 'justify-start'}`}>
       <div
