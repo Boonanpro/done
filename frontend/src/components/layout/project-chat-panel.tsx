@@ -97,7 +97,7 @@ function InlineProcessBlock({
         {/* Header */}
         <button
           onClick={() => setIsCollapsed((v) => !v)}
-          className="flex items-center gap-1.5 w-full px-3 py-1.5 text-[11px] text-muted-foreground hover:bg-muted/30 transition-colors"
+          className="flex items-center gap-1.5 w-full px-3 py-1.5 text-xs md:text-[11px] text-muted-foreground hover:bg-muted/30 transition-colors"
         >
           {isCollapsed ? (
             <ChevronRight className="h-3 w-3 shrink-0" />
@@ -141,7 +141,7 @@ function InlineProcessBlock({
                 );
               })}
               {isLive && steps.length === 0 && (
-                <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                <div className="flex items-center gap-1.5 text-xs md:text-[10px] text-muted-foreground">
                   <Loader2 className="h-2.5 w-2.5 animate-spin text-primary" />
                   <span>接続中...</span>
                 </div>
@@ -167,7 +167,7 @@ function ProcessStepItem({
   const displayText = fullText || step.label;
 
   return (
-    <div className="flex items-start gap-1.5 text-[10px] leading-relaxed">
+    <div className="flex items-start gap-1.5 text-xs md:text-[10px] leading-relaxed">
       {step.type === 'error' ? (
         <AlertCircle className="h-2.5 w-2.5 text-red-500 shrink-0 mt-0.5" />
       ) : step.type === 'reasoning' ? (
@@ -257,10 +257,10 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageRespons
   return (
     <div className={`flex ${msg.sender_type === 'human' ? 'justify-end' : 'justify-start'}`}>
       <div
-        className={`max-w-[85%] rounded-lg px-3 py-2 text-xs leading-relaxed ${
+        className={`max-w-[85%] rounded-lg px-3 py-2 text-sm md:text-xs leading-relaxed ${
           msg.sender_type === 'human'
             ? 'bg-primary text-primary-foreground'
-            : 'bg-muted text-foreground prose prose-xs prose-dan max-w-none'
+            : 'bg-muted text-foreground prose prose-sm md:prose-xs prose-dan max-w-none'
         }`}
       >
         {msg.sender_type === 'human'
@@ -440,7 +440,7 @@ function ChatInput({
           onKeyDown={handleKeyDown}
           placeholder="メッセージを入力..."
           rows={1}
-          className="flex-1 resize-none bg-transparent text-xs focus:outline-none min-h-[32px] max-h-[120px] py-1.5"
+          className="flex-1 resize-none bg-transparent text-sm md:text-xs focus:outline-none min-h-[32px] max-h-[120px] py-1.5"
         />
         {isSending ? (
           <Button
@@ -631,12 +631,12 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
               <h2 className="font-semibold text-sm truncate">{project?.title}</h2>
               <div className="flex items-center gap-2 mt-0.5">
                 {status && (
-                  <span className={`inline-block text-[10px] px-1.5 py-0.5 rounded-full font-medium ${status.color}`}>
+                  <span className={`inline-block text-xs md:text-[10px] px-1.5 py-0.5 rounded-full font-medium ${status.color}`}>
                     {status.label}
                   </span>
                 )}
                 {project?.created_at && (
-                  <span className="text-[10px] text-muted-foreground/60">
+                  <span className="text-xs md:text-[10px] text-muted-foreground/60">
                     {new Date(project.created_at).toLocaleDateString('ja-JP')}
                   </span>
                 )}
@@ -659,7 +659,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         <div className="shrink-0 border-b border-border">
           <button
             onClick={() => setProposalCollapsed((v) => !v)}
-            className="flex items-center gap-2 w-full px-4 py-2 text-xs hover:bg-muted/50 transition-colors"
+            className="flex items-center gap-2 w-full px-4 py-2 text-sm md:text-xs hover:bg-muted/50 transition-colors"
           >
             {proposalCollapsed ? <ChevronRight className="h-3 w-3 text-muted-foreground" /> : <ChevronDown className="h-3 w-3 text-muted-foreground" />}
             <FileText className="h-3 w-3 text-green-500" />
@@ -668,7 +668,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           </button>
           {!proposalCollapsed && (
             <div className="px-4 pb-3 max-h-[40vh] overflow-y-auto">
-              <div className="bg-muted rounded-lg px-3 py-2 text-xs leading-relaxed prose prose-xs prose-dan max-w-none">
+              <div className="bg-muted rounded-lg px-3 py-2 text-sm md:text-xs leading-relaxed prose prose-sm md:prose-xs prose-dan max-w-none">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{approvedProposal.content || ''}</ReactMarkdown>
               </div>
             </div>
@@ -685,7 +685,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         ) : !hasAnyContent && !isProcessing ? (
           <div className="flex flex-col items-center justify-center p-6 h-full">
             <MessageSquare className="h-10 w-10 text-muted-foreground/20 mb-3" />
-            <p className="text-xs text-muted-foreground">
+            <p className="text-sm md:text-xs text-muted-foreground">
               メッセージはまだありません
             </p>
           </div>
