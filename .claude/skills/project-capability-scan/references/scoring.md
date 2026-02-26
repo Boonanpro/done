@@ -29,3 +29,13 @@ Clamp final confidence to `0.00-1.00`.
 ## Human Requirement Rule
 
 Set `needs_human_now=true` only when at least one delivery-critical unit remains `limited` or requires legal/financial approval that current workflow cannot automate safely.
+
+## Default-Invert Rule（デフォルト反転）
+
+全タスクは **automation_level=full (score 95)** からスタートする。
+下げるには以下の全てを満たすこと:
+1. 具体的な現在の技術的制限を明記（出典・日付付き）
+2. 既存ツールやワークアラウンドで回避できない理由を説明
+3. 人間に委ねた場合のコスト・時間を併記
+
+根拠なくスコアを下げてはならない。

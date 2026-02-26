@@ -16,9 +16,25 @@ Assess, for a specific project request, how far current AI can execute now.
 1. Decompose the request into capability units.
 2. Collect recent evidence per unit using `references/source-policy.md`.
 3. Score automation and confidence using `references/scoring.md`.
+
+### Task Granularity Rule（タスク分解の粒度ルール）
+
+各capability unitの推定作業時間（人間換算）で自動化率の下限を設定する:
+- **4分未満** → automation_level=full (100% AI)
+- **4分〜1時間** → automation_level=full (80%+ AI)
+- **1〜4時間** → automation_level=assisted (50-70% AI)
+- **4時間超** → **分解不足。さらに細かいunitに分割せよ。**
+
 4. Build AI-first duration and cost estimates in USD.
 5. Summarize human touchpoints only where current evidence requires them.
 6. Output concise rationale and append the required block.
+
+### Self-Review（自己レビュー）
+
+出力前に以下をチェックする:
+- `full` 未満のタスクごとに「なぜAIにできないか」を1文で述べられるか確認する。述べられなければスコアを95に戻す。
+- 全体期間が「タスク数 × 平均AI完了時間」の2倍を超える場合、その理由を明記する。
+- `references/anti-bias.md` のチェックリストを通す。
 
 ## Required Output Block
 
