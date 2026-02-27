@@ -318,8 +318,8 @@ class ProjectService:
             query = query.gt("seq", since_seq)
         elif after:
             query = query.gt("created_at", after)
-        result = query.order("created_at", desc=False).limit(limit).execute()
-        return result.data or []
+        result = query.order("created_at", desc=True).limit(limit).execute()
+        return list(reversed(result.data or []))
 
     async def get_execution_events_by_room(
         self,

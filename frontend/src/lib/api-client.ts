@@ -1139,7 +1139,7 @@ export const api = {
     },
 
     executionEvents: {
-      list: (projectId: string, limit = 100) =>
+      list: (projectId: string, limit = 500) =>
         request<ExecutionEvent[]>(`/projects/${projectId}/execution-events?limit=${limit}`),
     },
   },
