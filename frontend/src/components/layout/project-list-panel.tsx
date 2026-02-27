@@ -23,6 +23,7 @@ import {
 import { useAuth } from '@/hooks/use-auth';
 import { api, type ProjectResponse, type ProjectStatusType } from '@/lib/api-client';
 import { useProjectStore } from '@/stores/project-store';
+import { useSessionStateStore } from '@/stores/session-state-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
 
 function useHasToken() {
@@ -111,6 +112,7 @@ export function ProjectListPanel({
 
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
   const selectProject = useProjectStore((s) => s.selectProject);
+  const activeSessionId = useSessionStateStore((s) => s.activeSessionId);
 
   const createProjectMutation = useMutation({
     mutationFn: (payload: { title: string; description?: string }) => api.projects.create(payload),
@@ -145,7 +147,7 @@ export function ProjectListPanel({
     }
     setIsCreateOpen(true);
     // ヘッダーの+ボタンからでもタイトルを自動生成
-    const roomId = getRoomIdFromPath();
+    const roomId = activeSessionId ?? undefined;
     if (!roomId) return;
     setIsGeneratingTitle(true);
     api.projects.suggestTitle(roomId)
@@ -179,12 +181,6 @@ export function ProjectListPanel({
     });
   };
 
-  // パスから room_id を取り出す（/chat/[roomId] の形式）
-  const getRoomIdFromPath = () => {
-    const match = pathname.match(/^\/chat\/([^/]+)$/);
-    return match ? match[1] : undefined;
-  };
-
   const handleOpenCreate = async () => {
     setIsCreateOpen((prev) => {
       if (prev) return false; // 閉じる場合はそのまま
@@ -193,7 +189,7 @@ export function ProjectListPanel({
     // 既に開いていた場合は閉じるだけ
     if (isCreateOpen) return;
 
-    const roomId = getRoomIdFromPath();
+    const roomId = activeSessionId ?? undefined;
     if (!roomId) return;
 
     setIsGeneratingTitle(true);
