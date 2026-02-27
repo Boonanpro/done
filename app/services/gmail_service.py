@@ -7,7 +7,7 @@ import base64
 import json
 import logging
 from typing import Optional, List, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from google.oauth2.credentials import Credentials
@@ -275,7 +275,7 @@ class GmailService:
             
             # 最終同期時刻を更新
             self.supabase.table("gmail_connections").update({
-                "last_sync_at": datetime.utcnow().isoformat(),
+                "last_sync_at": datetime.now(timezone.utc).isoformat(),
             }).eq("user_id", user_id).execute()
             
             logger.info(f"Gmail sync completed for user {user_id}: {len(new_message_ids)} new messages")

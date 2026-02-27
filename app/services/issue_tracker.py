@@ -8,7 +8,7 @@ Issue Tracker Service
 from typing import Optional, Any
 from dataclasses import dataclass
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 from app.services.supabase_client import get_supabase_client
@@ -169,7 +169,7 @@ class IssueTracker:
             # +1して更新
             self.supabase.table("issues").update({
                 "priority": current_priority + 1,
-                "last_occurred_at": datetime.utcnow().isoformat(),
+                "last_occurred_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", issue_id).execute()
 
         except Exception as e:
@@ -372,7 +372,7 @@ class IssueTracker:
             }
 
             if status == IssueStatus.RESOLVED:
-                update_data["resolved_at"] = datetime.utcnow().isoformat()
+                update_data["resolved_at"] = datetime.now(timezone.utc).isoformat()
 
             self.supabase.table("issues").update(update_data).eq("id", issue_id).execute()
 

@@ -13,7 +13,7 @@ import logging
 import hashlib
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 import json
 
 import sqlite_vec

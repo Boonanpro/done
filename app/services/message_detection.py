@@ -2,7 +2,7 @@
 Message Detection Service - Phase 5A: Doneチャット検知
 """
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 from app.services.supabase_client import get_supabase_client
@@ -124,7 +124,7 @@ class MessageDetectionService:
         if processing_result:
             update_data["processing_result"] = processing_result
         if status == DetectionStatus.PROCESSED:
-            update_data["processed_at"] = datetime.utcnow().isoformat()
+            update_data["processed_at"] = datetime.now(timezone.utc).isoformat()
         
         result = self.supabase.table("detected_messages").update(
             update_data

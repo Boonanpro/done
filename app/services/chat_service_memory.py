@@ -3,7 +3,7 @@ In-Memory Chat Service for Testing
 DBに依存しないテスト用のチャットサービス
 """
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import secrets
 import uuid
 
@@ -39,7 +39,7 @@ class InMemoryChatService:
         
         password_hash = get_password_hash(password)
         user_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         user = {
             "id": user_id,
@@ -91,7 +91,7 @@ class InMemoryChatService:
             user["display_name"] = display_name
         if avatar_url is not None:
             user["avatar_url"] = avatar_url
-        user["updated_at"] = datetime.utcnow().isoformat()
+        user["updated_at"] = datetime.now(timezone.utc).isoformat()
         
         return {
             "id": user["id"],
@@ -123,7 +123,7 @@ class InMemoryChatService:
         """Create an invite link"""
         code = generate_invite_code()
         invite_id = str(uuid.uuid4())
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expires_at = None
         if expires_in_hours:
             expires_at = (now + timedelta(hours=expires_in_hours)).isoformat()
@@ -165,7 +165,7 @@ class InMemoryChatService:
         # Check if expired
         if invite.get("expires_at"):
             expires_at = datetime.fromisoformat(invite["expires_at"])
-            if datetime.utcnow() > expires_at:
+            if datetime.now(timezone.utc) > expires_at:
                 raise ValueError("Invite has expired")
         
         # Check if max uses reached
@@ -205,7 +205,7 @@ class InMemoryChatService:
                 "user_id": user_id,
                 "friend_id": friend_id,
                 "status": "active",
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
     
     async def _create_direct_room(self, user1_id: str, user2_id: str) -> dict:
@@ -220,7 +220,7 @@ class InMemoryChatService:
         
         # Create new room
         room_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         room = {
             "id": room_id,
@@ -305,7 +305,7 @@ class InMemoryChatService:
     async def create_room(self, creator_id: str, name: str, member_ids: list[str]) -> dict:
         """Create a group chat room"""
         room_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         room = {
             "id": room_id,
@@ -394,7 +394,7 @@ class InMemoryChatService:
         room = self.rooms.get(room_id)
         if room and name is not None:
             room["name"] = name
-            room["updated_at"] = datetime.utcnow().isoformat()
+            room["updated_at"] = datetime.now(timezone.utc).isoformat()
         
         return await self.get_room(room_id, user_id)
     
@@ -439,7 +439,7 @@ class InMemoryChatService:
             raise ValueError("Permission denied")
         
         # Add new member
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         mem_id = str(uuid.uuid4())
         new_member = {
             "id": mem_id,
@@ -467,7 +467,7 @@ class InMemoryChatService:
             raise ValueError("Not a member of this room")
         
         message_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         message = {
             "id": message_id,
@@ -518,7 +518,7 @@ class InMemoryChatService:
         """Mark messages as read"""
         for m in self.room_members.values():
             if m["room_id"] == room_id and m["user_id"] == user_id:
-                m["last_read_at"] = datetime.utcnow().isoformat()
+                m["last_read_at"] = datetime.now(timezone.utc).isoformat()
                 return True
         return False
     
@@ -564,7 +564,7 @@ class InMemoryChatService:
                 settings["personality"] = personality
             if auto_reply_delay_ms is not None:
                 settings["auto_reply_delay_ms"] = auto_reply_delay_ms
-            settings["updated_at"] = datetime.utcnow().isoformat()
+            settings["updated_at"] = datetime.now(timezone.utc).isoformat()
         
         return settings
     

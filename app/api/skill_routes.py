@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 import re
 
@@ -937,7 +937,7 @@ async def generate_skill_endpoint(
 
             "status": "generated",
 
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
 
             "generated_skill_name": result.skill_name,
 

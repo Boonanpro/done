@@ -10,6 +10,9 @@ from typing import List, Dict, Any, Optional
 from enum import Enum
 from datetime import datetime, timezone
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
@@ -90,8 +93,8 @@ class Session:
     context: Dict[str, Any] = field(default_factory=dict)
 
     # タイムスタンプ
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def add_user_message(self, content: str) -> None:
         """ユーザーメッセージを追加"""
@@ -484,9 +487,6 @@ class Session:
 
         エラー発生時やキャンセル時にセッションが不整合な状態で残った場合の自動復旧用。
         """
-        import logging
-        logger = logging.getLogger(__name__)
-
         repaired = False
         max_iterations = 10  # 無限ループ防止
 
@@ -566,9 +566,6 @@ class SessionStore:
 
     async def get_or_create(self, session_id: str, user_id: str) -> Session:
         """セッションを取得または作成"""
-        import logging
-        logger = logging.getLogger(__name__)
-
         key = self._make_key(session_id, user_id)
 
         # キャッシュにあれば返す（キャンセル等で不整合になった場合も常に修復）

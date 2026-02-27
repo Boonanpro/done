@@ -4,7 +4,7 @@ Handles file uploads for chat attachments
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -104,7 +104,7 @@ async def upload_file(
         url=file_url,
         content_type=file.content_type,
         size=file_size,
-        created_at=datetime.utcnow().isoformat()
+        created_at=datetime.now(timezone.utc).isoformat()
     )
 
 

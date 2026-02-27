@@ -3,7 +3,7 @@ Agent Session Service - StateMachine状態の永続化
 """
 import logging
 from typing import Optional, Dict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.services.supabase_client import get_supabase_client
 from app.agent.states import AgentState, State
@@ -106,7 +106,7 @@ class SessionService:
             int: 削除されたセッション数
         """
         try:
-            cutoff = datetime.utcnow() - timedelta(days=days)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
             result = self.supabase.table("agent_sessions").delete().lt(
                 "updated_at", cutoff.isoformat()
