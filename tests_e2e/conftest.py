@@ -22,9 +22,9 @@ def pytest_configure(config):
     env_test_path = project_root / ".env.test"
     if env_test_path.exists():
         load_dotenv(env_test_path, override=True)
-        print(f"\n✅ Loaded test environment from {env_test_path}")
+        print(f"\nLoaded test environment from {env_test_path}")
     else:
-        print(f"\n⚠️ Warning: {env_test_path} not found!")
+        print(f"\nWarning: {env_test_path} not found!")
         print("   Copy env_test_example.txt to .env.test and configure it.")
         print("   E2E tests require a separate Supabase test project.\n")
 
@@ -84,17 +84,21 @@ def auth_headers(client):
 def browser_page():
     """Create Playwright browser page for E2E tests"""
     from playwright.sync_api import sync_playwright
-    
-    playwright = sync_playwright().start()
-    browser = playwright.chromium.launch(headless=False)  # --headed mode
+
+    try:
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(headless=True)
+    except Exception as exc:
+        pytest.skip(f"Playwright browser launch failed: {exc}")
+
     context = browser.new_context(
         viewport={"width": 1280, "height": 720},
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     )
     page = context.new_page()
-    
+
     yield page
-    
+
     # Cleanup
     context.close()
     browser.close()

@@ -38,6 +38,12 @@ _active_processes: Dict[str, subprocess.Popen] = {}
 _process_lock = threading.Lock()
 
 
+def is_cli_active(room_id: str) -> bool:
+    """CLIサブプロセスがまだ実行中かどうかを返す"""
+    with _process_lock:
+        return room_id in _active_processes
+
+
 def kill_cli_process(room_id: str) -> bool:
     """CLIサブプロセスを即座に終了する"""
     with _process_lock:
@@ -81,6 +87,72 @@ def _save_session(room_id: str, session_id: str):
         sb.table("projects").update({"metadata": metadata}).eq("room_id", room_id).execute()
     except Exception as e:
         logger.warning(f"Failed to save CLI session for {room_id}: {e}")
+
+
+def _save_execution_event_sync(
+    room_id: str,
+    event_type: str,
+    project_id: Optional[str] = None,
+    tool_name: Optional[str] = None,
+    tool_label: Optional[str] = None,
+    content: Optional[str] = None,
+):
+    """CLIスレッドからDB直接保存（sync）。best-effort: 失敗してもログのみ。"""
+    from app.services.execution_events import normalize_event_type
+    try:
+        from app.services.supabase_client import get_supabase_client
+        sb = get_supabase_client().client
+        normalized_type, original_type = normalize_event_type(event_type)
+        metadata = {}
+        if original_type is not None and original_type != normalized_type:
+            metadata["original_event_type"] = original_type
+        row = {
+            "room_id": room_id,
+            "event_type": normalized_type,
+            "tool_name": tool_name,
+            "tool_label": tool_label,
+            "content": content,
+            "metadata": metadata,
+        }
+        if project_id:
+            row["project_id"] = project_id
+        sb.table("execution_events").insert(row).execute()
+    except Exception as e:
+        _cli_debug(f"_save_execution_event_sync failed: {e}")
+
+
+def _save_ai_message_sync(
+    room_id: str,
+    content: str,
+    reasoning_steps: Optional[list] = None,
+    reasoning_full: Optional[list] = None,
+) -> bool:
+    """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。成功=True。"""
+    try:
+        from app.services.supabase_client import get_supabase_client
+        sb = get_supabase_client().client
+        ai_context = None
+        if reasoning_steps:
+            ai_context = {"reasoning_steps": reasoning_steps}
+            if reasoning_full:
+                ai_context["reasoning_full"] = reasoning_full
+        insert_data = {
+            "room_id": room_id,
+            "sender_id": None,
+            "sender_type": "ai",
+            "content": content,
+        }
+        if ai_context:
+            insert_data["ai_context"] = ai_context
+        result = sb.table("chat_messages").insert(insert_data).execute()
+        if result.data:
+            _cli_debug(f"_save_ai_message_sync OK: msg_id={result.data[0].get('id', '?')}")
+            return True
+        _cli_debug("_save_ai_message_sync: insert returned no data")
+        return False
+    except Exception as e:
+        _cli_debug(f"_save_ai_message_sync failed: {e}")
+        return False
 
 
 def _build_runtime_contract_section(is_planning: bool) -> str:
@@ -331,6 +403,7 @@ def _run_cli_process(
     env: dict,
     room_id: str,
     event_queue: thread_queue.Queue,
+    project_id: Optional[str] = None,
 ) -> Optional[dict]:
     """
     CLIプロセスを1回実行し、イベントをキューに送る。
@@ -341,6 +414,8 @@ def _run_cli_process(
     session_id_captured = None
     final_text_parts = []
     result_data = None
+    reasoning_steps_acc = []  # DB-first: reasoning短縮ラベル蓄積
+    reasoning_full_acc = []   # DB-first: reasoning全文蓄積
 
     # --include-partial-messages による重複を防ぐ
     # メッセージIDごとに「処理済みブロックのスナップショット」を記録
@@ -460,6 +535,29 @@ def _run_cli_process(
                     final_text_parts.append(ev["text"])
                 event_queue.put(ev)
 
+                # DB-first: CLIスレッドから直接DB保存（SSE断線対策）
+                if project_id:
+                    if ev["type"] == "tool_use":
+                        from app.api.project_routes import _format_tool_label
+                        _save_execution_event_sync(
+                            room_id, "tool_use", project_id=project_id,
+                            tool_name=ev.get("name", ""),
+                            tool_label=_format_tool_label(ev.get("name", ""), ev.get("input", {})),
+                        )
+                        reasoning_steps_acc.append(f"🔧 {_format_tool_label(ev.get('name', ''), ev.get('input', {}))}")
+                    elif ev["type"] == "reasoning" and ev.get("text", "").strip():
+                        _save_execution_event_sync(
+                            room_id, "reasoning", project_id=project_id,
+                            content=ev.get("text", ""),
+                        )
+                        reasoning_steps_acc.append(ev.get("text", ""))
+                        reasoning_full_acc.append(ev.get("text", ""))
+                    elif ev["type"] == "text":
+                        text_preview = ev.get("text", "").strip()
+                        if text_preview and len(text_preview) > 10:
+                            reasoning_steps_acc.append(text_preview)
+                            reasoning_full_acc.append(text_preview)
+
         elif msg_type == "result":
             session_id_captured = data.get("session_id")
             cost_usd = data.get("cost_usd", 0)
@@ -478,6 +576,8 @@ def _run_cli_process(
                 "final_text_parts": final_text_parts,
                 "cost": cost_usd,
                 "duration_ms": duration_ms,
+                "reasoning_steps": reasoning_steps_acc,
+                "reasoning_full": reasoning_full_acc,
             }
 
             _cli_debug(
@@ -531,6 +631,7 @@ def _run_cli_in_thread(
     event_queue: thread_queue.Queue,
     resume_session_id: Optional[str] = None,
     is_planning: bool = False,
+    project_id: Optional[str] = None,
 ):
     """
     別スレッドでCLI subprocessを実行する。
@@ -569,7 +670,7 @@ def _run_cli_in_thread(
         cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id, is_planning=is_planning)
         _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, prompt len={len(content)})")
 
-        result_data = _run_cli_process(cmd, content, env, room_id, event_queue)
+        result_data = _run_cli_process(cmd, content, env, room_id, event_queue, project_id=project_id)
 
         # セッション再開失敗 → セッションをクリアしてリトライ
         if _is_resume_error(result_data) and resume_session_id:
@@ -593,7 +694,7 @@ def _run_cli_in_thread(
             cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id=None, is_planning=is_planning)
             _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(content)})")
 
-            result_data = _run_cli_process(cmd, content, env, room_id, event_queue)
+            result_data = _run_cli_process(cmd, content, env, room_id, event_queue, project_id=project_id)
 
         # 最終結果をキューに送る
         if result_data:
@@ -612,6 +713,17 @@ def _run_cli_in_thread(
             if is_error and not text and errors:
                 text = f"CLIエラー: {'; '.join(errors)}"
 
+            # DB-first: AI応答とdoneイベントをキュー投入前に保存
+            cli_saved = False
+            if text and not is_error and project_id:
+                cli_saved = _save_ai_message_sync(
+                    room_id, text,
+                    reasoning_steps=result_data.get("reasoning_steps", []),
+                    reasoning_full=result_data.get("reasoning_full", []),
+                )
+            if project_id:
+                _save_execution_event_sync(room_id, "done", project_id=project_id, content="completed")
+
             event_queue.put({
                 "type": "result",
                 "text": text,
@@ -620,6 +732,7 @@ def _run_cli_in_thread(
                 "turns": result_data.get("num_turns", 0),
                 "duration_ms": result_data.get("duration_ms", 0),
                 "is_error": is_error,
+                "cli_saved": cli_saved,
             })
 
     except Exception as e:
@@ -631,6 +744,12 @@ def _run_cli_in_thread(
         _cleanup_mcp_config(room_id)
         _cli_debug("Sending sentinel")
         event_queue.put(_SENTINEL)
+        # CLIスレッド終了時にCancellationRegistryを確実に解除
+        try:
+            from app.services.cancellation import CancellationRegistry
+            CancellationRegistry.unregister(room_id)
+        except Exception:
+            pass
 
 
 async def process_message_cli(
@@ -643,6 +762,7 @@ async def process_message_cli(
     credentials: Optional[Dict] = None,
     system_prompt: Optional[str] = None,
     user_messages: str = "",
+    project_id: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Claude CLI経由でメッセージを処理し、分類済みイベントを返す。
@@ -674,7 +794,7 @@ async def process_message_cli(
     event_q = thread_queue.Queue()
     cli_thread = threading.Thread(
         target=_run_cli_in_thread,
-        args=(content, system_prompt, mcp_config_path, room_id, event_q, resume_session_id, is_planning),
+        args=(content, system_prompt, mcp_config_path, room_id, event_q, resume_session_id, is_planning, project_id),
         daemon=True,
     )
     cli_thread.start()

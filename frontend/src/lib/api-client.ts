@@ -357,6 +357,8 @@ export interface ActiveSessionStatus {
   started_at: number | null;
 }
 
+export type StreamInterruptionReason = 'stream_ended' | 'transient_error';
+
 // Note types
 export interface NoteDraftResponse {
   id: string;
@@ -568,7 +570,16 @@ async function request<T>(
 function isTransientNetworkError(message?: string): boolean {
   if (!message) return false;
   const m = message.toLowerCase();
-  return m.includes('networkerror') || m.includes('failed to fetch') || m.includes('network request failed');
+  return (
+    m.includes('networkerror') ||
+    m.includes('failed to fetch') ||
+    m.includes('network request failed') ||
+    m.includes('load failed') ||               // iOS Safari
+    m.includes('the operation was aborted') ||  // Chrome Android
+    m.includes('connection was lost') ||        // Safari generic
+    m.includes('network connection') ||         // Android WebView
+    m.includes('aborted')                       // fetch abort by OS
+  );
 }
 
 // ==================== API Methods ====================
@@ -943,6 +954,7 @@ export const api = {
         onVoiceAnnouncement?: (text: string, sessionId?: string) => void;
         onComplete?: (sessionId?: string) => void;
         onError?: (error: string, sessionId?: string) => void;
+        onInterrupted?: (reason: StreamInterruptionReason, sessionId?: string) => void;
         onSkillAvailable?: (browserSessionId: string, sessionId?: string) => void;
         onProjectCreated?: (projectId: string) => void;
       },
@@ -993,6 +1005,7 @@ export const api = {
         const decoder = new TextDecoder();
         let buffer = '';
         let completeCalled = false;
+        let lastEventSessionId = data.session_id;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -1012,6 +1025,9 @@ export const api = {
 
                 // session_idを抽出（バックエンドから送信される）
                 const eventSessionId = parsed.session_id as string | undefined;
+                if (eventSessionId) {
+                  lastEventSessionId = eventSessionId;
+                }
 
                 if (parsed.type === 'process' && callbacks.onProcessStep) {
                   callbacks.onProcessStep(parsed.step, eventSessionId);
@@ -1049,9 +1065,9 @@ export const api = {
         }
 
         // ストリーム終了時の安全弁: done イベントなしで終了した場合もクリーンアップ
-        if (!completeCalled && callbacks.onComplete) {
-          console.warn('[SSE] Stream ended without done event, forcing cleanup');
-          callbacks.onComplete();
+        if (!completeCalled && callbacks.onInterrupted) {
+          console.warn('[SSE] Stream ended without done event, switching to recovery');
+          callbacks.onInterrupted('stream_ended', lastEventSessionId);
         }
       } catch (error) {
         // AbortErrorは意図的なキャンセルなのでエラーとして扱わない
@@ -1066,12 +1082,17 @@ export const api = {
         const errorMsg = error instanceof Error ? error.message : String(error);
         const isTransient = isTransientNetworkError(errorMsg);
 
+        if (isTransient) {
+          callbacks.onInterrupted?.('transient_error', data.session_id);
+          return;
+        }
+
         if (callbacks.onError) {
           callbacks.onError(errorMsg);
         }
         // 一時的ネットワークエラー時はonCompleteを呼ばない → スピナー維持
         // useProjectRecovery がタブ復帰時に引き継ぐ
-        if (!isTransient && callbacks.onComplete) {
+        if (callbacks.onComplete) {
           callbacks.onComplete();
         }
       }

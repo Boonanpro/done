@@ -3,6 +3,7 @@ Chat API Routes for Done Chat
 Supports both Bearer token and HttpOnly Cookie authentication
 """
 from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Response, Request
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 from datetime import datetime, timezone
@@ -806,6 +807,7 @@ async def send_dan_message_stream(
         room_id_for_cancel = None  # 後で設定
         done_sent = False  # done イベント送信済みフラグ
         result_saved = False  # AI回答DB保存済みフラグ
+        cli_saved_ai_message = False  # CLIスレッドがAI応答をDB保存済みか
         replan_requested = _is_replan_request(request.content)
 
         async def _save_project_event_safe(project_service, **kwargs):
@@ -985,6 +987,7 @@ async def send_dan_message_stream(
                     project_description=project_info.get("description", ""),
                     project_status=project_info.get("status", "in_progress"),
                     user_messages=user_messages_for_cli,
+                    project_id=project_info.get("id"),
                 ):
                     if event["type"] == "keepalive":
                         # SSEコメント: クライアントのEventSourceパーサーは無視するが接続は維持される
@@ -1010,34 +1013,14 @@ async def send_dan_message_stream(
                             reasoning_full.append(text)
                         yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
                         step_counter += 1
-                        # execution_events に保存（ProcessMonitor用）
-                        if text.strip():
-                            try:
-                                await _save_project_event_safe(project_service,
-                                    project_id=project_info["id"],
-                                    room_id=room_id,
-                                    event_type="reasoning",
-                                    content=text,
-                                )
-                            except Exception:
-                                pass
+                        # DB保存はCLIスレッドが実行済み（DB-first）
 
                     elif event["type"] == "tool_use":
                         tool_label = _format_tool_label(event.get("name", ""), event.get("input", {}))
                         reasoning_steps.append(f"🔧 {tool_label}")
                         yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': f'🔧 {tool_label}', 'status': 'running'}})}\n\n"
                         step_counter += 1
-                        # execution_events に保存（ProcessMonitor用）
-                        try:
-                            await _save_project_event_safe(project_service,
-                                project_id=project_info["id"],
-                                room_id=room_id,
-                                event_type="tool_use",
-                                tool_name=event.get("name", ""),
-                                tool_label=tool_label,
-                            )
-                        except Exception:
-                            pass
+                        # DB保存はCLIスレッドが実行済み（DB-first）
 
                     elif event["type"] == "text":
                         # textイベントは暫定的に記録（最終回答はresultイベントで確定する）
@@ -1053,6 +1036,7 @@ async def send_dan_message_stream(
 
                     elif event["type"] == "result":
                         result_text = event.get("text", "")
+                        cli_saved_ai_message = event.get("cli_saved", False)
                         if result_text:
                             final_text = result_text
                         elif event.get("is_error"):
@@ -1061,57 +1045,52 @@ async def send_dan_message_stream(
 
                     elif event["type"] == "error":
                         yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': event['message']})}\n\n"
-                        # エラーも execution_events に保存
-                        try:
-                            await _save_project_event_safe(project_service,
-                                project_id=project_info["id"],
-                                room_id=room_id,
-                                event_type="error",
-                                content=event.get("message", ""),
-                            )
-                        except Exception:
-                            pass
+                        # DB保存はCLIスレッドが実行済み（DB-first）
 
                 # キャンセル時はスキップ（cancelled ハンドラで保存済み）
                 if not result_saved:
-                    # DBに保存（空の場合のフォールバックはエラー内容を含む）
                     ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
-                    ai_message_data = await service.send_dan_ai_message(
-                        current_user.user_id, ai_response_content, reasoning_steps,
-                        room_id=room_id, reasoning_full=reasoning_full,
-                    )
-                    await _archive_session_summary(
-                        service=service,
-                        user_id=current_user.user_id,
-                        room_id=room_id,
-                        archive_type="snapshot",
-                        is_project=True,
-                        project_title=project_info.get("title", ""),
-                        project_status=project_info.get("status", ""),
-                    )
 
-                    if not ai_message_data:
-                        import logging
-                        logging.error(f"send_dan_ai_message returned None for user {current_user.user_id}")
-                        raise ValueError("Failed to save AI message: returned None")
+                    if cli_saved_ai_message:
+                        # DB-first: CLIスレッドが既にAI応答を保存済み → クライアント送信のみ
+                        ai_message = {
+                            "id": "cli-saved",
+                            "room_id": room_id,
+                            "sender_id": None,
+                            "sender_name": "ダン",
+                            "sender_type": "ai",
+                            "content": ai_response_content,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                        yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+                    else:
+                        # フォールバック: CLIの保存が失敗した場合は従来通りSSEからDB保存
+                        ai_message_data = await service.send_dan_ai_message(
+                            current_user.user_id, ai_response_content, reasoning_steps,
+                            room_id=room_id, reasoning_full=reasoning_full,
+                        )
+                        if not ai_message_data:
+                            import logging
+                            logging.error(f"send_dan_ai_message returned None for user {current_user.user_id}")
+                            raise ValueError("Failed to save AI message: returned None")
 
-                    ai_message = {
-                        "id": ai_message_data["id"],
-                        "room_id": ai_message_data["room_id"],
-                        "sender_id": ai_message_data.get("sender_id"),
-                        "sender_name": "ダン",
-                        "sender_type": "ai",
-                        "content": ai_message_data["content"],
-                        "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
-                    }
-                    if ai_message_data.get("ai_context"):
-                        ai_message["ai_context"] = ai_message_data["ai_context"]
+                        ai_message = {
+                            "id": ai_message_data["id"],
+                            "room_id": ai_message_data["room_id"],
+                            "sender_id": ai_message_data.get("sender_id"),
+                            "sender_name": "ダン",
+                            "sender_type": "ai",
+                            "content": ai_message_data["content"],
+                            "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
+                        }
+                        if ai_message_data.get("ai_context"):
+                            ai_message["ai_context"] = ai_message_data["ai_context"]
 
-                    yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+                        yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
 
+                    # 提案保存はSSEジェネレーターに残す（SSE断線時は提案は作成されないが、
+                    # AI応答テキスト自体はCLIスレッドが保存しているのでユーザーは回答を見られる）
                     proposal_created = False
-                    # planning 状態のプロジェクトチャットでは、生成結果を提案として保存する
-                    # 「## 実行計画」セクションを含む場合のみ提案として扱う（それ以外は通常の回答）
                     if project_info.get("status") == "planning" and "## 実行計画" in ai_response_content:
                         try:
                             from app.services.proposal_steps import extract_steps
@@ -1155,15 +1134,8 @@ async def send_dan_message_stream(
                             except Exception:
                                 pass
 
-                    # DB: done イベント保存（再接続時に「完了済み」を判定するため）
-                    try:
-                        await _save_project_event_safe(project_service,
-                            project_id=project_info["id"], room_id=room_id,
-                            event_type="done",
-                            content="proposed" if proposal_created else "completed",
-                        )
-                    except Exception:
-                        pass
+                    # doneイベントはCLIスレッドが既にDB保存済み（DB-first）
+                    # 提案が作成された場合のみSSEからphaseイベントを追加保存
                     result_saved = True
                     yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
                     done_sent = True
@@ -1245,13 +1217,6 @@ async def send_dan_message_stream(
                         room_id=room_id,
                         reasoning_full=reasoning_full,
                     )
-                    await _archive_session_summary(
-                        service=service,
-                        user_id=current_user.user_id,
-                        room_id=room_id,
-                        archive_type="snapshot",
-                        is_project=False,
-                    )
                     result_saved = True
 
                     if not ai_message_data:
@@ -1297,9 +1262,11 @@ async def send_dan_message_stream(
             # クリーンアップ: リクエストIDとコールバックを解除
             ProgressCallbackRegistry.unregister(request_id)
             set_current_request_id(None)
-            # キャンセルフラグを解除
+            # キャンセルフラグを解除（CLIがまだ動いていたらスキップ → cli_runner.pyのfinally任せ）
             if room_id_for_cancel:
-                CancellationRegistry.unregister(room_id_for_cancel)
+                from app.agent.cli_runner import is_cli_active
+                if not is_cli_active(room_id_for_cancel):
+                    CancellationRegistry.unregister(room_id_for_cancel)
     
     return StreamingResponse(
         generate_stream(),
@@ -1550,6 +1517,7 @@ async def get_active_session_status(
     実行中ならポーリングモードに切り替える。
     """
     from app.services.cancellation import CancellationRegistry
+    from app.agent.cli_runner import is_cli_active
 
     info = CancellationRegistry.get_active_info(session_id)
     if info:
@@ -1558,6 +1526,15 @@ async def get_active_session_status(
             "session_id": session_id,
             "started_at": info["started_at"],
         }
+
+    # Registry にないが CLI プロセスがまだ動いている場合
+    if is_cli_active(session_id):
+        return {
+            "active": True,
+            "session_id": session_id,
+            "started_at": None,
+        }
+
     return {
         "active": False,
         "session_id": session_id,
@@ -1617,13 +1594,19 @@ async def get_proposals(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/proposals/{proposal_id}", response_model=ProposalResponse)
+@router.get("/proposals/{proposal_id}")
 async def get_proposal(
     proposal_id: str,
     current_user: TokenData = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ):
-    """提案の詳細を取得"""
+    """提案の詳細を取得。.htmlファイルはHTMLとして直接サーブ"""
+    if proposal_id.endswith(".html"):
+        proposals_dir = Path("D:/dan-workspace/proposals")
+        html_path = proposals_dir / proposal_id
+        if html_path.exists() and html_path.is_file():
+            return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+        raise HTTPException(status_code=404, detail="HTML file not found")
     proposal = await service.get_proposal(proposal_id, current_user.user_id)
     if not proposal:
         raise HTTPException(status_code=404, detail="Proposal not found")

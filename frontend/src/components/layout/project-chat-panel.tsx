@@ -1,17 +1,42 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
-import { X, FolderKanban, Loader2, MessageSquare, Send, Square, CheckCircle2, XCircle, ChevronDown, ChevronRight, Check, FileText, Terminal, Brain, AlertCircle, Trash2 } from 'lucide-react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { toast } from 'sonner';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertCircle,
+  Brain,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  FolderKanban,
+  Loader2,
+  MessageSquare,
+  Send,
+  Square,
+  Terminal,
+  Trash2,
+  X,
+  XCircle,
+} from 'lucide-react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
-import { api, type MessageResponse, type ProjectStatusType, type ProjectProposalResponse, type ProcessStep, type ExecutionEvent } from '@/lib/api-client';
-import { useProjectStore, useProcessState, useProcessActions } from '@/stores/project-store';
-import { useAuthStore } from '@/stores/auth-store';
+import {
+  api,
+  type ActiveSessionStatus,
+  type ExecutionEvent,
+  type MessageResponse,
+  type ProcessStep,
+  type ProjectProposalResponse,
+  type ProjectStatusType,
+} from '@/lib/api-client';
 import { useProjectRecovery } from '@/hooks/useProjectRecovery';
+import { useAuthStore } from '@/stores/auth-store';
+import { useProjectStore, useRecoveryActions, useRecoveryState } from '@/stores/project-store';
 
 interface ProjectChatPanelProps {
   projectId: string;
@@ -19,7 +44,7 @@ interface ProjectChatPanelProps {
 
 const STATUS_LABELS: Record<ProjectStatusType, { label: string; color: string }> = {
   planning: { label: '計画中', color: 'bg-blue-500/15 text-blue-600' },
-  proposed: { label: '提案中', color: 'bg-yellow-500/15 text-yellow-600' },
+  proposed: { label: '提案済', color: 'bg-yellow-500/15 text-yellow-600' },
   approved: { label: '承認済', color: 'bg-green-500/15 text-green-600' },
   in_progress: { label: '進行中', color: 'bg-purple-500/15 text-purple-600' },
   completed: { label: '完了', color: 'bg-gray-500/15 text-gray-600' },
@@ -27,39 +52,86 @@ const STATUS_LABELS: Record<ProjectStatusType, { label: string; color: string }>
   cancelled: { label: 'キャンセル', color: 'bg-red-500/15 text-red-600' },
 };
 
-// Step info with optional member role
-type StepInfo = { label: string; type: 'tool' | 'reasoning' | 'error'; role?: 'researcher' | 'critic' | 'leader' | null };
+type StepInfo = {
+  label: string;
+  type: 'tool' | 'reasoning' | 'error';
+  role?: 'researcher' | 'critic' | 'leader' | null;
+};
 
-// Member role badge
+type DisplayItem =
+  | { kind: 'message'; msg: MessageResponse }
+  | { kind: 'execution-block'; id: string; steps: StepInfo[]; isLive: boolean };
+
+interface ExecutionRun {
+  events: ExecutionEvent[];
+  isDone: boolean;
+  startTime: string;
+}
+
 function MemberBadge({ role }: { role: 'researcher' | 'critic' }) {
   const config = {
-    researcher: { emoji: '🔬', color: 'text-blue-500' },
-    critic: { emoji: '🔍', color: 'text-orange-500' },
+    researcher: { label: 'リサーチ', color: 'text-blue-500' },
+    critic: { label: 'クリティック', color: 'text-orange-500' },
   } as const;
-  const c = config[role];
+  const current = config[role];
+
   return (
-    <span className={`inline-flex items-center text-[9px] font-medium ${c.color} shrink-0`}>
-      {c.emoji}
+    <span className={`inline-flex items-center text-[9px] font-medium ${current.color} shrink-0`}>
+      {current.label}
     </span>
   );
 }
 
-// --- Inline Process Block ---
+function ProcessStepItem({
+  step,
+  isLastLive,
+}: {
+  step: StepInfo;
+  isLastLive: boolean;
+}) {
+  return (
+    <div className="flex items-start gap-1.5 text-xs md:text-[10px] leading-relaxed">
+      {step.type === 'error' ? (
+        <AlertCircle className="mt-0.5 h-2.5 w-2.5 shrink-0 text-red-500" />
+      ) : step.type === 'reasoning' ? (
+        isLastLive ? (
+          <Loader2 className="mt-0.5 h-2.5 w-2.5 shrink-0 animate-spin text-primary" />
+        ) : (
+          <Brain className="mt-0.5 h-2.5 w-2.5 shrink-0 text-yellow-500/70" />
+        )
+      ) : isLastLive ? (
+        <Loader2 className="mt-0.5 h-2.5 w-2.5 shrink-0 animate-spin text-primary" />
+      ) : (
+        <Check className="mt-0.5 h-2.5 w-2.5 shrink-0 text-green-500" />
+      )}
+      {step.role && step.role !== 'leader' ? <MemberBadge role={step.role} /> : null}
+      <span
+        className={`whitespace-pre-wrap ${
+          step.type === 'error'
+            ? 'text-red-500'
+            : step.type === 'reasoning'
+              ? 'italic text-muted-foreground/70'
+              : 'text-muted-foreground'
+        }`}
+      >
+        {step.label}
+      </span>
+    </div>
+  );
+}
+
 function InlineProcessBlock({
   steps,
-  fullTexts,
   isLive = false,
   defaultCollapsed = true,
 }: {
   steps: StepInfo[];
-  fullTexts?: string[];
   isLive?: boolean;
   defaultCollapsed?: boolean;
 }) {
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Live block: auto-expand and auto-scroll
   useEffect(() => {
     if (isLive && steps.length > 0) {
       setIsCollapsed(false);
@@ -70,35 +142,16 @@ function InlineProcessBlock({
     if (!isCollapsed && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [steps.length, isCollapsed]);
+  }, [isCollapsed, steps.length]);
 
   if (steps.length === 0 && !isLive) return null;
 
-  // reasoning ステップを全文テキストにマッピング（インデックスベース）
-  // fullTexts は reasoning/text イベントのみの全文配列
-  const reasoningFullMap = (() => {
-    if (!fullTexts || fullTexts.length === 0) return {};
-    const map: Record<number, string> = {};
-    let fullIdx = 0;
-    for (let i = 0; i < steps.length; i++) {
-      if (steps[i].type === 'reasoning' && fullIdx < fullTexts.length) {
-        // ラベルと全文が異なる場合のみマッピング（展開する意味がある場合のみ）
-        if (fullTexts[fullIdx] && fullTexts[fullIdx] !== steps[i].label) {
-          map[i] = fullTexts[fullIdx];
-        }
-        fullIdx++;
-      }
-    }
-    return map;
-  })();
-
   return (
     <div className="my-1">
-      <div className="max-w-[90%] rounded-lg border border-border/40 bg-muted/20 overflow-hidden">
-        {/* Header */}
+      <div className="max-w-[90%] overflow-hidden rounded-lg border border-border/40 bg-muted/20">
         <button
-          onClick={() => setIsCollapsed((v) => !v)}
-          className="flex items-center gap-1.5 w-full px-3 py-1.5 text-xs md:text-[11px] text-muted-foreground hover:bg-muted/30 transition-colors"
+          onClick={() => setIsCollapsed((value) => !value)}
+          className="flex w-full items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/30 md:text-[11px]"
         >
           {isCollapsed ? (
             <ChevronRight className="h-3 w-3 shrink-0" />
@@ -107,107 +160,39 @@ function InlineProcessBlock({
           )}
           <Terminal className="h-3 w-3 shrink-0 text-primary/60" />
           <span className="font-medium">
-            {isLive && steps.length === 0
-              ? '処理を開始中...'
-              : `実行ログ (${steps.length}件)`}
+            {isLive && steps.length === 0 ? '処理中...' : `処理 (${steps.length})`}
           </span>
-          {isLive && (
-            <Loader2 className="h-3 w-3 animate-spin text-primary ml-auto shrink-0" />
-          )}
-          {!isLive && steps.some((s) => s.type === 'error') && (
-            <AlertCircle className="h-3 w-3 text-red-500 ml-auto shrink-0" />
-          )}
-          {!isLive && !steps.some((s) => s.type === 'error') && steps.length > 0 && (
-            <Check className="h-3 w-3 text-green-500 ml-auto shrink-0" />
-          )}
+          {isLive ? <Loader2 className="ml-auto h-3 w-3 shrink-0 animate-spin text-primary" /> : null}
+          {!isLive && steps.some((step) => step.type === 'error') ? (
+            <AlertCircle className="ml-auto h-3 w-3 shrink-0 text-red-500" />
+          ) : null}
+          {!isLive && !steps.some((step) => step.type === 'error') && steps.length > 0 ? (
+            <Check className="ml-auto h-3 w-3 shrink-0 text-green-500" />
+          ) : null}
         </button>
 
-        {/* Steps */}
-        {!isCollapsed && (
-          <div
-            ref={scrollRef}
-            className="max-h-[400px] overflow-y-auto px-3 pb-2"
-          >
-            <div className="border-l-2 border-primary/20 pl-2.5 space-y-0.5">
-              {steps.map((step, i) => {
-                const isLastLive = isLive && i === steps.length - 1;
-                const fullText = reasoningFullMap[i];
-                return (
-                  <ProcessStepItem
-                    key={i}
-                    step={step}
-                    fullText={fullText}
-                    isLastLive={isLastLive}
-                  />
-                );
-              })}
-              {isLive && steps.length === 0 && (
-                <div className="flex items-center gap-1.5 text-xs md:text-[10px] text-muted-foreground">
+        {!isCollapsed ? (
+          <div ref={scrollRef} className="max-h-[400px] overflow-y-auto px-3 pb-2">
+            <div className="space-y-0.5 border-l-2 border-primary/20 pl-2.5">
+              {steps.map((step, index) => (
+                <ProcessStepItem
+                  key={`${step.type}-${index}`}
+                  step={step}
+                  isLastLive={isLive && index === steps.length - 1}
+                />
+              ))}
+              {isLive && steps.length === 0 ? (
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground md:text-[10px]">
                   <Loader2 className="h-2.5 w-2.5 animate-spin text-primary" />
-                  <span>接続中...</span>
+                  <span>更新を待機中...</span>
                 </div>
-              )}
+              ) : null}
             </div>
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   );
-}
-
-// --- Process Step Item ---
-function ProcessStepItem({
-  step,
-  fullText,
-  isLastLive,
-}: {
-  step: StepInfo;
-  fullText?: string;
-  isLastLive: boolean;
-}) {
-  const displayText = fullText || step.label;
-
-  return (
-    <div className="flex items-start gap-1.5 text-xs md:text-[10px] leading-relaxed">
-      {step.type === 'error' ? (
-        <AlertCircle className="h-2.5 w-2.5 text-red-500 shrink-0 mt-0.5" />
-      ) : step.type === 'reasoning' ? (
-        isLastLive ? (
-          <Loader2 className="h-2.5 w-2.5 animate-spin text-primary shrink-0 mt-0.5" />
-        ) : (
-          <Brain className="h-2.5 w-2.5 text-yellow-500/70 shrink-0 mt-0.5" />
-        )
-      ) : isLastLive ? (
-        <Loader2 className="h-2.5 w-2.5 animate-spin text-primary shrink-0 mt-0.5" />
-      ) : (
-        <Check className="h-2.5 w-2.5 text-green-500 shrink-0 mt-0.5" />
-      )}
-      {step.role && step.role !== 'leader' && <MemberBadge role={step.role} />}
-      <span
-        className={`${
-          step.type === 'error'
-            ? 'text-red-500'
-            : step.type === 'reasoning'
-              ? 'text-muted-foreground/70 italic'
-              : 'text-muted-foreground'
-        } whitespace-pre-wrap`}
-      >
-        {displayText}
-      </span>
-    </div>
-  );
-}
-
-// --- Display item types ---
-type DisplayItem =
-  | { kind: 'message'; msg: MessageResponse }
-  | { kind: 'execution-block'; steps: StepInfo[]; isLive: boolean; id: string };
-
-// --- Execution event helpers ---
-interface ExecutionRun {
-  events: ExecutionEvent[];
-  isDone: boolean;
-  startTime: string;
 }
 
 function groupExecutionRuns(events: ExecutionEvent[]): ExecutionRun[] {
@@ -217,17 +202,25 @@ function groupExecutionRuns(events: ExecutionEvent[]): ExecutionRun[] {
   for (const event of events) {
     if (event.event_type === 'done') {
       if (currentRun.length > 0) {
-        runs.push({ events: currentRun, isDone: true, startTime: currentRun[0].created_at });
+        runs.push({
+          events: currentRun,
+          isDone: true,
+          startTime: currentRun[0].created_at,
+        });
       }
       currentRun = [];
-    } else {
-      currentRun.push(event);
+      continue;
     }
+
+    currentRun.push(event);
   }
 
-  // Remaining events (no done yet)
   if (currentRun.length > 0) {
-    runs.push({ events: currentRun, isDone: false, startTime: currentRun[0].created_at });
+    runs.push({
+      events: currentRun,
+      isDone: false,
+      startTime: currentRun[0].created_at,
+    });
   }
 
   return runs;
@@ -235,33 +228,39 @@ function groupExecutionRuns(events: ExecutionEvent[]): ExecutionRun[] {
 
 function eventToStep(event: ExecutionEvent): StepInfo {
   const member = event.metadata?.member as string | undefined;
-  const role = (member === 'researcher' || member === 'critic' || member === 'leader') ? member : null;
+  const role =
+    member === 'researcher' || member === 'critic' || member === 'leader' ? member : null;
 
-  let label = '';
   if (event.event_type === 'tool_use') {
-    label = event.tool_label || event.tool_name || 'ツール実行';
-  } else if (event.event_type === 'error') {
-    label = event.content || 'エラー';
-  } else {
-    label = event.content || event.event_type;
+    return {
+      label: event.tool_label || event.tool_name || 'ツール実行',
+      type: 'tool',
+      role,
+    };
   }
 
-  const type: StepInfo['type'] =
-    event.event_type === 'tool_use' ? 'tool' :
-    event.event_type === 'error' ? 'error' : 'reasoning';
+  if (event.event_type === 'error') {
+    return {
+      label: event.content || 'エラー',
+      type: 'error',
+      role,
+    };
+  }
 
-  return { label, type, role };
+  return {
+    label: event.content || event.event_type,
+    type: 'reasoning',
+    role,
+  };
 }
 
-// --- Message bubble (memo化で不要な再描画を防ぐ) ---
 const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageResponse }) {
-  // Proposal messages: render as full-width iframe
   if (msg.sender_type !== 'human') {
     const proposalMatch = (msg.content || '').match(/```proposal\n([^\n]+)\n```/);
     if (proposalMatch) {
       const filename = proposalMatch[1].trim();
       return (
-        <div className="flex justify-start w-full px-1 py-1">
+        <div className="flex w-full justify-start px-1 py-1">
           <iframe
             src={`/api/v1/proposals/${filename}`}
             className="w-full rounded-xl border border-border"
@@ -277,7 +276,7 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageRespons
   if (msg.sender_type === 'human') {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-lg px-3 py-2 text-sm md:text-xs leading-relaxed bg-primary text-primary-foreground">
+        <div className="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm leading-relaxed text-primary-foreground md:text-xs">
           {msg.content}
         </div>
       </div>
@@ -285,19 +284,20 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageRespons
   }
 
   return (
-    <div className="text-sm md:text-xs leading-relaxed text-foreground prose prose-sm md:prose-xs prose-dan max-w-none">
+    <div className="prose prose-sm prose-dan max-w-none text-sm leading-relaxed text-foreground md:prose-xs md:text-xs">
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>
     </div>
   );
 });
 
-// --- Input area (分離して入力変更が他に影響しないようにする) ---
 function ChatInput({
   projectId,
   roomId,
+  isSessionActive,
 }: {
   projectId: string;
   roomId: string;
+  isSessionActive: boolean;
 }) {
   const [message, setMessage] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -306,42 +306,51 @@ function ChatInput({
   const queryClient = useQueryClient();
   const user = useAuthStore((state) => state.user);
   const selectProject = useProjectStore((s) => s.selectProject);
+  const { isInterrupted } = useRecoveryState(projectId);
+  const { resetRecovery, setInterrupted } = useRecoveryActions();
 
-  const { isSending } = useProcessState(projectId);
-  const { setSending, setProcessing, clearLiveSteps, addLiveStep, resetProcess } = useProcessActions();
-
-  // SSE接続断線時の自動復帰
   useProjectRecovery({ projectId, roomId });
 
-  const isTransientNetworkError = (message?: string): boolean => {
-    if (!message) return false;
-    const m = message.toLowerCase();
-    return m.includes('networkerror') || m.includes('failed to fetch') || m.includes('network request failed');
-  };
+  const syncActiveStatus = useCallback(
+    (active: boolean) => {
+      queryClient.setQueryData<ActiveSessionStatus>(['session-active', roomId], {
+        active,
+        session_id: roomId,
+        started_at: active ? Date.now() : null,
+      });
+    },
+    [queryClient, roomId]
+  );
 
-  // Textarea auto-resize
+  const isBusy = isInterrupted || isSessionActive;
+
   useEffect(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
+    const textarea = textareaRef.current;
+    if (!textarea) return;
     if (!message.trim()) {
-      ta.style.height = '32px';
+      textarea.style.height = '32px';
       return;
     }
-    ta.style.height = '32px';
-    ta.style.height = `${Math.min(ta.scrollHeight, 120)}px`;
+    textarea.style.height = '32px';
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 120)}px`;
   }, [message]);
 
-  // Send message
+  const invalidateProjectQueries = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['session-active', roomId] });
+    queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+    queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
+    queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+    queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
+  }, [projectId, queryClient, roomId]);
+
   const handleSendMessage = useCallback(async () => {
-    if (!message.trim() || isSending) return;
+    if (!message.trim() || isBusy) return;
 
     const content = message.trim();
     setMessage('');
-    setSending(projectId, true);
-    setProcessing(projectId, true);
-    clearLiveSteps(projectId);
+    syncActiveStatus(true);
+    setInterrupted(projectId, false);
 
-    // Optimistic update
     const tempUserMessageId = `temp-user-${Date.now()}`;
     const optimisticUserMessage: MessageResponse = {
       id: tempUserMessageId,
@@ -366,63 +375,59 @@ function ChatInput({
         { message: content, session_id: roomId },
         {
           onUserMessage: (msg) => {
-            queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
-              messages: [msg, ...(old?.messages || []).filter((m: MessageResponse) => m.id !== tempUserMessageId)],
-            }));
+            queryClient.setQueryData(
+              queryKey,
+              (old: { messages: MessageResponse[] } | undefined) => ({
+                messages: [
+                  msg,
+                  ...(old?.messages || []).filter(
+                    (current: MessageResponse) => current.id !== tempUserMessageId
+                  ),
+                ],
+              })
+            );
           },
-          onAIMessage: (msg) => {
-            setProcessing(projectId, false);
-            clearLiveSteps(projectId);
-            queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
-              messages: [msg, ...(old?.messages || [])],
-            }));
-            // 実行ログをここでも即再取得（onCompleteを待つと遅延が生じる）
+          onAIMessage: () => {
+            queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
-          onProcessStep: (step: ProcessStep) => {
-            addLiveStep(projectId, {
-              label: step.label,
-              type: step.label.startsWith('🔧') ? 'tool' : 'reasoning',
-            });
+          onProcessStep: (_step: ProcessStep) => {
+            queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
+          },
+          onInterrupted: () => {
+            syncActiveStatus(true);
+            setInterrupted(projectId, true);
+            queryClient.invalidateQueries({ queryKey: ['session-active', roomId] });
+            queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+            queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onComplete: () => {
-            setSending(projectId, false);
-            setProcessing(projectId, false);
-            queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
-            // 提案が作成された可能性があるので project と proposals を即再取得
-            queryClient.invalidateQueries({ queryKey: ['project', projectId] });
-            queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
-            // 実行ログを確実に取得（応答が速い場合ポーリングが走らない問題の対処）
-            queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
+            syncActiveStatus(false);
+            setInterrupted(projectId, false);
+            invalidateProjectQueries();
 
-            // タイトル自動生成: まだ「新しいプロジェクト」なら1回だけ実行
             if (!titleGeneratedRef.current) {
               titleGeneratedRef.current = true;
               const cached = queryClient.getQueryData<{ title?: string }>(['project', projectId]);
-              if (cached?.title === '新しいプロジェクト') {
-                api.projects.suggestTitle(roomId)
-                  .then(({ title }) => {
-                    if (title && title !== '新しいプロジェクト') {
-                      return api.projects.update(projectId, { title });
-                    }
-                  })
-                  .then(() => {
-                    queryClient.invalidateQueries({ queryKey: ['project', projectId] });
-                    queryClient.invalidateQueries({ queryKey: ['projects'] });
-                  })
-                  .catch(() => {}); // タイトル生成失敗は無視
-              }
+              api.projects
+                .suggestTitle(roomId)
+                .then(({ title }) => {
+                  if (title && title !== cached?.title) {
+                    return api.projects.update(projectId, { title });
+                  }
+                  return undefined;
+                })
+                .then(() => {
+                  queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+                  queryClient.invalidateQueries({ queryKey: ['projects'] });
+                })
+                .catch(() => {});
             }
           },
           onError: (error) => {
-            if (isTransientNetworkError(error)) {
-              console.warn('[project-chat] transient stream error, keeping spinner:', error);
-              // スピナーを止めない → useProjectRecovery がタブ復帰時に引き継ぐ
-              return;
-            }
-            setSending(projectId, false);
-            setProcessing(projectId, false);
-            toast.error(error || 'エラーが発生しました');
+            syncActiveStatus(false);
+            setInterrupted(projectId, false);
+            toast.error(error || 'メッセージの送信に失敗しました');
           },
           onProjectCreated: (createdProjectId) => {
             queryClient.invalidateQueries({ queryKey: ['projects'] });
@@ -434,15 +439,26 @@ function ChatInput({
         controller.signal
       );
     } catch (error) {
-      setSending(projectId, false);
-      setProcessing(projectId, false);
+      syncActiveStatus(false);
+      setInterrupted(projectId, false);
       if (error instanceof Error && error.name !== 'AbortError') {
-        toast.error('メッセージの送信に失敗しました');
+        toast.error('メッセージ送信中に問題が発生しました');
       }
     }
-  }, [message, isSending, roomId, user?.id, user?.display_name, queryClient, projectId, selectProject, setSending, setProcessing, clearLiveSteps, addLiveStep]);
+  }, [
+    invalidateProjectQueries,
+    isBusy,
+    message,
+    projectId,
+    queryClient,
+    roomId,
+    selectProject,
+    setInterrupted,
+    syncActiveStatus,
+    user?.display_name,
+    user?.id,
+  ]);
 
-  // Cancel
   const handleCancel = useCallback(async () => {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -451,55 +467,60 @@ function ChatInput({
 
     try {
       await api.sm.cancelSession(roomId);
-    } catch (e) {
-      console.error('Failed to cancel session:', e);
+    } catch (error) {
+      console.error('Failed to cancel session:', error);
     }
 
-    resetProcess(projectId);
-    toast.info('処理を停止しました');
-  }, [roomId, projectId, resetProcess]);
+    syncActiveStatus(false);
+    resetRecovery(projectId);
+    invalidateProjectQueries();
+    toast.info('処理を中断しました');
+  }, [invalidateProjectQueries, projectId, resetRecovery, roomId, syncActiveStatus]);
 
-  // Keyboard: PCのみEnterで送信。モバイルは改行（送信ボタンのみ）
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    const isMobile = window.matchMedia('(max-width: 767px)').matches;
-    if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
-      e.preventDefault();
-      handleSendMessage();
-    }
-  }, [handleSendMessage]);
+  const handleKeyDown = useCallback(
+    (event: React.KeyboardEvent) => {
+      const isMobile = window.matchMedia('(max-width: 767px)').matches;
+      if (event.key === 'Enter' && !event.shiftKey && !isMobile) {
+        event.preventDefault();
+        handleSendMessage();
+      }
+    },
+    [handleSendMessage]
+  );
 
-  // Esc to cancel
   useEffect(() => {
-    if (!isSending) return;
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
+    if (!isBusy) return;
+
+    const handleEsc = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
         handleCancel();
       }
     };
+
     window.addEventListener('keydown', handleEsc);
     return () => window.removeEventListener('keydown', handleEsc);
-  }, [isSending, handleCancel]);
+  }, [handleCancel, isBusy]);
 
   return (
     <div className="shrink-0 border-t border-border p-3">
-      <div className="flex items-end gap-2 p-2 rounded-xl border border-border bg-input/30 focus-within:border-primary/50 transition-colors">
+      <div className="flex items-end gap-2 rounded-xl border border-border bg-input/30 p-2 transition-colors focus-within:border-primary/50">
         <textarea
           ref={textareaRef}
           value={message}
-          onChange={(e) => setMessage(e.target.value)}
+          onChange={(event) => setMessage(event.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="メッセージを入力..."
           rows={1}
-          className="flex-1 resize-none bg-transparent text-sm md:text-xs focus:outline-none min-h-[32px] max-h-[120px] py-1.5"
+          className="min-h-[32px] max-h-[120px] flex-1 resize-none bg-transparent py-1.5 text-sm focus:outline-none md:text-xs"
         />
-        {isSending ? (
+        {isBusy ? (
           <Button
             size="icon"
             variant="destructive"
             className="h-7 w-7 shrink-0"
             onClick={handleCancel}
-            title="停止 (Escキー)"
+            title="キャンセル"
           >
             <Square className="h-3.5 w-3.5" />
           </Button>
@@ -521,11 +542,8 @@ function ChatInput({
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const selectProject = useProjectStore((s) => s.selectProject);
-
-  // プロセス状態は個別プロパティとして取得（変わった部分だけで再描画）
-  const { isProcessing, liveSteps } = useProcessState(projectId);
-
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [proposalCollapsed, setProposalCollapsed] = useState(true);
 
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
@@ -544,7 +562,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: (query) => (query.state.error ? 15000 : 3000),
   });
 
-  // Active execution status from backend (authoritative)
   const { data: activeStatus } = useQuery({
     queryKey: ['session-active', project?.room_id],
     queryFn: () => api.sm.getActiveStatus(project!.room_id!),
@@ -553,21 +570,17 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: (query) => (query.state.error ? 10000 : 2000),
   });
 
-  // Execution events query (inline process monitor)
-  const isActiveExecution = isProcessing || !!activeStatus?.active;
+  const isActiveExecution = !!activeStatus?.active;
+
   const { data: executionEvents = [] } = useQuery({
     queryKey: ['execution-events', projectId],
     queryFn: () => api.projects.executionEvents.list(projectId),
     enabled: !!projectId,
     retry: 1,
-    staleTime: 30 * 1000, // 30秒はキャッシュを使う（完了後も表示を維持）
-    refetchInterval: (query) => {
-      if (!isActiveExecution) return false;
-      return query.state.error ? 10000 : 2000;
-    },
+    staleTime: 30 * 1000,
+    refetchInterval: (query) => (isActiveExecution ? (query.state.error ? 10000 : 2000) : false),
   });
 
-  // Proposals query
   const isProposed = project?.status === 'proposed';
   const { data: proposals } = useQuery({
     queryKey: ['project-proposals', projectId],
@@ -576,15 +589,13 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: isProposed ? 5000 : false,
   });
 
-  const pendingProposal = proposals?.find((p: ProjectProposalResponse) => p.status === 'pending');
-  const approvedProposal = proposals?.find((p: ProjectProposalResponse) => p.status === 'approved');
+  const pendingProposal = proposals?.find((item: ProjectProposalResponse) => item.status === 'pending');
+  const approvedProposal = proposals?.find((item: ProjectProposalResponse) => item.status === 'approved');
 
-  // Approve/Reject mutations
   const approveMutation = useMutation({
-    mutationFn: (proposalId: string) =>
-      api.projects.proposals.action(projectId, proposalId, 'approve'),
+    mutationFn: (proposalId: string) => api.projects.proposals.action(projectId, proposalId, 'approve'),
     onSuccess: () => {
-      toast.success('提案を承認しました。実行を開始します...');
+      toast.success('提案を承認しました');
       queryClient.invalidateQueries({ queryKey: ['project', projectId] });
       queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
     },
@@ -594,8 +605,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   });
 
   const rejectMutation = useMutation({
-    mutationFn: (proposalId: string) =>
-      api.projects.proposals.action(projectId, proposalId, 'reject'),
+    mutationFn: (proposalId: string) => api.projects.proposals.action(projectId, proposalId, 'reject'),
     onSuccess: () => {
       toast.info('提案を却下しました');
       queryClient.invalidateQueries({ queryKey: ['project', projectId] });
@@ -614,12 +624,12 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       toast.success('プロジェクトを削除しました');
     },
     onError: () => {
-      toast.error('プロジェクト削除に失敗しました');
+      toast.error('プロジェクトの削除に失敗しました');
     },
   });
 
   const handleDeleteProject = () => {
-    if (window.confirm('このプロジェクトを削除しますか？\n会話履歴はメモリに保存されます。')) {
+    if (window.confirm('このプロジェクトを削除しますか？')) {
       deleteProjectMutation.mutate();
     }
   };
@@ -627,81 +637,71 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const status = project?.status ? STATUS_LABELS[project.status] : null;
   const messages = messagesData?.messages || [];
 
-  // Build display items: messages + execution event runs merged chronologically
   const displayItems = useMemo(() => {
     type TimedItem = { item: DisplayItem; sortKey: number; subKey: number };
     const timedItems: TimedItem[] = [];
+    const chronologicalMessages = [...messages].reverse();
 
-    // Messages and their ai_context process blocks
-    const chronological = [...messages].reverse();
-    for (const msg of chronological) {
+    for (const msg of chronologicalMessages) {
       const content = msg.content || '';
-
-      // Skip legacy [実行中]/[思考中] prefixed messages
-      if (msg.sender_type !== 'human' && (content.startsWith('[実行中]') || content.startsWith('[思考中]'))) {
+      if (
+        msg.sender_type !== 'human' &&
+        (content.startsWith('[PROCESS]') || content.startsWith('[THINKING]'))
+      ) {
         continue;
       }
 
-      const msgTime = new Date(msg.created_at).getTime();
-
       timedItems.push({
         item: { kind: 'message', msg },
-        sortKey: msgTime,
+        sortKey: new Date(msg.created_at).getTime(),
         subKey: 1,
       });
     }
 
-    // Execution event runs (from backend polling)
     const runs = groupExecutionRuns(executionEvents);
-    for (const run of runs) {
-      // While streaming in this tab, prefer liveSteps block to avoid duplicate monitors.
-      if (!run.isDone && isProcessing) continue;
-
+    for (let index = 0; index < runs.length; index++) {
+      const run = runs[index];
       const steps = run.events.map(eventToStep);
       if (steps.length === 0) continue;
 
-      // Option B: isLive only when actively executing (old data without done = completed)
-      const isLive = !run.isDone && !!isActiveExecution;
-
       timedItems.push({
-        item: { kind: 'execution-block', steps, isLive, id: `exec-${run.events[0].id}` },
+        item: {
+          kind: 'execution-block',
+          id: `exec-${run.events[0].id}`,
+          steps,
+          isLive: !run.isDone && index === runs.length - 1 && isActiveExecution,
+        },
         sortKey: new Date(run.startTime).getTime(),
         subKey: 0,
       });
     }
 
-    // Sort by time, then by subKey (process blocks before their messages)
-    timedItems.sort((a, b) => a.sortKey - b.sortKey || a.subKey - b.subKey);
-
-    return timedItems.map((t) => t.item);
-  }, [messages, executionEvents, isActiveExecution, isProcessing]);
+    timedItems.sort((left, right) => left.sortKey - right.sortKey || left.subKey - right.subKey);
+    return timedItems.map((item) => item.item);
+  }, [executionEvents, isActiveExecution, messages]);
 
   const hasAnyContent = displayItems.length > 0;
 
-  const [proposalCollapsed, setProposalCollapsed] = useState(true);
-
-  // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [displayItems.length, liveSteps.length, isProcessing]);
+  }, [displayItems.length, isActiveExecution]);
 
   return (
-    <div className="flex flex-col h-full overflow-hidden bg-background">
-      {/* Header */}
-      <div className="shrink-0 flex items-center gap-3 pl-12 pr-4 md:px-4 py-3 border-b border-border">
-        <FolderKanban className="h-5 w-5 text-primary shrink-0" />
-        <div className="flex-1 min-w-0">
+    <div className="flex h-full flex-col overflow-hidden bg-background">
+      <div className="flex shrink-0 items-center gap-3 border-b border-border py-3 pl-12 pr-4 md:px-4">
+        <FolderKanban className="h-5 w-5 shrink-0 text-primary" />
+        <div className="min-w-0 flex-1">
           {isLoading ? (
             <div className="flex items-center gap-2">
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-              <span className="text-sm text-muted-foreground">読み込み中...</span>
+              <span className="text-sm text-muted-foreground">プロジェクトを読み込み中...</span>
             </div>
           ) : (
             <>
               <div className="flex items-center gap-1.5">
-                <h2 className="font-semibold text-sm truncate">{project?.title}</h2>
+                <h2 className="truncate text-sm font-semibold">{project?.title}</h2>
                 <button
-                  className="shrink-0 p-0.5 rounded text-muted-foreground/40 hover:text-destructive transition-colors"
+                  className="shrink-0 rounded p-0.5 text-muted-foreground/40 transition-colors hover:text-destructive"
                   onClick={handleDeleteProject}
                   disabled={deleteProjectMutation.isPending}
                   title="プロジェクトを削除"
@@ -713,17 +713,19 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                   )}
                 </button>
               </div>
-              <div className="flex items-center gap-2 mt-0.5">
-                {status && (
-                  <span className={`inline-block text-xs md:text-[10px] px-1.5 py-0.5 rounded-full font-medium ${status.color}`}>
+              <div className="mt-0.5 flex items-center gap-2">
+                {status ? (
+                  <span
+                    className={`inline-block rounded-full px-1.5 py-0.5 text-xs font-medium md:text-[10px] ${status.color}`}
+                  >
                     {status.label}
                   </span>
-                )}
-                {project?.created_at && (
-                  <span className="text-xs md:text-[10px] text-muted-foreground/60">
+                ) : null}
+                {project?.created_at ? (
+                  <span className="text-xs text-muted-foreground/60 md:text-[10px]">
                     {new Date(project.created_at).toLocaleDateString('ja-JP')}
                   </span>
-                )}
+                ) : null}
               </div>
             </>
           )}
@@ -738,84 +740,77 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </Button>
       </div>
 
-      {/* Approved proposal (collapsible) */}
-      {approvedProposal && (
+      {approvedProposal ? (
         <div className="shrink-0 border-b border-border">
           <button
-            onClick={() => setProposalCollapsed((v) => !v)}
-            className="flex items-center gap-2 w-full px-4 py-2 text-sm md:text-xs hover:bg-muted/50 transition-colors"
+            onClick={() => setProposalCollapsed((value) => !value)}
+            className="flex w-full items-center gap-2 px-4 py-2 text-sm transition-colors hover:bg-muted/50 md:text-xs"
           >
-            {proposalCollapsed ? <ChevronRight className="h-3 w-3 text-muted-foreground" /> : <ChevronDown className="h-3 w-3 text-muted-foreground" />}
+            {proposalCollapsed ? (
+              <ChevronRight className="h-3 w-3 text-muted-foreground" />
+            ) : (
+              <ChevronDown className="h-3 w-3 text-muted-foreground" />
+            )}
             <FileText className="h-3 w-3 text-green-500" />
-            <span className="text-muted-foreground">承認済みの提案</span>
+            <span className="text-muted-foreground">承認済み提案</span>
             <CheckCircle2 className="h-3 w-3 text-green-500" />
           </button>
-          {!proposalCollapsed && (
-            <div className="px-4 pb-3 max-h-[40vh] overflow-y-auto">
-              <div className="bg-muted rounded-lg px-3 py-2 text-sm md:text-xs leading-relaxed prose prose-sm md:prose-xs prose-dan max-w-none">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{approvedProposal.content || ''}</ReactMarkdown>
+          {!proposalCollapsed ? (
+            <div className="max-h-[40vh] overflow-y-auto px-4 pb-3">
+              <div className="prose prose-sm prose-dan max-w-none rounded-lg bg-muted px-3 py-2 text-sm leading-relaxed md:prose-xs md:text-xs">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {approvedProposal.content || ''}
+                </ReactMarkdown>
               </div>
             </div>
-          )}
+          ) : null}
         </div>
-      )}
+      ) : null}
 
-      {/* Messages (with inline process blocks) */}
       <div className="flex-1 overflow-y-auto">
         {isLoadingMessages ? (
           <div className="flex items-center justify-center p-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
-        ) : !hasAnyContent && !isProcessing ? (
-          <div className="flex flex-col items-center justify-center p-6 h-full">
-            <MessageSquare className="h-10 w-10 text-muted-foreground/20 mb-3" />
-            <p className="text-sm md:text-xs text-muted-foreground">
-              メッセージはまだありません
-            </p>
+        ) : !hasAnyContent && !isActiveExecution ? (
+          <div className="flex h-full flex-col items-center justify-center p-6">
+            <MessageSquare className="mb-3 h-10 w-10 text-muted-foreground/20" />
+            <p className="text-sm text-muted-foreground md:text-xs">メッセージを送信して開始してください。</p>
           </div>
         ) : (
           <div className="flex flex-col gap-2 p-4">
             {(() => {
-              // 最後のexecution-blockのインデックスを求める（最新だけ展開）
-              const lastExecIdx = displayItems.reduce((last, item, i) =>
-                item.kind === 'execution-block' ? i : last, -1);
+              const lastExecutionIndex = displayItems.reduce(
+                (last, item, index) => (item.kind === 'execution-block' ? index : last),
+                -1
+              );
+
               return displayItems.map((item, index) => {
                 if (item.kind === 'execution-block') {
-                  const isLatest = index === lastExecIdx;
                   return (
                     <InlineProcessBlock
                       key={item.id}
                       steps={item.steps}
                       isLive={item.isLive}
-                      defaultCollapsed={!isLatest && !item.isLive}
+                      defaultCollapsed={index !== lastExecutionIndex && !item.isLive}
                     />
                   );
                 }
+
                 return <MessageBubble key={item.msg.id} msg={item.msg} />;
               });
             })()}
-
-            {/* Live process block (during streaming) */}
-            {isProcessing && (
-              <InlineProcessBlock
-                steps={liveSteps}
-                isLive={true}
-                defaultCollapsed={false}
-              />
-            )}
-
             <div ref={messagesEndRef} />
           </div>
         )}
       </div>
 
-      {/* Proposal Action Bar */}
-      {pendingProposal && project?.status === 'proposed' && (
-        <div className="shrink-0 border-t border-border px-4 py-2 bg-yellow-500/5">
+      {pendingProposal && project?.status === 'proposed' ? (
+        <div className="shrink-0 border-t border-border bg-yellow-500/5 px-4 py-2">
           <div className="flex gap-2">
             <Button
               size="sm"
-              className="h-8 text-xs gap-1.5"
+              className="h-8 gap-1.5 text-xs"
               onClick={() => approveMutation.mutate(pendingProposal.id)}
               disabled={approveMutation.isPending || rejectMutation.isPending}
             >
@@ -824,12 +819,12 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
               ) : (
                 <CheckCircle2 className="h-3.5 w-3.5" />
               )}
-              承認して実行
+              承認
             </Button>
             <Button
               size="sm"
               variant="outline"
-              className="h-8 text-xs gap-1.5"
+              className="h-8 gap-1.5 text-xs"
               onClick={() => rejectMutation.mutate(pendingProposal.id)}
               disabled={approveMutation.isPending || rejectMutation.isPending}
             >
@@ -842,13 +837,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             </Button>
           </div>
         </div>
-      )}
+      ) : null}
 
-      {/* Input Area */}
-      {project?.room_id && (
-        <ChatInput projectId={projectId} roomId={project.room_id} />
-      )}
+      {project?.room_id ? (
+        <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} />
+      ) : null}
     </div>
   );
 }
-
