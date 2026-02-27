@@ -986,6 +986,11 @@ async def send_dan_message_stream(
                     project_status=project_info.get("status", "in_progress"),
                     user_messages=user_messages_for_cli,
                 ):
+                    if event["type"] == "keepalive":
+                        # SSEコメント: クライアントのEventSourceパーサーは無視するが接続は維持される
+                        yield ": keepalive\n\n"
+                        continue
+
                     if event["type"] == "cancelled":
                         await service.send_dan_ai_message(current_user.user_id, "（中断されました）", [], room_id=room_id)
                         await _save_project_event_safe(project_service,
@@ -1183,6 +1188,11 @@ async def send_dan_message_stream(
                     project_description="",
                     project_status="in_progress",
                 ):
+                    if event["type"] == "keepalive":
+                        yield ": keepalive\n\n"
+                        continue
+
+
                     if event["type"] == "cancelled":
                         await service.send_dan_ai_message(
                             current_user.user_id, "処理を中止しました。", [], room_id=room_id
