@@ -706,6 +706,8 @@ async def process_message_cli(
                 _cli_debug(f"CLI timeout after {idle_seconds}s")
                 yield {"type": "error", "message": f"CLI timeout after {idle_seconds}s"}
                 break
+            # SSE接続を維持するためキープアライブを送出
+            yield {"type": "keepalive"}
             continue
 
         idle_seconds = 0
