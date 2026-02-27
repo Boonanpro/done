@@ -24,6 +24,61 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 _background_tasks: set = set()
 
 
+@router.get("/suggest-title")
+async def suggest_project_title(
+    room_id: Optional[str] = Query(default=None),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """チャット内容からプロジェクトタイトルを自動生成"""
+    from app.services.chat_service import ChatService
+
+    service = ChatService()
+    messages = []
+
+    if room_id:
+        try:
+            raw = await service.get_messages(room_id, current_user.user_id, limit=20)
+            messages = [
+                m.get("content", "")
+                for m in reversed(raw)
+                if m.get("sender_type") == "human" and m.get("content")
+            ]
+        except Exception:
+            pass
+
+    if not messages:
+        return {"title": "新しいプロジェクト"}
+
+    context = "\n".join(messages[:5])
+
+    try:
+        import anthropic
+        from app.config import settings
+
+        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=60,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "以下の会話内容から、プロジェクトのタイトルを日本語で1つ生成してください。\n"
+                    "タイトルは20文字以内の簡潔な名詞句にしてください。タイトルだけを返してください。\n\n"
+                    f"会話内容:\n{context[:800]}"
+                ),
+            }],
+        )
+        title = resp.content[0].text.strip().strip("「」『』")
+        if len(title) > 50:
+            title = title[:50]
+        return {"title": title}
+    except Exception:
+        # フォールバック: 最初のメッセージを短く切る
+        first = messages[0]
+        title = first.split("。")[0].split("、")[0].split("\n")[0][:30].strip()
+        return {"title": title or "新しいプロジェクト"}
+
+
 def get_project_service() -> ProjectService:
     return ProjectService()
 

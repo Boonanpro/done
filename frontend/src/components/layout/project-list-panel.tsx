@@ -103,6 +103,7 @@ export function ProjectListPanel({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newProjectTitle, setNewProjectTitle] = useState('');
   const [newProjectDescription, setNewProjectDescription] = useState('');
+  const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [isBusinessOpen, setIsBusinessOpen] = useState(false);
   const hasToken = useHasToken();
   const isMobile = useIsMobile();
@@ -143,6 +144,15 @@ export function ProjectListPanel({
       onToggleCollapse();
     }
     setIsCreateOpen(true);
+    // ヘッダーの+ボタンからでもタイトルを自動生成
+    const roomId = getRoomIdFromPath();
+    if (!roomId) return;
+    setIsGeneratingTitle(true);
+    api.projects.suggestTitle(roomId)
+      .then(({ title }) => setNewProjectTitle(title))
+      .catch(() => {})
+      .finally(() => setIsGeneratingTitle(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [forceOpenCreateToken, isCollapsed, onToggleCollapse]);
 
   const handleProjectClick = (project: ProjectResponse) => {
@@ -167,6 +177,34 @@ export function ProjectListPanel({
       title,
       description: description || undefined,
     });
+  };
+
+  // パスから room_id を取り出す（/chat/[roomId] の形式）
+  const getRoomIdFromPath = () => {
+    const match = pathname.match(/^\/chat\/([^/]+)$/);
+    return match ? match[1] : undefined;
+  };
+
+  const handleOpenCreate = async () => {
+    setIsCreateOpen((prev) => {
+      if (prev) return false; // 閉じる場合はそのまま
+      return true;
+    });
+    // 既に開いていた場合は閉じるだけ
+    if (isCreateOpen) return;
+
+    const roomId = getRoomIdFromPath();
+    if (!roomId) return;
+
+    setIsGeneratingTitle(true);
+    try {
+      const { title } = await api.projects.suggestTitle(roomId);
+      setNewProjectTitle(title);
+    } catch {
+      // 失敗しても空のままにしておく
+    } finally {
+      setIsGeneratingTitle(false);
+    }
   };
 
   const handleHeaderCreateClick = () => {
@@ -291,9 +329,13 @@ export function ProjectListPanel({
                   variant="ghost"
                   size="icon"
                   className="h-6 w-6 text-muted-foreground hover:text-sidebar-foreground"
-                  onClick={() => setIsCreateOpen((prev) => !prev)}
+                  onClick={handleOpenCreate}
                 >
-                  <Plus className="h-3.5 w-3.5" />
+                  {isGeneratingTitle ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Plus className="h-3.5 w-3.5" />
+                  )}
                 </Button>
               </div>
 

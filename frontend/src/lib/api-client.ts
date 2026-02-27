@@ -555,6 +555,18 @@ async function request<T>(
   return response.json();
 }
 
+// ==================== Helpers ====================
+
+/**
+ * 一時的なネットワークエラーかどうかを判定
+ * モバイルでのタブ切り替え等で発生する接続断を検出する
+ */
+function isTransientNetworkError(message?: string): boolean {
+  if (!message) return false;
+  const m = message.toLowerCase();
+  return m.includes('networkerror') || m.includes('failed to fetch') || m.includes('network request failed');
+}
+
 // ==================== API Methods ====================
 
 export const api = {
@@ -1046,11 +1058,16 @@ export const api = {
           }
           return;
         }
+
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        const isTransient = isTransientNetworkError(errorMsg);
+
         if (callbacks.onError) {
-          callbacks.onError(error instanceof Error ? error.message : String(error));
+          callbacks.onError(errorMsg);
         }
-        // エラー時もスピナー停止のためクリーンアップ
-        if (callbacks.onComplete) {
+        // 一時的ネットワークエラー時はonCompleteを呼ばない → スピナー維持
+        // useProjectRecovery がタブ復帰時に引き継ぐ
+        if (!isTransient && callbacks.onComplete) {
           callbacks.onComplete();
         }
       }
@@ -1113,6 +1130,9 @@ export const api = {
 
     get: (projectId: string) =>
       request<ProjectResponse>(`/projects/${projectId}`),
+
+    suggestTitle: (roomId?: string) =>
+      request<{ title: string }>(`/projects/suggest-title${roomId ? `?room_id=${roomId}` : ''}`),
 
     create: (data: { title: string; description?: string; origin_room_id?: string }) =>
       request<ProjectResponse>('/projects', {
