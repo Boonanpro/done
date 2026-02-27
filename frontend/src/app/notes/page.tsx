@@ -190,7 +190,7 @@ function DraftEditor({
         </label>
         <div className="flex gap-2 mb-2 flex-wrap">
           {tags.map((tag, i) => (
-            <Badge key={i} variant="secondary" className="gap-1">
+            <Badge key={tag} variant="secondary" className="gap-1">
               {tag}
               <button onClick={() => removeTag(i)} className="hover:text-destructive">
                 <X className="size-3" />

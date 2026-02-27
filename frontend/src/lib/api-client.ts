@@ -516,20 +516,24 @@ async function request<T>(
   if (!response.ok) {
     // 401 Unauthorized: セッション切れ → ログインページにリダイレクト
     if (response.status === 401) {
-      // トークンをクリア
-      setStoredToken(null);
-      immediateToken = null;
-      // auth-storeをクリア
-      try {
-        useAuthStore.getState().logout();
-      } catch {
-        // store未初期化時は無視
-      }
-      // ログインページにリダイレクト（ブラウザ環境のみ）
-      if (typeof window !== 'undefined') {
-        window.location.href = '/login';
-        // リダイレクト中はエラーをスローしない
-        return new Promise(() => {});
+      // ログインエンドポイント自体の401はリダイレクトしない（パスワード間違い等）
+      const isLoginEndpoint = endpoint === '/chat/login' || endpoint === '/chat/register';
+      if (!isLoginEndpoint) {
+        // トークンをクリア
+        setStoredToken(null);
+        immediateToken = null;
+        // auth-storeをクリア
+        try {
+          useAuthStore.getState().logout();
+        } catch {
+          // store未初期化時は無視
+        }
+        // ログインページにリダイレクト（ブラウザ環境のみ）
+        if (typeof window !== 'undefined') {
+          window.location.href = '/login';
+          // リダイレクト中はエラーをスローしない
+          return new Promise(() => {});
+        }
       }
     }
 
