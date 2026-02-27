@@ -546,7 +546,11 @@ async function request<T>(
     throw new ApiError(response.status, response.statusText, data);
   }
 
-  // Handle empty responses
+  // Handle empty responses (e.g. 204 No Content)
+  if (response.status === 204) {
+    return {} as T;
+  }
+
   const contentType = response.headers.get('content-type');
   if (!contentType || !contentType.includes('application/json')) {
     return {} as T;

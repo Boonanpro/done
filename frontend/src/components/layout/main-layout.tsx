@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useRef, useCallback, useEffect } from 'react';
-import { Menu, Plus, FolderOpen } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Menu, FolderOpen } from 'lucide-react';
 import { ProjectListPanel } from './project-list-panel';
 import { ProjectChatPanel } from './project-chat-panel';
 import { NotificationPanel } from '@/components/notification/notification-panel';
@@ -21,7 +21,6 @@ export function MainLayout({
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [hasOpenedMobileSidebar, setHasOpenedMobileSidebar] = useState(false);
-  const [forceOpenCreateToken, setForceOpenCreateToken] = useState(0);
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
 
   // When switching from desktop to mobile, reset sidebar state once.
@@ -36,13 +35,6 @@ export function MainLayout({
     }
   }, [isMobile, hasOpenedMobileSidebar]);
 
-  const openCreateProject = useCallback(() => {
-    if (isMobile) {
-      setSidebarOpen(true);
-    }
-    setForceOpenCreateToken((prev) => prev + 1);
-  }, [isMobile]);
-
   // ===== Mobile Layout =====
   if (isMobile) {
     return (
@@ -53,13 +45,6 @@ export function MainLayout({
           className="fixed top-3 left-3 z-40 h-9 w-9 flex items-center justify-center rounded-lg bg-background/80 backdrop-blur border border-border"
         >
           <Menu className="h-5 w-5" />
-        </button>
-        <button
-          onClick={openCreateProject}
-          className="fixed top-3 left-14 z-40 h-9 w-9 flex items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-sm"
-          aria-label="新規プロジェクト作成"
-        >
-          <Plus className="h-5 w-5" />
         </button>
 
         {/* Sidebar overlay */}
@@ -73,7 +58,6 @@ export function MainLayout({
               <ProjectListPanel
                 isCollapsed={false}
                 onToggleCollapse={() => setSidebarOpen(false)}
-                forceOpenCreateToken={forceOpenCreateToken}
               />
             </div>
           </>
@@ -105,18 +89,9 @@ export function MainLayout({
         gridTemplateColumns: `${sidebarWidth} 1fr`,
       }}
     >
-      <button
-        onClick={openCreateProject}
-        className="fixed top-3 right-3 z-30 h-9 px-3 inline-flex items-center gap-1 rounded-lg bg-primary text-primary-foreground shadow-sm"
-        aria-label="新規プロジェクト作成"
-      >
-        <Plus className="h-4 w-4" />
-        <span className="text-xs font-medium">新規</span>
-      </button>
       <ProjectListPanel
         isCollapsed={isCollapsed}
         onToggleCollapse={() => setIsCollapsed(!isCollapsed)}
-        forceOpenCreateToken={forceOpenCreateToken}
       />
       <main className="flex flex-col overflow-hidden relative">
         {selectedProjectId ? (

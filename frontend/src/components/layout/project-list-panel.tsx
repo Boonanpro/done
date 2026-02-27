@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -23,7 +23,6 @@ import {
 import { useAuth } from '@/hooks/use-auth';
 import { api, type ProjectResponse, type ProjectStatusType } from '@/lib/api-client';
 import { useProjectStore } from '@/stores/project-store';
-import { useSessionStateStore } from '@/stores/session-state-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
 
 function useHasToken() {
@@ -88,23 +87,17 @@ interface ProjectListPanelProps {
   className?: string;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
-  forceOpenCreateToken?: number;
 }
 
 export function ProjectListPanel({
   className,
   isCollapsed,
   onToggleCollapse,
-  forceOpenCreateToken = 0,
 }: ProjectListPanelProps) {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout, isLoggingOut } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
-  const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [newProjectTitle, setNewProjectTitle] = useState('');
-  const [newProjectDescription, setNewProjectDescription] = useState('');
-  const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [isBusinessOpen, setIsBusinessOpen] = useState(false);
   const hasToken = useHasToken();
   const isMobile = useIsMobile();
@@ -112,17 +105,12 @@ export function ProjectListPanel({
 
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
   const selectProject = useProjectStore((s) => s.selectProject);
-  const activeSessionId = useSessionStateStore((s) => s.activeSessionId);
 
   const createProjectMutation = useMutation({
     mutationFn: (payload: { title: string; description?: string }) => api.projects.create(payload),
     onSuccess: (project) => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
-      setNewProjectTitle('');
-      setNewProjectDescription('');
-      setIsCreateOpen(false);
       selectProject(project.id);
-      toast.success('プロジェクトを作成しました');
     },
     onError: () => {
       toast.error('プロジェクト作成に失敗しました');
@@ -140,23 +128,6 @@ export function ProjectListPanel({
     p.title.toLowerCase().includes(searchQuery.toLowerCase())
   ) ?? [];
 
-  useEffect(() => {
-    if (forceOpenCreateToken <= 0) return;
-    if (isCollapsed) {
-      onToggleCollapse();
-    }
-    setIsCreateOpen(true);
-    // ヘッダーの+ボタンからでもタイトルを自動生成
-    const roomId = activeSessionId ?? undefined;
-    if (!roomId) return;
-    setIsGeneratingTitle(true);
-    api.projects.suggestTitle(roomId)
-      .then(({ title }) => setNewProjectTitle(title))
-      .catch(() => {})
-      .finally(() => setIsGeneratingTitle(false));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [forceOpenCreateToken, isCollapsed, onToggleCollapse]);
-
   const handleProjectClick = (project: ProjectResponse) => {
     if (project.id === selectedProjectId) {
       selectProject(null);
@@ -168,48 +139,10 @@ export function ProjectListPanel({
     }
   };
 
-  const handleCreateProject = () => {
-    const title = newProjectTitle.trim();
-    if (!title) {
-      toast.error('タイトルを入力してください');
-      return;
+  const handleInstantCreate = () => {
+    if (!createProjectMutation.isPending) {
+      createProjectMutation.mutate({ title: '新しいプロジェクト' });
     }
-    const description = newProjectDescription.trim();
-    createProjectMutation.mutate({
-      title,
-      description: description || undefined,
-    });
-  };
-
-  const handleOpenCreate = async () => {
-    setIsCreateOpen((prev) => {
-      if (prev) return false; // 閉じる場合はそのまま
-      return true;
-    });
-    // 既に開いていた場合は閉じるだけ
-    if (isCreateOpen) return;
-
-    const roomId = activeSessionId ?? undefined;
-    if (!roomId) return;
-
-    setIsGeneratingTitle(true);
-    try {
-      const { title } = await api.projects.suggestTitle(roomId);
-      setNewProjectTitle(title);
-    } catch {
-      // 失敗しても空のままにしておく
-    } finally {
-      setIsGeneratingTitle(false);
-    }
-  };
-
-  const handleHeaderCreateClick = () => {
-    if (isCollapsed) {
-      onToggleCollapse();
-      setIsCreateOpen(true);
-      return;
-    }
-    setIsCreateOpen((prev) => !prev);
   };
 
   const handleLogout = async () => {
@@ -268,9 +201,14 @@ export function ProjectListPanel({
               variant="ghost"
               size="icon"
               className="h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent"
-              onClick={handleHeaderCreateClick}
+              onClick={handleInstantCreate}
+              disabled={createProjectMutation.isPending}
             >
-              <Plus className="h-4 w-4" />
+              {createProjectMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Plus className="h-4 w-4" />
+              )}
             </Button>
             <Button
               variant="ghost"
@@ -325,64 +263,16 @@ export function ProjectListPanel({
                   variant="ghost"
                   size="icon"
                   className="h-6 w-6 text-muted-foreground hover:text-sidebar-foreground"
-                  onClick={handleOpenCreate}
+                  onClick={handleInstantCreate}
+                  disabled={createProjectMutation.isPending}
                 >
-                  {isGeneratingTitle ? (
+                  {createProjectMutation.isPending ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   ) : (
                     <Plus className="h-3.5 w-3.5" />
                   )}
                 </Button>
               </div>
-
-              <AnimatePresence>
-                {isCreateOpen && (
-                  <motion.div
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    exit={{ opacity: 0, height: 0 }}
-                    className="overflow-hidden px-2 pb-2"
-                  >
-                    <div className="space-y-2 rounded-lg border border-sidebar-border bg-sidebar-accent/20 p-2">
-                      <Input
-                        value={newProjectTitle}
-                        onChange={(e) => setNewProjectTitle(e.target.value)}
-                        placeholder="タイトル"
-                        className="h-8 bg-sidebar-background text-xs"
-                        maxLength={120}
-                      />
-                      <Input
-                        value={newProjectDescription}
-                        onChange={(e) => setNewProjectDescription(e.target.value)}
-                        placeholder="説明（任意）"
-                        className="h-8 bg-sidebar-background text-xs"
-                        maxLength={300}
-                      />
-                      <div className="flex items-center gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          className="h-7 px-2 text-xs"
-                          onClick={handleCreateProject}
-                          disabled={createProjectMutation.isPending}
-                        >
-                          {createProjectMutation.isPending ? '作成中...' : '作成'}
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 px-2 text-xs"
-                          onClick={() => setIsCreateOpen(false)}
-                          disabled={createProjectMutation.isPending}
-                        >
-                          閉じる
-                        </Button>
-                      </div>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
             </>
           )}
 
@@ -409,7 +299,7 @@ export function ProjectListPanel({
                         whileHover={{ scale: 1.01 }}
                         whileTap={{ scale: 0.99 }}
                         className={cn(
-                          'group w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors text-left cursor-pointer',
+                          'w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors text-left cursor-pointer',
                           isActive
                             ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                             : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',

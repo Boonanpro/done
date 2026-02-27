@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
-import { X, FolderKanban, Loader2, MessageSquare, Send, Square, CheckCircle2, XCircle, ChevronDown, ChevronRight, Check, FileText, Terminal, Brain, AlertCircle } from 'lucide-react';
+import { X, FolderKanban, Loader2, MessageSquare, Send, Square, CheckCircle2, XCircle, ChevronDown, ChevronRight, Check, FileText, Terminal, Brain, AlertCircle, Trash2 } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import ReactMarkdown from 'react-markdown';
@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { api, type MessageResponse, type ProjectStatusType, type ProjectProposalResponse, type ProcessStep, type ExecutionEvent } from '@/lib/api-client';
 import { useProjectStore, useProcessState, useProcessActions } from '@/stores/project-store';
 import { useAuthStore } from '@/stores/auth-store';
+import { useProjectRecovery } from '@/hooks/useProjectRecovery';
 
 interface ProjectChatPanelProps {
   projectId: string;
@@ -301,12 +302,16 @@ function ChatInput({
   const [message, setMessage] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const titleGeneratedRef = useRef(false);
   const queryClient = useQueryClient();
   const user = useAuthStore((state) => state.user);
   const selectProject = useProjectStore((s) => s.selectProject);
 
   const { isSending } = useProcessState(projectId);
   const { setSending, setProcessing, clearLiveSteps, addLiveStep, resetProcess } = useProcessActions();
+
+  // SSE接続断線時の自動復帰
+  useProjectRecovery({ projectId, roomId });
 
   const isTransientNetworkError = (message?: string): boolean => {
     if (!message) return false;
@@ -389,14 +394,34 @@ function ChatInput({
             queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
             // 実行ログを確実に取得（応答が速い場合ポーリングが走らない問題の対処）
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
+
+            // タイトル自動生成: まだ「新しいプロジェクト」なら1回だけ実行
+            if (!titleGeneratedRef.current) {
+              titleGeneratedRef.current = true;
+              const cached = queryClient.getQueryData<{ title?: string }>(['project', projectId]);
+              if (cached?.title === '新しいプロジェクト') {
+                api.projects.suggestTitle(roomId)
+                  .then(({ title }) => {
+                    if (title && title !== '新しいプロジェクト') {
+                      return api.projects.update(projectId, { title });
+                    }
+                  })
+                  .then(() => {
+                    queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+                    queryClient.invalidateQueries({ queryKey: ['projects'] });
+                  })
+                  .catch(() => {}); // タイトル生成失敗は無視
+              }
+            }
           },
           onError: (error) => {
-            setSending(projectId, false);
-            setProcessing(projectId, false);
             if (isTransientNetworkError(error)) {
-              console.warn('[project-chat] transient stream error:', error);
+              console.warn('[project-chat] transient stream error, keeping spinner:', error);
+              // スピナーを止めない → useProjectRecovery がタブ復帰時に引き継ぐ
               return;
             }
+            setSending(projectId, false);
+            setProcessing(projectId, false);
             toast.error(error || 'エラーが発生しました');
           },
           onProjectCreated: (createdProjectId) => {
@@ -581,6 +606,24 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     },
   });
 
+  const deleteProjectMutation = useMutation({
+    mutationFn: () => api.projects.delete(projectId),
+    onSuccess: () => {
+      selectProject(null);
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      toast.success('プロジェクトを削除しました');
+    },
+    onError: () => {
+      toast.error('プロジェクト削除に失敗しました');
+    },
+  });
+
+  const handleDeleteProject = () => {
+    if (window.confirm('このプロジェクトを削除しますか？\n会話履歴はメモリに保存されます。')) {
+      deleteProjectMutation.mutate();
+    }
+  };
+
   const status = project?.status ? STATUS_LABELS[project.status] : null;
   const messages = messagesData?.messages || [];
 
@@ -655,7 +698,21 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             </div>
           ) : (
             <>
-              <h2 className="font-semibold text-sm truncate">{project?.title}</h2>
+              <div className="flex items-center gap-1.5">
+                <h2 className="font-semibold text-sm truncate">{project?.title}</h2>
+                <button
+                  className="shrink-0 p-0.5 rounded text-muted-foreground/40 hover:text-destructive transition-colors"
+                  onClick={handleDeleteProject}
+                  disabled={deleteProjectMutation.isPending}
+                  title="プロジェクトを削除"
+                >
+                  {deleteProjectMutation.isPending ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-3 w-3" />
+                  )}
+                </button>
+              </div>
               <div className="flex items-center gap-2 mt-0.5">
                 {status && (
                   <span className={`inline-block text-xs md:text-[10px] px-1.5 py-0.5 rounded-full font-medium ${status.color}`}>
