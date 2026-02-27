@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Menu, Plus } from 'lucide-react';
+import { Menu, Plus, FolderOpen } from 'lucide-react';
 import { ProjectListPanel } from './project-list-panel';
 import { ProjectChatPanel } from './project-chat-panel';
 import { NotificationPanel } from '@/components/notification/notification-panel';
@@ -9,16 +9,12 @@ import { useProjectStore } from '@/stores/project-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
 
 interface MainLayoutProps {
-  children: React.ReactNode;
+  children?: React.ReactNode;
   showNotifications?: boolean;
 }
 
-const DEFAULT_PROJECT_CHAT_WIDTH = 520;
-const MIN_PROJECT_CHAT_WIDTH = 320;
-const MAX_PROJECT_CHAT_WIDTH = 900;
-
 export function MainLayout({
-  children,
+  children: _children,
   showNotifications = true,
 }: MainLayoutProps) {
   const isMobile = useIsMobile();
@@ -27,11 +23,6 @@ export function MainLayout({
   const [hasOpenedMobileSidebar, setHasOpenedMobileSidebar] = useState(false);
   const [forceOpenCreateToken, setForceOpenCreateToken] = useState(0);
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
-
-  const [projectChatWidth, setProjectChatWidth] = useState(DEFAULT_PROJECT_CHAT_WIDTH);
-  const [isDragging, setIsDragging] = useState(false);
-  const dragStartX = useRef(0);
-  const dragStartWidth = useRef(0);
 
   // When switching from desktop to mobile, reset sidebar state once.
   useEffect(() => {
@@ -44,41 +35,6 @@ export function MainLayout({
       setHasOpenedMobileSidebar(true);
     }
   }, [isMobile, hasOpenedMobileSidebar]);
-
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      if (isMobile) return;
-      e.preventDefault();
-      setIsDragging(true);
-      dragStartX.current = e.clientX;
-      dragStartWidth.current = projectChatWidth;
-    },
-    [projectChatWidth, isMobile]
-  );
-
-  useEffect(() => {
-    if (!isDragging) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const delta = e.clientX - dragStartX.current;
-      const newWidth = Math.min(
-        MAX_PROJECT_CHAT_WIDTH,
-        Math.max(MIN_PROJECT_CHAT_WIDTH, dragStartWidth.current + delta)
-      );
-      setProjectChatWidth(newWidth);
-    };
-
-    const handleMouseUp = () => {
-      setIsDragging(false);
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isDragging]);
 
   const openCreateProject = useCallback(() => {
     if (isMobile) {
@@ -123,35 +79,30 @@ export function MainLayout({
           </>
         )}
 
-        {/* Content: either project chat (full screen) or main chat */}
+        {/* Content: project chat or empty state */}
         {selectedProjectId ? (
           <div className="h-full">
             <ProjectChatPanel projectId={selectedProjectId} />
           </div>
         ) : (
-          <main className="flex flex-col h-full overflow-hidden">
-            {children}
-            {showNotifications && <NotificationPanel />}
-          </main>
+          <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-3 px-6">
+            <FolderOpen className="h-12 w-12 opacity-40" />
+            <p className="text-center text-sm">左のメニューからプロジェクトを選択してください</p>
+          </div>
         )}
+        {showNotifications && <NotificationPanel />}
       </div>
     );
   }
 
-  // ===== Desktop Layout (unchanged) =====
+  // ===== Desktop Layout =====
   const sidebarWidth = isCollapsed ? '64px' : '280px';
-  const gridCols = selectedProjectId
-    ? `${sidebarWidth} ${projectChatWidth}px 4px 1fr`
-    : `${sidebarWidth} 0px 0px 1fr`;
 
   return (
     <div
-      className={`grid h-dvh overflow-hidden bg-background ${
-        isDragging ? '' : 'transition-[grid-template-columns] duration-300 ease-in-out'
-      }`}
+      className="grid h-dvh overflow-hidden bg-background transition-[grid-template-columns] duration-300 ease-in-out"
       style={{
-        gridTemplateColumns: gridCols,
-        cursor: isDragging ? 'col-resize' : undefined,
+        gridTemplateColumns: `${sidebarWidth} 1fr`,
       }}
     >
       <button
@@ -167,22 +118,15 @@ export function MainLayout({
         onToggleCollapse={() => setIsCollapsed(!isCollapsed)}
         forceOpenCreateToken={forceOpenCreateToken}
       />
-      <div className="overflow-hidden">
-        {selectedProjectId && (
-          <ProjectChatPanel projectId={selectedProjectId} />
-        )}
-      </div>
-      {selectedProjectId && (
-        <div
-          onMouseDown={handleMouseDown}
-          className="group flex items-center justify-center cursor-col-resize hover:bg-primary/10 active:bg-primary/20 transition-colors"
-        >
-          <div className="w-[2px] h-8 rounded-full bg-border group-hover:bg-primary/40 group-active:bg-primary/60 transition-colors" />
-        </div>
-      )}
-      {!selectedProjectId && <div />}
       <main className="flex flex-col overflow-hidden relative">
-        {children}
+        {selectedProjectId ? (
+          <ProjectChatPanel projectId={selectedProjectId} />
+        ) : (
+          <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-3">
+            <FolderOpen className="h-16 w-16 opacity-30" />
+            <p className="text-sm">プロジェクトを選択してください</p>
+          </div>
+        )}
         {showNotifications && <NotificationPanel />}
       </main>
     </div>

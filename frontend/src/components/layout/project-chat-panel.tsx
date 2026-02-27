@@ -273,20 +273,19 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageRespons
     }
   }
 
-  return (
-    <div className={`flex ${msg.sender_type === 'human' ? 'justify-end' : 'justify-start'}`}>
-      <div
-        className={`max-w-[85%] rounded-lg px-3 py-2 text-sm md:text-xs leading-relaxed ${
-          msg.sender_type === 'human'
-            ? 'bg-primary text-primary-foreground'
-            : 'bg-muted text-foreground prose prose-sm md:prose-xs prose-dan max-w-none'
-        }`}
-      >
-        {msg.sender_type === 'human'
-          ? msg.content
-          : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>
-        }
+  if (msg.sender_type === 'human') {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] rounded-lg px-3 py-2 text-sm md:text-xs leading-relaxed bg-primary text-primary-foreground">
+          {msg.content}
+        </div>
       </div>
+    );
+  }
+
+  return (
+    <div className="text-sm md:text-xs leading-relaxed text-foreground prose prose-sm md:prose-xs prose-dan max-w-none">
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>
     </div>
   );
 });

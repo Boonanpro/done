@@ -1,25 +1,28 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useQuery } from '@tanstack/react-query';
-import { Loader2 } from 'lucide-react';
 
 import { MainLayout } from '@/components/layout/main-layout';
-import { ChatView } from '@/components/chat/chat-view';
-import { api } from '@/lib/api-client';
-import { useAuthStore } from '@/stores/auth-store';
 
 /**
- * /chat - メインチャットページ
- * 単一のDANルームを自動解決してChatViewを表示
+ * /chat - メインページ
+ * プロジェクト一覧 + 選択したプロジェクトのチャットを表示
  */
 export default function ChatPage() {
   const router = useRouter();
-  const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
-  const isLoading = useAuthStore((state) => state.isLoading);
+  const [checked, setChecked] = useState(false);
+  const [hasToken, setHasToken] = useState(true); // SSR中はtrueで初期化（リダイレクト防止）
 
-  const hasToken = typeof window !== 'undefined' && !!localStorage.getItem('done-token');
+  // クライアントサイドでトークンを確認
+  useEffect(() => {
+    const token = localStorage.getItem('done-token');
+    setHasToken(!!token);
+    setChecked(true);
+    if (!token) {
+      router.push('/login');
+    }
+  }, [router]);
 
   // On localhost, clear stale PWA cache/service-worker state that can hide new UI.
   useEffect(() => {
@@ -44,37 +47,7 @@ export default function ChatPage() {
     }
   }, []);
 
-  // 認証チェック: トークンがなければ即リダイレクト（isLoadingを待たない）
-  useEffect(() => {
-    if (!hasToken) {
-      router.push('/login');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasToken]);
+  if (!checked || !hasToken) return null;
 
-  // DANルームを取得
-  const { data: danRoom, isLoading: isLoadingRoom } = useQuery({
-    queryKey: ['dan-room'],
-    queryFn: () => api.dan.getRoom(),
-    enabled: isAuthenticated || hasToken,
-    retry: 2,
-  });
-
-  // ローディング中
-  if (isLoadingRoom || !danRoom?.id) {
-    return (
-      <div className="flex items-center justify-center h-screen bg-background">
-        <div className="flex flex-col items-center gap-4">
-          <Loader2 className="h-8 w-8 animate-spin text-primary" />
-          <p className="text-muted-foreground">読み込み中...</p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <MainLayout>
-      <ChatView sessionId={danRoom.id} />
-    </MainLayout>
-  );
+  return <MainLayout />;
 }
