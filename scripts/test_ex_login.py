@@ -7,6 +7,7 @@ sys.path.insert(0, "D:\\done")
 
 from playwright.async_api import async_playwright
 from app.executors.ex_reservation.selectors import URLS, LOGIN, OTP, COMMON
+from app.config import settings
 
 
 def log(msg):
@@ -69,8 +70,8 @@ async def dump_page_elements(page):
 
 
 async def main():
-    member_id = "5719671594"
-    password = "Bold1315"
+    member_id = settings.EX_MEMBER_ID
+    password = settings.EX_PASSWORD
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)

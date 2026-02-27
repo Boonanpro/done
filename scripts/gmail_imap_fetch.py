@@ -156,5 +156,8 @@ def fetch_note_verification(gmail_address: str, password: str) -> None:
 
 if __name__ == "__main__":
     gmail_address = "0aw325171@gmail.com"
-    password = sys.argv[1] if len(sys.argv) > 1 else "Emoto589"
+    if len(sys.argv) < 2:
+        print("Usage: python gmail_imap_fetch.py <app_password>")
+        sys.exit(1)
+    password = sys.argv[1]
     fetch_note_verification(gmail_address, password)
