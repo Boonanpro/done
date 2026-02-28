@@ -187,14 +187,14 @@ def parse_step_verification(cli_output_text: str) -> dict:
 
 ### Step 4: Red操作の確認待ち
 
-ステップに「【要操作】」タグがある or 内容がRed判定の場合、
+ステップに「【要人間】」タグがある or 内容がRed判定の場合、
 実行を一時停止してユーザー確認を待つ。
 
 ```python
 def is_red_zone(step):
     """ステップがRed操作（ユーザー確認必須）かを判定"""
     desc = step.get("description", "")
-    red_keywords = ["購入", "確定", "送金", "振込", "削除", "解約", "個人情報", "【要操作】"]
+    red_keywords = ["購入", "確定", "送金", "振込", "削除", "解約", "個人情報", "【要人間】"]
     return any(kw in desc for kw in red_keywords)
 
 async def pause_for_confirmation(project_id, next_step):

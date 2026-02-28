@@ -2,7 +2,6 @@
 Gmail Service - Phase 5B: メール受信検知
 Gmail API連携によるメール検知・取得
 """
-import os
 import base64
 import json
 import logging

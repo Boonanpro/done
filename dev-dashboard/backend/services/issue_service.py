@@ -2,7 +2,7 @@
 Issue Service - イシュー関連のビジネスロジック
 """
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.services.supabase_client import get_supabase_client
 
@@ -120,7 +120,7 @@ class IssueService:
         if status:
             update_data["status"] = status
             if status == "resolved":
-                update_data["resolved_at"] = datetime.utcnow().isoformat()
+                update_data["resolved_at"] = datetime.now(timezone.utc).isoformat()
 
         if not update_data:
             return await self.get_issue(issue_id)

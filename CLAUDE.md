@@ -80,6 +80,22 @@ v2アーキテクチャに基づいて開発中。旧計画書（phase*.md）は
 - 状態遷移: LLMが `[STATE: xxx]` で宣言
 - メインロジック: `app/agent/v2/`
 
+## ⚠️ プロセス操作: PowerShell禁止 ⚠️
+
+**Git Bash（MINGW64）環境からPowerShellを呼び出してはいけない。**
+
+❌ `powershell -Command "..."` （ハングして返ってこなくなる）
+❌ `cmd /c "taskkill ..."` （引数が正しく渡らない）
+
+### 代わりに使う方法
+
+- **プロセス終了**: `taskkill //F //PID <PID>`（Git Bashでは`/`を`//`にエスケープ）
+- **プロセス操作が複雑な場合**: Pythonスクリプトを書いて `python script.py` で実行
+
+### 理由
+
+Git Bash（mintty）とPowerShellの間でパイプが正しく閉じられず、コマンドが永久にハングする。ハングした状態は「まだ実行中」に見えるため、失敗として検知できない。
+
 ## スキル開発ルール
 
 ### 1. ブラウザ自動化にはセレクタ調査が必須

@@ -1820,7 +1820,7 @@ async def execute_tool(
             return {"success": False, "error": f"grep エラー: {e}"}
 
     # 以下は外部依存あり
-    from app.services.cancellation import CancellationRegistry, CancelledError
+    from app.services.cancellation import CancellationRegistry
 
     # セッションIDを現在のコンテキストに設定（深い階層でもチェック可能に）
     if session_id:
@@ -1837,13 +1837,10 @@ async def execute_tool(
 
     # Executorを登録（初回のみ実行される）- 存在しない場合はスキップ
     try:
-        from app.executors.registry import find_executor, register_all_executors
+        from app.executors.registry import register_all_executors
         register_all_executors()
     except ImportError:
         pass  # registry が存在しない場合はスキップ
-
-    # リトライハンドラをインポート
-    from app.agent.v2.retry_handler import with_session_retry
 
     # ★★★ 認証情報取得 ★★★
     if skill_name == "_get_credentials":

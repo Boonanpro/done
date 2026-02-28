@@ -9,8 +9,9 @@ Auto-deploy script — GitHub mainブランチの変更を検知して自動反�
   1. 30秒ごとに git fetch origin main
   2. ローカルHEADとorigin/mainを比較
   3. 差分があれば git pull
-  4. uvicorn --reload と Next.js HMR が自動でリロード
-  5. requirements.txt/package.json が変わった場合のみ pip install/npm install
+  4. Pythonファイル変更時は start_backend.py で明示的に再起動
+  5. フロントエンドは Next.js HMR が自動でリロード
+  6. requirements.txt/package.json が変わった場合は pip install/npm install
 
 使い方:
   python scripts/auto_deploy.py          # フォアグラウンド実行
@@ -156,10 +157,11 @@ def check_and_deploy() -> bool:
         # Next.js dev server will pick up new dependencies on next HMR cycle
 
     if not needs_pip:
-        # uvicorn --reload がPythonファイル変更を自動検知するのでログだけ
+        # uvicorn --reload はWindows上で機能しないため、Pythonファイル変更時は明示的に再起動
         py_changed = [f for f in changed if f.endswith(".py")]
         if py_changed:
-            logging.info(f"Python files changed ({len(py_changed)}) → uvicorn --reload will handle it")
+            logging.info(f"Python files changed ({len(py_changed)}) → restarting backend")
+            restart_backend()
 
     ts_changed = [f for f in changed if f.endswith((".ts", ".tsx", ".js", ".jsx", ".css"))]
     if ts_changed:

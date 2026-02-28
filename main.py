@@ -11,8 +11,10 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
+from pathlib import Path
 
 from app.config import settings
 from app.api.chat_routes import router as chat_router
@@ -36,10 +38,6 @@ from app.api.file_routes import router as file_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.services.heartbeat_service import heartbeat_loop, opus_improvement_loop
-    heartbeat_task = asyncio.create_task(heartbeat_loop())
-    opus_task = asyncio.create_task(opus_improvement_loop())
-
     # Start WSS proxy for mobile WebSocket access (port 8443)
     wss_server = None
     try:
@@ -51,8 +49,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    heartbeat_task.cancel()
-    opus_task.cancel()
     if wss_server:
         wss_server.close()
 
@@ -96,8 +92,23 @@ app.include_router(skill_router, prefix="/api/v1")
 app.include_router(gemini_voice_router)
 app.include_router(project_router, prefix="/api/v1")
 app.include_router(note_router, prefix="/api/v1")
-app.include_router(file_router, prefix="/api/v1")
+app.include_router(file_router, prefix="/api/v1/files")
 
+
+
+@app.get("/api/v1/proposals/{filename}")
+async def serve_proposal_html(filename: str):
+    """HTMLプレゼンファイルを認証不要で直接サーブ（iframeで埋め込み表示用）"""
+    if not filename.endswith(".html"):
+        raise HTTPException(status_code=400, detail="Only .html files are supported")
+    proposals_dir = Path("D:/dan-workspace/proposals").resolve()
+    html_path = (proposals_dir / filename).resolve()
+    # Prevent path traversal attacks
+    if not html_path.is_relative_to(proposals_dir):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    if not html_path.exists() or not html_path.is_file():
+        raise HTTPException(status_code=404, detail="Proposal file not found")
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
 
 
 @app.get("/")

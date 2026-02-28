@@ -77,9 +77,9 @@ def extract_otp(text: str) -> str:
 
 def get_latest_recording_sid(phone_number: str = "+18302591977", minutes: int = 10):
     """最新の録音SIDを取得"""
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
-    date_after = datetime.utcnow() - timedelta(minutes=minutes)
+    date_after = datetime.now(timezone.utc) - timedelta(minutes=minutes)
 
     calls = client.calls.list(
         to=phone_number,

@@ -6,7 +6,9 @@ from typing import Optional
 
 from app.api.chat_routes import get_current_user, TokenData
 from app.services.project_service import ProjectService
+from app.services.run_service import RunService
 from app.models.project_schemas import (
+    AgentRunResponse,
     ProjectCreateRequest,
     ProjectUpdateRequest,
     ProjectResponse,
@@ -83,6 +85,10 @@ def get_project_service() -> ProjectService:
     return ProjectService()
 
 
+def get_run_service() -> RunService:
+    return RunService()
+
+
 # ==================== Projects ====================
 
 @router.get("", response_model=ProjectListResponse)
@@ -151,7 +157,28 @@ async def delete_project(
     current_user: TokenData = Depends(get_current_user),
     service: ProjectService = Depends(get_project_service),
 ):
-    """プロジェクトを削除"""
+    """プロジェクトを削除（削除前に会話をdate.mdにアーカイブ）"""
+    # 削除前にプロジェクト情報を取得してアーカイブ
+    project = await service.get_project(project_id, current_user.user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    room_id = project.get("room_id")
+    if room_id:
+        from app.api.chat_routes import _archive_session_summary
+        from app.services.chat_service import ChatService
+        chat_service = ChatService()
+        await _archive_session_summary(
+            service=chat_service,
+            user_id=current_user.user_id,
+            room_id=room_id,
+            archive_type="delete",
+            is_project=True,
+            project_title=project.get("title", ""),
+            project_status=project.get("status", ""),
+            force=True,
+        )
+
     deleted = await service.delete_project(project_id, current_user.user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -240,6 +267,7 @@ async def get_execution_events(
     limit: int = Query(default=100, le=500),
     after: Optional[str] = Query(default=None),
     since_seq: Optional[int] = Query(default=None),
+    run_id: Optional[str] = Query(default=None),
     current_user: TokenData = Depends(get_current_user),
     service: ProjectService = Depends(get_project_service),
 ):
@@ -248,7 +276,31 @@ async def get_execution_events(
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    return await service.get_execution_events(project_id, limit=limit, after=after, since_seq=since_seq)
+    return await service.get_execution_events(
+        project_id,
+        limit=limit,
+        after=after,
+        since_seq=since_seq,
+        run_id=run_id,
+    )
+
+
+@router.get("/{project_id}/current-run", response_model=AgentRunResponse)
+async def get_current_run(
+    project_id: str,
+    current_user: TokenData = Depends(get_current_user),
+    project_service: ProjectService = Depends(get_project_service),
+    run_service: RunService = Depends(get_run_service),
+):
+    """Return the current authoritative run for a project chat."""
+    project = await project_service.get_project(project_id, current_user.user_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    run = await run_service.get_current_run(project_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
 
 
 # ==================== Execution Resume ====================

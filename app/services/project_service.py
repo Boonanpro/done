@@ -142,6 +142,7 @@ class ProjectService:
         content: str,
         proposal_type: str = "plan",
         steps: Optional[list] = None,
+        run_id: Optional[str] = None,
         metadata: Optional[dict] = None,
     ) -> dict:
         """プロジェクトに提案を作成"""
@@ -152,6 +153,7 @@ class ProjectService:
 
         insert_data = {
             "project_id": project_id,
+            "run_id": run_id,
             "content": content,
             "proposal_type": proposal_type,
             "steps": steps or [],
@@ -268,6 +270,18 @@ class ProjectService:
 
         return result.data[0] if result.data else None
 
+    async def supersede_proposal(self, proposal_id: str, project_id: str) -> Optional[dict]:
+        """Replace a pending proposal when a newer run takes over."""
+        result = (
+            self.supabase.table("project_proposals")
+            .update({"status": "superseded"})
+            .eq("id", proposal_id)
+            .eq("project_id", project_id)
+            .eq("status", "pending")
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
     # ==================== Execution Events ====================
 
     async def save_execution_event(
@@ -275,6 +289,7 @@ class ProjectService:
         project_id: Optional[str],
         room_id: str,
         event_type: str,
+        run_id: Optional[str] = None,
         tool_name: Optional[str] = None,
         tool_label: Optional[str] = None,
         content: Optional[str] = None,
@@ -288,6 +303,7 @@ class ProjectService:
 
         row = {
             "room_id": room_id,
+            "run_id": run_id,
             "event_type": normalized_type,
             "tool_name": tool_name,
             "tool_label": tool_label,
@@ -307,6 +323,7 @@ class ProjectService:
         limit: int = 100,
         after: Optional[str] = None,
         since_seq: Optional[int] = None,
+        run_id: Optional[str] = None,
     ) -> list[dict]:
         """プロジェクトの実行イベント一覧を取得"""
         query = (
@@ -314,6 +331,8 @@ class ProjectService:
             .select("*")
             .eq("project_id", project_id)
         )
+        if run_id:
+            query = query.eq("run_id", run_id)
         if since_seq is not None:
             query = query.gt("seq", since_seq)
         elif after:

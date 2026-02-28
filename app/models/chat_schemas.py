@@ -2,7 +2,7 @@
 Pydantic Schemas for Done Chat
 """
 from pydantic import BaseModel, Field, EmailStr
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 from enum import Enum
 
@@ -191,8 +191,9 @@ class AddMemberRequest(BaseModel):
 
 class MessageSendRequest(BaseModel):
     """Send message request"""
-    content: str = Field(..., min_length=1, max_length=10000)
+    content: str = Field(..., min_length=0, max_length=10000)
     session_id: Optional[str] = Field(None, description="Target session/room ID")
+    image_urls: Optional[List[str]] = Field(default=[], description="Uploaded image URLs for vision")
 
 
 class MessageResponse(BaseModel):

@@ -17,6 +17,8 @@ import shutil
 import subprocess
 import threading
 import queue as thread_queue
+import unicodedata
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator, Optional, Dict, Any
 
@@ -36,6 +38,9 @@ _SENTINEL = object()  # キュー終了シグナル
 # アクティブなCLIプロセスを追跡（room_id → Popen）
 _active_processes: Dict[str, subprocess.Popen] = {}
 _process_lock = threading.Lock()
+
+# スレッドローカル: 現在のroom_idを自動追跡（_cli_debugで使用）
+_thread_local = threading.local()
 
 
 def is_cli_active(room_id: str) -> bool:
@@ -93,6 +98,7 @@ def _save_execution_event_sync(
     room_id: str,
     event_type: str,
     project_id: Optional[str] = None,
+    run_id: Optional[str] = None,
     tool_name: Optional[str] = None,
     tool_label: Optional[str] = None,
     content: Optional[str] = None,
@@ -108,6 +114,7 @@ def _save_execution_event_sync(
             metadata["original_event_type"] = original_type
         row = {
             "room_id": room_id,
+            "run_id": run_id,
             "event_type": normalized_type,
             "tool_name": tool_name,
             "tool_label": tool_label,
@@ -119,6 +126,33 @@ def _save_execution_event_sync(
         sb.table("execution_events").insert(row).execute()
     except Exception as e:
         _cli_debug(f"_save_execution_event_sync failed: {e}")
+
+
+def _update_run_sync(
+    run_id: Optional[str],
+    *,
+    state: Optional[str] = None,
+    claude_session_id: Optional[str] = None,
+):
+    """Best-effort sync update for the current agent run."""
+    if not run_id:
+        return
+    try:
+        from app.services.supabase_client import get_supabase_client
+
+        updates = {}
+        if state is not None:
+            updates["state"] = state
+        if claude_session_id is not None:
+            updates["claude_session_id"] = claude_session_id
+        if not updates:
+            return
+
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        sb = get_supabase_client().client
+        sb.table("agent_runs").update(updates).eq("id", run_id).execute()
+    except Exception as e:
+        _cli_debug(f"_update_run_sync failed: {e}")
 
 
 def _save_ai_message_sync(
@@ -177,7 +211,47 @@ def _build_runtime_contract_section(is_planning: bool) -> str:
     )
 
 
-def _build_system_prompt(title: str, description: str, status: str, user_messages: str = "") -> str:
+def _detect_user_language(text: str) -> str:
+    """Detect the dominant user language for visible reasoning/response guidance."""
+    counts = {"ja": 0, "zh": 0, "ko": 0}
+    for ch in text:
+        try:
+            name = unicodedata.name(ch, "")
+        except ValueError:
+            continue
+        if "HIRAGANA" in name or "KATAKANA" in name:
+            counts["ja"] += 3
+        elif "CJK" in name:
+            counts["zh"] += 1
+        elif "HANGUL" in name:
+            counts["ko"] += 1
+    if counts["ja"] > 0:
+        return "Japanese"
+    if counts["ko"] > 0:
+        return "Korean"
+    if counts["zh"] > 0:
+        return "Chinese"
+    return "English"
+
+
+def _build_language_alignment_section(latest_user_message: str, user_messages: str = "") -> str:
+    """Keep Claude's visible reasoning and answer in the user's language."""
+    language = _detect_user_language(latest_user_message or user_messages or "")
+    return (
+        "## Language Rule\n\n"
+        f"The user's latest message language is {language}. "
+        f"For all visible reasoning/thinking text and the final response, use {language}. "
+        "Do not switch to another language for visible reasoning and then translate later."
+    )
+
+
+def _build_system_prompt(
+    title: str,
+    description: str,
+    status: str,
+    user_messages: str = "",
+    latest_user_message: str = "",
+) -> str:
     """
     Build CLI system prompt for both normal and planning turns.
 
@@ -202,6 +276,7 @@ def _build_system_prompt(title: str, description: str, status: str, user_message
 
     # Runtime contract: tool/skill visibility and behavior policy.
     parts.append(_build_runtime_contract_section(is_planning=is_planning))
+    parts.append(_build_language_alignment_section(latest_user_message, user_messages))
 
     # Project context is appended only when project metadata exists.
     if title.strip() or description.strip():
@@ -277,11 +352,15 @@ def _cleanup_mcp_config(room_id: str):
 
 
 def _cli_debug(msg: str):
-    """CLI thread用ファイルデバッグログ"""
+    """CLI thread用ファイルデバッグログ（日付+room_id自動付与）"""
     from datetime import datetime
-    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    room_id = getattr(_thread_local, "room_id", "")
+    prefix = f"[{ts}]"
+    if room_id:
+        prefix = f"[{ts}] [{room_id[:8]}]"
     with open(PROJECT_ROOT / "cli_runner_debug.log", "a", encoding="utf-8") as f:
-        f.write(f"[{ts}] {msg}\n")
+        f.write(f"{prefix} {msg}\n")
         f.flush()
 
 
@@ -404,6 +483,7 @@ def _run_cli_process(
     room_id: str,
     event_queue: thread_queue.Queue,
     project_id: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> Optional[dict]:
     """
     CLIプロセスを1回実行し、イベントをキューに送る。
@@ -530,7 +610,7 @@ def _run_cli_process(
                         continue
                     if tool_id:
                         emitted_tool_use_ids.add(tool_id)
-                _cli_debug(f"  Event: type={ev['type']}, text_len={len(ev.get('text', ''))}")
+                _cli_debug(f"  Event: type={ev['type']}, name={ev.get('name', '')}, text_len={len(ev.get('text', ''))}")
                 if ev["type"] == "text":
                     final_text_parts.append(ev["text"])
                 event_queue.put(ev)
@@ -540,14 +620,14 @@ def _run_cli_process(
                     if ev["type"] == "tool_use":
                         from app.api.project_routes import _format_tool_label
                         _save_execution_event_sync(
-                            room_id, "tool_use", project_id=project_id,
+                            room_id, "tool_use", project_id=project_id, run_id=run_id,
                             tool_name=ev.get("name", ""),
                             tool_label=_format_tool_label(ev.get("name", ""), ev.get("input", {})),
                         )
                         reasoning_steps_acc.append(f"🔧 {_format_tool_label(ev.get('name', ''), ev.get('input', {}))}")
                     elif ev["type"] == "reasoning" and ev.get("text", "").strip():
                         _save_execution_event_sync(
-                            room_id, "reasoning", project_id=project_id,
+                            room_id, "reasoning", project_id=project_id, run_id=run_id,
                             content=ev.get("text", ""),
                         )
                         reasoning_steps_acc.append(ev.get("text", ""))
@@ -597,6 +677,7 @@ def _run_cli_process(
             # セッションIDを即座にDBへ保存（プロセス強制終了時にresultが来なくても--resumeできるように）
             if session_id_captured:
                 _save_session(room_id, session_id_captured)
+                _update_run_sync(run_id, claude_session_id=session_id_captured)
             _cli_debug(f"System message: session_id={session_id_captured}")
 
     # プロセスを追跡dictから削除
@@ -632,6 +713,7 @@ def _run_cli_in_thread(
     resume_session_id: Optional[str] = None,
     is_planning: bool = False,
     project_id: Optional[str] = None,
+    run_id: Optional[str] = None,
 ):
     """
     別スレッドでCLI subprocessを実行する。
@@ -640,6 +722,7 @@ def _run_cli_in_thread(
     セッション再開が失敗した場合（セッションが見つからない等）、
     保存済みセッションIDをクリアして新規会話として自動リトライする。
     """
+    _thread_local.room_id = room_id
     _cli_debug(f"Thread started for room {room_id}")
 
     claude_cmd, cli_js = _resolve_claude_cli()
@@ -672,7 +755,15 @@ def _run_cli_in_thread(
         cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id, is_planning=is_planning)
         _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, prompt len={len(content)})")
 
-        result_data = _run_cli_process(cmd, content, env, room_id, event_queue, project_id=project_id)
+        result_data = _run_cli_process(
+            cmd,
+            content,
+            env,
+            room_id,
+            event_queue,
+            project_id=project_id,
+            run_id=run_id,
+        )
 
         # セッション再開失敗 → セッションをクリアしてリトライ
         if _is_resume_error(result_data) and resume_session_id:
@@ -696,7 +787,15 @@ def _run_cli_in_thread(
             cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id=None, is_planning=is_planning)
             _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(content)})")
 
-            result_data = _run_cli_process(cmd, content, env, room_id, event_queue, project_id=project_id)
+            result_data = _run_cli_process(
+                cmd,
+                content,
+                env,
+                room_id,
+                event_queue,
+                project_id=project_id,
+                run_id=run_id,
+            )
 
         # 最終結果をキューに送る
         if result_data:
@@ -709,6 +808,7 @@ def _run_cli_in_thread(
             # 成功時のみセッションIDを保存
             if session_id and not is_error:
                 _save_session(room_id, session_id)
+                _update_run_sync(run_id, claude_session_id=session_id)
 
             # エラー時はerrorsの内容をテキストに含める
             text = result_text or "\n".join(final_text_parts)
@@ -724,7 +824,14 @@ def _run_cli_in_thread(
                     reasoning_full=result_data.get("reasoning_full", []),
                 )
             if project_id:
-                _save_execution_event_sync(room_id, "done", project_id=project_id, content="completed")
+                _save_execution_event_sync(
+                    room_id,
+                    "done",
+                    project_id=project_id,
+                    run_id=run_id,
+                    content="completed",
+                )
+            _update_run_sync(run_id, state="failed" if is_error else "completed")
 
             event_queue.put({
                 "type": "result",
@@ -739,6 +846,7 @@ def _run_cli_in_thread(
 
     except Exception as e:
         import traceback
+        from app.services.cancellation import CancellationRegistry
         error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         _cli_debug(f"ERROR: {error_detail}")
         event_queue.put({"type": "error", "message": error_detail})
@@ -748,17 +856,39 @@ def _run_cli_in_thread(
                 room_id,
                 f"処理中にエラーが発生しました。もう一度お試しください。\n（{type(e).__name__}）",
             )
-            _save_execution_event_sync(room_id, "done", project_id=project_id, content="error")
+            _save_execution_event_sync(
+                room_id,
+                "done",
+                project_id=project_id,
+                run_id=run_id,
+                content="error",
+            )
+        _update_run_sync(
+            run_id,
+            state="paused" if CancellationRegistry.is_cancelled(room_id) else "failed",
+        )
     finally:
         # セーフティネット: 正常パス(result_data)もexceptパス(done_saved)も通らなかった場合
         # = CLIがresultを出す前に静かに終了した場合
         if project_id and not result_data and not done_saved:
+            from app.services.cancellation import CancellationRegistry
             _cli_debug("Safety net: CLI exited without result, saving error to DB")
             _save_ai_message_sync(
                 room_id,
                 "処理が中断されました。もう一度お試しください。",
             )
-            _save_execution_event_sync(room_id, "done", project_id=project_id, content="interrupted")
+            done_content = "cancelled" if CancellationRegistry.is_cancelled(room_id) else "interrupted"
+            _save_execution_event_sync(
+                room_id,
+                "done",
+                project_id=project_id,
+                run_id=run_id,
+                content=done_content,
+            )
+            _update_run_sync(
+                run_id,
+                state="paused" if CancellationRegistry.is_cancelled(room_id) else "failed",
+            )
         _cleanup_mcp_config(room_id)
         _cli_debug("Sending sentinel")
         event_queue.put(_SENTINEL)
@@ -781,6 +911,7 @@ async def process_message_cli(
     system_prompt: Optional[str] = None,
     user_messages: str = "",
     project_id: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Claude CLI経由でメッセージを処理し、分類済みイベントを返す。
@@ -803,6 +934,7 @@ async def process_message_cli(
         system_prompt = _build_system_prompt(
             project_title, project_description, project_status,
             user_messages=user_messages,
+            latest_user_message=content,
         )
     is_planning = project_status == "planning"
     mcp_config_path = _build_mcp_config(room_id, user_id, credentials, is_planning=is_planning)
@@ -812,7 +944,17 @@ async def process_message_cli(
     event_q = thread_queue.Queue()
     cli_thread = threading.Thread(
         target=_run_cli_in_thread,
-        args=(content, system_prompt, mcp_config_path, room_id, event_q, resume_session_id, is_planning, project_id),
+        args=(
+            content,
+            system_prompt,
+            mcp_config_path,
+            room_id,
+            event_q,
+            resume_session_id,
+            is_planning,
+            project_id,
+            run_id,
+        ),
         daemon=True,
     )
     cli_thread.start()

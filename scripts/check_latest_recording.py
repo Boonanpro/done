@@ -2,7 +2,7 @@
 最新の録音をチェックしてダウンロードURLを表示
 """
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from twilio.rest import Client
 
@@ -21,7 +21,7 @@ print("=" * 70)
 print()
 
 # 過去1時間の着信を取得
-date_after = datetime.utcnow() - timedelta(hours=1)
+date_after = datetime.now(timezone.utc) - timedelta(hours=1)
 
 calls = client.calls.list(
     to=PHONE_NUMBER,

@@ -3,7 +3,7 @@ Twilio番号に着信した最新の録音からOTPコードを抽出
 """
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from twilio.rest import Client
 
@@ -83,7 +83,7 @@ def get_voice_otp(minutes=5, auto_transcribe=False):
     print()
 
     # 指定時間以降の着信通話を取得
-    date_after = datetime.utcnow() - timedelta(minutes=minutes)
+    date_after = datetime.now(timezone.utc) - timedelta(minutes=minutes)
 
     calls = client.calls.list(
         to=PHONE_NUMBER,

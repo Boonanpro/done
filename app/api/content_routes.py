@@ -2,12 +2,10 @@
 Content Intelligence API Routes - Phase 6
 """
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends
-from typing import Optional
 import logging
 import time
 
 from app.models.content_schemas import (
-    AnalyzeContentRequest,
     AnalyzeContentResponse,
     ExtractTextFromURLRequest,
     ExtractTextFromURLResponse,

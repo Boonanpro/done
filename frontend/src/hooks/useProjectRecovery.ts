@@ -39,6 +39,7 @@ export function useProjectRecovery({ projectId, roomId }: UseProjectRecoveryOpti
   const invalidateRecoveryQueries = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['session-active', roomId] });
     queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+    queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
     queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
     queryClient.invalidateQueries({ queryKey: ['project', projectId] });
     queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });

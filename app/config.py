@@ -3,6 +3,9 @@ Application Configuration - Phase 6 updated
 """
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -116,7 +119,13 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     """設定のシングルトンインスタンスを取得"""
-    return Settings()
+    s = Settings()
+    if s.APP_SECRET_KEY == "change-me-in-production":
+        logger.warning(
+            "APP_SECRET_KEY is using the default insecure value. "
+            "Set a secure key in your .env file before deploying to production."
+        )
+    return s
 
 
 settings = get_settings()

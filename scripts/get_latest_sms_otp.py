@@ -3,7 +3,7 @@ Twilio番号に届いた最新のSMSからOTPコードを抽出
 """
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from twilio.rest import Client
 
@@ -31,7 +31,7 @@ def get_latest_sms_otp(minutes=5):
     print()
     
     # 指定時間以降のSMSを取得
-    date_sent_after = datetime.utcnow() - timedelta(minutes=minutes)
+    date_sent_after = datetime.now(timezone.utc) - timedelta(minutes=minutes)
     
     messages = client.messages.list(
         to=PHONE_NUMBER,

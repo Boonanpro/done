@@ -5,7 +5,7 @@ Twilio番号 +18302591977 を登録し、OTP認証を自動化
 import os
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from twilio.rest import Client
 
@@ -39,11 +39,11 @@ def wait_for_otp_call(timeout_seconds=300):
     print("This script will automatically detect the OTP call and extract the code.")
     print()
 
-    start_time = datetime.utcnow()
+    start_time = datetime.now(timezone.utc)
     last_check_time = start_time
 
     while True:
-        elapsed = (datetime.utcnow() - start_time).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
 
         if elapsed > timeout_seconds:
             print()
@@ -54,7 +54,7 @@ def wait_for_otp_call(timeout_seconds=300):
         time.sleep(5)
 
         # 最後のチェックから30秒以内の着信を確認
-        date_after = datetime.utcnow() - timedelta(seconds=30)
+        date_after = datetime.now(timezone.utc) - timedelta(seconds=30)
 
         calls = client.calls.list(
             to=PHONE_NUMBER,

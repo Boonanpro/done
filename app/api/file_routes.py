@@ -12,12 +12,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.api.chat_routes import get_current_user
-from app.models import User
+from app.services.auth_service import TokenData
 
 router = APIRouter(tags=["files"])
 
-# Upload directory - use a dedicated folder in the project
-UPLOAD_DIR = Path("D:/done/uploads")
+# Upload directory - relative to project root
+UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
 
 # Allowed file extensions
@@ -41,15 +41,6 @@ class FileUploadResponse(BaseModel):
     created_at: str
 
 
-def get_file_type(filename: str) -> str:
-    """Determine file type from extension"""
-    ext = Path(filename).suffix.lower()
-    for file_type, extensions in ALLOWED_EXTENSIONS.items():
-        if ext in extensions:
-            return file_type
-    return "other"
-
-
 def is_allowed_file(filename: str) -> bool:
     """Check if file extension is allowed"""
     ext = Path(filename).suffix.lower()
@@ -62,7 +53,7 @@ def is_allowed_file(filename: str) -> bool:
 @router.post("/upload", response_model=FileUploadResponse)
 async def upload_file(
     file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user)
+    current_user: TokenData = Depends(get_current_user)
 ):
     """
     Upload a file for chat attachment
@@ -113,9 +104,13 @@ async def get_file(filename: str):
     """
     Serve uploaded files
     """
-    file_path = UPLOAD_DIR / filename
-    
+    file_path = (UPLOAD_DIR / filename).resolve()
+
+    # Prevent path traversal attacks
+    if not file_path.is_relative_to(UPLOAD_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
-    
+
     return FileResponse(file_path)

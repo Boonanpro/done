@@ -225,6 +225,7 @@ export interface StateMachineMessageRequest {
   message: string;
   session_id?: string;
   user_id?: string;
+  image_urls?: string[];
 }
 
 export interface StateMachineConfirmRequest {
@@ -329,6 +330,7 @@ export interface ProjectListResponse {
 export interface ProjectProposalResponse {
   id: string;
   project_id: string;
+  run_id?: string | null;
   content: string;
   proposal_type: string;
   status: 'pending' | 'approved' | 'rejected' | 'superseded';
@@ -341,6 +343,7 @@ export interface ProjectProposalResponse {
 export interface ExecutionEvent {
   id: string;
   project_id: string | null;
+  run_id?: string | null;
   room_id: string;
   event_type: 'tool_use' | 'reasoning' | 'phase' | 'error' | 'text' | 'done';
   tool_name: string | null;
@@ -355,6 +358,29 @@ export interface ActiveSessionStatus {
   active: boolean;
   session_id: string;
   started_at: number | null;
+}
+
+export type AgentRunState =
+  | 'running'
+  | 'awaiting_approval'
+  | 'awaiting_confirmation'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'superseded';
+
+export interface AgentRunResponse {
+  id: string;
+  project_id: string;
+  room_id: string;
+  claude_session_id?: string | null;
+  parent_run_id?: string | null;
+  state: AgentRunState;
+  active_proposal_id?: string | null;
+  superseded_by_run_id?: string | null;
+  metadata?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at?: string | null;
 }
 
 export type StreamInterruptionReason = 'stream_ended' | 'transient_error';
@@ -975,7 +1001,7 @@ export const api = {
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify({ content: data.message, session_id: data.session_id }),
+          body: JSON.stringify({ content: data.message, session_id: data.session_id, ...(data.image_urls?.length ? { image_urls: data.image_urls } : {}) }),
           signal,  // AbortSignal追加
         });
 
@@ -1176,6 +1202,9 @@ export const api = {
         method: 'DELETE',
       }),
 
+    currentRun: (projectId: string) =>
+      request<AgentRunResponse>(`/projects/${projectId}/current-run`),
+
     proposals: {
       list: (projectId: string) =>
         request<ProjectProposalResponse[]>(`/projects/${projectId}/proposals`),
@@ -1188,8 +1217,10 @@ export const api = {
     },
 
     executionEvents: {
-      list: (projectId: string, limit = 500) =>
-        request<ExecutionEvent[]>(`/projects/${projectId}/execution-events?limit=${limit}`),
+      list: (projectId: string, limit = 500, runId?: string) =>
+        request<ExecutionEvent[]>(
+          `/projects/${projectId}/execution-events?limit=${limit}${runId ? `&run_id=${runId}` : ''}`
+        ),
     },
   },
 

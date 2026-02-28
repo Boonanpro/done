@@ -4,9 +4,12 @@ Uses a dedicated thread with its own event loop to avoid Windows asyncio issues
 """
 from typing import Optional, Any
 import asyncio
+import logging
 import os
 import threading
 import queue
+
+logger = logging.getLogger(__name__)
 
 
 # ===== Executor用: 専用スレッドでPlaywrightを実行 =====
@@ -1031,4 +1034,4 @@ def abort_executor_session():
         except queue.Empty:
             break
 
-    print(f"[EXECUTOR_BROWSER] Session aborted - cleared {cleared_commands} commands, {cleared_results} results")
+    logger.info("[EXECUTOR_BROWSER] Session aborted - cleared %d commands, %d results", cleared_commands, cleared_results)

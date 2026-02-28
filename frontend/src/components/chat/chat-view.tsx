@@ -431,10 +431,14 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
     if (!text.trim() && attachedFiles.length === 0) return;
     if (isSending || !sessionId) return;
 
-    // ファイル付きメッセージの場合はファイル情報を含める
+    const isImageFile = (name: string) => /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(name);
+    const imageFiles = attachedFiles.filter(f => isImageFile(f.filename));
+    const nonImageFiles = attachedFiles.filter(f => !isImageFile(f.filename));
+
+    // 画像以外のファイルはテキストとして含める
     let content = text.trim();
-    if (attachedFiles.length > 0) {
-      const fileList = attachedFiles.map(f => `[ファイル] ${f.filename} (${f.url})`).join('\n');
+    if (nonImageFiles.length > 0) {
+      const fileList = nonImageFiles.map(f => `[ファイル] ${f.filename} (${f.url})`).join('\n');
       content = content ? `${content}\n\n${fileList}` : fileList;
     }
 
@@ -468,7 +472,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
 
     try {
       await api.sm.sendMessageStream(
-        { message: content, session_id: sessionId },
+        { message: content, session_id: sessionId, image_urls: imageFiles.map(f => f.url) },
         {
           onProcessStep: (step) => {
             queueProcessStep(step);
@@ -1365,21 +1369,38 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
           {/* 添付ファイル一覧 */}
           {attachedFiles.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-2">
-              {attachedFiles.map((file) => (
-                <div
-                  key={file.id}
-                  className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted border border-border text-xs"
-                >
-                  <File className="h-3 w-3 text-muted-foreground" />
-                  <span className="max-w-[150px] truncate">{file.filename}</span>
-                  <button
-                    onClick={() => handleRemoveFile(file.id)}
-                    className="ml-1 hover:text-destructive"
+              {attachedFiles.map((file) => {
+                const isImg = /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(file.filename);
+                return isImg ? (
+                  <div key={file.id} className="relative group">
+                    <img
+                      src={file.url}
+                      alt={file.filename}
+                      className="h-16 w-16 object-cover rounded-md border border-border"
+                    />
+                    <button
+                      onClick={() => handleRemoveFile(file.id)}
+                      className="absolute -top-1 -right-1 bg-background border border-border rounded-full p-0.5 opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    key={file.id}
+                    className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted border border-border text-xs"
                   >
-                    <X className="h-3 w-3" />
-                  </button>
-                </div>
-              ))}
+                    <File className="h-3 w-3 text-muted-foreground" />
+                    <span className="max-w-[150px] truncate">{file.filename}</span>
+                    <button
+                      onClick={() => handleRemoveFile(file.id)}
+                      className="ml-1 hover:text-destructive"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
           

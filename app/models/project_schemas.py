@@ -33,6 +33,16 @@ class ProposalStatus(str, Enum):
     SUPERSEDED = "superseded"
 
 
+class AgentRunState(str, Enum):
+    RUNNING = "running"
+    AWAITING_APPROVAL = "awaiting_approval"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SUPERSEDED = "superseded"
+
+
 # ==================== Project Schemas ====================
 
 class ProjectCreateRequest(BaseModel):
@@ -82,6 +92,7 @@ class ProjectProposalResponse(BaseModel):
     """提案レスポンス"""
     id: str
     project_id: str
+    run_id: Optional[str] = None
     content: str
     proposal_type: ProposalType
     status: ProposalStatus
@@ -111,6 +122,7 @@ class ExecutionEventResponse(BaseModel):
     """実行イベントレスポンス"""
     id: str
     project_id: Optional[str] = None
+    run_id: Optional[str] = None
     room_id: str
     event_type: str  # 'tool_use', 'reasoning', 'phase', 'error', 'text', 'done'
     tool_name: Optional[str] = None
@@ -119,3 +131,18 @@ class ExecutionEventResponse(BaseModel):
     metadata: Optional[dict] = None
     seq: Optional[int] = None
     created_at: datetime
+
+
+class AgentRunResponse(BaseModel):
+    """繧ｨ繝ｼ繧ｸ繧ｧ繝ｳ繝医Λ繝ｳ縺ｮ蠑墓焚"""
+    id: str
+    project_id: str
+    room_id: str
+    claude_session_id: Optional[str] = None
+    parent_run_id: Optional[str] = None
+    state: AgentRunState
+    active_proposal_id: Optional[str] = None
+    superseded_by_run_id: Optional[str] = None
+    metadata: Optional[dict] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None

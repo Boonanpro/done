@@ -1,3 +1,4 @@
+import asyncio
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -77,6 +78,7 @@ class FakeProjectService:
         content: str,
         proposal_type: str = "plan",
         steps: Optional[list] = None,
+        run_id: Optional[str] = None,
         metadata: Optional[dict] = None,
     ) -> dict:
         for p in self.proposals[project_id]:
@@ -85,6 +87,7 @@ class FakeProjectService:
         proposal = {
             "id": str(uuid.uuid4()),
             "project_id": project_id,
+            "run_id": run_id,
             "content": content,
             "proposal_type": proposal_type,
             "status": "pending",
@@ -125,6 +128,7 @@ class FakeProjectService:
         project_id: Optional[str],
         room_id: str,
         event_type: str,
+        run_id: Optional[str] = None,
         tool_name: Optional[str] = None,
         tool_label: Optional[str] = None,
         content: Optional[str] = None,
@@ -133,6 +137,7 @@ class FakeProjectService:
         event = {
             "id": str(uuid.uuid4()),
             "project_id": project_id,
+            "run_id": run_id,
             "room_id": room_id,
             "event_type": event_type,
             "tool_name": tool_name,
@@ -153,11 +158,73 @@ class FakeProjectService:
         limit: int = 100,
         after: Optional[str] = None,
         since_seq: Optional[int] = None,
+        run_id: Optional[str] = None,
     ) -> list[dict]:
         rows = self.execution_events.get(project_id, [])
+        if run_id is not None:
+            rows = [r for r in rows if r.get("run_id") == run_id]
         if since_seq is not None:
             rows = [r for r in rows if (r.get("seq") or 0) > since_seq]
         return rows[:limit]
+
+
+class FakeRunService:
+    def __init__(self) -> None:
+        self.runs: dict[str, dict] = {}
+
+    async def create_run(
+        self,
+        project_id: str,
+        room_id: str,
+        claude_session_id: Optional[str] = None,
+        parent_run_id: Optional[str] = None,
+        state: str = "running",
+        metadata: Optional[dict] = None,
+    ) -> dict:
+        now = datetime.now(timezone.utc)
+        run = {
+            "id": str(uuid.uuid4()),
+            "project_id": project_id,
+            "room_id": room_id,
+            "claude_session_id": claude_session_id,
+            "parent_run_id": parent_run_id,
+            "state": state,
+            "active_proposal_id": None,
+            "superseded_by_run_id": None,
+            "metadata": metadata or {},
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.runs[run["id"]] = run
+        return run
+
+    async def get_current_run(self, project_id: str) -> Optional[dict]:
+        rows = [r for r in self.runs.values() if r["project_id"] == project_id]
+        if not rows:
+            return None
+        rows.sort(key=lambda row: row["created_at"], reverse=True)
+        for row in rows:
+            if row.get("state") != "superseded" and not row.get("superseded_by_run_id"):
+                return row
+        return rows[0]
+
+    async def update_run(self, run_id: str, **updates) -> Optional[dict]:
+        run = self.runs.get(run_id)
+        if not run:
+            return None
+        run.update(updates)
+        run["updated_at"] = datetime.now(timezone.utc)
+        return run
+
+    async def attach_claude_session(self, run_id: str, claude_session_id: str) -> Optional[dict]:
+        return await self.update_run(run_id, claude_session_id=claude_session_id)
+
+    async def supersede_run(self, old_run_id: str, new_run_id: str) -> Optional[dict]:
+        return await self.update_run(
+            old_run_id,
+            state="superseded",
+            superseded_by_run_id=new_run_id,
+        )
 
 
 @pytest.fixture
@@ -166,6 +233,8 @@ def project_test_context(client):
     from app.api import project_routes
 
     fake_service = FakeProjectService()
+    fake_run_service = FakeRunService()
+    fake_service.run_service = fake_run_service
 
     async def fake_current_user() -> TokenData:
         return TokenData(
@@ -175,11 +244,13 @@ def project_test_context(client):
         )
 
     app.dependency_overrides[project_routes.get_project_service] = lambda: fake_service
+    app.dependency_overrides[project_routes.get_run_service] = lambda: fake_run_service
     app.dependency_overrides[project_routes.get_current_user] = fake_current_user
     try:
         yield fake_service
     finally:
         app.dependency_overrides.pop(project_routes.get_project_service, None)
+        app.dependency_overrides.pop(project_routes.get_run_service, None)
         app.dependency_overrides.pop(project_routes.get_current_user, None)
 
 
@@ -334,4 +405,66 @@ def test_project_flow_awaiting_then_confirm_to_completed(
 
     completed_project = _wait_for_project_status(client, project_id, "completed")
     assert completed_project["status"] == "completed"
+
+
+def test_get_current_run(client, project_test_context):
+    fake_service: FakeProjectService = project_test_context
+    fake_run_service: FakeRunService = fake_service.run_service
+
+    create_project = client.post(
+        "/api/v1/projects",
+        json={"title": "Run Test", "description": "current run endpoint"},
+    )
+    assert create_project.status_code == 201
+    project = create_project.json()
+
+    run = asyncio.run(
+        fake_run_service.create_run(
+            project_id=project["id"],
+            room_id=project["room_id"],
+            state="running",
+        )
+    )
+
+    response = client.get(f"/api/v1/projects/{project['id']}/current-run")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == run["id"]
+    assert body["project_id"] == project["id"]
+    assert body["state"] == "running"
+
+
+def test_get_current_run_skips_superseded_run(client, project_test_context):
+    fake_service: FakeProjectService = project_test_context
+    fake_run_service: FakeRunService = fake_service.run_service
+
+    create_project = client.post(
+        "/api/v1/projects",
+        json={"title": "Supersede Test", "description": "current run skips superseded"},
+    )
+    assert create_project.status_code == 201
+    project = create_project.json()
+
+    first_run = asyncio.run(
+        fake_run_service.create_run(
+            project_id=project["id"],
+            room_id=project["room_id"],
+            state="running",
+        )
+    )
+    second_run = asyncio.run(
+        fake_run_service.create_run(
+            project_id=project["id"],
+            room_id=project["room_id"],
+            parent_run_id=first_run["id"],
+            state="running",
+        )
+    )
+    asyncio.run(fake_run_service.supersede_run(first_run["id"], second_run["id"]))
+
+    response = client.get(f"/api/v1/projects/{project['id']}/current-run")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == second_run["id"]
+    assert body["state"] == "running"
 

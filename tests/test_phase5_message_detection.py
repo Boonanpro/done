@@ -3,7 +3,7 @@ Phase 5: Message Detection - Unit Tests
 """
 import pytest
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 # Test fixtures and mocks
@@ -55,7 +55,7 @@ class TestMessageDetectionService:
                 "source": "done_chat",
                 "content": "テストメッセージ",
                 "status": "pending",
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }]),
         ]
         
@@ -154,7 +154,7 @@ class TestChatServiceDetectionHook:
             mock_supabase.execute.side_effect = [
                 MagicMock(data=[{"user_id": "sender-1", "room_id": "room-1"}]),  # membership
                 MagicMock(data=[{"display_name": "Test User", "done_user_id": "done-user-1"}]),  # sender
-                MagicMock(data=[{"id": "msg-1", "room_id": "room-1", "sender_id": "sender-1", "sender_type": "human", "content": "test", "created_at": datetime.utcnow().isoformat()}]),  # insert
+                MagicMock(data=[{"id": "msg-1", "room_id": "room-1", "sender_id": "sender-1", "sender_type": "human", "content": "test", "created_at": datetime.now(timezone.utc).isoformat()}]),  # insert
                 MagicMock(data=[{"enabled": True, "mode": "auto"}]),  # ai_settings
                 MagicMock(data=[]),  # duplicate check
                 MagicMock(data=[{"id": "detected-1"}]),  # detection insert
@@ -188,7 +188,7 @@ class TestChatServiceDetectionHook:
             mock_supabase.execute.side_effect = [
                 MagicMock(data=[{"user_id": "sender-1", "room_id": "room-1"}]),  # membership
                 MagicMock(data=[{"display_name": "Test User", "done_user_id": "done-user-1"}]),  # sender
-                MagicMock(data=[{"id": "msg-1", "room_id": "room-1", "sender_id": "sender-1", "sender_type": "human", "content": "test", "created_at": datetime.utcnow().isoformat()}]),  # insert
+                MagicMock(data=[{"id": "msg-1", "room_id": "room-1", "sender_id": "sender-1", "sender_type": "human", "content": "test", "created_at": datetime.now(timezone.utc).isoformat()}]),  # insert
                 MagicMock(data=[{"enabled": False, "mode": "off"}]),  # ai_settings - disabled
             ]
             

@@ -6,7 +6,6 @@ import os
 import re
 import imaplib
 import email
-from datetime import datetime, timedelta
 from email.header import decode_header
 from typing import Optional
 import logging

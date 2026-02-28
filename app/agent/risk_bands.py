@@ -32,7 +32,7 @@ DEFAULT_RED_KEYWORDS = (
     "削除",
     "解約",
     "個人情報",
-    "【要操作】",
+    "【要人間】",
 )
 
 DEFAULT_YELLOW_KEYWORDS = (

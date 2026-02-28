@@ -3,9 +3,10 @@
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 
+import os
 from elevenlabs.client import ElevenLabs
 
-API_KEY = "sk_11bd74a5e92e5229ef0bf097bf6aa2e88c38909f7fcd1dbc"
+API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 
 client = ElevenLabs(api_key=API_KEY)
 

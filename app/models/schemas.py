@@ -3,7 +3,7 @@ Pydantic Schemas for Data Models
 """
 from pydantic import BaseModel, Field
 from typing import Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import uuid
 
@@ -49,8 +49,8 @@ class User(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     email: Optional[str] = None
     line_user_id: Optional[str] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
     class Config:
         from_attributes = True
 
@@ -84,8 +84,8 @@ class Credential(BaseModel):
     user_id: str
     service_name: str
     encrypted_data: bytes
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
     class Config:
         from_attributes = True
 
@@ -98,8 +98,8 @@ class Message(BaseModel):
     direction: str  # "inbound", "outbound"
     content: str
     metadata: Optional[dict[str, Any]] = None
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
     class Config:
         from_attributes = True
 

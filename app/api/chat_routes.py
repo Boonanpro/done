@@ -92,6 +92,22 @@ def _compact_text(text: str, limit: int = 220) -> str:
     return text[: limit - 1] + "..."
 
 
+def _build_content_with_images(content: str, image_urls: list) -> str:
+    """画像URLをローカルパスに変換してcontentの先頭に付加する"""
+    if not image_urls:
+        return content
+    import os
+    upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
+    upload_dir = os.path.normpath(upload_dir)
+    lines = []
+    for url in image_urls:
+        filename = url.split("/")[-1]
+        local_path = os.path.join(upload_dir, filename).replace("\\", "/")
+        lines.append(f"[添付画像: {local_path}]")
+    image_prefix = "\n".join(lines)
+    return f"{image_prefix}\n\n{content}" if content.strip() else image_prefix
+
+
 def _fetch_latest_user_message_from_room(service: ChatService, room_id: str) -> str:
     """指定ルームの最新ユーザーメッセージを取得する（旧データ互換を含む）。"""
     if not room_id:
@@ -787,9 +803,8 @@ async def send_dan_message_stream(
     """ダンにメッセージを送信（SSEストリーミング版）- Agent v2を使用"""
     from starlette.responses import StreamingResponse
     from app.services.progress_callback import (
-        ProgressCallbackRegistry, 
+        ProgressCallbackRegistry,
         set_current_request_id,
-        ProgressUpdate
     )
     import uuid
     import asyncio
@@ -809,6 +824,7 @@ async def send_dan_message_stream(
         result_saved = False  # AI回答DB保存済みフラグ
         cli_saved_ai_message = False  # CLIスレッドがAI応答をDB保存済みか
         replan_requested = _is_replan_request(request.content)
+        run_id = None
 
         async def _save_project_event_safe(project_service, **kwargs):
             """Best-effort event write; avoid blocking chat execution on log writes."""
@@ -826,9 +842,41 @@ async def send_dan_message_stream(
                 )
 
         try:
+            preloaded_project_info = {}
+            preloaded_is_project = False
+            current_project_run = None
+            should_supersede_existing_run = False
+            if request.session_id:
+                try:
+                    from app.services.project_service import ProjectService
+                    from app.services.run_service import RunService
+
+                    preload_project_service = ProjectService()
+                    proj_result = (
+                        preload_project_service.supabase.table("projects")
+                        .select("id, title, description, status, room_id")
+                        .eq("room_id", request.session_id)
+                        .execute()
+                    )
+                    if proj_result.data:
+                        preloaded_is_project = True
+                        preloaded_project_info = proj_result.data[0]
+                        current_project_run = await RunService().get_current_run(
+                            preloaded_project_info["id"]
+                        )
+                        should_supersede_existing_run = bool(
+                            current_project_run
+                            and current_project_run.get("state")
+                            not in {"completed", "failed", "superseded"}
+                        )
+                        if CancellationRegistry.is_active(request.session_id):
+                            should_supersede_existing_run = True
+                except Exception:
+                    pass
             if (
                 request.session_id
                 and not replan_requested
+                and not preloaded_is_project
                 and CancellationRegistry.is_active(request.session_id)
             ):
                 busy_message = "前の実行がまだ進行中です。停止してから再送してください。"
@@ -841,14 +889,14 @@ async def send_dan_message_stream(
             # session_idが指定されていればそのルームに、なければ現在のDanルームに送信
             if request.session_id:
                 room_id = request.session_id
-                message = await service.send_message(room_id, current_user.user_id, request.content, sender_type="human")
+                message = await service.send_message(room_id, current_user.user_id, _build_content_with_images(request.content, request.image_urls or []), sender_type="human")
             else:
-                message = await service.send_dan_message(current_user.user_id, request.content)
+                message = await service.send_dan_message(current_user.user_id, _build_content_with_images(request.content, request.image_urls or []))
                 room_id = message["room_id"]
             user = await service.get_user_by_id(current_user.user_id)
 
             # 方針変更要求時は、既存の同一ルーム実行を先に止める
-            if replan_requested:
+            if replan_requested or should_supersede_existing_run:
                 try:
                     CancellationRegistry.cancel(room_id)
                 except Exception:
@@ -895,20 +943,21 @@ async def send_dan_message_stream(
             # ========================================
             # プロジェクトルーム判定 → SDK Runner / 通常 Runner の分岐
             # ========================================
-            is_project = False
-            project_info = {}
+            is_project = preloaded_is_project
+            project_info = preloaded_project_info
             try:
-                from app.services.project_service import ProjectService
-                ps = ProjectService()
-                proj_result = (
-                    ps.supabase.table("projects")
-                    .select("id, title, description, status")
-                    .eq("room_id", room_id)
-                    .execute()
-                )
-                if proj_result.data:
-                    is_project = True
-                    project_info = proj_result.data[0]
+                if not is_project:
+                    from app.services.project_service import ProjectService
+                    ps = ProjectService()
+                    proj_result = (
+                        ps.supabase.table("projects")
+                        .select("id, title, description, status")
+                        .eq("room_id", room_id)
+                        .execute()
+                    )
+                    if proj_result.data:
+                        is_project = True
+                        project_info = proj_result.data[0]
             except Exception:
                 pass
 
@@ -918,12 +967,64 @@ async def send_dan_message_stream(
                 # ========================================
                 from app.agent.cli_runner import process_message_cli
                 from app.api.project_routes import _format_tool_label
+                from app.services.run_service import RunService
 
                 project_service = ProjectService()
+                run_service = RunService()
                 final_text = ""
                 reasoning_steps = []   # 短いラベル（プロセスモニター表示用）
                 reasoning_full = []    # 全文（DB保存用、フロントで展開表示）
                 step_counter = 0
+                run_state = None
+                if current_project_run is None and should_supersede_existing_run:
+                    try:
+                        current_project_run = await run_service.get_current_run(project_info["id"])
+                    except Exception:
+                        current_project_run = None
+                try:
+                    run_metadata = {}
+                    if should_supersede_existing_run and current_project_run:
+                        run_metadata["started_by"] = "follow_up"
+                        run_metadata["superseded_run_id"] = current_project_run["id"]
+                        if current_project_run.get("active_proposal_id"):
+                            run_metadata["superseded_proposal_id"] = current_project_run["active_proposal_id"]
+                    if replan_requested:
+                        run_metadata["direction_changed"] = True
+                    run = await run_service.create_run(
+                        project_id=project_info["id"],
+                        room_id=room_id,
+                        parent_run_id=current_project_run["id"] if current_project_run else None,
+                        metadata=run_metadata or None,
+                    )
+                    run_id = run["id"]
+                    if should_supersede_existing_run and current_project_run:
+                        await run_service.supersede_run(current_project_run["id"], run_id)
+                        active_proposal_id = current_project_run.get("active_proposal_id")
+                        if active_proposal_id:
+                            await project_service.supersede_proposal(
+                                active_proposal_id,
+                                project_info["id"],
+                            )
+                            await project_service.update_project(
+                                project_info["id"],
+                                current_user.user_id,
+                                status="planning",
+                            )
+                        await _save_project_event_safe(
+                            project_service,
+                            project_id=project_info["id"],
+                            room_id=room_id,
+                            run_id=run_id,
+                            event_type="phase",
+                            content="previous run superseded by user follow-up",
+                        )
+                except Exception as run_error:
+                    logger.warning(
+                        "Failed to create agent run (project=%s, room=%s): %s",
+                        project_info.get("id"),
+                        room_id,
+                        run_error,
+                    )
 
                 # 方針変更要求が来たら、現在ステータスに関係なく planning へ戻して再計画
                 if replan_requested and project_info.get("status") != "planning":
@@ -940,6 +1041,7 @@ async def send_dan_message_stream(
                         await _save_project_event_safe(project_service,
                             project_id=project_info["id"],
                             room_id=room_id,
+                            run_id=run_id,
                             event_type="phase",
                             content="user requested direction change; switched to planning",
                         )
@@ -982,12 +1084,13 @@ async def send_dan_message_stream(
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
-                    content=request.content,
+                    content=_build_content_with_images(request.content, request.image_urls or []),
                     project_title=project_info.get("title", ""),
                     project_description=project_info.get("description", ""),
                     project_status=project_info.get("status", "in_progress"),
                     user_messages=user_messages_for_cli,
                     project_id=project_info.get("id"),
+                    run_id=run_id,
                 ):
                     if event["type"] == "keepalive":
                         # SSEコメント: クライアントのEventSourceパーサーは無視するが接続は維持される
@@ -998,8 +1101,11 @@ async def send_dan_message_stream(
                         await service.send_dan_ai_message(current_user.user_id, "（中断されました）", [], room_id=room_id)
                         await _save_project_event_safe(project_service,
                             project_id=project_info["id"], room_id=room_id,
+                            run_id=run_id,
                             event_type="done", content="cancelled",
                         )
+                        if run_id:
+                            await run_service.update_run(run_id, state="paused")
                         yield f"data: {json.dumps({'type': 'cancelled', 'session_id': room_id})}\n\n"
                         done_sent = True
                         result_saved = True
@@ -1037,6 +1143,9 @@ async def send_dan_message_stream(
                     elif event["type"] == "result":
                         result_text = event.get("text", "")
                         cli_saved_ai_message = event.get("cli_saved", False)
+                        if run_id and event.get("session_id"):
+                            await run_service.attach_claude_session(run_id, event["session_id"])
+                        run_state = "failed" if event.get("is_error") else "completed"
                         if result_text:
                             final_text = result_text
                         elif event.get("is_error"):
@@ -1044,6 +1153,9 @@ async def send_dan_message_stream(
                             final_text = result_text  # エラー内容（cli_runnerが組み立て済み）
 
                     elif event["type"] == "error":
+                        if run_id:
+                            await run_service.update_run(run_id, state="failed")
+                        run_state = "failed"
                         yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': event['message']})}\n\n"
                         # DB保存はCLIスレッドが実行済み（DB-first）
 
@@ -1096,9 +1208,10 @@ async def send_dan_message_stream(
                             from app.services.proposal_steps import extract_steps
 
                             proposal_steps = extract_steps(ai_response_content)
-                            await asyncio.wait_for(
+                            proposal = await asyncio.wait_for(
                                 project_service.create_proposal(
                                     project_id=project_info["id"],
+                                    run_id=run_id,
                                     content=ai_response_content,
                                     proposal_type="plan",
                                     steps=proposal_steps,
@@ -1110,9 +1223,16 @@ async def send_dan_message_stream(
                                 timeout=10,
                             )
                             proposal_created = True
+                            if run_id and proposal:
+                                await run_service.update_run(
+                                    run_id,
+                                    state="awaiting_approval",
+                                    active_proposal_id=proposal["id"],
+                                )
                             await _save_project_event_safe(project_service,
                                 project_id=project_info["id"],
                                 room_id=room_id,
+                                run_id=run_id,
                                 event_type="phase",
                                 content="planning output saved as proposal",
                             )
@@ -1128,6 +1248,7 @@ async def send_dan_message_stream(
                                 await _save_project_event_safe(project_service,
                                     project_id=project_info["id"],
                                     room_id=room_id,
+                                    run_id=run_id,
                                     event_type="error",
                                     content=f"proposal save failed: {proposal_error}",
                                 )
@@ -1136,6 +1257,8 @@ async def send_dan_message_stream(
 
                     # doneイベントはCLIスレッドが既にDB保存済み（DB-first）
                     # 提案が作成された場合のみSSEからphaseイベントを追加保存
+                    if run_id and run_state and not proposal_created:
+                        await run_service.update_run(run_id, state=run_state)
                     result_saved = True
                     yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
                     done_sent = True
@@ -1155,7 +1278,7 @@ async def send_dan_message_stream(
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
-                    content=request.content,
+                    content=_build_content_with_images(request.content, request.image_urls or []),
                     project_title="",
                     project_description="",
                     project_status="in_progress",

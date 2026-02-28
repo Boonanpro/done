@@ -20,7 +20,7 @@ import anthropic
 
 from app.agent.v2.session import Session, get_session_store
 from app.agent.v2.tools import (
-    execute_tool, format_tool_result, FormattedToolResult, SkillRegistry,
+    execute_tool, format_tool_result, SkillRegistry,
     get_all_skill_tools, parse_tool_name,
 )
 from app.config import settings
@@ -269,8 +269,8 @@ class AgentRunner:
             }
         """
         try:
-            print(f"[RUNNER_DEBUG] Starting process_message for user {self.session.user_id}")
-            safe_print(f"[RUNNER_DEBUG] Message: {user_message[:50]}...")
+            logger.debug(f"[RUNNER] Starting process_message for user {self.session.user_id}")
+            logger.debug(f"[RUNNER] Message: {user_message[:50]}...")
 
             # 現在のセッションIDをコンテキストに設定（キャンセルチェック用）
             from app.services.cancellation import CancellationRegistry
@@ -294,7 +294,7 @@ class AgentRunner:
             # 3. LLM呼び出し→ツール実行ループ（Native Tool Use）
             tool_results = []
             user_response = None
-            print(f"[RUNNER_DEBUG] Starting LLM loop, state: {self.session.current_state.value}")
+            logger.debug(f"[RUNNER] Starting LLM loop, state: {self.session.current_state.value}")
 
             for loop_count in range(MAX_TOOL_LOOPS + 1):
                 # キャンセルチェック
@@ -308,7 +308,7 @@ class AgentRunner:
                         "cancelled": True,
                     }
 
-                print(f"[RUNNER_DEBUG] Calling LLM with tools (loop {loop_count})...")
+                logger.debug(f"[RUNNER] Calling LLM with tools (loop {loop_count})...")
 
                 # LLMをTool Use APIで呼び出し
                 response = await self._call_llm_with_tools()
@@ -326,7 +326,7 @@ class AgentRunner:
                 if not parsed["tool_calls"]:
                     if parsed["reasoning_text"] and self._on_reasoning_step:
                         await self._on_reasoning_step(parsed["reasoning_text"])
-                    print(f"[RUNNER_DEBUG] No more tool calls")
+                    logger.debug(f"[RUNNER] No more tool calls")
                     break
                 # 最大ループに達した場合は明示的に中断メッセージ
                 if loop_count >= MAX_TOOL_LOOPS:
@@ -336,7 +336,7 @@ class AgentRunner:
                     # ユーザーに中断を伝える（LLMのテキスト出力がなかった場合のみ上書き）
                     if not user_response:
                         user_response = f"操作回数の上限（{MAX_TOOL_LOOPS}回）に達したため、途中で中断しました。続きが必要な場合は指示してください。"
-                    print(f"[RUNNER_DEBUG] Max loops reached, breaking")
+                    logger.debug(f"[RUNNER] Max loops reached, breaking")
                     break
 
                 # ツールを実行
@@ -595,12 +595,12 @@ class AgentRunner:
         4. 利用可能なスキル一覧
         5. ブートストラップファイル（USER → MEMORY → yesterday/today → SOUL → RULES）
         """
-        print("[RUNNER_DEBUG] Building system prompt...")
+        logger.debug("[RUNNER] Building system prompt...")
         parts = []
 
         # 1. コアプロンプト
         parts.append(get_core_prompt())
-        print(f"[RUNNER_DEBUG] Core prompt added")
+        logger.debug(f"[RUNNER] Core prompt added")
 
         # 2. 現在日時
         from datetime import datetime
@@ -615,7 +615,7 @@ class AgentRunner:
         project_context = self._get_project_context()
         if project_context:
             parts.append(project_context)
-            print(f"[RUNNER_DEBUG] Project context injected")
+            logger.debug(f"[RUNNER] Project context injected")
 
         # 3. 利用可能なツール一覧
         tools_section = self._build_tools_list_section()
@@ -631,7 +631,7 @@ class AgentRunner:
         bootstrap = load_all_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
-            print(f"[RUNNER_DEBUG] Bootstrap files loaded: {len(bootstrap)} chars")
+            logger.debug(f"[RUNNER] Bootstrap files loaded: {len(bootstrap)} chars")
 
         # 6. 言語指示（最後 = recency biasで最も効く位置）
         lang = getattr(self, "_user_language", "Japanese")
@@ -643,7 +643,7 @@ class AgentRunner:
         )
 
         system = "\n\n---\n\n".join(parts)
-        print(f"[RUNNER_DEBUG] Total system prompt: {len(system)} chars (lang={lang})")
+        logger.debug(f"[RUNNER] Total system prompt: {len(system)} chars (lang={lang})")
         return system
 
     def _build_tools_list_section(self) -> str:

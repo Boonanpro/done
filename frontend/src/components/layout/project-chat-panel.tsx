@@ -8,10 +8,12 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  File,
   FileText,
   FolderKanban,
   Loader2,
   MessageSquare,
+  Paperclip,
   Send,
   Square,
   Terminal,
@@ -29,6 +31,7 @@ import {
   api,
   type ActiveSessionStatus,
   type ExecutionEvent,
+  type FileUploadResponse,
   type MessageResponse,
   type ProcessStep,
   type ProjectProposalResponse,
@@ -61,12 +64,6 @@ type StepInfo = {
 type DisplayItem =
   | { kind: 'message'; msg: MessageResponse }
   | { kind: 'execution-block'; id: string; steps: StepInfo[]; isLive: boolean };
-
-interface ExecutionRun {
-  events: ExecutionEvent[];
-  isDone: boolean;
-  startTime: string;
-}
 
 function MemberBadge({ role }: { role: 'researcher' | 'critic' }) {
   const config = {
@@ -195,37 +192,6 @@ function InlineProcessBlock({
   );
 }
 
-function groupExecutionRuns(events: ExecutionEvent[]): ExecutionRun[] {
-  const runs: ExecutionRun[] = [];
-  let currentRun: ExecutionEvent[] = [];
-
-  for (const event of events) {
-    if (event.event_type === 'done') {
-      if (currentRun.length > 0) {
-        runs.push({
-          events: currentRun,
-          isDone: true,
-          startTime: currentRun[0].created_at,
-        });
-      }
-      currentRun = [];
-      continue;
-    }
-
-    currentRun.push(event);
-  }
-
-  if (currentRun.length > 0) {
-    runs.push({
-      events: currentRun,
-      isDone: false,
-      startTime: currentRun[0].created_at,
-    });
-  }
-
-  return runs;
-}
-
 function eventToStep(event: ExecutionEvent): StepInfo {
   const member = event.metadata?.member as string | undefined;
   const role =
@@ -254,6 +220,16 @@ function eventToStep(event: ExecutionEvent): StepInfo {
   };
 }
 
+function parseHumanContent(content: string): { images: string[]; text: string } {
+  const images: string[] = [];
+  const text = content.replace(/\[添付画像: ([^\]]+)\]/g, (_, path) => {
+    const filename = path.replace(/\\/g, '/').split('/').pop();
+    if (filename) images.push(`/api/v1/files/${filename}`);
+    return '';
+  }).trim();
+  return { images, text };
+}
+
 const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageResponse }) {
   if (msg.sender_type !== 'human') {
     const proposalMatch = (msg.content || '').match(/```proposal\n([^\n]+)\n```/);
@@ -274,10 +250,18 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageRespons
   }
 
   if (msg.sender_type === 'human') {
+    const { images, text } = parseHumanContent(msg.content || '');
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm leading-relaxed text-primary-foreground md:text-xs">
-          {msg.content}
+        <div className="max-w-[85%] flex flex-col items-end gap-1">
+          {images.map((url, i) => (
+            <img key={i} src={url} alt="添付画像" className="rounded-xl max-w-full max-h-64 object-contain border border-primary/20" />
+          ))}
+          {text && (
+            <div className="rounded-lg bg-primary px-3 py-2 text-sm leading-relaxed text-primary-foreground md:text-xs">
+              {text}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -300,14 +284,18 @@ function ChatInput({
   isSessionActive: boolean;
 }) {
   const [message, setMessage] = useState('');
+  const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const titleGeneratedRef = useRef(false);
+  const streamRequestRef = useRef(0);
   const queryClient = useQueryClient();
   const user = useAuthStore((state) => state.user);
   const selectProject = useProjectStore((s) => s.selectProject);
   const { isInterrupted } = useRecoveryState(projectId);
-  const { resetRecovery, setInterrupted } = useRecoveryActions();
+  const { resetRecovery, setInterrupted, setWarmupMode } = useRecoveryActions();
 
   useProjectRecovery({ projectId, roomId });
 
@@ -338,18 +326,66 @@ function ChatInput({
   const invalidateProjectQueries = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['session-active', roomId] });
     queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+    queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
     queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
     queryClient.invalidateQueries({ queryKey: ['project', projectId] });
     queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
   }, [projectId, queryClient, roomId]);
 
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    setIsUploading(true);
+    try {
+      const uploaded: FileUploadResponse[] = [];
+      for (const file of Array.from(files)) {
+        if (file.size > 10 * 1024 * 1024) {
+          toast.error(`${file.name} は10MB以上のファイルは添付できません`);
+          continue;
+        }
+        uploaded.push(await api.files.upload(file));
+      }
+      setAttachedFiles(prev => [...prev, ...uploaded]);
+    } catch {
+      toast.error('ファイルのアップロードに失敗しました');
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }, []);
+
+  const handleRemoveFile = useCallback((fileId: string) => {
+    setAttachedFiles(prev => prev.filter(f => f.id !== fileId));
+  }, []);
+
+  const handleClickAttach = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
   const handleSendMessage = useCallback(async () => {
-    if (!message.trim() || isBusy) return;
+    if (!message.trim() && attachedFiles.length === 0) return;
 
     const content = message.trim();
+    const imageUrls = attachedFiles
+      .filter(f => /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(f.filename))
+      .map(f => f.url);
+    const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
+    const optimisticContent = imagePrefix
+      ? (content ? `${imagePrefix}\n\n${content}` : imagePrefix)
+      : content;
     setMessage('');
+    setAttachedFiles([]);
+    const requestId = streamRequestRef.current + 1;
+    streamRequestRef.current = requestId;
+
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
     syncActiveStatus(true);
     setInterrupted(projectId, false);
+    setWarmupMode(projectId, isBusy ? 'switching' : 'thinking');
 
     const tempUserMessageId = `temp-user-${Date.now()}`;
     const optimisticUserMessage: MessageResponse = {
@@ -358,7 +394,7 @@ function ChatInput({
       sender_id: user?.id || '',
       sender_name: user?.display_name || 'You',
       sender_type: 'human',
-      content,
+      content: optimisticContent,
       created_at: new Date().toISOString(),
     };
 
@@ -372,9 +408,10 @@ function ChatInput({
 
     try {
       await api.sm.sendMessageStream(
-        { message: content, session_id: roomId },
+        { message: content, session_id: roomId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}) },
         {
           onUserMessage: (msg) => {
+            if (streamRequestRef.current !== requestId) return;
             queryClient.setQueryData(
               queryKey,
               (old: { messages: MessageResponse[] } | undefined) => ({
@@ -388,22 +425,33 @@ function ChatInput({
             );
           },
           onAIMessage: () => {
+            if (streamRequestRef.current !== requestId) return;
+            setWarmupMode(projectId, null);
             queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+            queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onProcessStep: (_step: ProcessStep) => {
+            if (streamRequestRef.current !== requestId) return;
+            setWarmupMode(projectId, null);
+            queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onInterrupted: () => {
+            if (streamRequestRef.current !== requestId) return;
             syncActiveStatus(true);
             setInterrupted(projectId, true);
+            setWarmupMode(projectId, null);
             queryClient.invalidateQueries({ queryKey: ['session-active', roomId] });
             queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+            queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
           onComplete: () => {
+            if (streamRequestRef.current !== requestId) return;
             syncActiveStatus(false);
             setInterrupted(projectId, false);
+            setWarmupMode(projectId, null);
             invalidateProjectQueries();
 
             if (!titleGeneratedRef.current) {
@@ -425,11 +473,14 @@ function ChatInput({
             }
           },
           onError: (error) => {
+            if (streamRequestRef.current !== requestId) return;
             syncActiveStatus(false);
             setInterrupted(projectId, false);
+            setWarmupMode(projectId, null);
             toast.error(error || 'メッセージの送信に失敗しました');
           },
           onProjectCreated: (createdProjectId) => {
+            if (streamRequestRef.current !== requestId) return;
             queryClient.invalidateQueries({ queryKey: ['projects'] });
             if (createdProjectId !== projectId) {
               selectProject(createdProjectId);
@@ -439,13 +490,16 @@ function ChatInput({
         controller.signal
       );
     } catch (error) {
+      if (streamRequestRef.current !== requestId) return;
       syncActiveStatus(false);
       setInterrupted(projectId, false);
+      setWarmupMode(projectId, null);
       if (error instanceof Error && error.name !== 'AbortError') {
         toast.error('メッセージ送信中に問題が発生しました');
       }
     }
   }, [
+    attachedFiles,
     invalidateProjectQueries,
     isBusy,
     message,
@@ -454,6 +508,7 @@ function ChatInput({
     roomId,
     selectProject,
     setInterrupted,
+    setWarmupMode,
     syncActiveStatus,
     user?.display_name,
     user?.id,
@@ -473,9 +528,10 @@ function ChatInput({
 
     syncActiveStatus(false);
     resetRecovery(projectId);
+    setWarmupMode(projectId, null);
     invalidateProjectQueries();
     toast.info('処理を中断しました');
-  }, [invalidateProjectQueries, projectId, resetRecovery, roomId, syncActiveStatus]);
+  }, [invalidateProjectQueries, projectId, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -504,7 +560,34 @@ function ChatInput({
 
   return (
     <div className="shrink-0 border-t border-border p-3">
+      {attachedFiles.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-2">
+          {attachedFiles.map((file) => {
+            const isImg = /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(file.filename);
+            return isImg ? (
+              <div key={file.id} className="relative group">
+                <img src={file.url} alt={file.filename} className="h-14 w-14 object-cover rounded-md border border-border" />
+                <button onClick={() => handleRemoveFile(file.id)} className="absolute -top-1 -right-1 bg-background border border-border rounded-full p-0.5 opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity">
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            ) : (
+              <div key={file.id} className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted border border-border text-xs">
+                <File className="h-3 w-3 text-muted-foreground" />
+                <span className="max-w-[120px] truncate">{file.filename}</span>
+                <button onClick={() => handleRemoveFile(file.id)} className="ml-1 hover:text-destructive">
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div className="flex items-end gap-2 rounded-xl border border-border bg-input/30 p-2 transition-colors focus-within:border-primary/50">
+        <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} accept="image/*,video/*,.pdf,.txt,.doc,.docx" />
+        <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground" onClick={handleClickAttach} disabled={isUploading} title="ファイルを添付">
+          {isUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Paperclip className="h-3.5 w-3.5" />}
+        </Button>
         <textarea
           ref={textareaRef}
           value={message}
@@ -514,7 +597,15 @@ function ChatInput({
           rows={1}
           className="min-h-[32px] max-h-[120px] flex-1 resize-none bg-transparent py-1.5 text-sm focus:outline-none md:text-xs"
         />
-        {isBusy ? (
+        {message.trim() || attachedFiles.length > 0 ? (
+          <Button
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            onClick={handleSendMessage}
+          >
+            <Send className="h-3.5 w-3.5" />
+          </Button>
+        ) : isBusy ? (
           <Button
             size="icon"
             variant="destructive"
@@ -529,7 +620,7 @@ function ChatInput({
             size="icon"
             className="h-7 w-7 shrink-0"
             onClick={handleSendMessage}
-            disabled={!message.trim()}
+            disabled={!message.trim() && attachedFiles.length === 0}
           >
             <Send className="h-3.5 w-3.5" />
           </Button>
@@ -544,6 +635,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const selectProject = useProjectStore((s) => s.selectProject);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [proposalCollapsed, setProposalCollapsed] = useState(true);
+  const { warmupMode } = useRecoveryState(projectId);
 
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
@@ -572,9 +664,17 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const isActiveExecution = !!activeStatus?.active;
 
-  const { data: executionEvents = [] } = useQuery({
+  const { data: currentRun } = useQuery({
+    queryKey: ['current-run', projectId],
+    queryFn: () => api.projects.currentRun(projectId),
+    enabled: !!projectId,
+    retry: false,
+    refetchInterval: (query) => (isActiveExecution ? (query.state.error ? 10000 : 2000) : false),
+  });
+
+  const { data: allExecutionEvents = [] } = useQuery({
     queryKey: ['execution-events', projectId],
-    queryFn: () => api.projects.executionEvents.list(projectId),
+    queryFn: () => api.projects.executionEvents.list(projectId, 500),
     enabled: !!projectId,
     retry: 1,
     staleTime: 30 * 1000,
@@ -589,8 +689,28 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: isProposed ? 5000 : false,
   });
 
-  const pendingProposal = proposals?.find((item: ProjectProposalResponse) => item.status === 'pending');
-  const approvedProposal = proposals?.find((item: ProjectProposalResponse) => item.status === 'approved');
+  const pendingProposal =
+    proposals?.find(
+      (item: ProjectProposalResponse) =>
+        item.status === 'pending' &&
+        (!currentRun?.active_proposal_id || item.id === currentRun.active_proposal_id)
+    ) ??
+    proposals?.find((item: ProjectProposalResponse) => item.status === 'pending');
+
+  const approvedProposal =
+    proposals?.find(
+      (item: ProjectProposalResponse) =>
+        item.status === 'approved' && (!currentRun?.id || item.run_id === currentRun.id)
+    ) ??
+    proposals?.find((item: ProjectProposalResponse) => item.status === 'approved');
+  const transitionLabel = 'Thinking...';
+  const currentRunEvents = currentRun
+    ? allExecutionEvents.filter((e) => e.run_id === currentRun.id)
+    : [];
+  const showWarmupBlock =
+    isActiveExecution &&
+    (!!warmupMode || (!!currentRun && currentRun.state === 'running')) &&
+    currentRunEvents.length === 0;
 
   const approveMutation = useMutation({
     mutationFn: (proposalId: string) => api.projects.proposals.action(projectId, proposalId, 'approve'),
@@ -658,33 +778,67 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       });
     }
 
-    const runs = groupExecutionRuns(executionEvents);
-    for (let index = 0; index < runs.length; index++) {
-      const run = runs[index];
-      const steps = run.events.map(eventToStep);
-      if (steps.length === 0) continue;
-
+    // Warmup block for current live run that has no events yet
+    if (showWarmupBlock) {
       timedItems.push({
         item: {
           kind: 'execution-block',
-          id: `exec-${run.events[0].id}`,
-          steps,
-          isLive: !run.isDone && index === runs.length - 1 && isActiveExecution,
+          id: `warmup-${projectId}`,
+          steps: [
+            {
+              label: transitionLabel,
+              type: 'reasoning',
+            },
+          ],
+          isLive: true,
         },
-        sortKey: new Date(run.startTime).getTime(),
+        sortKey: Date.now(),
         subKey: 0,
       });
     }
 
+    // Group all execution events by run_id and create a block per run
+    const eventsByRun = new Map<string, ExecutionEvent[]>();
+    for (const event of allExecutionEvents) {
+      const rid = event.run_id || 'unknown';
+      if (!eventsByRun.has(rid)) eventsByRun.set(rid, []);
+      eventsByRun.get(rid)!.push(event);
+    }
+
+    for (const [runId, events] of eventsByRun) {
+      const steps = events
+        .filter((event) => event.event_type !== 'done' && event.event_type !== 'phase')
+        .map(eventToStep);
+
+      if (steps.length > 0) {
+        const isLiveRun =
+          !!currentRun &&
+          runId === currentRun.id &&
+          isActiveExecution &&
+          currentRun.state === 'running';
+
+        timedItems.push({
+          item: {
+            kind: 'execution-block',
+            id: `exec-${runId}`,
+            steps,
+            isLive: isLiveRun,
+          },
+          sortKey: new Date(events[0].created_at).getTime(),
+          subKey: 0,
+        });
+      }
+    }
+
     timedItems.sort((left, right) => left.sortKey - right.sortKey || left.subKey - right.subKey);
     return timedItems.map((item) => item.item);
-  }, [executionEvents, isActiveExecution, messages]);
+  }, [allExecutionEvents, currentRun, isActiveExecution, messages, projectId, showWarmupBlock, transitionLabel]);
 
   const hasAnyContent = displayItems.length > 0;
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [displayItems.length, isActiveExecution]);
+  }, [displayItems]);
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -740,7 +894,34 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </Button>
       </div>
 
-      {approvedProposal ? (
+      {pendingProposal ? (
+        <div className="shrink-0 border-b border-border">
+          <button
+            onClick={() => setProposalCollapsed((value) => !value)}
+            className="flex w-full items-center gap-2 px-4 py-2 text-sm transition-colors hover:bg-muted/50 md:text-xs"
+          >
+            {proposalCollapsed ? (
+              <ChevronRight className="h-3 w-3 text-muted-foreground" />
+            ) : (
+              <ChevronDown className="h-3 w-3 text-muted-foreground" />
+            )}
+            <FileText className="h-3 w-3 text-yellow-600" />
+            <span className="text-muted-foreground">承認待ちの提案</span>
+            <Loader2 className="h-3 w-3 text-yellow-600" />
+          </button>
+          {!proposalCollapsed ? (
+            <div className="max-h-[40vh] overflow-y-auto px-4 pb-3">
+              <div className="prose prose-sm prose-dan max-w-none rounded-lg bg-yellow-500/5 px-3 py-2 text-sm leading-relaxed md:prose-xs md:text-xs">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {pendingProposal.content || ''}
+                </ReactMarkdown>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {approvedProposal && !pendingProposal ? (
         <div className="shrink-0 border-b border-border">
           <button
             onClick={() => setProposalCollapsed((value) => !value)}
@@ -767,7 +948,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       ) : null}
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="relative flex-1 overflow-y-auto">
         {isLoadingMessages ? (
           <div className="flex items-center justify-center p-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
