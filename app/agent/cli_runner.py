@@ -665,6 +665,8 @@ def _run_cli_in_thread(
         if val and key not in env:
             env[key] = val
 
+    result_data = None
+    done_saved = False
     try:
         # 1回目: セッション再開を試みる
         cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id, is_planning=is_planning)
@@ -740,7 +742,23 @@ def _run_cli_in_thread(
         error_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
         _cli_debug(f"ERROR: {error_detail}")
         event_queue.put({"type": "error", "message": error_detail})
+        done_saved = True  # finallyで二重保存しないためのフラグ
+        if project_id:
+            _save_ai_message_sync(
+                room_id,
+                f"処理中にエラーが発生しました。もう一度お試しください。\n（{type(e).__name__}）",
+            )
+            _save_execution_event_sync(room_id, "done", project_id=project_id, content="error")
     finally:
+        # セーフティネット: 正常パス(result_data)もexceptパス(done_saved)も通らなかった場合
+        # = CLIがresultを出す前に静かに終了した場合
+        if project_id and not result_data and not done_saved:
+            _cli_debug("Safety net: CLI exited without result, saving error to DB")
+            _save_ai_message_sync(
+                room_id,
+                "処理が中断されました。もう一度お試しください。",
+            )
+            _save_execution_event_sync(room_id, "done", project_id=project_id, content="interrupted")
         _cleanup_mcp_config(room_id)
         _cli_debug("Sending sentinel")
         event_queue.put(_SENTINEL)
