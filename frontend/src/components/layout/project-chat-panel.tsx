@@ -284,10 +284,12 @@ function ChatInput({
   projectId,
   roomId,
   isSessionActive,
+  sendMessageRef,
 }: {
   projectId: string;
   roomId: string;
   isSessionActive: boolean;
+  sendMessageRef?: React.MutableRefObject<((content: string) => void) | null>;
 }) {
   const [message, setMessage] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
@@ -331,7 +333,8 @@ function ChatInput({
 
   const invalidateProjectQueries = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['session-active', roomId] });
-    queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+    // project-messages は refetch で即座に再取得（SSE断線で見逃したメッセージを確実に表示）
+    queryClient.refetchQueries({ queryKey: ['project-messages', roomId] });
     queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
     queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
     queryClient.invalidateQueries({ queryKey: ['project', projectId] });
@@ -368,19 +371,13 @@ function ChatInput({
     fileInputRef.current?.click();
   }, []);
 
-  const handleSendMessage = useCallback(async () => {
-    if (!message.trim() && attachedFiles.length === 0) return;
+  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = []) => {
+    if (!content.trim() && imageUrls.length === 0) return;
 
-    const content = message.trim();
-    const imageUrls = attachedFiles
-      .filter(f => /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(f.filename))
-      .map(f => f.url);
     const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
     const optimisticContent = imagePrefix
       ? (content ? `${imagePrefix}\n\n${content}` : imagePrefix)
       : content;
-    setMessage('');
-    setAttachedFiles([]);
     const requestId = streamRequestRef.current + 1;
     streamRequestRef.current = requestId;
 
@@ -449,7 +446,8 @@ function ChatInput({
             setInterrupted(projectId, true);
             setWarmupMode(projectId, null);
             queryClient.invalidateQueries({ queryKey: ['session-active', roomId] });
-            queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+            // project-messages は refetch で即座に再取得（SSE断線で見逃したメッセージを確実に表示）
+            queryClient.refetchQueries({ queryKey: ['project-messages', roomId] });
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
@@ -505,10 +503,8 @@ function ChatInput({
       }
     }
   }, [
-    attachedFiles,
     invalidateProjectQueries,
     isBusy,
-    message,
     projectId,
     queryClient,
     roomId,
@@ -519,6 +515,26 @@ function ChatInput({
     user?.display_name,
     user?.id,
   ]);
+
+  // 親コンポーネントから sendMessageCore を呼べるようにする
+  useEffect(() => {
+    if (sendMessageRef) {
+      sendMessageRef.current = (content: string) => { sendMessageCore(content); };
+      return () => { sendMessageRef.current = null; };
+    }
+  }, [sendMessageRef, sendMessageCore]);
+
+  const handleSendMessage = useCallback(async () => {
+    if (!message.trim() && attachedFiles.length === 0) return;
+
+    const content = message.trim();
+    const imageUrls = attachedFiles
+      .filter(f => /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(f.filename))
+      .map(f => f.url);
+    setMessage('');
+    setAttachedFiles([]);
+    await sendMessageCore(content, imageUrls);
+  }, [attachedFiles, message, sendMessageCore]);
 
   const handleCancel = useCallback(async () => {
     if (abortControllerRef.current) {
@@ -640,6 +656,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const selectProject = useProjectStore((s) => s.selectProject);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const sendMessageRef = useRef<((content: string) => void) | null>(null);
   const [proposalCollapsed, setProposalCollapsed] = useState(true);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const { warmupMode } = useRecoveryState(projectId);
@@ -725,6 +742,8 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       toast.success('提案を承認しました');
       queryClient.invalidateQueries({ queryKey: ['project', projectId] });
       queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
+      // 承認メッセージを自動送信 → 通常のチャットSSEフローで実行開始
+      sendMessageRef.current?.('提案を承認します。計画に従って実行を開始してください。');
     },
     onError: () => {
       toast.error('提案の承認に失敗しました');
@@ -1028,7 +1047,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       ) : null}
 
       {project?.room_id ? (
-        <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} />
+        <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} sendMessageRef={sendMessageRef} />
       ) : null}
 
       {lightboxImage && (

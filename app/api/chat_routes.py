@@ -899,6 +899,8 @@ async def send_dan_message_stream(
             if replan_requested or should_supersede_existing_run:
                 try:
                     CancellationRegistry.cancel(room_id)
+                    from app.agent.cli_runner import kill_cli_process
+                    kill_cli_process(room_id)
                 except Exception:
                     pass
 

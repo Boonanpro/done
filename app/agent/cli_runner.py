@@ -55,11 +55,22 @@ def kill_cli_process(room_id: str) -> bool:
         process = _active_processes.pop(room_id, None)
     if process is None:
         return False
+    _terminate_process(process)
+    return True
+
+
+def _terminate_process(process: subprocess.Popen):
+    """プロセスをterminate→wait→kill（フォールバック）で確実に終了させる"""
     try:
-        process.terminate()  # Windows: TerminateProcess
-        return True
-    except Exception:
-        return False
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _cli_debug(f"Process PID={process.pid} did not exit after terminate, using kill()")
+            process.kill()
+            process.wait(timeout=3)
+    except Exception as e:
+        _cli_debug(f"_terminate_process error: {e}")
 
 
 def _load_session(room_id: str) -> Optional[str]:
@@ -515,9 +526,13 @@ def _run_cli_process(
         errors="replace",
     )
 
-    # プロセスを追跡dictに登録
+    # プロセスを追跡dictに登録（旧プロセスがあればkill）
     with _process_lock:
+        old_process = _active_processes.get(room_id)
         _active_processes[room_id] = process
+    if old_process is not None:
+        _cli_debug(f"Killing orphaned process PID={old_process.pid} before registering new PID={process.pid}")
+        _terminate_process(old_process)
 
     _cli_debug(f"CLI process started: PID={process.pid}")
 
@@ -680,9 +695,10 @@ def _run_cli_process(
                 _update_run_sync(run_id, claude_session_id=session_id_captured)
             _cli_debug(f"System message: session_id={session_id_captured}")
 
-    # プロセスを追跡dictから削除
+    # プロセスを追跡dictから削除（自分のプロセスだけ。新プロセスが既に登録されている場合は触らない）
     with _process_lock:
-        _active_processes.pop(room_id, None)
+        if _active_processes.get(room_id) is process:
+            _active_processes.pop(room_id, None)
 
     return_code = process.wait(timeout=30)
     _cli_debug(f"CLI process exited with code {return_code}")
@@ -694,14 +710,18 @@ def _run_cli_process(
     return result_data
 
 
-def _is_resume_error(result_data: Optional[dict]) -> bool:
-    """resultがセッション再開失敗かどうかを判定する"""
-    if not result_data:
+def _should_retry_without_resume(result_data: Optional[dict], used_resume: bool) -> bool:
+    """resumeを使った実行が失敗し、フレッシュセッションでリトライすべきかを判定する。
+
+    以下のケースでリトライ:
+    - result_dataがNone（CLIがresultを出さずに終了）
+    - is_error==True（"No conversation found"を含む任意のエラー）
+    """
+    if not used_resume:
         return False
-    if not result_data.get("is_error"):
-        return False
-    errors = result_data.get("errors", [])
-    return any("No conversation found" in e for e in errors)
+    if result_data is None:
+        return True
+    return result_data.get("is_error", False)
 
 
 def _run_cli_in_thread(
@@ -714,6 +734,7 @@ def _run_cli_in_thread(
     is_planning: bool = False,
     project_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    cancel_event: Optional[threading.Event] = None,
 ):
     """
     別スレッドでCLI subprocessを実行する。
@@ -766,9 +787,9 @@ def _run_cli_in_thread(
         )
 
         # セッション再開失敗 → セッションをクリアしてリトライ
-        if _is_resume_error(result_data) and resume_session_id:
-            errors = result_data.get("errors", [])
-            _cli_debug(f"Resume failed: {errors}. Clearing session and retrying without resume.")
+        if _should_retry_without_resume(result_data, used_resume=resume_session_id is not None):
+            errors = result_data.get("errors", []) if result_data else []
+            _cli_debug(f"Resume failed (result_data={'None' if result_data is None else 'error'}): {errors}. Clearing session and retrying without resume.")
 
             # 古いセッションIDをクリア
             _cli_sessions.pop(room_id, None)
@@ -815,8 +836,19 @@ def _run_cli_in_thread(
             if is_error and not text and errors:
                 text = f"CLIエラー: {'; '.join(errors)}"
 
-            # Queue-first: フロントエンドを即座にアンブロックしてからDB保存。
-            # Supabase接続不安定時にDB保存がハングしてもUIに影響しない。
+            # DB-first: CLIスレッドからAI応答を保存（SSE断線対策）
+            # SSEハンドラに依存せず、ここで確実にDBに書き込む
+            cli_saved = False
+            if text.strip():
+                reasoning = result_data.get("reasoning_steps", [])
+                reasoning_full_list = result_data.get("reasoning_full", [])
+                cli_saved = _save_ai_message_sync(
+                    room_id, text, reasoning, reasoning_full_list
+                )
+                _cli_debug(f"AI message DB save: cli_saved={cli_saved}, text_len={len(text)}")
+
+            # Queue-first: フロントエンドを即座にアンブロックする。
+            # cli_saved=True の場合、SSEハンドラはDB保存をスキップしてクライアント送信のみ行う。
             event_queue.put({
                 "type": "result",
                 "text": text,
@@ -825,11 +857,8 @@ def _run_cli_in_thread(
                 "turns": result_data.get("num_turns", 0),
                 "duration_ms": result_data.get("duration_ms", 0),
                 "is_error": is_error,
-                "cli_saved": False,
+                "cli_saved": cli_saved,
             })
-
-            # AI応答のDB保存はSSEハンドラが行う（cli_saved=False）。
-            # ここではdoneイベントとrun状態のみ保存する。
             if project_id:
                 _save_execution_event_sync(
                     room_id,
@@ -889,9 +918,13 @@ def _run_cli_in_thread(
         _cli_debug("Sending sentinel")
         event_queue.put(_SENTINEL)
         # CLIスレッド終了時にCancellationRegistryを確実に解除
+        # cancel_eventが渡されている場合は自分のEventだけ解除（新スレッドのEventを消さない）
         try:
             from app.services.cancellation import CancellationRegistry
-            CancellationRegistry.unregister(room_id)
+            if cancel_event is not None:
+                CancellationRegistry.unregister_if_match(room_id, cancel_event)
+            else:
+                CancellationRegistry.unregister(room_id)
         except Exception:
             pass
 
@@ -936,6 +969,10 @@ async def process_message_cli(
     mcp_config_path = _build_mcp_config(room_id, user_id, credentials, is_planning=is_planning)
     resume_session_id = _load_session(room_id)
 
+    # cancel_eventの参照を取得（旧スレッドが新スレッドのEventを消さないようにする）
+    from app.services.cancellation import CancellationRegistry
+    cancel_event = CancellationRegistry.get_event(room_id)
+
     # CLI を別スレッドで実行
     event_q = thread_queue.Queue()
     cli_thread = threading.Thread(
@@ -950,6 +987,7 @@ async def process_message_cli(
             is_planning,
             project_id,
             run_id,
+            cancel_event,
         ),
         daemon=True,
     )

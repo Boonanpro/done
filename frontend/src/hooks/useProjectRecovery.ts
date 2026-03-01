@@ -38,7 +38,8 @@ export function useProjectRecovery({ projectId, roomId }: UseProjectRecoveryOpti
 
   const invalidateRecoveryQueries = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ['session-active', roomId] });
-    queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+    // project-messages は refetch で即座に再取得（SSE断線で見逃したメッセージを確実に表示）
+    queryClient.refetchQueries({ queryKey: ['project-messages', roomId] });
     queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
     queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
     queryClient.invalidateQueries({ queryKey: ['project', projectId] });

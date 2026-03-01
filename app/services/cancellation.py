@@ -71,11 +71,25 @@ class CancellationRegistry:
             return False
 
     @classmethod
+    def get_event(cls, session_id: str) -> Optional[threading.Event]:
+        """現在のEventオブジェクト参照を返す"""
+        with cls._lock:
+            return cls._instances.get(session_id)
+
+    @classmethod
     def unregister(cls, session_id: str):
         """セッションを登録解除"""
         with cls._lock:
             cls._instances.pop(session_id, None)
             cls._started_at.pop(session_id, None)
+
+    @classmethod
+    def unregister_if_match(cls, session_id: str, event: threading.Event):
+        """保持中のEventと一致する場合のみ登録解除（旧スレッドが新スレッドのEventを消さないようにする）"""
+        with cls._lock:
+            if cls._instances.get(session_id) is event:
+                cls._instances.pop(session_id, None)
+                cls._started_at.pop(session_id, None)
 
     @classmethod
     def clear_all(cls):
