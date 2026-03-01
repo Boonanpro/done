@@ -230,7 +230,7 @@ function parseHumanContent(content: string): { images: string[]; text: string } 
   return { images, text };
 }
 
-const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageResponse }) {
+const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: MessageResponse; onImageClick?: (url: string) => void }) {
   if (msg.sender_type !== 'human') {
     const proposalMatch = (msg.content || '').match(/```proposal\n([^\n]+)\n```/);
     if (proposalMatch) {
@@ -255,7 +255,13 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: MessageRespons
       <div className="flex justify-end">
         <div className="max-w-[85%] flex flex-col items-end gap-1">
           {images.map((url, i) => (
-            <img key={i} src={url} alt="添付画像" className="rounded-xl max-w-full max-h-64 object-contain border border-primary/20" />
+            <img
+              key={i}
+              src={url}
+              alt="添付画像"
+              className="rounded-xl max-w-full max-h-64 object-contain border border-primary/20 cursor-zoom-in"
+              onClick={() => onImageClick?.(url)}
+            />
           ))}
           {text && (
             <div className="rounded-lg bg-primary px-3 py-2 text-sm leading-relaxed text-primary-foreground md:text-xs">
@@ -635,6 +641,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const selectProject = useProjectStore((s) => s.selectProject);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [proposalCollapsed, setProposalCollapsed] = useState(true);
+  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const { warmupMode } = useRecoveryState(projectId);
 
   const { data: project, isLoading } = useQuery({
@@ -978,7 +985,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                   );
                 }
 
-                return <MessageBubble key={item.msg.id} msg={item.msg} />;
+                return <MessageBubble key={item.msg.id} msg={item.msg} onImageClick={setLightboxImage} />;
               });
             })()}
             <div ref={messagesEndRef} />
@@ -1023,6 +1030,26 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       {project?.room_id ? (
         <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} />
       ) : null}
+
+      {lightboxImage && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
+          onClick={() => setLightboxImage(null)}
+        >
+          <div
+            className="overflow-auto max-h-screen max-w-screen-xl p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              src={lightboxImage}
+              alt="拡大表示"
+              className="max-w-full max-h-[90vh] object-contain rounded-lg cursor-zoom-out"
+              style={{ touchAction: 'pan-x pan-y pinch-zoom' }}
+              onClick={() => setLightboxImage(null)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
