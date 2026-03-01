@@ -280,6 +280,8 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
   );
 });
 
+type DanSkill = { name: string; display_name: string; description: string };
+
 function ChatInput({
   projectId,
   roomId,
@@ -294,6 +296,10 @@ function ChatInput({
   const [message, setMessage] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
   const [isUploading, setIsUploading] = useState(false);
+  const [showSkillSuggestions, setShowSkillSuggestions] = useState(false);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const skillsCacheRef = useRef<DanSkill[] | null>(null);
+  const [skills, setSkills] = useState<DanSkill[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -306,6 +312,49 @@ function ChatInput({
   const { resetRecovery, setInterrupted, setWarmupMode } = useRecoveryActions();
 
   useProjectRecovery({ projectId, roomId });
+
+  // Skill suggestions for slash commands
+  const fetchSkills = useCallback(async () => {
+    if (skillsCacheRef.current) {
+      setSkills(skillsCacheRef.current);
+      return;
+    }
+    try {
+      const res = await fetch(`${window.location.origin}/api/v1/chat/dan/skills`, {
+        credentials: 'include',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        skillsCacheRef.current = data.skills || [];
+        setSkills(skillsCacheRef.current!);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const skillFilter = message.startsWith('/') ? message.slice(1).toLowerCase() : '';
+  const filteredSkills = useMemo(
+    () =>
+      showSkillSuggestions
+        ? skills.filter(
+            (s) =>
+              s.name.toLowerCase().includes(skillFilter) ||
+              s.display_name.toLowerCase().includes(skillFilter)
+          )
+        : [],
+    [showSkillSuggestions, skills, skillFilter]
+  );
+
+  const insertSkill = useCallback(
+    (skill: DanSkill) => {
+      setMessage(`/${skill.name} `);
+      setShowSkillSuggestions(false);
+      setSelectedIndex(0);
+      textareaRef.current?.focus();
+    },
+    []
+  );
 
   const syncActiveStatus = useCallback(
     (active: boolean) => {
@@ -459,21 +508,34 @@ function ChatInput({
             invalidateProjectQueries();
 
             if (!titleGeneratedRef.current) {
-              titleGeneratedRef.current = true;
               const cached = queryClient.getQueryData<{ title?: string }>(['project', projectId]);
-              api.projects
-                .suggestTitle(roomId)
-                .then(({ title }) => {
-                  if (title && title !== cached?.title) {
-                    return api.projects.update(projectId, { title });
-                  }
-                  return undefined;
-                })
-                .then(() => {
-                  queryClient.invalidateQueries({ queryKey: ['project', projectId] });
-                  queryClient.invalidateQueries({ queryKey: ['projects'] });
-                })
-                .catch(() => {});
+              const currentTitle = cached?.title ?? '';
+              const isDefaultTitle = !currentTitle || currentTitle === '新しいプロジェクト';
+
+              // すでにカスタムタイトルがある場合は以降チェック不要
+              if (!isDefaultTitle) {
+                titleGeneratedRef.current = true;
+              } else {
+                // 3往復（=6件）以上になってからタイトルを生成・固定する
+                const msgs = queryClient.getQueryData<{ messages: unknown[] }>(['project-messages', roomId]);
+                const msgCount = msgs?.messages?.length ?? 0;
+                if (msgCount >= 6) {
+                  titleGeneratedRef.current = true;
+                  api.projects
+                    .suggestTitle(roomId)
+                    .then(({ title }) => {
+                      if (title && title !== '新しいプロジェクト') {
+                        return api.projects.update(projectId, { title });
+                      }
+                      return undefined;
+                    })
+                    .then(() => {
+                      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+                      queryClient.invalidateQueries({ queryKey: ['projects'] });
+                    })
+                    .catch(() => {});
+                }
+              }
             }
           },
           onError: (error) => {
@@ -557,13 +619,35 @@ function ChatInput({
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
+      if (showSkillSuggestions && filteredSkills.length > 0) {
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          setSelectedIndex((prev) => (prev + 1) % filteredSkills.length);
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          setSelectedIndex((prev) => (prev - 1 + filteredSkills.length) % filteredSkills.length);
+          return;
+        }
+        if (event.key === 'Enter' || event.key === 'Tab') {
+          event.preventDefault();
+          insertSkill(filteredSkills[selectedIndex]);
+          return;
+        }
+      }
+      if (event.key === 'Escape' && showSkillSuggestions) {
+        event.preventDefault();
+        setShowSkillSuggestions(false);
+        return;
+      }
       const isMobile = window.matchMedia('(max-width: 767px)').matches;
       if (event.key === 'Enter' && !event.shiftKey && !isMobile) {
         event.preventDefault();
         handleSendMessage();
       }
     },
-    [handleSendMessage]
+    [handleSendMessage, showSkillSuggestions, filteredSkills, selectedIndex, insertSkill]
   );
 
   useEffect(() => {
@@ -581,7 +665,32 @@ function ChatInput({
   }, [handleCancel, isBusy]);
 
   return (
-    <div className="shrink-0 border-t border-border p-3">
+    <div className="relative shrink-0 border-t border-border p-3">
+      {showSkillSuggestions && filteredSkills.length > 0 && (
+        <div className="absolute bottom-full left-3 right-3 mb-1 max-h-[200px] overflow-y-auto rounded-lg border border-border bg-popover shadow-lg z-50">
+          {filteredSkills.map((skill, idx) => (
+            <button
+              key={skill.name}
+              ref={(el) => {
+                if (idx === selectedIndex && el) {
+                  el.scrollIntoView({ block: 'nearest' });
+                }
+              }}
+              className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent md:text-xs ${
+                idx === selectedIndex ? 'bg-accent' : ''
+              }`}
+              onMouseEnter={() => setSelectedIndex(idx)}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                insertSkill(skill);
+              }}
+            >
+              <span className="font-medium text-foreground shrink-0">/{skill.name}</span>
+              <span className="text-muted-foreground truncate">{skill.description}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {attachedFiles.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-2">
           {attachedFiles.map((file) => {
@@ -613,7 +722,17 @@ function ChatInput({
         <textarea
           ref={textareaRef}
           value={message}
-          onChange={(event) => setMessage(event.target.value)}
+          onChange={(event) => {
+            const val = event.target.value;
+            setMessage(val);
+            if (val.startsWith('/') && !val.includes(' ')) {
+              setShowSkillSuggestions(true);
+              setSelectedIndex(0);
+              fetchSkills();
+            } else {
+              setShowSkillSuggestions(false);
+            }
+          }}
           onKeyDown={handleKeyDown}
           placeholder="メッセージを入力..."
           rows={1}

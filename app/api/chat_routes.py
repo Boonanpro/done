@@ -9,6 +9,7 @@ from typing import Optional
 from datetime import datetime, timezone
 import json
 import logging
+import re
 from pathlib import Path
 
 from app.config import settings
@@ -82,6 +83,21 @@ def _is_replan_request(text: str) -> bool:
         return False
     lowered = text.lower()
     return any(keyword in text or keyword in lowered for keyword in REPLAN_KEYWORDS)
+
+
+def _extract_skill_command(text: str) -> tuple:
+    """
+    メッセージ先頭の /skill-name を検出。
+    Returns: (skill_name or None, remaining_content)
+    """
+    if not text or not text.startswith("/"):
+        return None, text
+    match = re.match(r'^/([a-zA-Z0-9_-]+)\s*(.*)', text, re.DOTALL)
+    if not match:
+        return None, text
+    skill_name = match.group(1)
+    remaining = match.group(2).strip()
+    return skill_name, remaining
 
 
 def _compact_text(text: str, limit: int = 220) -> str:
@@ -794,6 +810,19 @@ async def get_dan_messages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/dan/skills")
+async def list_dan_skills(current_user: TokenData = Depends(get_current_user)):
+    """スラッシュコマンド候補用のスキル一覧"""
+    from app.agent.v2.tools import SkillRegistry
+    skills = SkillRegistry.list_all()
+    return {
+        "skills": [
+            {"name": s.name, "display_name": s.display_name, "description": s.description}
+            for s in skills
+        ]
+    }
+
+
 @router.post("/dan/messages/stream")
 async def send_dan_message_stream(
     request: MessageSendRequest,
@@ -824,6 +853,17 @@ async def send_dan_message_stream(
         result_saved = False  # AI回答DB保存済みフラグ
         cli_saved_ai_message = False  # CLIスレッドがAI応答をDB保存済みか
         replan_requested = _is_replan_request(request.content)
+        # スラッシュコマンド検出: /skill-name でスキルを明示起動
+        skill_name, skill_remaining = _extract_skill_command(request.content)
+        skill_injection = None
+        if skill_name:
+            from app.agent.v2.tools import SkillRegistry
+            skill = SkillRegistry.get(skill_name)
+            if skill:
+                skill_content = skill.markdown_content or skill.raw_content or ""
+                skill_injection = f"## スキル指示: {skill.display_name}\n\n以下のスキルのルールに必ず従って作業すること。\n\n{skill_content}"
+        # スキル検出時はコンテンツから /skill-name を除去
+        effective_content = skill_remaining if skill_injection else request.content
         run_id = None
 
         async def _save_project_event_safe(project_service, **kwargs):
@@ -1086,13 +1126,14 @@ async def send_dan_message_stream(
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
-                    content=_build_content_with_images(request.content, request.image_urls or []),
+                    content=_build_content_with_images(effective_content, request.image_urls or []),
                     project_title=project_info.get("title", ""),
                     project_description=project_info.get("description", ""),
                     project_status=project_info.get("status", "in_progress"),
                     user_messages=user_messages_for_cli,
                     project_id=project_info.get("id"),
                     run_id=run_id,
+                    skill_injection=skill_injection,
                 ):
                     if event["type"] == "keepalive":
                         # SSEコメント: クライアントのEventSourceパーサーは無視するが接続は維持される
@@ -1280,10 +1321,11 @@ async def send_dan_message_stream(
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
-                    content=_build_content_with_images(request.content, request.image_urls or []),
+                    content=_build_content_with_images(effective_content, request.image_urls or []),
                     project_title="",
                     project_description="",
                     project_status="in_progress",
+                    skill_injection=skill_injection,
                 ):
                     if event["type"] == "keepalive":
                         yield ": keepalive\n\n"
