@@ -815,14 +815,21 @@ def _run_cli_in_thread(
             if is_error and not text and errors:
                 text = f"CLIエラー: {'; '.join(errors)}"
 
-            # DB-first: AI応答とdoneイベントをキュー投入前に保存
-            cli_saved = False
-            if text and not is_error and project_id:
-                cli_saved = _save_ai_message_sync(
-                    room_id, text,
-                    reasoning_steps=result_data.get("reasoning_steps", []),
-                    reasoning_full=result_data.get("reasoning_full", []),
-                )
+            # Queue-first: フロントエンドを即座にアンブロックしてからDB保存。
+            # Supabase接続不安定時にDB保存がハングしてもUIに影響しない。
+            event_queue.put({
+                "type": "result",
+                "text": text,
+                "session_id": session_id,
+                "cost": result_data.get("cost", 0),
+                "turns": result_data.get("num_turns", 0),
+                "duration_ms": result_data.get("duration_ms", 0),
+                "is_error": is_error,
+                "cli_saved": False,
+            })
+
+            # AI応答のDB保存はSSEハンドラが行う（cli_saved=False）。
+            # ここではdoneイベントとrun状態のみ保存する。
             if project_id:
                 _save_execution_event_sync(
                     room_id,
@@ -832,17 +839,6 @@ def _run_cli_in_thread(
                     content="completed",
                 )
             _update_run_sync(run_id, state="failed" if is_error else "completed")
-
-            event_queue.put({
-                "type": "result",
-                "text": text,
-                "session_id": session_id,
-                "cost": result_data.get("cost", 0),
-                "turns": result_data.get("num_turns", 0),
-                "duration_ms": result_data.get("duration_ms", 0),
-                "is_error": is_error,
-                "cli_saved": cli_saved,
-            })
 
     except Exception as e:
         import traceback
