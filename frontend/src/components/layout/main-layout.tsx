@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Menu, FolderOpen } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { ProjectListPanel } from './project-list-panel';
 import { ProjectChatPanel } from './project-chat-panel';
 import { NotificationPanel } from '@/components/notification/notification-panel';
@@ -19,9 +20,33 @@ export function MainLayout({
 }: MainLayoutProps) {
   const isMobile = useIsMobile();
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(280);
+  const [isResizing, setIsResizing] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [hasOpenedMobileSidebar, setHasOpenedMobileSidebar] = useState(false);
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
+
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+    setIsResizing(true);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const handleMouseMove = (e: MouseEvent) => {
+      setSidebarWidth(Math.max(180, Math.min(600, startWidth + e.clientX - startX)));
+    };
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  }, [sidebarWidth]);
 
   // When switching from desktop to mobile, reset sidebar state once.
   useEffect(() => {
@@ -80,19 +105,30 @@ export function MainLayout({
   }
 
   // ===== Desktop Layout =====
-  const sidebarWidth = isCollapsed ? '64px' : '280px';
+  const effectiveWidth = isCollapsed ? 64 : sidebarWidth;
 
   return (
     <div
-      className="grid h-dvh overflow-hidden bg-background transition-[grid-template-columns] duration-300 ease-in-out"
-      style={{
-        gridTemplateColumns: `${sidebarWidth} 1fr`,
-      }}
+      className={cn(
+        'relative grid h-dvh overflow-hidden bg-background',
+        !isResizing && 'transition-[grid-template-columns] duration-300 ease-in-out'
+      )}
+      style={{ gridTemplateColumns: `${effectiveWidth}px 1fr` }}
     >
       <ProjectListPanel
         isCollapsed={isCollapsed}
         onToggleCollapse={() => setIsCollapsed(!isCollapsed)}
       />
+      {/* Resize handle */}
+      {!isCollapsed && (
+        <div
+          className="absolute top-0 h-full z-10 w-3 -translate-x-1/2 cursor-col-resize group"
+          style={{ left: effectiveWidth }}
+          onMouseDown={handleResizeStart}
+        >
+          <div className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 group-hover:bg-primary/40 transition-colors" />
+        </div>
+      )}
       <main className="flex flex-col overflow-hidden relative">
         {selectedProjectId ? (
           <ProjectChatPanel projectId={selectedProjectId} />

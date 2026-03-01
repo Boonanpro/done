@@ -196,20 +196,22 @@ export function ProjectListPanel({
             )}
           </AnimatePresence>
 
-          <div className="ml-auto flex items-center gap-1">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent"
-              onClick={handleInstantCreate}
-              disabled={createProjectMutation.isPending}
-            >
-              {createProjectMutation.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Plus className="h-4 w-4" />
-              )}
-            </Button>
+          <div className={cn("flex items-center gap-1", isCollapsed ? "mx-auto" : "ml-auto")}>
+            {!isCollapsed && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent"
+                onClick={handleInstantCreate}
+                disabled={createProjectMutation.isPending}
+              >
+                {createProjectMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Plus className="h-4 w-4" />
+                )}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"
