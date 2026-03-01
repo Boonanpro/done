@@ -242,15 +242,13 @@ async def proposal_action(
                 project_id, current_user.user_id, status="in_progress"
             )
 
-            # SDK実行をバックグラウンドで開始
-            import asyncio
-            task = asyncio.create_task(_start_project_execution(
-                project=project,
-                proposal=result,
-                user_id=current_user.user_id,
-            ))
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
+            # awaiting_approval の run を completed にして、
+            # 次のチャットメッセージで supersede されないようにする
+            from app.services.run_service import RunService
+            run_service = RunService()
+            current_run = await run_service.get_current_run(project_id)
+            if current_run and current_run.get("state") == "awaiting_approval":
+                await run_service.update_run(current_run["id"], state="completed")
     else:
         result = await service.reject_proposal(proposal_id, project_id)
 

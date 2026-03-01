@@ -4,7 +4,7 @@ import { useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Plus, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, MessageCircle, X, Briefcase, FileEdit } from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Plus, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, MessageCircle, X, Briefcase, FileEdit, Clapperboard } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -64,6 +64,12 @@ const businessItems = [
     href: '/notes',
     icon: FileEdit,
     description: 'note記事の下書き・投稿管理',
+  },
+  {
+    title: 'Studio',
+    href: '/studio',
+    icon: Clapperboard,
+    description: 'AI Vlog 制作ダッシュボード',
   },
 ];
 

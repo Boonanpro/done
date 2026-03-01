@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     # EX Reservation (SmartEX) Credentials
     EX_MEMBER_ID: str = ""
     EX_PASSWORD: str = ""
+
+    # Studio - fal.ai (Kling O3 video generation)
+    FAL_API_KEY: str = ""
     
     # Properties for Gmail settings
     @property

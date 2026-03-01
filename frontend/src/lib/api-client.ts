@@ -449,6 +449,66 @@ export interface FileUploadResponse {
   created_at: string;
 }
 
+// ==================== Studio Types ====================
+
+export interface StudioChannel {
+  id: string;
+  name: string;
+  description?: string;
+  concept?: string;
+  character_name?: string;
+  character_description?: string;
+  character_image_url?: string;
+  youtube_channel_id?: string;
+  youtube_channel_url?: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StudioEpisode {
+  id: string;
+  channel_id: string;
+  episode_number?: number;
+  title: string;
+  description?: string;
+  script?: string;
+  script_messages: Array<{ role: string; content: string }>;
+  status: string;
+  youtube_video_id?: string;
+  youtube_url?: string;
+  scheduled_at?: string;
+  published_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StudioVoiceTrack {
+  id: string;
+  episode_id: string;
+  label?: string;
+  text_content: string;
+  voice_id?: string;
+  file_url?: string;
+  duration_seconds?: number;
+  status: string;
+  created_at: string;
+}
+
+export interface StudioVideoClip {
+  id: string;
+  episode_id: string;
+  label?: string;
+  prompt: string;
+  file_url?: string;
+  thumbnail_url?: string;
+  kling_task_id?: string;
+  kling_status: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
 // ==================== API Error Class ====================
 
 export class ApiError extends Error {
@@ -1487,5 +1547,47 @@ export const api = {
   // File upload endpoint
   files: {
     upload: (file: File) => uploadFile('/files/upload', file),
+  },
+
+  // Studio - AI Vlog Production
+  studio: {
+    // Channels
+    listChannels: () => request<StudioChannel[]>('/studio/channels'),
+    createChannel: (data: { name: string; description?: string; concept?: string; character_name?: string; character_description?: string }) =>
+      request<StudioChannel>('/studio/channels', { method: 'POST', body: JSON.stringify(data) }),
+    updateChannel: (id: string, data: Partial<StudioChannel>) =>
+      request<StudioChannel>(`/studio/channels/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+    // Episodes
+    listEpisodes: (channelId: string) => request<StudioEpisode[]>(`/studio/channels/${channelId}/episodes`),
+    createEpisode: (data: { channel_id: string; title: string; episode_number?: number; description?: string }) =>
+      request<StudioEpisode>('/studio/episodes', { method: 'POST', body: JSON.stringify(data) }),
+    getEpisode: (episodeId: string) => request<StudioEpisode>(`/studio/episodes/${episodeId}`),
+    updateEpisode: (episodeId: string, data: Partial<StudioEpisode>) =>
+      request<StudioEpisode>(`/studio/episodes/${episodeId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+    // Script chat
+    chatScript: (episodeId: string, message: string) =>
+      request<{ response: string }>('/studio/script/chat', {
+        method: 'POST',
+        body: JSON.stringify({ episode_id: episodeId, message }),
+      }),
+
+    // Voice
+    generateVoice: (episodeId: string, text: string, label?: string, voiceId?: string) =>
+      request<StudioVoiceTrack>('/studio/voice/generate', {
+        method: 'POST',
+        body: JSON.stringify({ episode_id: episodeId, text, label, voice_id: voiceId }),
+      }),
+    listVoiceTracks: (episodeId: string) => request<StudioVoiceTrack[]>(`/studio/episodes/${episodeId}/voice`),
+
+    // Video
+    generateVideo: (episodeId: string, prompt: string, duration?: number, mode?: string, label?: string) =>
+      request<StudioVideoClip>('/studio/video/generate', {
+        method: 'POST',
+        body: JSON.stringify({ episode_id: episodeId, prompt, duration: duration ?? 5, mode: mode ?? 'std', label }),
+      }),
+    checkVideoStatus: (clipId: string) => request<StudioVideoClip>(`/studio/video/${clipId}/status`),
+    listVideoClips: (episodeId: string) => request<StudioVideoClip[]>(`/studio/episodes/${episodeId}/clips`),
   },
 };

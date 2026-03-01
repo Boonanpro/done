@@ -31,6 +31,7 @@ from app.api.gemini_voice_routes import router as gemini_voice_router
 from app.api.project_routes import router as project_router
 from app.api.note_routes import router as note_router
 from app.api.file_routes import router as file_router
+from app.api.studio_routes import router as studio_router
 
 
 # v3: Executorは不使用（汎用ツールで処理）
@@ -93,6 +94,7 @@ app.include_router(gemini_voice_router)
 app.include_router(project_router, prefix="/api/v1")
 app.include_router(note_router, prefix="/api/v1")
 app.include_router(file_router, prefix="/api/v1/files")
+app.include_router(studio_router, prefix="/api/v1")
 
 
 
