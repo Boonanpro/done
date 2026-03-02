@@ -1488,6 +1488,21 @@ async def get_dan_sessions(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/dan/sessions/active-list")
+async def list_active_sessions(
+    current_user: TokenData = Depends(get_current_user),
+):
+    """
+    全アクティブセッション一覧（ドレインパターン用）
+
+    self-devスキルがデプロイ前に他セッションの実行状態を確認するために使用。
+    """
+    from app.agent.cli_runner import _active_processes, _process_lock
+    with _process_lock:
+        active_ids = list(_active_processes.keys())
+    return {"active_session_ids": active_ids}
+
+
 @router.post("/dan/sessions", response_model=SessionCreateResponse)
 async def create_dan_session(
     current_user: TokenData = Depends(get_current_user),
