@@ -1150,14 +1150,17 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
                                     const lang = className?.replace('language-', '');
                                     if (lang === 'proposal') {
                                       const filename = String(children).trim();
+                                      const url = `/api/v1/proposals/${filename}`;
                                       return (
-                                        <iframe
-                                          src={`/api/v1/proposals/${filename}`}
-                                          className="w-full rounded-xl border border-border mt-2"
-                                          style={{ height: '600px' }}
-                                          sandbox="allow-scripts allow-same-origin"
-                                          title={filename}
-                                        />
+                                        <a
+                                          href={url}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="inline-flex items-center gap-2 px-4 py-2 mt-2 rounded-lg bg-accent/10 text-accent hover:bg-accent/20 transition-colors text-sm font-medium"
+                                        >
+                                          📄 {filename}
+                                          <span className="text-xs opacity-60">（別タブで開く）</span>
+                                        </a>
                                       );
                                     }
                                     return <code className={className}>{children}</code>;
