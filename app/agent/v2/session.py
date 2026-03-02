@@ -55,16 +55,18 @@ def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
 
 
 class State(str, Enum):
-    """エージェントの状態"""
-    INTAKE = "intake"      # 要望を理解
-    PLAN = "plan"          # 計画を立てる
-    RESEARCH = "research"  # 情報収集
-    PROPOSE = "propose"    # 提案
-    CONFIRM = "confirm"    # 承認確認
-    EXECUTE = "execute"    # 実行
-    VERIFY = "verify"      # 結果確認
-    REPORT = "report"      # 報告
-    CHAT = "chat"          # 雑談モード
+    """Legacy: 状態遷移は未使用。DB/API互換のため残置。
+    current_stateは常にINTAKEのまま変わらない。
+    将来状態管理を再設計する際にこのEnumごと置き換えること。"""
+    INTAKE = "intake"
+    PLAN = "plan"
+    RESEARCH = "research"
+    PROPOSE = "propose"
+    CONFIRM = "confirm"
+    EXECUTE = "execute"
+    VERIFY = "verify"
+    REPORT = "report"
+    CHAT = "chat"
 
 
 @dataclass
@@ -432,10 +434,6 @@ class Session:
         """コンテキストから値を取得"""
         return self.context.get(key, default)
 
-    def transition_to(self, new_state: State) -> None:
-        """状態を遷移"""
-        self.current_state = new_state
-        self.updated_at = datetime.now(timezone.utc)
 
     def to_dict(self) -> Dict[str, Any]:
         """辞書に変換（永続化用）"""
