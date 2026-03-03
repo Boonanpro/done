@@ -336,9 +336,6 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
         CHECK_SKILL_TOOL,
-        READ_WORKSPACE_TOOL,
-        UPDATE_WORKSPACE_TOOL,
-        SEARCH_MEMORY_TOOL,
         READ_FILE_TOOL,
         WRITE_FILE_TOOL,
         EDIT_FILE_TOOL,
@@ -561,97 +558,7 @@ CHECK_SKILL_TOOL = {
     }
 }
 
-# ============================================
-# ワークスペース読み書きツール（自己学習用）
-# ============================================
-
 WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
-
-READ_WORKSPACE_TOOL = {
-    "name": "read_workspace",
-    "description": """ワークスペースファイルを読み取る。
-自分のルール、ユーザー情報、記憶を確認する時に使用。
-
-読み取り可能なファイル:
-- RULES.md: 運用ルール
-- USER.md: ユーザー情報と好み
-- MEMORY.md: 長期記憶
-- memory/YYYY-MM-DD.md: 日付別の会話ログ""",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "filename": {
-                "type": "string",
-                "description": "読み取るファイル名（例: RULES.md, memory/2026-02-07.md）"
-            }
-        },
-        "required": ["filename"]
-    }
-}
-
-UPDATE_WORKSPACE_TOOL = {
-    "name": "update_workspace",
-    "description": """ワークスペースファイルを更新する。
-学んだルール、ユーザーの好み、重要な情報を保存する時に使用。
-
-更新可能なファイル:
-- RULES.md: 新しいルールを追加、既存ルールを改善
-- USER.md: ユーザーの好みを記録
-- MEMORY.md: 重要な情報を保存
-- memory/YYYY-MM-DD.md: 日付別の会話ログ
-
-使用例:
-- ユーザーが「簡潔に答えて」と言った → USER.md に追記
-- 特定の操作がうまくいかなかった → RULES.md に追記
-- 重要な会話の内容を忘れたくない → MEMORY.md に追記
-- 今日の会話の要約を保存 → memory/2026-02-06.md に追記""",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "filename": {
-                "type": "string",
-                "description": "更新するファイル名（例: USER.md, memory/2026-02-06.md）"
-            },
-            "content": {
-                "type": "string",
-                "description": "新しいファイル内容（全体を置き換え）"
-            },
-            "append": {
-                "type": "string",
-                "description": "追記する内容（既存内容の末尾に追加）。content と同時に指定しない"
-            }
-        },
-        "required": ["filename"]
-    }
-}
-
-SEARCH_MEMORY_TOOL = {
-    "name": "search_memory",
-    "description": """過去の記憶を検索する（ハイブリッド検索: セマンティック + キーワード）。
-
-「あの件どうなった？」「前に話したこと」など、過去の会話や保存した情報を探す時に使用。
-MEMORY.md、USER.md、memory/*.md を横断検索する。
-
-使用例:
-- 「Amazon 買い物」で検索 → 過去のAmazon関連の会話を発見
-- 「好きな食べ物」で検索 → ユーザーの好みを発見
-- 「2月1日」で検索 → その日の会話ログを発見""",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "検索クエリ（自然言語でOK）"
-            },
-            "max_results": {
-                "type": "integer",
-                "description": "最大結果数（デフォルト: 6）",
-                "default": 6
-            }
-        },
-        "required": ["query"]
-    }
-}
 
 # ============================================
 # コード実行ツール
@@ -808,15 +715,6 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "deep_research":
         return ("_deep_research", "research")
-
-    if tool_name == "read_workspace":
-        return ("_read_workspace", "read")
-
-    if tool_name == "update_workspace":
-        return ("_update_workspace", "update")
-
-    if tool_name == "search_memory":
-        return ("_search_memory", "search")
 
     if tool_name == "read_file":
         return ("_read_file", "read")
@@ -1520,114 +1418,6 @@ async def execute_tool(
     skill_name = tool_call["skill"]
     action = tool_call["action"]
     params = tool_call["params"]
-
-    # ★★★ ワークスペース読み取り（外部依存なし）★★★
-    if skill_name == "_read_workspace":
-        filename = params.get("filename")
-        if not filename:
-            return {"success": False, "error": "filename が必要です"}
-
-        allowed_root = ["RULES.md", "USER.md", "MEMORY.md", "HEARTBEAT_PROMPT.md"]
-        is_memory_file = filename.startswith("memory/") and filename.endswith(".md")
-
-        if filename not in allowed_root and not is_memory_file:
-            return {"success": False, "error": f"許可されていないファイル: {filename}"}
-
-        filepath = WORKSPACE_DIR / filename
-        if not filepath.exists():
-            return {"success": False, "error": f"ファイルが存在しません: {filename}"}
-
-        try:
-            content = filepath.read_text(encoding="utf-8")
-            return {"success": True, "filename": filename, "content": content}
-        except Exception as e:
-            return {"success": False, "error": f"読み取りエラー: {e}"}
-
-    # ★★★ ワークスペース更新（外部依存なし）★★★
-    if skill_name == "_update_workspace":
-        filename = params.get("filename")
-        content = params.get("content")
-        append = params.get("append")
-
-        if not filename:
-            return {"success": False, "error": "filename が必要です"}
-
-        # 許可されたファイル: ルートの.mdファイル または memory/*.md
-        allowed_root_files = ["RULES.md", "USER.md", "MEMORY.md", "HEARTBEAT_PROMPT.md"]
-        is_memory_file = filename.startswith("memory/") and filename.endswith(".md")
-
-        if filename not in allowed_root_files and not is_memory_file:
-            return {"success": False, "error": f"許可されていないファイル: {filename}。更新可能: {allowed_root_files} または memory/*.md"}
-
-        if not content and not append:
-            return {"success": False, "error": "content または append が必要です"}
-
-        if content and append:
-            return {"success": False, "error": "content と append は同時に指定できません"}
-
-        filepath = WORKSPACE_DIR / filename
-
-        try:
-            # memory/ ディレクトリも作成
-            filepath.parent.mkdir(parents=True, exist_ok=True)
-
-            if append:
-                existing = ""
-                if filepath.exists():
-                    existing = filepath.read_text(encoding="utf-8")
-                new_content = existing.rstrip() + "\n\n" + append
-                filepath.write_text(new_content, encoding="utf-8")
-                result = {"success": True, "filename": filename, "action": "appended"}
-            else:
-                filepath.write_text(content, encoding="utf-8")
-                result = {"success": True, "filename": filename, "action": "replaced"}
-
-            # 更新後にインデックスを再構築（非同期で）
-            try:
-                from app.services.memory_service import get_memory_service
-                memory_service = get_memory_service()
-                memory_service.index_file(filepath)
-            except Exception as e:
-                logger.warning(f"Failed to re-index memory file: {e}")
-
-            return result
-        except Exception as e:
-            return {"success": False, "error": f"書き込みエラー: {e}"}
-
-    # ★★★ メモリ検索（ハイブリッド検索）★★★
-    if skill_name == "_search_memory":
-        query = params.get("query")
-        max_results = params.get("max_results", 6)
-
-        if not query:
-            return {"success": False, "error": "query が必要です"}
-
-        try:
-            from app.services.memory_service import get_memory_service
-            memory_service = get_memory_service()
-
-            # 検索前にインデックスを更新（変更があれば）
-            memory_service.index_all()
-
-            results = memory_service.search(query, max_results=max_results)
-
-            if not results:
-                return {
-                    "success": True,
-                    "query": query,
-                    "results": [],
-                    "message": "該当する記憶が見つかりませんでした"
-                }
-
-            return {
-                "success": True,
-                "query": query,
-                "results": results,
-                "message": f"{len(results)}件の記憶が見つかりました"
-            }
-        except Exception as e:
-            logger.exception(f"Memory search failed: {e}")
-            return {"success": False, "error": f"検索エラー: {e}"}
 
     # ★★★ コード実行（外部依存なし）★★★
     if skill_name == "_exec_code":
@@ -2419,6 +2209,12 @@ def format_tool_result(
         pw = result.get('password', '')
         masked_pw = f"{pw[:2]}{'*' * (len(pw) - 2)}" if pw and len(pw) > 2 else '（なし）'
         lines.append(f"パスワード: {masked_pw}")
+        return FormattedToolResult(text="\n".join(lines), images=images)
+
+    # check_skill: manual フィールドにスキル本文が入っている
+    manual = result.get("manual")
+    if manual:
+        lines.append(manual)
         return FormattedToolResult(text="\n".join(lines), images=images)
 
     # bash / read_file / write_file / edit_file: output を直接返す

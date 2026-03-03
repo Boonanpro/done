@@ -60,7 +60,10 @@ class MemoryService:
         if self._openai_client is None:
             if not settings.OPENAI_API_KEY:
                 raise RuntimeError("OPENAI_API_KEY not set")
-            self._openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            self._openai_client = OpenAI(
+                api_key=settings.OPENAI_API_KEY,
+                timeout=10.0,  # 10秒でタイムアウト（無限待ち防止）
+            )
         return self._openai_client
 
     def _get_db(self) -> sqlite3.Connection:

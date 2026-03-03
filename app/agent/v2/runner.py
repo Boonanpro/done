@@ -1060,7 +1060,7 @@ class AgentRunner:
         if text_parts:
             summary = "\n\n".join(text_parts)
 
-        # 要約を日付ファイルに上書き保存（ブートストラップ + search_memory 両方で利用可能）
+        # 要約を日付ファイルに上書き保存（ブートストラップ + Grep検索 両方で利用可能）
         if summary and summary != "会話の要約が生成されませんでした。":
             date_str = datetime.now().strftime("%Y-%m-%d")
             memory_dir = WORKSPACE_DIR / "memory"

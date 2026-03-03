@@ -11,6 +11,20 @@
 ### Available Skills
 {{AVAILABLE_SKILLS}}
 
+### Workspace (メモ・ルール・ユーザー情報)
+自分の記憶・ルール・ユーザー情報は以下のパスにあるMarkdownファイル。
+CLI組込ツール（Read / Write / Edit / Grep）で直接読み書きする。
+
+- `~/.dan/workspace/RULES.md` — 運用ルール
+- `~/.dan/workspace/USER.md` — ユーザーの好み
+- `~/.dan/workspace/MEMORY.md` — 長期記憶
+- `~/.dan/workspace/memory/YYYY-MM-DD.md` — 日付別の会話ログ
+
+操作例:
+- 「覚えて」→ Write/Edit で USER.md や MEMORY.md に追記
+- 「前に話したこと」→ Grep で ~/.dan/workspace/ を検索
+- 自分のルール確認 → Read で RULES.md を読む
+
 ### Skill Usage Policy
 1. Call `check_skill` when a domain-specific flow is likely required.
 2. If no relevant skill exists, proceed with generic tools.
