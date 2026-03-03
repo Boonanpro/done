@@ -713,15 +713,28 @@ def _run_cli_process(
 def _should_retry_without_resume(result_data: Optional[dict], used_resume: bool) -> bool:
     """resumeを使った実行が失敗し、フレッシュセッションでリトライすべきかを判定する。
 
-    以下のケースでリトライ:
-    - result_dataがNone（CLIがresultを出さずに終了）
-    - is_error==True（"No conversation found"を含む任意のエラー）
+    セッションIDを消してリトライするのは「セッション自体が見つからない」場合のみ。
+    ツールのフリーズやMCPクラッシュ（result_data=None, exit code 1）では
+    セッションは無事なので消してはいけない。
     """
     if not used_resume:
         return False
+    # result_dataがNone = CLIがresultを出さずに終了（ツールのハング等）
+    # → セッション自体は正常な可能性が高い。消さない。
     if result_data is None:
-        return True
-    return result_data.get("is_error", False)
+        return False
+    # エラーの場合: セッションが見つからないエラーだけリトライ
+    if result_data.get("is_error", False):
+        errors = result_data.get("errors", [])
+        error_text = " ".join(str(e) for e in errors).lower()
+        result_text = (result_data.get("result_text") or "").lower()
+        combined = error_text + " " + result_text
+        # 「セッションが見つからない」系のエラーのみリトライ
+        if "no conversation found" in combined or "session" in combined and "not found" in combined:
+            return True
+        # その他のエラー（ツール失敗、APIエラー等）→ セッションは消さない
+        return False
+    return False
 
 
 def _run_cli_in_thread(
@@ -941,6 +954,7 @@ async def process_message_cli(
     user_messages: str = "",
     project_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    skill_injection: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Claude CLI経由でメッセージを処理し、分類済みイベントを返す。
@@ -965,6 +979,8 @@ async def process_message_cli(
             user_messages=user_messages,
             latest_user_message=content,
         )
+    if skill_injection:
+        system_prompt += f"\n\n{skill_injection}"
     is_planning = project_status == "planning"
     mcp_config_path = _build_mcp_config(room_id, user_id, credentials, is_planning=is_planning)
     resume_session_id = _load_session(room_id)
