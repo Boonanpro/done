@@ -138,6 +138,16 @@ class MemoryService:
             )
         """)
 
+        # Embedding cache: content_hash → embedding (OpenClaw方式)
+        # 同じ内容のチャンクは1回だけAPIを呼び、キャッシュから再利用する
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+                content_hash TEXT PRIMARY KEY,
+                embedding TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         conn.commit()
 
     def _compute_file_hash(self, content: str) -> str:
@@ -204,8 +214,32 @@ class MemoryService:
         )
         return response.data[0].embedding
 
+    def _get_cached_embedding(self, content_hash: str) -> Optional[List[float]]:
+        """embedding_cacheからキャッシュ済みのembeddingを取得"""
+        conn = self._get_db()
+        row = conn.execute(
+            "SELECT embedding FROM embedding_cache WHERE content_hash = ?",
+            (content_hash,)
+        ).fetchone()
+        if row:
+            return json.loads(row[0])
+        return None
+
+    def _save_cached_embedding(self, content_hash: str, embedding: List[float]):
+        """embeddingをキャッシュに保存"""
+        conn = self._get_db()
+        conn.execute(
+            "INSERT OR REPLACE INTO embedding_cache (content_hash, embedding) VALUES (?, ?)",
+            (content_hash, json.dumps(embedding))
+        )
+
     def index_file(self, file_path: Path) -> int:
-        """Index a single file, returns number of chunks indexed"""
+        """
+        Index a single file with chunk-level deduplication.
+
+        OpenClaw方式: チャンクごとにcontent_hashを比較し、
+        変更があったチャンクだけembedding APIを呼ぶ。
+        """
         if not file_path.exists():
             logger.warning(f"File not found: {file_path}")
             return 0
@@ -226,40 +260,73 @@ class MemoryService:
             logger.debug(f"File unchanged, skipping: {relative_path}")
             return 0
 
-        # Remove old chunks for this file
-        old_chunk_ids = [r[0] for r in conn.execute(
-            "SELECT id FROM chunks WHERE file_path = ?", (relative_path,)
-        ).fetchall()]
+        # 新しいチャンクを生成
+        new_chunks = self._chunk_text(content, relative_path)
+        new_hashes = {chunk['content_hash'] for chunk in new_chunks}
 
-        if old_chunk_ids:
-            conn.execute(f"DELETE FROM chunks WHERE file_path = ?", (relative_path,))
-            for chunk_id in old_chunk_ids:
-                conn.execute("DELETE FROM chunks_vec WHERE chunk_id = ?", (chunk_id,))
+        # 既存チャンクのハッシュ→ID+embeddingの有無を取得
+        existing_rows = conn.execute(
+            """SELECT c.id, c.content_hash, (cv.chunk_id IS NOT NULL) as has_vec
+               FROM chunks c
+               LEFT JOIN chunks_vec cv ON cv.chunk_id = c.id
+               WHERE c.file_path = ?""",
+            (relative_path,)
+        ).fetchall()
+        existing_by_hash = {}
+        for row_id, row_hash, has_vec in existing_rows:
+            existing_by_hash[row_hash] = {"id": row_id, "has_vec": bool(has_vec)}
 
-        # Chunk and index
-        chunks = self._chunk_text(content, relative_path)
-        indexed_count = 0
+        # 不要になったチャンクを削除（新しいチャンク群に含まれないもの）
+        for old_hash, info in existing_by_hash.items():
+            if old_hash not in new_hashes:
+                conn.execute("DELETE FROM chunks WHERE id = ?", (info["id"],))
+                conn.execute("DELETE FROM chunks_vec WHERE chunk_id = ?", (info["id"],))
 
-        for chunk in chunks:
-            # Insert chunk
-            cursor = conn.execute(
-                """INSERT INTO chunks (file_path, content, start_line, end_line, content_hash)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (chunk['file_path'], chunk['content'], chunk['start_line'],
-                 chunk['end_line'], chunk['content_hash'])
-            )
-            chunk_id = cursor.lastrowid
+        # 新しいチャンクを処理
+        api_calls = 0
+        cache_hits = 0
+        skipped = 0
 
-            # Get embedding and insert
+        for chunk in new_chunks:
+            c_hash = chunk['content_hash']
+
+            # 既存チャンクにハッシュが一致 + embeddingもある → スキップ
+            if c_hash in existing_by_hash and existing_by_hash[c_hash]["has_vec"]:
+                skipped += 1
+                continue
+
+            # 既存チャンクにハッシュが一致するがembeddingがない → embeddingだけ追加
+            if c_hash in existing_by_hash:
+                chunk_id = existing_by_hash[c_hash]["id"]
+            else:
+                # 新規チャンク → INSERT
+                cursor = conn.execute(
+                    """INSERT OR REPLACE INTO chunks (file_path, content, start_line, end_line, content_hash)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (chunk['file_path'], chunk['content'], chunk['start_line'],
+                     chunk['end_line'], c_hash)
+                )
+                chunk_id = cursor.lastrowid
+
+            # embedding: キャッシュ優先 → なければAPI呼び出し
             try:
-                embedding = self._get_embedding(chunk['content'])
+                cached = self._get_cached_embedding(c_hash)
+                if cached:
+                    embedding = cached
+                    cache_hits += 1
+                else:
+                    embedding = self._get_embedding(chunk['content'])
+                    self._save_cached_embedding(c_hash, embedding)
+                    api_calls += 1
+
+                # chunks_vecに挿入（既存があれば置換）
+                conn.execute("DELETE FROM chunks_vec WHERE chunk_id = ?", (chunk_id,))
                 conn.execute(
                     "INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)",
                     (chunk_id, json.dumps(embedding))
                 )
-                indexed_count += 1
             except Exception as e:
-                logger.error(f"Failed to get embedding: {e}")
+                logger.error(f"Failed to get embedding for chunk: {e}")
                 continue
 
         # Update file tracking
@@ -270,8 +337,12 @@ class MemoryService:
         )
 
         conn.commit()
-        logger.info(f"Indexed {indexed_count} chunks from {relative_path}")
-        return indexed_count
+        total = api_calls + cache_hits + skipped
+        logger.info(
+            f"Indexed {relative_path}: {total} chunks "
+            f"(api={api_calls}, cache={cache_hits}, skipped={skipped})"
+        )
+        return api_calls + cache_hits
 
     def index_all(self) -> Dict[str, int]:
         """Index all memory files"""
