@@ -241,11 +241,20 @@ async def _archive_session_summary(
         if total_messages == 0:
             return
 
-        if not force:
-            if total_messages < COMPACTION_SNAPSHOT_INTERVAL_MESSAGES:
-                return
-            if total_messages % COMPACTION_SNAPSHOT_INTERVAL_MESSAGES != 0:
-                return
+        # force=True（削除時）はLLM要約を使用
+        if force:
+            await _archive_session_with_llm(
+                service=service,
+                user_id=user_id,
+                room_id=room_id,
+            )
+            return
+
+        # 定期アーカイブ（force=False）は従来通り
+        if total_messages < COMPACTION_SNAPSHOT_INTERVAL_MESSAGES:
+            return
+        if total_messages % COMPACTION_SNAPSHOT_INTERVAL_MESSAGES != 0:
+            return
 
         sample_limit = min(120, total_messages)
         messages = await service.get_messages(room_id, user_id, limit=sample_limit)
@@ -261,6 +270,225 @@ async def _archive_session_summary(
         _append_memory_entry(entry or "")
     except Exception as e:
         logger.warning("Failed to archive session summary (%s): %s", archive_type, e)
+
+
+async def _archive_session_with_llm(
+    *,
+    service: ChatService,
+    user_id: str,
+    room_id: str,
+) -> None:
+    """
+    セッション削除時のLLM要約アーカイブ。
+
+    1. agent_sessions_v2 から last_compacted_at を確認
+    2. last_compacted_at 以降のメッセージだけを抽出（コンパクション済み分を除外）
+    3. LLMで要約して日付ファイルに追記
+    4. MEMORY.md（長期記憶）も更新
+    """
+    import anthropic
+    from datetime import timedelta
+
+    # 1. セッションから last_compacted_at を取得
+    last_compacted_at = None
+    try:
+        from app.agent.v2.session import get_session_store
+        store = get_session_store()
+        session = await store.get_or_create(room_id, user_id)
+        last_compacted_at_str = session.get_context("last_compacted_at")
+        if last_compacted_at_str:
+            last_compacted_at = parse_datetime(last_compacted_at_str)
+            logger.info(f"Session {room_id} last_compacted_at: {last_compacted_at_str}")
+    except Exception as e:
+        logger.warning(f"Failed to get session context for {room_id}: {e}")
+
+    # 2. メッセージ取得（last_compacted_at以降、または全件）
+    query = (
+        service.supabase.table("chat_messages")
+        .select("sender_type, content, created_at")
+        .eq("room_id", room_id)
+        .order("created_at", desc=False)
+    )
+    if last_compacted_at:
+        query = query.gt("created_at", last_compacted_at.isoformat())
+
+    result = query.execute()
+    messages = result.data or []
+
+    if not messages:
+        logger.info(f"No uncompacted messages for session {room_id}, skipping archive")
+        return
+
+    # 3. LLM用フォーマットに変換（sender_type → role）
+    llm_messages = []
+    for msg in messages:
+        role = "user" if msg.get("sender_type") in ("human", "user") else "assistant"
+        content = msg.get("content", "")
+        if not content:
+            continue
+        llm_messages.append({"role": "user" if role == "user" else "assistant", "content": content})
+
+    if not llm_messages:
+        return
+
+    # 隣接する同一roleのメッセージをマージ（Anthropic APIの制約対応）
+    merged = []
+    for msg in llm_messages:
+        if merged and merged[-1]["role"] == msg["role"]:
+            merged[-1]["content"] += "\n\n" + msg["content"]
+        else:
+            merged.append(dict(msg))
+    llm_messages = merged
+
+    # 先頭がassistantの場合、空のuserメッセージを挿入
+    if llm_messages and llm_messages[0]["role"] == "assistant":
+        llm_messages.insert(0, {"role": "user", "content": "(会話の続き)"})
+
+    # 文字数制限（80K超の場合は直近分に制限）
+    total_chars = sum(len(m["content"]) for m in llm_messages)
+    if total_chars > 80000:
+        trimmed = []
+        char_count = 0
+        for msg in reversed(llm_messages):
+            char_count += len(msg["content"])
+            trimmed.append(msg)
+            if char_count > 80000:
+                break
+        llm_messages = list(reversed(trimmed))
+        # 先頭がassistantの場合の再チェック
+        if llm_messages and llm_messages[0]["role"] == "assistant":
+            llm_messages.insert(0, {"role": "user", "content": "(会話の続き)"})
+
+    # 4. LLM呼び出し（runner.pyと同じプロンプト）
+    flush_system = """あなたは会話ログの圧縮係です。
+
+以下の会話の全内容を箇条書きで要約してください。
+
+ルール:
+- 全てのトピック・やり取りを漏れなく含める。省略禁止。
+- 各トピックは1-2行で簡潔に。
+- ユーザーの質問・相談内容、それに対する回答・結果を両方含める。
+- 具体的な固有名詞（店名、商品名、URL、金額等）は省略せず残す。
+- 「重要かどうか」の判断はしない。全て記録する。
+- テキスト出力のみ。ツールは使わない。
+"""
+
+    llm_messages.append({
+        "role": "user",
+        "content": "上記の会話の全内容を箇条書きで要約してください。省略禁止。"
+    })
+
+    model = "MiniMax-M2.5"
+    if settings.MINIMAX_API_KEY:
+        client = anthropic.AsyncAnthropic(
+            api_key=settings.MINIMAX_API_KEY,
+            base_url="https://api.minimax.io/anthropic",
+        )
+    elif settings.ANTHROPIC_API_KEY:
+        client = anthropic.AsyncAnthropic(
+            api_key=settings.ANTHROPIC_API_KEY,
+        )
+    else:
+        logger.warning("No LLM API key available, falling back to excerpt archive")
+        return
+
+    response = await client.messages.create(
+        model=model,
+        max_tokens=4000,
+        system=flush_system,
+        messages=llm_messages,
+    )
+
+    summary = ""
+    text_parts = []
+    for block in response.content:
+        if block.type == "text":
+            text_parts.append(block.text.strip())
+    if text_parts:
+        summary = "\n\n".join(text_parts)
+
+    if not summary:
+        logger.warning(f"LLM summary generation failed for session {room_id}")
+        return
+
+    # 5. メッセージの実際の日付でファイルに追記
+    jst = timezone(timedelta(hours=9))
+    last_msg_created_at = messages[-1].get("created_at")
+    if last_msg_created_at:
+        msg_date = parse_datetime(last_msg_created_at).astimezone(jst)
+    else:
+        msg_date = datetime.now(jst)
+    date_str = msg_date.strftime("%Y-%m-%d")
+    time_str = msg_date.strftime("%H:%M")
+
+    WORKSPACE_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    filepath = WORKSPACE_MEMORY_DIR / f"{date_str}.md"
+
+    entry = f"\n\n## {time_str} session={room_id} [delete-archive]\n\n{summary}\n"
+    with filepath.open("a", encoding="utf-8") as f:
+        f.write(entry)
+    logger.info(f"Delete archive (LLM summary) saved to {filepath}")
+
+    # 6. MEMORY.md（長期記憶）の更新
+    await _update_long_term_memory_standalone(client, model, summary)
+
+
+async def _update_long_term_memory_standalone(client, model: str, conversation_summary: str) -> None:
+    """
+    MEMORY.mdを自動更新する（スタンドアロン版）。
+    runner.py の _update_long_term_memory と同じロジック。
+    """
+    memory_file = WORKSPACE_DIR / "MEMORY.md"
+    current_memory = ""
+    if memory_file.exists():
+        current_memory = memory_file.read_text(encoding="utf-8")
+
+    system = """あなたは長期記憶の管理係です。
+
+「現在の長期記憶」と「今回の会話要約」を見て、長期記憶の更新版を出力してください。
+
+長期記憶に残すべき情報:
+- ユーザーの好み・習慣（よく使うサービス、好きなブランド等）
+- アカウント情報（メールアドレス、住所、ユーザー名等）
+- 繰り返し参照される事実（家族構成、仕事、定期的な予定等）
+- 重要な決定事項（購入したもの、契約したサービス等）
+- Danの動作に関するフィードバック（こうしてほしい、これはやめて等）
+
+ルール:
+- 現在の長期記憶にある情報は保持する（消さない）
+- 新しい情報があれば追加する
+- 古い情報が更新された場合は最新に書き換える
+- 一時的な話題（天気、一回きりの質問等）は含めない
+- Markdown形式で、セクション分けして整理する
+- テキスト出力のみ。ツールは使わない。
+"""
+
+    messages = [
+        {
+            "role": "user",
+            "content": f"## 現在の長期記憶\n\n{current_memory}\n\n---\n\n## 今回の会話要約\n\n{conversation_summary}\n\n---\n\n上記を統合した、更新版の長期記憶をMarkdownで出力してください。",
+        }
+    ]
+
+    try:
+        response = await client.messages.create(
+            model=model,
+            max_tokens=2000,
+            system=system,
+            messages=messages,
+        )
+
+        text_parts = []
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text.strip())
+
+        if text_parts:
+            updated_memory = "\n\n".join(text_parts)
+            memory_file.write_text(updated_memory, encoding="utf-8")
+            logger.info("MEMORY.md updated with long-term memory (delete archive)")
+    except Exception as e:
+        logger.warning(f"Failed to update MEMORY.md during delete archive: {e}")
 
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str, remember_me: bool = False):

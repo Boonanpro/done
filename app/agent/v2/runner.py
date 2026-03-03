@@ -949,6 +949,10 @@ class AgentRunner:
             removed = self.session.compact(summary, keep_recent=COMPACTION_KEEP_RECENT)
             logger.info(f"Compacted: removed {removed} messages, kept {COMPACTION_KEEP_RECENT}")
 
+            # コンパクション完了時刻を記録（削除時アーカイブで「どこまで要約済みか」判定用）
+            from datetime import datetime as dt_, timezone as tz_
+            self.session.set_context("last_compacted_at", dt_.now(tz_.utc).isoformat())
+
             # セッションを再保存
             store = get_session_store()
             await store.save(self.session)
@@ -1017,7 +1021,7 @@ class AgentRunner:
         Returns:
             会話の要約テキスト
         """
-        from datetime import datetime
+        from datetime import datetime, timezone, timedelta
 
         # フラッシュ用のシステムプロンプト（圧縮機として指示）
         flush_system = """あなたは会話ログの圧縮係です。
@@ -1060,17 +1064,24 @@ class AgentRunner:
         if text_parts:
             summary = "\n\n".join(text_parts)
 
-        # 要約を日付ファイルに上書き保存（ブートストラップ + Grep検索 両方で利用可能）
+        # 要約を日付ファイルに追記保存（ブートストラップ + Grep検索 両方で利用可能）
         if summary and summary != "会話の要約が生成されませんでした。":
-            date_str = datetime.now().strftime("%Y-%m-%d")
+            # session.updated_at（UTC）をJSTに変換して日付ファイル名を決定
+            jst = timezone(timedelta(hours=9))
+            session_date = self.session.updated_at.astimezone(jst)
+            date_str = session_date.strftime("%Y-%m-%d")
+            time_str = session_date.strftime("%H:%M")
+
             memory_dir = WORKSPACE_DIR / "memory"
             memory_dir.mkdir(parents=True, exist_ok=True)
             filepath = memory_dir / f"{date_str}.md"
-            filepath.write_text(
-                f"# {date_str} 会話ログ（最終更新: {datetime.now().strftime('%H:%M')}）\n\n{summary}",
-                encoding="utf-8",
-            )
-            logger.info(f"Compaction summary saved to {filepath}")
+
+            # 追記モード: 同日の別セッション/別コンパクションの要約を保持
+            session_id = self.session.session_id
+            entry = f"\n\n## {time_str} session={session_id}\n\n{summary}\n"
+            with filepath.open("a", encoding="utf-8") as f:
+                f.write(entry)
+            logger.info(f"Compaction summary appended to {filepath}")
 
         # MEMORY.md（長期記憶）の自動更新
         if summary and summary != "会話の要約が生成されませんでした。":
