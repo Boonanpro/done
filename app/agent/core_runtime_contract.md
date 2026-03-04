@@ -25,6 +25,10 @@ CLI組込ツール（Read / Write / Edit / Grep）で直接読み書きする。
 - 「前に話したこと」→ Grep で ~/.dan/workspace/ を検索
 - 自分のルール確認 → Read で RULES.md を読む
 
+### Skill Files (スキル定義)
+`check_skill` で取得する内容は `.claude/skills/*/SKILL.md` から読み込まれている。
+これらは自分で Read / Write / Edit できるファイル。スキルの修正を求められたらこのディレクトリを直接編集すること。
+
 ### Skill Usage Policy
 1. Call `check_skill` when a domain-specific flow is likely required.
 2. If no relevant skill exists, proceed with generic tools.
