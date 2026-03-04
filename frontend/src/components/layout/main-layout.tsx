@@ -115,10 +115,12 @@ export function MainLayout({
       )}
       style={{ gridTemplateColumns: `${effectiveWidth}px 1fr` }}
     >
-      <ProjectListPanel
-        isCollapsed={isCollapsed}
-        onToggleCollapse={() => setIsCollapsed(!isCollapsed)}
-      />
+      <div className="min-w-0 overflow-hidden">
+        <ProjectListPanel
+          isCollapsed={isCollapsed}
+          onToggleCollapse={() => setIsCollapsed(!isCollapsed)}
+        />
+      </div>
       {/* Resize handle */}
       {!isCollapsed && (
         <div
@@ -129,7 +131,7 @@ export function MainLayout({
           <div className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 group-hover:bg-primary/40 transition-colors" />
         </div>
       )}
-      <main className="flex flex-col overflow-hidden relative">
+      <main className="flex flex-col overflow-hidden relative min-w-0">
         {selectedProjectId ? (
           <ProjectChatPanel projectId={selectedProjectId} />
         ) : (

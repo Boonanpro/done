@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useSyncExternalStore } from 'react';
+import { useState, useRef, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus } from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus, Pencil } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -99,6 +99,10 @@ export function ProjectListPanel({
   const { user, logout, isLoggingOut } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [isBusinessOpen, setIsBusinessOpen] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState('');
+  const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null);
+  const editInputRef = useRef<HTMLInputElement>(null);
   const hasToken = useHasToken();
   const isMobile = useIsMobile();
   const queryClient = useQueryClient();
@@ -116,6 +120,34 @@ export function ProjectListPanel({
       toast.error('プロジェクト作成に失敗しました');
     },
   });
+
+  const renameMutation = useMutation({
+    mutationFn: ({ id, title }: { id: string; title: string }) => api.projects.update(id, { title }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      setEditingProjectId(null);
+    },
+    onError: () => {
+      toast.error('タイトルの更新に失敗しました');
+      setEditingProjectId(null);
+    },
+  });
+
+  const handleStartEdit = (e: React.MouseEvent, project: ProjectResponse) => {
+    e.stopPropagation();
+    setEditingProjectId(project.id);
+    setEditingTitle(project.title);
+    setTimeout(() => editInputRef.current?.select(), 0);
+  };
+
+  const handleConfirmEdit = (project: ProjectResponse) => {
+    const trimmed = editingTitle.trim();
+    if (trimmed && trimmed !== project.title) {
+      renameMutation.mutate({ id: project.id, title: trimmed });
+    } else {
+      setEditingProjectId(null);
+    }
+  };
 
   const { data: projectsData, isLoading: isLoadingProjects } = useQuery({
     queryKey: ['projects'],
@@ -174,7 +206,7 @@ export function ProjectListPanel({
     <TooltipProvider delayDuration={0}>
       <div
         className={cn(
-          'relative flex flex-col h-full overflow-hidden bg-sidebar border-r border-sidebar-border',
+          'relative flex flex-col h-full w-full overflow-hidden bg-sidebar border-r border-sidebar-border',
           className
         )}
       >
@@ -298,8 +330,8 @@ export function ProjectListPanel({
                   <Tooltip key={project.id}>
                     <TooltipTrigger asChild>
                       <motion.div
-                        whileHover={{ scale: 1.01 }}
-                        whileTap={{ scale: 0.99 }}
+                        whileHover={{ scale: editingProjectId === project.id ? 1 : 1.01 }}
+                        whileTap={{ scale: editingProjectId === project.id ? 1 : 0.99 }}
                         className={cn(
                           'w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors text-left cursor-pointer',
                           isActive
@@ -307,18 +339,50 @@ export function ProjectListPanel({
                             : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
                           isCollapsed && 'justify-center px-0'
                         )}
-                        onClick={() => handleProjectClick(project)}
+                        onClick={() => editingProjectId !== project.id && handleProjectClick(project)}
+                        onMouseEnter={() => setHoveredProjectId(project.id)}
+                        onMouseLeave={() => setHoveredProjectId(null)}
                       >
                         <div className="relative shrink-0">
                           <FolderKanban className="h-4 w-4" />
                           <span className={cn('absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full', statusColor)} />
                         </div>
                         {!isCollapsed && (
-                          <div className="flex-1 min-w-0">
-                            <p className="truncate">{project.title}</p>
-                            <p className="text-xs text-muted-foreground truncate">
-                              {STATUS_LABELS[project.status]} · {formatRelativeTime(project.updated_at || project.created_at)}
-                            </p>
+                          <div className="flex-1 min-w-0 flex items-center gap-1">
+                            {editingProjectId === project.id ? (
+                              <input
+                                ref={editInputRef}
+                                className="flex-1 min-w-0 bg-transparent border-b border-primary text-sm outline-none py-0.5"
+                                value={editingTitle}
+                                onClick={(e) => e.stopPropagation()}
+                                onChange={(e) => setEditingTitle(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') { e.preventDefault(); handleConfirmEdit(project); }
+                                  if (e.key === 'Escape') setEditingProjectId(null);
+                                }}
+                                onBlur={() => handleConfirmEdit(project)}
+                                autoFocus
+                              />
+                            ) : (
+                              <>
+                                <div className="flex-1 min-w-0">
+                                  <p className="truncate">{project.title}</p>
+                                  <p className="text-xs text-muted-foreground truncate">
+                                    {STATUS_LABELS[project.status]} · {formatRelativeTime(project.updated_at || project.created_at)}
+                                  </p>
+                                </div>
+                                <button
+                                  className={cn(
+                                    'shrink-0 p-0.5 rounded transition-opacity',
+                                    hoveredProjectId === project.id ? 'opacity-100' : 'opacity-0'
+                                  )}
+                                  onClick={(e) => handleStartEdit(e, project)}
+                                  title="タイトルを編集"
+                                >
+                                  <Pencil className="h-3 w-3 text-muted-foreground" />
+                                </button>
+                              </>
+                            )}
                           </div>
                         )}
                       </motion.div>

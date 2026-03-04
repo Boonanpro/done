@@ -275,7 +275,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
 
   return (
     <div className="prose prose-sm prose-dan max-w-none text-sm leading-relaxed text-foreground md:prose-xs md:text-xs">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content || ''}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; } }}>{msg.content || ''}</ReactMarkdown>
     </div>
   );
 });
@@ -1057,7 +1057,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           {!proposalCollapsed ? (
             <div className="max-h-[40vh] overflow-y-auto px-4 pb-3">
               <div className="prose prose-sm prose-dan max-w-none rounded-lg bg-yellow-500/5 px-3 py-2 text-sm leading-relaxed md:prose-xs md:text-xs">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; } }}>
                   {pendingProposal.content || ''}
                 </ReactMarkdown>
               </div>
@@ -1084,7 +1084,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           {!proposalCollapsed ? (
             <div className="max-h-[40vh] overflow-y-auto px-4 pb-3">
               <div className="prose prose-sm prose-dan max-w-none rounded-lg bg-muted px-3 py-2 text-sm leading-relaxed md:prose-xs md:text-xs">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; } }}>
                   {approvedProposal.content || ''}
                 </ReactMarkdown>
               </div>

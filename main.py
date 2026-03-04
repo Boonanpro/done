@@ -100,7 +100,7 @@ app.include_router(studio_router, prefix="/api/v1")
 
 @app.get("/api/v1/proposals/{filename}")
 async def serve_proposal_html(filename: str):
-    """HTMLプレゼンファイルを認証不要で直接サーブ（iframeで埋め込み表示用）"""
+    """HTMLプレゼンファイルを認証不要で直接サーブ（URLリンクから別タブで開く用）"""
     if not filename.endswith(".html"):
         raise HTTPException(status_code=400, detail="Only .html files are supported")
     proposals_dir = Path("D:/dan-workspace/proposals").resolve()

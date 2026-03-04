@@ -1146,6 +1146,9 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
                               <ReactMarkdown
                                 remarkPlugins={[remarkGfm]}
                                 components={{
+                                  a({ href, children }) {
+                                    return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
+                                  },
                                   code({ className, children }) {
                                     const lang = className?.replace('language-', '');
                                     if (lang === 'proposal') {
