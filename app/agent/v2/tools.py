@@ -632,7 +632,7 @@ EDIT_FILE_TOOL = {
 
 BASH_TOOL = {
     "name": "bash",
-    "description": "シェルコマンドを実行する。git操作、npm、pip install等に使用。ls/find/grep/cat等のUnixコマンドが使える。",
+    "description": "シェルコマンドを実行する。git操作、npm、pip install等に使用。\n\n重要: bash で find/grep/cat/head/tail を実行してはいけない。代わりに専用ツールを使うこと:\n- ファイル検索: glob ツール（find や ls ではなく）\n- 内容検索: grep ツール（bash の grep/rg ではなく）\n- ファイル読み取り: read_file ツール（cat/head/tail ではなく）",
     "input_schema": {
         "type": "object",
         "properties": {
