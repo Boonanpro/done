@@ -101,7 +101,6 @@ export function ProjectListPanel({
   const [isBusinessOpen, setIsBusinessOpen] = useState(false);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
-  const [hoveredProjectId, setHoveredProjectId] = useState<string | null>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
   const hasToken = useHasToken();
   const isMobile = useIsMobile();
@@ -330,18 +329,16 @@ export function ProjectListPanel({
                   <Tooltip key={project.id}>
                     <TooltipTrigger asChild>
                       <motion.div
-                        whileHover={{ scale: editingProjectId === project.id ? 1 : 1.01 }}
-                        whileTap={{ scale: editingProjectId === project.id ? 1 : 0.99 }}
+                        whileHover={{ scale: 1 }}
+                        whileTap={{ scale: 1 }}
                         className={cn(
-                          'w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors text-left cursor-pointer',
+                          'group w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors text-left cursor-pointer',
                           isActive
                             ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                             : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
                           isCollapsed && 'justify-center px-0'
                         )}
                         onClick={() => editingProjectId !== project.id && handleProjectClick(project)}
-                        onMouseEnter={() => setHoveredProjectId(project.id)}
-                        onMouseLeave={() => setHoveredProjectId(null)}
                       >
                         <div className="relative shrink-0">
                           <FolderKanban className="h-4 w-4" />
@@ -372,10 +369,7 @@ export function ProjectListPanel({
                                   </p>
                                 </div>
                                 <button
-                                  className={cn(
-                                    'shrink-0 p-0.5 rounded transition-opacity',
-                                    hoveredProjectId === project.id ? 'opacity-100' : 'opacity-0'
-                                  )}
+                                  className="shrink-0 p-0.5 rounded transition-opacity opacity-0 group-hover:opacity-100"
                                   onClick={(e) => handleStartEdit(e, project)}
                                   title="タイトルを編集"
                                 >

@@ -145,6 +145,11 @@
   }
 }
 
+/* Radix ScrollArea: prevent content wrapper from expanding beyond viewport */
+[data-slot="scroll-area-viewport"] > div {
+  display: block !important;
+}
+
 /* Focus visible styles */
 @layer base {
   :focus-visible {

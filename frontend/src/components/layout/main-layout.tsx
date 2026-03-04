@@ -108,14 +108,15 @@ export function MainLayout({
   const effectiveWidth = isCollapsed ? 64 : sidebarWidth;
 
   return (
-    <div
-      className={cn(
-        'relative grid h-dvh overflow-hidden bg-background',
-        !isResizing && 'transition-[grid-template-columns] duration-300 ease-in-out'
-      )}
-      style={{ gridTemplateColumns: `${effectiveWidth}px 1fr` }}
-    >
-      <div className="min-w-0 overflow-hidden">
+    <div className="relative flex h-dvh overflow-hidden bg-background">
+      {/* Sidebar */}
+      <div
+        className={cn(
+          'relative shrink-0 overflow-hidden',
+          !isResizing && 'transition-[width] duration-300 ease-in-out'
+        )}
+        style={{ width: effectiveWidth }}
+      >
         <ProjectListPanel
           isCollapsed={isCollapsed}
           onToggleCollapse={() => setIsCollapsed(!isCollapsed)}
@@ -131,7 +132,7 @@ export function MainLayout({
           <div className="absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 group-hover:bg-primary/40 transition-colors" />
         </div>
       )}
-      <main className="flex flex-col overflow-hidden relative min-w-0">
+      <main className="flex flex-1 flex-col overflow-hidden relative min-w-0">
         {selectedProjectId ? (
           <ProjectChatPanel projectId={selectedProjectId} />
         ) : (
