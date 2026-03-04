@@ -397,8 +397,8 @@ function ChatInput({
     try {
       const uploaded: FileUploadResponse[] = [];
       for (const file of Array.from(files)) {
-        if (file.size > 10 * 1024 * 1024) {
-          toast.error(`${file.name} は10MB以上のファイルは添付できません`);
+        if (file.size > 100 * 1024 * 1024) {
+          toast.error(`${file.name} は100MB以上のファイルは添付できません`);
           continue;
         }
         uploaded.push(await api.files.upload(file));

@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {
     "video": {".mp4", ".avi", ".mov", ".mkv", ".webm"},
 }
 
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 
 
 class FileUploadResponse(BaseModel):
@@ -64,7 +64,7 @@ async def upload_file(
     file.file.seek(0)
     
     if file_size > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="File size exceeds 10MB limit")
+        raise HTTPException(status_code=400, detail="File size exceeds 100MB limit")
     
     # Validate file extension
     if not is_allowed_file(file.filename):

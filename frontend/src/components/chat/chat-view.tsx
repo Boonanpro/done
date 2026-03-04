@@ -820,9 +820,9 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
     try {
       const uploadedFiles: FileUploadResponse[] = [];
       for (const file of Array.from(files)) {
-        // ファイルサイズ制限 (10MB)
-        if (file.size > 10 * 1024 * 1024) {
-          toast.error(`${file.name} は10MB以上のファイルは添付できません`);
+        // ファイルサイズ制限 (100MB)
+        if (file.size > 100 * 1024 * 1024) {
+          toast.error(`${file.name} は100MB以上のファイルは添付できません`);
           continue;
         }
         const uploaded = await api.files.upload(file);
