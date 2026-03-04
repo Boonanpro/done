@@ -80,9 +80,9 @@ def _load_session(room_id: str) -> Optional[str]:
     try:
         from app.services.supabase_client import get_supabase_client
         sb = get_supabase_client().client
-        result = sb.table("projects").select("metadata").eq("room_id", room_id).execute()
-        if result.data and result.data[0].get("metadata"):
-            session_id = result.data[0]["metadata"].get("cli_session_id")
+        result = sb.table("cli_sessions").select("cli_session_id").eq("room_id", room_id).execute()
+        if result.data:
+            session_id = result.data[0].get("cli_session_id")
             if session_id:
                 _cli_sessions[room_id] = session_id
                 return session_id
@@ -96,11 +96,13 @@ def _save_session(room_id: str, session_id: str):
     _cli_sessions[room_id] = session_id
     try:
         from app.services.supabase_client import get_supabase_client
+        from datetime import datetime, timezone
         sb = get_supabase_client().client
-        result = sb.table("projects").select("metadata").eq("room_id", room_id).execute()
-        metadata = (result.data[0].get("metadata") or {}) if result.data else {}
-        metadata["cli_session_id"] = session_id
-        sb.table("projects").update({"metadata": metadata}).eq("room_id", room_id).execute()
+        sb.table("cli_sessions").upsert({
+            "room_id": room_id,
+            "cli_session_id": session_id,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
     except Exception as e:
         logger.warning(f"Failed to save CLI session for {room_id}: {e}")
 
@@ -209,7 +211,7 @@ def _build_runtime_contract_section(is_planning: bool) -> str:
     )
     from app.agent.runtime_contract import render_runtime_contract
 
-    cli_builtin_tools = ["read_file", "write_file", "edit_file", "bash"]
+    cli_builtin_tools = ["read_file", "write_file", "edit_file", "bash", "glob", "grep"]
     mcp_tools = get_team_leader_tools() if is_planning else get_all_skill_tools()
     mcp_tool_names = [tool.get("name", "") for tool in mcp_tools if tool.get("name")]
     skill_names = sorted({skill.name for skill in SkillRegistry.list_all()})
@@ -809,11 +811,7 @@ def _run_cli_in_thread(
             try:
                 from app.services.supabase_client import get_supabase_client
                 sb = get_supabase_client().client
-                proj = sb.table("projects").select("id, metadata").eq("room_id", room_id).execute()
-                if proj.data:
-                    meta = proj.data[0].get("metadata") or {}
-                    meta.pop("cli_session_id", None)
-                    sb.table("projects").update({"metadata": meta}).eq("id", proj.data[0]["id"]).execute()
+                sb.table("cli_sessions").delete().eq("room_id", room_id).execute()
             except Exception as e:
                 _cli_debug(f"Failed to clear session from DB: {e}")
 
