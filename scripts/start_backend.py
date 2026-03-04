@@ -239,15 +239,81 @@ def _get_ancestors_only() -> set[int]:
     return pids
 
 
+def _get_interactive_claude_pids() -> set[int]:
+    """
+    Find claude.exe/node claude processes launched from interactive shells
+    (powershell, pwsh, cmd, bash, mintty, WindowsTerminal).
+    These are the user's Claude Code sessions — must NOT be killed.
+    """
+    interactive_pids = set()
+    try:
+        # Build parent->name map
+        result = subprocess.run(
+            ["wmic", "process", "get", "processid,parentprocessid,name", "/format:csv"],
+            capture_output=True, text=True, timeout=10,
+        )
+        proc_parent = {}
+        proc_name = {}
+        for line in result.stdout.split("\n"):
+            line = line.strip()
+            if not line or line.startswith("Node"):
+                continue
+            parts = line.split(",")
+            if len(parts) >= 4:
+                try:
+                    name = parts[1].strip().lower()
+                    parent_pid = int(parts[2].strip())
+                    pid_val = int(parts[3].strip())
+                    proc_parent[pid_val] = parent_pid
+                    proc_name[pid_val] = name
+                except (ValueError, IndexError):
+                    pass
+
+        SHELL_NAMES = {"powershell.exe", "pwsh.exe", "cmd.exe", "bash.exe",
+                       "mintty.exe", "windowsterminal.exe", "conhost.exe"}
+
+        # Find claude.exe whose parent (or grandparent) is a shell
+        for pid_val, name in proc_name.items():
+            if name != "claude.exe":
+                continue
+            # Walk up to 5 ancestors looking for a shell
+            check_pid = pid_val
+            for _ in range(5):
+                parent = proc_parent.get(check_pid)
+                if parent is None or parent == 0:
+                    break
+                parent_name = proc_name.get(parent, "")
+                if parent_name in SHELL_NAMES:
+                    interactive_pids.add(pid_val)
+                    # Also protect entire subtree of this interactive session
+                    queue = [pid_val]
+                    while queue:
+                        p = queue.pop()
+                        interactive_pids.add(p)
+                        for child, par in proc_parent.items():
+                            if par == p and child not in interactive_pids:
+                                interactive_pids.add(child)
+                                queue.append(child)
+                    break
+                check_pid = parent
+
+    except Exception as e:
+        print(f"[start] Warning: could not detect interactive sessions: {e}")
+    return interactive_pids
+
+
 def get_sdk_processes() -> list[tuple[int, str]]:
     """
     Get SDK/CLI-related processes (claude.exe, node claude, and mcp_server.py)
-    spawned by project execution.
+    spawned by project execution (Dan's backend).
 
-    IMPORTANT: Excludes the current process tree (ancestors) so we don't kill
-    Claude Code itself or the shell that launched this script.
+    IMPORTANT: Excludes:
+    - The current process tree (ancestors) so we don't kill ourselves
+    - Interactive Claude Code sessions launched from shells (PowerShell, cmd, etc.)
     """
     own_pids = _get_own_process_tree()
+    interactive_pids = _get_interactive_claude_pids()
+    protected_pids = own_pids | interactive_pids
     processes = []
     try:
         # claude.exe (SDK agent processes - native binary)
@@ -263,10 +329,12 @@ def get_sdk_processes() -> list[tuple[int, str]]:
             if parts:
                 try:
                     pid = int(parts[-1])
-                    if pid not in own_pids:
-                        processes.append((pid, "claude.exe"))
-                    else:
+                    if pid in own_pids:
                         print(f"  [SKIP] claude.exe PID {pid} (own process tree)")
+                    elif pid in interactive_pids:
+                        print(f"  [SKIP] claude.exe PID {pid} (interactive session)")
+                    else:
+                        processes.append((pid, "claude.exe"))
                 except ValueError:
                     pass
 
@@ -290,10 +358,12 @@ def get_sdk_processes() -> list[tuple[int, str]]:
                 if parts:
                     try:
                         pid = int(parts[-1])
-                        if pid not in own_pids:
-                            processes.append((pid, "node claude"))
-                        else:
+                        if pid in own_pids:
                             print(f"  [SKIP] node claude PID {pid} (own process tree)")
+                        elif pid in interactive_pids:
+                            print(f"  [SKIP] node claude PID {pid} (interactive session)")
+                        else:
+                            processes.append((pid, "node claude"))
                     except ValueError:
                         pass
 
@@ -311,10 +381,12 @@ def get_sdk_processes() -> list[tuple[int, str]]:
                 if parts:
                     try:
                         pid = int(parts[-1])
-                        if pid not in own_pids:
-                            processes.append((pid, "mcp_server.py"))
-                        else:
+                        if pid in own_pids:
                             print(f"  [SKIP] mcp_server.py PID {pid} (own process tree)")
+                        elif pid in interactive_pids:
+                            print(f"  [SKIP] mcp_server.py PID {pid} (interactive session)")
+                        else:
+                            processes.append((pid, "mcp_server.py"))
                     except ValueError:
                         pass
     except Exception as e:
