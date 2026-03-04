@@ -554,7 +554,7 @@ export function ChatView({ sessionId, autoVoice = false }: ChatViewProps) {
         toast.error('メッセージの送信に失敗しました');
       }
     }
-  }, [message, isSending, sessionId, queryClient, messagesData, user?.id, user?.display_name, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, setPendingConfirmation, voice, queueProcessStep, flushStepQueue, selectProject]);
+  }, [message, attachedFiles, isSending, sessionId, queryClient, messagesData, user?.id, user?.display_name, setIsSending, setProcess, getSessionState, addProcessStep, deleteProcess, setPendingConfirmation, voice, queueProcessStep, flushStepQueue, selectProject]);
 
   // Voice send ref
   useEffect(() => {
