@@ -53,8 +53,12 @@ Claude Appの「コード」タブはリモートサンドボックスで動作�
    - ❌ `git checkout -b claude/xxx` → ブランチ作成は禁止
    - ✅ `git add ... && git commit && git push origin main`
 2. **「再起動しました」「反映しました」と言わないこと**
-   - 自宅PCの `auto_deploy.py` が30秒以内にpullして自動反映する
+   - `auto_deploy.py` がpullして自動反映するので、リモートから直接反映はできない
    - 「mainにpushしました。約30秒で自動反映されます」と伝えること
+
+### ※ ローカルCLI（自宅PC）の場合
+
+上記はリモート専用ルール。ローカルCLIでpushした場合は `--reload` で即反映されるため、「pushしました。反映済みです」でOK。
 3. **DBマイグレーション**: Playwright が使えない場合はSQLファイル作成のみ
 
 ## DBマイグレーション実行
