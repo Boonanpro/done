@@ -359,13 +359,13 @@ def get_team_leader_tools() -> List[Dict[str, Any]]:
 
 BROWSER_TOOL = {
     "name": "browser",
-    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。",
+    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。evaluate: JSを実行して結果を返す。content: ページのHTML全体を取得する。keyboard_press: キーを押す（Escape, Tab等）。hover: 要素にマウスを乗せる。reload: ページを再読み込み。",
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["open", "screenshot", "click", "type", "scroll", "back", "select"],
+                "enum": ["open", "screenshot", "click", "type", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload"],
                 "description": "実行するアクション",
             },
             "url": {"type": "string", "description": "開くURL（action=open）"},
@@ -376,6 +376,8 @@ BROWSER_TOOL = {
             "x": {"type": "integer", "description": "X座標（action=click, refが使えない場合）"},
             "y": {"type": "integer", "description": "Y座標（action=click, refが使えない場合）"},
             "value": {"type": "string", "description": "選択する値（action=select）"},
+            "expression": {"type": "string", "description": "実行するJavaScriptコード（action=evaluate）"},
+            "key": {"type": "string", "description": "押すキー（action=keyboard_press, 例: Escape, Tab, Enter, ArrowDown）"},
         },
         "required": ["action"]
     }
@@ -2713,6 +2715,46 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             # refからセレクタを構築して select_option を呼ぶ
             selector = f'[data-dan-ref="{ref}"]'
             await page.locator(selector).select_option(value)
+            return await _get_browser_state(page)
+
+        elif action == "evaluate":
+            expression = params.get("expression")
+            if not expression:
+                return {"success": False, "error": "expression が必要です"}
+            result = await page.evaluate(expression)
+            state = await _get_browser_state(page)
+            state.insert(0, {"type": "text", "text": f"evaluate result: {result}"})
+            return state
+
+        elif action == "content":
+            html = await page.content()
+            if len(html) > 50000:
+                html = html[:50000] + "\n... (truncated)"
+            return [{"type": "text", "text": html}]
+
+        elif action == "keyboard_press":
+            key = params.get("key")
+            if not key:
+                return {"success": False, "error": "key が必要です"}
+            await page.keyboard.press(key)
+            await page.wait_for_timeout(300)
+            return await _get_browser_state(page)
+
+        elif action == "hover":
+            ref = params.get("ref")
+            if ref:
+                selector = f'[data-dan-ref="{ref}"]'
+                await page.locator(selector).hover()
+            elif params.get("x") is not None and params.get("y") is not None:
+                await page.mouse.move(float(params["x"]), float(params["y"]))
+            else:
+                return {"success": False, "error": "ref または x,y が必要です"}
+            await page.wait_for_timeout(300)
+            return await _get_browser_state(page)
+
+        elif action == "reload":
+            await page.reload()
+            await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
             return await _get_browser_state(page)
 
         else:

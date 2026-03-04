@@ -84,9 +84,14 @@ def kill_process(pid: int) -> bool:
 
 
 def is_port_free(port: int) -> bool:
-    """Check if port is free."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('127.0.0.1', port)) != 0
+    """Check if port is free by attempting to bind (immune to ghost sockets)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(('127.0.0.1', port))
+            return True
+    except OSError:
+        return False
 
 
 def check_health(port: int, timeout: int = 5) -> bool:
