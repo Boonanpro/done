@@ -54,7 +54,7 @@ def render_runtime_contract(
     replacements = {
         "{{CLI_BUILTIN_TOOLS}}": ", ".join(cli_builtin_tools) if cli_builtin_tools else "(none)",
         "{{MCP_TOOLS}}": ", ".join(mcp_tools) if mcp_tools else "(none)",
-        "{{AVAILABLE_SKILLS}}": ", ".join(available_skills) if available_skills else "(none)",
+        "{{AVAILABLE_SKILLS}}": "\n".join(f"- {s}" for s in available_skills) if available_skills else "(none)",
     }
     for token, value in replacements.items():
         template = template.replace(token, value)

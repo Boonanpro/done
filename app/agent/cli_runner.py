@@ -214,12 +214,14 @@ def _build_runtime_contract_section(is_planning: bool) -> str:
     cli_builtin_tools = ["read_file", "write_file", "edit_file", "bash", "glob", "grep"]
     mcp_tools = get_team_leader_tools() if is_planning else get_all_skill_tools()
     mcp_tool_names = [tool.get("name", "") for tool in mcp_tools if tool.get("name")]
-    skill_names = sorted({skill.name for skill in SkillRegistry.list_all()})
+    skill_entries = sorted(
+        [f"{skill.name}: {skill.description}" for skill in SkillRegistry.list_all()],
+    )
 
     return render_runtime_contract(
         cli_builtin_tools=cli_builtin_tools,
         mcp_tools=mcp_tool_names,
-        available_skills=skill_names,
+        available_skills=skill_entries,
         logger=logger,
     )
 
