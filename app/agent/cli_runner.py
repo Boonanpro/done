@@ -297,7 +297,7 @@ def _build_system_prompt(
     # NOTE: title is intentionally excluded to prevent the LLM from
     #       mistaking an auto-generated title for the current task
     #       after context compaction.
-    if description.strip():
+    if (description or "").strip():
         parts.append(_CLI_PROJECT_TEMPLATE.format(
             description=description,
             status=status,
