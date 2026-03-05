@@ -108,11 +108,9 @@ def _compact_text(text: str, limit: int = 220) -> str:
     return text[: limit - 1] + "..."
 
 
-async def _build_content_with_media(content: str, image_urls: list, file_urls: list | None = None) -> str:
-    """画像URL・ファイルURLをcontentの先頭に付加する。動画はGeminiで分析する。"""
+def _build_content_with_media(content: str, image_urls: list, file_urls: list | None = None) -> str:
+    """画像URL・ファイルURLをcontentの先頭に付加する（同期・即時）。"""
     import os
-    from app.services.video_analyzer import analyze_video
-
     upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
     upload_dir = os.path.normpath(upload_dir)
     VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
@@ -126,19 +124,39 @@ async def _build_content_with_media(content: str, image_urls: list, file_urls: l
         url = f.get("url", "")
         ext = os.path.splitext(name)[1].lower()
         if ext in VIDEO_EXTS:
-            filename = url.split("/")[-1]
-            local_path = os.path.join(upload_dir, filename)
-            analysis = await analyze_video(local_path)
-            if analysis:
-                lines.append(f"[添付動画: {name} ({url})]\n[動画分析結果(Gemini):\n{analysis}\n]")
-            else:
-                lines.append(f"[添付動画: {name} ({url})] ※分析に失敗しました")
+            lines.append(f"[添付動画: {name} ({url})]")
         else:
             lines.append(f"[添付ファイル: {name} ({url})]")
     if not lines:
         return content
     prefix = "\n".join(lines)
     return f"{prefix}\n\n{content}" if content.strip() else prefix
+
+
+async def _enrich_content_with_video_analysis(content: str, file_urls: list | None = None) -> str:
+    """動画ファイルがあればGemini分析を実行し、結果をコンテンツに追加する（非同期）。"""
+    import os
+    from app.services.video_analyzer import analyze_video
+
+    if not file_urls:
+        return content
+    upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
+    upload_dir = os.path.normpath(upload_dir)
+    VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+    analyses = []
+    for f in file_urls:
+        name = f.get("name", "file")
+        url = f.get("url", "")
+        ext = os.path.splitext(name)[1].lower()
+        if ext in VIDEO_EXTS:
+            filename = url.split("/")[-1]
+            local_path = os.path.join(upload_dir, filename)
+            analysis = await analyze_video(local_path)
+            if analysis:
+                analyses.append(f"[動画分析結果(Gemini):\n{analysis}\n]")
+    if not analyses:
+        return content
+    return content + "\n" + "\n".join(analyses)
 
 
 def _fetch_latest_user_message_from_room(service: ChatService, room_id: str) -> str:
@@ -1174,9 +1192,9 @@ async def send_dan_message_stream(
             # session_idが指定されていればそのルームに、なければ現在のDanルームに送信
             if request.session_id:
                 room_id = request.session_id
-                message = await service.send_message(room_id, current_user.user_id, await _build_content_with_media(request.content, request.image_urls or [], request.file_urls or []), sender_type="human")
+                message = await service.send_message(room_id, current_user.user_id, _build_content_with_media(request.content, request.image_urls or [], request.file_urls or []), sender_type="human")
             else:
-                message = await service.send_dan_message(current_user.user_id, await _build_content_with_media(request.content, request.image_urls or [], request.file_urls or []))
+                message = await service.send_dan_message(current_user.user_id, _build_content_with_media(request.content, request.image_urls or [], request.file_urls or []))
                 room_id = message["room_id"]
             user = await service.get_user_by_id(current_user.user_id)
 
@@ -1368,10 +1386,13 @@ async def send_dan_message_stream(
                     except Exception:
                         pass
 
+                cli_content = _build_content_with_media(effective_content, request.image_urls or [], request.file_urls or [])
+                cli_content = await _enrich_content_with_video_analysis(cli_content, request.file_urls or [])
+
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
-                    content=await _build_content_with_media(effective_content, request.image_urls or [], request.file_urls or []),
+                    content=cli_content,
                     project_title=project_info.get("title", ""),
                     project_description=project_info.get("description", ""),
                     project_status=project_info.get("status", "in_progress"),
@@ -1563,10 +1584,13 @@ async def send_dan_message_stream(
                 reasoning_full = []
                 step_counter = 0
 
+                cli_content_dan = _build_content_with_media(effective_content, request.image_urls or [], request.file_urls or [])
+                cli_content_dan = await _enrich_content_with_video_analysis(cli_content_dan, request.file_urls or [])
+
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
-                    content=await _build_content_with_media(effective_content, request.image_urls or [], request.file_urls or []),
+                    content=cli_content_dan,
                     project_title="",
                     project_description="",
                     project_status="in_progress",

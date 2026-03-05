@@ -225,9 +225,14 @@ function parseHumanContent(content: string): { images: string[]; videos: string[
   const videos: string[] = [];
   const files: { name: string; url: string }[] = [];
   const text = content
+    .replace(/\[動画分析結果\(Gemini\):\n[\s\S]*?\n\]/g, '')
     .replace(/\[添付画像: ([^\]]+)\]/g, (_, path) => {
       const filename = path.replace(/\\/g, '/').split('/').pop();
       if (filename) images.push(`/api/v1/files/${filename}`);
+      return '';
+    })
+    .replace(/\[添付動画: (.+?) \((.+?)\)\](?:\s*※分析に失敗しました)?/g, (_, _name, url) => {
+      videos.push(url);
       return '';
     })
     .replace(/\[添付ファイル: (.+?) \((.+?)\)\]/g, (_, name, url) => {
