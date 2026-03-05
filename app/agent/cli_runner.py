@@ -294,17 +294,18 @@ def _build_system_prompt(
     parts.append(_build_language_alignment_section(latest_user_message, user_messages))
 
     # Project context is appended only when project metadata exists.
-    if title.strip() or description.strip():
+    # NOTE: title is intentionally excluded to prevent the LLM from
+    #       mistaking an auto-generated title for the current task
+    #       after context compaction.
+    if description.strip():
         parts.append(_CLI_PROJECT_TEMPLATE.format(
-            title=title,
-            description=description or "(none)",
+            description=description,
             status=status,
         ))
 
     return "\n\n".join(parts)
 _CLI_PROJECT_TEMPLATE = """## プロジェクト
 
-- タイトル: {title}
 - 説明: {description}
 - ステータス: {status}
 - コードベース: D:/done（ファイル操作は絶対パスで指定すること）
@@ -473,7 +474,7 @@ def _build_cli_cmd(
         "--include-partial-messages",
         "--verbose",
         "--dangerously-skip-permissions",
-        "--model", "sonnet",
+        "--model", "opus",
         "--max-turns", "200",
         "--mcp-config", mcp_config_path,
         "--append-system-prompt", system_prompt,

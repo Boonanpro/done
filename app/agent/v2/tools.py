@@ -2723,7 +2723,7 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                 return {"success": False, "error": "expression が必要です"}
             result = await page.evaluate(expression)
             state = await _get_browser_state(page)
-            state.insert(0, {"type": "text", "text": f"evaluate result: {result}"})
+            state["content"].insert(0, {"type": "text", "text": f"evaluate result: {result}"})
             return state
 
         elif action == "content":

@@ -19,7 +19,6 @@ def get_leader_resident_prompt(title: str, description: str, user_messages: str 
     return f"""あなたはプロジェクトチームの「リーダー（事業部長）」です。
 
 ## プロジェクト情報
-- タイトル: {title}
 - 説明: {description or "(なし)"}
 
 {f"## ユーザーの依頼文（原文）{chr(10)}{user_messages}" if user_messages else ""}
@@ -33,7 +32,7 @@ def get_leader_resident_prompt(title: str, description: str, user_messages: str 
 - web検索、URL読み込み、Task tool（並行調査）など、すべてのツールを自由に使える
 - check_skillで既存スキルの手順書を参照してよい（必要と判断した場合のみ）
 - 1回の検索で不十分なら何度でも検索してよい
-- 仮説は調査中にいくらでも修正してよい
+- 仮説は調査中に修正してよい
 - 「わからない」と正直に言ってよい
 - ユーザーの前提が間違っていると思ったら遠慮なく指摘せよ
 
