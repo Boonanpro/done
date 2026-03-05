@@ -149,6 +149,7 @@ Playwright等でブラウザ操作するスキルを新規作成・修正する�
 - `python scripts/start_test_backend.py` でport 8001にテスト環境を起動
 - テストユーザーとしてAPIにログインし、実際にリクエストを送って動作確認
 - ログやDB状態を確認して、推測ではなく**事実に基づいて**動作を検証
+- テスト完了後は `python scripts/start_test_backend.py` を再実行してクリーンアップするか、`taskkill /F /T /PID <PID>` で `/T`（ツリー終了）を必ず付けて終了する。`/T` なしの手動taskkillは子プロセスが残り、本番バックエンドの再起動を妨げる
 
 ### 禁止事項
 

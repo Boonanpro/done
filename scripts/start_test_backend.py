@@ -72,7 +72,7 @@ def kill_process(pid: int) -> bool:
     """Kill a process by PID using taskkill."""
     try:
         result = subprocess.run(
-            ["taskkill", "/F", "/PID", str(pid)],
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
             capture_output=True,
             text=True,
             timeout=10,
