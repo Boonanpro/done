@@ -226,6 +226,7 @@ export interface StateMachineMessageRequest {
   session_id?: string;
   user_id?: string;
   image_urls?: string[];
+  file_urls?: { name: string; url: string }[];
 }
 
 export interface StateMachineConfirmRequest {
@@ -1061,7 +1062,7 @@ export const api = {
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify({ content: data.message, session_id: data.session_id, ...(data.image_urls?.length ? { image_urls: data.image_urls } : {}) }),
+          body: JSON.stringify({ content: data.message, session_id: data.session_id, ...(data.image_urls?.length ? { image_urls: data.image_urls } : {}), ...(data.file_urls?.length ? { file_urls: data.file_urls } : {}) }),
           signal,  // AbortSignal追加
         });
 

@@ -108,20 +108,24 @@ def _compact_text(text: str, limit: int = 220) -> str:
     return text[: limit - 1] + "..."
 
 
-def _build_content_with_images(content: str, image_urls: list) -> str:
-    """画像URLをローカルパスに変換してcontentの先頭に付加する"""
-    if not image_urls:
-        return content
+def _build_content_with_media(content: str, image_urls: list, file_urls: list | None = None) -> str:
+    """画像URL・ファイルURLをcontentの先頭に付加する"""
     import os
     upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
     upload_dir = os.path.normpath(upload_dir)
     lines = []
-    for url in image_urls:
+    for url in (image_urls or []):
         filename = url.split("/")[-1]
         local_path = os.path.join(upload_dir, filename).replace("\\", "/")
         lines.append(f"[添付画像: {local_path}]")
-    image_prefix = "\n".join(lines)
-    return f"{image_prefix}\n\n{content}" if content.strip() else image_prefix
+    for f in (file_urls or []):
+        name = f.get("name", "file")
+        url = f.get("url", "")
+        lines.append(f"[添付ファイル: {name} ({url})]")
+    if not lines:
+        return content
+    prefix = "\n".join(lines)
+    return f"{prefix}\n\n{content}" if content.strip() else prefix
 
 
 def _fetch_latest_user_message_from_room(service: ChatService, room_id: str) -> str:
@@ -1157,9 +1161,9 @@ async def send_dan_message_stream(
             # session_idが指定されていればそのルームに、なければ現在のDanルームに送信
             if request.session_id:
                 room_id = request.session_id
-                message = await service.send_message(room_id, current_user.user_id, _build_content_with_images(request.content, request.image_urls or []), sender_type="human")
+                message = await service.send_message(room_id, current_user.user_id, _build_content_with_media(request.content, request.image_urls or [], request.file_urls or []), sender_type="human")
             else:
-                message = await service.send_dan_message(current_user.user_id, _build_content_with_images(request.content, request.image_urls or []))
+                message = await service.send_dan_message(current_user.user_id, _build_content_with_media(request.content, request.image_urls or [], request.file_urls or []))
                 room_id = message["room_id"]
             user = await service.get_user_by_id(current_user.user_id)
 
@@ -1354,7 +1358,7 @@ async def send_dan_message_stream(
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
-                    content=_build_content_with_images(effective_content, request.image_urls or []),
+                    content=_build_content_with_media(effective_content, request.image_urls or [], request.file_urls or []),
                     project_title=project_info.get("title", ""),
                     project_description=project_info.get("description", ""),
                     project_status=project_info.get("status", "in_progress"),
@@ -1549,7 +1553,7 @@ async def send_dan_message_stream(
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
-                    content=_build_content_with_images(effective_content, request.image_urls or []),
+                    content=_build_content_with_media(effective_content, request.image_urls or [], request.file_urls or []),
                     project_title="",
                     project_description="",
                     project_status="in_progress",

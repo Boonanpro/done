@@ -220,14 +220,26 @@ function eventToStep(event: ExecutionEvent): StepInfo {
   };
 }
 
-function parseHumanContent(content: string): { images: string[]; text: string } {
+function parseHumanContent(content: string): { images: string[]; videos: string[]; files: { name: string; url: string }[]; text: string } {
   const images: string[] = [];
-  const text = content.replace(/\[添付画像: ([^\]]+)\]/g, (_, path) => {
-    const filename = path.replace(/\\/g, '/').split('/').pop();
-    if (filename) images.push(`/api/v1/files/${filename}`);
-    return '';
-  }).trim();
-  return { images, text };
+  const videos: string[] = [];
+  const files: { name: string; url: string }[] = [];
+  const text = content
+    .replace(/\[添付画像: ([^\]]+)\]/g, (_, path) => {
+      const filename = path.replace(/\\/g, '/').split('/').pop();
+      if (filename) images.push(`/api/v1/files/${filename}`);
+      return '';
+    })
+    .replace(/\[添付ファイル: (.+?) \((.+?)\)\]/g, (_, name, url) => {
+      if (/\.(mp4|avi|mov|mkv|webm)$/i.test(name)) {
+        videos.push(url);
+      } else {
+        files.push({ name, url });
+      }
+      return '';
+    })
+    .trim();
+  return { images, videos, files, text };
 }
 
 const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: MessageResponse; onImageClick?: (url: string) => void }) {
@@ -250,7 +262,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
   }
 
   if (msg.sender_type === 'human') {
-    const { images, text } = parseHumanContent(msg.content || '');
+    const { images, videos, files, text } = parseHumanContent(msg.content || '');
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%] flex flex-col items-end gap-1">
@@ -262,6 +274,26 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
               className="rounded-xl max-w-full max-h-64 object-contain border border-primary/20 cursor-zoom-in"
               onClick={() => onImageClick?.(url)}
             />
+          ))}
+          {videos.map((url, i) => (
+            <video
+              key={`vid-${i}`}
+              src={url}
+              controls
+              className="rounded-xl max-w-full border border-primary/20"
+              style={{ maxHeight: '300px' }}
+            />
+          ))}
+          {files.map((f, i) => (
+            <a
+              key={`file-${i}`}
+              href={f.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs underline text-primary-foreground/80"
+            >
+              {f.name}
+            </a>
           ))}
           {text && (
             <div className="rounded-lg bg-primary px-3 py-2 text-sm leading-relaxed text-primary-foreground md:text-xs">
@@ -420,12 +452,14 @@ function ChatInput({
     fileInputRef.current?.click();
   }, []);
 
-  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = []) => {
-    if (!content.trim() && imageUrls.length === 0) return;
+  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = []) => {
+    if (!content.trim() && imageUrls.length === 0 && fileUrls.length === 0) return;
 
     const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
-    const optimisticContent = imagePrefix
-      ? (content ? `${imagePrefix}\n\n${content}` : imagePrefix)
+    const filePrefix = fileUrls.map(f => `[添付ファイル: ${f.name} (${f.url})]`).join('\n');
+    const mediaParts = [imagePrefix, filePrefix].filter(Boolean).join('\n');
+    const optimisticContent = mediaParts
+      ? (content ? `${mediaParts}\n\n${content}` : mediaParts)
       : content;
     const requestId = streamRequestRef.current + 1;
     streamRequestRef.current = requestId;
@@ -460,7 +494,7 @@ function ChatInput({
 
     try {
       await api.sm.sendMessageStream(
-        { message: content, session_id: roomId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}) },
+        { message: content, session_id: roomId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}) },
         {
           onUserMessage: (msg) => {
             if (streamRequestRef.current !== requestId) return;
@@ -589,13 +623,14 @@ function ChatInput({
   const handleSendMessage = useCallback(async () => {
     if (!message.trim() && attachedFiles.length === 0) return;
 
+    const isImageFile = (name: string) => /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(name);
+    const imageUrls = attachedFiles.filter(f => isImageFile(f.filename)).map(f => f.url);
+    const fileUrls = attachedFiles.filter(f => !isImageFile(f.filename)).map(f => ({ name: f.filename, url: f.url }));
+
     const content = message.trim();
-    const imageUrls = attachedFiles
-      .filter(f => /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(f.filename))
-      .map(f => f.url);
     setMessage('');
     setAttachedFiles([]);
-    await sendMessageCore(content, imageUrls);
+    await sendMessageCore(content, imageUrls, fileUrls);
   }, [attachedFiles, message, sendMessageCore]);
 
   const handleCancel = useCallback(async () => {
@@ -695,9 +730,17 @@ function ChatInput({
         <div className="mb-2 flex flex-wrap gap-2">
           {attachedFiles.map((file) => {
             const isImg = /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(file.filename);
+            const isVideo = /\.(mp4|avi|mov|mkv|webm)$/i.test(file.filename);
             return isImg ? (
               <div key={file.id} className="relative group">
                 <img src={file.url} alt={file.filename} className="h-14 w-14 object-cover rounded-md border border-border" />
+                <button onClick={() => handleRemoveFile(file.id)} className="absolute -top-1 -right-1 bg-background border border-border rounded-full p-0.5 opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity">
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            ) : isVideo ? (
+              <div key={file.id} className="relative group">
+                <video src={file.url} className="h-14 w-14 object-cover rounded-md border border-border" muted />
                 <button onClick={() => handleRemoveFile(file.id)} className="absolute -top-1 -right-1 bg-background border border-border rounded-full p-0.5 opacity-0 group-hover:opacity-100 hover:text-destructive transition-opacity">
                   <X className="h-3 w-3" />
                 </button>

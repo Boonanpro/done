@@ -194,6 +194,7 @@ class MessageSendRequest(BaseModel):
     content: str = Field(..., min_length=0, max_length=10000)
     session_id: Optional[str] = Field(None, description="Target session/room ID")
     image_urls: Optional[List[str]] = Field(default=[], description="Uploaded image URLs for vision")
+    file_urls: Optional[List[dict]] = Field(default=[], description="Uploaded file URLs [{name, url}]")
 
 
 class MessageResponse(BaseModel):
