@@ -12,19 +12,13 @@ import logging
 RUNTIME_CONTRACT_TEMPLATE_PATH = Path(__file__).resolve().parent / "core_runtime_contract.md"
 
 DEFAULT_RUNTIME_CONTRACT_TEMPLATE = (
-    "## Runtime Contract\n"
-    "- You are Dan core. Keep one consistent behavior in this chat.\n"
-    "- Use available tools first. If domain-specific procedure is needed, use check_skill.\n\n"
+    "## Available Tools\n\n"
     "### CLI Built-in Tools\n"
     "{{CLI_BUILTIN_TOOLS}}\n\n"
     "### MCP Tools\n"
     "{{MCP_TOOLS}}\n\n"
     "### Available Skills\n"
-    "{{AVAILABLE_SKILLS}}\n\n"
-    "### Skill Usage Policy\n"
-    "1. Call check_skill when a domain-specific flow is likely required.\n"
-    "2. If no relevant skill exists, proceed with generic tools.\n"
-    "3. Do not stop only because a skill is missing.\n"
+    "{{AVAILABLE_SKILLS}}\n"
 )
 
 
