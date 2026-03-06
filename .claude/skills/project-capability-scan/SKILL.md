@@ -1,6 +1,6 @@
 ---
-name: project-capability-scan
-description: Evaluate, for a concrete project request, what current AI can execute now vs where human intervention is still required, using dated evidence and AI-first assumptions. Use when feasibility, schedule, team design, or cost estimates depend on latest model/tool capabilities, or when lane C / deep capability uncertainty is detected.
+name: _disabled_project-capability-scan
+description: "[DISABLED] This skill is temporarily disabled pending review and integration into the project skill."
 ---
 
 # Project Capability Scan
