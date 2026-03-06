@@ -342,15 +342,6 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     ]
 
 
-def get_team_leader_tools() -> List[Dict[str, Any]]:
-    """
-    チームリーダー用ツール（プロジェクト planning 時）
-
-    Task tool有効化に伴い、リーダーにも全ツールを渡す。
-    調査・検証はClaude Code組み込みのTask toolで自律的に行う。
-    """
-    return get_all_skill_tools()
-
 
 # ============================================
 # ブラウザ操作ツール（Dan直接操作）
@@ -1256,8 +1247,8 @@ def parse_tool_call(response: str) -> Optional[Dict[str, Any]]:
     tool_pos = match.end()
     remaining = response[tool_pos:]
 
-    # 次の[TOOL:]または[STATE:]または空行2つまでをパラメータとして扱う
-    param_section = re.split(r'\n\n|\[TOOL:|\[STATE:', remaining)[0]
+    # 次の[TOOL:]または空行2つまでをパラメータとして扱う
+    param_section = re.split(r'\n\n|\[TOOL:', remaining)[0]
 
     logger.debug("Param section:\n%s...", param_section[:300])
 

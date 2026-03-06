@@ -7,7 +7,6 @@ LLMは自分が何を言ったかを覚えている。
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
-from enum import Enum
 from datetime import datetime, timezone
 import json
 import logging
@@ -54,20 +53,6 @@ def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
             return datetime.now(timezone.utc)
 
 
-class State(str, Enum):
-    """Legacy: 状態遷移は未使用。DB/API互換のため残置。
-    current_stateは常にINTAKEのまま変わらない。
-    将来状態管理を再設計する際にこのEnumごと置き換えること。"""
-    INTAKE = "intake"
-    PLAN = "plan"
-    RESEARCH = "research"
-    PROPOSE = "propose"
-    CONFIRM = "confirm"
-    EXECUTE = "execute"
-    VERIFY = "verify"
-    REPORT = "report"
-    CHAT = "chat"
-
 
 @dataclass
 class Session:
@@ -84,9 +69,6 @@ class Session:
     # 会話履歴（これが全て）
     # contentはstrまたはList[ContentBlock]（Vision API対応）
     messages: List[Dict[str, Any]] = field(default_factory=list)
-
-    # 現在の状態
-    current_state: State = State.INTAKE
 
     # 推論ステップ（ナレーション用）
     reasoning_steps: List[str] = field(default_factory=list)
@@ -441,7 +423,6 @@ class Session:
             "session_id": self.session_id,
             "user_id": self.user_id,
             "messages": self.messages,
-            "current_state": self.current_state.value,
             "reasoning_steps": self.reasoning_steps,
             "context": self.context,
             "created_at": self.created_at.isoformat(),
@@ -456,7 +437,6 @@ class Session:
             user_id=data["user_id"],
         )
         session.messages = data.get("messages", [])
-        session.current_state = State(data.get("current_state", "intake"))
         session.reasoning_steps = data.get("reasoning_steps", [])
         session.context = data.get("context", {})
 
@@ -627,7 +607,6 @@ class SessionStore:
                     "session_id": data["session_id"],
                     "user_id": data["user_id"],
                     "messages": data.get("messages", []),
-                    "current_state": data.get("current_state", "intake"),
                     "reasoning_steps": data.get("reasoning_steps", []),
                     "context": data.get("context", {}),
                     "created_at": data.get("created_at"),
@@ -649,7 +628,6 @@ class SessionStore:
                 "session_id": session.session_id,
                 "user_id": session.user_id,
                 "messages": session.messages,
-                "current_state": session.current_state.value,
                 "reasoning_steps": session.reasoning_steps,
                 "context": session.context,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
