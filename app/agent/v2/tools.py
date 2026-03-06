@@ -332,7 +332,6 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         BROWSER_TOOL,
         READ_URL_TOOL,
         DEEP_RESEARCH_TOOL,
-        SKILL_GENERATE_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
         CHECK_SKILL_TOOL,
@@ -425,25 +424,6 @@ DEEP_RESEARCH_TOOL = {
     }
 }
 
-# ============================================
-# スキル生成ツール
-# ============================================
-
-SKILL_GENERATE_TOOL = {
-    "name": "skill_generate",
-    "description": "Visual Agentセッションからスキルを生成する",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "session_id": {"type": "string", "description": "ブラウザセッションID"},
-            "skill_name": {"type": "string", "description": "スキル名"},
-            "start_step": {"type": "integer", "description": "開始ステップ（省略時は最初から）"},
-            "end_step": {"type": "integer", "description": "終了ステップ（省略時は最後まで）"},
-            "instruction": {"type": "string", "description": "生成時の追加指示（任意）"},
-        },
-        "required": ["session_id", "skill_name"]
-    }
-}
 
 # ============================================
 # 認証情報: サービス名正規化
@@ -692,9 +672,6 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     Returns:
         (skill_name, action) or None
     """
-    if tool_name == "skill_generate":
-        return ("_skill_generate", "generate")
-
     if tool_name == "save_credentials":
         return ("_save_credentials", "save")
 
@@ -757,102 +734,6 @@ SKILL_DIRECTORIES = [
     Path(__file__).parent.parent.parent.parent / ".claude" / "skills",
 ]
 
-# Visual Agentログ（スキル化用）
-BROWSER_LOGS_DIR = Path("D:/done/app/logs/browser")
-
-
-def _yaml_is_successful(yaml_path: Path) -> Optional[bool]:
-    """YAMLログのsession.successを判定"""
-    try:
-        import yaml
-        data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    if not isinstance(data, dict):
-        return None
-    session = data.get("session", {})
-    if isinstance(session, dict) and "success" in session:
-        return bool(session.get("success"))
-    return None
-
-
-def _find_yaml_by_session_id(session_id: str) -> Optional[Path]:
-    """セッションIDからYAMLファイルを検索"""
-    session_dir = BROWSER_LOGS_DIR / session_id
-    if session_dir.exists():
-        yaml_files = list(session_dir.glob("*.yaml"))
-        if yaml_files:
-            success_files = [f for f in yaml_files if _yaml_is_successful(f)]
-            if success_files:
-                return max(success_files, key=lambda f: f.stat().st_mtime)
-            return max(yaml_files, key=lambda f: f.stat().st_mtime)
-
-    candidates = []
-    for yaml_file in BROWSER_LOGS_DIR.glob("*/*.yaml"):
-        if session_id in yaml_file.parent.name:
-            candidates.append(yaml_file)
-    if candidates:
-        success_files = [f for f in candidates if _yaml_is_successful(f)]
-        if success_files:
-            return max(success_files, key=lambda f: f.stat().st_mtime)
-        return max(candidates, key=lambda f: f.stat().st_mtime)
-    return None
-
-
-def _slice_yaml_log_for_generation(
-    yaml_log_path: str,
-    start_step: Optional[int],
-    end_step: Optional[int],
-) -> Optional[str]:
-    """開始/終了ステップでYAMLログを切り出す"""
-    try:
-        import yaml
-
-        log_path = Path(yaml_log_path)
-        if not log_path.exists():
-            return None
-
-        data = yaml.safe_load(log_path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or "steps" not in data:
-            return None
-
-        steps = data.get("steps", [])
-        if not isinstance(steps, list):
-            return None
-
-        min_index = min([s.get("index", 0) for s in steps], default=0)
-        max_index = max([s.get("index", 0) for s in steps], default=0)
-
-        start = start_step if start_step is not None else min_index
-        end = end_step if end_step is not None else max_index
-
-        if start > end:
-            return None
-
-        sliced_steps = [
-            s for s in steps
-            if isinstance(s, dict) and start <= s.get("index", 0) <= end
-        ]
-
-        if not sliced_steps:
-            return None
-
-        data["steps"] = sliced_steps
-
-        output_path = log_path.parent / f"{log_path.stem}_slice_{start}_{end}.yaml"
-        with open(output_path, "w", encoding="utf-8") as f:
-            yaml.dump(
-                data,
-                f,
-                allow_unicode=True,
-                default_flow_style=False,
-                sort_keys=False,
-            )
-
-        return str(output_path)
-    except Exception:
-        return None
-
 
 async def _record_issue_for_failure(
     result: Dict[str, Any],
@@ -870,7 +751,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in ("_skill_generate", "_jina", "_deep_research"):
+        if skill_name in ("_jina", "_deep_research"):
             return
 
         error_type = result.get("error_type")
@@ -1779,107 +1660,6 @@ async def execute_tool(
             "description": skill.description,
             "manual": "\n".join(result_parts),
             "available_actions": available_actions,
-        }
-
-    # ★★★ スキル生成 ★★★
-    # Visual Agentセッションからスキルを生成
-    if skill_name == "_skill_generate":
-        session_id_param = params.get("session_id")
-        target_skill_name = params.get("skill_name")
-        start_step = params.get("start_step")
-        end_step = params.get("end_step")
-        instruction = params.get("instruction")
-
-        if not session_id_param or not target_skill_name:
-            return {
-                "success": False,
-                "error": "session_id と skill_name が必要です",
-            }
-
-        yaml_path = _find_yaml_by_session_id(session_id_param)
-        if not yaml_path:
-            return {
-                "success": False,
-                "error": f"セッション {session_id_param} のログが見つかりません",
-            }
-
-        sliced_path = _slice_yaml_log_for_generation(
-            str(yaml_path),
-            start_step,
-            end_step,
-        )
-        yaml_for_generate = sliced_path or str(yaml_path)
-
-        from app.services.skill_generator_claude import analyze_session_for_skill, generate_skill
-
-        if _yaml_is_successful(Path(yaml_for_generate)) is False:
-            issue_recorded = False
-            try:
-                from app.services.issue_tracker import IssueTracker, Issue, IssueType
-                issue = Issue(
-                    issue_type=IssueType.EXECUTION_FAILED,
-                    original_wish=f"skill_generate: {target_skill_name}",
-                    service_type="skill_generate",
-                    service_name=target_skill_name,
-                    research_result={},
-                    error_message="成功ログが見つからないためスキル生成を中止しました",
-                    error_details={"session_id": session_id_param},
-                    user_id=user_id,
-                )
-                tracker = IssueTracker()
-                await tracker.record_issue(issue)
-                issue_recorded = True
-            except Exception:
-                issue_recorded = False
-
-            return {
-                "success": False,
-                "error": "成功ログが見つからないためスキルを生成できません",
-                "issue_recorded": issue_recorded,
-            }
-
-        proposal = await analyze_session_for_skill(
-            str(yaml_for_generate),
-            instruction=instruction,
-        )
-        if not proposal:
-            return {
-                "success": False,
-                "error": "セッションの分析に失敗しました（成功ログが不足している可能性があります）",
-            }
-
-        # 重複スキルがある場合はスキップ
-        if not proposal.should_create:
-            return {
-                "success": True,
-                "skipped": True,
-                "message": f"スキル生成をスキップしました: {proposal.skip_reason}",
-                "existing_skill": proposal.existing_skill,
-                "suggestion": f"既存のスキル '{proposal.existing_skill}' を使用してください",
-            }
-
-        gen_result = await generate_skill(
-            yaml_log_path=yaml_for_generate,
-            skill_name=target_skill_name,
-            description=proposal.description,
-            analysis=proposal.analysis,
-            steps=proposal.steps,
-            instruction=instruction,
-        )
-
-        if not gen_result.success:
-            return {
-                "success": False,
-                "error": gen_result.error or "スキル生成に失敗しました",
-                "output": gen_result.output,
-            }
-
-        return {
-            "success": True,
-            "skill_name": gen_result.skill_name,
-            "skill_path": gen_result.skill_path,
-            "files_created": gen_result.files_created,
-            "message": f"スキル '{gen_result.skill_name}' を生成しました",
         }
 
     # ★★★ ブラウザ直接操作ツール ★★★
