@@ -253,9 +253,9 @@ def _build_language_alignment_section(latest_user_message: str, user_messages: s
     language = _detect_user_language(latest_user_message or user_messages or "")
     return (
         "## Language Rule\n\n"
-        f"The user's latest message language is {language}. "
-        f"For all visible reasoning/thinking text and the final response, use {language}. "
-        "Do not switch to another language for visible reasoning and then translate later."
+        f"The user's latest message language is **{language}**. "
+        "Match all visible reasoning, intermediate explanations, and the final response "
+        "to the user's language. Do not use a different language for reasoning and then translate."
     )
 
 
@@ -308,10 +308,6 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 - 操作後はURL・タイトル・見出しの変化で結果を確認する
 - 証拠なく「完了しました」と報告しない
 - ローディング中ならbrowser(action=screenshot)で再確認
-
-### 認証情報
-- ログインが必要 → まず get_credentials で保存済みか確認
-- なければユーザーに聞く → save_credentials で保存
 
 ### チャットAPI テスト
 - 接続テストには `POST /api/v1/chat/rooms/{{room_id}}/dry-run` を使うこと
