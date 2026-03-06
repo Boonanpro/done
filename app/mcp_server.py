@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 USER_ID = os.environ.get("DAN_USER_ID", "")
 SESSION_ID = os.environ.get("DAN_SESSION_ID", "")
 CREDENTIALS = json.loads(os.environ.get("DAN_CREDENTIALS", "{}"))
-IS_PLANNING = os.environ.get("DAN_IS_PLANNING", "") == "1"
 
 app = Server("dan-tools")
 
@@ -41,13 +40,9 @@ _CLI_BUILTIN_TOOLS = {"read_file", "write_file", "edit_file", "bash"}
 @app.list_tools()
 async def list_tools() -> list[types.Tool]:
     """既存のツール定義を MCP 形式に変換して返す（CLI重複分は除外）"""
-    from app.agent.v2.tools import get_all_skill_tools, get_team_leader_tools
+    from app.agent.v2.tools import get_all_skill_tools
 
-    # planning モードではリーダーツールのみ（環境変数で判定、DB依存なし）
-    if IS_PLANNING:
-        anthropic_tools = get_team_leader_tools()
-    else:
-        anthropic_tools = get_all_skill_tools()
+    anthropic_tools = get_all_skill_tools()
 
     mcp_tools = []
     for tool in anthropic_tools:

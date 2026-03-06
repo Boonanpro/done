@@ -202,17 +202,16 @@ def _save_ai_message_sync(
         return False
 
 
-def _build_runtime_contract_section(is_planning: bool) -> str:
+def _build_runtime_contract_section() -> str:
     """Build runtime contract for CLI chat from one versioned template file."""
     from app.agent.v2.tools import (
         SkillRegistry,
         get_all_skill_tools,
-        get_team_leader_tools,
     )
     from app.agent.runtime_contract import render_runtime_contract
 
     cli_builtin_tools = ["read_file", "write_file", "edit_file", "bash", "glob", "grep"]
-    mcp_tools = get_team_leader_tools() if is_planning else get_all_skill_tools()
+    mcp_tools = get_all_skill_tools()
     mcp_tool_names = [tool.get("name", "") for tool in mcp_tools if tool.get("name")]
     skill_entries = sorted(
         [f"{skill.name}: {skill.description}" for skill in SkillRegistry.list_all()],
@@ -268,21 +267,16 @@ def _build_system_prompt(
     latest_user_message: str = "",
 ) -> str:
     """
-    Build CLI system prompt for both normal and planning turns.
+    Build CLI system prompt.
 
-    This path is now chat-first core, so it should load shared bootstrap files
-    and runtime contract consistently.
+    Base identity is minimal — domain-specific behavior is loaded via
+    check_skill (e.g. project skill) at runtime.
     """
-    from app.agent.bootstrap_context import load_all_bootstrap_files
+    from app.agent.bootstrap_context import get_core_prompt, load_all_bootstrap_files
 
-    is_planning = status == "planning"
     parts = []
 
-    if is_planning:
-        from app.agent.v2.team.prompts import get_leader_resident_prompt
-        parts.append(get_leader_resident_prompt(title, description, user_messages))
-    else:
-        parts.append("You are Dan core assistant. You plan, research, implement, and explain clearly.")
+    parts.append(get_core_prompt())
 
     # Shared memory/rules context used across chat turns.
     bootstrap = load_all_bootstrap_files()
@@ -290,7 +284,7 @@ def _build_system_prompt(
         parts.append(bootstrap)
 
     # Runtime contract: tool/skill visibility and behavior policy.
-    parts.append(_build_runtime_contract_section(is_planning=is_planning))
+    parts.append(_build_runtime_contract_section())
     parts.append(_build_language_alignment_section(latest_user_message, user_messages))
 
     # Project context is appended only when project metadata exists.
@@ -332,7 +326,7 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 - 本番の送信エンドポイント (`/messages`, `/dan/messages/stream`) をテスト目的で使わないこと"""
 
 
-def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = None, is_planning: bool = False) -> str:
+def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = None) -> str:
     """MCP設定ファイルをセッション固有のパスに書き出して返す"""
     mcp_json = {
         "mcpServers": {
@@ -343,7 +337,7 @@ def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = 
                     "DAN_USER_ID": user_id,
                     "DAN_SESSION_ID": room_id,
                     "DAN_CREDENTIALS": json.dumps(credentials or {}),
-                    "DAN_IS_PLANNING": "1" if is_planning else "",
+                    "DAN_IS_PLANNING": "",
                 },
             }
         }
@@ -460,7 +454,6 @@ def _build_cli_cmd(
     mcp_config_path: str,
     system_prompt: str,
     resume_session_id: Optional[str] = None,
-    is_planning: bool = False,
 ) -> list[str]:
     """CLIコマンドライン引数を組み立てる"""
     if cli_js:
@@ -479,12 +472,6 @@ def _build_cli_cmd(
         "--mcp-config", mcp_config_path,
         "--append-system-prompt", system_prompt,
     ])
-
-    # planning モード: 不要なツールを禁止（Task/WebSearch/WebFetch は解禁）
-    if is_planning:
-        cmd.extend([
-            "--disallowedTools", "TodoWrite,TodoRead",
-        ])
 
     if resume_session_id:
         cmd.extend(["--resume", resume_session_id])
@@ -749,7 +736,6 @@ def _run_cli_in_thread(
     room_id: str,
     event_queue: thread_queue.Queue,
     resume_session_id: Optional[str] = None,
-    is_planning: bool = False,
     project_id: Optional[str] = None,
     run_id: Optional[str] = None,
     cancel_event: Optional[threading.Event] = None,
@@ -791,7 +777,7 @@ def _run_cli_in_thread(
     done_saved = False
     try:
         # 1回目: セッション再開を試みる
-        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id, is_planning=is_planning)
+        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id)
         _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, prompt len={len(content)})")
 
         result_data = _run_cli_process(
@@ -819,7 +805,7 @@ def _run_cli_in_thread(
                 _cli_debug(f"Failed to clear session from DB: {e}")
 
             # 2回目: 新規会話として実行
-            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id=None, is_planning=is_planning)
+            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id=None)
             _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(content)})")
 
             result_data = _run_cli_process(
@@ -982,8 +968,7 @@ async def process_message_cli(
         )
     if skill_injection:
         system_prompt += f"\n\n{skill_injection}"
-    is_planning = project_status == "planning"
-    mcp_config_path = _build_mcp_config(room_id, user_id, credentials, is_planning=is_planning)
+    mcp_config_path = _build_mcp_config(room_id, user_id, credentials)
     resume_session_id = _load_session(room_id)
 
     # cancel_eventの参照を取得（旧スレッドが新スレッドのEventを消さないようにする）
@@ -1001,7 +986,6 @@ async def process_message_cli(
             room_id,
             event_q,
             resume_session_id,
-            is_planning,
             project_id,
             run_id,
             cancel_event,
