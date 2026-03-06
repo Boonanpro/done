@@ -31,7 +31,11 @@ function getProposalIconType(proposal: ProposalResponse): ProposalIconType {
   return 'task';
 }
 
-export function NotificationPanel() {
+interface NotificationPanelProps {
+  inline?: boolean;
+}
+
+export function NotificationPanel({ inline = false }: NotificationPanelProps) {
   const queryClient = useQueryClient();
   const [isExpanded, setIsExpanded] = useState(false);
   const [selectedProposal, setSelectedProposal] = useState<ProposalResponse | null>(null);
@@ -134,7 +138,7 @@ export function NotificationPanel() {
   return (
     <motion.div
       initial={false}
-      className="absolute z-50 md:top-4 md:right-4 top-4 right-4"
+      className={inline ? "relative" : "absolute z-50 md:top-4 md:right-4 top-4 right-4"}
     >
       <AnimatePresence mode="wait">
         {selectedProposal ? (
@@ -143,7 +147,7 @@ export function NotificationPanel() {
             initial={{ opacity: 0, scale: 0.95, y: 20 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: 20 }}
-            className="w-96 bg-card border border-border rounded-xl shadow-2xl overflow-hidden"
+            className={cn("bg-card border border-border rounded-xl shadow-2xl overflow-hidden", inline ? "w-full" : "w-96")}
           >
             {/* Detail Header */}
             <div className="flex items-center justify-between p-3 border-b border-border bg-muted/30">
@@ -277,8 +281,9 @@ export function NotificationPanel() {
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: 20 }}
             className={cn(
-              'w-72 bg-card border border-border rounded-xl shadow-2xl overflow-hidden transition-all',
-              !isExpanded && 'w-auto'
+              'bg-card border border-border rounded-xl overflow-hidden transition-all',
+              inline ? 'w-full shadow-none' : 'w-72 shadow-2xl',
+              !isExpanded && !inline && 'w-auto'
             )}
           >
             {/* Header */}

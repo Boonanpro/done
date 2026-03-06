@@ -83,6 +83,7 @@ export function MainLayout({
               <ProjectListPanel
                 isCollapsed={false}
                 onToggleCollapse={() => setSidebarOpen(false)}
+                showNotifications={showNotifications}
               />
             </div>
           </>
@@ -99,7 +100,6 @@ export function MainLayout({
             <p className="text-center text-sm">左のメニューからプロジェクトを選択してください</p>
           </div>
         )}
-        {showNotifications && <NotificationPanel />}
       </div>
     );
   }

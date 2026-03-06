@@ -4,7 +4,7 @@ import { useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Plus, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, MessageCircle, X, Briefcase, FileEdit, Clapperboard } from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, MessageCircle, X, Briefcase, FileEdit, Clapperboard } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -105,21 +105,6 @@ export function Sidebar({ className }: SidebarProps) {
     session.title.toLowerCase().includes(searchQuery.toLowerCase())
   ) ?? [];
 
-  // Create new session
-  const createSessionMutation = useMutation({
-    mutationFn: api.dan.createSession,
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['dan-sessions'] });
-      if (data?.id) {
-        // 新しいセッションに直接遷移
-        router.push(`/chat/${data.id}`);
-        toast.success('新しい会話を開始しました');
-      }
-    },
-    onError: () => {
-      toast.error('新しい会話の開始に失敗しました');
-    },
-  });
 
   // Delete session
   const deleteSessionMutation = useMutation({
@@ -149,10 +134,6 @@ export function Sidebar({ className }: SidebarProps) {
       }
     },
   });
-
-  const handleNewConversation = () => {
-    createSessionMutation.mutate();
-  };
 
   // セッションクリック時はURLで遷移するだけ
   const handleSessionClick = (session: SessionResponse) => {
@@ -239,33 +220,6 @@ export function Sidebar({ className }: SidebarProps) {
           </Button>
         </div>
 
-        {/*
-          New Chat Button - 単一セッションモードでは非表示
-          将来マルチセッションに戻す場合はコメント解除
-        */}
-        {/* <div className="p-3">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="outline"
-                className={cn(
-                  'w-full justify-start gap-2 bg-sidebar-accent/50 border-sidebar-border hover:bg-sidebar-accent',
-                  isCollapsed && 'justify-center px-0'
-                )}
-                onClick={handleNewConversation}
-                disabled={createSessionMutation.isPending}
-              >
-                {createSessionMutation.isPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Plus className="h-4 w-4" />
-                )}
-                {!isCollapsed && <span>新しい会話</span>}
-              </Button>
-            </TooltipTrigger>
-            {isCollapsed && <TooltipContent side="right">新しい会話</TooltipContent>}
-          </Tooltip>
-        </div> */}
 
         {/* Search */}
         <AnimatePresence>

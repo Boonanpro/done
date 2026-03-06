@@ -24,6 +24,7 @@ import { useAuth } from '@/hooks/use-auth';
 import { api, type ProjectResponse, type ProjectStatusType } from '@/lib/api-client';
 import { useProjectStore } from '@/stores/project-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
+import { NotificationPanel } from '@/components/notification/notification-panel';
 
 function useHasToken() {
   return useSyncExternalStore(
@@ -87,12 +88,14 @@ interface ProjectListPanelProps {
   className?: string;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
+  showNotifications?: boolean;
 }
 
 export function ProjectListPanel({
   className,
   isCollapsed,
   onToggleCollapse,
+  showNotifications = false,
 }: ProjectListPanelProps) {
   const pathname = usePathname();
   const router = useRouter();
@@ -228,21 +231,6 @@ export function ProjectListPanel({
           </AnimatePresence>
 
           <div className={cn("flex items-center gap-1", isCollapsed ? "mx-auto" : "ml-auto")}>
-            {!isCollapsed && (
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent"
-                onClick={handleInstantCreate}
-                disabled={createProjectMutation.isPending}
-              >
-                {createProjectMutation.isPending ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Plus className="h-4 w-4" />
-                )}
-              </Button>
-            )}
             <Button
               variant="ghost"
               size="icon"
@@ -542,6 +530,13 @@ export function ProjectListPanel({
             })}
           </nav>
         </ScrollArea>
+
+        {/* Notifications (mobile only, inline in sidebar) */}
+        {showNotifications && !isCollapsed && (
+          <div className="px-3 py-2">
+            <NotificationPanel inline />
+          </div>
+        )}
 
         <Separator className="bg-sidebar-border" />
 
