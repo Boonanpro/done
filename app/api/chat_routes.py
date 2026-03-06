@@ -134,26 +134,41 @@ def _build_content_with_media(content: str, image_urls: list, file_urls: list | 
 
 
 async def _enrich_content_with_video_analysis(content: str, file_urls: list | None = None) -> str:
-    """動画ファイルがあればGemini分析を実行し、結果をコンテンツに追加する（非同期）。"""
-    import os
-    from app.services.video_analyzer import analyze_video
+    """動画ファイル・動画URLがあればGemini分析を実行し、結果をコンテンツに追加する。
 
-    if not file_urls:
-        return content
-    upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
-    upload_dir = os.path.normpath(upload_dir)
-    VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+    対応:
+    - ファイルアップロード: .mp4/.avi/.mov/.mkv/.webm
+    - URL: YouTube, Loom (メッセージ本文から自動検出)
+    """
+    import os
+    from app.services.video_analyzer import analyze_video, analyze_video_url, extract_video_urls
+
     analyses = []
-    for f in file_urls:
-        name = f.get("name", "file")
-        url = f.get("url", "")
-        ext = os.path.splitext(name)[1].lower()
-        if ext in VIDEO_EXTS:
-            filename = url.split("/")[-1]
-            local_path = os.path.join(upload_dir, filename)
-            analysis = await analyze_video(local_path)
-            if analysis:
-                analyses.append(f"[動画分析結果(Gemini):\n{analysis}\n]")
+
+    # 1. アップロードされた動画ファイル
+    if file_urls:
+        upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
+        upload_dir = os.path.normpath(upload_dir)
+        VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+        for f in file_urls:
+            name = f.get("name", "file")
+            url = f.get("url", "")
+            ext = os.path.splitext(name)[1].lower()
+            if ext in VIDEO_EXTS:
+                filename = url.split("/")[-1]
+                local_path = os.path.join(upload_dir, filename)
+                analysis = await analyze_video(local_path)
+                if analysis:
+                    analyses.append(f"[動画分析結果(Gemini):\n{analysis}\n]")
+
+    # 2. メッセージ本文中の動画URL (YouTube, Loom)
+    video_urls = extract_video_urls(content)
+    logger.warning("Video URL detection: found %d URLs in message: %s", len(video_urls), video_urls)
+    for v in video_urls:
+        analysis = await analyze_video_url(v["platform"], v["video_id"], v["url"])
+        if analysis:
+            analyses.append(f"[{v['platform']}動画分析結果(Gemini) {v['url']}:\n{analysis}\n]")
+
     if not analyses:
         return content
     return content + "\n" + "\n".join(analyses)
@@ -186,7 +201,6 @@ def _build_session_memory_summary_entry(
     archive_type: str,
     room_id: str,
     messages: list[dict],
-    is_project: bool,
     project_title: str = "",
     project_status: str = "",
     message_count: Optional[int] = None,
@@ -227,7 +241,7 @@ def _build_session_memory_summary_entry(
 
     return (
         f"### {ts} [{archive_type}] room={room_id}\n"
-        f"- mode: {'project' if is_project else 'chat'}\n"
+        f"- mode: chat\n"
         f"- project_title: {project_label}\n"
         f"- project_status: {status_label}\n"
         f"- total_messages: {total_count}\n"
@@ -260,7 +274,6 @@ async def _archive_session_summary(
     user_id: str,
     room_id: str,
     archive_type: str,
-    is_project: bool,
     project_title: str = "",
     project_status: str = "",
     force: bool = False,
@@ -297,7 +310,6 @@ async def _archive_session_summary(
             archive_type=archive_type,
             room_id=room_id,
             messages=messages,
-            is_project=is_project,
             project_title=project_title,
             project_status=project_status,
             message_count=total_messages,
@@ -946,27 +958,10 @@ async def dry_run_message(
     if not room:
         raise HTTPException(status_code=404, detail="Room not found or not a member")
 
-    # プロジェクトルームかどうか判定
-    is_project = False
-    try:
-        from app.services.project_service import ProjectService
-        ps = ProjectService()
-        proj_result = (
-            ps.supabase.table("projects")
-            .select("id")
-            .eq("room_id", room_id)
-            .execute()
-        )
-        if proj_result.data:
-            is_project = True
-    except Exception:
-        pass
-
     return {
         "status": "ok",
         "room_id": room_id,
         "content_received": request.content,
-        "is_project": is_project,
     }
 
 
@@ -1145,8 +1140,7 @@ async def send_dan_message_stream(
                 )
 
         try:
-            preloaded_project_info = {}
-            preloaded_is_project = False
+            project_info = {}
             current_project_run = None
             should_supersede_existing_run = False
             if request.session_id:
@@ -1162,10 +1156,9 @@ async def send_dan_message_stream(
                         .execute()
                     )
                     if proj_result.data:
-                        preloaded_is_project = True
-                        preloaded_project_info = proj_result.data[0]
+                        project_info = proj_result.data[0]
                         current_project_run = await RunService().get_current_run(
-                            preloaded_project_info["id"]
+                            project_info["id"]
                         )
                         should_supersede_existing_run = bool(
                             current_project_run
@@ -1176,18 +1169,6 @@ async def send_dan_message_stream(
                             should_supersede_existing_run = True
                 except Exception:
                     pass
-            if (
-                request.session_id
-                and not replan_requested
-                and not preloaded_is_project
-                and CancellationRegistry.is_active(request.session_id)
-            ):
-                busy_message = "前の実行がまだ進行中です。停止してから再送してください。"
-                yield f"data: {json.dumps({'type': 'error', 'session_id': request.session_id, 'message': busy_message})}\n\n"
-                done_sent = True
-                yield f"data: {json.dumps({'type': 'done', 'session_id': request.session_id})}\n\n"
-                return
-
             # Step 1: ユーザーメッセージを保存
             # session_idが指定されていればそのルームに、なければ現在のDanルームに送信
             if request.session_id:
@@ -1246,30 +1227,10 @@ async def send_dan_message_stream(
                 logging.warning(f"Failed to get conversation history: {e}")
             
             # ========================================
-            # プロジェクトルーム判定 → SDK Runner / 通常 Runner の分岐
+            # CLI Runner でメッセージ処理
+            # （全チャットがプロジェクトなので分岐不要。インデント維持のためif True）
             # ========================================
-            is_project = preloaded_is_project
-            project_info = preloaded_project_info
-            try:
-                if not is_project:
-                    from app.services.project_service import ProjectService
-                    ps = ProjectService()
-                    proj_result = (
-                        ps.supabase.table("projects")
-                        .select("id, title, description, status")
-                        .eq("room_id", room_id)
-                        .execute()
-                    )
-                    if proj_result.data:
-                        is_project = True
-                        project_info = proj_result.data[0]
-            except Exception:
-                pass
-
-            if is_project:
-                # ========================================
-                # CLI Runner でプロジェクト実行（SDK は親子タスクでフリーズするため）
-                # ========================================
+            if True:
                 from app.agent.cli_runner import process_message_cli
                 from app.api.project_routes import _format_tool_label
                 from app.services.run_service import RunService
@@ -1572,107 +1533,7 @@ async def send_dan_message_stream(
                     yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
                     done_sent = True
 
-            else:
-                # ========================================
-                # 非プロジェクトチャットも CLI Runner に統一
-                # ========================================
-                from app.agent.cli_runner import process_message_cli
-                from app.api.project_routes import _format_tool_label
-
-                final_text = ""
-                reasoning_steps = []
-                reasoning_full = []
-                step_counter = 0
-
-                cli_content_dan = _build_content_with_media(effective_content, request.image_urls or [], request.file_urls or [])
-                cli_content_dan = await _enrich_content_with_video_analysis(cli_content_dan, request.file_urls or [])
-
-                async for event in process_message_cli(
-                    room_id=room_id,
-                    user_id=current_user.user_id,
-                    content=cli_content_dan,
-                    project_title="",
-                    project_description="",
-                    project_status="in_progress",
-                    skill_injection=skill_injection,
-                ):
-                    if event["type"] == "keepalive":
-                        yield ": keepalive\n\n"
-                        continue
-
-
-                    if event["type"] == "cancelled":
-                        await service.send_dan_ai_message(
-                            current_user.user_id, "処理を中止しました。", [], room_id=room_id
-                        )
-                        yield f"data: {json.dumps({'type': 'cancelled', 'session_id': room_id})}\n\n"
-                        done_sent = True
-                        result_saved = True
-                        break
-
-                    elif event["type"] == "reasoning":
-                        text = event.get("text", "")
-                        label = text
-                        reasoning_steps.append(label)
-                        if text.strip():
-                            reasoning_full.append(text)
-                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
-                        step_counter += 1
-
-                    elif event["type"] == "tool_use":
-                        tool_label = _format_tool_label(event.get("name", ""), event.get("input", {}))
-                        reasoning_steps.append(f"🛠 {tool_label}")
-                        yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': f'🛠 {tool_label}', 'status': 'running'}})}\n\n"
-                        step_counter += 1
-
-                    elif event["type"] == "text":
-                        final_text = event["text"]
-                        text_preview = event["text"].strip()
-                        if text_preview and len(text_preview) > 10:
-                            reasoning_steps.append(text_preview)
-                            reasoning_full.append(text_preview)
-                            yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': text_preview, 'status': 'running'}})}\n\n"
-                            step_counter += 1
-
-                    elif event["type"] == "result":
-                        result_text = event.get("text", "")
-                        if result_text:
-                            final_text = result_text
-                        elif event.get("is_error"):
-                            final_text = result_text
-
-                    elif event["type"] == "error":
-                        yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': event['message']})}\n\n"
-
-                if not result_saved:
-                    ai_response_content = final_text or "応答の生成に失敗しました。"
-                    ai_message_data = await service.send_dan_ai_message(
-                        current_user.user_id,
-                        ai_response_content,
-                        reasoning_steps,
-                        room_id=room_id,
-                        reasoning_full=reasoning_full,
-                    )
-                    result_saved = True
-
-                    if not ai_message_data:
-                        raise ValueError("Failed to save AI message: returned None")
-
-                    ai_message = {
-                        "id": ai_message_data["id"],
-                        "room_id": ai_message_data["room_id"],
-                        "sender_id": ai_message_data.get("sender_id"),
-                        "sender_name": "ダン",
-                        "sender_type": "ai",
-                        "content": ai_message_data["content"],
-                        "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
-                    }
-                    if ai_message_data.get("ai_context"):
-                        ai_message["ai_context"] = ai_message_data["ai_context"]
-
-                    yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
-                    yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
-                    done_sent = True
+            # NOTE: 全チャットは統一済み。非プロジェクト分岐は削除済み (2026-03-06)
         except Exception as e:
             import logging
             import traceback
@@ -1910,7 +1771,6 @@ async def delete_dan_session(
             user_id=current_user.user_id,
             room_id=session_id,
             archive_type="delete",
-            is_project=False,
             force=True,
         )
 

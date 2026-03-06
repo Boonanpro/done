@@ -173,7 +173,6 @@ async def delete_project(
             user_id=current_user.user_id,
             room_id=room_id,
             archive_type="delete",
-            is_project=True,
             project_title=project.get("title", ""),
             project_status=project.get("status", ""),
             force=True,
