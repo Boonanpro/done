@@ -252,10 +252,11 @@ def _build_language_alignment_section(latest_user_message: str, user_messages: s
     """Keep Claude's visible reasoning and answer in the user's language."""
     language = _detect_user_language(latest_user_message or user_messages or "")
     return (
-        "## Language Rule\n\n"
-        f"The user's latest message language is **{language}**. "
-        "Match all visible reasoning, intermediate explanations, and the final response "
-        "to the user's language. Do not use a different language for reasoning and then translate."
+        "## Language Rule (CRITICAL)\n\n"
+        f"The user's language is **{language}**. "
+        "ALL output — including intermediate reasoning between tool calls, "
+        "thinking text, status updates, and the final response — "
+        f"MUST be in {language}. Never use English for any visible output."
     )
 
 
