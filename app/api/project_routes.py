@@ -157,30 +157,37 @@ async def delete_project(
     current_user: TokenData = Depends(get_current_user),
     service: ProjectService = Depends(get_project_service),
 ):
-    """プロジェクトを削除（削除前に会話をdate.mdにアーカイブ）"""
-    # 削除前にプロジェクト情報を取得してアーカイブ
+    """プロジェクトを削除（LLMアーカイブはバックグラウンドで実行）"""
+    import asyncio
+
     project = await service.get_project(project_id, current_user.user_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # 削除前にメッセージを収集（DB読み取りのみ、高速）
+    messages_for_archive = None
     room_id = project.get("room_id")
     if room_id:
-        from app.api.chat_routes import _archive_session_summary
+        from app.api.chat_routes import _collect_messages_for_archive
         from app.services.chat_service import ChatService
         chat_service = ChatService()
-        await _archive_session_summary(
+        messages_for_archive = await _collect_messages_for_archive(
             service=chat_service,
             user_id=current_user.user_id,
             room_id=room_id,
-            archive_type="delete",
-            project_title=project.get("title", ""),
-            project_status=project.get("status", ""),
-            force=True,
         )
 
+    # 即座に削除
     deleted = await service.delete_project(project_id, current_user.user_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
+
+    # LLMアーカイブをバックグラウンドで実行
+    if room_id and messages_for_archive:
+        from app.api.chat_routes import _run_archive_in_background
+        asyncio.create_task(
+            _run_archive_in_background(room_id, messages_for_archive)
+        )
 
 
 # ==================== Proposals ====================

@@ -319,6 +319,182 @@ async def _archive_session_summary(
         logger.warning("Failed to archive session summary (%s): %s", archive_type, e)
 
 
+async def _collect_messages_for_archive(
+    *,
+    service: ChatService,
+    user_id: str,
+    room_id: str,
+) -> list[dict] | None:
+    """
+    アーカイブ用のメッセージをDBから収集（高速）。
+    LLM呼び出しは行わない。削除前に呼び出すこと。
+    """
+    try:
+        count_result = (
+            service.supabase.table("chat_messages")
+            .select("id", count="exact")
+            .eq("room_id", room_id)
+            .execute()
+        )
+        total_messages = count_result.count or 0
+        if total_messages == 0:
+            return None
+
+        # last_compacted_at を取得
+        last_compacted_at = None
+        try:
+            from app.agent.v2.session import get_session_store
+            store = get_session_store()
+            session = await store.get_or_create(room_id, user_id)
+            last_compacted_at_str = session.get_context("last_compacted_at")
+            if last_compacted_at_str:
+                last_compacted_at = parse_datetime(last_compacted_at_str)
+        except Exception as e:
+            logger.warning(f"Failed to get session context for {room_id}: {e}")
+
+        # メッセージ取得
+        query = (
+            service.supabase.table("chat_messages")
+            .select("sender_type, content, created_at")
+            .eq("room_id", room_id)
+            .order("created_at", desc=False)
+        )
+        if last_compacted_at:
+            query = query.gt("created_at", last_compacted_at.isoformat())
+
+        result = query.execute()
+        return result.data or None
+    except Exception as e:
+        logger.warning("Failed to collect messages for archive: %s", e)
+        return None
+
+
+async def _run_archive_in_background(room_id: str, messages: list[dict]) -> None:
+    """
+    収集済みメッセージからLLM要約を生成してファイルに書き込む（バックグラウンド用）。
+    """
+    try:
+        await _archive_messages_with_llm(room_id=room_id, messages=messages)
+    except Exception as e:
+        logger.warning("Background archive failed for session %s: %s", room_id, e)
+
+
+async def _archive_messages_with_llm(
+    *,
+    room_id: str,
+    messages: list[dict],
+) -> None:
+    """収集済みメッセージからLLM要約を生成してファイルに追記する。"""
+    import anthropic
+    from datetime import timedelta
+
+    # LLM用フォーマットに変換
+    llm_messages = []
+    for msg in messages:
+        role = "user" if msg.get("sender_type") in ("human", "user") else "assistant"
+        content = msg.get("content", "")
+        if not content:
+            continue
+        llm_messages.append({"role": role, "content": content})
+
+    if not llm_messages:
+        return
+
+    # 隣接する同一roleのメッセージをマージ
+    merged = []
+    for msg in llm_messages:
+        if merged and merged[-1]["role"] == msg["role"]:
+            merged[-1]["content"] += "\n\n" + msg["content"]
+        else:
+            merged.append(dict(msg))
+    llm_messages = merged
+
+    if llm_messages and llm_messages[0]["role"] == "assistant":
+        llm_messages.insert(0, {"role": "user", "content": "(会話の続き)"})
+
+    # 文字数制限
+    total_chars = sum(len(m["content"]) for m in llm_messages)
+    if total_chars > 80000:
+        trimmed = []
+        char_count = 0
+        for msg in reversed(llm_messages):
+            char_count += len(msg["content"])
+            trimmed.append(msg)
+            if char_count > 80000:
+                break
+        llm_messages = list(reversed(trimmed))
+        if llm_messages and llm_messages[0]["role"] == "assistant":
+            llm_messages.insert(0, {"role": "user", "content": "(会話の続き)"})
+
+    flush_system = """あなたは会話ログの圧縮係です。
+
+以下の会話の全内容を箇条書きで要約してください。
+
+ルール:
+- 全てのトピック・やり取りを漏れなく含める。省略禁止。
+- 各トピックは1-2行で簡潔に。
+- ユーザーの質問・相談内容、それに対する回答・結果を両方含める。
+- 具体的な固有名詞（店名、商品名、URL、金額等）は省略せず残す。
+- 「重要かどうか」の判断はしない。全て記録する。
+- テキスト出力のみ。ツールは使わない。
+"""
+
+    llm_messages.append({
+        "role": "user",
+        "content": "上記の会話の全内容を箇条書きで要約してください。省略禁止。"
+    })
+
+    model = "MiniMax-M2.5"
+    if settings.MINIMAX_API_KEY:
+        client = anthropic.AsyncAnthropic(
+            api_key=settings.MINIMAX_API_KEY,
+            base_url="https://api.minimax.io/anthropic",
+        )
+    elif settings.ANTHROPIC_API_KEY:
+        client = anthropic.AsyncAnthropic(
+            api_key=settings.ANTHROPIC_API_KEY,
+        )
+    else:
+        logger.warning("No LLM API key available for archive")
+        return
+
+    response = await client.messages.create(
+        model=model,
+        max_tokens=4000,
+        system=flush_system,
+        messages=llm_messages,
+    )
+
+    text_parts = []
+    for block in response.content:
+        if block.type == "text":
+            text_parts.append(block.text.strip())
+    summary = "\n\n".join(text_parts) if text_parts else ""
+
+    if not summary:
+        logger.warning(f"LLM summary generation failed for session {room_id}")
+        return
+
+    jst = timezone(timedelta(hours=9))
+    last_msg_created_at = messages[-1].get("created_at")
+    if last_msg_created_at:
+        msg_date = parse_datetime(last_msg_created_at).astimezone(jst)
+    else:
+        msg_date = datetime.now(jst)
+    date_str = msg_date.strftime("%Y-%m-%d")
+    time_str = msg_date.strftime("%H:%M")
+
+    WORKSPACE_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    filepath = WORKSPACE_MEMORY_DIR / f"{date_str}.md"
+
+    entry = f"\n\n## {time_str} session={room_id} [delete-archive]\n\n{summary}\n"
+    with filepath.open("a", encoding="utf-8") as f:
+        f.write(entry)
+    logger.info(f"Delete archive (LLM summary) saved to {filepath}")
+
+    await _update_long_term_memory_standalone(client, model, summary)
+
+
 async def _archive_session_with_llm(
     *,
     service: ChatService,
@@ -1760,24 +1936,34 @@ async def delete_dan_session(
     - アクティブなセッションを削除した場合、別のセッションに自動切り替え
     - 関連するメッセージも全て削除される
     - 実行中の処理とブラウザ操作もキャンセルされる
+    - アーカイブ（LLM要約）はバックグラウンドで実行
     """
+    import asyncio
+
     try:
         # キャンセル処理: 実行中のタスクとブラウザ操作を停止
         from app.services.cancellation import CancellationRegistry
         from app.tools.browser import abort_executor_session
 
-        await _archive_session_summary(
-            service=service,
-            user_id=current_user.user_id,
-            room_id=session_id,
-            archive_type="delete",
-            force=True,
-        )
-
         CancellationRegistry.cancel(session_id)
         abort_executor_session()
 
+        # メッセージをDBから先に取得（高速）してからバックグラウンドでLLM要約
+        messages_for_archive = await _collect_messages_for_archive(
+            service=service,
+            user_id=current_user.user_id,
+            room_id=session_id,
+        )
+
+        # 即座に削除を実行
         result = await service.delete_dan_session(current_user.user_id, session_id)
+
+        # LLM要約をバックグラウンドで実行（削除完了後）
+        if messages_for_archive:
+            asyncio.create_task(
+                _run_archive_in_background(session_id, messages_for_archive)
+            )
+
         return {
             "message": "Session deleted successfully",
             "new_active_session_id": result.get("new_active_session_id"),
