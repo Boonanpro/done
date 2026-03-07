@@ -252,15 +252,18 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
     const proposalMatch = (msg.content || '').match(/```proposal\n([^\n]+)\n```/);
     if (proposalMatch) {
       const filename = proposalMatch[1].trim();
+      const proposalUrl = `/api/v1/proposals/${filename}`;
       return (
         <div className="flex w-full justify-start px-1 py-1">
-          <iframe
-            src={`/api/v1/proposals/${filename}`}
-            className="w-full rounded-xl border border-border"
-            style={{ height: '600px' }}
-            sandbox="allow-scripts allow-same-origin"
-            title={filename}
-          />
+          <a
+            href={proposalUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-3 text-sm text-foreground shadow-sm transition-colors hover:bg-muted"
+          >
+            <FileText className="h-4 w-4 text-primary" />
+            <span>{filename}</span>
+          </a>
         </div>
       );
     }
@@ -301,7 +304,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
             </a>
           ))}
           {text && (
-            <div className="rounded-lg bg-primary px-3 py-2 text-sm leading-relaxed text-primary-foreground md:text-xs">
+            <div className="rounded-lg bg-primary px-3 py-2 text-sm leading-relaxed text-primary-foreground md:text-xs whitespace-pre-wrap">
               {text}
             </div>
           )}
