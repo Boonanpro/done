@@ -826,8 +826,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const selectProject = useProjectStore((s) => s.selectProject);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sendMessageRef = useRef<((content: string) => void) | null>(null);
   const [proposalCollapsed, setProposalCollapsed] = useState(true);
+  const isNearBottomRef = useRef(true);
+  const [hasNewMessages, setHasNewMessages] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const { warmupMode } = useRecoveryState(projectId);
 
@@ -1033,8 +1036,25 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const hasAnyContent = displayItems.length > 0;
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (isNearBottomRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    } else {
+      setHasNewMessages(true);
+    }
   }, [displayItems]);
+
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    isNearBottomRef.current = nearBottom;
+    if (nearBottom) setHasNewMessages(false);
+  }, []);
+
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    setHasNewMessages(false);
+  }, []);
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -1136,7 +1156,17 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       ) : null}
 
-      <div className="relative flex-1 overflow-y-auto">
+      <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto">
+        {hasNewMessages && (
+          <button
+            onClick={scrollToBottom}
+            className="sticky top-[calc(100%-3rem)] z-10 mx-auto flex items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-lg transition-opacity hover:opacity-90"
+            style={{ display: 'block', marginLeft: 'auto', marginRight: 'auto', width: 'fit-content' }}
+          >
+            <ChevronDown className="h-3.5 w-3.5" />
+            新しいメッセージ
+          </button>
+        )}
         {isLoadingMessages ? (
           <div className="flex items-center justify-center p-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />

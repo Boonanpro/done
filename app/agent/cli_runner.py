@@ -905,6 +905,14 @@ def _run_cli_in_thread(
                 state="paused" if CancellationRegistry.is_cancelled(room_id) else "failed",
             )
         _cleanup_mcp_config(room_id)
+        # コンパクションサマリーをdaily memoryにミラーリング
+        try:
+            from app.services.compaction_sync import sync_compaction_summaries
+            synced = sync_compaction_summaries()
+            if synced:
+                _cli_debug(f"Compaction sync: mirrored {synced} summary(ies)")
+        except Exception as e:
+            _cli_debug(f"Compaction sync error (non-fatal): {e}")
         _cli_debug("Sending sentinel")
         event_queue.put(_SENTINEL)
         # CLIスレッド終了時にCancellationRegistryを確実に解除
