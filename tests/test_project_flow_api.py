@@ -49,6 +49,12 @@ class FakeProjectService:
             return None
         return project
 
+    async def get_project_by_room_id(self, room_id: str) -> Optional[dict]:
+        for project in self.projects.values():
+            if project["room_id"] == room_id:
+                return project
+        return None
+
     async def list_projects(self, user_id: str, status: Optional[str] = None) -> list[dict]:
         rows = [p for p in self.projects.values() if p["user_id"] == user_id]
         if status:
@@ -254,157 +260,91 @@ def project_test_context(client):
         app.dependency_overrides.pop(project_routes.get_current_user, None)
 
 
-def _wait_for_project_status(
-    client: Any,
-    project_id: str,
-    expected_status: str,
-    timeout_sec: float = 2.0,
-) -> dict:
-    deadline = time.time() + timeout_sec
-    last = {}
-    while time.time() < deadline:
-        response = client.get(f"/api/v1/projects/{project_id}")
-        assert response.status_code == 200
-        last = response.json()
-        if last.get("status") == expected_status:
-            return last
-        time.sleep(0.05)
-    raise AssertionError(
-        f"project status did not become '{expected_status}', last={last.get('status')}"
-    )
-
-
-def test_project_flow_awaiting_then_cancel(client, project_test_context, monkeypatch):
+def test_proposal_approve_saves_active_plan(client, project_test_context, tmp_path, monkeypatch):
+    """承認ボタンを押すと active.md に計画が保存される"""
     fake_service: FakeProjectService = project_test_context
 
-    async def fake_start_project_execution(project: dict, proposal: dict, user_id: str):
-        await fake_service.update_project(
-            project["id"],
-            user_id,
-            status="awaiting_confirmation",
-            metadata={
-                "pending_step": 1,
-                "proposal_id": proposal["id"],
-                "previous_results": [],
-            },
-        )
-
+    # active.md の保存先をtmpに変更
+    plans_dir = tmp_path / "plans"
     monkeypatch.setattr(
-        "app.api.project_routes._start_project_execution",
-        fake_start_project_execution,
+        "app.agent.bootstrap_context.WORKSPACE_DIR",
+        tmp_path,
     )
 
     create_project = client.post(
         "/api/v1/projects",
-        json={"title": "Flow Test A", "description": "project flow cancel path"},
+        json={"title": "Plan Save Test", "description": "test active plan save"},
     )
     assert create_project.status_code == 201
     project = create_project.json()
     project_id = project["id"]
-    assert project["status"] == "planning"
 
     create_proposal = client.post(
         f"/api/v1/projects/{project_id}/proposals",
         json={
-            "content": "## 実行計画\n1. 購入を確定する",
+            "content": "## HP制作計画\n1. v0.devでコンポーネント生成\n2. デプロイ",
             "proposal_type": "plan",
             "steps": [
-                {"step_number": 1, "description": "購入を確定する", "status": "pending"}
+                {"step_number": 1, "description": "v0.devでコンポーネント生成", "status": "pending"},
+                {"step_number": 2, "description": "Cloudflareにデプロイ", "status": "pending"},
             ],
         },
     )
     assert create_proposal.status_code == 201
     proposal = create_proposal.json()
 
-    after_proposal = client.get(f"/api/v1/projects/{project_id}")
-    assert after_proposal.status_code == 200
-    assert after_proposal.json()["status"] == "proposed"
-
     approve = client.post(
         f"/api/v1/projects/{project_id}/proposals/{proposal['id']}/action",
         json={"action": "approve"},
     )
     assert approve.status_code == 200
 
-    waiting_project = _wait_for_project_status(client, project_id, "awaiting_confirmation")
-    assert waiting_project.get("metadata", {}).get("pending_step") == 1
-
-    cancel = client.post(
-        f"/api/v1/projects/{project_id}/resume",
-        json={"action": "cancel"},
-    )
-    assert cancel.status_code == 200
-    assert cancel.json()["status"] == "paused"
+    # active.md が作成されたことを確認
+    active_plan_path = plans_dir / "active.md"
+    assert active_plan_path.exists()
+    content = active_plan_path.read_text(encoding="utf-8")
+    assert "Plan Save Test" in content
+    assert "v0.devでコンポーネント生成" in content
+    assert "Cloudflareにデプロイ" in content
 
 
-def test_project_flow_awaiting_then_confirm_to_completed(
-    client, project_test_context, monkeypatch
-):
+def test_proposal_reject_clears_active_plan(client, project_test_context, tmp_path, monkeypatch):
+    """却下すると active.md が削除される"""
     fake_service: FakeProjectService = project_test_context
 
-    async def fake_start_project_execution(project: dict, proposal: dict, user_id: str):
-        await fake_service.update_project(
-            project["id"],
-            user_id,
-            status="awaiting_confirmation",
-            metadata={
-                "pending_step": 1,
-                "proposal_id": proposal["id"],
-                "previous_results": [],
-            },
-        )
-
-    async def fake_run_stepwise_execution(*args, **kwargs):
-        project_id = kwargs.get("project_id") or args[0]
-        user_id = kwargs.get("user_id")
-        if user_id is None and len(args) > 2:
-            user_id = args[2]
-        await fake_service.update_project(project_id, user_id, status="completed")
-
+    plans_dir = tmp_path / "plans"
+    plans_dir.mkdir(parents=True)
+    (plans_dir / "active.md").write_text("dummy plan", encoding="utf-8")
     monkeypatch.setattr(
-        "app.api.project_routes._start_project_execution",
-        fake_start_project_execution,
-    )
-    monkeypatch.setattr(
-        "app.services.project_execution.run_stepwise_execution",
-        fake_run_stepwise_execution,
+        "app.agent.bootstrap_context.WORKSPACE_DIR",
+        tmp_path,
     )
 
     create_project = client.post(
         "/api/v1/projects",
-        json={"title": "Flow Test B", "description": "project flow confirm path"},
+        json={"title": "Reject Test", "description": "test reject clears plan"},
     )
     assert create_project.status_code == 201
-    project_id = create_project.json()["id"]
+    project = create_project.json()
+    project_id = project["id"]
 
     create_proposal = client.post(
         f"/api/v1/projects/{project_id}/proposals",
         json={
-            "content": "## 実行計画\n1. 実装する",
+            "content": "## 計画\n1. 何かする",
             "proposal_type": "plan",
-            "steps": [{"step_number": 1, "description": "実装する", "status": "pending"}],
+            "steps": [{"step_number": 1, "description": "何かする", "status": "pending"}],
         },
     )
     assert create_proposal.status_code == 201
     proposal = create_proposal.json()
 
-    approve = client.post(
+    reject = client.post(
         f"/api/v1/projects/{project_id}/proposals/{proposal['id']}/action",
-        json={"action": "approve"},
+        json={"action": "reject"},
     )
-    assert approve.status_code == 200
-
-    _wait_for_project_status(client, project_id, "awaiting_confirmation")
-
-    confirm = client.post(
-        f"/api/v1/projects/{project_id}/resume",
-        json={"action": "confirm"},
-    )
-    assert confirm.status_code == 200
-    assert confirm.json()["status"] == "in_progress"
-
-    completed_project = _wait_for_project_status(client, project_id, "completed")
-    assert completed_project["status"] == "completed"
+    assert reject.status_code == 200
+    assert not (plans_dir / "active.md").exists()
 
 
 def test_get_current_run(client, project_test_context):
@@ -468,3 +408,155 @@ def test_get_current_run_skips_superseded_run(client, project_test_context):
     assert body["id"] == second_run["id"]
     assert body["state"] == "running"
 
+
+# ==================== create_proposal ツールのテスト ====================
+
+@pytest.mark.asyncio
+async def test_create_proposal_tool_success(monkeypatch):
+    """create_proposalツールが正常に提案を作成する"""
+    from app.agent.v2.tools import _execute_create_proposal
+
+    fake_service = FakeProjectService()
+    # プロジェクトを事前作成
+    project = await fake_service.create_project(
+        user_id="test-user",
+        title="Tool Test",
+        description="test create_proposal tool",
+    )
+    room_id = project["room_id"]
+
+    # ProjectServiceをモック
+    monkeypatch.setattr(
+        "app.agent.v2.tools._get_project_service",
+        lambda: fake_service,
+    )
+
+    result = await _execute_create_proposal(
+        params={
+            "title": "HP制作計画",
+            "steps": [
+                "v0.devでコンポーネント生成",
+                "Claude Codeでコード調整",
+                "Cloudflareにデプロイ",
+            ],
+        },
+        user_id="test-user",
+        session_id=room_id,
+    )
+
+    assert result["success"] is True
+    assert "proposal_id" in result
+
+    # DBに保存されたか確認
+    proposals = await fake_service.get_proposals(project["id"])
+    assert len(proposals) == 1
+    proposal = proposals[0]
+    assert proposal["status"] == "pending"
+    assert len(proposal["steps"]) == 3
+    assert proposal["steps"][0]["description"] == "v0.devでコンポーネント生成"
+    assert proposal["steps"][1]["step_number"] == 2
+    assert proposal["metadata"]["source"] == "create_proposal_tool"
+
+    # プロジェクトステータスが proposed になったか
+    updated_project = await fake_service.get_project(project["id"], "test-user")
+    assert updated_project["status"] == "proposed"
+
+
+@pytest.mark.asyncio
+async def test_create_proposal_tool_no_session():
+    """セッションIDなしでエラーを返す"""
+    from app.agent.v2.tools import _execute_create_proposal
+
+    result = await _execute_create_proposal(
+        params={"title": "テスト", "steps": ["ステップ1"]},
+        user_id="test-user",
+        session_id=None,
+    )
+    assert result["success"] is False
+    assert "セッションID" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_create_proposal_tool_no_project(monkeypatch):
+    """プロジェクトが見つからない場合エラーを返す"""
+    from app.agent.v2.tools import _execute_create_proposal
+
+    fake_service = FakeProjectService()
+    monkeypatch.setattr(
+        "app.agent.v2.tools._get_project_service",
+        lambda: fake_service,
+    )
+
+    result = await _execute_create_proposal(
+        params={"title": "テスト", "steps": ["ステップ1"]},
+        user_id="test-user",
+        session_id="nonexistent-room",
+    )
+    assert result["success"] is False
+    assert "プロジェクトが見つかりません" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_create_proposal_tool_empty_title():
+    """タイトルなしでエラーを返す"""
+    from app.agent.v2.tools import _execute_create_proposal
+
+    result = await _execute_create_proposal(
+        params={"title": "", "steps": ["ステップ1"]},
+        user_id="test-user",
+        session_id="some-room",
+    )
+    assert result["success"] is False
+    assert "タイトル" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_create_proposal_tool_empty_steps():
+    """ステップなしでエラーを返す"""
+    from app.agent.v2.tools import _execute_create_proposal
+
+    result = await _execute_create_proposal(
+        params={"title": "テスト", "steps": []},
+        user_id="test-user",
+        session_id="some-room",
+    )
+    assert result["success"] is False
+    assert "ステップ" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_create_proposal_tool_supersedes_pending(monkeypatch):
+    """新しい提案が既存のpending提案をsupersededにする"""
+    from app.agent.v2.tools import _execute_create_proposal
+
+    fake_service = FakeProjectService()
+    project = await fake_service.create_project(
+        user_id="test-user",
+        title="Supersede Test",
+    )
+    room_id = project["room_id"]
+
+    monkeypatch.setattr(
+        "app.agent.v2.tools._get_project_service",
+        lambda: fake_service,
+    )
+
+    # 1つ目の提案
+    await _execute_create_proposal(
+        params={"title": "計画v1", "steps": ["ステップA"]},
+        user_id="test-user",
+        session_id=room_id,
+    )
+
+    # 2つ目の提案
+    result = await _execute_create_proposal(
+        params={"title": "計画v2", "steps": ["ステップB"]},
+        user_id="test-user",
+        session_id=room_id,
+    )
+    assert result["success"] is True
+
+    proposals = await fake_service.get_proposals(project["id"])
+    statuses = [p["status"] for p in proposals]
+    assert statuses.count("pending") == 1
+    assert statuses.count("superseded") == 1

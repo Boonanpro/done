@@ -273,7 +273,9 @@ def _build_system_prompt(
     Base identity is minimal — domain-specific behavior is loaded via
     check_skill (e.g. project skill) at runtime.
     """
-    from app.agent.bootstrap_context import get_core_prompt, load_all_bootstrap_files
+    from app.agent.bootstrap_context import (
+        get_core_prompt, load_all_bootstrap_files, load_active_plan,
+    )
 
     parts = []
 
@@ -298,11 +300,25 @@ def _build_system_prompt(
             status=status,
         ))
 
+    # Approved plan — injected near the end for recency bias.
+    active_plan = load_active_plan()
+    if active_plan:
+        parts.append(active_plan)
+
+    # Absolute rules — placed LAST for maximum attention.
+    parts.append(_ABSOLUTE_RULES)
+
     return "\n\n".join(parts)
 _CLI_PROJECT_TEMPLATE = """## プロジェクト
 
 - 説明: {description}
 - ステータス: {status}
+
+### 提案ルール
+- 新しい作業や大きな変更を始める前に、`create_proposal` ツールで計画を提案すること
+- 各ステップには「何を」「どうやって」を含める（例: 「v0.devでコンポーネント生成」）
+- 提案後、UIに承認/却下ボタンが表示される。承認されるまで実行に着手しないこと
+- 軽微な質問・調査・修正には提案不要。判断に迷ったら提案する
 
 ### ブラウザ操作
 - @e参照は直前の操作結果でのみ有効。ページ遷移後は使わない
@@ -314,6 +330,11 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 - 接続テストには `POST /api/v1/chat/rooms/{{room_id}}/dry-run` を使うこと
 - dry-run は認証・ルーム検証のみ行い、DBに書き込まない
 - 本番の送信エンドポイント (`/messages`, `/dan/messages/stream`) をテスト目的で使わないこと"""
+
+_ABSOLUTE_RULES = """## 絶対ルール（例外なし）
+1. 質問にはまず回答。作業はその後。
+2. 承認済み計画がある場合、逸脱しない。逸脱が必要なら理由を説明し承認を得る。
+3. 成果物にはスクリーンショットで目視確認し、内容の不一致がないか検証する。"""
 
 
 def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = None) -> str:

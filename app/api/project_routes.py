@@ -16,15 +16,10 @@ from app.models.project_schemas import (
     ProjectProposalCreateRequest,
     ProjectProposalResponse,
     ProjectProposalActionRequest,
-    ProjectResumeRequest,
     ExecutionEventResponse,
 )
 
 router = APIRouter(prefix="/projects", tags=["projects"])
-
-# バックグラウンドタスクの参照を保持（GC防止）
-_background_tasks: set = set()
-
 
 @router.get("/suggest-title")
 async def suggest_project_title(
@@ -182,6 +177,10 @@ async def delete_project(
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    # 承認済み計画をクリア
+    from app.agent.bootstrap_context import clear_active_plan
+    clear_active_plan()
+
     # LLMアーカイブをバックグラウンドで実行
     if room_id and messages_for_archive:
         from app.api.chat_routes import _run_archive_in_background
@@ -248,6 +247,14 @@ async def proposal_action(
                 project_id, current_user.user_id, status="in_progress"
             )
 
+            # 承認済み計画をファイルに保存 → cli_runner.pyがシステムプロンプトに注入
+            from app.agent.bootstrap_context import save_active_plan
+            save_active_plan(
+                project_title=project.get("title", ""),
+                steps=result.get("steps", []),
+                content=result.get("content", ""),
+            )
+
             # awaiting_approval の run を completed にして、
             # 次のチャットメッセージで supersede されないようにする
             from app.services.run_service import RunService
@@ -257,6 +264,9 @@ async def proposal_action(
                 await run_service.update_run(current_run["id"], state="completed")
     else:
         result = await service.reject_proposal(proposal_id, project_id)
+        # 却下時は計画をクリア
+        from app.agent.bootstrap_context import clear_active_plan
+        clear_active_plan()
 
     if not result:
         raise HTTPException(status_code=404, detail="Proposal not found or already actioned")
@@ -305,94 +315,6 @@ async def get_current_run(
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
-
-
-# ==================== Execution Resume ====================
-
-@router.post("/{project_id}/resume", response_model=ProjectResponse)
-async def resume_execution(
-    project_id: str,
-    request: ProjectResumeRequest,
-    current_user: TokenData = Depends(get_current_user),
-    service: ProjectService = Depends(get_project_service),
-):
-    """Red操作確認後、実行を再開（または中止）"""
-    project = await service.get_project(project_id, current_user.user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    if project["status"] != "awaiting_confirmation":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Project is not awaiting confirmation (current: {project['status']})",
-        )
-
-    metadata = project.get("metadata") or {}
-    pending_step = metadata.get("pending_step")
-    proposal_id = metadata.get("proposal_id", "")
-    previous_results = metadata.get("previous_results", [])
-
-    if not pending_step:
-        raise HTTPException(
-            status_code=400,
-            detail="No pending step found in project metadata",
-        )
-
-    if request.action == "cancel":
-        # 中止: ステータスをpausedに
-        updated = await service.update_project(
-            project_id, current_user.user_id, status="paused"
-        )
-        return updated
-
-    # confirm: 中断地点から実行を再開
-    # まず提案からステップ一覧を取得
-    proposals = await service.get_proposals(project_id)
-    proposal = next(
-        (p for p in proposals if p["id"] == proposal_id), None
-    )
-    if not proposal:
-        raise HTTPException(status_code=404, detail="Proposal not found")
-
-    steps = proposal.get("steps") or []
-    proposal_content = proposal.get("content", "")
-    proposal_metadata = proposal.get("metadata") or {}
-
-    # チーム文脈を再構築
-    research_findings = proposal_metadata.get("research_findings", "")
-    critique = proposal_metadata.get("critique", "")
-    team_context = ""
-    if research_findings or critique:
-        team_context = "## チーム議論の参考情報\n"
-        if research_findings:
-            team_context += f"\n### リサーチャーの調査結果\n{research_findings}\n"
-        if critique:
-            team_context += f"\n### クリティックの検証結果\n{critique}\n"
-
-    # バックグラウンドで再開
-    import asyncio
-    from app.services.project_execution import run_stepwise_execution
-
-    task = asyncio.create_task(run_stepwise_execution(
-        project_id=project_id,
-        room_id=project["room_id"],
-        user_id=current_user.user_id,
-        proposal_id=proposal_id,
-        title=project.get("title", ""),
-        description=project.get("description", ""),
-        steps=steps,
-        plan_content=proposal_content,
-        team_context=team_context,
-        start_from_step=pending_step,
-    ))
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-
-    # ステータスをin_progressに更新して返す
-    updated = await service.update_project(
-        project_id, current_user.user_id, status="in_progress"
-    )
-    return updated
 
 
 # ==================== Helpers ====================
@@ -490,37 +412,3 @@ def _format_tool_label(name: str, tool_input: dict) -> str:
     return name
 
 
-async def _start_project_execution(project: dict, proposal: dict, user_id: str):
-    """承認された提案をステップごとに実行開始（段階的実行）"""
-    from app.services.project_execution import run_stepwise_execution
-
-    project_id = project["id"]
-    room_id = project["room_id"]
-    proposal_content = proposal.get("content", "")
-    steps = proposal.get("steps") or []
-
-    # チーム議論のメタデータ
-    proposal_metadata = proposal.get("metadata") or {}
-    research_findings = proposal_metadata.get("research_findings", "")
-    critique = proposal_metadata.get("critique", "")
-
-    team_context = ""
-    if research_findings or critique:
-        team_context = "## チーム議論の参考情報（計画時の調査・検証結果）\n"
-        if research_findings:
-            team_context += f"\n### リサーチャーの調査結果\n{research_findings}\n"
-        if critique:
-            team_context += f"\n### クリティックの検証結果\n{critique}\n"
-        team_context += "\n上記を踏まえて、指摘されたリスクに注意しながら実行してください。\n"
-
-    await run_stepwise_execution(
-        project_id=project_id,
-        room_id=room_id,
-        user_id=user_id,
-        proposal_id=proposal.get("id", ""),
-        title=project.get("title", ""),
-        description=project.get("description", ""),
-        steps=steps,
-        plan_content=proposal_content,
-        team_context=team_context,
-    )

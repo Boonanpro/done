@@ -7,7 +7,6 @@ CLI/Gemini paths can evolve without importing legacy runner code.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 from pathlib import Path
 
 # Core prompt used by active runtimes.
@@ -40,9 +39,11 @@ def load_all_bootstrap_files() -> str:
     Order (important):
     1. USER.md
     2. MEMORY.md
-    3. recent daily memory (yesterday, today)
-    4. SOUL.md
-    5. RULES.md (placed last for recency)
+    3. SOUL.md
+    4. RULES.md (placed last for recency)
+
+    Daily logs (memory/{date}.md) are NOT injected.
+    Dan can read them on demand via read_file.
     """
     parts = []
 
@@ -54,14 +55,8 @@ def load_all_bootstrap_files() -> str:
     if memory:
         parts.append(f"## 長期記憶\n\n{memory}")
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    for date_str in [yesterday, today]:
-        daily = load_bootstrap_file(f"memory/{date_str}.md")
-        if daily:
-            if len(daily) > 4000:
-                daily = daily[-4000:]
-            parts.append(f"## 会話ログ ({date_str})\n\n{daily}")
+    # Daily logs are no longer injected into system prompt.
+    # Dan can read memory/{date}.md on demand via read_file if needed.
 
     soul = load_bootstrap_file("SOUL.md")
     if soul:
@@ -74,4 +69,50 @@ def load_all_bootstrap_files() -> str:
     if parts:
         return "\n\n---\n\n".join(parts)
     return ""
+
+
+def load_active_plan() -> str:
+    """Load active plan if one exists. Returns empty string if none."""
+    plan_path = WORKSPACE_DIR / "plans" / "active.md"
+    if plan_path.exists():
+        try:
+            return plan_path.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+    return ""
+
+
+def save_active_plan(project_title: str, steps: list, content: str = "") -> None:
+    """Save approved plan for system prompt injection."""
+    plans_dir = WORKSPACE_DIR / "plans"
+    plans_dir.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        "## 承認済み計画",
+        "",
+        f"プロジェクト: {project_title}",
+        "",
+        "以下はユーザーと合意済みの計画です。この計画に従って作業してください。",
+        "計画から逸脱する必要がある場合は、必ず理由を説明してユーザーの承認を得てください。",
+        "",
+    ]
+
+    if steps:
+        for step in steps:
+            num = step.get("step_number", "?")
+            desc = step.get("description", step.get("title", ""))
+            status = step.get("status", "pending")
+            icon = "✅" if status == "completed" else "⬜"
+            lines.append(f"- {icon} Step {num}: {desc}")
+    elif content:
+        lines.append(content[:2000])
+
+    (plans_dir / "active.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def clear_active_plan() -> None:
+    """Remove active plan."""
+    plan_path = WORKSPACE_DIR / "plans" / "active.md"
+    if plan_path.exists():
+        plan_path.unlink()
 

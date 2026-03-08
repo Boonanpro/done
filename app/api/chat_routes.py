@@ -1646,64 +1646,9 @@ async def send_dan_message_stream(
 
                         yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
 
-                    # 提案保存はSSEジェネレーターに残す（SSE断線時は提案は作成されないが、
-                    # AI応答テキスト自体はCLIスレッドが保存しているのでユーザーは回答を見られる）
-                    proposal_created = False
-                    if project_info.get("status") == "planning" and "## 実行計画" in ai_response_content:
-                        try:
-                            from app.services.proposal_steps import extract_steps
-
-                            proposal_steps = extract_steps(ai_response_content)
-                            proposal = await asyncio.wait_for(
-                                project_service.create_proposal(
-                                    project_id=project_info["id"],
-                                    run_id=run_id,
-                                    content=ai_response_content,
-                                    proposal_type="plan",
-                                    steps=proposal_steps,
-                                    metadata={
-                                        "source": "project_chat_planning",
-                                        "generated_by": "cli_runner",
-                                    },
-                                ),
-                                timeout=10,
-                            )
-                            proposal_created = True
-                            if run_id and proposal:
-                                await run_service.update_run(
-                                    run_id,
-                                    state="awaiting_approval",
-                                    active_proposal_id=proposal["id"],
-                                )
-                            await _save_project_event_safe(project_service,
-                                project_id=project_info["id"],
-                                room_id=room_id,
-                                run_id=run_id,
-                                event_type="phase",
-                                content="planning output saved as proposal",
-                            )
-                        except Exception as proposal_error:
-                            logger.warning(
-                                "Failed to save planning output as proposal "
-                                "(project=%s, room=%s): %s",
-                                project_info.get("id"),
-                                room_id,
-                                proposal_error,
-                            )
-                            try:
-                                await _save_project_event_safe(project_service,
-                                    project_id=project_info["id"],
-                                    room_id=room_id,
-                                    run_id=run_id,
-                                    event_type="error",
-                                    content=f"proposal save failed: {proposal_error}",
-                                )
-                            except Exception:
-                                pass
-
-                    # doneイベントはCLIスレッドが既にDB保存済み（DB-first）
-                    # 提案が作成された場合のみSSEからphaseイベントを追加保存
-                    if run_id and run_state and not proposal_created:
+                    # 提案作成は create_proposal MCPツール経由で行われる（DB-first）
+                    # SSE側での見出し検出は不要
+                    if run_id and run_state:
                         await run_service.update_run(run_id, state=run_state)
                     result_saved = True
                     yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
