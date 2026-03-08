@@ -2624,9 +2624,24 @@ async def _execute_read_url(params: Dict[str, Any]) -> Dict[str, Any]:
 # ============================================
 
 def _get_project_service():
-    """ProjectServiceのファクトリ（テスト時にmonkeypatch可能）"""
-    from app.services.project_service import ProjectService
-    return ProjectService()
+    """ProjectServiceのファクトリ（テスト時にmonkeypatch可能）
+
+    MCPサーバーから呼ばれる場合、SupabaseClientのEncryptionService初期化で
+    ENCRYPTION_KEYが未設定だとエラーになる。ProjectServiceは暗号化を使わないので
+    直接supabase clientを作成して回避する。
+    """
+    try:
+        from app.services.project_service import ProjectService
+        return ProjectService()
+    except (ValueError, Exception):
+        # EncryptionService初期化失敗時: 直接クライアントを作成
+        from app.services.project_service import ProjectService
+        from app.config import settings
+        from supabase import create_client
+        service = object.__new__(ProjectService)
+        key = settings.SUPABASE_SERVICE_ROLE_KEY or settings.SUPABASE_KEY
+        service.supabase = create_client(settings.SUPABASE_URL, key)
+        return service
 
 
 async def _execute_create_proposal(
