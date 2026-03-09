@@ -33,6 +33,7 @@ from pathlib import Path
 REPO_DIR = Path("D:/done")
 FRONTEND_DIR = REPO_DIR / "frontend"
 LOG_FILE = REPO_DIR / "deploy.log"
+LAST_DEPLOY_FILE = REPO_DIR / ".last_deploy_hash"
 POLL_INTERVAL = 30  # seconds
 
 
@@ -123,6 +124,18 @@ def restart_backend():
         logging.error(f"Backend restart failed: {r.stderr.strip()}")
 
 
+def get_last_deploy_hash() -> str:
+    """Return the commit hash from last successful deploy."""
+    if LAST_DEPLOY_FILE.exists():
+        return LAST_DEPLOY_FILE.read_text().strip()
+    return ""
+
+
+def save_last_deploy_hash(commit_hash: str) -> None:
+    """Record the commit hash after a successful deploy."""
+    LAST_DEPLOY_FILE.write_text(commit_hash)
+
+
 def check_and_deploy() -> bool:
     """1回のチェック＆デプロイサイクル。変更があればTrueを返す。"""
     if not git_fetch():
@@ -131,17 +144,27 @@ def check_and_deploy() -> bool:
     local = get_local_head()
     remote = get_remote_head()
 
-    if local == remote:
+    # Pull remote changes if any
+    if local != remote:
+        logging.info(f"Remote changes detected: {local[:8]} → {remote[:8]}")
+        if not git_pull():
+            return False
+
+    # Compare current HEAD against last deployed hash
+    current_head = get_local_head()
+    last_deploy = get_last_deploy_hash()
+
+    if current_head == last_deploy:
         return False
 
-    logging.info(f"New commits detected: {local[:8]} → {remote[:8]}")
-
-    old_head = local
-    if not git_pull():
+    if not last_deploy:
+        # First run: record current state without restarting
+        logging.info(f"First run, recording current HEAD: {current_head[:8]}")
+        save_last_deploy_hash(current_head)
         return False
 
-    new_head = get_local_head()
-    changed = get_changed_files(old_head, new_head)
+    logging.info(f"New commits since last deploy: {last_deploy[:8]} → {current_head[:8]}")
+    changed = get_changed_files(last_deploy, current_head)
     logging.info(f"Changed files ({len(changed)}): {', '.join(changed[:10])}")
 
     # 依存関係の変更を検知
@@ -167,6 +190,7 @@ def check_and_deploy() -> bool:
     if ts_changed:
         logging.info(f"Frontend files changed ({len(ts_changed)}) → Next.js HMR will handle it")
 
+    save_last_deploy_hash(current_head)
     logging.info("Deploy cycle complete.")
     return True
 

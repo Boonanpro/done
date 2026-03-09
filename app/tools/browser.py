@@ -60,20 +60,28 @@ async def _executor_worker():
     try:
         print("[EXECUTOR_BROWSER] Starting Playwright...")
         playwright = await async_playwright().start()
-        browser = await playwright.chromium.launch(headless=False, slow_mo=100)
 
         user_data_dir = os.path.join(os.path.expanduser("~"), ".ai_secretary", "browser_data")
         os.makedirs(user_data_dir, exist_ok=True)
 
-        context = await browser.new_context(
+        context = await playwright.chromium.launch_persistent_context(
+            user_data_dir=user_data_dir,
+            headless=False,
+            slow_mo=100,
+            args=["--disable-blink-features=AutomationControlled"],
             viewport={"width": 1440, "height": 900},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         )
+        browser = context  # persistent contextではcontextがbrowser相当
 
         # 新しいタブを検知するリスナーを登録
         context.on("page", on_new_page)
 
-        page = await context.new_page()
+        # persistent contextは最初のページを自動作成する
+        if context.pages:
+            page = context.pages[0]
+        else:
+            page = await context.new_page()
         pages_state["current"] = page
         pages_state["all_pages"].append(page)
 
@@ -173,6 +181,18 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
 
     elif cmd == "get_url":
         return {"url": page.url}
+
+    elif cmd == "save_image":
+        # URLから画像をダウンロードしてファイルに保存
+        url = args["url"]
+        save_path = args["path"]
+        response = await context.request.get(url)
+        body = await response.body()
+        import pathlib
+        pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(save_path, "wb") as f:
+            f.write(body)
+        return {"saved": save_path, "size": len(body)}
 
     elif cmd == "locator_count":
         count = await page.locator(args["selector"]).count()
@@ -655,6 +675,13 @@ class ExecutorPageProxy:
             None, lambda: _send_executor_command("evaluate", expression=expression, arg=arg)
         )
         return result.get("result")
+
+    async def save_image(self, url: str, path: str):
+        """URLから画像をダウンロードしてファイルに保存"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, lambda: _send_executor_command("save_image", url=url, path=path)
+        )
 
     async def wait_for_selector(self, selector: str, timeout: int = 30000, state: str = "visible"):
         """セレクタが表示されるまで待機"""

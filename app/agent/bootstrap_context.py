@@ -38,12 +38,11 @@ def load_all_bootstrap_files() -> str:
 
     Order (important):
     1. USER.md
-    2. MEMORY.md
-    3. SOUL.md
-    4. RULES.md (placed last for recency)
+    2. SOUL.md
+    3. RULES.md (placed last for recency)
 
-    Daily logs (memory/{date}.md) are NOT injected.
-    Dan can read them on demand via read_file.
+    MEMORY.md is NOT injected into system prompt (too large, dilutes built-in instructions).
+    Dan can read ~/.dan/workspace/MEMORY.md on demand via read_file.
     """
     parts = []
 
@@ -51,12 +50,7 @@ def load_all_bootstrap_files() -> str:
     if user:
         parts.append(f"## ユーザー情報\n\n{user}")
 
-    memory = load_bootstrap_file("MEMORY.md")
-    if memory:
-        parts.append(f"## 長期記憶\n\n{memory}")
-
-    # Daily logs are no longer injected into system prompt.
-    # Dan can read memory/{date}.md on demand via read_file if needed.
+    # MEMORY.md: on-demand only. Read via read_file when needed.
 
     soul = load_bootstrap_file("SOUL.md")
     if soul:

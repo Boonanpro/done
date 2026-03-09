@@ -39,6 +39,9 @@ _SENTINEL = object()  # キュー終了シグナル
 _active_processes: Dict[str, subprocess.Popen] = {}
 _process_lock = threading.Lock()
 
+# 停止されたroom_idを記録（次回起動時に--fork-sessionを付けるため）
+_interrupted_rooms: set = set()
+
 # スレッドローカル: 現在のroom_idを自動追跡（_cli_debugで使用）
 _thread_local = threading.local()
 
@@ -55,6 +58,7 @@ def kill_cli_process(room_id: str) -> bool:
         process = _active_processes.pop(room_id, None)
     if process is None:
         return False
+    _interrupted_rooms.add(room_id)
     _terminate_process(process)
     return True
 
@@ -316,25 +320,15 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 
 ### 提案ルール
 - 新しい作業や大きな変更を始める前に、`create_proposal` ツールで計画を提案すること
-- 各ステップには「何を」「どうやって」を含める（例: 「v0.devでコンポーネント生成」）
 - 提案後、UIに承認/却下ボタンが表示される。承認されるまで実行に着手しないこと
-- 軽微な質問・調査・修正には提案不要。判断に迷ったら提案する
+- 軽微な質問・調査・修正には提案不要"""
 
-### ブラウザ操作
-- @e参照は直前の操作結果でのみ有効。ページ遷移後は使わない
-- 操作後はURL・タイトル・見出しの変化で結果を確認する
-- 証拠なく「完了しました」と報告しない
-- ローディング中ならbrowser(action=screenshot)で再確認
-
-### チャットAPI テスト
-- 接続テストには `POST /api/v1/chat/rooms/{{room_id}}/dry-run` を使うこと
-- dry-run は認証・ルーム検証のみ行い、DBに書き込まない
-- 本番の送信エンドポイント (`/messages`, `/dan/messages/stream`) をテスト目的で使わないこと"""
-
-_ABSOLUTE_RULES = """## 絶対ルール（例外なし）
-1. 質問にはまず回答。作業はその後。
+_ABSOLUTE_RULES = """## 絶対ルール
+1. 質問にはまず回答。作業はその後。報告を求められたら報告だけして次の指示を待て。
 2. 承認済み計画がある場合、逸脱しない。逸脱が必要なら理由を説明し承認を得る。
-3. 成果物にはスクリーンショットで目視確認し、内容の不一致がないか検証する。"""
+3. 同じアプローチで2回失敗したら、回避策を試すのではなく根本原因を特定しろ。自分のソースコード（D:/done配下）をRead/Edit/Bashで調査・修正できる。
+4. browserツールで実現できない操作（ダウンロード等）はBashでPythonスクリプトを書いて直接Playwrightを使え。persistent contextのパス: ~/.ai_secretary/browser_data
+5. 長期記憶が必要なら `read_file` で `~/.dan/workspace/MEMORY.md` を読め。"""
 
 
 def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = None) -> str:
@@ -349,6 +343,7 @@ def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = 
                     "DAN_SESSION_ID": room_id,
                     "DAN_CREDENTIALS": json.dumps(credentials or {}),
                     "DAN_IS_PLANNING": "",
+                    "ENCRYPTION_KEY": os.environ.get("ENCRYPTION_KEY", ""),
                 },
             }
         }
@@ -465,6 +460,7 @@ def _build_cli_cmd(
     mcp_config_path: str,
     system_prompt: str,
     resume_session_id: Optional[str] = None,
+    fork_session: bool = False,
 ) -> list[str]:
     """CLIコマンドライン引数を組み立てる"""
     if cli_js:
@@ -486,6 +482,8 @@ def _build_cli_cmd(
 
     if resume_session_id:
         cmd.extend(["--resume", resume_session_id])
+        if fork_session:
+            cmd.append("--fork-session")
 
     return cmd
 
@@ -644,15 +642,16 @@ def _run_cli_process(
                         )
                         reasoning_steps_acc.append(f"🔧 {_format_tool_label(ev.get('name', ''), ev.get('input', {}))}")
                     elif ev["type"] == "reasoning" and ev.get("text", "").strip():
-                        _save_execution_event_sync(
-                            room_id, "reasoning", project_id=project_id, run_id=run_id,
-                            content=ev.get("text", ""),
-                        )
-                        reasoning_steps_acc.append(ev.get("text", ""))
+                        # thinkingはプロセスモニターに送らない（英語で読みにくい）
+                        # reasoning_full にだけ蓄積（デバッグ用に保持）
                         reasoning_full_acc.append(ev.get("text", ""))
                     elif ev["type"] == "text":
                         text_preview = ev.get("text", "").strip()
                         if text_preview and len(text_preview) > 10:
+                            _save_execution_event_sync(
+                                room_id, "reasoning", project_id=project_id, run_id=run_id,
+                                content=text_preview,
+                            )
                             reasoning_steps_acc.append(text_preview)
                             reasoning_full_acc.append(text_preview)
 
@@ -732,8 +731,11 @@ def _should_retry_without_resume(result_data: Optional[dict], used_resume: bool)
         error_text = " ".join(str(e) for e in errors).lower()
         result_text = (result_data.get("result_text") or "").lower()
         combined = error_text + " " + result_text
-        # 「セッションが見つからない」系のエラーのみリトライ
+        # 「セッションが見つからない」系のエラー → セッションクリアしてリトライ
         if "no conversation found" in combined or "session" in combined and "not found" in combined:
+            return True
+        # 「Prompt is too long」→ 会話履歴が肥大化。セッションクリアしてリトライ
+        if "prompt is too long" in combined:
             return True
         # その他のエラー（ツール失敗、APIエラー等）→ セッションは消さない
         return False
@@ -787,9 +789,12 @@ def _run_cli_in_thread(
     result_data = None
     done_saved = False
     try:
-        # 1回目: セッション再開を試みる
-        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id)
-        _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, prompt len={len(content)})")
+        # 1回目: セッション再開を試みる（中断後はfork-sessionで新規セッション分岐）
+        need_fork = room_id in _interrupted_rooms
+        if need_fork:
+            _interrupted_rooms.discard(room_id)
+        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id, fork_session=need_fork)
+        _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, fork={need_fork}, prompt len={len(content)})")
 
         result_data = _run_cli_process(
             cmd,
@@ -908,12 +913,15 @@ def _run_cli_in_thread(
         # = CLIがresultを出す前に静かに終了した場合
         if project_id and not result_data and not done_saved:
             from app.services.cancellation import CancellationRegistry
-            _cli_debug("Safety net: CLI exited without result, saving error to DB")
-            _save_ai_message_sync(
-                room_id,
-                "処理が中断されました。もう一度お試しください。",
-            )
-            done_content = "cancelled" if CancellationRegistry.is_cancelled(room_id) else "interrupted"
+            was_cancelled = CancellationRegistry.is_cancelled(room_id)
+            _cli_debug(f"Safety net: CLI exited without result (cancelled={was_cancelled})")
+            # キャンセル時はSSE側(chat_routes.py)が「（中断されました）」を保存するので重複しない
+            if not was_cancelled:
+                _save_ai_message_sync(
+                    room_id,
+                    "処理が中断されました。もう一度お試しください。",
+                )
+            done_content = "cancelled" if was_cancelled else "interrupted"
             _save_execution_event_sync(
                 room_id,
                 "done",
@@ -923,7 +931,7 @@ def _run_cli_in_thread(
             )
             _update_run_sync(
                 run_id,
-                state="paused" if CancellationRegistry.is_cancelled(room_id) else "failed",
+                state="paused" if was_cancelled else "failed",
             )
         _cleanup_mcp_config(room_id)
         # コンパクションサマリーをdaily memoryにミラーリング

@@ -356,7 +356,7 @@ BROWSER_TOOL = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["open", "screenshot", "click", "type", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload"],
+                "enum": ["open", "screenshot", "click", "type", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image"],
                 "description": "実行するアクション",
             },
             "url": {"type": "string", "description": "開くURL（action=open）"},
@@ -369,6 +369,7 @@ BROWSER_TOOL = {
             "value": {"type": "string", "description": "選択する値（action=select）"},
             "expression": {"type": "string", "description": "実行するJavaScriptコード（action=evaluate）"},
             "key": {"type": "string", "description": "押すキー（action=keyboard_press, 例: Escape, Tab, Enter, ArrowDown）"},
+            "path": {"type": "string", "description": "保存先ファイルパス（action=save_image）"},
         },
         "required": ["action"]
     }
@@ -2523,6 +2524,17 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             state = await _get_browser_state(page)
             state["content"].insert(0, {"type": "text", "text": f"evaluate result: {result}"})
             return state
+
+        elif action == "save_image":
+            url = params.get("url")
+            path = params.get("path")
+            if not url or not path:
+                return {"success": False, "error": "url と path が必要です"}
+            result = await page.save_image(url, path)
+            return {
+                "success": True,
+                "content": [{"type": "text", "text": f"画像を保存しました: {result}"}],
+            }
 
         elif action == "content":
             html = await page.content()
