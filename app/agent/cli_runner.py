@@ -646,6 +646,7 @@ def _run_cli_process(
                         # reasoning_full にだけ蓄積（デバッグ用に保持）
                         reasoning_full_acc.append(ev.get("text", ""))
                     elif ev["type"] == "text":
+                        # テキスト出力（日本語の独り言）はプロセスモニターに表示
                         text_preview = ev.get("text", "").strip()
                         if text_preview and len(text_preview) > 10:
                             _save_execution_event_sync(
@@ -734,8 +735,8 @@ def _should_retry_without_resume(result_data: Optional[dict], used_resume: bool)
         # 「セッションが見つからない」系のエラー → セッションクリアしてリトライ
         if "no conversation found" in combined or "session" in combined and "not found" in combined:
             return True
-        # 「Prompt is too long」→ 会話履歴が肥大化。セッションクリアしてリトライ
-        if "prompt is too long" in combined:
+        # 「Prompt is too long」「Out of memory」→ 会話履歴が肥大化。セッションクリアしてリトライ
+        if "prompt is too long" in combined or "out of memory" in combined:
             return True
         # その他のエラー（ツール失敗、APIエラー等）→ セッションは消さない
         return False
