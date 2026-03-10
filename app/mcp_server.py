@@ -18,6 +18,33 @@ import logging
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
+# .env から環境変数を補完（MCP サブプロセスには os.environ 経由でしか渡らないため、
+# 空や未設定の場合は .env を直接読んで補完する）
+def _ensure_env_from_dotenv():
+    """ENCRYPTION_KEY 等、.env にしかない変数を os.environ に補完"""
+    env_path = os.path.join(PROJECT_ROOT, ".env")
+    if not os.path.exists(env_path):
+        return
+    needed = {"ENCRYPTION_KEY", "SUPABASE_URL", "SUPABASE_KEY", "SUPABASE_SERVICE_ROLE_KEY"}
+    missing = {k for k in needed if not os.environ.get(k)}
+    if not missing:
+        return
+    try:
+        with open(env_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key in missing and value:
+                    os.environ[key] = value
+    except Exception:
+        pass
+
+_ensure_env_from_dotenv()
+
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 import mcp.types as types
