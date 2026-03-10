@@ -20,6 +20,7 @@ import {
   Trash2,
   X,
   XCircle,
+  Presentation,
 } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ReactMarkdown from 'react-markdown';
@@ -37,6 +38,7 @@ import {
   type ProjectProposalResponse,
   type ProjectStatusType,
 } from '@/lib/api-client';
+import { useRouter } from 'next/navigation';
 import { useProjectRecovery } from '@/hooks/useProjectRecovery';
 import { useAuthStore } from '@/stores/auth-store';
 import { useProjectStore, useRecoveryActions, useRecoveryState } from '@/stores/project-store';
@@ -87,7 +89,7 @@ function ProcessStepItem({
   isLastLive: boolean;
 }) {
   return (
-    <div className="flex items-start gap-1.5 text-xs md:text-[10px] leading-relaxed">
+    <div className="flex items-start gap-1.5 text-sm md:text-[15px] leading-relaxed">
       {step.type === 'error' ? (
         <AlertCircle className="mt-0.5 h-2.5 w-2.5 shrink-0 text-red-500" />
       ) : step.type === 'reasoning' ? (
@@ -148,7 +150,7 @@ function InlineProcessBlock({
       <div className="max-w-[90%] overflow-hidden rounded-lg border border-border/40 bg-muted/20">
         <button
           onClick={() => setIsCollapsed((value) => !value)}
-          className="flex w-full items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted/30 md:text-[11px]"
+          className="flex w-full items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/30 md:text-[15px]"
         >
           {isCollapsed ? (
             <ChevronRight className="h-3 w-3 shrink-0" />
@@ -179,7 +181,7 @@ function InlineProcessBlock({
                 />
               ))}
               {isLive && steps.length === 0 ? (
-                <div className="flex items-center gap-1.5 text-xs text-muted-foreground md:text-[10px]">
+                <div className="flex items-center gap-1.5 text-sm text-muted-foreground md:text-[15px]">
                   <Loader2 className="h-2.5 w-2.5 animate-spin text-primary" />
                   <span>更新を待機中...</span>
                 </div>
@@ -298,13 +300,14 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
               href={f.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-xs underline text-primary-foreground/80"
+              className="flex items-center gap-2 rounded-lg border border-primary/20 bg-primary/90 px-3 py-2 text-sm text-primary-foreground transition-colors hover:bg-primary md:text-[15px]"
             >
-              {f.name}
+              <FileText className="h-4 w-4 shrink-0" />
+              <span className="truncate max-w-[200px]">{f.name}</span>
             </a>
           ))}
           {text && (
-            <div className="rounded-lg bg-primary px-3 py-2 text-sm leading-relaxed text-primary-foreground md:text-xs whitespace-pre-wrap">
+            <div className="rounded-lg bg-primary px-3 py-2 text-base leading-relaxed text-primary-foreground md:text-[17px] whitespace-pre-wrap">
               {text}
             </div>
           )}
@@ -314,8 +317,8 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
   }
 
   return (
-    <div className="prose prose-sm prose-dan max-w-none text-sm leading-relaxed text-foreground md:prose-xs md:text-xs">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; } }}>{msg.content || ''}</ReactMarkdown>
+    <div className="prose prose-base prose-dan max-w-none text-base leading-relaxed text-foreground md:prose-base md:text-[17px]">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; }, img({ src, alt }) { const imgSrc = typeof src === 'string' ? src : ''; return <img src={imgSrc} alt={alt || ''} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(imgSrc)} />; } }}>{msg.content || ''}</ReactMarkdown>
     </div>
   );
 });
@@ -336,6 +339,7 @@ function ChatInput({
   const [message, setMessage] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
   const [isUploading, setIsUploading] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [showSkillSuggestions, setShowSkillSuggestions] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const skillsCacheRef = useRef<DanSkill[] | null>(null);
@@ -430,13 +434,12 @@ function ChatInput({
     queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
   }, [projectId, queryClient, roomId]);
 
-  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  const uploadFiles = useCallback(async (fileList: File[]) => {
+    if (fileList.length === 0) return;
     setIsUploading(true);
     try {
       const uploaded: FileUploadResponse[] = [];
-      for (const file of Array.from(files)) {
+      for (const file of fileList) {
         if (file.size > 100 * 1024 * 1024) {
           toast.error(`${file.name} は100MB以上のファイルは添付できません`);
           continue;
@@ -448,9 +451,56 @@ function ChatInput({
       toast.error('ファイルのアップロードに失敗しました');
     } finally {
       setIsUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   }, []);
+
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    await uploadFiles(Array.from(files));
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, [uploadFiles]);
+
+  const handlePaste = useCallback(async (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (files.length > 0) {
+      e.preventDefault();
+      await uploadFiles(files);
+    }
+  }, [uploadFiles]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only reset if leaving the container (not entering a child)
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) {
+      await uploadFiles(files);
+    }
+  }, [uploadFiles]);
 
   const handleRemoveFile = useCallback((fileId: string) => {
     setAttachedFiles(prev => prev.filter(f => f.id !== fileId));
@@ -708,7 +758,17 @@ function ChatInput({
   }, [handleCancel, isBusy]);
 
   return (
-    <div className="relative shrink-0 border-t border-border p-3">
+    <div
+      className={`relative shrink-0 border-t p-3 transition-colors ${isDragging ? 'border-primary bg-primary/5' : 'border-border'}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {isDragging && (
+        <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/10">
+          <span className="text-sm font-medium text-primary">ファイルをドロップして添付</span>
+        </div>
+      )}
       {showSkillSuggestions && filteredSkills.length > 0 && (
         <div className="absolute bottom-full left-3 right-3 mb-1 max-h-[200px] overflow-y-auto rounded-lg border border-border bg-popover shadow-lg z-50">
           {filteredSkills.map((skill, idx) => (
@@ -719,7 +779,7 @@ function ChatInput({
                   el.scrollIntoView({ block: 'nearest' });
                 }
               }}
-              className={`flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent md:text-xs ${
+              className={`flex w-full items-start gap-2 px-3 py-2 text-left text-base transition-colors hover:bg-accent md:text-[17px] ${
                 idx === selectedIndex ? 'bg-accent' : ''
               }`}
               onMouseEnter={() => setSelectedIndex(idx)}
@@ -766,7 +826,7 @@ function ChatInput({
         </div>
       )}
       <div className="flex items-end gap-2 rounded-xl border border-border bg-input/30 p-2 transition-colors focus-within:border-primary/50">
-        <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} accept="image/*,video/*,.pdf,.txt,.doc,.docx" />
+        <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} accept="*/*" />
         <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground" onClick={handleClickAttach} disabled={isUploading} title="ファイルを添付">
           {isUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Paperclip className="h-3.5 w-3.5" />}
         </Button>
@@ -785,9 +845,10 @@ function ChatInput({
             }
           }}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder="メッセージを入力..."
           rows={1}
-          className="min-h-[32px] max-h-[120px] flex-1 resize-none bg-transparent py-1.5 text-sm focus:outline-none md:text-xs"
+          className="min-h-[32px] max-h-[120px] flex-1 resize-none bg-transparent py-1.5 text-base focus:outline-none md:text-[17px]"
         />
         {message.trim() || attachedFiles.length > 0 ? (
           <Button
@@ -824,6 +885,7 @@ function ChatInput({
 
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
+  const router = useRouter();
   const selectProject = useProjectStore((s) => s.selectProject);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -1064,12 +1126,12 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           {isLoading ? (
             <div className="flex items-center gap-2">
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-              <span className="text-sm text-muted-foreground">プロジェクトを読み込み中...</span>
+              <span className="text-base text-muted-foreground md:text-[17px]">プロジェクトを読み込み中...</span>
             </div>
           ) : (
             <>
               <div className="flex items-center gap-1.5">
-                <h2 className="truncate text-sm font-semibold">{project?.title}</h2>
+                <h2 className="truncate text-base font-semibold md:text-[17px]">{project?.title}</h2>
                 <button
                   className="shrink-0 rounded p-0.5 text-muted-foreground/40 transition-colors hover:text-destructive"
                   onClick={handleDeleteProject}
@@ -1086,13 +1148,13 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
               <div className="mt-0.5 flex items-center gap-2">
                 {status ? (
                   <span
-                    className={`inline-block rounded-full px-1.5 py-0.5 text-xs font-medium md:text-[10px] ${status.color}`}
+                    className={`inline-block rounded-full px-1.5 py-0.5 text-sm font-medium md:text-[15px] ${status.color}`}
                   >
                     {status.label}
                   </span>
                 ) : null}
                 {project?.created_at ? (
-                  <span className="text-xs text-muted-foreground/60 md:text-[10px]">
+                  <span className="text-sm text-muted-foreground/60 md:text-[15px]">
                     {new Date(project.created_at).toLocaleDateString('ja-JP')}
                   </span>
                 ) : null}
@@ -1106,7 +1168,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         <div className="shrink-0 border-b border-border">
           <button
             onClick={() => setProposalCollapsed((value) => !value)}
-            className="flex w-full items-center gap-2 px-4 py-2 text-sm transition-colors hover:bg-muted/50 md:text-xs"
+            className="flex w-full items-center gap-2 px-4 py-2 text-base transition-colors hover:bg-muted/50 md:text-[17px]"
           >
             {proposalCollapsed ? (
               <ChevronRight className="h-3 w-3 text-muted-foreground" />
@@ -1119,7 +1181,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           </button>
           {!proposalCollapsed ? (
             <div className="max-h-[40vh] overflow-y-auto px-4 pb-3">
-              <div className="prose prose-sm prose-dan max-w-none rounded-lg bg-yellow-500/5 px-3 py-2 text-sm leading-relaxed md:prose-xs md:text-xs">
+              <div className="prose prose-base prose-dan max-w-none rounded-lg bg-yellow-500/5 px-3 py-2 text-base leading-relaxed md:prose-base md:text-[17px]">
                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; } }}>
                   {pendingProposal.content || ''}
                 </ReactMarkdown>
@@ -1133,7 +1195,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         <div className="shrink-0 border-b border-border">
           <button
             onClick={() => setProposalCollapsed((value) => !value)}
-            className="flex w-full items-center gap-2 px-4 py-2 text-sm transition-colors hover:bg-muted/50 md:text-xs"
+            className="flex w-full items-center gap-2 px-4 py-2 text-base transition-colors hover:bg-muted/50 md:text-[17px]"
           >
             {proposalCollapsed ? (
               <ChevronRight className="h-3 w-3 text-muted-foreground" />
@@ -1146,7 +1208,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           </button>
           {!proposalCollapsed ? (
             <div className="max-h-[40vh] overflow-y-auto px-4 pb-3">
-              <div className="prose prose-sm prose-dan max-w-none rounded-lg bg-muted px-3 py-2 text-sm leading-relaxed md:prose-xs md:text-xs">
+              <div className="prose prose-base prose-dan max-w-none rounded-lg bg-muted px-3 py-2 text-base leading-relaxed md:prose-base md:text-[17px]">
                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; } }}>
                   {approvedProposal.content || ''}
                 </ReactMarkdown>
@@ -1174,7 +1236,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         ) : !hasAnyContent && !isActiveExecution ? (
           <div className="flex h-full flex-col items-center justify-center p-6">
             <MessageSquare className="mb-3 h-10 w-10 text-muted-foreground/20" />
-            <p className="text-sm text-muted-foreground md:text-xs">メッセージを送信して開始してください。</p>
+            <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
           </div>
         ) : (
           <div className="flex flex-col gap-2 p-4">
@@ -1233,6 +1295,19 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                 <XCircle className="h-3.5 w-3.5" />
               )}
               却下
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 gap-1.5 text-xs border-blue-500/30 text-blue-500 hover:bg-blue-500/10"
+              onClick={() => {
+                sessionStorage.setItem('meeting-topic', project?.title || '提案');
+                sessionStorage.setItem('meeting-content', pendingProposal.content || '');
+                router.push('/meeting');
+              }}
+            >
+              <Presentation className="h-3.5 w-3.5" />
+              MTGで確認
             </Button>
           </div>
         </div>
