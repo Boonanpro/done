@@ -331,6 +331,15 @@ _ABSOLUTE_RULES = """## 絶対ルール
 5. 長期記憶が必要なら `read_file` で `~/.dan/workspace/MEMORY.md` を読め。"""
 
 
+def _get_encryption_key() -> str:
+    """Settings（.env）からENCRYPTION_KEYを取得"""
+    try:
+        from app.config import Settings
+        return Settings().ENCRYPTION_KEY or ""
+    except Exception:
+        return ""
+
+
 def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = None) -> str:
     """MCP設定ファイルをセッション固有のパスに書き出して返す"""
     mcp_json = {
@@ -343,7 +352,7 @@ def _build_mcp_config(room_id: str, user_id: str, credentials: Optional[Dict] = 
                     "DAN_SESSION_ID": room_id,
                     "DAN_CREDENTIALS": json.dumps(credentials or {}),
                     "DAN_IS_PLANNING": "",
-                    "ENCRYPTION_KEY": os.environ.get("ENCRYPTION_KEY", ""),
+                    "ENCRYPTION_KEY": os.environ.get("ENCRYPTION_KEY", "") or _get_encryption_key(),
                 },
             }
         }
