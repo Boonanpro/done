@@ -39,10 +39,12 @@ ANALYSIS_PROMPT = (
 
 # URL patterns
 _YOUTUBE_RE = re.compile(
-    r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([\w-]+)'
+    r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)([\w-]+)',
+    re.IGNORECASE,
 )
 _LOOM_RE = re.compile(
-    r'https?://(?:www\.)?loom\.com/share/([\w-]+)'
+    r'https?://(?:www\.)?loom\.com/share/([\w-]+)',
+    re.IGNORECASE,
 )
 
 
