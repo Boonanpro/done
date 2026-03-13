@@ -270,6 +270,7 @@ def _build_system_prompt(
     status: str,
     user_messages: str = "",
     latest_user_message: str = "",
+    project_id: str | None = None,
 ) -> str:
     """
     Build CLI system prompt.
@@ -304,8 +305,8 @@ def _build_system_prompt(
             status=status,
         ))
 
-    # Approved plan — injected near the end for recency bias.
-    active_plan = load_active_plan()
+    # Approved plan — injected only for the owning project.
+    active_plan = load_active_plan(project_id)
     if active_plan:
         parts.append(active_plan)
 
@@ -722,6 +723,81 @@ def _run_cli_process(
     return result_data
 
 
+def _trim_old_images_from_session(session_id: str, keep_recent: int = 20):
+    """セッションJSONLファイルから古い画像を削除し、直近のものだけ残す。
+
+    Claude CLIのセッションに画像が蓄積すると、Anthropic APIの
+    "dimension limit for many-image requests (2000px)" エラーが発生する。
+    この関数はCLI起動前に呼ばれ、古い画像をテキストプレースホルダーに置換する。
+
+    Args:
+        session_id: CLIセッションID（UUIDフォーマット）
+        keep_recent: 直近何行分の画像を保持するか（デフォルト20行）
+    """
+    session_file = Path.home() / ".claude" / "projects" / "D--dan-workspace" / f"{session_id}.jsonl"
+    if not session_file.exists():
+        return
+
+    try:
+        with open(session_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        # まず画像を含む行を特定
+        image_line_indices = []
+        for i, line in enumerate(lines):
+            if '"type":"image"' in line or '"type": "image"' in line:
+                # 実際にbase64データがある行だけ対象（プレースホルダーは除外）
+                if '"base64"' in line and len(line) > 5000:
+                    image_line_indices.append(i)
+
+        if len(image_line_indices) <= keep_recent:
+            return  # 十分少ないので何もしない
+
+        # 古い画像の行を特定（直近keep_recent行は残す）
+        lines_to_strip = set(image_line_indices[:-keep_recent])
+        if not lines_to_strip:
+            return
+
+        def _strip_images(obj):
+            """再帰的に画像ブロックをプレースホルダーに置換"""
+            if isinstance(obj, dict):
+                # Anthropic Vision API形式: {type: "image", source: {type: "base64", data: ...}}
+                if obj.get("type") == "image" and "source" in obj:
+                    return {"type": "text", "text": "[画像: 省略]"}
+                # Claude CLI toolUseResult形式: {type: "image", file: {base64: ...}}
+                if obj.get("type") == "image" and "file" in obj:
+                    return {"type": "text", "text": "[画像: 省略]"}
+                # base64データを直接持つdict
+                if "base64" in obj and isinstance(obj.get("base64"), str) and len(obj["base64"]) > 100:
+                    return {"type": "text", "text": "[画像: 省略]"}
+                return {k: _strip_images(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [_strip_images(item) for item in obj]
+            return obj
+
+        modified = []
+        stripped_count = 0
+        for i, line in enumerate(lines):
+            if i in lines_to_strip:
+                try:
+                    entry = json.loads(line.strip())
+                    entry = _strip_images(entry)
+                    modified.append(json.dumps(entry, ensure_ascii=False) + "\n")
+                    stripped_count += 1
+                except Exception:
+                    modified.append(line)
+            else:
+                modified.append(line)
+
+        if stripped_count > 0:
+            with open(session_file, "w", encoding="utf-8") as f:
+                f.writelines(modified)
+            _cli_debug(f"Trimmed {stripped_count} old image lines from session {session_id} (kept recent {keep_recent})")
+
+    except Exception as e:
+        _cli_debug(f"Failed to trim images from session {session_id}: {e}")
+
+
 def _should_retry_without_resume(result_data: Optional[dict], used_resume: bool) -> bool:
     """resumeを使った実行が失敗し、フレッシュセッションでリトライすべきかを判定する。
 
@@ -744,8 +820,8 @@ def _should_retry_without_resume(result_data: Optional[dict], used_resume: bool)
         # 「セッションが見つからない」系のエラー → セッションクリアしてリトライ
         if "no conversation found" in combined or "session" in combined and "not found" in combined:
             return True
-        # 「Prompt is too long」「Out of memory」→ 会話履歴が肥大化。セッションクリアしてリトライ
-        if "prompt is too long" in combined or "out of memory" in combined:
+        # 「Prompt is too long」「Out of memory」「dimension limit」→ 会話履歴が肥大化。セッションクリアしてリトライ
+        if "prompt is too long" in combined or "out of memory" in combined or "dimension limit" in combined:
             return True
         # その他のエラー（ツール失敗、APIエラー等）→ セッションは消さない
         return False
@@ -799,6 +875,10 @@ def _run_cli_in_thread(
     result_data = None
     done_saved = False
     try:
+        # セッション再開前に古い画像を間引く（APIの画像数制限エラーを予防）
+        if resume_session_id:
+            _trim_old_images_from_session(resume_session_id)
+
         # 1回目: セッション再開を試みる（中断後はfork-sessionで新規セッション分岐）
         need_fork = room_id in _interrupted_rooms
         if need_fork:
@@ -1002,6 +1082,7 @@ async def process_message_cli(
             project_title, project_description, project_status,
             user_messages=user_messages,
             latest_user_message=content,
+            project_id=project_id,
         )
     if skill_injection:
         system_prompt += f"\n\n{skill_injection}"

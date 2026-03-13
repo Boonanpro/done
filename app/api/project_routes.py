@@ -1,8 +1,11 @@
 """
 Project API Routes - プロジェクト管理
 """
+import logging
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from app.api.chat_routes import get_current_user, TokenData
 from app.services.project_service import ProjectService
@@ -177,10 +180,6 @@ async def delete_project(
     if not deleted:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # 承認済み計画をクリア
-    from app.agent.bootstrap_context import clear_active_plan
-    clear_active_plan()
-
     # LLMアーカイブをバックグラウンドで実行
     if room_id and messages_for_archive:
         from app.api.chat_routes import _run_archive_in_background
@@ -247,14 +246,6 @@ async def proposal_action(
                 project_id, current_user.user_id, status="in_progress"
             )
 
-            # 承認済み計画をファイルに保存 → cli_runner.pyがシステムプロンプトに注入
-            from app.agent.bootstrap_context import save_active_plan
-            save_active_plan(
-                project_title=project.get("title", ""),
-                steps=result.get("steps", []),
-                content=result.get("content", ""),
-            )
-
             # awaiting_approval の run を completed にして、
             # 次のチャットメッセージで supersede されないようにする
             from app.services.run_service import RunService
@@ -264,9 +255,6 @@ async def proposal_action(
                 await run_service.update_run(current_run["id"], state="completed")
     else:
         result = await service.reject_proposal(proposal_id, project_id)
-        # 却下時は計画をクリア
-        from app.agent.bootstrap_context import clear_active_plan
-        clear_active_plan()
 
     if not result:
         raise HTTPException(status_code=404, detail="Proposal not found or already actioned")
@@ -307,11 +295,21 @@ async def get_current_run(
     run_service: RunService = Depends(get_run_service),
 ):
     """Return the current authoritative run for a project chat."""
-    project = await project_service.get_project(project_id, current_user.user_id)
+    try:
+        project = await project_service.get_project(project_id, current_user.user_id)
+    except Exception:
+        logger.warning("current-run: transient DB error on get_project", exc_info=True)
+        raise HTTPException(status_code=503, detail="Temporary database error")
+
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    run = await run_service.get_current_run(project_id)
+    try:
+        run = await run_service.get_current_run(project_id)
+    except Exception:
+        logger.warning("current-run: transient DB error on get_current_run", exc_info=True)
+        raise HTTPException(status_code=503, detail="Temporary database error")
+
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return run

@@ -65,48 +65,53 @@ def load_all_bootstrap_files() -> str:
     return ""
 
 
-def load_active_plan() -> str:
-    """Load active plan if one exists. Returns empty string if none."""
-    plan_path = WORKSPACE_DIR / "plans" / "active.md"
-    if plan_path.exists():
-        try:
-            return plan_path.read_text(encoding="utf-8")
-        except Exception:
+def load_active_plan(project_id: str | None = None) -> str:
+    """Load approved plan for a specific project from DB.
+
+    Returns formatted plan text, or empty string if no approved plan exists.
+    If project_id is None, returns empty string (no global plan injection).
+    """
+    if not project_id:
+        return ""
+
+    try:
+        from app.services.supabase_client import get_supabase_client
+        supabase = get_supabase_client().client
+        result = (
+            supabase.table("project_proposals")
+            .select("content, steps, status")
+            .eq("project_id", project_id)
+            .eq("status", "approved")
+            .order("approved_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not result.data:
             return ""
-    return ""
 
+        proposal = result.data[0]
+        steps = proposal.get("steps") or []
+        content = proposal.get("content") or ""
 
-def save_active_plan(project_title: str, steps: list, content: str = "") -> None:
-    """Save approved plan for system prompt injection."""
-    plans_dir = WORKSPACE_DIR / "plans"
-    plans_dir.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "## 承認済み計画",
+            "",
+            "以下はユーザーと合意済みの計画です。この計画に従って作業してください。",
+            "計画から逸脱する必要がある場合は、必ず理由を説明してユーザーの承認を得てください。",
+            "",
+        ]
 
-    lines = [
-        "## 承認済み計画",
-        "",
-        f"プロジェクト: {project_title}",
-        "",
-        "以下はユーザーと合意済みの計画です。この計画に従って作業してください。",
-        "計画から逸脱する必要がある場合は、必ず理由を説明してユーザーの承認を得てください。",
-        "",
-    ]
+        if steps:
+            for step in steps:
+                num = step.get("step_number", "?")
+                desc = step.get("description", step.get("title", ""))
+                status = step.get("status", "pending")
+                icon = "✅" if status == "completed" else "⬜"
+                lines.append(f"- {icon} Step {num}: {desc}")
+        elif content:
+            lines.append(content[:2000])
 
-    if steps:
-        for step in steps:
-            num = step.get("step_number", "?")
-            desc = step.get("description", step.get("title", ""))
-            status = step.get("status", "pending")
-            icon = "✅" if status == "completed" else "⬜"
-            lines.append(f"- {icon} Step {num}: {desc}")
-    elif content:
-        lines.append(content[:2000])
-
-    (plans_dir / "active.md").write_text("\n".join(lines), encoding="utf-8")
-
-
-def clear_active_plan() -> None:
-    """Remove active plan."""
-    plan_path = WORKSPACE_DIR / "plans" / "active.md"
-    if plan_path.exists():
-        plan_path.unlink()
+        return "\n".join(lines)
+    except Exception:
+        return ""
 
