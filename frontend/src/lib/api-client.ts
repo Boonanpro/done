@@ -1038,6 +1038,7 @@ export const api = {
         onProcessStep?: (step: ProcessStep, sessionId?: string) => void;
         onUserMessage?: (message: MessageResponse, sessionId?: string) => void;
         onAIMessage?: (message: MessageResponse, sessionId?: string) => void;
+        onAIMessageUpdate?: (content: string, sessionId?: string) => void;
         onVoiceAnnouncement?: (text: string, sessionId?: string) => void;
         onComplete?: (sessionId?: string) => void;
         onError?: (error: string, sessionId?: string) => void;
@@ -1124,6 +1125,8 @@ export const api = {
                   callbacks.onUserMessage(parsed.message, eventSessionId);
                 } else if (parsed.type === 'ai_message' && callbacks.onAIMessage) {
                   callbacks.onAIMessage(parsed.message, eventSessionId);
+                } else if (parsed.type === 'ai_message_update' && callbacks.onAIMessageUpdate) {
+                  callbacks.onAIMessageUpdate(parsed.content, eventSessionId);
                 } else if (parsed.type === 'done') {
                   // スキル化可能な場合、コールバックを呼び出す
                   if (parsed.can_create_skill && parsed.browser_session_id && callbacks.onSkillAvailable) {

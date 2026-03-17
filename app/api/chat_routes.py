@@ -1414,6 +1414,7 @@ async def send_dan_message_stream(
                 project_service = ProjectService()
                 run_service = RunService()
                 final_text = ""
+                accumulated_reply = ""  # [REPLY]タグで蓄積した中間テキスト
                 reasoning_steps = []   # 短いラベル（プロセスモニター表示用）
                 reasoning_full = []    # 全文（DB保存用、フロントで展開表示）
                 step_counter = 0
@@ -1578,8 +1579,25 @@ async def send_dan_message_stream(
                         # textイベントは暫定的に記録（最終回答はresultイベントで確定する）
                         final_text = event["text"]
                         text_preview = event["text"].strip()
-                        if text_preview and len(text_preview) > 10:
-                            # Use full text preview without truncation.
+
+                        # [REPLY]タグの中身を抽出 → チャット欄に追記
+                        reply_parts = re.findall(r'\[REPLY\](.*?)\[/REPLY\]', event["text"], re.DOTALL)
+                        if reply_parts:
+                            reply_text = "\n\n".join(p.strip() for p in reply_parts if p.strip())
+                            if reply_text:
+                                accumulated_reply = (accumulated_reply + "\n\n" + reply_text).strip() if accumulated_reply else reply_text
+                                yield f"data: {json.dumps({'type': 'ai_message_update', 'session_id': room_id, 'content': accumulated_reply})}\n\n"
+
+                        # タグ外のテキスト → プロセスモニターへ
+                        non_reply = re.sub(r'\[REPLY\].*?\[/REPLY\]', '', event["text"], flags=re.DOTALL).strip()
+                        if non_reply and len(non_reply) > 10:
+                            label = non_reply
+                            reasoning_steps.append(label)
+                            reasoning_full.append(non_reply)
+                            yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': label, 'status': 'running'}})}\n\n"
+                            step_counter += 1
+                        elif text_preview and len(text_preview) > 10 and not reply_parts:
+                            # [REPLY]タグがない通常テキスト → 従来通りプロセスモニターへ
                             label = text_preview
                             reasoning_steps.append(label)
                             reasoning_full.append(text_preview)
@@ -1607,7 +1625,18 @@ async def send_dan_message_stream(
 
                 # キャンセル時はスキップ（cancelled ハンドラで保存済み）
                 if not result_saved:
-                    ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
+                    # 最終テキストから[REPLY]タグを除去（チャット欄に直接表示されるため不要）
+                    cleaned_final = re.sub(r'\[REPLY\](.*?)\[/REPLY\]', lambda m: m.group(1).strip(), final_text or "", flags=re.DOTALL).strip() if final_text else ""
+                    # 蓄積した中間[REPLY]テキストを最終テキストの前に結合
+                    accumulated = accumulated_reply
+                    if accumulated and cleaned_final:
+                        ai_response_content = accumulated + "\n\n" + cleaned_final
+                    elif accumulated:
+                        ai_response_content = accumulated
+                    elif cleaned_final:
+                        ai_response_content = cleaned_final
+                    else:
+                        ai_response_content = "応答を生成できませんでした。もう一度お試しください。"
 
                     if cli_saved_ai_message:
                         # DB-first: CLIスレッドが既にAI応答を保存済み → クライアント送信のみ
