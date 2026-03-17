@@ -4,7 +4,7 @@ import { useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, MessageCircle, X, Briefcase, FileEdit, Clapperboard } from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, MessageCircle, X, Briefcase, FileEdit, Clapperboard, LayoutDashboard, ExternalLink } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -58,7 +58,7 @@ const navItems = [
   },
 ];
 
-const businessItems = [
+const staticBusinessItems = [
   {
     title: 'note投稿',
     href: '/notes',
@@ -83,6 +83,20 @@ export function Sidebar({ className }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [isBusinessOpen, setIsBusinessOpen] = useState(false);
   const hasToken = useHasToken();
+
+  // ダッシュボードビジネス一覧を動的取得
+  const { data: dashboardData } = useQuery({
+    queryKey: ['dashboard-businesses'],
+    queryFn: async () => {
+      const res = await fetch('http://127.0.0.1:8000/api/dashboard/businesses');
+      if (!res.ok) return { businesses: [] };
+      return res.json() as Promise<{ businesses: Array<{ id: string; name: string; slug: string; icon?: string; status?: string }> }>;
+    },
+    enabled: hasToken,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const dashboardBusinesses = dashboardData?.businesses?.filter(b => b.status !== 'archived') ?? [];
 
   // URLから現在のセッションIDを取得（唯一の真実源）
   const currentSessionId = params.sessionId as string | undefined;
@@ -414,7 +428,8 @@ export function Sidebar({ className }: SidebarProps) {
                   exit={{ opacity: 0, height: 0 }}
                   className="overflow-hidden"
                 >
-                  {businessItems.map((item) => {
+                  {/* 固定メニュー */}
+                  {staticBusinessItems.map((item) => {
                     const isActive = pathname.startsWith(item.href);
                     const Icon = item.icon;
                     return (
@@ -439,6 +454,31 @@ export function Sidebar({ className }: SidebarProps) {
                       </Tooltip>
                     );
                   })}
+                  {/* 動的ダッシュボード（別タブで開く） */}
+                  {dashboardBusinesses.map((biz) => (
+                    <Tooltip key={biz.slug}>
+                      <TooltipTrigger asChild>
+                        <a
+                          href={`/dashboard/${biz.slug}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          <motion.div
+                            whileHover={{ scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
+                            className="flex items-center gap-3 pl-8 pr-3 py-2 rounded-lg text-sm transition-colors text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
+                          >
+                            <LayoutDashboard className="h-4 w-4 shrink-0" />
+                            <span className="flex-1 truncate">{biz.name}</span>
+                            <ExternalLink className="h-3 w-3 shrink-0 opacity-50" />
+                          </motion.div>
+                        </a>
+                      </TooltipTrigger>
+                      <TooltipContent side="right">
+                        <p className="text-xs">{biz.name}のダッシュボード（別タブで開く）</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  ))}
                 </motion.div>
               )}
             </AnimatePresence>
