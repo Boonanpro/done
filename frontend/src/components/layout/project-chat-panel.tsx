@@ -616,52 +616,9 @@ function ChatInput({
           onAIMessage: () => {
             if (streamRequestRef.current !== requestId) return;
             setWarmupMode(projectId, null);
-            // partial-replyを削除（DBから取得する本物のメッセージに置き換わる）
-            queryClient.setQueryData(
-              queryKey,
-              (old: { messages: MessageResponse[] } | undefined) => {
-                if (!old) return old;
-                const filtered = old.messages.filter((m: MessageResponse) => m.id !== 'partial-reply');
-                return { messages: filtered };
-              }
-            );
             queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
-          },
-          onAIMessageUpdate: (content: string) => {
-            if (streamRequestRef.current !== requestId) return;
-            setWarmupMode(projectId, null);
-            // 中間[REPLY]テキストを一時的なAIメッセージとしてキャッシュに追加/更新
-            const partialId = 'partial-reply';
-            queryClient.setQueryData(
-              queryKey,
-              (old: { messages: MessageResponse[] } | undefined) => {
-                const messages = old?.messages || [];
-                const existing = messages.find((m: MessageResponse) => m.id === partialId);
-                if (existing) {
-                  return {
-                    messages: messages.map((m: MessageResponse) =>
-                      m.id === partialId ? { ...m, content } : m
-                    ),
-                  };
-                }
-                return {
-                  messages: [
-                    {
-                      id: partialId,
-                      room_id: roomId,
-                      sender_id: null,
-                      sender_name: 'ダン',
-                      sender_type: 'ai' as const,
-                      content,
-                      created_at: new Date().toISOString(),
-                    },
-                    ...messages,
-                  ],
-                };
-              }
-            );
           },
           onProcessStep: (_step: ProcessStep) => {
             if (streamRequestRef.current !== requestId) return;
@@ -696,10 +653,10 @@ function ChatInput({
               if (!isDefaultTitle) {
                 titleGeneratedRef.current = true;
               } else {
-                // 3往復（=6件）以上になってからタイトルを生成・固定する
+                // 1往復（=2件）以上でタイトルを生成する
                 const msgs = queryClient.getQueryData<{ messages: unknown[] }>(['project-messages', roomId]);
                 const msgCount = msgs?.messages?.length ?? 0;
-                if (msgCount >= 6) {
+                if (msgCount >= 2) {
                   titleGeneratedRef.current = true;
                   api.projects
                     .suggestTitle(roomId)
