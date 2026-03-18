@@ -390,6 +390,46 @@ def _cli_debug(msg: str):
         f.flush()
 
 
+def _filter_response_with_haiku(user_message: str, text_parts: list[str]) -> str:
+    """
+    全テキストパーツをHaikuに渡し、ユーザー向けの回答部分のみ抽出する。
+    失敗時は空文字を返す（呼び出し元でフォールバック）。
+    """
+    try:
+        import anthropic
+        all_text = "\n\n---\n\n".join(text_parts)
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=4096,
+            messages=[{
+                "role": "user",
+                "content": f"""以下はAIアシスタントがツールを使いながら作業した際のテキスト出力（作業ログ）です。
+この中から**ユーザーへの回答・報告として意味のある部分だけ**を抽出してください。
+
+## ルール
+- 作業メモや独り言（「確認します」「次に〜します」等）は除外する
+- ユーザーの質問への回答、調査結果の報告、作業完了の報告は残す
+- 抽出した内容はそのまま出力する（要約や言い換えはしない）
+- 全てが独り言で回答が含まれていない場合は、最後のテキストをそのまま返す
+
+## ユーザーの質問
+{user_message}
+
+## AIの作業ログ（テキスト出力、---で区切り）
+{all_text}
+
+## 抽出結果（回答部分のみ）"""
+            }],
+        )
+        result = response.content[0].text.strip()
+        if result:
+            return result
+    except Exception as e:
+        _cli_debug(f"Haiku filter failed: {e}")
+    return ""
+
+
 def _classify_content_blocks(blocks: list) -> list[Dict[str, Any]]:
     """
     assistantメッセージのcontent blocksを分類する。
@@ -941,6 +981,13 @@ def _run_cli_in_thread(
             text = result_text or "\n".join(final_text_parts)
             if is_error and not text and errors:
                 text = f"CLIエラー: {'; '.join(errors)}"
+
+            # 中間テキストが複数ある場合、Haikuで回答部分のみ抽出
+            if not is_error and len(final_text_parts) > 1 and text.strip():
+                filtered = _filter_response_with_haiku(content, final_text_parts)
+                if filtered:
+                    _cli_debug(f"Haiku filter: {len(text)} -> {len(filtered)} chars")
+                    text = filtered
 
             # DB-first: CLIスレッドからAI応答を保存（SSE断線対策）
             # SSEハンドラに依存せず、ここで確実にDBに書き込む
