@@ -225,3 +225,66 @@ class StudioRenderService:
             "output_path": output_path,
             "file_size_kb": round(file_size_kb, 1),
         }
+
+    # ==================== Evaluate ====================
+
+    async def evaluate(
+        self,
+        video_path: str,
+        criteria: str,
+    ) -> dict:
+        """Gemini API で動画を評価する"""
+        if not os.path.exists(video_path):
+            return {"success": False, "error": f"File not found: {video_path}"}
+
+        from app.config import settings
+        api_key = settings.GOOGLE_GEMINI_API_KEY
+        if not api_key:
+            return {"success": False, "error": "GOOGLE_GEMINI_API_KEY is not set"}
+
+        def _do_evaluate():
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=api_key)
+
+            # 動画ファイルをアップロード
+            video_file = client.files.upload(
+                file=video_path,
+                config=types.UploadFileConfig(mime_type="video/mp4"),
+            )
+            logger.info(f"[studio_evaluate] Uploaded {video_path} as {video_file.name}")
+
+            # アップロード完了を待つ
+            import time
+            while video_file.state.name == "PROCESSING":
+                time.sleep(2)
+                video_file = client.files.get(name=video_file.name)
+
+            if video_file.state.name == "FAILED":
+                return {"success": False, "error": "Gemini file processing failed"}
+
+            # 評価リクエスト
+            prompt = f"この動画を以下の基準で評価してください。各基準について「OK」「NG」を判定し、NGの場合は具体的にどのタイムスタンプで何が問題かを指摘してください。\n\n評価基準:\n{criteria}"
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[video_file, prompt],
+            )
+
+            evaluation = response.text
+
+            # アップロードしたファイルを削除
+            try:
+                client.files.delete(name=video_file.name)
+            except Exception:
+                pass
+
+            return {"success": True, "evaluation": evaluation}
+
+        try:
+            result = await asyncio.to_thread(_do_evaluate)
+            logger.info(f"[studio_evaluate] Done: {len(result.get('evaluation', ''))} chars")
+            return result
+        except Exception as e:
+            logger.error(f"[studio_evaluate] Error: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}

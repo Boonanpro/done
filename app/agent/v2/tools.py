@@ -344,6 +344,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         STUDIO_ENCODE_TOOL,
         STUDIO_PROBE_TOOL,
         STUDIO_EXTRACT_FRAME_TOOL,
+        STUDIO_EVALUATE_TOOL,
     ]
 
 
@@ -732,6 +733,21 @@ STUDIO_PROBE_TOOL = {
             "path": {"type": "string", "description": "動画ファイルパス"},
         },
         "required": ["path"],
+    },
+}
+
+STUDIO_EVALUATE_TOOL = {
+    "name": "studio_evaluate",
+    "description": """完成動画をGemini APIに送り、指定した基準で品質を評価する。
+各基準についてOK/NG判定とタイムスタンプ付きの具体的な指摘を返す。
+send_fileでユーザーに送る前に必ず実行し、NGがあれば修正してから送ること。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "video_path": {"type": "string", "description": "評価対象の動画ファイルパス（MP4）"},
+            "criteria": {"type": "string", "description": "評価基準（例: '1. 実写映像が5箇所で使われている 2. テキストが読める大きさ 3. トランジションが滑らか'）"},
+        },
+        "required": ["video_path", "criteria"],
     },
 }
 
@@ -1410,6 +1426,8 @@ async def execute_tool(
                 return await svc.probe(**params)
             elif action == "extract_frame":
                 return await svc.extract_frame(**params)
+            elif action == "evaluate":
+                return await svc.evaluate(**params)
             else:
                 return {"success": False, "error": f"Unknown studio action: {action}"}
         except Exception as e:
