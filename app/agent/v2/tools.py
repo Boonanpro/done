@@ -340,6 +340,10 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         WRITE_FILE_TOOL,
         EDIT_FILE_TOOL,
         BASH_TOOL,
+        STUDIO_RECORD_TOOL,
+        STUDIO_ENCODE_TOOL,
+        STUDIO_PROBE_TOOL,
+        STUDIO_EXTRACT_FRAME_TOOL,
     ]
 
 
@@ -674,6 +678,78 @@ GREP_TOOL = {
 }
 
 
+# ============================================
+# スタジオ録画/エンコードツール（バックエンド実行）
+# ============================================
+
+STUDIO_RECORD_TOOL = {
+    "name": "studio_record",
+    "description": """HTMLファイルをPlaywright headless Chromiumで録画して.webmファイルを生成する。
+バックエンド(FastAPI)プロセスで実行されるため、Bash経由のPlaywright録画より安定。
+録画後のファイルパスを返す。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "html_path": {"type": "string", "description": "録画対象のHTMLファイルパス（例: D:/dan-workspace/proposals/demo.html）"},
+            "output_dir": {"type": "string", "description": "出力ディレクトリ（例: D:/dan-workspace/proposals/output）"},
+            "duration_sec": {"type": "integer", "description": "録画秒数（例: 52）"},
+            "width": {"type": "integer", "description": "ビューポート幅（デフォルト: 1920）"},
+            "height": {"type": "integer", "description": "ビューポート高さ（デフォルト: 1080）"},
+            "serve_dir": {"type": "string", "description": "HTTPサーバーのルートディレクトリ。指定時はHTMLをHTTP経由で開く（base64画像のクラッシュ回避）"},
+            "pre_wait_ms": {"type": "integer", "description": "録画開始前の待機ミリ秒（デフォルト: 5000）"},
+            "js_eval": {"type": "string", "description": "録画開始後に実行するJS（例: video要素の強制再生）"},
+        },
+        "required": ["html_path", "output_dir", "duration_sec"],
+    },
+}
+
+STUDIO_ENCODE_TOOL = {
+    "name": "studio_encode",
+    "description": """FFmpegで動画を変換/エンコードする。WebM→MP4変換、解像度変更、コーデック変換などに使用。
+バックエンドで実行されるため1080pエンコードもメモリ制限なしで動作する。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "input_path": {"type": "string", "description": "入力動画ファイルパス"},
+            "output_path": {"type": "string", "description": "出力動画ファイルパス（例: D:/dan-workspace/output/final.mp4）"},
+            "width": {"type": "integer", "description": "出力幅（デフォルト: 1920）"},
+            "height": {"type": "integer", "description": "出力高さ（デフォルト: 1080）"},
+            "codec": {"type": "string", "description": "コーデック（デフォルト: libx264）"},
+            "crf": {"type": "integer", "description": "品質 0-51（デフォルト: 20、低いほど高品質）"},
+            "preset": {"type": "string", "description": "速度 ultrafast/fast/medium/slow（デフォルト: fast）"},
+            "extra_args": {"type": "string", "description": "追加FFmpeg引数（デフォルト: -pix_fmt yuv420p -movflags +faststart）"},
+        },
+        "required": ["input_path", "output_path"],
+    },
+}
+
+STUDIO_PROBE_TOOL = {
+    "name": "studio_probe",
+    "description": "動画ファイルのメタ情報（コーデック、解像度、長さ、サイズ）を取得する。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "動画ファイルパス"},
+        },
+        "required": ["path"],
+    },
+}
+
+STUDIO_EXTRACT_FRAME_TOOL = {
+    "name": "studio_extract_frame",
+    "description": "動画から指定時刻のフレームをPNG画像として抽出する。動画の内容検証に使用。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "video_path": {"type": "string", "description": "動画ファイルパス"},
+            "timestamp": {"type": "string", "description": "抽出時刻（例: '3', '1:30'）"},
+            "output_path": {"type": "string", "description": "出力PNGパス"},
+        },
+        "required": ["video_path", "timestamp", "output_path"],
+    },
+}
+
+
 def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     """
     Parse tool name into (skill_name, action).
@@ -709,6 +785,10 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "deep_research":
         return ("_deep_research", "research")
+
+    if tool_name.startswith("studio_"):
+        action = tool_name[len("studio_"):]
+        return ("_studio_render", action)
 
     if tool_name == "read_file":
         return ("_read_file", "read")
@@ -1316,6 +1396,25 @@ async def execute_tool(
     skill_name = tool_call["skill"]
     action = tool_call["action"]
     params = tool_call["params"]
+
+    # ★★★ スタジオ録画/エンコード（バックエンド実行）★★★
+    if skill_name == "_studio_render":
+        from app.services.studio_render_service import StudioRenderService
+        svc = StudioRenderService()
+        try:
+            if action == "record":
+                return await svc.record(**params)
+            elif action == "encode":
+                return await svc.encode(**params)
+            elif action == "probe":
+                return await svc.probe(**params)
+            elif action == "extract_frame":
+                return await svc.extract_frame(**params)
+            else:
+                return {"success": False, "error": f"Unknown studio action: {action}"}
+        except Exception as e:
+            logger.error(f"[studio_{action}] Error: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
 
     # ★★★ コード実行（外部依存なし）★★★
     if skill_name == "_exec_code":

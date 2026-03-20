@@ -58,6 +58,92 @@ WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
 WORKSPACE_MEMORY_DIR = WORKSPACE_DIR / "memory"
 COMPACTION_SNAPSHOT_INTERVAL_MESSAGES = 40
 logger = logging.getLogger(__name__)
+
+# ==================== Observer Timer ====================
+import asyncio as _asyncio_observer
+
+# room_id → asyncio.Task (5分タイマー)
+_observer_timers: dict[str, "_asyncio_observer.Task"] = {}
+# room_id → 最後の観察時点のDBメッセージ数
+_observer_last_message_index: dict[str, int] = {}
+OBSERVER_DELAY_SECONDS = 300  # 5分
+
+
+async def _run_single_observer(room_id: str, user_id: str, observer_name: str, checklist_path: Path, last_index: int):
+    """1つの観察者を実行する"""
+    if not checklist_path.exists():
+        logger.info(f"[Observer:{observer_name}] {checklist_path.name} not found, skipping")
+        return
+
+    checklist = checklist_path.read_text(encoding="utf-8")
+    prompt = (
+        f"[OBSERVER MODE] これはユーザーからのメッセージではなく、システムによる自動観察リクエストです。\n"
+        f"ユーザーには見えません。チャットに返答しないでください。\n\n"
+        f"以下のチェックリストに従い、メッセージ{last_index}番以降の会話を振り返ってください。\n"
+        f"学びがあれば該当ファイルを直接編集してください。なければ何もしないでください。\n\n"
+        f"---\n{checklist}\n---\n\n"
+        f"完了したら「観察完了」とだけ返答してください。"
+    )
+
+    try:
+        from app.agent.cli_runner import process_message_cli
+        async for event in process_message_cli(
+            room_id=room_id,
+            user_id=user_id,
+            content=prompt,
+            system_prompt=f"あなたは観察者モード（{observer_name}）です。指示されたファイル編集を行い、完了したら「観察完了」とだけ返答してください。",
+        ):
+            if event["type"] == "result":
+                logger.info(f"[Observer:{observer_name}] Completed for room {room_id}")
+            elif event["type"] == "error":
+                logger.warning(f"[Observer:{observer_name}] Error for room {room_id}: {event.get('message')}")
+    except Exception as e:
+        logger.error(f"[Observer:{observer_name}] Failed for room {room_id}: {e}")
+
+
+async def _run_observer(room_id: str, user_id: str):
+    """5分の沈黙後に2つの観察者を並列実行する"""
+    try:
+        await _asyncio_observer.sleep(OBSERVER_DELAY_SECONDS)
+    except _asyncio_observer.CancelledError:
+        return
+
+    last_index = _observer_last_message_index.get(room_id, 0)
+    logger.info(f"[Observer] Firing for room {room_id} (last_index={last_index})")
+
+    try:
+        try:
+            from app.services.supabase_client import get_supabase_client
+            sb = get_supabase_client().client
+            count_result = sb.table("chat_messages").select("id", count="exact").eq("room_id", room_id).execute()
+            current_count = count_result.count or 0
+            _observer_last_message_index[room_id] = current_count
+        except Exception:
+            pass
+
+        observer_dir = Path(__file__).parent.parent.parent / ".claude"
+        await _asyncio_observer.gather(
+            _run_single_observer(room_id, user_id, "学び+メタ認知", observer_dir / "observer_learning.md", last_index),
+            _run_single_observer(room_id, user_id, "計画", observer_dir / "observer_planning.md", last_index),
+        )
+    except Exception as e:
+        logger.error(f"[Observer] Failed for room {room_id}: {e}")
+    finally:
+        _observer_timers.pop(room_id, None)
+
+
+def _reset_observer_timer(room_id: str, user_id: str):
+    """観察タイマーをリセット（会話が続いている間はリセットされ続ける）"""
+    existing = _observer_timers.pop(room_id, None)
+    if existing and not existing.done():
+        existing.cancel()
+    try:
+        loop = _asyncio_observer.get_running_loop()
+        task = loop.create_task(_run_observer(room_id, user_id))
+        _observer_timers[room_id] = task
+    except RuntimeError:
+        pass
+
 REPLAN_KEYWORDS = (
     "やっぱり",
     "方針変更",
@@ -1653,6 +1739,9 @@ async def send_dan_message_stream(
                     result_saved = True
                     yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
                     done_sent = True
+
+                    # 観察タイマーをリセット（ダンの回答完了 → 5分カウント開始）
+                    _reset_observer_timer(room_id, current_user.user_id)
 
             # NOTE: 全チャットは統一済み。非プロジェクト分岐は削除済み (2026-03-06)
         except Exception as e:
