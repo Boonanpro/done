@@ -108,6 +108,19 @@ async def _run_observer(room_id: str, user_id: str):
     except _asyncio_observer.CancelledError:
         return
 
+    # ダンが作業中なら観察をスキップ（衝突防止）
+    from app.services.cancellation import CancellationRegistry
+    if CancellationRegistry.is_active(room_id):
+        logger.info(f"[Observer] Skipped for room {room_id}: CLI is active")
+        _observer_timers.pop(room_id, None)
+        return
+
+    from app.agent.cli_runner import is_cli_active
+    if is_cli_active(room_id):
+        logger.info(f"[Observer] Skipped for room {room_id}: CLI process is running")
+        _observer_timers.pop(room_id, None)
+        return
+
     last_index = _observer_last_message_index.get(room_id, 0)
     logger.info(f"[Observer] Firing for room {room_id} (last_index={last_index})")
 
@@ -1431,6 +1444,10 @@ async def send_dan_message_stream(
                             should_supersede_existing_run = True
                 except Exception:
                     pass
+            # 観察タイマーをリセット（ユーザーが会話を続けている = 観察不要）
+            if request.session_id:
+                _reset_observer_timer(request.session_id, current_user.user_id)
+
             # Step 1: ユーザーメッセージを保存
             # session_idが指定されていればそのルームに、なければ現在のDanルームに送信
             if request.session_id:

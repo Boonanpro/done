@@ -131,17 +131,9 @@ function InlineProcessBlock({
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (isLive && steps.length > 0) {
-      setIsCollapsed(false);
-    }
-  }, [isLive, steps.length]);
+  // 自動展開なし（ユーザーが閉じたらそのまま維持）
 
-  useEffect(() => {
-    if (!isCollapsed && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [isCollapsed, steps.length]);
+  // 自動スクロールなし（ユーザーが自由にスクロール位置を維持できるようにする）
 
   if (steps.length === 0 && !isLive) return null;
 
@@ -222,15 +214,19 @@ function eventToStep(event: ExecutionEvent): StepInfo {
   };
 }
 
-function parseHumanContent(content: string): { images: string[]; videos: string[]; files: { name: string; url: string }[]; text: string } {
+function parseMediaContent(content: string): { images: string[]; videos: string[]; files: { name: string; url: string }[]; text: string } {
   const images: string[] = [];
   const videos: string[] = [];
   const files: { name: string; url: string }[] = [];
   const text = content
     .replace(/\[動画分析結果\(Gemini\):\n[\s\S]*?\n\]/g, '')
-    .replace(/\[添付画像: ([^\]]+)\]/g, (_, path) => {
-      const filename = path.replace(/\\/g, '/').split('/').pop();
-      if (filename) images.push(`/api/v1/files/${filename}`);
+    .replace(/\[添付画像: ([^\]]+)\]/g, (_, path: string) => {
+      if (path.startsWith('/api/')) {
+        images.push(path);
+      } else {
+        const filename = path.replace(/\\/g, '/').split('/').pop();
+        if (filename) images.push(`/api/v1/files/${filename}`);
+      }
       return '';
     })
     .replace(/\[添付動画: (.+?) \((.+?)\)\](?:\s*※分析に失敗しました)?/g, (_, _name, url) => {
@@ -250,29 +246,9 @@ function parseHumanContent(content: string): { images: string[]; videos: string[
 }
 
 const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: MessageResponse; onImageClick?: (url: string) => void }) {
-  if (msg.sender_type !== 'human') {
-    const proposalMatch = (msg.content || '').match(/```proposal\n([^\n]+)\n```/);
-    if (proposalMatch) {
-      const filename = proposalMatch[1].trim();
-      const proposalUrl = `/api/v1/proposals/${filename}`;
-      return (
-        <div className="flex w-full justify-start px-1 py-1">
-          <a
-            href={proposalUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-3 text-sm text-foreground shadow-sm transition-colors hover:bg-muted"
-          >
-            <FileText className="h-4 w-4 text-primary" />
-            <span>{filename}</span>
-          </a>
-        </div>
-      );
-    }
-  }
 
   if (msg.sender_type === 'human') {
-    const { images, videos, files, text } = parseHumanContent(msg.content || '');
+    const { images, videos, files, text } = parseMediaContent(msg.content || '');
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%] flex flex-col items-end gap-1">
@@ -316,9 +292,78 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
     );
   }
 
+  const rawContent = msg.content || '';
+  // Extract proposal blocks and split content into segments
+  const proposalRegex = /```proposal\n([^\n]+)\n```/g;
+  const proposals: { filename: string; url: string }[] = [];
+  let match;
+  while ((match = proposalRegex.exec(rawContent)) !== null) {
+    const filename = match[1].trim();
+    proposals.push({ filename, url: `/api/v1/proposals/${filename}` });
+  }
+  // Remove proposal blocks from text before passing to parseMediaContent
+  const contentWithoutProposals = rawContent.replace(proposalRegex, '').trim();
+
+  const { images: aiImages, videos: aiVideos, files: aiFiles, text: aiText } = parseMediaContent(contentWithoutProposals);
+  const hasMedia = aiImages.length > 0 || aiVideos.length > 0 || aiFiles.length > 0;
+
   return (
-    <div className="prose prose-base prose-dan max-w-none text-base leading-relaxed text-foreground md:prose-base md:text-[17px]">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; }, img({ src, alt }) { const imgSrc = typeof src === 'string' ? src : ''; return <img src={imgSrc} alt={alt || ''} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(imgSrc)} />; } }}>{msg.content || ''}</ReactMarkdown>
+    <div>
+      {hasMedia && (
+        <div className="flex flex-col gap-1.5 mb-2">
+          {aiImages.map((url, i) => (
+            <img
+              key={i}
+              src={url}
+              alt="添付画像"
+              className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in"
+              onClick={() => onImageClick?.(url)}
+            />
+          ))}
+          {aiVideos.map((url, i) => (
+            <video
+              key={`vid-${i}`}
+              src={url}
+              controls
+              className="rounded-xl max-w-full border border-border"
+              style={{ maxHeight: '300px' }}
+            />
+          ))}
+          {aiFiles.map((f, i) => (
+            <a
+              key={`file-${i}`}
+              href={f.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"
+            >
+              <FileText className="h-4 w-4 shrink-0 text-primary" />
+              <span className="truncate max-w-[250px]">{f.name}</span>
+            </a>
+          ))}
+        </div>
+      )}
+      {aiText && (
+        <div className="prose prose-base prose-dan max-w-none text-base leading-relaxed text-foreground md:prose-base md:text-[17px]">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; }, img({ src, alt }) { const imgSrc = typeof src === 'string' ? src : ''; return <img src={imgSrc} alt={alt || ''} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(imgSrc)} />; } }}>{aiText}</ReactMarkdown>
+        </div>
+      )}
+      {proposals.length > 0 && (
+        <div className="flex flex-col gap-1.5 mt-2">
+          {proposals.map((p, i) => (
+            <a
+              key={`proposal-${i}`}
+              href={p.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-3 text-sm text-foreground shadow-sm transition-colors hover:bg-muted"
+            >
+              <FileText className="h-4 w-4 text-primary" />
+              <span>{p.filename}</span>
+            </a>
+          ))}
+        </div>
+      )}
     </div>
   );
 });
@@ -608,10 +653,10 @@ function ChatInput({
               if (!isDefaultTitle) {
                 titleGeneratedRef.current = true;
               } else {
-                // 3往復（=6件）以上になってからタイトルを生成・固定する
+                // 1往復（=2件）以上でタイトルを生成する
                 const msgs = queryClient.getQueryData<{ messages: unknown[] }>(['project-messages', roomId]);
                 const msgCount = msgs?.messages?.length ?? 0;
-                if (msgCount >= 6) {
+                if (msgCount >= 2) {
                   titleGeneratedRef.current = true;
                   api.projects
                     .suggestTitle(roomId)
@@ -966,8 +1011,13 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const currentRunEvents = currentRun
     ? allExecutionEvents.filter((e) => e.run_id === currentRun.id)
     : [];
+  // warmupMode はメッセージ送信時にフロントエンドが即座にセットし、
+  // SSEイベント受信時にクリアされる。isActiveExecution はバックエンドへの
+  // ポーリング結果に依存するため、バックエンドの登録処理が完了するまでの
+  // 0〜2秒間に false が返ってきて「Thinking...」が一瞬消える問題がある。
+  // warmupMode がセットされている間はフロントエンド側の状態を信頼する。
   const showWarmupBlock =
-    isActiveExecution &&
+    (isActiveExecution || !!warmupMode) &&
     (!!warmupMode || (!!currentRun && currentRun.state === 'running')) &&
     currentRunEvents.length === 0;
 
