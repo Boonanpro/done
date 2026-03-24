@@ -1,10 +1,10 @@
 'use client';
 
-import { useState, useSyncExternalStore } from 'react';
+import { useState, useRef, useSyncExternalStore } from 'react';
 import Link from 'next/link';
-import { usePathname, useRouter, useParams } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, MessageCircle, X, Briefcase, FileEdit, Clapperboard } from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus, Pencil, Clapperboard } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -21,10 +21,11 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useAuth } from '@/hooks/use-auth';
-import { api, SessionResponse, ApiError } from '@/lib/api-client';
-import { useSessionStateStore } from '@/stores/session-state-store';
+import { api, type ProjectResponse, type ProjectStatusType } from '@/lib/api-client';
+import { useProjectStore } from '@/stores/project-store';
+import { useIsMobile } from '@/hooks/useIsMobile';
+import { NotificationPanel } from '@/components/notification/notification-panel';
 
-// Hook to safely check localStorage after hydration
 function useHasToken() {
   return useSyncExternalStore(
     () => () => {},
@@ -33,9 +34,25 @@ function useHasToken() {
   );
 }
 
-interface SidebarProps {
-  className?: string;
-}
+const STATUS_COLORS: Record<ProjectStatusType, string> = {
+  planning: 'bg-yellow-400',
+  proposed: 'bg-blue-400',
+  approved: 'bg-green-400',
+  in_progress: 'bg-primary',
+  completed: 'bg-emerald-500',
+  paused: 'bg-gray-400',
+  cancelled: 'bg-red-400',
+};
+
+const STATUS_LABELS: Record<ProjectStatusType, string> = {
+  planning: '計画中',
+  proposed: '提案済',
+  approved: '承認済',
+  in_progress: '進行中',
+  completed: '完了',
+  paused: '一時停止',
+  cancelled: 'キャンセル',
+};
 
 const navItems = [
   {
@@ -73,83 +90,99 @@ const businessItems = [
   },
 ];
 
-export function Sidebar({ className }: SidebarProps) {
+interface SidebarProps {
+  className?: string;
+  isCollapsed: boolean;
+  onToggleCollapse: () => void;
+  showNotifications?: boolean;
+}
+
+export function Sidebar({
+  className,
+  isCollapsed,
+  onToggleCollapse,
+  showNotifications = false,
+}: SidebarProps) {
   const pathname = usePathname();
   const router = useRouter();
-  const params = useParams();
-  const queryClient = useQueryClient();
   const { user, logout, isLoggingOut } = useAuth();
-  const [isCollapsed, setIsCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [isBusinessOpen, setIsBusinessOpen] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState('');
+  const editInputRef = useRef<HTMLInputElement>(null);
   const hasToken = useHasToken();
+  const isMobile = useIsMobile();
+  const queryClient = useQueryClient();
 
-  // URLから現在のセッションIDを取得（唯一の真実源）
-  const currentSessionId = params.sessionId as string | undefined;
+  const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
+  const selectProject = useProjectStore((s) => s.selectProject);
 
-  // セッション状態ストア
-  const setActiveSessionId = useSessionStateStore((state) => state.setActiveSessionId);
-  const sessionStates = useSessionStateStore((state) => state.sessions);
-  const markAsRead = useSessionStateStore((state) => state.markAsRead);
+  const createProjectMutation = useMutation({
+    mutationFn: (payload: { title: string; description?: string }) => api.projects.create(payload),
+    onSuccess: (project) => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      selectProject(project.id);
+    },
+    onError: () => {
+      toast.error('プロジェクト作成に失敗しました');
+    },
+  });
 
-  // Fetch sessions
-  const { data: sessionsData, isLoading: isLoadingSessions } = useQuery({
-    queryKey: ['dan-sessions'],
-    queryFn: api.dan.getSessions,
+  const renameMutation = useMutation({
+    mutationFn: ({ id, title }: { id: string; title: string }) => api.projects.update(id, { title }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      setEditingProjectId(null);
+    },
+    onError: () => {
+      toast.error('タイトルの更新に失敗しました');
+      setEditingProjectId(null);
+    },
+  });
+
+  const handleStartEdit = (e: React.MouseEvent, project: ProjectResponse) => {
+    e.stopPropagation();
+    setEditingProjectId(project.id);
+    setEditingTitle(project.title);
+    setTimeout(() => editInputRef.current?.select(), 0);
+  };
+
+  const handleConfirmEdit = (project: ProjectResponse) => {
+    const trimmed = editingTitle.trim();
+    if (trimmed && trimmed !== project.title) {
+      renameMutation.mutate({ id: project.id, title: trimmed });
+    } else {
+      setEditingProjectId(null);
+    }
+  };
+
+  const { data: projectsData, isLoading: isLoadingProjects } = useQuery({
+    queryKey: ['projects'],
+    queryFn: () => api.projects.list(),
     enabled: hasToken,
     staleTime: 60 * 1000,
   });
 
-  // Filter sessions by search query
-  const filteredSessions = sessionsData?.sessions?.filter((session) =>
-    session.title.toLowerCase().includes(searchQuery.toLowerCase())
+  const filteredProjects = projectsData?.projects?.filter((p) =>
+    p.title.toLowerCase().includes(searchQuery.toLowerCase())
   ) ?? [];
 
-
-  // Delete session
-  const deleteSessionMutation = useMutation({
-    mutationFn: (sessionId: string) => api.dan.deleteSession(sessionId),
-    onSuccess: (data, deletedSessionId) => {
-      const wasActive = deletedSessionId === currentSessionId;
-      const newActiveId = data.new_active_session_id;
-
-      // Remove from cache
-      queryClient.setQueryData(['dan-sessions'], (old: typeof sessionsData) => ({
-        sessions: old?.sessions?.filter((s) => s.id !== deletedSessionId) || [],
-        current_session_id: newActiveId || old?.current_session_id,
-      }));
-
-      // If the deleted session was active, navigate to new session
-      if (wasActive && newActiveId) {
-        router.push(`/chat/${newActiveId}`);
+  const handleProjectClick = (project: ProjectResponse) => {
+    if (project.id === selectedProjectId) {
+      selectProject(null);
+    } else {
+      selectProject(project.id);
+      if (isMobile) {
+        onToggleCollapse();
       }
-
-      toast.success('会話を削除しました');
-    },
-    onError: (err) => {
-      if (err instanceof ApiError && err.status === 400) {
-        toast.error('会話の削除に失敗しました');
-      } else {
-        toast.error('会話の削除に失敗しました');
-      }
-    },
-  });
-
-  // セッションクリック時はURLで遷移するだけ
-  const handleSessionClick = (session: SessionResponse) => {
-    if (session.id === currentSessionId) {
-      return; // 既に同じセッション
     }
-    // セッション状態を更新して既読にする
-    setActiveSessionId(session.id);
-    markAsRead(session.id);
-    // URLで遷移
-    router.push(`/chat/${session.id}`);
   };
 
-  const handleDeleteSession = (e: React.MouseEvent, sessionId: string) => {
-    e.stopPropagation();
-    deleteSessionMutation.mutate(sessionId);
+  const handleInstantCreate = () => {
+    if (!createProjectMutation.isPending) {
+      createProjectMutation.mutate({ title: '新しいプロジェクト' });
+    }
   };
 
   const handleLogout = async () => {
@@ -161,7 +194,7 @@ export function Sidebar({ className }: SidebarProps) {
     }
   };
 
-  const formatRelativeTime = (dateString: string | undefined) => {
+  const formatRelativeTime = (dateString: string | null | undefined) => {
     if (!dateString) return '';
     const date = new Date(dateString);
     const now = new Date();
@@ -179,12 +212,9 @@ export function Sidebar({ className }: SidebarProps) {
 
   return (
     <TooltipProvider delayDuration={0}>
-      <motion.aside
-        initial={false}
-        animate={{ width: isCollapsed ? 64 : 280 }}
-        transition={{ duration: 0.2, ease: 'easeInOut' }}
+      <div
         className={cn(
-          'relative flex flex-col h-full overflow-hidden bg-sidebar border-r border-sidebar-border',
+          'relative flex flex-col h-full w-full overflow-hidden bg-sidebar border-r border-sidebar-border',
           className
         )}
       >
@@ -206,20 +236,21 @@ export function Sidebar({ className }: SidebarProps) {
             )}
           </AnimatePresence>
 
-          <Button
-            variant="ghost"
-            size="icon"
-            className="ml-auto h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent"
-            onClick={() => setIsCollapsed(!isCollapsed)}
-          >
-            {isCollapsed ? (
-              <ChevronRight className="h-4 w-4" />
-            ) : (
-              <ChevronLeft className="h-4 w-4" />
-            )}
-          </Button>
+          <div className={cn("flex items-center gap-1", isCollapsed ? "mx-auto" : "ml-auto")}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-sidebar-foreground hover:bg-sidebar-accent"
+              onClick={onToggleCollapse}
+            >
+              {isCollapsed ? (
+                <ChevronRight className="h-4 w-4" />
+              ) : (
+                <ChevronLeft className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
         </div>
-
 
         {/* Search */}
         <AnimatePresence>
@@ -228,12 +259,12 @@ export function Sidebar({ className }: SidebarProps) {
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: 'auto' }}
               exit={{ opacity: 0, height: 0 }}
-              className="px-3 pb-3"
+              className="px-3 py-3"
             >
               <div className="relative">
                 <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
-                  placeholder="チャットを検索..."
+                  placeholder="プロジェクトを検索..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="pl-8 h-9 bg-sidebar-accent/30 border-sidebar-border text-sm"
@@ -245,41 +276,55 @@ export function Sidebar({ className }: SidebarProps) {
 
         <Separator className="bg-sidebar-border" />
 
-        {/* Chat Sessions */}
+        {/* Project List */}
         <ScrollArea className="flex-1 min-h-0 px-3 py-2">
           {!isCollapsed && (
-            <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-muted-foreground font-medium">
-              <MessageSquare className="h-3 w-3" />
-              <span>ダンとの会話</span>
-            </div>
+            <>
+              <div className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs text-muted-foreground font-medium">
+                <div className="flex items-center gap-2">
+                  <FolderKanban className="h-3 w-3" />
+                  <span>プロジェクト</span>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6 text-muted-foreground hover:text-sidebar-foreground"
+                  onClick={handleInstantCreate}
+                  disabled={createProjectMutation.isPending}
+                >
+                  {createProjectMutation.isPending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Plus className="h-3.5 w-3.5" />
+                  )}
+                </Button>
+              </div>
+            </>
           )}
 
           <nav className="space-y-1">
-            {isLoadingSessions ? (
+            {isLoadingProjects ? (
               <div className="flex items-center justify-center py-4">
                 <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
               </div>
-            ) : filteredSessions.length === 0 ? (
+            ) : filteredProjects.length === 0 ? (
               !isCollapsed && (
                 <p className="text-xs text-muted-foreground text-center py-4">
-                  会話履歴がありません
+                  プロジェクトはありません
                 </p>
               )
             ) : (
-              filteredSessions.map((session) => {
-                // URLのsessionIdと比較してアクティブ判定
-                const isActive = session.id === currentSessionId;
-                const isDeleting = deleteSessionMutation.isPending &&
-                  deleteSessionMutation.variables === session.id;
-                const unreadCount = sessionStates.get(session.id)?.unreadCount || 0;
-                const hasUnread = unreadCount > 0;
+              filteredProjects.map((project) => {
+                const isActive = project.id === selectedProjectId;
+                const statusColor = STATUS_COLORS[project.status] || 'bg-gray-400';
 
                 return (
-                  <Tooltip key={session.id}>
+                  <Tooltip key={project.id}>
                     <TooltipTrigger asChild>
                       <motion.div
-                        whileHover={{ scale: 1.01 }}
-                        whileTap={{ scale: 0.99 }}
+                        whileHover={{ scale: 1 }}
+                        whileTap={{ scale: 1 }}
                         className={cn(
                           'group w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors text-left cursor-pointer',
                           isActive
@@ -287,45 +332,55 @@ export function Sidebar({ className }: SidebarProps) {
                             : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
                           isCollapsed && 'justify-center px-0'
                         )}
-                        onClick={() => !isDeleting && handleSessionClick(session)}
+                        onClick={() => editingProjectId !== project.id && handleProjectClick(project)}
                       >
                         <div className="relative shrink-0">
-                          <MessageCircle className="h-4 w-4" />
-                          {hasUnread && !isActive && (
-                            <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-white border border-sidebar-border" />
-                          )}
+                          <FolderKanban className="h-4 w-4" />
+                          <span className={cn('absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full', statusColor)} />
                         </div>
                         {!isCollapsed && (
-                          <>
-                            <div className="flex-1 min-w-0">
-                              <p className={cn("truncate", hasUnread && !isActive && "font-semibold")}>{session.title}</p>
-                              <p className="text-xs text-muted-foreground truncate">
-                                {formatRelativeTime(session.last_message_at)}
-                              </p>
-                            </div>
-                            <button
-                              onClick={(e) => handleDeleteSession(e, session.id)}
-                              disabled={isDeleting}
-                              className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-destructive/20 hover:text-destructive transition-all"
-                              title="会話を削除"
-                            >
-                              {isDeleting ? (
-                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                              ) : (
-                                <X className="h-3.5 w-3.5" />
-                              )}
-                            </button>
-                          </>
+                          <div className="flex-1 min-w-0 flex items-center gap-1">
+                            {editingProjectId === project.id ? (
+                              <input
+                                ref={editInputRef}
+                                className="flex-1 min-w-0 bg-transparent border-b border-primary text-sm outline-none py-0.5"
+                                value={editingTitle}
+                                onClick={(e) => e.stopPropagation()}
+                                onChange={(e) => setEditingTitle(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') { e.preventDefault(); handleConfirmEdit(project); }
+                                  if (e.key === 'Escape') setEditingProjectId(null);
+                                }}
+                                onBlur={() => handleConfirmEdit(project)}
+                                autoFocus
+                              />
+                            ) : (
+                              <>
+                                <div className="flex-1 min-w-0">
+                                  <p className="truncate">{project.title}</p>
+                                  <p className="text-xs text-muted-foreground truncate">
+                                    {STATUS_LABELS[project.status]} · {formatRelativeTime(project.updated_at || project.created_at)}
+                                  </p>
+                                </div>
+                                <button
+                                  className="shrink-0 p-0.5 rounded transition-opacity opacity-0 group-hover:opacity-100"
+                                  onClick={(e) => handleStartEdit(e, project)}
+                                  title="タイトルを編集"
+                                >
+                                  <Pencil className="h-3 w-3 text-muted-foreground" />
+                                </button>
+                              </>
+                            )}
+                          </div>
                         )}
                       </motion.div>
                     </TooltipTrigger>
                     {isCollapsed && (
                       <TooltipContent side="right">
-                        <p className="font-medium">{session.title}</p>
+                        <p className="font-medium">{project.title}</p>
                         <p className="text-xs text-muted-foreground">
-                          {formatRelativeTime(session.last_message_at)}
+                          {STATUS_LABELS[project.status]}
                         </p>
-                        {hasUnread && <p className="text-xs text-primary">新着メッセージあり</p>}
                       </TooltipContent>
                     )}
                   </Tooltip>
@@ -344,7 +399,10 @@ export function Sidebar({ className }: SidebarProps) {
               return (
                 <Tooltip key={item.href}>
                   <TooltipTrigger asChild>
-                    <Link href={item.href}>
+                    <Link
+                      href={item.href}
+                      onClick={() => { if (isMobile) selectProject(null); }}
+                    >
                       <motion.div
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
@@ -379,7 +437,7 @@ export function Sidebar({ className }: SidebarProps) {
                   whileTap={{ scale: 0.98 }}
                   className={cn(
                     'flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer',
-                    (isBusinessOpen || pathname.startsWith('/notes'))
+                    (isBusinessOpen || pathname.startsWith('/notes') || pathname.startsWith('/studio'))
                       ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                       : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
                     isCollapsed && 'justify-center px-0'
@@ -420,7 +478,7 @@ export function Sidebar({ className }: SidebarProps) {
                     return (
                       <Tooltip key={item.href}>
                         <TooltipTrigger asChild>
-                          <Link href={item.href}>
+                          <a href={item.href} target="_blank" rel="noopener noreferrer">
                             <motion.div
                               whileHover={{ scale: 1.02 }}
                               whileTap={{ scale: 0.98 }}
@@ -434,7 +492,7 @@ export function Sidebar({ className }: SidebarProps) {
                               <Icon className="h-4 w-4 shrink-0" />
                               <span>{item.title}</span>
                             </motion.div>
-                          </Link>
+                          </a>
                         </TooltipTrigger>
                       </Tooltip>
                     );
@@ -478,6 +536,13 @@ export function Sidebar({ className }: SidebarProps) {
             })}
           </nav>
         </ScrollArea>
+
+        {/* Notifications (mobile only, inline in sidebar) */}
+        {showNotifications && !isCollapsed && (
+          <div className="px-3 py-2">
+            <NotificationPanel inline />
+          </div>
+        )}
 
         <Separator className="bg-sidebar-border" />
 
@@ -525,7 +590,7 @@ export function Sidebar({ className }: SidebarProps) {
             </Tooltip>
           </div>
         </div>
-      </motion.aside>
+      </div>
     </TooltipProvider>
   );
 }
