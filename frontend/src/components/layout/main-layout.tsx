@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Menu, FolderOpen } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { ProjectListPanel } from './project-list-panel';
+import { Sidebar } from './sidebar';
 import { ProjectChatPanel } from './project-chat-panel';
 import { NotificationPanel } from '@/components/notification/notification-panel';
 import { useProjectStore } from '@/stores/project-store';
@@ -80,7 +80,7 @@ export function MainLayout({
               onClick={() => setSidebarOpen(false)}
             />
             <div className="fixed inset-y-0 left-0 z-50 w-[280px] animate-in slide-in-from-left duration-200">
-              <ProjectListPanel
+              <Sidebar
                 isCollapsed={false}
                 onToggleCollapse={() => setSidebarOpen(false)}
                 showNotifications={showNotifications}
@@ -117,7 +117,7 @@ export function MainLayout({
         )}
         style={{ width: effectiveWidth }}
       >
-        <ProjectListPanel
+        <Sidebar
           isCollapsed={isCollapsed}
           onToggleCollapse={() => setIsCollapsed(!isCollapsed)}
         />

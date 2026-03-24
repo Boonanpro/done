@@ -2,14 +2,39 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { api, StudioEpisode, StudioVoiceTrack, StudioVideoClip } from '@/lib/api-client';
+import { api, ApiError, StudioEpisode, StudioVoiceTrack, StudioVideoClip } from '@/lib/api-client';
 import {
   ChevronLeft, Send, Play, Pause, SkipBack, SkipForward,
-  Scissors, Type, Palette, Music, Layers, Film, Mic, Video,
-  RefreshCw, Plus, Trash2, GripVertical, Volume2,
+  Film, Mic, Video, RefreshCw, Volume2, X, AlertCircle, CheckCircle,
 } from 'lucide-react';
 
-// ─── Types ───
+// ─── Toast System ───
+type Toast = { id: number; message: string; type: 'error' | 'success' | 'info' };
+let toastId = 0;
+
+function useToast() {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const add = useCallback((message: string, type: Toast['type'] = 'error') => {
+    const id = ++toastId;
+    setToasts(t => [...t, { id, message, type }]);
+    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), type === 'error' ? 8000 : 4000);
+  }, []);
+  const remove = useCallback((id: number) => setToasts(t => t.filter(x => x.id !== id)), []);
+  return { toasts, add, remove };
+}
+
+function extractErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    const d = err.data as Record<string, unknown> | undefined;
+    if (d?.detail && typeof d.detail === 'string') return d.detail;
+    if (d?.detail && typeof d.detail === 'object') return JSON.stringify(d.detail);
+    return `API Error ${err.status}: ${err.statusText}`;
+  }
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+// ─── Timeline Clip Type ───
 type TimelineClip = {
   id: string;
   track: 'v1' | 'v2' | 'audio' | 'bgm' | 'text';
@@ -21,16 +46,18 @@ type TimelineClip = {
   type: 'video' | 'voice' | 'text';
 };
 
-// ─── Component ───
+// ─── Main Component ───
 export default function EpisodeEditorPage() {
   const router = useRouter();
   const { channelId, episodeId } = useParams<{ channelId: string; episodeId: string }>();
+  const { toasts, add: toast, remove: removeToast } = useToast();
 
   // Data
   const [episode, setEpisode] = useState<StudioEpisode | null>(null);
   const [voiceTracks, setVoiceTracks] = useState<StudioVoiceTrack[]>([]);
   const [videoClips, setVideoClips] = useState<StudioVideoClip[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   // UI State
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
@@ -42,11 +69,11 @@ export default function EpisodeEditorPage() {
   const [messages, setMessages] = useState<Array<{ role: string; content: string }>>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
+  const [chatError, setChatError] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Generate forms
-  const [showVideoForm, setShowVideoForm] = useState(false);
-  const [showVoiceForm, setShowVoiceForm] = useState(false);
+  const [activePanel, setActivePanel] = useState<'none' | 'video' | 'voice'>('none');
   const [videoPrompt, setVideoPrompt] = useState('');
   const [videoLabel, setVideoLabel] = useState('');
   const [videoDuration, setVideoDuration] = useState(5);
@@ -70,18 +97,42 @@ export default function EpisodeEditorPage() {
       setMessages(ep.script_messages || []);
       setVoiceTracks(vt);
       setVideoClips(vc);
-      // Auto-select first video clip
       if (vc.length > 0 && vc[0].file_url) {
         setPreviewUrl(vc[0].file_url);
         setPreviewType('video');
         setSelectedClipId(vc[0].id);
       }
-    }).catch(console.error).finally(() => setLoading(false));
+    }).catch(err => {
+      setLoadError(extractErrorMessage(err));
+    }).finally(() => setLoading(false));
   }, [episodeId]);
 
+  // ─── Auto-scroll chat ───
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // ─── Auto-poll video status ───
+  useEffect(() => {
+    const processing = videoClips.filter(c => c.kling_status === 'processing');
+    if (processing.length === 0) return;
+    const timer = setInterval(async () => {
+      for (const clip of processing) {
+        try {
+          const updated = await api.studio.checkVideoStatus(clip.id);
+          setVideoClips(clips => clips.map(c => c.id === clip.id ? updated : c));
+          if (updated.kling_status === 'done') {
+            toast(`映像「${updated.label || 'clip'}」の生成が完了しました`, 'success');
+          } else if (updated.kling_status === 'error') {
+            toast(`映像「${updated.label || 'clip'}」の生成に失敗しました`, 'error');
+          }
+        } catch {
+          // polling error is non-critical, skip
+        }
+      }
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [videoClips, toast]);
 
   // ─── Chat ───
   const sendMessage = useCallback(async (e: React.FormEvent) => {
@@ -90,13 +141,17 @@ export default function EpisodeEditorPage() {
     if (!msg || chatSending) return;
     setChatInput('');
     setChatSending(true);
+    setChatError(null);
     const updated = [...messages, { role: 'user', content: msg }];
     setMessages(updated);
     try {
       const res = await api.studio.chatScript(episodeId, msg);
       setMessages([...updated, { role: 'assistant', content: res.response }]);
-    } catch {
-      setMessages([...updated, { role: 'assistant', content: 'エラーが発生しました。' }]);
+    } catch (err) {
+      const errMsg = extractErrorMessage(err);
+      setChatError(errMsg);
+      // Keep the user message but show error instead of fake assistant message
+      setMessages([...updated, { role: 'assistant', content: `⚠ エラー: ${errMsg}` }]);
     } finally {
       setChatSending(false);
     }
@@ -112,13 +167,14 @@ export default function EpisodeEditorPage() {
       setVideoClips(c => [clip, ...c]);
       setVideoPrompt('');
       setVideoLabel('');
-      setShowVideoForm(false);
+      setActivePanel('none');
+      toast('映像生成リクエストを送信しました。完了まで数分かかります。', 'info');
     } catch (err) {
-      console.error(err);
+      toast(extractErrorMessage(err));
     } finally {
       setGeneratingVideo(false);
     }
-  }, [episodeId, videoPrompt, videoDuration, videoLabel, generatingVideo]);
+  }, [episodeId, videoPrompt, videoDuration, videoLabel, generatingVideo, toast]);
 
   // ─── Voice Generation ───
   const handleGenerateVoice = useCallback(async (e: React.FormEvent) => {
@@ -127,22 +183,17 @@ export default function EpisodeEditorPage() {
     setGeneratingVoice(true);
     try {
       const track = await api.studio.generateVoice(episodeId, voiceText, voiceLabel);
-      setVoiceTracks(t => [track, ...t]);
+      setVoiceTracks(t => [...t, track]);
       setVoiceText('');
       setVoiceLabel('');
-      setShowVoiceForm(false);
+      setActivePanel('none');
+      toast('音声を生成しました', 'success');
     } catch (err) {
-      console.error(err);
+      toast(extractErrorMessage(err));
     } finally {
       setGeneratingVoice(false);
     }
-  }, [episodeId, voiceText, voiceLabel, generatingVoice]);
-
-  // ─── Poll Video Status ───
-  const pollVideo = useCallback(async (clipId: string) => {
-    const updated = await api.studio.checkVideoStatus(clipId);
-    setVideoClips(clips => clips.map(c => c.id === clipId ? updated : c));
-  }, []);
+  }, [episodeId, voiceText, voiceLabel, generatingVoice, toast]);
 
   // ─── Preview Controls ───
   const selectMedia = useCallback((url: string, type: 'video' | 'audio', id: string) => {
@@ -180,6 +231,7 @@ export default function EpisodeEditorPage() {
     aOffset += w + 2;
   });
 
+  // ─── Loading / Error States ───
   if (loading) {
     return (
       <div className="h-screen bg-[#06060a] text-zinc-500 flex items-center justify-center text-sm">
@@ -188,8 +240,46 @@ export default function EpisodeEditorPage() {
     );
   }
 
+  if (loadError) {
+    return (
+      <div className="h-screen bg-[#06060a] text-zinc-300 flex flex-col items-center justify-center gap-4">
+        <AlertCircle size={32} className="text-red-500" />
+        <p className="text-sm">データの読み込みに失敗しました</p>
+        <p className="text-xs text-zinc-500 max-w-md text-center">{loadError}</p>
+        <button
+          onClick={() => window.location.reload()}
+          className="text-xs text-indigo-400 hover:text-indigo-300 underline mt-2"
+        >
+          再読み込み
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen bg-[#06060a] text-zinc-200 flex flex-col overflow-hidden select-none">
+      {/* ═══ Toast Notifications ═══ */}
+      <div className="fixed top-3 right-3 z-[100] flex flex-col gap-2 max-w-sm">
+        {toasts.map(t => (
+          <div
+            key={t.id}
+            className={`flex items-start gap-2 px-3 py-2.5 rounded-lg text-xs shadow-lg border animate-in slide-in-from-right ${
+              t.type === 'error' ? 'bg-red-950/90 border-red-800/60 text-red-200' :
+              t.type === 'success' ? 'bg-green-950/90 border-green-800/60 text-green-200' :
+              'bg-zinc-900/90 border-zinc-700/60 text-zinc-200'
+            }`}
+          >
+            {t.type === 'error' ? <AlertCircle size={14} className="shrink-0 mt-0.5 text-red-400" /> :
+             t.type === 'success' ? <CheckCircle size={14} className="shrink-0 mt-0.5 text-green-400" /> :
+             <RefreshCw size={14} className="shrink-0 mt-0.5 text-zinc-400" />}
+            <span className="flex-1 leading-relaxed">{t.message}</span>
+            <button onClick={() => removeToast(t.id)} className="shrink-0 text-zinc-500 hover:text-zinc-300">
+              <X size={12} />
+            </button>
+          </div>
+        ))}
+      </div>
+
       {/* ═══ Title Bar ═══ */}
       <div className="h-9 bg-[#08080e] border-b border-zinc-800/60 flex items-center px-3 gap-2 shrink-0">
         <button onClick={() => router.push(`/studio/${channelId}`)} className="text-zinc-500 hover:text-white">
@@ -211,32 +301,6 @@ export default function EpisodeEditorPage() {
 
       {/* ═══ Main Body ═══ */}
       <div className="flex-1 flex min-h-0">
-        {/* ─── Left Toolbar ─── */}
-        <div className="w-11 bg-[#08080e] border-r border-zinc-800/60 flex flex-col items-center py-2 gap-0.5 shrink-0">
-          {[
-            { icon: Play, label: 'Play' },
-            { icon: Scissors, label: 'Cut' },
-            { icon: Type, label: 'Text' },
-            null,
-            { icon: Palette, label: 'Color' },
-            { icon: Music, label: 'Audio' },
-            { icon: Layers, label: 'Effects' },
-            null,
-            { icon: Film, label: 'Media' },
-          ].map((item, i) =>
-            item === null ? (
-              <div key={`d${i}`} className="w-6 h-px bg-zinc-800/60 my-1.5" />
-            ) : (
-              <button
-                key={item.label}
-                className="w-9 h-9 rounded-lg flex items-center justify-center text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800/40 transition-colors"
-                title={item.label}
-              >
-                <item.icon size={15} />
-              </button>
-            )
-          )}
-        </div>
 
         {/* ─── Center: Preview + Media + Timeline ─── */}
         <div className="flex-1 flex flex-col min-w-0">
@@ -257,46 +321,63 @@ export default function EpisodeEditorPage() {
                   <audio ref={audioRef} src={previewUrl} onEnded={() => setIsPlaying(false)} />
                 </div>
               ) : (
-                <div className="text-zinc-700 text-sm font-medium">プレビュー</div>
+                <div className="text-zinc-700 text-sm flex flex-col items-center gap-2">
+                  <Film size={32} className="opacity-30" />
+                  <span>メディアを選択してプレビュー</span>
+                </div>
               )}
 
               {/* Controls overlay */}
-              <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-4">
-                <button className="text-zinc-500 hover:text-white"><SkipBack size={14} /></button>
-                <button onClick={togglePlay} className="text-white hover:text-zinc-300">
-                  {isPlaying ? <Pause size={18} /> : <Play size={18} />}
-                </button>
-                <button className="text-zinc-500 hover:text-white"><SkipForward size={14} /></button>
-              </div>
+              {previewUrl && (
+                <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-4 bg-black/60 rounded-full px-4 py-1.5">
+                  <button className="text-zinc-400 hover:text-white"><SkipBack size={14} /></button>
+                  <button onClick={togglePlay} className="text-white hover:text-zinc-300">
+                    {isPlaying ? <Pause size={18} /> : <Play size={18} />}
+                  </button>
+                  <button className="text-zinc-400 hover:text-white"><SkipForward size={14} /></button>
+                </div>
+              )}
             </div>
           </div>
 
           {/* Media Browser */}
-          <div className="h-20 bg-[#0e0e18] border-t border-zinc-800/60 flex items-center px-3 gap-2 overflow-x-auto shrink-0">
+          <div className="h-24 bg-[#0e0e18] border-t border-zinc-800/60 flex items-center px-3 gap-2 overflow-x-auto shrink-0">
+            {videoClips.length === 0 && voiceTracks.length === 0 && (
+              <span className="text-xs text-zinc-700 mr-2">メディアがありません</span>
+            )}
+
             {/* Video Clips */}
             {videoClips.map(clip => (
               <button
                 key={clip.id}
                 onClick={() => clip.file_url && selectMedia(clip.file_url, 'video', clip.id)}
-                className={`w-28 h-14 rounded shrink-0 border-2 transition-all relative overflow-hidden group ${
+                className={`w-28 h-16 rounded shrink-0 border-2 transition-all relative overflow-hidden ${
                   selectedClipId === clip.id ? 'border-indigo-500 shadow-lg shadow-indigo-500/20' : 'border-transparent hover:border-zinc-600'
                 }`}
               >
                 {clip.thumbnail_url ? (
                   <img src={clip.thumbnail_url} className="w-full h-full object-cover" alt="" />
                 ) : (
-                  <div className="w-full h-full bg-zinc-800 flex items-center justify-center">
+                  <div className="w-full h-full bg-zinc-800 flex flex-col items-center justify-center gap-1">
                     {clip.kling_status === 'processing' ? (
-                      <RefreshCw size={14} className="text-yellow-500 animate-spin" />
+                      <>
+                        <RefreshCw size={14} className="text-yellow-500 animate-spin" />
+                        <span className="text-[8px] text-yellow-500">生成中...</span>
+                      </>
                     ) : clip.kling_status === 'error' ? (
-                      <span className="text-xs text-red-400">ERR</span>
+                      <>
+                        <AlertCircle size={14} className="text-red-400" />
+                        <span className="text-[8px] text-red-400">失敗</span>
+                      </>
+                    ) : clip.file_url ? (
+                      <Video size={14} className="text-blue-400" />
                     ) : (
                       <Video size={14} className="text-zinc-600" />
                     )}
                   </div>
                 )}
-                <span className="absolute bottom-0.5 right-1 text-[9px] text-white/80 bg-black/60 px-1 rounded font-mono">
-                  {clip.kling_status === 'done' ? '5s' : '...'}
+                <span className="absolute bottom-0.5 left-1 text-[8px] text-white/80 bg-black/70 px-1 rounded truncate max-w-[90%]">
+                  {clip.label || clip.prompt.slice(0, 10)}
                 </span>
               </button>
             ))}
@@ -306,7 +387,7 @@ export default function EpisodeEditorPage() {
               <button
                 key={track.id}
                 onClick={() => track.file_url && selectMedia(track.file_url, 'audio', track.id)}
-                className={`w-28 h-14 rounded shrink-0 border-2 transition-all bg-zinc-800 flex flex-col items-center justify-center gap-1 ${
+                className={`w-28 h-16 rounded shrink-0 border-2 transition-all bg-zinc-800 flex flex-col items-center justify-center gap-1 ${
                   selectedClipId === track.id ? 'border-green-500' : 'border-transparent hover:border-zinc-600'
                 }`}
               >
@@ -314,33 +395,122 @@ export default function EpisodeEditorPage() {
                 <span className="text-[9px] text-zinc-400 truncate max-w-[90%]">
                   {track.label || track.text_content.slice(0, 12)}
                 </span>
+                {track.status === 'done' && <span className="text-[7px] text-green-500">完了</span>}
+                {track.status === 'error' && <span className="text-[7px] text-red-400">失敗</span>}
               </button>
             ))}
 
             {/* Add buttons */}
             <button
-              onClick={() => setShowVideoForm(true)}
-              className="w-14 h-14 rounded border-2 border-dashed border-zinc-700 shrink-0 flex flex-col items-center justify-center gap-1 text-zinc-600 hover:text-zinc-400 hover:border-zinc-500 transition-colors"
+              onClick={() => setActivePanel(activePanel === 'video' ? 'none' : 'video')}
+              className={`w-16 h-16 rounded border-2 border-dashed shrink-0 flex flex-col items-center justify-center gap-1 transition-colors ${
+                activePanel === 'video' ? 'border-indigo-500 text-indigo-400' : 'border-zinc-700 text-zinc-600 hover:text-zinc-400 hover:border-zinc-500'
+              }`}
             >
-              <Video size={12} />
+              <Video size={14} />
               <span className="text-[8px]">映像</span>
             </button>
             <button
-              onClick={() => setShowVoiceForm(true)}
-              className="w-14 h-14 rounded border-2 border-dashed border-zinc-700 shrink-0 flex flex-col items-center justify-center gap-1 text-zinc-600 hover:text-zinc-400 hover:border-zinc-500 transition-colors"
+              onClick={() => setActivePanel(activePanel === 'voice' ? 'none' : 'voice')}
+              className={`w-16 h-16 rounded border-2 border-dashed shrink-0 flex flex-col items-center justify-center gap-1 transition-colors ${
+                activePanel === 'voice' ? 'border-green-500 text-green-400' : 'border-zinc-700 text-zinc-600 hover:text-zinc-400 hover:border-zinc-500'
+              }`}
             >
-              <Mic size={12} />
+              <Mic size={14} />
               <span className="text-[8px]">音声</span>
             </button>
           </div>
 
+          {/* Generation Panel (slides in below media browser) */}
+          {activePanel !== 'none' && (
+            <div className="bg-[#0e0e18] border-t border-zinc-800/60 px-4 py-3 shrink-0">
+              {activePanel === 'video' && (
+                <form onSubmit={handleGenerateVideo} className="flex gap-3 items-end">
+                  <div className="flex-1 space-y-2">
+                    <div className="flex gap-2">
+                      <input
+                        className="flex-1 bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:border-indigo-500"
+                        placeholder="ラベル（例: 冒頭シーン）"
+                        value={videoLabel}
+                        onChange={e => setVideoLabel(e.target.value)}
+                      />
+                      <select
+                        className="bg-zinc-900 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs focus:outline-none"
+                        value={videoDuration}
+                        onChange={e => setVideoDuration(Number(e.target.value))}
+                      >
+                        <option value={5}>5秒</option>
+                        <option value={10}>10秒</option>
+                      </select>
+                    </div>
+                    <textarea
+                      className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:border-indigo-500 resize-none"
+                      rows={2}
+                      placeholder="映像プロンプト（英語推奨）"
+                      value={videoPrompt}
+                      onChange={e => setVideoPrompt(e.target.value)}
+                      required
+                      autoFocus
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <button
+                      type="submit"
+                      disabled={generatingVideo || !videoPrompt.trim()}
+                      className="bg-indigo-500 text-white px-4 py-2 rounded-lg text-xs font-medium hover:bg-indigo-400 disabled:opacity-40 transition-colors whitespace-nowrap"
+                    >
+                      {generatingVideo ? '送信中...' : '生成'}
+                    </button>
+                    <button type="button" onClick={() => setActivePanel('none')} className="text-zinc-500 text-xs hover:text-zinc-300">
+                      閉じる
+                    </button>
+                  </div>
+                </form>
+              )}
+              {activePanel === 'voice' && (
+                <form onSubmit={handleGenerateVoice} className="flex gap-3 items-end">
+                  <div className="flex-1 space-y-2">
+                    <input
+                      className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:border-green-500"
+                      placeholder="ラベル（例: 冒頭ナレーション）"
+                      value={voiceLabel}
+                      onChange={e => setVoiceLabel(e.target.value)}
+                    />
+                    <textarea
+                      className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:border-green-500 resize-none"
+                      rows={2}
+                      placeholder="読み上げるテキスト..."
+                      value={voiceText}
+                      onChange={e => setVoiceText(e.target.value)}
+                      required
+                      autoFocus
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <button
+                      type="submit"
+                      disabled={generatingVoice || !voiceText.trim()}
+                      className="bg-green-600 text-white px-4 py-2 rounded-lg text-xs font-medium hover:bg-green-500 disabled:opacity-40 transition-colors whitespace-nowrap"
+                    >
+                      {generatingVoice ? '生成中...' : '生成'}
+                    </button>
+                    <button type="button" onClick={() => setActivePanel('none')} className="text-zinc-500 text-xs hover:text-zinc-300">
+                      閉じる
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          )}
+
           {/* Timeline */}
-          <div className="h-[180px] bg-[#0a0a12] border-t border-zinc-800/60 flex flex-col shrink-0">
-            {/* Timeline toolbar */}
+          <div className="h-[160px] bg-[#0a0a12] border-t border-zinc-800/60 flex flex-col shrink-0">
+            {/* Timeline header */}
             <div className="h-7 bg-[#0e0e18] border-b border-zinc-800/40 flex items-center px-3 gap-4 text-[11px]">
-              <span className="text-indigo-400 font-medium">編集</span>
-              <span className="text-zinc-600">カラー</span>
-              <span className="text-zinc-600">オーディオ</span>
+              <span className="text-indigo-400 font-medium">タイムライン</span>
+              <span className="text-zinc-600 ml-auto">
+                映像: {videoClips.filter(c => c.file_url).length} / 音声: {voiceTracks.filter(t => t.file_url).length}
+              </span>
             </div>
 
             {/* Ruler */}
@@ -364,7 +534,7 @@ export default function EpisodeEditorPage() {
                 { id: 'audio', label: 'A1 音声', trackKey: 'audio' as const },
                 { id: 'bgm', label: 'BGM', trackKey: 'bgm' as const },
               ].map(track => (
-                <div key={track.id} className="h-[26px] flex items-center border-b border-zinc-900/50">
+                <div key={track.id} className="h-[24px] flex items-center border-b border-zinc-900/50">
                   <div className="w-16 shrink-0 text-[9px] text-zinc-600 font-semibold text-right pr-2 border-r border-zinc-800/40 h-full flex items-center justify-end">
                     {track.label}
                   </div>
@@ -402,7 +572,7 @@ export default function EpisodeEditorPage() {
           </div>
         </div>
 
-        {/* ─── Right: AI Panel ─── */}
+        {/* ─── Right: AI Chat Panel ─── */}
         <div className="w-80 bg-[#0f0f1a] border-l border-zinc-800/60 flex flex-col shrink-0">
           {/* AI Header */}
           <div className="h-10 border-b border-zinc-800/60 flex items-center px-3 gap-2 text-sm font-semibold shrink-0">
@@ -418,7 +588,8 @@ export default function EpisodeEditorPage() {
             {messages.length === 0 && (
               <div className="text-zinc-700 text-xs text-center py-8">
                 AIと脚本を壁打ちする<br />
-                <span className="text-zinc-800 mt-1 block">「第1話の構成を考えて」</span>
+                <span className="text-zinc-600 mt-2 block">例:「第1話の構成を考えて」</span>
+                <span className="text-zinc-600 block">「冒頭の掴みを3パターン出して」</span>
               </div>
             )}
             {messages.map((m, i) => (
@@ -439,18 +610,27 @@ export default function EpisodeEditorPage() {
             {chatSending && (
               <div className="bg-[#141420] border border-zinc-800/60 rounded-xl px-3 py-2 text-xs text-zinc-500 rounded-bl-sm">
                 <span className="text-[10px] font-bold text-indigo-400 block mb-1">DAN</span>
-                考え中...
+                <span className="animate-pulse">考え中...</span>
               </div>
             )}
             <div ref={chatEndRef} />
           </div>
+
+          {/* Chat error banner */}
+          {chatError && (
+            <div className="mx-2 mb-1 px-3 py-1.5 bg-red-950/50 border border-red-800/40 rounded-lg text-[10px] text-red-300 flex items-center gap-1.5">
+              <AlertCircle size={10} className="shrink-0" />
+              <span className="truncate">{chatError}</span>
+              <button onClick={() => setChatError(null)} className="ml-auto shrink-0"><X size={10} /></button>
+            </div>
+          )}
 
           {/* Input */}
           <form onSubmit={sendMessage} className="p-2.5 border-t border-zinc-800/60 shrink-0">
             <div className="flex items-center gap-2 bg-[#0a0a15] border border-zinc-800/60 rounded-xl px-3 py-2">
               <input
                 className="flex-1 bg-transparent text-xs text-zinc-200 placeholder:text-zinc-700 focus:outline-none"
-                placeholder="指示を入力..."
+                placeholder="脚本について相談..."
                 value={chatInput}
                 onChange={e => setChatInput(e.target.value)}
               />
@@ -465,109 +645,6 @@ export default function EpisodeEditorPage() {
           </form>
         </div>
       </div>
-
-      {/* ═══ Modals ═══ */}
-
-      {/* Video Generation Modal */}
-      {showVideoForm && (
-        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center" onClick={() => setShowVideoForm(false)}>
-          <div className="bg-[#111120] border border-zinc-700 rounded-2xl p-6 w-[480px] max-w-[90vw]" onClick={e => e.stopPropagation()}>
-            <h2 className="text-sm font-semibold mb-4 flex items-center gap-2"><Video size={16} /> 映像生成（Kling O3）</h2>
-            <form onSubmit={handleGenerateVideo} className="space-y-3">
-              <input
-                className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-zinc-500"
-                placeholder="ラベル（例: 冒頭シーン）"
-                value={videoLabel}
-                onChange={e => setVideoLabel(e.target.value)}
-              />
-              <textarea
-                className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-zinc-500 resize-none"
-                rows={3}
-                placeholder="映像プロンプト（英語推奨）"
-                value={videoPrompt}
-                onChange={e => setVideoPrompt(e.target.value)}
-                required
-                autoFocus
-              />
-              <div className="flex items-center gap-3">
-                <label className="text-xs text-zinc-400">尺</label>
-                <select
-                  className="bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none"
-                  value={videoDuration}
-                  onChange={e => setVideoDuration(Number(e.target.value))}
-                >
-                  <option value={5}>5秒</option>
-                  <option value={10}>10秒</option>
-                </select>
-              </div>
-              <div className="flex gap-3 pt-2">
-                <button
-                  type="submit"
-                  disabled={generatingVideo || !videoPrompt.trim()}
-                  className="bg-indigo-500 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-400 disabled:opacity-50 transition-colors"
-                >
-                  {generatingVideo ? '送信中...' : '生成'}
-                </button>
-                <button type="button" onClick={() => setShowVideoForm(false)} className="text-zinc-400 px-4 py-2 text-sm">
-                  キャンセル
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Voice Generation Modal */}
-      {showVoiceForm && (
-        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center" onClick={() => setShowVoiceForm(false)}>
-          <div className="bg-[#111120] border border-zinc-700 rounded-2xl p-6 w-[480px] max-w-[90vw]" onClick={e => e.stopPropagation()}>
-            <h2 className="text-sm font-semibold mb-4 flex items-center gap-2"><Mic size={16} /> 音声生成</h2>
-            <form onSubmit={handleGenerateVoice} className="space-y-3">
-              <input
-                className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-zinc-500"
-                placeholder="ラベル（例: 冒頭ナレーション）"
-                value={voiceLabel}
-                onChange={e => setVoiceLabel(e.target.value)}
-              />
-              <textarea
-                className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-zinc-500 resize-none"
-                rows={4}
-                placeholder="読み上げるテキスト..."
-                value={voiceText}
-                onChange={e => setVoiceText(e.target.value)}
-                required
-                autoFocus
-              />
-              <div className="flex gap-3 pt-2">
-                <button
-                  type="submit"
-                  disabled={generatingVoice || !voiceText.trim()}
-                  className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-green-500 disabled:opacity-50 transition-colors"
-                >
-                  {generatingVoice ? '生成中...' : '生成'}
-                </button>
-                <button type="button" onClick={() => setShowVoiceForm(false)} className="text-zinc-400 px-4 py-2 text-sm">
-                  キャンセル
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Polling buttons for processing clips */}
-      {videoClips.some(c => c.kling_status === 'processing') && (
-        <div className="fixed bottom-4 right-96 z-40 bg-yellow-500/10 border border-yellow-500/30 text-yellow-300 text-xs px-3 py-2 rounded-lg flex items-center gap-2">
-          <RefreshCw size={12} className="animate-spin" />
-          映像生成中...
-          <button
-            onClick={() => videoClips.filter(c => c.kling_status === 'processing').forEach(c => pollVideo(c.id))}
-            className="ml-1 underline hover:text-yellow-100"
-          >
-            更新
-          </button>
-        </div>
-      )}
     </div>
   );
 }
