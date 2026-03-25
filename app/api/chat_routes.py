@@ -59,101 +59,212 @@ WORKSPACE_MEMORY_DIR = WORKSPACE_DIR / "memory"
 COMPACTION_SNAPSHOT_INTERVAL_MESSAGES = 40
 logger = logging.getLogger(__name__)
 
-# ==================== Observer Timer ====================
+# ==================== Observer ====================
 import asyncio as _asyncio_observer
 
-# room_id → asyncio.Task (5分タイマー)
-_observer_timers: dict[str, "_asyncio_observer.Task"] = {}
 # room_id → 最後の観察時点のDBメッセージ数
 _observer_last_message_index: dict[str, int] = {}
-OBSERVER_DELAY_SECONDS = 300  # 5分
+# 現在実行中の観察者タスク（room_id → asyncio.Task）
+_observer_running: dict[str, "_asyncio_observer.Task"] = {}
+
+OBSERVER_ROOM_SUFFIX = "__observer"
 
 
-async def _run_single_observer(room_id: str, user_id: str, observer_name: str, checklist_path: Path, last_index: int):
-    """1つの観察者を実行する"""
+def _get_session_title(room_id: str) -> str:
+    """room_idからセッションタイトルを取得する"""
+    try:
+        from app.services.supabase_client import get_supabase_client
+        sb = get_supabase_client().client
+        result = sb.table("chat_rooms").select("name").eq("id", room_id).limit(1).execute()
+        if result.data:
+            name = result.data[0].get("name", "")
+            if name and name != "新しいプロジェクト":
+                return name
+    except Exception:
+        pass
+    return room_id[:8]
+
+
+def _fetch_messages_since(room_id: str, last_index: int) -> str:
+    """last_index以降のメッセージをDBから取得してテキスト化する"""
+    try:
+        from app.services.supabase_client import get_supabase_client
+        sb = get_supabase_client().client
+        result = (
+            sb.table("chat_messages")
+            .select("sender_type,content,created_at")
+            .eq("room_id", room_id)
+            .order("created_at", desc=False)
+            .execute()
+        )
+        messages = result.data or []
+        # last_index以降のメッセージを取得
+        new_messages = messages[last_index:]
+        if not new_messages:
+            return ""
+        lines = []
+        for i, msg in enumerate(new_messages, start=last_index + 1):
+            sender = "ユーザー" if msg["sender_type"] == "human" else "ダン"
+            content = (msg.get("content") or "")[:2000]  # 個別メッセージは2000文字で切る
+            lines.append(f"[{i}] {sender}: {content}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"[Observer] Failed to fetch messages: {e}")
+        return ""
+
+
+async def _run_single_observer(
+    room_id: str,
+    user_id: str,
+    observer_name: str,
+    checklist_path: Path,
+    conversation_text: str,
+) -> dict:
+    """1つの観察者を実行する。{"files": [...], "summary": "..."} を返す。"""
     if not checklist_path.exists():
         logger.info(f"[Observer:{observer_name}] {checklist_path.name} not found, skipping")
-        return
+        return {"files": [], "summary": ""}
 
     checklist = checklist_path.read_text(encoding="utf-8")
     prompt = (
         f"[OBSERVER MODE] これはユーザーからのメッセージではなく、システムによる自動観察リクエストです。\n"
         f"ユーザーには見えません。チャットに返答しないでください。\n\n"
-        f"以下のチェックリストに従い、メッセージ{last_index}番以降の会話を振り返ってください。\n"
-        f"学びがあれば該当ファイルを直接編集してください。なければ何もしないでください。\n\n"
+        f"ROOM_ID: {room_id}\n\n"
+        f"以下は直前の会話内容です:\n\n{conversation_text}\n\n"
+        f"---\n\n以下のチェックリストに従い、上記の会話を振り返ってください。\n"
+        f"該当があればファイルを直接編集してください。なければ何もしないでください。\n\n"
         f"---\n{checklist}\n---\n\n"
-        f"完了したら「観察完了」とだけ返答してください。"
+        f"何も記録しなかった場合は何も返答せず終了。記録した場合のみ、日本語箇条書き3行以内で要約を返答。"
     )
 
+    edited_files: list[str] = []
+    summary = ""
+    observer_room_id = f"{room_id}{OBSERVER_ROOM_SUFFIX}"
     try:
         from app.agent.cli_runner import process_message_cli
         async for event in process_message_cli(
-            room_id=room_id,
+            room_id=observer_room_id,
             user_id=user_id,
             content=prompt,
-            system_prompt=f"あなたは観察者モード（{observer_name}）です。指示されたファイル編集を行い、完了したら「観察完了」とだけ返答してください。",
+            system_prompt=(
+                f"あなたは観察者モード（{observer_name}）です。指示されたファイル編集を行ってください。\n"
+                f"【返答ルール】\n"
+                f"- 何も記録しなかった場合: 何も返答せず終了\n"
+                f"- 記録した場合: 日本語で箇条書き3行以内の要約のみ返答（例:「- RULES.mdに○○を追加」「- 計画を更新: Phase 1を完了済みに変更」）\n"
+                f"- 内部思考・英語・説明文は一切含めない"
+            ),
+            skip_save=True,
+            skip_resume=True,
+            cwd=str(Path(__file__).parent.parent.parent),  # D:/done
         ):
-            if event["type"] == "result":
-                logger.info(f"[Observer:{observer_name}] Completed for room {room_id}")
+            if event["type"] == "tool_use":
+                tool_name = event.get("name", "")
+                if tool_name in ("Edit", "Write", "mcp__dan-tools__write_file"):
+                    tool_input = event.get("input", {})
+                    file_path = tool_input.get("file_path", "") or tool_input.get("path", "")
+                    if file_path and file_path not in edited_files:
+                        edited_files.append(file_path)
+            elif event["type"] == "result":
+                summary = event.get("text", "")
+                logger.info(f"[Observer:{observer_name}] Completed for room {room_id} (edited={len(edited_files)} files)")
             elif event["type"] == "error":
                 logger.warning(f"[Observer:{observer_name}] Error for room {room_id}: {event.get('message')}")
     except Exception as e:
         logger.error(f"[Observer:{observer_name}] Failed for room {room_id}: {e}")
+    return {"files": edited_files, "summary": summary}
 
 
-async def _run_observer(room_id: str, user_id: str):
-    """5分の沈黙後に2つの観察者を並列実行する"""
-    try:
-        await _asyncio_observer.sleep(OBSERVER_DELAY_SECONDS)
-    except _asyncio_observer.CancelledError:
-        return
-
-    # ダンが作業中なら観察をスキップ（衝突防止）
-    from app.services.cancellation import CancellationRegistry
-    if CancellationRegistry.is_active(room_id):
-        logger.info(f"[Observer] Skipped for room {room_id}: CLI is active")
-        _observer_timers.pop(room_id, None)
-        return
-
-    from app.agent.cli_runner import is_cli_active
-    if is_cli_active(room_id):
-        logger.info(f"[Observer] Skipped for room {room_id}: CLI process is running")
-        _observer_timers.pop(room_id, None)
-        return
-
+async def _run_observers(room_id: str, user_id: str):
+    """2つの観察者を逐次実行する（ダン回答完了後に即座に呼ばれる）"""
     last_index = _observer_last_message_index.get(room_id, 0)
-    logger.info(f"[Observer] Firing for room {room_id} (last_index={last_index})")
+    logger.info(f"[Observer] Starting for room {room_id} (last_index={last_index})")
 
     try:
+        # DBからメッセージ取得
+        conversation_text = _fetch_messages_since(room_id, last_index)
+        if not conversation_text:
+            logger.info(f"[Observer] No new messages for room {room_id}, skipping")
+            return
+
+        # 現在のメッセージ数を記録
         try:
             from app.services.supabase_client import get_supabase_client
             sb = get_supabase_client().client
             count_result = sb.table("chat_messages").select("id", count="exact").eq("room_id", room_id).execute()
-            current_count = count_result.count or 0
-            _observer_last_message_index[room_id] = current_count
+            _observer_last_message_index[room_id] = count_result.count or 0
         except Exception:
             pass
 
         observer_dir = Path(__file__).parent.parent.parent / ".claude"
-        await _asyncio_observer.gather(
-            _run_single_observer(room_id, user_id, "学び+メタ認知", observer_dir / "observer_learning.md", last_index),
-            _run_single_observer(room_id, user_id, "計画", observer_dir / "observer_planning.md", last_index),
-        )
+
+        # 計画 → 学び+メタ認知 の順で逐次実行
+        summaries: list[str] = []
+        all_edited: list[str] = []
+
+        def _is_meaningful_summary(text: str) -> bool:
+            """変更なし系のサマリーを除外する"""
+            if not text.strip():
+                return False
+            skip_phrases = ["変更なし", "学びなし", "計画なし", "更新不要", "記録不要", "何も記録", "終了します", "No update", "no change"]
+            lower = text.lower()
+            return not any(phrase.lower() in lower for phrase in skip_phrases)
+
+        plan_result = await _run_single_observer(room_id, user_id, "計画", observer_dir / "observer_planning.md", conversation_text)
+        all_edited += plan_result["files"]
+        if _is_meaningful_summary(plan_result["summary"]):
+            summaries.append(f"【計画】{plan_result['summary']}")
+
+        learn_result = await _run_single_observer(room_id, user_id, "学び+メタ認知", observer_dir / "observer_learning.md", conversation_text)
+        all_edited += learn_result["files"]
+        if _is_meaningful_summary(learn_result["summary"]):
+            summaries.append(f"【学び】{learn_result['summary']}")
+
+        logger.info(f"[Observer] Both observers completed for room {room_id} (total edited={len(all_edited)} files)")
+
+        # 意味のあるサマリーがある場合のみ通知を作成
+        if summaries:
+            await _create_observer_notification(room_id, user_id, summaries)
     except Exception as e:
         logger.error(f"[Observer] Failed for room {room_id}: {e}")
     finally:
-        _observer_timers.pop(room_id, None)
+        _observer_running.pop(room_id, None)
 
 
-def _reset_observer_timer(room_id: str, user_id: str):
-    """観察タイマーをリセット（会話が続いている間はリセットされ続ける）"""
-    existing = _observer_timers.pop(room_id, None)
+async def _create_observer_notification(room_id: str, user_id: str, summaries: list[str]):
+    """観察者の記録内容を通知として作成する"""
+    try:
+        session_title = _get_session_title(room_id)
+        content = f"セッション「{session_title}」\n\n" + "\n\n".join(summaries)
+        title = "観察者: 記録を更新しました"
+
+        from app.services.supabase_client import get_supabase_client
+        sb = get_supabase_client().client
+        sb.table("dan_proposals").insert({
+            "user_id": user_id,
+            "type": "action",
+            "title": title,
+            "content": content,
+            "source_room_id": room_id,
+            "status": "pending",
+        }).execute()
+        logger.info(f"[Observer] Notification created for room {room_id}")
+    except Exception as e:
+        logger.error(f"[Observer] Failed to create notification: {e}")
+
+
+def _trigger_observer(room_id: str, user_id: str):
+    """ダンの回答完了後に観察者を即座に起動する。前の観察者が実行中ならスキップ。"""
+    # 前の観察者がまだ実行中ならスキップ
+    existing = _observer_running.get(room_id)
     if existing and not existing.done():
-        existing.cancel()
+        logger.info(f"[Observer] Skipped for room {room_id}: previous observer still running")
+        return
+
     try:
         loop = _asyncio_observer.get_running_loop()
-        task = loop.create_task(_run_observer(room_id, user_id))
-        _observer_timers[room_id] = task
+        task = loop.create_task(_run_observers(room_id, user_id))
+        _observer_running[room_id] = task
+        logger.info(f"[Observer] Triggered for room {room_id}")
     except RuntimeError:
         pass
 
@@ -1444,9 +1555,7 @@ async def send_dan_message_stream(
                             should_supersede_existing_run = True
                 except Exception:
                     pass
-            # 観察タイマーをリセット（ユーザーが会話を続けている = 観察不要）
-            if request.session_id:
-                _reset_observer_timer(request.session_id, current_user.user_id)
+            # 観察者はダンの回答完了後に起動する（1807行目付近）
 
             # Step 1: ユーザーメッセージを保存
             # session_idが指定されていればそのルームに、なければ現在のDanルームに送信
@@ -1757,8 +1866,8 @@ async def send_dan_message_stream(
                     yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
                     done_sent = True
 
-                    # 観察タイマーをリセット（ダンの回答完了 → 5分カウント開始）
-                    _reset_observer_timer(room_id, current_user.user_id)
+                    # ダンの回答完了 → 観察者を即座にバックグラウンド起動
+                    _trigger_observer(room_id, current_user.user_id)
 
             # NOTE: 全チャットは統一済み。非プロジェクト分岐は削除済み (2026-03-06)
         except Exception as e:

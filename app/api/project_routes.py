@@ -247,21 +247,7 @@ async def proposal_action(
                 project_id, current_user.user_id, status="in_progress"
             )
 
-            # 承認済み計画をファイルに保存 → cli_runner.pyがシステムプロンプトに注入
-            from app.agent.bootstrap_context import save_active_plan
-            save_active_plan(
-                project_title=project.get("title", ""),
-                steps=result.get("steps", []),
-                content=result.get("content", ""),
-            )
-
-            # awaiting_approval の run を completed にして、
-            # 次のチャットメッセージで supersede されないようにする
-            from app.services.run_service import RunService
-            run_service = RunService()
-            current_run = await run_service.get_current_run(project_id)
-            if current_run and current_run.get("state") == "awaiting_approval":
-                await run_service.update_run(current_run["id"], state="completed")
+            # 計画の記録は観察者が担当（plans/{room_id}.md）
     else:
         result = await service.reject_proposal(proposal_id, project_id)
         # 却下時は計画をクリア

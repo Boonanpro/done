@@ -270,6 +270,7 @@ def _build_system_prompt(
     status: str,
     user_messages: str = "",
     latest_user_message: str = "",
+    room_id: str = "",
 ) -> str:
     """
     Build CLI system prompt.
@@ -305,7 +306,7 @@ def _build_system_prompt(
         ))
 
     # Approved plan — injected near the end for recency bias.
-    active_plan = load_active_plan()
+    active_plan = load_active_plan(room_id=room_id)
     if active_plan:
         parts.append(active_plan)
 
@@ -319,8 +320,8 @@ _CLI_PROJECT_TEMPLATE = """## プロジェクト
 - ステータス: {status}
 
 ### 提案ルール
-- 新しい作業や大きな変更を始める前に、`create_proposal` ツールで計画を提案すること
-- 提案後、UIに承認/却下ボタンが表示される。承認されるまで実行に着手しないこと
+- 新しい作業や大きな変更を始める前に、`create_proposal` ツールで構造化された計画を提案すること
+- ユーザーがチャットで承認（「OK」「やって」「それでいこう」等）するまで実行に着手しないこと
 - 軽微な質問・調査・修正には提案不要"""
 
 _ABSOLUTE_RULES = """## 絶対ルール
@@ -505,6 +506,7 @@ def _run_cli_process(
     event_queue: thread_queue.Queue,
     project_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> Optional[dict]:
     """
     CLIプロセスを1回実行し、イベントをキューに送る。
@@ -530,7 +532,7 @@ def _run_cli_process(
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        cwd=str(CLI_WORKSPACE),
+        cwd=cwd or str(CLI_WORKSPACE),
         env=env,
         encoding="utf-8",
         errors="replace",
@@ -762,6 +764,8 @@ def _run_cli_in_thread(
     project_id: Optional[str] = None,
     run_id: Optional[str] = None,
     cancel_event: Optional[threading.Event] = None,
+    skip_save: bool = False,
+    cwd: Optional[str] = None,
 ):
     """
     別スレッドでCLI subprocessを実行する。
@@ -814,6 +818,7 @@ def _run_cli_in_thread(
             event_queue,
             project_id=project_id,
             run_id=run_id,
+            cwd=cwd,
         )
 
         # セッション再開失敗 → セッションをクリアしてリトライ
@@ -841,6 +846,7 @@ def _run_cli_in_thread(
                 room_id,
                 event_queue,
                 project_id=project_id,
+                cwd=cwd,
                 run_id=run_id,
             )
 
@@ -865,7 +871,7 @@ def _run_cli_in_thread(
             # DB-first: CLIスレッドからAI応答を保存（SSE断線対策）
             # SSEハンドラに依存せず、ここで確実にDBに書き込む
             cli_saved = False
-            if text.strip():
+            if text.strip() and not skip_save:
                 reasoning = result_data.get("reasoning_steps", [])
                 reasoning_full_list = result_data.get("reasoning_full", [])
                 cli_saved = _save_ai_message_sync(
@@ -979,6 +985,9 @@ async def process_message_cli(
     project_id: Optional[str] = None,
     run_id: Optional[str] = None,
     skill_injection: Optional[str] = None,
+    skip_save: bool = False,
+    skip_resume: bool = False,
+    cwd: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Claude CLI経由でメッセージを処理し、分類済みイベントを返す。
@@ -1002,11 +1011,12 @@ async def process_message_cli(
             project_title, project_description, project_status,
             user_messages=user_messages,
             latest_user_message=content,
+            room_id=room_id,
         )
     if skill_injection:
         system_prompt += f"\n\n{skill_injection}"
     mcp_config_path = _build_mcp_config(room_id, user_id, credentials)
-    resume_session_id = _load_session(room_id)
+    resume_session_id = None if skip_resume else _load_session(room_id)
 
     # cancel_eventの参照を取得（旧スレッドが新スレッドのEventを消さないようにする）
     from app.services.cancellation import CancellationRegistry
@@ -1026,6 +1036,8 @@ async def process_message_cli(
             project_id,
             run_id,
             cancel_event,
+            skip_save,
+            cwd,
         ),
         daemon=True,
     )

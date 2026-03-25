@@ -2779,10 +2779,10 @@ async def _execute_create_proposal(
     session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    提案を作成してDBに保存する。
+    構造化された提案テキストを生成する。
 
-    UIに承認/却下ボタンが表示される。
-    承認されると計画がシステムプロンプトに注入される。
+    DB保存や承認フローは行わない。チャットのテキストとして返すだけ。
+    ユーザーが「OK」「やって」等で承認すれば、観察者が計画を記録する。
     """
     title = params.get("title", "")
     steps_raw = params.get("steps", [])
@@ -2792,46 +2792,16 @@ async def _execute_create_proposal(
     if not steps_raw:
         return {"success": False, "error": "ステップが必要です"}
 
-    # room_id からプロジェクトを検索
-    if not session_id:
-        return {"success": False, "error": "セッションIDがありません（プロジェクトチャット内で使用してください）"}
-
-    service = _get_project_service()
-    project = await service.get_project_by_room_id(session_id)
-    if not project:
-        return {"success": False, "error": "このチャットに紐づくプロジェクトが見つかりません"}
-
-    # ステップを構造化
-    steps = []
-    for i, desc in enumerate(steps_raw, 1):
-        steps.append({
-            "step_number": i,
-            "description": str(desc),
-            "status": "pending",
-        })
-
     # 提案内容をマークダウンで構築
-    content_lines = [f"## {title}", ""]
-    for step in steps:
-        content_lines.append(f"{step['step_number']}. {step['description']}")
+    content_lines = [f"## 提案: {title}", ""]
+    for i, desc in enumerate(steps_raw, 1):
+        content_lines.append(f"{i}. {desc}")
     content = "\n".join(content_lines)
 
-    try:
-        proposal = await service.create_proposal(
-            project_id=project["id"],
-            content=content,
-            proposal_type="plan",
-            steps=steps,
-            metadata={"source": "create_proposal_tool"},
-        )
-        return {
-            "success": True,
-            "proposal_id": proposal["id"],
-            "message": f"提案「{title}」を作成しました。承認ボタンがUIに表示されます。承認されるまで実行に着手しないでください。",
-        }
-    except Exception as e:
-        logger.exception(f"Failed to create proposal: {e}")
-        return {"success": False, "error": f"提案の作成に失敗しました: {e}"}
+    return {
+        "success": True,
+        "message": f"以下の計画を提案します。承認いただければ着手します。\n\n{content}",
+    }
 
 
 async def _execute_deep_research(params: Dict[str, Any]) -> Dict[str, Any]:

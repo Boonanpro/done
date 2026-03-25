@@ -1316,52 +1316,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         )}
       </div>
 
-      {pendingProposal && project?.status === 'proposed' ? (
-        <div className="shrink-0 border-t border-border bg-yellow-500/5 px-4 py-2">
-          <div className="flex gap-2">
-            <Button
-              size="sm"
-              className="h-8 gap-1.5 text-xs"
-              onClick={() => approveMutation.mutate(pendingProposal.id)}
-              disabled={approveMutation.isPending || rejectMutation.isPending}
-            >
-              {approveMutation.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <CheckCircle2 className="h-3.5 w-3.5" />
-              )}
-              承認
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 gap-1.5 text-xs"
-              onClick={() => rejectMutation.mutate(pendingProposal.id)}
-              disabled={approveMutation.isPending || rejectMutation.isPending}
-            >
-              {rejectMutation.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <XCircle className="h-3.5 w-3.5" />
-              )}
-              却下
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 gap-1.5 text-xs border-blue-500/30 text-blue-500 hover:bg-blue-500/10"
-              onClick={() => {
-                sessionStorage.setItem('meeting-topic', project?.title || '提案');
-                sessionStorage.setItem('meeting-content', pendingProposal.content || '');
-                router.push('/meeting');
-              }}
-            >
-              <Presentation className="h-3.5 w-3.5" />
-              MTGで確認
-            </Button>
-          </div>
-        </div>
-      ) : null}
+      {/* 承認/却下ボタンは廃止。チャットでの承認を観察者が検知して計画を記録する */}
 
       {project?.room_id ? (
         <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} sendMessageRef={sendMessageRef} />

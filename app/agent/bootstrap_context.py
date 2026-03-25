@@ -65,12 +65,25 @@ def load_all_bootstrap_files() -> str:
     return ""
 
 
-def load_active_plan() -> str:
-    """Load active plan if one exists. Returns empty string if none."""
-    plan_path = WORKSPACE_DIR / "plans" / "active.md"
-    if plan_path.exists():
+def load_active_plan(room_id: str = "") -> str:
+    """Load active plan if one exists. Returns empty string if none.
+
+    If room_id is given, tries plans/{room_id}.md first.
+    Falls back to plans/active.md for legacy compatibility.
+    """
+    plans_dir = WORKSPACE_DIR / "plans"
+    if room_id:
+        room_plan = plans_dir / f"{room_id}.md"
+        if room_plan.exists():
+            try:
+                return room_plan.read_text(encoding="utf-8")
+            except Exception:
+                pass
+    # Legacy fallback
+    active_plan = plans_dir / "active.md"
+    if active_plan.exists():
         try:
-            return plan_path.read_text(encoding="utf-8")
+            return active_plan.read_text(encoding="utf-8")
         except Exception:
             return ""
     return ""
