@@ -4,7 +4,7 @@ import { useState, useRef, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus, Pencil, Clapperboard } from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -76,6 +76,12 @@ const navItems = [
 ];
 
 const businessItems = [
+  {
+    title: 'DX事業',
+    href: '/dashboard/dx',
+    icon: LayoutDashboard,
+    description: 'HP制作・DXツール管理ダッシュボード',
+  },
   {
     title: 'note投稿',
     href: '/notes',
@@ -437,7 +443,7 @@ export function Sidebar({
                   whileTap={{ scale: 0.98 }}
                   className={cn(
                     'flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer',
-                    (isBusinessOpen || pathname.startsWith('/notes') || pathname.startsWith('/studio'))
+                    (isBusinessOpen || pathname.startsWith('/notes') || pathname.startsWith('/studio') || pathname.startsWith('/dashboard/dx'))
                       ? 'bg-sidebar-accent text-sidebar-accent-foreground'
                       : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
                     isCollapsed && 'justify-center px-0'
