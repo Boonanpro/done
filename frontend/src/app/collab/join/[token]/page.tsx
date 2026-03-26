@@ -4,16 +4,24 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Send, Circle, Bot, User, UserCheck, Paperclip } from 'lucide-react';
+import { Send, Circle, Bot, User, UserCheck, Paperclip, Pencil } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { useCollabWebSocket } from '@/hooks/useCollabWebSocket';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { PWAInstallPrompt } from '@/components/pwa-install-prompt';
+import { LinkifyText } from '@/components/linkify-text';
 
-const GUEST_TOKEN_KEY = 'collab-guest-token';
-const GUEST_ROOM_KEY = 'collab-guest-room';
+const GUEST_NAME_KEY = 'collab-guest-name'; // shared across all rooms
+
+function getStorageKeys(inviteToken: string) {
+  return {
+    tokenKey: `collab-guest-token-${inviteToken}`,
+    roomKey: `collab-guest-room-${inviteToken}`,
+    titleKey: `collab-guest-title-${inviteToken}`,
+  };
+}
 
 function formatTime(dateStr: string): string {
   return new Date(dateStr).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
@@ -22,7 +30,12 @@ function formatTime(dateStr: string): string {
 export default function GuestJoinPage() {
   const params = useParams();
   const inviteToken = params.token as string;
-  const [guestName, setGuestName] = useState('');
+  const [guestName, setGuestName] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem(GUEST_NAME_KEY) || '';
+    }
+    return '';
+  });
   const [guestToken, setGuestToken] = useState<string | null>(null);
   const [roomId, setRoomId] = useState<string | null>(null);
   const [roomTitle, setRoomTitle] = useState('');
@@ -33,16 +46,23 @@ export default function GuestJoinPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [editNameValue, setEditNameValue] = useState('');
 
-  // Check for existing session
+  // Check for existing session + restore guest name
   useEffect(() => {
-    const savedToken = localStorage.getItem(GUEST_TOKEN_KEY);
-    const savedRoom = localStorage.getItem(GUEST_ROOM_KEY);
+    const keys = getStorageKeys(inviteToken);
+    const savedToken = localStorage.getItem(keys.tokenKey);
+    const savedRoom = localStorage.getItem(keys.roomKey);
+    const savedTitle = localStorage.getItem(keys.titleKey);
+    const savedName = localStorage.getItem(GUEST_NAME_KEY);
+    if (savedName && !guestName) setGuestName(savedName);
     if (savedToken && savedRoom) {
       setGuestToken(savedToken);
       setRoomId(savedRoom);
+      if (savedTitle) setRoomTitle(savedTitle);
     }
-  }, []);
+  }, [inviteToken]);
 
   // Fetch invite info
   const { data: inviteInfo } = useQuery({
@@ -91,8 +111,11 @@ export default function GuestJoinPage() {
       setGuestToken(result.guest_token);
       setRoomId(result.room_id);
       setRoomTitle(result.room_title);
-      localStorage.setItem(GUEST_TOKEN_KEY, result.guest_token);
-      localStorage.setItem(GUEST_ROOM_KEY, result.room_id);
+      const keys = getStorageKeys(inviteToken);
+      localStorage.setItem(keys.tokenKey, result.guest_token);
+      localStorage.setItem(keys.roomKey, result.room_id);
+      localStorage.setItem(keys.titleKey, result.room_title);
+      localStorage.setItem(GUEST_NAME_KEY, guestName.trim());
       toast.success('参加しました');
     } catch (e: any) {
       toast.error(e?.data?.detail || '参加できませんでした');
@@ -144,6 +167,7 @@ export default function GuestJoinPage() {
 
     return (
       <div className="min-h-screen flex items-center justify-center bg-background p-4">
+        <PWAInstallPrompt />
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
             <CardTitle className="text-xl">
@@ -198,6 +222,15 @@ export default function GuestJoinPage() {
             <span>{onlineUsers.length}人オンライン</span>
           </div>
         </div>
+        <button
+          className="flex items-center gap-2 hover:bg-accent rounded-full px-2 py-1 transition-colors"
+          onClick={() => { setEditNameValue(guestName); setEditingName(true); }}
+        >
+          <div className="h-8 w-8 rounded-full bg-blue-600 flex items-center justify-center text-sm font-bold text-white shrink-0">
+            {guestName.charAt(0).toUpperCase()}
+          </div>
+          <span className="text-sm max-w-[80px] truncate">{guestName}</span>
+        </button>
       </div>
 
       {/* Messages */}
@@ -208,6 +241,35 @@ export default function GuestJoinPage() {
           ))}
         </div>
       </div>
+
+      {/* Name edit overlay */}
+      {editingName && (
+        <div className="absolute inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-card border rounded-xl shadow-lg p-4 w-full max-w-sm space-y-3">
+            <p className="font-semibold text-sm">表示名を変更</p>
+            <Input
+              value={editNameValue}
+              onChange={(e) => setEditNameValue(e.target.value)}
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const v = (editNameValue).trim();
+                  if (v) { setGuestName(v); localStorage.setItem(GUEST_NAME_KEY, v); toast.success('表示名を変更しました'); }
+                  setEditingName(false); setEditNameValue('');
+                }
+              }}
+            />
+            <div className="flex gap-2">
+              <Button variant="outline" className="flex-1" onClick={() => { setEditingName(false); setEditNameValue(''); }}>キャンセル</Button>
+              <Button className="flex-1" onClick={() => {
+                const v = (editNameValue).trim();
+                if (v) { setGuestName(v); localStorage.setItem(GUEST_NAME_KEY, v); toast.success('表示名を変更しました'); }
+                setEditingName(false); setEditNameValue('');
+              }}>保存</Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <PWAInstallPrompt />
 
@@ -278,7 +340,7 @@ function GuestMessageBubble({ message }: { message: CollabMessageResponse }) {
           }
           return null;
         })()}
-        <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+        <p className="text-sm whitespace-pre-wrap break-words"><LinkifyText text={message.content} /></p>
       </div>
     </div>
   );

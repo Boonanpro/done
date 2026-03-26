@@ -176,6 +176,19 @@ async def update_room(
     return CollabRoomResponse(**room, guest_count=0)
 
 
+@router.delete("/rooms/{room_id}")
+async def delete_room(
+    room_id: str,
+    user: TokenData = Depends(get_current_user),
+    service: CollabService = Depends(get_collab_service),
+):
+    room = await service.get_room(room_id)
+    if not room or room["owner_id"] != user.user_id:
+        raise HTTPException(status_code=404, detail="Room not found")
+    await service.delete_room(room_id)
+    return {"success": True}
+
+
 # ==================== Invites ====================
 
 @router.post("/rooms/{room_id}/invites", response_model=CollabInviteResponse)
@@ -490,6 +503,11 @@ class CollabConnectionManager:
     def add(self, room_id: str, ws: WebSocket, sender_type: str, sender_name: str):
         if room_id not in self.connections:
             self.connections[room_id] = []
+        # Remove stale connections from the same user (reconnect case)
+        self.connections[room_id] = [
+            c for c in self.connections[room_id]
+            if not (c["sender_type"] == sender_type and c["sender_name"] == sender_name)
+        ]
         self.connections[room_id].append({
             "ws": ws, "sender_type": sender_type, "sender_name": sender_name
         })
@@ -586,10 +604,12 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
 
         # Add to room
         collab_manager.add(room_id, websocket, sender_type, sender_name)
+        online = collab_manager.get_online_users(room_id)
         await websocket.send_json({
             "type": "auth_success",
             "sender_type": sender_type,
             "sender_name": sender_name,
+            "online_users": online,
         })
 
         # Notify others
@@ -597,7 +617,7 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
             "type": "user_joined",
             "sender_type": sender_type,
             "sender_name": sender_name,
-            "online_users": collab_manager.get_online_users(room_id),
+            "online_users": online,
         }, exclude_ws=websocket)
 
         # Message loop
@@ -610,35 +630,80 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                 if not content:
                     continue
                 metadata = data.get("metadata") or {}
-                # Save to DB
-                message = await service.send_message(
-                    room_id=room_id,
-                    sender_type=sender_type,
-                    sender_name=sender_name,
-                    content=content,
-                    metadata=metadata,
-                )
-                # Broadcast to all (including sender for confirmation)
-                msg_payload = {
-                    "type": "new_message",
-                    "message": {
-                        "id": message["id"],
-                        "room_id": room_id,
-                        "sender_type": message["sender_type"],
-                        "sender_name": message["sender_name"],
-                        "content": message["content"],
-                        "metadata": message.get("metadata", {}),
-                        "created_at": message["created_at"],
-                    }
-                }
-                await collab_manager.broadcast(room_id, msg_payload)
 
-                # DAN auto-assist: trigger when guest sends a message
-                if sender_type == "guest":
+                # Check for @ダン mention (owner-only private message to DAN)
+                import re
+                is_dan_mention = sender_type == "owner" and bool(
+                    re.match(r'^@[ダだ][ンん]\s*', content)
+                )
+
+                if is_dan_mention:
+                    # Strip the @ダン prefix
+                    dan_content = re.sub(r'^@[ダだ][ンん]\s*', '', content).strip()
+                    if not dan_content:
+                        continue
+
+                    # Save as owner_only message
+                    message = await service.send_message(
+                        room_id=room_id,
+                        sender_type=sender_type,
+                        sender_name=sender_name,
+                        content=content,
+                        metadata={**metadata, "visibility": "owner_only"},
+                    )
+                    # Send only to owner
+                    await collab_manager.send_to_type(room_id, "owner", {
+                        "type": "new_message",
+                        "message": {
+                            "id": message["id"],
+                            "room_id": room_id,
+                            "sender_type": message["sender_type"],
+                            "sender_name": message["sender_name"],
+                            "content": message["content"],
+                            "metadata": message.get("metadata", {}),
+                            "created_at": message["created_at"],
+                        }
+                    })
+                    # Trigger DAN with the owner's instruction
                     import asyncio
                     asyncio.ensure_future(
-                        _trigger_dan_assist(service, room_id, message)
+                        _trigger_dan_assist(service, room_id, {
+                            **message,
+                            "content": dan_content,
+                            "sender_type": "owner",
+                            "sender_name": sender_name,
+                            "_owner_instruction": True,
+                        })
                     )
+                else:
+                    # Normal message - visible to all
+                    message = await service.send_message(
+                        room_id=room_id,
+                        sender_type=sender_type,
+                        sender_name=sender_name,
+                        content=content,
+                        metadata=metadata,
+                    )
+                    msg_payload = {
+                        "type": "new_message",
+                        "message": {
+                            "id": message["id"],
+                            "room_id": room_id,
+                            "sender_type": message["sender_type"],
+                            "sender_name": message["sender_name"],
+                            "content": message["content"],
+                            "metadata": message.get("metadata", {}),
+                            "created_at": message["created_at"],
+                        }
+                    }
+                    await collab_manager.broadcast(room_id, msg_payload)
+
+                    # DAN auto-assist: trigger when guest sends a message
+                    if sender_type == "guest":
+                        import asyncio
+                        asyncio.ensure_future(
+                            _trigger_dan_assist(service, room_id, message)
+                        )
 
             elif msg_type == "typing":
                 await collab_manager.broadcast(room_id, {
@@ -666,17 +731,20 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
 
 
 async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_message: dict):
-    """Run full DAN agent in background when auto-assist is enabled."""
+    """Run full DAN agent in background when auto-assist is enabled or owner mentions @ダン."""
     try:
+        is_owner_instruction = trigger_message.get("_owner_instruction", False)
         room = await service.get_room(room_id)
-        if not room or not room.get("ai_auto_assist"):
-            return
 
-        # Quick skip filter (greetings, short replies)
-        from app.services.collab_dan_service import _should_skip
-        content = trigger_message.get("content", "").strip()
-        if _should_skip(content):
-            return
+        # For guest messages, check auto-assist setting + skip filter
+        if not is_owner_instruction:
+            if not room or not room.get("ai_auto_assist"):
+                return
+            from app.services.collab_dan_service import _should_skip
+            content = trigger_message.get("content", "").strip()
+            if _should_skip(content):
+                return
+        # Owner instructions always proceed (no skip filter, no auto-assist check)
 
         # Get context
         recent = await service.get_messages(room_id, limit=20)
@@ -697,22 +765,36 @@ async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_mess
         history_text = "\n".join(history_lines)
 
         # Build prompt for full DAN agent
-        collab_prompt = (
-            f"あなたはコラボルーム内でオーナー（{owner_name}）をアシストしています。\n"
-            f"あなたの応答はオーナーだけに見えます。ゲストには見えません。\n\n"
-            f"## ルーム情報\n"
-            f"- タイトル: {room['title']}\n"
-            f"- 説明: {room.get('description') or '(なし)'}\n\n"
-            f"## 会話履歴\n{history_text}\n\n"
-            f"## ゲストの新しいメッセージ\n"
-            f"【ゲスト({trigger_message.get('sender_name', '?')})】{content}\n\n"
-            f"## 指示\n"
-            f"このメッセージに対してオーナーをサポートしてください。\n"
-            f"- ツールが必要なら使ってください（カレンダー確認、ファイル操作、ブラウザ操作など）\n"
-            f"- 返信文の提案がある場合は「返信案:」と明示してください\n"
-            f"- 反応不要なメッセージなら何も返さないでください\n"
-            f"- 簡潔に（長くても5行以内）"
-        )
+        content = trigger_message.get("content", "").strip()
+        if is_owner_instruction:
+            collab_prompt = (
+                f"あなたはコラボルーム内でオーナー（{owner_name}）をアシストしています。\n"
+                f"あなたの応答はオーナーだけに見えます。ゲストには見えません。\n\n"
+                f"## ルーム情報\n"
+                f"- タイトル: {room['title']}\n"
+                f"- 説明: {room.get('description') or '(なし)'}\n\n"
+                f"## 会話履歴\n{history_text}\n\n"
+                f"## オーナーからの指示\n"
+                f"{content}\n\n"
+                f"この指示を実行してください。ツールを積極的に使ってください。"
+            )
+        else:
+            collab_prompt = (
+                f"あなたはコラボルーム内でオーナー（{owner_name}）をアシストしています。\n"
+                f"あなたの応答はオーナーだけに見えます。ゲストには見えません。\n\n"
+                f"## ルーム情報\n"
+                f"- タイトル: {room['title']}\n"
+                f"- 説明: {room.get('description') or '(なし)'}\n\n"
+                f"## 会話履歴\n{history_text}\n\n"
+                f"## ゲストの新しいメッセージ\n"
+                f"【ゲスト({trigger_message.get('sender_name', '?')})】{content}\n\n"
+                f"## 指示\n"
+                f"このメッセージに対してオーナーをサポートしてください。\n"
+                f"- ツールが必要なら使ってください（カレンダー確認、ファイル操作、ブラウザ操作など）\n"
+                f"- 返信文の提案がある場合は「返信案:」と明示してください\n"
+                f"- 反応不要なメッセージなら何も返さないでください\n"
+                f"- 簡潔に（長くても5行以内）"
+            )
 
         # Use a unique room_id for collab DAN to avoid conflicting with main chat sessions
         collab_dan_room_id = f"collab_dan_{room_id}"
@@ -733,8 +815,19 @@ async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_mess
             content=collab_prompt,
             system_prompt=(
                 f"あなたはDANです。オーナー（{owner_name}）の秘書として、コラボルーム内のゲストとのやり取りをサポートします。\n"
-                f"ツール（ブラウザ操作、ファイル管理、検索など）を自由に使ってください。\n"
-                f"応答は日本語で簡潔に。反応不要なら空文字を返してください。"
+                f"ツールを積極的に使ってください。応答は日本語で簡潔に。反応不要なら空文字を返してください。\n\n"
+                f"## 使えるツール\n"
+                f"- **Googleカレンダー**: オーナーのカレンダーに接続済み。Pythonで直接呼び出せます:\n"
+                f"  - 予定一覧: python -c \"from app.services.calendar_service import CalendarService; svc=CalendarService(); print(svc.get_events('{room['owner_id']}'))\"\n"
+                f"  - 空き時間: python -c \"from app.services.calendar_service import CalendarService; svc=CalendarService(); print(svc.find_free_slots('{room['owner_id']}'))\"\n"
+                f"  - 予定作成: python -c \"from app.services.calendar_service import CalendarService; svc=CalendarService(); print(svc.create_event('{room['owner_id']}', 'タイトル', '2026-03-28T10:00:00+09:00', '2026-03-28T11:00:00+09:00'))\"\n"
+                f"- **ファイル操作**: D:/dan-workspace/ でファイルの読み書きが可能\n"
+                f"- **ブラウザ操作**: Webページのアクセス、操作が可能\n"
+                f"- **検索**: Web検索が可能\n\n"
+                f"## 重要ルール\n"
+                f"- スケジュールに関する質問には、必ずカレンダーAPIを実行して実データを確認してから回答すること\n"
+                f"- 「オーナーに聞いてください」ではなく、自分でツールを使って情報を取得すること\n"
+                f"- 返信文の提案がある場合は「返信案:「〇〇」」の形式で明示すること"
             ),
             skip_resume=True,
             cwd="D:/dan-workspace",
@@ -745,10 +838,18 @@ async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_mess
                 if event.get("text"):
                     final_text = event["text"]
             elif event["type"] == "error":
-                logger.error("DAN CLI error: %s", event.get("message", ""))
+                error_msg = event.get("message", "Unknown error")
+                logger.error("DAN CLI error: %s", error_msg)
+                final_text = f"（エラーが発生しました: {error_msg}）"
+                break
+            # keepalive events are ignored silently
 
         final_text = final_text.strip()
         if not final_text or final_text.upper() == "SKIP":
+            # Notify owner that DAN finished without response
+            await collab_manager.send_to_type(room_id, "owner", {
+                "type": "dan_done", "room_id": room_id,
+            })
             return
 
         # Save and send to owner only
@@ -775,3 +876,26 @@ async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_mess
 
     except Exception as e:
         logger.error("DAN assist error: %s", e, exc_info=True)
+        # Notify owner about the error
+        try:
+            error_message = await service.send_message(
+                room_id=room_id,
+                sender_type="dan_owner",
+                sender_name="DAN",
+                content=f"（エラー: {str(e)[:200]}）",
+                metadata={"visibility": "owner_only"},
+            )
+            await collab_manager.send_to_type(room_id, "owner", {
+                "type": "new_message",
+                "message": {
+                    "id": error_message["id"],
+                    "room_id": room_id,
+                    "sender_type": error_message["sender_type"],
+                    "sender_name": error_message["sender_name"],
+                    "content": error_message["content"],
+                    "metadata": error_message.get("metadata", {}),
+                    "created_at": error_message["created_at"],
+                }
+            })
+        except Exception:
+            pass

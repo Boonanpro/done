@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
-import { Plus, Users, MessageSquare, Clock, Archive, Copy, Link2 } from 'lucide-react';
+import { Plus, Users, MessageSquare, Clock, Archive, Copy, Link2, Trash2 } from 'lucide-react';
 import { api, type CollabRoomResponse } from '@/lib/api-client';
 import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
@@ -131,7 +131,19 @@ export default function CollabListPage() {
       ) : (
         <div className="space-y-3">
           {rooms.map((room) => (
-            <RoomCard key={room.id} room={room} onClick={() => router.push(`/collab/${room.id}`)} />
+            <RoomCard
+              key={room.id}
+              room={room}
+              onClick={() => router.push(`/collab/${room.id}`)}
+              onDelete={() => {
+                if (confirm(`「${room.title}」を削除しますか？メッセージも全て削除されます。`)) {
+                  api.collab.deleteRoom(room.id).then(() => {
+                    queryClient.invalidateQueries({ queryKey: ['collab-rooms'] });
+                    toast.success('ルームを削除しました');
+                  }).catch(() => toast.error('削除に失敗しました'));
+                }
+              }}
+            />
           ))}
         </div>
       )}
@@ -140,7 +152,7 @@ export default function CollabListPage() {
   );
 }
 
-function RoomCard({ room, onClick }: { room: CollabRoomResponse; onClick: () => void }) {
+function RoomCard({ room, onClick, onDelete }: { room: CollabRoomResponse; onClick: () => void; onDelete: () => void }) {
   return (
     <Card
       className="cursor-pointer hover:bg-accent/50 transition-colors"
@@ -170,6 +182,12 @@ function RoomCard({ room, onClick }: { room: CollabRoomResponse; onClick: () => 
             <span>{room.guest_count}</span>
           </div>
           <span>{formatRelativeTime(room.updated_at)}</span>
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            className="p-1 rounded hover:bg-destructive/10 hover:text-destructive transition-colors"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
         </div>
       </CardContent>
     </Card>

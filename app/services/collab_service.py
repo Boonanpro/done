@@ -85,6 +85,11 @@ class CollabService:
             lambda: self.supabase.table("collab_rooms").update(updates).eq("id", room_id).execute())
         return result.data[0]
 
+    async def delete_room(self, room_id: str):
+        """Delete a room and all related data (CASCADE handles children)."""
+        await self._retry("delete_room",
+            lambda: self.supabase.table("collab_rooms").delete().eq("id", room_id).execute())
+
     # ==================== Invites ====================
 
     async def create_invite(self, room_id: str, owner_id: str, role: str = "reviewer",

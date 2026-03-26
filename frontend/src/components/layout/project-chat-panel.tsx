@@ -345,7 +345,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
       )}
       {aiText && (
         <div className="prose prose-base prose-dan max-w-none text-base leading-relaxed text-foreground md:prose-base md:text-[17px]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; }, img({ src, alt }) { const imgSrc = typeof src === 'string' ? src : ''; return <img src={imgSrc} alt={alt || ''} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(imgSrc)} />; } }}>{aiText}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; }, img({ src, alt }) { const imgSrc = typeof src === 'string' && src ? src : null; if (!imgSrc) return null; return <img src={imgSrc} alt={alt || ''} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(imgSrc)} />; } }}>{aiText}</ReactMarkdown>
         </div>
       )}
       {proposals.length > 0 && (

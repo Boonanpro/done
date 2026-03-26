@@ -11,7 +11,7 @@ interface UseCollabWebSocketOptions {
   onUserJoined?: (data: { sender_type: string; sender_name: string; online_users: OnlineUser[] }) => void;
   onUserLeft?: (data: { sender_type: string; sender_name: string; online_users: OnlineUser[] }) => void;
   onTyping?: (data: { sender_type: string; sender_name: string }) => void;
-  onDanThinking?: () => void;
+  onDanThinking?: (thinking: boolean) => void;
 }
 
 export interface OnlineUser {
@@ -67,6 +67,7 @@ export function useCollabWebSocket({
           case 'auth_success':
             setIsConnected(true);
             reconnectAttempts.current = 0;
+            if (data.online_users) setOnlineUsers(data.online_users);
             break;
           case 'new_message':
             onMessage?.(data.message);
@@ -83,7 +84,10 @@ export function useCollabWebSocket({
             onTyping?.(data);
             break;
           case 'dan_thinking':
-            onDanThinking?.();
+            onDanThinking?.(true);
+            break;
+          case 'dan_done':
+            onDanThinking?.(false);
             break;
           case 'error':
             console.error('Collab WS error:', data.message);

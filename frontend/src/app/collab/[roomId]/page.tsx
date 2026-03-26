@@ -13,6 +13,7 @@ import { MainLayout } from '@/components/layout/main-layout';
 import { useCollabWebSocket, type OnlineUser } from '@/hooks/useCollabWebSocket';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { LinkifyText } from '@/components/linkify-text';
 import { Switch } from '@/components/ui/switch';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger,
@@ -56,6 +57,7 @@ export default function CollabRoomPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [danThinking, setDanThinking] = useState(false);
+  const [danMode, setDanMode] = useState(false);
 
   // Fetch room info
   const { data: room } = useQuery({
@@ -91,8 +93,8 @@ export default function CollabRoomPage() {
     });
   }, []);
 
-  const handleDanThinking = useCallback(() => {
-    setDanThinking(true);
+  const handleDanThinking = useCallback((thinking: boolean) => {
+    setDanThinking(thinking);
   }, []);
 
   const { isConnected, onlineUsers, sendMessage: wsSend } = useCollabWebSocket({
@@ -114,7 +116,8 @@ export default function CollabRoomPage() {
   const handleSend = () => {
     const content = input.trim();
     if (!content) return;
-    wsSend(content);
+    const finalContent = danMode ? `@ダン ${content}` : content;
+    wsSend(finalContent);
     setInput('');
     inputRef.current?.focus();
   };
@@ -156,11 +159,32 @@ export default function CollabRoomPage() {
     mutationFn: () => api.collab.createInvite(roomId),
     onSuccess: (data) => {
       setInviteUrl(data.invite_url);
-      navigator.clipboard.writeText(data.invite_url);
-      toast.success('招待リンクをコピーしました');
+      toast.success('招待リンクを作成しました');
     },
-    onError: () => toast.error('招待リンク作成に失敗しました'),
+    onError: (e: any) => {
+      const detail = e?.data?.detail || e?.message || '';
+      toast.error(`招待リンク作成に失敗しました${detail ? ': ' + detail : ''}`);
+    },
   });
+
+  const handleShareInvite = async () => {
+    if (!inviteUrl) return;
+    // Try native share (works on mobile with direct user tap)
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: room?.title || 'コラボルーム', url: inviteUrl });
+        return;
+      } catch { /* cancelled */ }
+    }
+    // Fallback to clipboard
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      toast.success('コピーしました');
+    } catch {
+      // Last resort: select text for manual copy
+      toast.error('コピーできませんでした。リンクを長押しでコピーしてください');
+    }
+  };
 
   // AI assist toggle
   const toggleAssist = useMutation({
@@ -180,21 +204,40 @@ export default function CollabRoomPage() {
           <ArrowLeft className="h-4 w-4" />
         </Button>
         <div className="flex-1 min-w-0">
-          <h2 className="font-semibold truncate">{room?.title ?? '...'}</h2>
+          <h2
+            className="font-semibold truncate cursor-pointer hover:underline decoration-dashed underline-offset-4"
+            onClick={() => {
+              const newTitle = prompt('ルーム名を変更', room?.title || '');
+              if (newTitle && newTitle.trim() && newTitle !== room?.title) {
+                api.collab.updateRoom(roomId, { title: newTitle.trim() }).then(() => {
+                  queryClient.invalidateQueries({ queryKey: ['collab-room', roomId] });
+                });
+              }
+            }}
+          >
+            {room?.title ?? '...'}
+          </h2>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Circle className={`h-2 w-2 fill-current ${isConnected ? 'text-green-500' : 'text-gray-400'}`} />
             <span>{onlineUsers.length}人オンライン</span>
           </div>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => inviteMutation.mutate()}
-          disabled={inviteMutation.isPending}
-        >
-          <Link2 className="h-4 w-4 mr-1" />
-          招待
-        </Button>
+        {inviteUrl ? (
+          <Button variant="outline" size="sm" onClick={handleShareInvite}>
+            <Copy className="h-4 w-4 mr-1" />
+            共有
+          </Button>
+        ) : (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => inviteMutation.mutate()}
+            disabled={inviteMutation.isPending}
+          >
+            <Link2 className="h-4 w-4 mr-1" />
+            招待
+          </Button>
+        )}
         <Sheet>
           <SheetTrigger asChild>
             <Button variant="ghost" size="icon">
@@ -287,20 +330,41 @@ export default function CollabRoomPage() {
         >
           <Paperclip className="h-4 w-4" />
         </Button>
-        <Input
-          ref={inputRef}
-          placeholder="メッセージを入力..."
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-          className="flex-1"
-        />
-        <Button size="icon" onClick={handleSend} disabled={!input.trim()}>
+        <Button
+          variant={danMode ? "default" : "ghost"}
+          size="icon"
+          onClick={() => setDanMode(!danMode)}
+          className={danMode ? "bg-violet-600 hover:bg-violet-700 text-white" : ""}
+          title={danMode ? "DANモード ON（相手に見えません）" : "DANに話しかける"}
+        >
+          <Bot className="h-4 w-4" />
+        </Button>
+        <div className="flex-1 relative">
+          {danMode && (
+            <div className="absolute left-3 top-1/2 -translate-y-1/2 text-[10px] text-violet-400 font-medium pointer-events-none">
+              DAN宛
+            </div>
+          )}
+          <Input
+            ref={inputRef}
+            placeholder={danMode ? "DANへの指示を入力..." : "メッセージを入力..."}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            className={danMode ? "pl-14 border-violet-500/50 bg-violet-500/5" : ""}
+          />
+        </div>
+        <Button
+          size="icon"
+          onClick={handleSend}
+          disabled={!input.trim()}
+          className={danMode ? "bg-violet-600 hover:bg-violet-700" : ""}
+        >
           <Send className="h-4 w-4" />
         </Button>
       </div>
@@ -336,13 +400,18 @@ function MessageBubble({ message, isOwner, onSendReply }: {
   const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
   const isImage = file?.type?.startsWith('image/');
   const { reply } = isDan ? extractReply(message.content) : { reply: null };
+  const [editedReply, setEditedReply] = useState(reply || '');
 
   const handleSendReply = () => {
-    if (reply && onSendReply) {
-      onSendReply(reply);
+    const text = editedReply.trim();
+    if (text && onSendReply) {
+      onSendReply(text);
       setSent(true);
     }
   };
+
+  // Private owner messages (sent via DAN mode) - show on right with dashed border
+  const isOwnerPrivate = isOwner && isPrivate;
 
   return (
     <div className={`flex ${isOwner || isDan ? 'justify-end' : 'justify-start'}`}>
@@ -350,18 +419,20 @@ function MessageBubble({ message, isOwner, onSendReply }: {
         className={`max-w-[75%] rounded-lg px-3 py-2 ${
           isDan
             ? 'bg-violet-500/10 border border-violet-500/20'
-            : isOwner
-              ? 'bg-primary text-primary-foreground'
-              : 'bg-muted'
+            : isOwnerPrivate
+              ? 'bg-violet-500/5 border border-dashed border-violet-500/30'
+              : isOwner
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-muted'
         }`}
       >
         <div className="flex items-center gap-1.5 mb-1">
-          <SenderIcon type={message.sender_type} />
-          <span className="text-xs font-medium opacity-70">
-            {message.sender_name}
+          {isPrivate ? <Bot className="h-4 w-4 text-violet-400" /> : <SenderIcon type={message.sender_type} />}
+          <span className={`text-xs font-medium ${isPrivate ? 'text-violet-400' : 'opacity-70'}`}>
+            {isOwnerPrivate ? `${message.sender_name} → DAN` : message.sender_name}
           </span>
           {isPrivate && (
-            <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1 rounded">自分だけ</span>
+            <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded-full">非公開</span>
           )}
           <span className="text-[10px] opacity-50 ml-auto">
             {formatTime(message.created_at)}
@@ -383,16 +454,25 @@ function MessageBubble({ message, isOwner, onSendReply }: {
             {file.size && <span className="text-xs opacity-50">({(file.size / 1024).toFixed(0)}KB)</span>}
           </a>
         ) : null}
-        <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+        <p className="text-sm whitespace-pre-wrap break-words"><LinkifyText text={message.content} /></p>
         {reply && !sent && (
-          <Button
-            size="sm"
-            className="mt-2 w-full bg-violet-600 hover:bg-violet-700 text-white"
-            onClick={handleSendReply}
-          >
-            <Send className="h-3.5 w-3.5 mr-1.5" />
-            返信を送信
-          </Button>
+          <div className="mt-2 space-y-1.5">
+            <textarea
+              value={editedReply}
+              onChange={(e) => setEditedReply(e.target.value)}
+              className="w-full text-sm bg-background/50 border border-violet-500/30 rounded px-2 py-1.5 resize-none focus:outline-none focus:border-violet-500"
+              rows={Math.min(editedReply.split('\n').length + 1, 4)}
+            />
+            <Button
+              size="sm"
+              className="w-full bg-violet-600 hover:bg-violet-700 text-white"
+              onClick={handleSendReply}
+              disabled={!editedReply.trim()}
+            >
+              <Send className="h-3.5 w-3.5 mr-1.5" />
+              返信を送信
+            </Button>
+          </div>
         )}
         {reply && sent && (
           <p className="text-[10px] text-violet-300 mt-1.5">送信済み</p>

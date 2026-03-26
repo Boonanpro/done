@@ -1,14 +1,14 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { X, Download, Share } from 'lucide-react';
+import { X, Download, Share, Smartphone } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const DISMISSED_KEY = 'pwa-install-dismissed';
 
 export function PWAInstallPrompt() {
   const [show, setShow] = useState(false);
-  const [isIOS, setIsIOS] = useState(false);
+  const [platform, setPlatform] = useState<'ios' | 'android' | 'desktop'>('desktop');
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
 
   useEffect(() => {
@@ -20,22 +20,31 @@ export function PWAInstallPrompt() {
 
     const ua = navigator.userAgent;
     const ios = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-    setIsIOS(ios);
+    const android = /Android/.test(ua);
 
     if (ios) {
-      // iOS: show manual instructions after a short delay
-      const timer = setTimeout(() => setShow(true), 3000);
-      return () => clearTimeout(timer);
+      setPlatform('ios');
+    } else if (android) {
+      setPlatform('android');
+    } else {
+      setPlatform('desktop');
     }
 
-    // Android/Chrome: listen for beforeinstallprompt
+    // Listen for beforeinstallprompt (Chrome/Edge on Android & desktop)
     const handler = (e: Event) => {
       e.preventDefault();
       setDeferredPrompt(e);
       setShow(true);
     };
     window.addEventListener('beforeinstallprompt', handler);
-    return () => window.removeEventListener('beforeinstallprompt', handler);
+
+    // Show after delay for iOS and as fallback for others
+    const timer = setTimeout(() => setShow(true), 3000);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handler);
+      clearTimeout(timer);
+    };
   }, []);
 
   const handleInstall = useCallback(async () => {
@@ -60,35 +69,43 @@ export function PWAInstallPrompt() {
       <div className="bg-card border rounded-xl shadow-lg p-4 max-w-md mx-auto">
         <div className="flex items-start gap-3">
           <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
-            <Download className="h-5 w-5 text-primary" />
+            <Smartphone className="h-5 w-5 text-primary" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="font-semibold text-sm">アプリをインストール</h3>
-            {isIOS ? (
+            <h3 className="font-semibold text-sm">アプリとしてインストール</h3>
+            {platform === 'ios' ? (
               <div className="text-xs text-muted-foreground mt-1 space-y-1">
                 <p>通知を受け取るにはホーム画面に追加してください:</p>
                 <div className="flex items-center gap-1.5 bg-muted/50 rounded-md px-2 py-1.5">
-                  <span className="text-base">1.</span>
+                  <span>1.</span>
                   <Share className="h-3.5 w-3.5" />
-                  <span>共有ボタンをタップ</span>
+                  <span>画面下の共有ボタンをタップ</span>
                 </div>
                 <div className="flex items-center gap-1.5 bg-muted/50 rounded-md px-2 py-1.5">
-                  <span className="text-base">2.</span>
+                  <span>2.</span>
                   <span>「ホーム画面に追加」をタップ</span>
                 </div>
               </div>
-            ) : (
+            ) : deferredPrompt ? (
               <p className="text-xs text-muted-foreground mt-1">
-                ホーム画面に追加して、通知を受け取れるようにしましょう
+                アプリとしてインストールすると、通知を受け取れるようになります
               </p>
+            ) : (
+              <div className="text-xs text-muted-foreground mt-1 space-y-1">
+                <p>アプリとしてインストールできます:</p>
+                <div className="flex items-center gap-1.5 bg-muted/50 rounded-md px-2 py-1.5">
+                  <span>ブラウザのメニュー →「アプリをインストール」</span>
+                </div>
+              </div>
             )}
           </div>
           <button onClick={handleDismiss} className="text-muted-foreground hover:text-foreground shrink-0">
             <X className="h-4 w-4" />
           </button>
         </div>
-        {!isIOS && deferredPrompt && (
+        {deferredPrompt && (
           <Button className="w-full mt-3" size="sm" onClick={handleInstall}>
+            <Download className="h-4 w-4 mr-1.5" />
             インストール
           </Button>
         )}

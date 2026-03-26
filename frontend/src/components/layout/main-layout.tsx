@@ -53,12 +53,13 @@ export function MainLayout({
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
 
+  const hasChildren = !!children;
   useEffect(() => {
-    if (isMobile && !hasOpenedMobileSidebar) {
+    if (isMobile && !hasOpenedMobileSidebar && !hasChildren) {
       setSidebarOpen(true);
       setHasOpenedMobileSidebar(true);
     }
-  }, [isMobile, hasOpenedMobileSidebar]);
+  }, [isMobile, hasOpenedMobileSidebar, hasChildren]);
 
   // ===== Mobile Layout =====
   if (isMobile) {

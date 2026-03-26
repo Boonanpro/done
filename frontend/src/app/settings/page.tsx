@@ -508,8 +508,8 @@ function CalendarIntegration() {
   return (
     <div className="flex items-center justify-between p-4 rounded-lg border">
       <div className="flex items-center gap-3">
-        <div className="h-10 w-10 rounded-lg bg-blue-500/10 flex items-center justify-center">
-          <Calendar className="h-5 w-5 text-blue-500" />
+        <div className="h-10 w-10 rounded-lg flex items-center justify-center overflow-hidden">
+          <img src="https://upload.wikimedia.org/wikipedia/commons/a/a5/Google_Calendar_icon_%282020%29.svg" alt="Google Calendar" className="h-8 w-8" />
         </div>
         <div>
           <p className="font-medium text-sm">Google カレンダー</p>
@@ -578,8 +578,8 @@ function GmailIntegration() {
   return (
     <div className="flex items-center justify-between p-4 rounded-lg border">
       <div className="flex items-center gap-3">
-        <div className="h-10 w-10 rounded-lg bg-red-500/10 flex items-center justify-center">
-          <Mail className="h-5 w-5 text-red-500" />
+        <div className="h-10 w-10 rounded-lg flex items-center justify-center overflow-hidden">
+          <img src="https://upload.wikimedia.org/wikipedia/commons/7/7e/Gmail_icon_%282020%29.svg" alt="Gmail" className="h-8 w-8" />
         </div>
         <div>
           <p className="font-medium text-sm">Gmail</p>
