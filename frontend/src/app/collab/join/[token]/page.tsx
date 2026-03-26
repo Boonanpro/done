@@ -10,6 +10,7 @@ import { useCollabWebSocket } from '@/hooks/useCollabWebSocket';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { PWAInstallPrompt } from '@/components/pwa-install-prompt';
 
 const GUEST_TOKEN_KEY = 'collab-guest-token';
 const GUEST_ROOM_KEY = 'collab-guest-room';
@@ -207,6 +208,8 @@ export default function GuestJoinPage() {
           ))}
         </div>
       </div>
+
+      <PWAInstallPrompt />
 
       {/* Input */}
       <div className="flex items-center gap-2 px-4 py-3 border-t shrink-0">
