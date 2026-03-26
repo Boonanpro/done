@@ -666,46 +666,100 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
 
 
 async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_message: dict):
-    """Run DAN assist in background when auto-assist is enabled."""
+    """Run full DAN agent in background when auto-assist is enabled."""
     try:
         room = await service.get_room(room_id)
         if not room or not room.get("ai_auto_assist"):
             return
 
-        # Get recent messages for context
-        recent = await service.get_messages(room_id, limit=10)
-
-        # Get owner display name
-        owner_name = await _get_display_name(room["owner_id"], "オーナー")
-
-        # Call DAN (sync, so run in executor)
-        import asyncio
-        from app.services.collab_dan_service import get_dan_response
-        loop = asyncio.get_event_loop()
-        response_text = await loop.run_in_executor(
-            None,
-            lambda: get_dan_response(
-                room["title"],
-                room.get("description"),
-                recent,
-                trigger_message,
-                owner_name=owner_name,
-            ),
-        )
-
-        if not response_text:
+        # Quick skip filter (greetings, short replies)
+        from app.services.collab_dan_service import _should_skip
+        content = trigger_message.get("content", "").strip()
+        if _should_skip(content):
             return
 
-        # Save DAN message with visibility=owner_only
+        # Get context
+        recent = await service.get_messages(room_id, limit=20)
+        owner_name = await _get_display_name(room["owner_id"], "オーナー")
+
+        # Build conversation history with role labels
+        history_lines = []
+        for msg in recent:
+            st = msg.get("sender_type", "?")
+            sn = msg.get("sender_name", "?")
+            c = msg.get("content", "")
+            if st == "owner":
+                history_lines.append(f"【オーナー({sn})】{c}")
+            elif st == "guest":
+                history_lines.append(f"【ゲスト({sn})】{c}")
+            elif st.startswith("dan_"):
+                history_lines.append(f"【DAN】{c}")
+        history_text = "\n".join(history_lines)
+
+        # Build prompt for full DAN agent
+        collab_prompt = (
+            f"あなたはコラボルーム内でオーナー（{owner_name}）をアシストしています。\n"
+            f"あなたの応答はオーナーだけに見えます。ゲストには見えません。\n\n"
+            f"## ルーム情報\n"
+            f"- タイトル: {room['title']}\n"
+            f"- 説明: {room.get('description') or '(なし)'}\n\n"
+            f"## 会話履歴\n{history_text}\n\n"
+            f"## ゲストの新しいメッセージ\n"
+            f"【ゲスト({trigger_message.get('sender_name', '?')})】{content}\n\n"
+            f"## 指示\n"
+            f"このメッセージに対してオーナーをサポートしてください。\n"
+            f"- ツールが必要なら使ってください（カレンダー確認、ファイル操作、ブラウザ操作など）\n"
+            f"- 返信文の提案がある場合は「返信案:」と明示してください\n"
+            f"- 反応不要なメッセージなら何も返さないでください\n"
+            f"- 簡潔に（長くても5行以内）"
+        )
+
+        # Use a unique room_id for collab DAN to avoid conflicting with main chat sessions
+        collab_dan_room_id = f"collab_dan_{room_id}"
+
+        # Notify owner that DAN is thinking
+        await collab_manager.send_to_type(room_id, "owner", {
+            "type": "dan_thinking",
+            "room_id": room_id,
+        })
+
+        # Run full DAN agent via cli_runner
+        from app.agent.cli_runner import process_message_cli
+        final_text = ""
+
+        async for event in process_message_cli(
+            room_id=collab_dan_room_id,
+            user_id=room["owner_id"],
+            content=collab_prompt,
+            system_prompt=(
+                f"あなたはDANです。オーナー（{owner_name}）の秘書として、コラボルーム内のゲストとのやり取りをサポートします。\n"
+                f"ツール（ブラウザ操作、ファイル管理、検索など）を自由に使ってください。\n"
+                f"応答は日本語で簡潔に。反応不要なら空文字を返してください。"
+            ),
+            skip_resume=True,
+            cwd="D:/dan-workspace",
+        ):
+            if event["type"] == "text":
+                final_text += event.get("text", "")
+            elif event["type"] == "result":
+                if event.get("text"):
+                    final_text = event["text"]
+            elif event["type"] == "error":
+                logger.error("DAN CLI error: %s", event.get("message", ""))
+
+        final_text = final_text.strip()
+        if not final_text or final_text.upper() == "SKIP":
+            return
+
+        # Save and send to owner only
         dan_message = await service.send_message(
             room_id=room_id,
             sender_type="dan_owner",
             sender_name="DAN",
-            content=response_text,
+            content=final_text,
             metadata={"visibility": "owner_only"},
         )
 
-        # Send only to owner (not guest)
         await collab_manager.send_to_type(room_id, "owner", {
             "type": "new_message",
             "message": {
@@ -720,4 +774,4 @@ async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_mess
         })
 
     except Exception as e:
-        logger.error("DAN assist error: %s", e)
+        logger.error("DAN assist error: %s", e, exc_info=True)
