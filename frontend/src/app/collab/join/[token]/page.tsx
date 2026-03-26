@@ -56,7 +56,20 @@ export default function GuestJoinPage() {
     const savedRoom = localStorage.getItem(keys.roomKey);
     const savedTitle = localStorage.getItem(keys.titleKey);
     const savedName = localStorage.getItem(GUEST_NAME_KEY);
-    if (savedName && !guestName) setGuestName(savedName);
+
+    // Restore name from: 1) localStorage 2) JWT token payload
+    if (savedName) {
+      setGuestName(savedName);
+    } else if (savedToken) {
+      try {
+        const payload = JSON.parse(atob(savedToken.split('.')[1]));
+        if (payload.guest_name) {
+          setGuestName(payload.guest_name);
+          localStorage.setItem(GUEST_NAME_KEY, payload.guest_name);
+        }
+      } catch { /* invalid token */ }
+    }
+
     if (savedToken && savedRoom) {
       setGuestToken(savedToken);
       setRoomId(savedRoom);

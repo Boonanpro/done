@@ -155,36 +155,44 @@ export default function CollabRoomPage() {
   };
 
   // Create invite
-  const inviteMutation = useMutation({
-    mutationFn: () => api.collab.createInvite(roomId),
-    onSuccess: (data) => {
-      setInviteUrl(data.invite_url);
-      toast.success('招待リンクを作成しました');
-    },
-    onError: (e: any) => {
-      const detail = e?.data?.detail || e?.message || '';
-      toast.error(`招待リンク作成に失敗しました${detail ? ': ' + detail : ''}`);
-    },
-  });
+  const [showInviteDialog, setShowInviteDialog] = useState(false);
 
-  const handleShareInvite = async () => {
-    if (!inviteUrl) return;
-    // Try native share (works on mobile with direct user tap)
-    if (navigator.share) {
-      try {
-        await navigator.share({ title: room?.title || 'コラボルーム', url: inviteUrl });
-        return;
-      } catch { /* cancelled */ }
-    }
-    // Fallback to clipboard
+  const handleInvite = async () => {
     try {
-      await navigator.clipboard.writeText(inviteUrl);
-      toast.success('コピーしました');
-    } catch {
-      // Last resort: select text for manual copy
-      toast.error('コピーできませんでした。リンクを長押しでコピーしてください');
+      const data = await api.collab.createInvite(roomId);
+      setInviteUrl(data.invite_url);
+
+      // Copy using hidden input + execCommand (works on mobile Safari)
+      const copied = copyToClipboard(data.invite_url);
+      if (copied) {
+        toast.success('招待リンクをコピーしました');
+        return;
+      }
+
+      // Fallback: show dialog
+      setShowInviteDialog(true);
+    } catch (e: any) {
+      const detail = e?.data?.detail || e?.message || '';
+      toast.error(`招待リンク作成に失敗: ${detail}`, { duration: 10000 });
     }
   };
+
+  function copyToClipboard(text: string): boolean {
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
 
   // AI assist toggle
   const toggleAssist = useMutation({
@@ -222,22 +230,14 @@ export default function CollabRoomPage() {
             <span>{onlineUsers.length}人オンライン</span>
           </div>
         </div>
-        {inviteUrl ? (
-          <Button variant="outline" size="sm" onClick={handleShareInvite}>
-            <Copy className="h-4 w-4 mr-1" />
-            共有
-          </Button>
-        ) : (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => inviteMutation.mutate()}
-            disabled={inviteMutation.isPending}
-          >
-            <Link2 className="h-4 w-4 mr-1" />
-            招待
-          </Button>
-        )}
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleInvite}
+        >
+          <Link2 className="h-4 w-4 mr-1" />
+          招待
+        </Button>
         <Sheet>
           <SheetTrigger asChild>
             <Button variant="ghost" size="icon">
@@ -369,6 +369,56 @@ export default function CollabRoomPage() {
         </Button>
       </div>
     </div>
+
+    {/* Invite link dialog */}
+    {showInviteDialog && inviteUrl && (
+      <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-4">
+        <div className="bg-card border rounded-xl shadow-lg p-5 w-full max-w-sm space-y-4">
+          <h3 className="font-semibold">招待リンク</h3>
+          <p className="text-xs text-muted-foreground">このリンクを友人に共有してください</p>
+          <input
+            readOnly
+            value={inviteUrl}
+            className="w-full text-xs bg-muted rounded px-3 py-2 select-all"
+            onFocus={(e) => e.target.select()}
+          />
+          <div className="flex gap-2">
+            {typeof navigator !== 'undefined' && navigator.share && (
+              <Button
+                className="flex-1"
+                onClick={async () => {
+                  try {
+                    await navigator.share({ title: room?.title || 'コラボルーム', url: inviteUrl });
+                    setShowInviteDialog(false);
+                  } catch { /* cancelled */ }
+                }}
+              >
+                共有
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              className="flex-1"
+              onClick={() => {
+                if (copyToClipboard(inviteUrl)) {
+                  toast.success('コピーしました');
+                  setShowInviteDialog(false);
+                } else {
+                  toast.error('テキストを長押しでコピーしてください');
+                }
+              }}
+            >
+              <Copy className="h-4 w-4 mr-1" />
+              コピー
+            </Button>
+          </div>
+          <Button variant="ghost" className="w-full" onClick={() => setShowInviteDialog(false)}>
+            閉じる
+          </Button>
+        </div>
+      </div>
+    )}
+
     </MainLayout>
   );
 }
