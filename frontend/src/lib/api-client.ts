@@ -1591,4 +1591,142 @@ export const api = {
     checkVideoStatus: (clipId: string) => request<StudioVideoClip>(`/studio/video/${clipId}/status`),
     listVideoClips: (episodeId: string) => request<StudioVideoClip[]>(`/studio/episodes/${episodeId}/clips`),
   },
+
+  // Collab endpoints
+  collab: {
+    createRoom: (data: { title: string; description?: string; project_ref?: string; ai_auto_assist?: boolean }) =>
+      request<CollabRoomResponse>('/collab/rooms', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+
+    listRooms: () => request<{ rooms: CollabRoomResponse[] }>('/collab/rooms'),
+
+    getRoom: (roomId: string) => request<CollabRoomResponse>(`/collab/rooms/${roomId}`),
+
+    updateRoom: (roomId: string, data: Partial<{ title: string; status: string; ai_auto_assist: boolean }>) =>
+      request<CollabRoomResponse>(`/collab/rooms/${roomId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+
+    createInvite: (roomId: string, data?: { role?: string; expires_hours?: number }) =>
+      request<CollabInviteResponse>(`/collab/rooms/${roomId}/invites`, {
+        method: 'POST',
+        body: JSON.stringify(data ?? {}),
+      }),
+
+    listInvites: (roomId: string) => request<{ invites: CollabInviteRaw[] }>(`/collab/rooms/${roomId}/invites`),
+
+    getInviteInfo: (token: string) => request<CollabInviteInfo>(`/collab/join/${token}`),
+
+    joinRoom: (token: string, guestName: string) =>
+      request<CollabJoinResponse>(`/collab/join/${token}`, {
+        method: 'POST',
+        body: JSON.stringify({ guest_name: guestName }),
+      }),
+
+    getMessages: (roomId: string, limit?: number, token?: string) => {
+      const headers: Record<string, string> = {};
+      if (token) headers['X-Guest-Token'] = token;
+      return request<{ messages: CollabMessageResponse[] }>(
+        `/collab/rooms/${roomId}/messages?limit=${limit ?? 50}`,
+        { headers }
+      );
+    },
+
+    sendMessage: (roomId: string, content: string, token?: string) => {
+      const headers: Record<string, string> = {};
+      if (token) headers['X-Guest-Token'] = token;
+      return request<CollabMessageResponse>(`/collab/rooms/${roomId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ content }),
+        headers,
+      });
+    },
+
+    getFiles: (roomId: string, token?: string) => {
+      const headers: Record<string, string> = {};
+      if (token) headers['X-Guest-Token'] = token;
+      return request<{ files: CollabFileResponse[] }>(`/collab/rooms/${roomId}/files`, { headers });
+    },
+  },
 };
+
+// ==================== Collab Types ====================
+
+export interface CollabRoomResponse {
+  id: string;
+  owner_id: string;
+  title: string;
+  description: string | null;
+  project_ref: string | null;
+  status: string;
+  ai_auto_assist: boolean;
+  ai_assist_config: Record<string, boolean> | null;
+  guest_count: number;
+  last_message: string | null;
+  last_message_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CollabInviteResponse {
+  id: string;
+  room_id: string;
+  token: string;
+  invite_url: string;
+  role: string;
+  status: string;
+  expires_at: string;
+  created_at: string;
+}
+
+export interface CollabInviteRaw {
+  id: string;
+  room_id: string;
+  token: string;
+  role: string;
+  status: string;
+  guest_name: string | null;
+  expires_at: string;
+  joined_at: string | null;
+}
+
+export interface CollabInviteInfo {
+  room_title: string;
+  room_description: string | null;
+  role: string;
+  status: string;
+  already_joined: boolean;
+  guest_name: string | null;
+}
+
+export interface CollabJoinResponse {
+  room_id: string;
+  room_title: string;
+  guest_token: string;
+  guest_name: string;
+  role: string;
+}
+
+export interface CollabMessageResponse {
+  id: string;
+  room_id: string;
+  sender_type: string;
+  sender_name: string;
+  content: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface CollabFileResponse {
+  id: string;
+  room_id: string;
+  uploaded_by: string;
+  file_name: string;
+  file_path: string;
+  file_type: string | null;
+  file_size: number | null;
+  created_at: string;
+}

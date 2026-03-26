@@ -100,6 +100,10 @@ class Settings(BaseSettings):
 
     # Studio - fal.ai (Kling O3 video generation)
     FAL_API_KEY: str = ""
+
+    # Deploy: external frontend/CORS
+    ALLOWED_ORIGINS: str = ""  # comma-separated extra origins
+    FRONTEND_URL: str = ""     # e.g. https://xxx.vercel.app
     
     # Properties for Gmail settings
     @property
