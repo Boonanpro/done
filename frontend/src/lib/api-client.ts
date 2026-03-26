@@ -1610,6 +1610,11 @@ export const api = {
         body: JSON.stringify(data),
       }),
 
+    deleteRoom: (roomId: string) =>
+      request<{ success: boolean }>(`/collab/rooms/${roomId}`, {
+        method: 'DELETE',
+      }),
+
     createInvite: (roomId: string, data?: { role?: string; expires_hours?: number }) =>
       request<CollabInviteResponse>(`/collab/rooms/${roomId}/invites`, {
         method: 'POST',
