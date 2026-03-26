@@ -37,6 +37,19 @@ def get_collab_service() -> CollabService:
     return CollabService()
 
 
+async def _get_display_name(user_id: str, fallback_email: str) -> str:
+    """Get user's display_name from DB, fallback to email prefix."""
+    try:
+        from app.services.supabase_client import get_supabase_client
+        client = get_supabase_client().client
+        result = client.table("users").select("display_name").eq("id", user_id).limit(1).execute()
+        if result.data and result.data[0].get("display_name"):
+            return result.data[0]["display_name"]
+    except Exception:
+        pass
+    return fallback_email.split("@")[0]
+
+
 def _get_jwt_secret() -> str:
     return settings.JWT_SECRET_KEY or settings.APP_SECRET_KEY
 
@@ -286,7 +299,22 @@ async def get_messages(
     if not has_access:
         raise HTTPException(status_code=403, detail="Access denied")
 
+    # Determine if requester is owner or guest
+    is_owner = False
+    if owner_token:
+        td = decode_access_token(owner_token)
+        if td:
+            room = await service.get_room(room_id)
+            if room and room["owner_id"] == td.user_id:
+                is_owner = True
+
     messages = await service.get_messages(room_id, limit=limit, before=before)
+
+    # Filter visibility: guest doesn't see owner_only messages
+    if not is_owner:
+        messages = [m for m in messages
+                    if m.get("metadata", {}).get("visibility") != "owner_only"]
+
     return CollabMessageListResponse(
         messages=[CollabMessageResponse(**m) for m in messages]
     )
@@ -315,7 +343,7 @@ async def send_message(
             room = await service.get_room(room_id)
             if room and room["owner_id"] == token_data.user_id:
                 sender_type = "owner"
-                sender_name = token_data.email.split("@")[0]
+                sender_name = await _get_display_name(token_data.user_id, token_data.email)
 
     # Try guest auth
     if not sender_type:
@@ -336,6 +364,14 @@ async def send_message(
         content=req.content,
         metadata=req.metadata,
     )
+
+    # Trigger DAN assist for guest messages (REST API path)
+    if sender_type == "guest":
+        import asyncio
+        asyncio.ensure_future(
+            _trigger_dan_assist(service, room_id, message)
+        )
+
     return CollabMessageResponse(**message)
 
 
@@ -474,6 +510,17 @@ class CollabConnectionManager:
                 except Exception:
                     pass
 
+    async def send_to_type(self, room_id: str, sender_type: str, message: dict):
+        """Send message only to connections of a specific sender_type (e.g. 'owner')."""
+        if room_id not in self.connections:
+            return
+        for conn in self.connections[room_id]:
+            if conn["sender_type"] == sender_type:
+                try:
+                    await conn["ws"].send_json(message)
+                except Exception:
+                    pass
+
     def get_online_users(self, room_id: str) -> list[dict]:
         if room_id not in self.connections:
             return []
@@ -520,7 +567,7 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                 await websocket.close()
                 return
             sender_type = "owner"
-            sender_name = token_data.email.split("@")[0]
+            sender_name = await _get_display_name(token_data.user_id, token_data.email)
 
         elif auth_type == "auth_guest" and token:
             # Guest auth
@@ -562,16 +609,17 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                 content = data.get("content", "").strip()
                 if not content:
                     continue
+                metadata = data.get("metadata") or {}
                 # Save to DB
                 message = await service.send_message(
                     room_id=room_id,
                     sender_type=sender_type,
                     sender_name=sender_name,
                     content=content,
-                    metadata=data.get("metadata"),
+                    metadata=metadata,
                 )
                 # Broadcast to all (including sender for confirmation)
-                await collab_manager.broadcast(room_id, {
+                msg_payload = {
                     "type": "new_message",
                     "message": {
                         "id": message["id"],
@@ -582,7 +630,15 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                         "metadata": message.get("metadata", {}),
                         "created_at": message["created_at"],
                     }
-                })
+                }
+                await collab_manager.broadcast(room_id, msg_payload)
+
+                # DAN auto-assist: trigger when guest sends a message
+                if sender_type == "guest":
+                    import asyncio
+                    asyncio.ensure_future(
+                        _trigger_dan_assist(service, room_id, message)
+                    )
 
             elif msg_type == "typing":
                 await collab_manager.broadcast(room_id, {
@@ -607,3 +663,61 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                 "sender_name": sender_name,
                 "online_users": collab_manager.get_online_users(room_id),
             })
+
+
+async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_message: dict):
+    """Run DAN assist in background when auto-assist is enabled."""
+    try:
+        room = await service.get_room(room_id)
+        if not room or not room.get("ai_auto_assist"):
+            return
+
+        # Get recent messages for context
+        recent = await service.get_messages(room_id, limit=10)
+
+        # Get owner display name
+        owner_name = await _get_display_name(room["owner_id"], "オーナー")
+
+        # Call DAN (sync, so run in executor)
+        import asyncio
+        from app.services.collab_dan_service import get_dan_response
+        loop = asyncio.get_event_loop()
+        response_text = await loop.run_in_executor(
+            None,
+            lambda: get_dan_response(
+                room["title"],
+                room.get("description"),
+                recent,
+                trigger_message,
+                owner_name=owner_name,
+            ),
+        )
+
+        if not response_text:
+            return
+
+        # Save DAN message with visibility=owner_only
+        dan_message = await service.send_message(
+            room_id=room_id,
+            sender_type="dan_owner",
+            sender_name="DAN",
+            content=response_text,
+            metadata={"visibility": "owner_only"},
+        )
+
+        # Send only to owner (not guest)
+        await collab_manager.send_to_type(room_id, "owner", {
+            "type": "new_message",
+            "message": {
+                "id": dan_message["id"],
+                "room_id": room_id,
+                "sender_type": dan_message["sender_type"],
+                "sender_name": dan_message["sender_name"],
+                "content": dan_message["content"],
+                "metadata": dan_message.get("metadata", {}),
+                "created_at": dan_message["created_at"],
+            }
+        })
+
+    except Exception as e:
+        logger.error("DAN assist error: %s", e)
