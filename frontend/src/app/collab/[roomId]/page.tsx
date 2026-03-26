@@ -13,7 +13,6 @@ import { MainLayout } from '@/components/layout/main-layout';
 import { useCollabWebSocket, type OnlineUser } from '@/hooks/useCollabWebSocket';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Switch } from '@/components/ui/switch';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger,
@@ -54,6 +53,8 @@ export default function CollabRoomPage() {
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploading, setIsUploading] = useState(false);
 
   // Fetch room info
   const { data: room } = useQuery({
@@ -109,6 +110,38 @@ export default function CollabRoomPage() {
     inputRef.current?.focus();
   };
 
+  // File upload
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+      const res = await fetch(`${apiUrl}/api/v1/collab/rooms/${roomId}/files`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      if (!res.ok) throw new Error('Upload failed');
+      const fileData = await res.json();
+      // Send message with file attachment
+      const fileUrl = apiUrl
+        ? `${apiUrl}${fileData.file_path}`
+        : fileData.file_path;
+      wsSend(`${file.name}`, {
+        file: { id: fileData.id, name: fileData.file_name, url: fileUrl, type: fileData.file_type, size: fileData.file_size },
+      });
+      toast.success('ファイルを送信しました');
+    } catch {
+      toast.error('ファイルのアップロードに失敗しました');
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   // Create invite
   const inviteMutation = useMutation({
     mutationFn: () => api.collab.createInvite(roomId),
@@ -131,9 +164,9 @@ export default function CollabRoomPage() {
 
   return (
     <MainLayout showNotifications={false}>
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b bg-background">
+      <div className="flex items-center gap-3 px-4 py-3 border-b bg-background shrink-0">
         <Button variant="ghost" size="icon" onClick={() => router.push('/collab')}>
           <ArrowLeft className="h-4 w-4" />
         </Button>
@@ -212,16 +245,31 @@ export default function CollabRoomPage() {
       </div>
 
       {/* Messages */}
-      <ScrollArea className="flex-1 px-4" ref={scrollRef}>
+      <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef}>
         <div className="space-y-3 py-4">
           {messages.map((msg) => (
             <MessageBubble key={msg.id} message={msg} isOwner={msg.sender_type === 'owner'} />
           ))}
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Input */}
-      <div className="flex items-center gap-2 px-4 py-3 border-t bg-background">
+      <div className="flex items-center gap-2 px-4 py-3 border-t bg-background shrink-0">
+        <input
+          type="file"
+          ref={fileInputRef}
+          className="hidden"
+          onChange={handleFileUpload}
+          accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip"
+        />
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={isUploading}
+        >
+          <Paperclip className="h-4 w-4" />
+        </Button>
         <Input
           ref={inputRef}
           placeholder="メッセージを入力..."
@@ -246,9 +294,12 @@ export default function CollabRoomPage() {
 
 function MessageBubble({ message, isOwner }: { message: CollabMessageResponse; isOwner: boolean }) {
   const isDan = message.sender_type.startsWith('dan_');
+  const isPrivate = message.metadata?.visibility === 'owner_only';
+  const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
+  const isImage = file?.type?.startsWith('image/');
 
   return (
-    <div className={`flex ${isOwner ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex ${isOwner || isDan ? 'justify-end' : 'justify-start'}`}>
       <div
         className={`max-w-[75%] rounded-lg px-3 py-2 ${
           isDan
@@ -263,10 +314,29 @@ function MessageBubble({ message, isOwner }: { message: CollabMessageResponse; i
           <span className="text-xs font-medium opacity-70">
             {message.sender_name}
           </span>
+          {isPrivate && (
+            <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1 rounded">自分だけ</span>
+          )}
           <span className="text-[10px] opacity-50 ml-auto">
             {formatTime(message.created_at)}
           </span>
         </div>
+        {file && isImage ? (
+          <a href={file.url} target="_blank" rel="noopener noreferrer">
+            <img src={file.url} alt={file.name} className="max-w-full max-h-60 rounded mt-1" />
+          </a>
+        ) : file ? (
+          <a
+            href={file.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 mt-1 text-sm underline opacity-80"
+          >
+            <Paperclip className="h-3.5 w-3.5" />
+            {file.name}
+            {file.size && <span className="text-xs opacity-50">({(file.size / 1024).toFixed(0)}KB)</span>}
+          </a>
+        ) : null}
         <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
       </div>
     </div>

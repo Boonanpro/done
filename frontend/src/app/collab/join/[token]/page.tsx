@@ -4,12 +4,11 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Send, Circle, Bot, User, UserCheck } from 'lucide-react';
+import { Send, Circle, Bot, User, UserCheck, Paperclip } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { useCollabWebSocket } from '@/hooks/useCollabWebSocket';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 const GUEST_TOKEN_KEY = 'collab-guest-token';
@@ -31,6 +30,8 @@ export default function GuestJoinPage() {
   const [isJoining, setIsJoining] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploading, setIsUploading] = useState(false);
 
   // Check for existing session
   useEffect(() => {
@@ -107,6 +108,34 @@ export default function GuestJoinPage() {
     inputRef.current?.focus();
   };
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !roomId || !guestToken) return;
+    setIsUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+      const res = await fetch(`${apiUrl}/api/v1/collab/rooms/${roomId}/files`, {
+        method: 'POST',
+        headers: { 'X-Guest-Token': guestToken },
+        body: formData,
+      });
+      if (!res.ok) throw new Error('Upload failed');
+      const fileData = await res.json();
+      const fileUrl = apiUrl ? `${apiUrl}${fileData.file_path}` : fileData.file_path;
+      wsSend(file.name, {
+        file: { id: fileData.id, name: fileData.file_name, url: fileUrl, type: fileData.file_type, size: fileData.file_size },
+      });
+      toast.success('ファイルを送信しました');
+    } catch {
+      toast.error('アップロードに失敗しました');
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   // Not joined yet - show join form
   if (!guestToken || !roomId) {
     const isExpired = inviteInfo?.status === 'expired';
@@ -158,9 +187,9 @@ export default function GuestJoinPage() {
 
   // Joined - show chat
   return (
-    <div className="flex flex-col h-screen bg-background">
+    <div className="flex flex-col h-dvh bg-background overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b">
+      <div className="flex items-center gap-3 px-4 py-3 border-b shrink-0">
         <div className="flex-1 min-w-0">
           <h2 className="font-semibold truncate">{roomTitle || 'コラボルーム'}</h2>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -171,16 +200,21 @@ export default function GuestJoinPage() {
       </div>
 
       {/* Messages */}
-      <ScrollArea className="flex-1 px-4" ref={scrollRef}>
+      <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef}>
         <div className="space-y-3 py-4">
           {messages.map((msg) => (
             <GuestMessageBubble key={msg.id} message={msg} />
           ))}
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Input */}
-      <div className="flex items-center gap-2 px-4 py-3 border-t">
+      <div className="flex items-center gap-2 px-4 py-3 border-t shrink-0">
+        <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload}
+          accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip" />
+        <Button variant="ghost" size="icon" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
+          <Paperclip className="h-4 w-4" />
+        </Button>
         <Input
           ref={inputRef}
           placeholder="メッセージを入力..."
@@ -230,6 +264,17 @@ function GuestMessageBubble({ message }: { message: CollabMessageResponse }) {
           <span className="text-xs font-medium opacity-70">{message.sender_name}</span>
           <span className="text-[10px] opacity-50 ml-auto">{formatTime(message.created_at)}</span>
         </div>
+        {(() => {
+          const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
+          const isImage = file?.type?.startsWith('image/');
+          if (file && isImage) {
+            return <a href={file.url} target="_blank" rel="noopener noreferrer"><img src={file.url} alt={file.name} className="max-w-full max-h-60 rounded mt-1" /></a>;
+          }
+          if (file) {
+            return <a href={file.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 mt-1 text-sm underline opacity-80"><Paperclip className="h-3.5 w-3.5" />{file.name}</a>;
+          }
+          return null;
+        })()}
         <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
       </div>
     </div>
