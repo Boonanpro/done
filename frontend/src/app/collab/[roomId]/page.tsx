@@ -55,6 +55,7 @@ export default function CollabRoomPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [danThinking, setDanThinking] = useState(false);
 
   // Fetch room info
   const { data: room } = useQuery({
@@ -81,10 +82,17 @@ export default function CollabRoomPage() {
 
   // WebSocket
   const handleNewMessage = useCallback((msg: CollabMessageResponse) => {
+    if (msg.sender_type?.startsWith('dan_')) {
+      setDanThinking(false);
+    }
     setMessages((prev) => {
       if (prev.some((m) => m.id === msg.id)) return prev;
       return [...prev, msg];
     });
+  }, []);
+
+  const handleDanThinking = useCallback(() => {
+    setDanThinking(true);
   }, []);
 
   const { isConnected, onlineUsers, sendMessage: wsSend } = useCollabWebSocket({
@@ -92,6 +100,7 @@ export default function CollabRoomPage() {
     token,
     isGuest: false,
     onMessage: handleNewMessage,
+    onDanThinking: handleDanThinking,
   });
 
   // Auto-scroll
@@ -248,8 +257,16 @@ export default function CollabRoomPage() {
       <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef}>
         <div className="space-y-3 py-4">
           {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} isOwner={msg.sender_type === 'owner'} />
+            <MessageBubble key={msg.id} message={msg} isOwner={msg.sender_type === 'owner'} onSendReply={wsSend} />
           ))}
+          {danThinking && (
+            <div className="flex justify-end">
+              <div className="bg-violet-500/10 border border-violet-500/20 rounded-lg px-3 py-2 flex items-center gap-2">
+                <Bot className="h-4 w-4 text-violet-400 animate-pulse" />
+                <span className="text-xs text-violet-300">DAN 分析中...</span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -292,11 +309,40 @@ export default function CollabRoomPage() {
   );
 }
 
-function MessageBubble({ message, isOwner }: { message: CollabMessageResponse; isOwner: boolean }) {
+function extractReply(content: string): { body: string; reply: string | null } {
+  // Match patterns like 返信案: 「...」 or **返信案:** 「...」 or 返信案:\n「...」
+  const patterns = [
+    /(?:\*\*)?返信案(?:\*\*)?[:：]\s*[「「]([^」」]+)[」」]/,
+    /(?:\*\*)?返信案(?:\*\*)?[:：]\s*「([^」]+)」/,
+    /(?:\*\*)?返信案(?:\*\*)?[:：]\s*\n?[「「]([^」」]+)[」」]/,
+  ];
+  for (const pattern of patterns) {
+    const match = content.match(pattern);
+    if (match) {
+      return { body: content, reply: match[1].trim() };
+    }
+  }
+  return { body: content, reply: null };
+}
+
+function MessageBubble({ message, isOwner, onSendReply }: {
+  message: CollabMessageResponse;
+  isOwner: boolean;
+  onSendReply?: (content: string) => void;
+}) {
+  const [sent, setSent] = useState(false);
   const isDan = message.sender_type.startsWith('dan_');
   const isPrivate = message.metadata?.visibility === 'owner_only';
   const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
   const isImage = file?.type?.startsWith('image/');
+  const { reply } = isDan ? extractReply(message.content) : { reply: null };
+
+  const handleSendReply = () => {
+    if (reply && onSendReply) {
+      onSendReply(reply);
+      setSent(true);
+    }
+  };
 
   return (
     <div className={`flex ${isOwner || isDan ? 'justify-end' : 'justify-start'}`}>
@@ -338,6 +384,19 @@ function MessageBubble({ message, isOwner }: { message: CollabMessageResponse; i
           </a>
         ) : null}
         <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+        {reply && !sent && (
+          <Button
+            size="sm"
+            className="mt-2 w-full bg-violet-600 hover:bg-violet-700 text-white"
+            onClick={handleSendReply}
+          >
+            <Send className="h-3.5 w-3.5 mr-1.5" />
+            返信を送信
+          </Button>
+        )}
+        {reply && sent && (
+          <p className="text-[10px] text-violet-300 mt-1.5">送信済み</p>
+        )}
       </div>
     </div>
   );

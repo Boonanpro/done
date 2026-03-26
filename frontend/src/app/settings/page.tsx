@@ -5,7 +5,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { motion } from 'framer-motion';
-import { User, Lock, CreditCard, Globe, Loader2, Camera, Check } from 'lucide-react';
+import { User, Lock, CreditCard, Globe, Loader2, Camera, Check, Link2, Calendar, Mail } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -139,6 +139,7 @@ export default function SettingsPage() {
 
   const settingsSections = [
     { id: 'profile', label: 'プロフィール', icon: User },
+    { id: 'integrations', label: '連携', icon: Link2 },
     { id: 'security', label: 'セキュリティ', icon: Lock },
     { id: 'payment', label: '決済情報', icon: CreditCard },
     { id: 'language', label: '言語', icon: Globe },
@@ -261,6 +262,27 @@ export default function SettingsPage() {
                           )}
                         </Button>
                       </form>
+                    </CardContent>
+                  </Card>
+                </motion.div>
+              </TabsContent>
+
+              {/* Integrations Tab */}
+              <TabsContent value="integrations">
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                >
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>外部サービス連携</CardTitle>
+                      <CardDescription>
+                        DANが利用する外部サービスとの連携を管理します
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <CalendarIntegration />
+                      <GmailIntegration />
                     </CardContent>
                   </Card>
                 </motion.div>
@@ -434,5 +456,145 @@ export default function SettingsPage() {
         </DialogContent>
       </Dialog>
     </MainLayout>
+  );
+}
+
+function CalendarIntegration() {
+  const [status, setStatus] = useState<{ connected: boolean; email: string | null } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const token = localStorage.getItem('done-token');
+    if (!token) return;
+    fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/calendar/status`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then(setStatus)
+      .catch(() => setStatus({ connected: false, email: null }))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleConnect = async () => {
+    const token = localStorage.getItem('done-token');
+    if (!token) return;
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/calendar/connect`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (data.auth_url) {
+        window.open(data.auth_url, '_blank', 'width=600,height=700');
+      }
+    } catch {
+      toast.error('連携に失敗しました');
+    }
+  };
+
+  const handleDisconnect = async () => {
+    const token = localStorage.getItem('done-token');
+    if (!token) return;
+    await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/calendar/disconnect`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    setStatus({ connected: false, email: null });
+    toast.success('連携を解除しました');
+  };
+
+  if (loading) return <div className="text-sm text-muted-foreground">読み込み中...</div>;
+
+  return (
+    <div className="flex items-center justify-between p-4 rounded-lg border">
+      <div className="flex items-center gap-3">
+        <div className="h-10 w-10 rounded-lg bg-blue-500/10 flex items-center justify-center">
+          <Calendar className="h-5 w-5 text-blue-500" />
+        </div>
+        <div>
+          <p className="font-medium text-sm">Google カレンダー</p>
+          {status?.connected ? (
+            <p className="text-xs text-muted-foreground">{status.email} と連携中</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">DANがスケジュールを確認・管理できるようになります</p>
+          )}
+        </div>
+      </div>
+      {status?.connected ? (
+        <Button variant="outline" size="sm" onClick={handleDisconnect}>解除</Button>
+      ) : (
+        <Button size="sm" onClick={handleConnect}>連携する</Button>
+      )}
+    </div>
+  );
+}
+
+function GmailIntegration() {
+  const [status, setStatus] = useState<{ connected: boolean; email: string | null } | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const token = localStorage.getItem('done-token');
+    if (!token) return;
+    fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/gmail/status`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((data) => setStatus({ connected: data.connected, email: data.email }))
+      .catch(() => setStatus({ connected: false, email: null }))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleConnect = async () => {
+    const token = localStorage.getItem('done-token');
+    if (!token) return;
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/gmail/setup`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      });
+      const data = await res.json();
+      if (data.auth_url) {
+        window.open(data.auth_url, '_blank', 'width=600,height=700');
+      }
+    } catch {
+      toast.error('連携に失敗しました');
+    }
+  };
+
+  const handleDisconnect = async () => {
+    const token = localStorage.getItem('done-token');
+    if (!token) return;
+    await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/gmail/disconnect`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    setStatus({ connected: false, email: null });
+    toast.success('連携を解除しました');
+  };
+
+  if (loading) return <div className="text-sm text-muted-foreground">読み込み中...</div>;
+
+  return (
+    <div className="flex items-center justify-between p-4 rounded-lg border">
+      <div className="flex items-center gap-3">
+        <div className="h-10 w-10 rounded-lg bg-red-500/10 flex items-center justify-center">
+          <Mail className="h-5 w-5 text-red-500" />
+        </div>
+        <div>
+          <p className="font-medium text-sm">Gmail</p>
+          {status?.connected ? (
+            <p className="text-xs text-muted-foreground">{status.email} と連携中</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">DANがメールを確認・送信できるようになります</p>
+          )}
+        </div>
+      </div>
+      {status?.connected ? (
+        <Button variant="outline" size="sm" onClick={handleDisconnect}>解除</Button>
+      ) : (
+        <Button size="sm" onClick={handleConnect}>連携する</Button>
+      )}
+    </div>
   );
 }
