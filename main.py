@@ -32,6 +32,7 @@ from app.api.note_routes import router as note_router
 from app.api.file_routes import router as file_router
 from app.api.studio_routes import router as studio_router
 from app.api.dashboard_routes import router as dashboard_router
+from app.api.collab_routes import router as collab_router
 
 
 # v3: Executorは不使用（汎用ツールで処理）
@@ -69,6 +70,9 @@ ALLOWED_ORIGINS = [
     "http://localhost:8000",      # Swagger UI
     "http://127.0.0.1:8000",
 ]
+# Vercel等の外部フロントエンドを許可
+if settings.ALLOWED_ORIGINS:
+    ALLOWED_ORIGINS.extend([o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()])
 
 app.add_middleware(
     CORSMiddleware,
@@ -95,6 +99,7 @@ app.include_router(note_router, prefix="/api/v1")
 app.include_router(file_router, prefix="/api/v1/files")
 app.include_router(studio_router, prefix="/api/v1")
 app.include_router(dashboard_router, prefix="/api")
+app.include_router(collab_router, prefix="/api/v1")
 
 
 

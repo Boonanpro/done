@@ -62,10 +62,10 @@ const navItems = [
     description: 'ダンとの会話',
   },
   {
-    title: '友達',
-    href: '/friends',
+    title: 'コミュニケーション',
+    href: '/collab',
     icon: Users,
-    description: '友達とのチャット',
+    description: 'コラボルーム・外部連携',
   },
   {
     title: '設定',
@@ -179,6 +179,10 @@ export function Sidebar({
       selectProject(null);
     } else {
       selectProject(project.id);
+      // チャットページ以外にいる場合は /chat に遷移
+      if (!pathname.startsWith('/chat')) {
+        router.push('/chat');
+      }
       if (isMobile) {
         onToggleCollapse();
       }

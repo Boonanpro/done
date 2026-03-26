@@ -15,7 +15,7 @@ interface MainLayoutProps {
 }
 
 export function MainLayout({
-  children: _children,
+  children,
   showNotifications = true,
 }: MainLayoutProps) {
   const isMobile = useIsMobile();
@@ -89,8 +89,10 @@ export function MainLayout({
           </>
         )}
 
-        {/* Content: project chat or empty state */}
-        {selectedProjectId ? (
+        {/* Content: children, project chat, or empty state */}
+        {children ? (
+          <div className="h-full">{children}</div>
+        ) : selectedProjectId ? (
           <div className="h-full">
             <ProjectChatPanel projectId={selectedProjectId} />
           </div>
@@ -133,7 +135,9 @@ export function MainLayout({
         </div>
       )}
       <main className="flex flex-1 flex-col overflow-hidden relative min-w-0">
-        {selectedProjectId ? (
+        {children ? (
+          children
+        ) : selectedProjectId ? (
           <ProjectChatPanel projectId={selectedProjectId} />
         ) : (
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-3">

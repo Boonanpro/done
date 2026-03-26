@@ -1,0 +1,609 @@
+"""
+Collaboration Room API Routes
+Supports owner auth (JWT) and guest auth (invite-based JWT)
+"""
+from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisconnect, Request, UploadFile, File
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from typing import Optional
+from datetime import datetime, timedelta, timezone
+import json
+import logging
+import uuid
+import os
+from pathlib import Path
+
+from app.config import settings
+from app.services.auth_service import decode_access_token, TokenData
+from app.services.collab_service import CollabService
+from app.models.collab_schemas import (
+    CollabRoomCreateRequest, CollabRoomUpdateRequest, CollabRoomResponse, CollabRoomListResponse,
+    CollabInviteCreateRequest, CollabInviteResponse,
+    CollabJoinRequest, CollabJoinResponse,
+    CollabMessageSendRequest, CollabMessageResponse, CollabMessageListResponse,
+    CollabFileResponse, CollabFileListResponse,
+)
+from jose import jwt as jose_jwt
+
+router = APIRouter(prefix="/collab", tags=["collab"])
+security = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
+
+ACCESS_TOKEN_COOKIE = "done_access_token"
+UPLOAD_DIR = Path("D:/done/uploads/collab")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_collab_service() -> CollabService:
+    return CollabService()
+
+
+def _get_jwt_secret() -> str:
+    return settings.JWT_SECRET_KEY or settings.APP_SECRET_KEY
+
+
+async def get_current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> TokenData:
+    token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not token and credentials:
+        token = credentials.credentials
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token_data = decode_access_token(token)
+    if not token_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return token_data
+
+
+def _create_guest_token(invite_id: str, room_id: str, guest_name: str, role: str) -> str:
+    """Create a lightweight JWT for guest access."""
+    expire = datetime.now(timezone.utc) + timedelta(hours=72)
+    payload = {
+        "sub": invite_id,
+        "room_id": room_id,
+        "guest_name": guest_name,
+        "role": role,
+        "type": "guest",
+        "exp": expire,
+    }
+    return jose_jwt.encode(payload, _get_jwt_secret(), algorithm="HS256")
+
+
+def _decode_guest_token(token: str) -> Optional[dict]:
+    """Decode a guest JWT token."""
+    try:
+        payload = jose_jwt.decode(token, _get_jwt_secret(), algorithms=["HS256"])
+        if payload.get("type") != "guest":
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def _get_guest_token_from_request(request: Request, credentials=None) -> Optional[str]:
+    """Extract guest token from header or cookie."""
+    # Check X-Guest-Token header first
+    guest_token = request.headers.get("X-Guest-Token")
+    if guest_token:
+        return guest_token
+    # Fallback to Bearer
+    if credentials and credentials.credentials:
+        return credentials.credentials
+    return None
+
+
+# ==================== Room CRUD ====================
+
+@router.post("/rooms", response_model=CollabRoomResponse)
+async def create_room(
+    req: CollabRoomCreateRequest,
+    user: TokenData = Depends(get_current_user),
+    service: CollabService = Depends(get_collab_service),
+):
+    room = await service.create_room(
+        owner_id=user.user_id,
+        title=req.title,
+        description=req.description,
+        project_ref=req.project_ref,
+        ai_auto_assist=req.ai_auto_assist,
+        ai_assist_config=req.ai_assist_config.model_dump() if req.ai_assist_config else None,
+    )
+    return CollabRoomResponse(**room, guest_count=0)
+
+
+@router.get("/rooms", response_model=CollabRoomListResponse)
+async def list_rooms(
+    user: TokenData = Depends(get_current_user),
+    service: CollabService = Depends(get_collab_service),
+):
+    rooms = await service.list_rooms(user.user_id)
+    room_responses = []
+    for r in rooms:
+        # Get guest count
+        invites = await service.list_invites(r["id"])
+        guest_count = sum(1 for i in invites if i["status"] == "joined")
+        # Get last message
+        messages = await service.get_messages(r["id"], limit=1)
+        last_msg = messages[-1] if messages else None
+        room_responses.append(CollabRoomResponse(
+            **r,
+            guest_count=guest_count,
+            last_message=last_msg["content"][:100] if last_msg else None,
+            last_message_at=last_msg["created_at"] if last_msg else None,
+        ))
+    return CollabRoomListResponse(rooms=room_responses)
+
+
+@router.get("/rooms/{room_id}", response_model=CollabRoomResponse)
+async def get_room(
+    room_id: str,
+    user: TokenData = Depends(get_current_user),
+    service: CollabService = Depends(get_collab_service),
+):
+    room = await service.get_room(room_id)
+    if not room or room["owner_id"] != user.user_id:
+        raise HTTPException(status_code=404, detail="Room not found")
+    invites = await service.list_invites(room_id)
+    guest_count = sum(1 for i in invites if i["status"] == "joined")
+    return CollabRoomResponse(**room, guest_count=guest_count)
+
+
+@router.patch("/rooms/{room_id}", response_model=CollabRoomResponse)
+async def update_room(
+    room_id: str,
+    req: CollabRoomUpdateRequest,
+    user: TokenData = Depends(get_current_user),
+    service: CollabService = Depends(get_collab_service),
+):
+    updates = req.model_dump(exclude_none=True)
+    if "ai_assist_config" in updates and updates["ai_assist_config"]:
+        updates["ai_assist_config"] = updates["ai_assist_config"]
+    room = await service.update_room(room_id, user.user_id, updates)
+    return CollabRoomResponse(**room, guest_count=0)
+
+
+# ==================== Invites ====================
+
+@router.post("/rooms/{room_id}/invites", response_model=CollabInviteResponse)
+async def create_invite(
+    room_id: str,
+    req: CollabInviteCreateRequest,
+    request: Request,
+    user: TokenData = Depends(get_current_user),
+    service: CollabService = Depends(get_collab_service),
+):
+    invite = await service.create_invite(
+        room_id=room_id,
+        owner_id=user.user_id,
+        role=req.role.value,
+        expires_hours=req.expires_hours,
+    )
+    # Build invite URL
+    from app.config import settings as app_settings
+    frontend_url = (app_settings.FRONTEND_URL or "http://localhost:3000").rstrip("/")
+    invite_url = f"{frontend_url}/collab/join/{invite['token']}"
+    return CollabInviteResponse(**invite, invite_url=invite_url)
+
+
+@router.get("/rooms/{room_id}/invites")
+async def list_invites(
+    room_id: str,
+    user: TokenData = Depends(get_current_user),
+    service: CollabService = Depends(get_collab_service),
+):
+    room = await service.get_room(room_id)
+    if not room or room["owner_id"] != user.user_id:
+        raise HTTPException(status_code=404, detail="Room not found")
+    invites = await service.list_invites(room_id)
+    return {"invites": invites}
+
+
+# ==================== Guest Join (No auth required) ====================
+
+@router.get("/join/{token}")
+async def get_invite_info(
+    token: str,
+    service: CollabService = Depends(get_collab_service),
+):
+    """Get invite info for the join page (no auth required)."""
+    invite = await service.get_invite_by_token(token)
+    if not invite:
+        raise HTTPException(status_code=404, detail="Invalid invite link")
+
+    room = invite.get("collab_rooms")
+    expires_at = datetime.fromisoformat(invite["expires_at"].replace("Z", "+00:00"))
+    is_expired = datetime.now(timezone.utc) > expires_at or invite["status"] == "expired"
+
+    return {
+        "room_title": room["title"] if room else "Unknown",
+        "room_description": room.get("description") if room else None,
+        "role": invite["role"],
+        "status": "expired" if is_expired else invite["status"],
+        "already_joined": invite["status"] == "joined",
+        "guest_name": invite.get("guest_name"),
+    }
+
+
+@router.post("/join/{token}", response_model=CollabJoinResponse)
+async def join_room(
+    token: str,
+    req: CollabJoinRequest,
+    service: CollabService = Depends(get_collab_service),
+):
+    """Guest joins a collab room via invite token. No auth required."""
+    invite = await service.get_invite_by_token(token)
+    if not invite:
+        raise HTTPException(status_code=404, detail="Invalid invite link")
+
+    guest_jwt = _create_guest_token(
+        invite_id=invite["id"],
+        room_id=invite["room_id"],
+        guest_name=req.guest_name,
+        role=invite["role"],
+    )
+
+    result = await service.join_room(token, req.guest_name, guest_jwt)
+    return CollabJoinResponse(guest_token=guest_jwt, **result)
+
+
+# ==================== Messages ====================
+
+@router.get("/rooms/{room_id}/messages", response_model=CollabMessageListResponse)
+async def get_messages(
+    room_id: str,
+    limit: int = 50,
+    before: Optional[str] = None,
+    request: Request = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    # Verify access (owner or guest)
+    owner_token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not owner_token and credentials:
+        owner_token = credentials.credentials
+
+    has_access = False
+    if owner_token:
+        # Try as owner
+        token_data = decode_access_token(owner_token)
+        if token_data:
+            has_access = await service.verify_room_access(room_id, user_id=token_data.user_id)
+        # Try as guest
+        if not has_access:
+            guest_data = _decode_guest_token(owner_token)
+            if guest_data and guest_data.get("room_id") == room_id:
+                has_access = True
+
+    # Also check X-Guest-Token header
+    if not has_access:
+        guest_token = request.headers.get("X-Guest-Token")
+        if guest_token:
+            guest_data = _decode_guest_token(guest_token)
+            if guest_data and guest_data.get("room_id") == room_id:
+                has_access = True
+
+    if not has_access:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    messages = await service.get_messages(room_id, limit=limit, before=before)
+    return CollabMessageListResponse(
+        messages=[CollabMessageResponse(**m) for m in messages]
+    )
+
+
+@router.post("/rooms/{room_id}/messages", response_model=CollabMessageResponse)
+async def send_message(
+    room_id: str,
+    req: CollabMessageSendRequest,
+    request: Request = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    # Determine sender
+    sender_type = None
+    sender_name = None
+
+    # Try owner auth
+    owner_token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not owner_token and credentials:
+        owner_token = credentials.credentials
+
+    if owner_token:
+        token_data = decode_access_token(owner_token)
+        if token_data:
+            room = await service.get_room(room_id)
+            if room and room["owner_id"] == token_data.user_id:
+                sender_type = "owner"
+                sender_name = token_data.email.split("@")[0]
+
+    # Try guest auth
+    if not sender_type:
+        guest_token = _get_guest_token_from_request(request, credentials)
+        if guest_token:
+            guest_data = _decode_guest_token(guest_token)
+            if guest_data and guest_data.get("room_id") == room_id:
+                sender_type = "guest"
+                sender_name = guest_data.get("guest_name", "Guest")
+
+    if not sender_type:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    message = await service.send_message(
+        room_id=room_id,
+        sender_type=sender_type,
+        sender_name=sender_name,
+        content=req.content,
+        metadata=req.metadata,
+    )
+    return CollabMessageResponse(**message)
+
+
+# ==================== Files ====================
+
+@router.post("/rooms/{room_id}/files", response_model=CollabFileResponse)
+async def upload_file(
+    room_id: str,
+    file: UploadFile = File(...),
+    request: Request = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    # Determine uploader
+    uploaded_by = None
+
+    owner_token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not owner_token and credentials:
+        owner_token = credentials.credentials
+
+    if owner_token:
+        token_data = decode_access_token(owner_token)
+        if token_data:
+            room = await service.get_room(room_id)
+            if room and room["owner_id"] == token_data.user_id:
+                uploaded_by = "owner"
+
+    if not uploaded_by:
+        guest_token = _get_guest_token_from_request(request, credentials)
+        if guest_token:
+            guest_data = _decode_guest_token(guest_token)
+            if guest_data and guest_data.get("room_id") == room_id:
+                uploaded_by = "guest"
+
+    if not uploaded_by:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Save file
+    room_dir = UPLOAD_DIR / room_id
+    room_dir.mkdir(parents=True, exist_ok=True)
+
+    ext = os.path.splitext(file.filename)[1] if file.filename else ""
+    saved_name = f"{uuid.uuid4()}{ext}"
+    file_path = room_dir / saved_name
+
+    content = await file.read()
+    if len(content) > 100 * 1024 * 1024:  # 100MB limit
+        raise HTTPException(status_code=413, detail="File too large (max 100MB)")
+
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    record = await service.save_file_record(
+        room_id=room_id,
+        uploaded_by=uploaded_by,
+        file_name=file.filename or saved_name,
+        file_path=f"/api/v1/collab/files/{room_id}/{saved_name}",
+        file_type=file.content_type,
+        file_size=len(content),
+    )
+    return CollabFileResponse(**record)
+
+
+@router.get("/rooms/{room_id}/files", response_model=CollabFileListResponse)
+async def list_files(
+    room_id: str,
+    request: Request = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    # Access check (simplified - similar to messages)
+    has_access = False
+    owner_token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not owner_token and credentials:
+        owner_token = credentials.credentials
+    if owner_token:
+        token_data = decode_access_token(owner_token)
+        if token_data:
+            has_access = await service.verify_room_access(room_id, user_id=token_data.user_id)
+    if not has_access:
+        guest_token = request.headers.get("X-Guest-Token")
+        if guest_token:
+            guest_data = _decode_guest_token(guest_token)
+            if guest_data and guest_data.get("room_id") == room_id:
+                has_access = True
+    if not has_access:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    files = await service.get_files(room_id)
+    return CollabFileListResponse(files=[CollabFileResponse(**f) for f in files])
+
+
+from fastapi.responses import FileResponse
+
+@router.get("/files/{room_id}/{filename}")
+async def serve_file(room_id: str, filename: str):
+    """Serve uploaded collab files."""
+    file_path = UPLOAD_DIR / room_id / filename
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    # Prevent path traversal
+    if not file_path.resolve().is_relative_to(UPLOAD_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return FileResponse(file_path)
+
+
+# ==================== WebSocket ====================
+
+class CollabConnectionManager:
+    """WebSocket connection manager for collab rooms."""
+
+    def __init__(self):
+        # room_id -> list of {ws, sender_type, sender_name}
+        self.connections: dict[str, list[dict]] = {}
+
+    def add(self, room_id: str, ws: WebSocket, sender_type: str, sender_name: str):
+        if room_id not in self.connections:
+            self.connections[room_id] = []
+        self.connections[room_id].append({
+            "ws": ws, "sender_type": sender_type, "sender_name": sender_name
+        })
+
+    def remove(self, room_id: str, ws: WebSocket):
+        if room_id in self.connections:
+            self.connections[room_id] = [c for c in self.connections[room_id] if c["ws"] != ws]
+            if not self.connections[room_id]:
+                del self.connections[room_id]
+
+    async def broadcast(self, room_id: str, message: dict, exclude_ws: WebSocket = None):
+        if room_id not in self.connections:
+            return
+        for conn in self.connections[room_id]:
+            if conn["ws"] != exclude_ws:
+                try:
+                    await conn["ws"].send_json(message)
+                except Exception:
+                    pass
+
+    def get_online_users(self, room_id: str) -> list[dict]:
+        if room_id not in self.connections:
+            return []
+        return [{"sender_type": c["sender_type"], "sender_name": c["sender_name"]}
+                for c in self.connections[room_id]]
+
+
+collab_manager = CollabConnectionManager()
+
+
+@router.websocket("/ws/{room_id}")
+async def collab_websocket(websocket: WebSocket, room_id: str):
+    """
+    WebSocket for real-time collab chat.
+
+    Auth flow:
+    1. Client sends: {"type": "auth", "token": "JWT"} (owner)
+       OR: {"type": "auth_guest", "token": "GUEST_JWT"} (guest)
+    2. Server validates and adds to room
+    3. Messages: {"type": "message", "content": "..."}
+    4. Typing: {"type": "typing"}
+    """
+    await websocket.accept()
+    service = CollabService()
+    sender_type = None
+    sender_name = None
+
+    try:
+        # Wait for auth
+        auth_data = await websocket.receive_json()
+        auth_type = auth_data.get("type")
+        token = auth_data.get("token")
+
+        if auth_type == "auth" and token:
+            # Owner auth
+            token_data = decode_access_token(token)
+            if not token_data:
+                await websocket.send_json({"type": "error", "message": "Invalid token"})
+                await websocket.close()
+                return
+            room = await service.get_room(room_id)
+            if not room or room["owner_id"] != token_data.user_id:
+                await websocket.send_json({"type": "error", "message": "Not authorized"})
+                await websocket.close()
+                return
+            sender_type = "owner"
+            sender_name = token_data.email.split("@")[0]
+
+        elif auth_type == "auth_guest" and token:
+            # Guest auth
+            guest_data = _decode_guest_token(token)
+            if not guest_data or guest_data.get("room_id") != room_id:
+                await websocket.send_json({"type": "error", "message": "Invalid guest token"})
+                await websocket.close()
+                return
+            sender_type = "guest"
+            sender_name = guest_data.get("guest_name", "Guest")
+
+        else:
+            await websocket.send_json({"type": "error", "message": "Auth required"})
+            await websocket.close()
+            return
+
+        # Add to room
+        collab_manager.add(room_id, websocket, sender_type, sender_name)
+        await websocket.send_json({
+            "type": "auth_success",
+            "sender_type": sender_type,
+            "sender_name": sender_name,
+        })
+
+        # Notify others
+        await collab_manager.broadcast(room_id, {
+            "type": "user_joined",
+            "sender_type": sender_type,
+            "sender_name": sender_name,
+            "online_users": collab_manager.get_online_users(room_id),
+        }, exclude_ws=websocket)
+
+        # Message loop
+        while True:
+            data = await websocket.receive_json()
+            msg_type = data.get("type")
+
+            if msg_type == "message":
+                content = data.get("content", "").strip()
+                if not content:
+                    continue
+                # Save to DB
+                message = await service.send_message(
+                    room_id=room_id,
+                    sender_type=sender_type,
+                    sender_name=sender_name,
+                    content=content,
+                    metadata=data.get("metadata"),
+                )
+                # Broadcast to all (including sender for confirmation)
+                await collab_manager.broadcast(room_id, {
+                    "type": "new_message",
+                    "message": {
+                        "id": message["id"],
+                        "room_id": room_id,
+                        "sender_type": message["sender_type"],
+                        "sender_name": message["sender_name"],
+                        "content": message["content"],
+                        "metadata": message.get("metadata", {}),
+                        "created_at": message["created_at"],
+                    }
+                })
+
+            elif msg_type == "typing":
+                await collab_manager.broadcast(room_id, {
+                    "type": "typing",
+                    "sender_type": sender_type,
+                    "sender_name": sender_name,
+                }, exclude_ws=websocket)
+
+            elif msg_type == "ping":
+                await websocket.send_json({"type": "pong"})
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error("WebSocket error: %s", e)
+    finally:
+        collab_manager.remove(room_id, websocket)
+        if sender_type:
+            await collab_manager.broadcast(room_id, {
+                "type": "user_left",
+                "sender_type": sender_type,
+                "sender_name": sender_name,
+                "online_users": collab_manager.get_online_users(room_id),
+            })
