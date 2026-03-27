@@ -246,9 +246,9 @@ export default function CollabRoomPage() {
     <MainLayout showNotifications={false}>
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b bg-background shrink-0">
+      <div className="flex items-center gap-3 px-4 py-3 pl-14 sm:pl-4 border-b bg-background shrink-0">
         <Button variant="ghost" size="icon" onClick={() => router.push('/collab')}>
-          <ArrowLeft className="h-4 w-4" />
+          <ArrowLeft className="h-5 w-5" />
         </Button>
         <div className="flex-1 min-w-0">
           <h2

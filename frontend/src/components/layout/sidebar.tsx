@@ -114,6 +114,8 @@ export function Sidebar({
   const { user, logout, isLoggingOut } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [isBusinessOpen, setIsBusinessOpen] = useState(false);
+  const [showAllProjects, setShowAllProjects] = useState(false);
+  const PROJECT_DISPLAY_LIMIT = 5;
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const editInputRef = useRef<HTMLInputElement>(null);
@@ -354,7 +356,8 @@ export function Sidebar({
                 </p>
               )
             ) : (
-              filteredProjects.map((project) => {
+              <>
+              {(searchQuery ? filteredProjects : (showAllProjects ? filteredProjects : filteredProjects.slice(0, PROJECT_DISPLAY_LIMIT))).map((project) => {
                 const isActive = project.id === selectedProjectId;
                 const statusColor = STATUS_COLORS[project.status] || 'bg-gray-400';
 
@@ -452,7 +455,17 @@ export function Sidebar({
                     )}
                   </Tooltip>
                 );
-              })
+              })}
+              {!isCollapsed && !searchQuery && filteredProjects.length > PROJECT_DISPLAY_LIMIT && (
+                <button
+                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-muted-foreground hover:text-sidebar-foreground transition-colors"
+                  onClick={() => setShowAllProjects(!showAllProjects)}
+                >
+                  <ChevronDown className={cn('h-3 w-3 transition-transform', showAllProjects && 'rotate-180')} />
+                  <span>{showAllProjects ? '折りたたむ' : `他${filteredProjects.length - PROJECT_DISPLAY_LIMIT}件を表示`}</span>
+                </button>
+              )}
+              </>
             )}
           </nav>
 

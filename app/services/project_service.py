@@ -177,7 +177,10 @@ class ProjectService:
         **updates,
     ) -> Optional[dict]:
         """プロジェクトを更新"""
-        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        # iconのみの更新ではupdated_atを変更しない（ソート順を維持）
+        icon_only = set(updates.keys()) == {"icon"}
+        if not icon_only:
+            updates["updated_at"] = datetime.now(timezone.utc).isoformat()
         result = (
             self.supabase.table("projects")
             .update(updates)
