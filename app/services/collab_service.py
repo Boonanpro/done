@@ -134,7 +134,8 @@ class CollabService:
         if invite["status"] == "expired":
             raise ValueError("Invite expired")
 
-        expires_at = datetime.fromisoformat(invite["expires_at"].replace("Z", "+00:00"))
+        from app.services.chat_service import parse_datetime
+        expires_at = parse_datetime(invite["expires_at"])
         if datetime.now(timezone.utc) > expires_at:
             await self._retry("expire_invite",
                 lambda: self.supabase.table("collab_invites")

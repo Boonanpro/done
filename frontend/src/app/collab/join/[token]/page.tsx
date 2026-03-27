@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { PWAInstallPrompt } from '@/components/pwa-install-prompt';
+import { OpenInBrowserPrompt } from '@/components/open-in-browser';
 import { LinkifyText } from '@/components/linkify-text';
 
 const GUEST_NAME_KEY = 'collab-guest-name'; // shared across all rooms
@@ -180,6 +181,7 @@ export default function GuestJoinPage() {
 
     return (
       <div className="min-h-screen flex items-center justify-center bg-background p-4">
+        <OpenInBrowserPrompt />
         <PWAInstallPrompt />
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
@@ -225,7 +227,8 @@ export default function GuestJoinPage() {
 
   // Joined - show chat
   return (
-    <div className="flex flex-col h-dvh bg-background overflow-hidden">
+    <div className="flex flex-col h-dvh bg-background overflow-hidden relative">
+      <OpenInBrowserPrompt />
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3 border-b shrink-0">
         <div className="flex-1 min-w-0">
