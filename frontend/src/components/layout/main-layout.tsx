@@ -12,11 +12,13 @@ import { useIsMobile } from '@/hooks/useIsMobile';
 interface MainLayoutProps {
   children?: React.ReactNode;
   showNotifications?: boolean;
+  hideHamburger?: boolean;
 }
 
 export function MainLayout({
   children,
   showNotifications = true,
+  hideHamburger = false,
 }: MainLayoutProps) {
   const isMobile = useIsMobile();
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -66,12 +68,14 @@ export function MainLayout({
     return (
       <div className="relative h-dvh overflow-hidden bg-background">
         {/* Hamburger button */}
-        <button
-          onClick={() => setSidebarOpen(true)}
-          className="fixed top-3 left-3 z-40 h-9 w-9 flex items-center justify-center rounded-lg bg-background/80 backdrop-blur border border-border"
-        >
-          <Menu className="h-5 w-5" />
-        </button>
+        {!hideHamburger && (
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="fixed top-3 left-3 z-40 h-9 w-9 flex items-center justify-center rounded-lg bg-background/80 backdrop-blur border border-border"
+          >
+            <Menu className="h-5 w-5" />
+          </button>
+        )}
 
         {/* Sidebar overlay */}
         {sidebarOpen && (

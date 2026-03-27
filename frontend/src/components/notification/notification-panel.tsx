@@ -193,48 +193,69 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
               </div>
 
               {/* Actions */}
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  className="flex-1 gap-1"
-                  onClick={handleApprove}
-                  disabled={respondMutation.isPending || editMode}
-                >
-                  {respondMutation.isPending && respondMutation.variables?.action === 'approve' ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <Check className="h-3 w-3" />
-                  )}
-                  承認
-                </Button>
-                <Button
-                  size="sm"
-                  variant={editMode ? 'default' : 'outline'}
-                  className="flex-1 gap-1"
-                  onClick={handleEdit}
-                  disabled={respondMutation.isPending && respondMutation.variables?.action !== 'edit'}
-                >
-                  {respondMutation.isPending && respondMutation.variables?.action === 'edit' ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <Edit className="h-3 w-3" />
-                  )}
-                  {editMode ? '保存' : '編集'}
-                </Button>
-              </div>
+              {(selectedProposal.type as string) === 'observation' ? (
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="flex-1 gap-1"
+                    onClick={handleApprove}
+                    disabled={respondMutation.isPending}
+                  >
+                    {respondMutation.isPending ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Check className="h-3 w-3" />
+                    )}
+                    確認済み
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      className="flex-1 gap-1"
+                      onClick={handleApprove}
+                      disabled={respondMutation.isPending || editMode}
+                    >
+                      {respondMutation.isPending && respondMutation.variables?.action === 'approve' ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Check className="h-3 w-3" />
+                      )}
+                      承認
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={editMode ? 'default' : 'outline'}
+                      className="flex-1 gap-1"
+                      onClick={handleEdit}
+                      disabled={respondMutation.isPending && respondMutation.variables?.action !== 'edit'}
+                    >
+                      {respondMutation.isPending && respondMutation.variables?.action === 'edit' ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Edit className="h-3 w-3" />
+                      )}
+                      {editMode ? '保存' : '編集'}
+                    </Button>
+                  </div>
 
-              {editMode && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="w-full"
-                  onClick={() => {
-                    setEditMode(false);
-                    setEditedContent('');
-                  }}
-                >
-                  キャンセル
-                </Button>
+                  {editMode && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="w-full"
+                      onClick={() => {
+                        setEditMode(false);
+                        setEditedContent('');
+                      }}
+                    >
+                      キャンセル
+                    </Button>
+                  )}
+                </>
               )}
 
               {/* Mini Chat */}

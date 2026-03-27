@@ -243,11 +243,11 @@ export default function CollabRoomPage() {
   });
 
   return (
-    <MainLayout showNotifications={false}>
+    <MainLayout showNotifications={false} hideHamburger>
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-3 pl-14 sm:pl-4 border-b bg-background shrink-0">
-        <Button variant="ghost" size="icon" onClick={() => router.push('/collab')}>
+      <div className="flex items-center gap-3 px-4 py-3 border-b bg-background shrink-0">
+        <Button variant="ghost" size="icon" className="shrink-0" onClick={() => router.push('/collab')}>
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div className="flex-1 min-w-0">
