@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import Optional
 
 from app.api.chat_routes import get_current_user, TokenData
-from app.services.project_service import ProjectService
+from app.services.project_service import ProjectService, generate_icon_for_title
 from app.services.run_service import RunService
 from app.models.project_schemas import (
     AgentRunResponse,
@@ -74,6 +74,19 @@ async def suggest_project_title(
         first = messages[0]
         title = first.split("。")[0].split("、")[0].split("\n")[0][:30].strip()
         return {"title": title or "新しいプロジェクト"}
+
+
+@router.post("/generate-icon")
+async def generate_icon(
+    request: dict,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """タイトルからアイコン絵文字を生成"""
+    title = request.get("title", "")
+    if not title:
+        return {"icon": "📁"}
+    icon = generate_icon_for_title(title)
+    return {"icon": icon}
 
 
 def get_project_service() -> ProjectService:

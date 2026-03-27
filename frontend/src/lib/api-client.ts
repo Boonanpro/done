@@ -319,6 +319,7 @@ export interface ProjectResponse {
   room_id: string | null;
   origin_room_id: string | null;
   summary: string | null;
+  icon: string | null;
   metadata: Record<string, unknown> | null;
   created_at: string;
   updated_at: string | null;
@@ -1252,7 +1253,7 @@ export const api = {
         body: JSON.stringify(data),
       }),
 
-    update: (projectId: string, data: { title?: string; status?: ProjectStatusType; summary?: string }) =>
+    update: (projectId: string, data: { title?: string; status?: ProjectStatusType; summary?: string; icon?: string }) =>
       request<ProjectResponse>(`/projects/${projectId}`, {
         method: 'PATCH',
         body: JSON.stringify(data),

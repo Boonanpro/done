@@ -13,6 +13,76 @@ from app.services.execution_events import normalize_event_type
 logger = logging.getLogger(__name__)
 
 
+_KEYWORD_ICONS = {
+    'HP': '🌐', 'ホームページ': '🌐', 'サイト': '🌐', 'Web': '🌐', 'web': '🌐',
+    '野球': '⚾', 'スポーツ': '⚾',
+    '営業': '💼', 'セールス': '💼', 'B2B': '💼', 'b2b': '💼',
+    'ダッシュボード': '📊', 'dashboard': '📊', '管理': '📊',
+    '動画': '🎬', 'ビデオ': '🎬', 'Vlog': '🎬', 'Studio': '🎬',
+    '提案': '📝', '企画': '📝', '計画': '📝',
+    'note': '📮', '記事': '📮', '投稿': '📮', 'ブログ': '📮',
+    'デザイン': '🎨', 'ロゴ': '🎨', 'UI': '🎨',
+    'アプリ': '📱', 'モバイル': '📱', 'PWA': '📱',
+    'AI': '🤖', '自動化': '🤖', 'bot': '🤖',
+    '税': '💰', '会計': '💰', '請求': '💰',
+    'メール': '📮', 'LINE': '💬', 'チャット': '💬',
+    'カレンダー': '📅', '予約': '📅',
+    '研究': '🔬', '分析': '🔬',
+    '教育': '🎓', '学習': '🎓',
+    '写真': '📷', '音楽': '🎵',
+    '建設': '🏗️', '工事': '🏗️',
+    '不動産': '🏠', '住宅': '🏠',
+}
+
+
+def _guess_icon(title: str) -> str:
+    """キーワードベースで絵文字を推定（フォールバック用）"""
+    for keyword, emoji in _KEYWORD_ICONS.items():
+        if keyword in title:
+            return emoji
+    return "📁"
+
+
+def generate_icon_for_title(title: str) -> str:
+    """タイトルから絵文字アイコンを生成（Haiku使用、失敗時はキーワードフォールバック）"""
+    try:
+        import anthropic
+        from app.config import settings
+
+        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=10,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "以下のプロジェクトタイトルに最も合う絵文字を1つだけ返してください。"
+                    "絵文字のみを返し、他のテキストは一切含めないでください。\n\n"
+                    f"タイトル: {title}"
+                ),
+            }],
+        )
+        icon = resp.content[0].text.strip()
+        import re
+        emoji_match = re.search(
+            r'[\U0001F300-\U0001FAD6\U0001FA70-\U0001FAFF\U00002702-\U000027B0'
+            r'\U0000FE00-\U0000FE0F\U0001F900-\U0001F9FF\U0001F600-\U0001F64F'
+            r'\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF\U00002600-\U000026FF'
+            r'\U0000200D\U00002B50\U000023F0-\U000023FA\U0000231A-\U0000231B'
+            r'\U00002934-\U00002935\U000025AA-\U000025FE\U00002B05-\U00002B07'
+            r'\U00002B1B-\U00002B1C\U00003030\U0000303D\U00003297\U00003299]+',
+            icon
+        )
+        if emoji_match:
+            return emoji_match.group(0)
+        if len(icon) <= 4:
+            return icon
+        return _guess_icon(title)
+    except Exception as e:
+        logger.warning(f"Icon generation failed, using keyword fallback: {e}")
+        return _guess_icon(title)
+
+
 class ProjectService:
     """プロジェクト管理"""
 
@@ -48,6 +118,9 @@ class ProjectService:
                 "role": "owner",
             }).execute()
 
+        # アイコン自動生成
+        icon = generate_icon_for_title(title)
+
         # プロジェクトを作成
         insert_data = {
             "id": project_id,
@@ -57,6 +130,7 @@ class ProjectService:
             "status": "planning",
             "room_id": room_id,
             "origin_room_id": origin_room_id,
+            "icon": icon,
         }
         if metadata:
             insert_data["metadata"] = metadata

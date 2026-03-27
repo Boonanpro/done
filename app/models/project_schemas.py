@@ -57,6 +57,7 @@ class ProjectUpdateRequest(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=255)
     status: Optional[ProjectStatus] = None
     summary: Optional[str] = None
+    icon: Optional[str] = Field(None, max_length=10)
 
 
 class ProjectResponse(BaseModel):
@@ -69,6 +70,7 @@ class ProjectResponse(BaseModel):
     room_id: Optional[str] = None
     origin_room_id: Optional[str] = None
     summary: Optional[str] = None
+    icon: Optional[str] = None
     metadata: Optional[dict] = None
     created_at: datetime
     updated_at: Optional[datetime] = None

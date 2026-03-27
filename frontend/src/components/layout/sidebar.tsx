@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useSyncExternalStore } from 'react';
+import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -146,6 +146,35 @@ export function Sidebar({
       setEditingProjectId(null);
     },
   });
+
+  const iconMutation = useMutation({
+    mutationFn: ({ id, icon }: { id: string; icon: string }) => api.projects.update(id, { icon }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      setEmojiPickerProjectId(null);
+    },
+  });
+
+  const [emojiPickerProjectId, setEmojiPickerProjectId] = useState<string | null>(null);
+  const emojiPickerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!emojiPickerProjectId) return;
+    const handler = (e: MouseEvent) => {
+      if (emojiPickerRef.current && !emojiPickerRef.current.contains(e.target as Node)) {
+        setEmojiPickerProjectId(null);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [emojiPickerProjectId]);
+
+  const EMOJI_OPTIONS = [
+    '📁', '📂', '📊', '📈', '💼', '🏗️', '🌐', '🎯', '🚀', '💡',
+    '📝', '📋', '🔧', '⚙️', '🎨', '🏠', '🏢', '🛒', '📱', '💻',
+    '⚾', '🎵', '📷', '🎬', '📚', '✈️', '🍽️', '🏥', '🎓', '🔬',
+    '💰', '📮', '🗂️', '🔑', '🛠️', '🎪', '🌟', '🎁', '🤖', '🧩',
+  ];
 
   const handleStartEdit = (e: React.MouseEvent, project: ProjectResponse) => {
     e.stopPropagation();
@@ -345,8 +374,36 @@ export function Sidebar({
                         onClick={() => editingProjectId !== project.id && handleProjectClick(project)}
                       >
                         <div className="relative shrink-0">
-                          <FolderKanban className="h-4 w-4" />
+                          <button
+                            className="text-base leading-none hover:scale-110 transition-transform"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEmojiPickerProjectId(emojiPickerProjectId === project.id ? null : project.id);
+                            }}
+                            title="アイコンを変更"
+                          >
+                            {project.icon || '📁'}
+                          </button>
                           <span className={cn('absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full', statusColor)} />
+                          {emojiPickerProjectId === project.id && (
+                            <div
+                              ref={emojiPickerRef}
+                              className="absolute top-7 left-0 z-50 bg-popover border border-border rounded-lg shadow-lg p-2 w-[220px]"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div className="grid grid-cols-8 gap-1">
+                                {EMOJI_OPTIONS.map((emoji) => (
+                                  <button
+                                    key={emoji}
+                                    className="h-7 w-7 flex items-center justify-center rounded hover:bg-accent text-base"
+                                    onClick={() => iconMutation.mutate({ id: project.id, icon: emoji })}
+                                  >
+                                    {emoji}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                         {!isCollapsed && (
                           <div className="flex-1 min-w-0 flex items-center gap-1">
@@ -387,7 +444,7 @@ export function Sidebar({
                     </TooltipTrigger>
                     {isCollapsed && (
                       <TooltipContent side="right">
-                        <p className="font-medium">{project.title}</p>
+                        <p className="font-medium">{project.icon || '📁'} {project.title}</p>
                         <p className="text-xs text-muted-foreground">
                           {STATUS_LABELS[project.status]}
                         </p>
