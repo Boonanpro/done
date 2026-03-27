@@ -324,8 +324,11 @@ async def get_messages(
 
     messages = await service.get_messages(room_id, limit=limit, before=before)
 
-    # Filter visibility: guest doesn't see owner_only messages
-    if not is_owner:
+    # Filter visibility: each side only sees their own private messages
+    if is_owner:
+        messages = [m for m in messages
+                    if m.get("metadata", {}).get("visibility") != "guest_only"]
+    else:
         messages = [m for m in messages
                     if m.get("metadata", {}).get("visibility") != "owner_only"]
 
@@ -632,28 +635,29 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                     continue
                 metadata = data.get("metadata") or {}
 
-                # Check for @ダン mention (owner-only private message to DAN)
+                # Check for @ダン mention (private message to DAN, both owner and guest)
                 import re
-                is_dan_mention = sender_type == "owner" and bool(
-                    re.match(r'^@[ダだ][ンん]\s*', content)
-                )
+                is_dan_mention = bool(re.match(r'^@[ダだ][ンん]\s*', content))
 
                 if is_dan_mention:
-                    # Strip the @ダン prefix
                     dan_content = re.sub(r'^@[ダだ][ンん]\s*', '', content).strip()
                     if not dan_content:
                         continue
 
-                    # Save as owner_only message
+                    # Determine visibility: owner sees owner's DAN, guest sees guest's DAN
+                    visibility = "owner_only" if sender_type == "owner" else "guest_only"
+                    dan_type = "dan_owner" if sender_type == "owner" else "dan_guest"
+
+                    # Save as private message
                     message = await service.send_message(
                         room_id=room_id,
                         sender_type=sender_type,
                         sender_name=sender_name,
                         content=content,
-                        metadata={**metadata, "visibility": "owner_only"},
+                        metadata={**metadata, "visibility": visibility},
                     )
-                    # Send only to owner
-                    await collab_manager.send_to_type(room_id, "owner", {
+                    # Send only to the sender's side
+                    await collab_manager.send_to_type(room_id, sender_type, {
                         "type": "new_message",
                         "message": {
                             "id": message["id"],
@@ -665,17 +669,30 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                             "created_at": message["created_at"],
                         }
                     })
-                    # Trigger DAN with the owner's instruction
-                    import asyncio
-                    asyncio.ensure_future(
-                        _trigger_dan_assist(service, room_id, {
-                            **message,
-                            "content": dan_content,
-                            "sender_type": "owner",
-                            "sender_name": sender_name,
-                            "_owner_instruction": True,
-                        })
-                    )
+
+                    if sender_type == "owner":
+                        # Owner: trigger full DAN agent
+                        import asyncio
+                        asyncio.ensure_future(
+                            _trigger_dan_assist(service, room_id, {
+                                **message,
+                                "content": dan_content,
+                                "sender_type": "owner",
+                                "sender_name": sender_name,
+                                "_owner_instruction": True,
+                            })
+                        )
+                    else:
+                        # Guest: trigger lightweight DAN
+                        import asyncio
+                        asyncio.ensure_future(
+                            _trigger_guest_dan_assist(service, room_id, {
+                                **message,
+                                "content": dan_content,
+                                "sender_type": "guest",
+                                "sender_name": sender_name,
+                            })
+                        )
                 else:
                     # Normal message - visible to all
                     message = await service.send_message(
@@ -699,6 +716,12 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                     }
                     await collab_manager.broadcast(room_id, msg_payload)
 
+                    # Push notification to the other side
+                    import asyncio
+                    asyncio.ensure_future(_send_push(
+                        room_id, sender_type, sender_name, content
+                    ))
+
                     # DAN auto-assist: trigger when guest sends a message
                     if sender_type == "guest":
                         import asyncio
@@ -711,6 +734,15 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                     "type": "typing",
                     "sender_type": sender_type,
                     "sender_name": sender_name,
+                }, exclude_ws=websocket)
+
+            elif msg_type == "read":
+                # Broadcast read receipt to others
+                await collab_manager.broadcast(room_id, {
+                    "type": "read",
+                    "sender_type": sender_type,
+                    "sender_name": sender_name,
+                    "message_id": data.get("message_id"),
                 }, exclude_ws=websocket)
 
             elif msg_type == "ping":
@@ -900,3 +932,131 @@ async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_mess
             })
         except Exception:
             pass
+
+
+async def _trigger_guest_dan_assist(service: CollabService, room_id: str, trigger_message: dict):
+    """Lightweight DAN assist for guests using Gemini API (no tools)."""
+    try:
+        room = await service.get_room(room_id)
+        if not room:
+            return
+
+        recent = await service.get_messages(room_id, limit=20)
+        guest_name = trigger_message.get("sender_name", "ゲスト")
+        content = trigger_message.get("content", "").strip()
+
+        # Build conversation history
+        history_lines = []
+        for msg in recent:
+            st = msg.get("sender_type", "?")
+            sn = msg.get("sender_name", "?")
+            c = msg.get("content", "")
+            if st == "owner":
+                history_lines.append(f"【オーナー({sn})】{c}")
+            elif st == "guest":
+                history_lines.append(f"【ゲスト({sn})】{c}")
+            elif st == "dan_guest":
+                history_lines.append(f"【DAN→ゲスト】{c}")
+        history_text = "\n".join(history_lines)
+
+        # Notify guest that DAN is thinking
+        await collab_manager.send_to_type(room_id, "guest", {
+            "type": "dan_thinking", "room_id": room_id,
+        })
+
+        # Call lightweight DAN (Gemini)
+        import asyncio
+        from app.services.collab_dan_service import get_dan_response
+        loop = asyncio.get_event_loop()
+        response_text = await loop.run_in_executor(
+            None,
+            lambda: get_dan_response(
+                room["title"],
+                room.get("description"),
+                recent,
+                trigger_message,
+                owner_name=guest_name,
+                system_override=(
+                    f"あなたはDANというAIアシスタントです。コラボルーム内でゲスト（{guest_name}）をサポートします。\n"
+                    f"あなたの応答はゲストだけに見えます。オーナーには見えません。\n\n"
+                    f"## ルーム情報\n"
+                    f"- タイトル: {room['title']}\n"
+                    f"- 説明: {room.get('description') or '(なし)'}\n\n"
+                    f"## 会話履歴\n{history_text}\n\n"
+                    f"## ゲスト（{guest_name}）からの指示\n{content}\n\n"
+                    f"## ルール\n"
+                    f"- 日本語で簡潔に回答（5行以内）\n"
+                    f"- 返信文の提案がある場合は「返信案:「〇〇」」の形式で明示\n"
+                    f"- 反応不要なら何も返さないでください"
+                ),
+            ),
+        )
+
+        if not response_text or response_text.strip().upper() == "SKIP":
+            await collab_manager.send_to_type(room_id, "guest", {
+                "type": "dan_done", "room_id": room_id,
+            })
+            return
+
+        # Save and send to guest only
+        dan_message = await service.send_message(
+            room_id=room_id,
+            sender_type="dan_guest",
+            sender_name="DAN",
+            content=response_text,
+            metadata={"visibility": "guest_only"},
+        )
+
+        await collab_manager.send_to_type(room_id, "guest", {
+            "type": "new_message",
+            "message": {
+                "id": dan_message["id"],
+                "room_id": room_id,
+                "sender_type": dan_message["sender_type"],
+                "sender_name": dan_message["sender_name"],
+                "content": dan_message["content"],
+                "metadata": dan_message.get("metadata", {}),
+                "created_at": dan_message["created_at"],
+            }
+        })
+
+    except Exception as e:
+        logger.error("Guest DAN assist error: %s", e, exc_info=True)
+        try:
+            error_msg = await service.send_message(
+                room_id=room_id,
+                sender_type="dan_guest",
+                sender_name="DAN",
+                content=f"（エラー: {str(e)[:200]}）",
+                metadata={"visibility": "guest_only"},
+            )
+            await collab_manager.send_to_type(room_id, "guest", {
+                "type": "new_message",
+                "message": {
+                    "id": error_msg["id"],
+                    "room_id": room_id,
+                    "sender_type": error_msg["sender_type"],
+                    "sender_name": error_msg["sender_name"],
+                    "content": error_msg["content"],
+                    "metadata": error_msg.get("metadata", {}),
+                    "created_at": error_msg["created_at"],
+                }
+            })
+        except Exception:
+            pass  # guest DAN error fallback
+
+
+async def _send_push(room_id: str, sender_type: str, sender_name: str, content: str):
+    """Send push notification to the other side."""
+    try:
+        from app.services.push_service import get_push_service
+        svc = get_push_service()
+        body = content[:100] + ("..." if len(content) > 100 else "")
+        await svc.notify_room(
+            room_id=room_id,
+            exclude_type=sender_type,
+            title=sender_name,
+            body=body,
+        )
+    except Exception as e:
+        logger.error("Push notification error: %s", e)

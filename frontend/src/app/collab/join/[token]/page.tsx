@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { Send, Circle, Bot, User, UserCheck, Paperclip, Pencil } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { useCollabWebSocket } from '@/hooks/useCollabWebSocket';
+import { usePushNotification } from '@/hooks/usePushNotification';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -25,7 +26,26 @@ function getStorageKeys(inviteToken: string) {
 }
 
 function formatTime(dateStr: string): string {
-  return new Date(dateStr).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+  const d = new Date(dateStr);
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isYesterday = d.toDateString() === yesterday.toDateString();
+  const time = d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+  if (isToday) return time;
+  if (isYesterday) return `昨日 ${time}`;
+  return `${d.getMonth() + 1}/${d.getDate()} ${time}`;
+}
+
+function formatDateSeparator(dateStr: string): string {
+  const d = new Date(dateStr);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return '今日';
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return '昨日';
+  return d.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' });
 }
 
 export default function GuestJoinPage() {
@@ -47,6 +67,9 @@ export default function GuestJoinPage() {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [readByOther, setReadByOther] = useState<string | null>(null);
+  const [danMode, setDanMode] = useState(false);
+  const [danThinking, setDanThinking] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [editNameValue, setEditNameValue] = useState('');
 
@@ -96,18 +119,42 @@ export default function GuestJoinPage() {
 
   // WebSocket
   const handleNewMessage = useCallback((msg: CollabMessageResponse) => {
+    if (msg.sender_type === 'dan_guest') setDanThinking(false);
     setMessages((prev) => {
       if (prev.some((m) => m.id === msg.id)) return prev;
       return [...prev, msg];
     });
   }, []);
 
-  const { isConnected, onlineUsers, sendMessage: wsSend } = useCollabWebSocket({
+  const handleDanThinking = useCallback((thinking: boolean) => {
+    setDanThinking(thinking);
+  }, []);
+
+  const handleRead = useCallback((data: { sender_type: string; message_id: string }) => {
+    if (data.sender_type === 'owner') {
+      setReadByOther(data.message_id);
+    }
+  }, []);
+
+  const { isConnected, onlineUsers, sendMessage: wsSend, sendRead } = useCollabWebSocket({
     roomId: roomId || '',
     token: guestToken || '',
     isGuest: true,
     onMessage: handleNewMessage,
+    onRead: handleRead,
+    onDanThinking: handleDanThinking,
   });
+
+  // Send read receipt when new messages arrive from owner
+  useEffect(() => {
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && lastMsg.sender_type === 'owner') {
+      sendRead(lastMsg.id);
+    }
+  }, [messages, sendRead]);
+
+  // Push notifications
+  usePushNotification(roomId || '', 'guest');
 
   // Auto-scroll
   useEffect(() => {
@@ -141,7 +188,8 @@ export default function GuestJoinPage() {
   const handleSend = () => {
     const content = input.trim();
     if (!content) return;
-    wsSend(content);
+    const finalContent = danMode ? `@ダン ${content}` : content;
+    wsSend(finalContent);
     setInput('');
     inputRef.current?.focus();
   };
@@ -180,7 +228,7 @@ export default function GuestJoinPage() {
     const alreadyJoined = inviteInfo?.already_joined;
 
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="min-h-screen flex items-start justify-center bg-background p-4 pt-[15vh]">
         <OpenInBrowserPrompt />
         <PWAInstallPrompt />
         <Card className="w-full max-w-md">
@@ -252,9 +300,34 @@ export default function GuestJoinPage() {
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef}>
         <div className="space-y-3 py-4">
-          {messages.map((msg) => (
-            <GuestMessageBubble key={msg.id} message={msg} />
-          ))}
+          {messages.map((msg, i) => {
+            const prevDate = i > 0 ? new Date(messages[i - 1].created_at).toDateString() : '';
+            const curDate = new Date(msg.created_at).toDateString();
+            const showSeparator = curDate !== prevDate;
+            return (
+              <div key={msg.id}>
+                {showSeparator && (
+                  <div className="flex items-center gap-3 py-2">
+                    <div className="flex-1 border-t border-border" />
+                    <span className="text-[10px] text-muted-foreground shrink-0">{formatDateSeparator(msg.created_at)}</span>
+                    <div className="flex-1 border-t border-border" />
+                  </div>
+                )}
+                <GuestMessageBubble
+                  message={msg}
+                  showRead={msg.sender_type === 'guest' && readByOther != null && messages.filter(m => m.sender_type === 'guest').pop()?.id === msg.id}
+                />
+              </div>
+            );
+          })}
+          {danThinking && (
+            <div className="flex justify-end">
+              <div className="bg-violet-500/10 border border-violet-500/20 rounded-lg px-3 py-2 flex items-center gap-2">
+                <Bot className="h-4 w-4 text-violet-400 animate-pulse" />
+                <span className="text-xs text-violet-300">DAN 分析中...</span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -296,20 +369,42 @@ export default function GuestJoinPage() {
         <Button variant="ghost" size="icon" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
           <Paperclip className="h-4 w-4" />
         </Button>
-        <Input
-          ref={inputRef}
-          placeholder="メッセージを入力..."
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-          className="flex-1"
-        />
-        <Button size="icon" onClick={handleSend} disabled={!input.trim()}>
+        <Button
+          variant={danMode ? "default" : "ghost"}
+          size="icon"
+          onClick={() => setDanMode(!danMode)}
+          className={danMode ? "bg-violet-600 hover:bg-violet-700 text-white" : ""}
+          title={danMode ? "DANモード ON（相手に見えません）" : "AIに聞く"}
+        >
+          <Bot className="h-4 w-4" />
+        </Button>
+        <div className="flex-1 relative">
+          {danMode && (
+            <div className="absolute left-3 top-1/2 -translate-y-1/2 text-[10px] text-violet-400 font-medium pointer-events-none">
+              DAN宛
+            </div>
+          )}
+          <textarea
+            ref={inputRef as any}
+            placeholder={danMode ? "AIに質問..." : "メッセージを入力..."}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            rows={1}
+            className={`flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none ${danMode ? "pl-14 border-violet-500/50 bg-violet-500/5" : ""}`}
+            style={{ maxHeight: '120px', overflowY: 'auto' }}
+            onInput={(e) => {
+              const t = e.target as HTMLTextAreaElement;
+              t.style.height = 'auto';
+              t.style.height = Math.min(t.scrollHeight, 120) + 'px';
+            }}
+          />
+        </div>
+        <Button
+          size="icon"
+          onClick={handleSend}
+          disabled={!input.trim()}
+          className={danMode ? "bg-violet-600 hover:bg-violet-700" : ""}
+        >
           <Send className="h-4 w-4" />
         </Button>
       </div>
@@ -317,7 +412,7 @@ export default function GuestJoinPage() {
   );
 }
 
-function GuestMessageBubble({ message }: { message: CollabMessageResponse }) {
+function GuestMessageBubble({ message, showRead }: { message: CollabMessageResponse; showRead?: boolean }) {
   const isGuest = message.sender_type === 'guest';
   const isDan = message.sender_type.startsWith('dan_');
 
@@ -329,20 +424,30 @@ function GuestMessageBubble({ message }: { message: CollabMessageResponse }) {
     }
   }
 
+  const isPrivate = message.metadata?.visibility === 'guest_only';
+  const isGuestPrivate = isGuest && isPrivate;
+
   return (
-    <div className={`flex ${isGuest ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex ${isGuest || isDan ? 'justify-end' : 'justify-start'}`}>
       <div
         className={`max-w-[75%] rounded-lg px-3 py-2 ${
           isDan
             ? 'bg-violet-500/10 border border-violet-500/20'
-            : isGuest
-              ? 'bg-primary text-primary-foreground'
-              : 'bg-muted'
+            : isGuestPrivate
+              ? 'bg-violet-500/5 border border-dashed border-violet-500/30'
+              : isGuest
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-muted'
         }`}
       >
         <div className="flex items-center gap-1.5 mb-1">
-          <SenderIcon type={message.sender_type} />
-          <span className="text-xs font-medium opacity-70">{message.sender_name}</span>
+          {isPrivate ? <Bot className="h-4 w-4 text-violet-400" /> : <SenderIcon type={message.sender_type} />}
+          <span className={`text-xs font-medium ${isPrivate ? 'text-violet-400' : 'opacity-70'}`}>
+            {isGuestPrivate ? `${message.sender_name} → DAN` : message.sender_name}
+          </span>
+          {isPrivate && (
+            <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded-full">非公開</span>
+          )}
           <span className="text-[10px] opacity-50 ml-auto">{formatTime(message.created_at)}</span>
         </div>
         {(() => {
@@ -358,6 +463,9 @@ function GuestMessageBubble({ message }: { message: CollabMessageResponse }) {
         })()}
         <p className="text-sm whitespace-pre-wrap break-words"><LinkifyText text={message.content} /></p>
       </div>
+      {showRead && (
+        <p className="text-[10px] text-muted-foreground text-right mt-0.5 mr-1">既読</p>
+      )}
     </div>
   );
 }

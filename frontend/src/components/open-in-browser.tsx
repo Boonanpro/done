@@ -62,8 +62,7 @@ export function OpenInBrowserPrompt() {
         <div>
           <h2 className="text-lg font-bold">ブラウザで開いてください</h2>
           <p className="text-sm text-muted-foreground mt-2">
-            このアプリはLINE内のブラウザでは正常に動作しません。
-            {ios ? 'Safari' : 'Chrome'}で開いてください。
+            アプリ内ブラウザでは正常に動作しません。{ios ? 'Safari' : 'Chrome'}で開いてください。
           </p>
         </div>
 
@@ -84,13 +83,6 @@ export function OpenInBrowserPrompt() {
             Chromeで開く
           </Button>
         )}
-
-        <button
-          onClick={() => setShow(false)}
-          className="text-xs text-muted-foreground hover:text-foreground"
-        >
-          このまま続ける
-        </button>
       </div>
     </div>
   );

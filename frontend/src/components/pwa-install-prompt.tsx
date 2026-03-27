@@ -1,22 +1,55 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { X, Download, Share, MoreVertical } from 'lucide-react';
+import { X, Download, Share, MoreVertical, Bell, BellOff, MessageSquare } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-const DISMISSED_KEY = 'pwa-install-dismissed';
-const MESSAGES_BEFORE_PROMPT = 3; // Show after user sends a few messages
+const DISMISSED_KEY = 'pwa-install-dismissed-v4';
+
+// Fake notification preview component
+function NotificationPreview({ enabled }: { enabled: boolean }) {
+  return (
+    <div className={`rounded-xl p-3 ${enabled ? 'bg-muted/60 border border-border' : 'bg-muted/20 border border-dashed border-muted-foreground/20'}`}>
+      <div className="flex items-center gap-2 mb-2">
+        {enabled ? (
+          <Bell className="h-3.5 w-3.5 text-green-400" />
+        ) : (
+          <BellOff className="h-3.5 w-3.5 text-muted-foreground/40" />
+        )}
+        <span className={`text-[10px] font-medium ${enabled ? 'text-green-400' : 'text-muted-foreground/40'}`}>
+          {enabled ? 'インストール後' : '今の状態'}
+        </span>
+      </div>
+      {enabled ? (
+        <div className="flex items-start gap-2.5 bg-background/80 rounded-lg p-2.5 shadow-sm">
+          <div className="h-8 w-8 rounded-lg bg-primary/20 flex items-center justify-center shrink-0">
+            <MessageSquare className="h-4 w-4 text-primary" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs font-semibold">Done</p>
+            <p className="text-[11px] text-muted-foreground truncate">たく: 来週の土曜なら空いてるよ</p>
+          </div>
+          <span className="text-[10px] text-muted-foreground shrink-0">今</span>
+        </div>
+      ) : (
+        <div className="flex items-center justify-center py-3">
+          <p className="text-xs text-muted-foreground/40">通知は届きません</p>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function PWAInstallPrompt() {
   const [show, setShow] = useState(false);
-  const [step, setStep] = useState(0); // 0=banner, 1=step-by-step
+  const [step, setStep] = useState(0);
   const [platform, setPlatform] = useState<'ios' | 'android' | 'desktop'>('desktop');
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
 
   useEffect(() => {
     if (window.matchMedia('(display-mode: standalone)').matches) return;
     const dismissed = localStorage.getItem(DISMISSED_KEY);
-    if (dismissed && Date.now() - parseInt(dismissed) < 7 * 24 * 60 * 60 * 1000) return;
+    if (dismissed && Date.now() - parseInt(dismissed) < 5 * 60 * 1000) return; // 5分後に再表示
 
     const ua = navigator.userAgent;
     const ios = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
@@ -29,8 +62,7 @@ export function PWAInstallPrompt() {
     };
     window.addEventListener('beforeinstallprompt', handler);
 
-    // Show after a delay to not interrupt first interaction
-    const timer = setTimeout(() => setShow(true), 8000);
+    const timer = setTimeout(() => setShow(true), 1000);
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handler);
@@ -57,13 +89,20 @@ export function PWAInstallPrompt() {
   if (step === 1) {
     return (
       <div className="fixed inset-0 z-50 bg-background/90 backdrop-blur-sm flex items-center justify-center p-4">
-        <div className="bg-card border rounded-2xl shadow-xl p-5 w-full max-w-sm space-y-4 relative">
+        <div className="bg-card border rounded-2xl shadow-xl p-5 w-full max-w-sm space-y-4 relative max-h-[90vh] overflow-y-auto">
           <button onClick={handleDismiss} className="absolute top-3 right-3 text-muted-foreground hover:text-foreground">
             <X className="h-5 w-5" />
           </button>
 
           <h3 className="font-bold text-base">アプリをインストール</h3>
-          <p className="text-xs text-muted-foreground">ホーム画面に追加すると、通知が届くようになります</p>
+
+          {/* Before / After comparison */}
+          <div className="grid grid-cols-2 gap-2">
+            <NotificationPreview enabled={false} />
+            <NotificationPreview enabled={true} />
+          </div>
+
+          <p className="text-xs text-muted-foreground">ブラウザのままでも使えますが、新着メッセージに気づけません。ホーム画面に追加すると、LINEのように通知が届くようになります。</p>
 
           {platform === 'ios' ? (
             <div className="space-y-3">
@@ -153,21 +192,26 @@ export function PWAInstallPrompt() {
 
   // Initial banner
   return (
-    <div className="fixed bottom-20 left-4 right-4 z-50 animate-in slide-in-from-bottom duration-300">
-      <div className="bg-card border rounded-xl shadow-lg p-3 max-w-md mx-auto">
-        <div className="flex items-center gap-3">
-          <div className="h-10 w-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
-            <Download className="h-5 w-5 text-primary" />
+    <div className="fixed bottom-4 left-4 right-4 z-50 animate-in slide-in-from-bottom duration-300">
+      <div className="bg-card border rounded-xl shadow-lg p-3 max-w-md mx-auto space-y-2">
+        <div className="flex items-start gap-3">
+          <div className="h-10 w-10 rounded-xl bg-primary/10 flex items-center justify-center shrink-0 mt-0.5">
+            <Bell className="h-5 w-5 text-primary" />
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium">通知を受け取りませんか？</p>
-            <p className="text-xs text-muted-foreground">アプリに追加すると新着メッセージが届きます</p>
+            <p className="text-sm font-medium">メッセージの通知を受け取る</p>
+            <p className="text-xs text-muted-foreground">ブラウザのままでも使えますが、新着に気づけません。インストールするとLINEのように通知が届きます</p>
           </div>
           <button onClick={handleDismiss} className="text-muted-foreground shrink-0 p-1">
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="flex gap-2 mt-2">
+        {/* Notification preview */}
+        <div className="grid grid-cols-2 gap-2">
+          <NotificationPreview enabled={false} />
+          <NotificationPreview enabled={true} />
+        </div>
+        <div className="flex gap-2">
           {deferredPrompt ? (
             <Button className="flex-1" size="sm" onClick={handleInstall}>
               <Download className="h-4 w-4 mr-1" />
