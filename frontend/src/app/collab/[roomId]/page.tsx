@@ -11,6 +11,7 @@ import {
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { MainLayout } from '@/components/layout/main-layout';
 import { useCollabWebSocket, type OnlineUser } from '@/hooks/useCollabWebSocket';
+import { usePushNotification } from '@/hooks/usePushNotification';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { LinkifyText } from '@/components/linkify-text';
@@ -20,7 +21,26 @@ import {
 } from '@/components/ui/sheet';
 
 function formatTime(dateStr: string): string {
-  return new Date(dateStr).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+  const d = new Date(dateStr);
+  const now = new Date();
+  const isToday = d.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isYesterday = d.toDateString() === yesterday.toDateString();
+  const time = d.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+  if (isToday) return time;
+  if (isYesterday) return `昨日 ${time}`;
+  return `${d.getMonth() + 1}/${d.getDate()} ${time}`;
+}
+
+function formatDateSeparator(dateStr: string): string {
+  const d = new Date(dateStr);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return '今日';
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (d.toDateString() === yesterday.toDateString()) return '昨日';
+  return d.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' });
 }
 
 function SenderIcon({ type }: { type: string }) {
@@ -58,6 +78,7 @@ export default function CollabRoomPage() {
   const [isUploading, setIsUploading] = useState(false);
   const [danThinking, setDanThinking] = useState(false);
   const [danMode, setDanMode] = useState(false);
+  const [readByOther, setReadByOther] = useState<string | null>(null); // last message_id read by other side
 
   // Fetch room info
   const { data: room } = useQuery({
@@ -97,13 +118,31 @@ export default function CollabRoomPage() {
     setDanThinking(thinking);
   }, []);
 
-  const { isConnected, onlineUsers, sendMessage: wsSend } = useCollabWebSocket({
+  const handleRead = useCallback((data: { sender_type: string; message_id: string }) => {
+    if (data.sender_type === 'guest') {
+      setReadByOther(data.message_id);
+    }
+  }, []);
+
+  const { isConnected, onlineUsers, sendMessage: wsSend, sendRead } = useCollabWebSocket({
     roomId,
     token,
     isGuest: false,
     onMessage: handleNewMessage,
     onDanThinking: handleDanThinking,
+    onRead: handleRead,
   });
+
+  // Send read receipt when new messages arrive from guest
+  useEffect(() => {
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && lastMsg.sender_type === 'guest') {
+      sendRead(lastMsg.id);
+    }
+  }, [messages, sendRead]);
+
+  // Push notifications
+  usePushNotification(roomId, 'owner');
 
   // Auto-scroll
   useEffect(() => {
@@ -299,9 +338,28 @@ export default function CollabRoomPage() {
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef}>
         <div className="space-y-3 py-4">
-          {messages.map((msg) => (
-            <MessageBubble key={msg.id} message={msg} isOwner={msg.sender_type === 'owner'} onSendReply={wsSend} />
-          ))}
+          {messages.map((msg, i) => {
+            const prevDate = i > 0 ? new Date(messages[i - 1].created_at).toDateString() : '';
+            const curDate = new Date(msg.created_at).toDateString();
+            const showSeparator = curDate !== prevDate;
+            return (
+              <div key={msg.id}>
+                {showSeparator && (
+                  <div className="flex items-center gap-3 py-2">
+                    <div className="flex-1 border-t border-border" />
+                    <span className="text-[10px] text-muted-foreground shrink-0">{formatDateSeparator(msg.created_at)}</span>
+                    <div className="flex-1 border-t border-border" />
+                  </div>
+                )}
+                <MessageBubble
+                  message={msg}
+                  isOwner={msg.sender_type === 'owner'}
+                  onSendReply={wsSend}
+                  showRead={msg.sender_type === 'owner' && !msg.metadata?.visibility && readByOther != null && messages.filter(m => m.sender_type === 'owner' && !m.metadata?.visibility).pop()?.id === msg.id}
+                />
+              </div>
+            );
+          })}
           {danThinking && (
             <div className="flex justify-end">
               <div className="bg-violet-500/10 border border-violet-500/20 rounded-lg px-3 py-2 flex items-center gap-2">
@@ -345,18 +403,19 @@ export default function CollabRoomPage() {
               DAN宛
             </div>
           )}
-          <Input
-            ref={inputRef}
+          <textarea
+            ref={inputRef as any}
             placeholder={danMode ? "DANへの指示を入力..." : "メッセージを入力..."}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
+            rows={1}
+            className={`flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none ${danMode ? "pl-14 border-violet-500/50 bg-violet-500/5" : ""}`}
+            style={{ maxHeight: '120px', overflowY: 'auto' }}
+            onInput={(e) => {
+              const t = e.target as HTMLTextAreaElement;
+              t.style.height = 'auto';
+              t.style.height = Math.min(t.scrollHeight, 120) + 'px';
             }}
-            className={danMode ? "pl-14 border-violet-500/50 bg-violet-500/5" : ""}
           />
         </div>
         <Button
@@ -439,10 +498,11 @@ function extractReply(content: string): { body: string; reply: string | null } {
   return { body: content, reply: null };
 }
 
-function MessageBubble({ message, isOwner, onSendReply }: {
+function MessageBubble({ message, isOwner, onSendReply, showRead }: {
   message: CollabMessageResponse;
   isOwner: boolean;
   onSendReply?: (content: string) => void;
+  showRead?: boolean;
 }) {
   const [sent, setSent] = useState(false);
   const isDan = message.sender_type.startsWith('dan_');
@@ -528,6 +588,9 @@ function MessageBubble({ message, isOwner, onSendReply }: {
           <p className="text-[10px] text-violet-300 mt-1.5">送信済み</p>
         )}
       </div>
+      {showRead && (
+        <p className="text-[10px] text-muted-foreground text-right mt-0.5 mr-1">既読</p>
+      )}
     </div>
   );
 }

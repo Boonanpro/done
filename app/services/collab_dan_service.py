@@ -125,22 +125,28 @@ def get_dan_response(
     recent_messages: list[dict],
     trigger_message: dict,
     owner_name: str = "オーナー",
+    system_override: Optional[str] = None,
 ) -> Optional[str]:
     """Generate a DAN assist response. Returns None if no response needed."""
     content = trigger_message.get("content", "").strip()
 
-    # Quick skip filter
-    if _should_skip(content):
+    # Quick skip filter (skip for auto-assist, not for direct @ダン calls)
+    if not system_override and _should_skip(content):
         return None
 
-    user_prompt = _build_prompt(
-        room_title, room_description, recent_messages, trigger_message, owner_name
-    )
+    system = system_override or SYSTEM_PROMPT
+    if system_override:
+        # system_override already contains the full prompt with context
+        user_prompt = "上記の指示に従って回答してください。"
+    else:
+        user_prompt = _build_prompt(
+            room_title, room_description, recent_messages, trigger_message, owner_name
+        )
 
     # Try Anthropic first, then Gemini
-    result = _try_anthropic(SYSTEM_PROMPT, user_prompt)
+    result = _try_anthropic(system, user_prompt)
     if not result:
-        result = _try_gemini(SYSTEM_PROMPT, user_prompt)
+        result = _try_gemini(system, user_prompt)
 
     if not result:
         logger.error("All LLM providers failed for DAN assist")
