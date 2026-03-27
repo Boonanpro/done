@@ -238,7 +238,8 @@ async def get_invite_info(
         raise HTTPException(status_code=404, detail="Invalid invite link")
 
     room = invite.get("collab_rooms")
-    expires_at = datetime.fromisoformat(invite["expires_at"].replace("Z", "+00:00"))
+    from app.services.chat_service import parse_datetime
+    expires_at = parse_datetime(invite["expires_at"])
     is_expired = datetime.now(timezone.utc) > expires_at or invite["status"] == "expired"
 
     return {
