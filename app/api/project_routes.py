@@ -13,9 +13,6 @@ from app.models.project_schemas import (
     ProjectUpdateRequest,
     ProjectResponse,
     ProjectListResponse,
-    ProjectProposalCreateRequest,
-    ProjectProposalResponse,
-    ProjectProposalActionRequest,
     ExecutionEventResponse,
 )
 
@@ -200,76 +197,6 @@ async def delete_project(
         asyncio.create_task(
             _run_archive_in_background(room_id, messages_for_archive)
         )
-
-
-# ==================== Proposals ====================
-
-@router.get("/{project_id}/proposals", response_model=list[ProjectProposalResponse])
-async def list_proposals(
-    project_id: str,
-    current_user: TokenData = Depends(get_current_user),
-    service: ProjectService = Depends(get_project_service),
-):
-    """プロジェクトの提案一覧"""
-    # 所有者チェック
-    project = await service.get_project(project_id, current_user.user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    return await service.get_proposals(project_id)
-
-
-@router.post("/{project_id}/proposals", response_model=ProjectProposalResponse, status_code=201)
-async def create_proposal(
-    project_id: str,
-    request: ProjectProposalCreateRequest,
-    current_user: TokenData = Depends(get_current_user),
-    service: ProjectService = Depends(get_project_service),
-):
-    """プロジェクトに提案を作成"""
-    project = await service.get_project(project_id, current_user.user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    return await service.create_proposal(
-        project_id=project_id,
-        content=request.content,
-        proposal_type=request.proposal_type,
-        steps=request.steps,
-    )
-
-
-@router.post("/{project_id}/proposals/{proposal_id}/action", response_model=ProjectProposalResponse)
-async def proposal_action(
-    project_id: str,
-    proposal_id: str,
-    request: ProjectProposalActionRequest,
-    current_user: TokenData = Depends(get_current_user),
-    service: ProjectService = Depends(get_project_service),
-):
-    """提案を承認または却下"""
-    project = await service.get_project(project_id, current_user.user_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    if request.action == "approve":
-        result = await service.approve_proposal(proposal_id, project_id)
-        if result:
-            # 承認成功 → ステータスをin_progressに更新
-            await service.update_project(
-                project_id, current_user.user_id, status="in_progress"
-            )
-
-            # 計画の記録は観察者が担当（plans/{room_id}.md）
-    else:
-        result = await service.reject_proposal(proposal_id, project_id)
-        # 却下時は計画をクリア
-        from app.agent.bootstrap_context import clear_active_plan
-        clear_active_plan()
-
-    if not result:
-        raise HTTPException(status_code=404, detail="Proposal not found or already actioned")
-    return result
 
 
 # ==================== Execution Events ====================

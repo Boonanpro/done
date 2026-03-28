@@ -21,7 +21,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useAuth } from '@/hooks/use-auth';
-import { api, type ProjectResponse, type ProjectStatusType } from '@/lib/api-client';
+import { api, type ProjectResponse } from '@/lib/api-client';
 import { useProjectStore } from '@/stores/project-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { NotificationPanel } from '@/components/notification/notification-panel';
@@ -34,25 +34,6 @@ function useHasToken() {
   );
 }
 
-const STATUS_COLORS: Record<ProjectStatusType, string> = {
-  planning: 'bg-yellow-400',
-  proposed: 'bg-blue-400',
-  approved: 'bg-green-400',
-  in_progress: 'bg-primary',
-  completed: 'bg-emerald-500',
-  paused: 'bg-gray-400',
-  cancelled: 'bg-red-400',
-};
-
-const STATUS_LABELS: Record<ProjectStatusType, string> = {
-  planning: '計画中',
-  proposed: '提案済',
-  approved: '承認済',
-  in_progress: '進行中',
-  completed: '完了',
-  paused: '一時停止',
-  cancelled: 'キャンセル',
-};
 
 const navItems = [
   {
@@ -359,7 +340,6 @@ export function Sidebar({
               <>
               {(searchQuery ? filteredProjects : (showAllProjects ? filteredProjects : filteredProjects.slice(0, PROJECT_DISPLAY_LIMIT))).map((project) => {
                 const isActive = project.id === selectedProjectId;
-                const statusColor = STATUS_COLORS[project.status] || 'bg-gray-400';
 
                 return (
                   <Tooltip key={project.id}>

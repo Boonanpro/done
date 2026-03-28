@@ -35,7 +35,6 @@ import {
   type FileUploadResponse,
   type MessageResponse,
   type ProcessStep,
-  type ProjectProposalResponse,
   type ProjectStatusType,
 } from '@/lib/api-client';
 import { useRouter } from 'next/navigation';
@@ -47,15 +46,6 @@ interface ProjectChatPanelProps {
   projectId: string;
 }
 
-const STATUS_LABELS: Record<ProjectStatusType, { label: string; color: string }> = {
-  planning: { label: '計画中', color: 'bg-blue-500/15 text-blue-600' },
-  proposed: { label: '提案済', color: 'bg-yellow-500/15 text-yellow-600' },
-  approved: { label: '承認済', color: 'bg-green-500/15 text-green-600' },
-  in_progress: { label: '進行中', color: 'bg-purple-500/15 text-purple-600' },
-  completed: { label: '完了', color: 'bg-gray-500/15 text-gray-600' },
-  paused: { label: '一時停止', color: 'bg-orange-500/15 text-orange-600' },
-  cancelled: { label: 'キャンセル', color: 'bg-red-500/15 text-red-600' },
-};
 
 type StepInfo = {
   label: string;
@@ -486,7 +476,6 @@ function ChatInput({
     queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
     queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
     queryClient.invalidateQueries({ queryKey: ['project', projectId] });
-    queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
   }, [projectId, queryClient, roomId]);
 
   const uploadFiles = useCallback(async (fileList: File[]) => {
@@ -949,7 +938,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sendMessageRef = useRef<((content: string) => void) | null>(null);
-  const [proposalCollapsed, setProposalCollapsed] = useState(true);
   const isNearBottomRef = useRef(true);
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
@@ -999,28 +987,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: (query) => (isActiveExecution ? (query.state.error ? 10000 : 2000) : false),
   });
 
-  const isProposed = project?.status === 'proposed';
-  const { data: proposals } = useQuery({
-    queryKey: ['project-proposals', projectId],
-    queryFn: () => api.projects.proposals.list(projectId),
-    enabled: !!projectId && !!project?.status,
-    refetchInterval: isProposed ? 5000 : false,
-  });
-
-  const pendingProposal =
-    proposals?.find(
-      (item: ProjectProposalResponse) =>
-        item.status === 'pending' &&
-        (!currentRun?.active_proposal_id || item.id === currentRun.active_proposal_id)
-    ) ??
-    proposals?.find((item: ProjectProposalResponse) => item.status === 'pending');
-
-  const approvedProposal =
-    proposals?.find(
-      (item: ProjectProposalResponse) =>
-        item.status === 'approved' && (!currentRun?.id || item.run_id === currentRun.id)
-    ) ??
-    proposals?.find((item: ProjectProposalResponse) => item.status === 'approved');
   const transitionLabel = 'Thinking...';
   const currentRunEvents = currentRun
     ? allExecutionEvents.filter((e) => e.run_id === currentRun.id)
@@ -1034,32 +1000,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     (isActiveExecution || !!warmupMode) &&
     (!!warmupMode || (!!currentRun && currentRun.state === 'running')) &&
     currentRunEvents.length === 0;
-
-  const approveMutation = useMutation({
-    mutationFn: (proposalId: string) => api.projects.proposals.action(projectId, proposalId, 'approve'),
-    onSuccess: () => {
-      toast.success('提案を承認しました');
-      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
-      queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
-      // 承認メッセージを自動送信 → 通常のチャットSSEフローで実行開始
-      sendMessageRef.current?.('提案を承認します。計画に従って実行を開始してください。');
-    },
-    onError: () => {
-      toast.error('提案の承認に失敗しました');
-    },
-  });
-
-  const rejectMutation = useMutation({
-    mutationFn: (proposalId: string) => api.projects.proposals.action(projectId, proposalId, 'reject'),
-    onSuccess: () => {
-      toast.info('提案を却下しました');
-      queryClient.invalidateQueries({ queryKey: ['project', projectId] });
-      queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
-    },
-    onError: () => {
-      toast.error('提案の却下に失敗しました');
-    },
-  });
 
   const deleteProjectMutation = useMutation({
     mutationFn: () => api.projects.delete(projectId),
@@ -1079,7 +1019,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     }
   };
 
-  const status = project?.status ? STATUS_LABELS[project.status] : null;
   const messages = messagesData?.messages || [];
 
   const displayItems = useMemo(() => {

@@ -43,7 +43,6 @@ export function useProjectRecovery({ projectId, roomId }: UseProjectRecoveryOpti
     queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
     queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
     queryClient.invalidateQueries({ queryKey: ['project', projectId] });
-    queryClient.invalidateQueries({ queryKey: ['project-proposals', projectId] });
   }, [projectId, queryClient, roomId]);
 
   const stopPolling = useCallback(() => {

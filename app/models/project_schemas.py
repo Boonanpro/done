@@ -11,26 +11,10 @@ from enum import Enum
 
 class ProjectStatus(str, Enum):
     PLANNING = "planning"
-    PROPOSED = "proposed"
-    APPROVED = "approved"
     IN_PROGRESS = "in_progress"
-    AWAITING_CONFIRMATION = "awaiting_confirmation"
     COMPLETED = "completed"
     PAUSED = "paused"
     CANCELLED = "cancelled"
-
-
-class ProposalType(str, Enum):
-    PLAN = "plan"
-    REVISION = "revision"
-    HEARTBEAT = "heartbeat"
-
-
-class ProposalStatus(str, Enum):
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    SUPERSEDED = "superseded"
 
 
 class AgentRunState(str, Enum):
@@ -79,34 +63,6 @@ class ProjectResponse(BaseModel):
 class ProjectListResponse(BaseModel):
     """プロジェクト一覧レスポンス"""
     projects: list[ProjectResponse]
-
-
-# ==================== Proposal Schemas ====================
-
-class ProjectProposalCreateRequest(BaseModel):
-    """提案作成リクエスト（内部用 - ダンが作成）"""
-    content: str = Field(..., min_length=1)
-    proposal_type: ProposalType = ProposalType.PLAN
-    steps: Optional[list[dict]] = None
-
-
-class ProjectProposalResponse(BaseModel):
-    """提案レスポンス"""
-    id: str
-    project_id: str
-    run_id: Optional[str] = None
-    content: str
-    proposal_type: ProposalType
-    status: ProposalStatus
-    steps: Optional[list[dict]] = None
-    metadata: Optional[dict] = None
-    approved_at: Optional[datetime] = None
-    created_at: datetime
-
-
-class ProjectProposalActionRequest(BaseModel):
-    """提案承認/却下リクエスト"""
-    action: str = Field(..., pattern="^(approve|reject)$")
 
 
 class ProjectResumeRequest(BaseModel):
