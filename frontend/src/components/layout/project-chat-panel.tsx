@@ -375,11 +375,13 @@ function ChatInput({
   roomId,
   isSessionActive,
   sendMessageRef,
+  onSessionComplete,
 }: {
   projectId: string;
   roomId: string;
   isSessionActive: boolean;
   sendMessageRef?: React.MutableRefObject<((content: string) => void) | null>;
+  onSessionComplete?: () => void;
 }) {
   const [message, setMessage] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
@@ -445,8 +447,14 @@ function ChatInput({
     []
   );
 
+  // 完了直後にポーリングが古い active=true を返して上書きするのを防ぐ
+  const completedAtRef = useRef<number>(0);
+
   const syncActiveStatus = useCallback(
     (active: boolean) => {
+      if (!active) {
+        completedAtRef.current = Date.now();
+      }
       queryClient.setQueryData<ActiveSessionStatus>(['session-active', roomId], {
         active,
         session_id: roomId,
@@ -456,7 +464,9 @@ function ChatInput({
     [queryClient, roomId]
   );
 
-  const isBusy = isInterrupted || isSessionActive;
+  // ポーリング結果が完了直後5秒以内なら active=true を無視
+  const effectiveSessionActive = isSessionActive && (Date.now() - completedAtRef.current > 5000);
+  const isBusy = isInterrupted || effectiveSessionActive;
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -642,6 +652,7 @@ function ChatInput({
             syncActiveStatus(false);
             setInterrupted(projectId, false);
             setWarmupMode(projectId, null);
+            onSessionComplete?.();
             invalidateProjectQueries();
 
             if (!titleGeneratedRef.current) {
@@ -680,6 +691,7 @@ function ChatInput({
             syncActiveStatus(false);
             setInterrupted(projectId, false);
             setWarmupMode(projectId, null);
+            onSessionComplete?.();
             toast.error(error || 'メッセージの送信に失敗しました');
           },
           onProjectCreated: (createdProjectId) => {
@@ -931,6 +943,8 @@ function ChatInput({
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const router = useRouter();
+  // 完了直後にポーリングが古い active=true を返すのを防ぐ
+  const panelCompletedAtRef = useRef<number>(0);
   const selectProject = useProjectStore((s) => s.selectProject);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -966,7 +980,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: (query) => (query.state.error ? 10000 : 2000),
   });
 
-  const isActiveExecution = !!activeStatus?.active;
+  const isActiveExecution = !!activeStatus?.active && (Date.now() - panelCompletedAtRef.current > 5000);
 
   const { data: currentRun } = useQuery({
     queryKey: ['current-run', projectId],
@@ -1319,7 +1333,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       {/* 承認/却下ボタンは廃止。チャットでの承認を観察者が検知して計画を記録する */}
 
       {project?.room_id ? (
-        <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} sendMessageRef={sendMessageRef} />
+        <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} sendMessageRef={sendMessageRef} onSessionComplete={() => { panelCompletedAtRef.current = Date.now(); }} />
       ) : null}
 
       {lightboxImage && (

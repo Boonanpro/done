@@ -75,6 +75,13 @@ def _get_session_title(room_id: str) -> str:
     try:
         from app.services.supabase_client import get_supabase_client
         sb = get_supabase_client().client
+        # projectsテーブルのtitleを優先（Haikuが生成した正しいタイトル）
+        result = sb.table("projects").select("title").eq("room_id", room_id).limit(1).execute()
+        if result.data:
+            title = result.data[0].get("title", "")
+            if title and title != "新しいプロジェクト":
+                return title
+        # フォールバック: chat_rooms.name
         result = sb.table("chat_rooms").select("name").eq("id", room_id).limit(1).execute()
         if result.data:
             name = result.data[0].get("name", "")
@@ -134,7 +141,8 @@ async def _run_single_observer(
         f"---\n\n以下のチェックリストに従い、上記の会話を振り返ってください。\n"
         f"該当があればファイルを直接編集してください。なければ何もしないでください。\n\n"
         f"---\n{checklist}\n---\n\n"
-        f"何も記録しなかった場合は何も返答せず終了。記録した場合のみ、日本語箇条書き3行以内で要約を返答。"
+        f"何も記録しなかった場合は一切何も返答せず、空のまま終了せよ（「学びなし」「該当なし」等も返答しない）。\n"
+        f"記録した場合のみ、日本語箇条書き3行以内で要約を返答。"
     )
 
     edited_files: list[str] = []
@@ -205,7 +213,13 @@ async def _run_observers(room_id: str, user_id: str):
             """変更なし系のサマリーを除外する"""
             if not text.strip():
                 return False
-            skip_phrases = ["変更なし", "学びなし", "計画なし", "更新不要", "記録不要", "何も記録", "終了します", "No update", "no change"]
+            skip_phrases = [
+                "変更なし", "学びなし", "計画なし", "更新不要", "記録不要",
+                "何も記録", "終了します", "該当なし", "特になし", "観察完了",
+                "No update", "no change", "no new", "no learnings",
+                "nothing to record", "no issues", "no errors",
+                "no user feedback", "no coding", "no design",
+            ]
             lower = text.lower()
             return not any(phrase.lower() in lower for phrase in skip_phrases)
 
@@ -241,7 +255,7 @@ async def _create_observer_notification(room_id: str, user_id: str, summaries: l
         sb = get_supabase_client().client
         sb.table("dan_proposals").insert({
             "user_id": user_id,
-            "type": "action",
+            "type": "observation",
             "title": title,
             "content": content,
             "source_room_id": room_id,
@@ -1313,6 +1327,17 @@ async def send_message(
     """Send a message to a room"""
     try:
         message = await service.send_message(room_id, current_user.user_id, request.content)
+
+        # プロジェクトチャットの場合、プロジェクトのupdated_atを更新（リスト繰り上げ）
+        try:
+            from app.services.project_service import ProjectService
+            ps = ProjectService()
+            project = await ps.get_project_by_room_id(room_id)
+            if project:
+                await ps.update_project(project["id"], current_user.user_id, summary=project.get("summary"))
+        except Exception:
+            pass  # プロジェクト更新失敗はメッセージ送信に影響させない
+
         # Get sender info
         user = await service.get_user_by_id(current_user.user_id)
         return MessageResponse(

@@ -178,8 +178,13 @@ class ProjectService:
     ) -> Optional[dict]:
         """プロジェクトを更新"""
         # iconのみの更新ではupdated_atを変更しない（ソート順を維持）
+        # DBトリガーが常にupdated_atを更新するため、元の値で上書きする
         icon_only = set(updates.keys()) == {"icon"}
-        if not icon_only:
+        if icon_only:
+            current = self.supabase.table("projects").select("updated_at").eq("id", project_id).execute()
+            if current.data:
+                updates["updated_at"] = current.data[0]["updated_at"]
+        else:
             updates["updated_at"] = datetime.now(timezone.utc).isoformat()
         result = (
             self.supabase.table("projects")
