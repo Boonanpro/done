@@ -65,28 +65,53 @@ def load_all_bootstrap_files() -> str:
     return ""
 
 
+def _get_project_title(room_id: str) -> str:
+    """DBからプロジェクトタイトルを取得する。"""
+    try:
+        from app.services.supabase_client import get_supabase_client
+        sb = get_supabase_client().client
+        result = sb.table("projects").select("title").eq("room_id", room_id).limit(1).execute()
+        if result.data:
+            title = result.data[0].get("title", "")
+            if title and title != "新しいプロジェクト":
+                return title
+    except Exception:
+        pass
+    return ""
+
+
 def load_active_plan(room_id: str = "") -> str:
     """Load active plan if one exists. Returns empty string if none.
 
     If room_id is given, tries plans/{room_id}.md first.
     Falls back to plans/active.md for legacy compatibility.
+    Project title is fetched from DB at load time (not stored in file).
     """
     plans_dir = WORKSPACE_DIR / "plans"
+    content = ""
     if room_id:
         room_plan = plans_dir / f"{room_id}.md"
         if room_plan.exists():
             try:
-                return room_plan.read_text(encoding="utf-8")
+                content = room_plan.read_text(encoding="utf-8")
             except Exception:
                 pass
     # Legacy fallback
-    active_plan = plans_dir / "active.md"
-    if active_plan.exists():
-        try:
-            return active_plan.read_text(encoding="utf-8")
-        except Exception:
-            return ""
-    return ""
+    if not content:
+        active_plan = plans_dir / "active.md"
+        if active_plan.exists():
+            try:
+                content = active_plan.read_text(encoding="utf-8")
+            except Exception:
+                return ""
+    if not content:
+        return ""
+    # Inject current project title from DB
+    if room_id:
+        title = _get_project_title(room_id)
+        if title:
+            content = f"プロジェクト名: {title}\n\n{content}"
+    return content
 
 
 def save_active_plan(project_title: str, steps: list, content: str = "") -> None:

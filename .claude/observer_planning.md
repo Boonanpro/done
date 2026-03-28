@@ -15,20 +15,13 @@
   1. 合意内容（計画のタイトル、ステップ、方針）を抽出する
   2. **プロンプトで渡された `ROOM_ID` を使って** 以下のパスに書き出す:
      `~/.dan/workspace/plans/{ROOM_ID}.md`
-  3. **プロジェクト名はDBから取得する。** 推測や会話からの抽出ではなく、以下のPythonで正確な名前を取得すること:
-     ```python
-     from app.services.supabase_client import get_supabase_client
-     sb = get_supabase_client().client
-     result = sb.table("projects").select("title").eq("room_id", "{ROOM_ID}").limit(1).execute()
-     title = result.data[0]["title"] if result.data else "不明"
-     ```
+  3. **プロジェクト名はファイルに書かない。** タイトルは `load_active_plan()` が毎回DBから動的に取得するため、計画ファイルにはROOM_IDのみ記載する。
   4. フォーマット:
 
 ```markdown
 ## 承認済み計画
 
 ROOM_ID: {ROOM_ID}
-プロジェクト: {DBから取得したタイトル}
 
 以下はユーザーと合意済みの計画です。この計画に従って作業してください。
 計画から逸脱する必要がある場合は、必ず理由を説明してユーザーの承認を得てください。
