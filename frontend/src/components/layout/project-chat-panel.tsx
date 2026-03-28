@@ -1209,78 +1209,17 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                   )}
                 </button>
               </div>
-              <div className="mt-0.5 flex items-center gap-2">
-                {status ? (
-                  <span
-                    className={`inline-block rounded-full px-1.5 py-0.5 text-sm font-medium md:text-[15px] ${status.color}`}
-                  >
-                    {status.label}
-                  </span>
-                ) : null}
-                {project?.created_at ? (
+              {project?.created_at ? (
+                <div className="mt-0.5">
                   <span className="text-sm text-muted-foreground/60 md:text-[15px]">
                     {new Date(project.created_at).toLocaleDateString('ja-JP')}
                   </span>
-                ) : null}
-              </div>
+                </div>
+              ) : null}
             </>
           )}
         </div>
       </div>
-
-      {pendingProposal ? (
-        <div className="shrink-0 border-b border-border">
-          <button
-            onClick={() => setProposalCollapsed((value) => !value)}
-            className="flex w-full items-center gap-2 px-4 py-2 text-base transition-colors hover:bg-muted/50 md:text-[17px]"
-          >
-            {proposalCollapsed ? (
-              <ChevronRight className="h-3 w-3 text-muted-foreground" />
-            ) : (
-              <ChevronDown className="h-3 w-3 text-muted-foreground" />
-            )}
-            <FileText className="h-3 w-3 text-yellow-600" />
-            <span className="text-muted-foreground">承認待ちの提案</span>
-            <Loader2 className="h-3 w-3 text-yellow-600" />
-          </button>
-          {!proposalCollapsed ? (
-            <div className="max-h-[40vh] overflow-y-auto px-4 pb-3">
-              <div className="prose prose-base prose-dan max-w-none rounded-lg bg-yellow-500/5 px-3 py-2 text-base leading-relaxed md:prose-base md:text-[17px]">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; } }}>
-                  {pendingProposal.content || ''}
-                </ReactMarkdown>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {approvedProposal && !pendingProposal ? (
-        <div className="shrink-0 border-b border-border">
-          <button
-            onClick={() => setProposalCollapsed((value) => !value)}
-            className="flex w-full items-center gap-2 px-4 py-2 text-base transition-colors hover:bg-muted/50 md:text-[17px]"
-          >
-            {proposalCollapsed ? (
-              <ChevronRight className="h-3 w-3 text-muted-foreground" />
-            ) : (
-              <ChevronDown className="h-3 w-3 text-muted-foreground" />
-            )}
-            <FileText className="h-3 w-3 text-green-500" />
-            <span className="text-muted-foreground">承認済み提案</span>
-            <CheckCircle2 className="h-3 w-3 text-green-500" />
-          </button>
-          {!proposalCollapsed ? (
-            <div className="max-h-[40vh] overflow-y-auto px-4 pb-3">
-              <div className="prose prose-base prose-dan max-w-none rounded-lg bg-muted px-3 py-2 text-base leading-relaxed md:prose-base md:text-[17px]">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; } }}>
-                  {approvedProposal.content || ''}
-                </ReactMarkdown>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
 
       <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto">
         {hasNewMessages && (

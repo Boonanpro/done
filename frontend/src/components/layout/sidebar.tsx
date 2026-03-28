@@ -387,7 +387,6 @@ export function Sidebar({
                           >
                             {project.icon || '📁'}
                           </button>
-                          <span className={cn('absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full', statusColor)} />
                           {emojiPickerProjectId === project.id && (
                             <div
                               ref={emojiPickerRef}
@@ -429,7 +428,7 @@ export function Sidebar({
                                 <div className="flex-1 min-w-0">
                                   <p className="truncate">{project.title}</p>
                                   <p className="text-xs text-muted-foreground truncate">
-                                    {STATUS_LABELS[project.status]} · {formatRelativeTime(project.updated_at || project.created_at)}
+                                    {formatRelativeTime(project.updated_at || project.created_at)}
                                   </p>
                                 </div>
                                 <button
@@ -448,9 +447,6 @@ export function Sidebar({
                     {isCollapsed && (
                       <TooltipContent side="right">
                         <p className="font-medium">{project.icon || '📁'} {project.title}</p>
-                        <p className="text-xs text-muted-foreground">
-                          {STATUS_LABELS[project.status]}
-                        </p>
                       </TooltipContent>
                     )}
                   </Tooltip>
