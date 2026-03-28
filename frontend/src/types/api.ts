@@ -3100,7 +3100,7 @@ export interface components {
          * @description 提案タイプ
          * @enum {string}
          */
-        ProposalType: "reply" | "action" | "schedule" | "reminder";
+        ProposalType: "reply" | "action" | "schedule" | "reminder" | "observation";
         /**
          * ProposalsListResponse
          * @description 提案一覧レスポンス

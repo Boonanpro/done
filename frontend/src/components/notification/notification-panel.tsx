@@ -147,10 +147,11 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
             initial={{ opacity: 0, scale: 0.95, y: 20 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: 20 }}
-            className={cn("bg-card border border-border rounded-xl shadow-2xl overflow-hidden", inline ? "w-full" : "w-96")}
+            className={cn("bg-card border border-border rounded-xl shadow-2xl max-h-[80vh] flex flex-col", inline ? "w-full" : "w-96")}
+            style={{ borderRadius: '0.75rem' }}
           >
             {/* Detail Header */}
-            <div className="flex items-center justify-between p-3 border-b border-border bg-muted/30">
+            <div className="flex items-center justify-between p-3 border-b border-border bg-muted/30 shrink-0 rounded-t-xl">
               <div className="flex items-center gap-2 min-w-0 flex-1">
                 {(() => {
                   const Icon = iconMap[getProposalIconType(selectedProposal)];
@@ -173,7 +174,7 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
             </div>
 
             {/* Detail Content */}
-            <div className="p-4 space-y-4">
+            <div className="p-4 space-y-4 overflow-y-auto" style={{ maxHeight: 'calc(80vh - 52px)' }}>
               {editMode ? (
                 <textarea
                   value={editedContent}
@@ -182,7 +183,7 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
                   placeholder="内容を編集..."
                 />
               ) : (
-                <p className="text-sm text-muted-foreground">
+                <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
                   {selectedProposal.content || selectedProposal.title}
                 </p>
               )}
@@ -337,7 +338,7 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
                   exit={{ height: 0 }}
                   className="overflow-hidden"
                 >
-                  <ScrollArea className="max-h-80">
+                  <div className="max-h-80 overflow-y-auto">
                     <div className="p-2 space-y-1">
                       {isLoading ? (
                         // Loading state
@@ -403,7 +404,7 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
                         })
                       )}
                     </div>
-                  </ScrollArea>
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>

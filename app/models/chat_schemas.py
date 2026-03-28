@@ -321,10 +321,11 @@ class ProposalStatus(str, Enum):
 
 class ProposalType(str, Enum):
     """提案タイプ"""
-    REPLY = "reply"          # 返信案
-    ACTION = "action"        # アクション提案
-    SCHEDULE = "schedule"    # スケジュール登録
-    REMINDER = "reminder"    # リマインダー
+    REPLY = "reply"              # 返信案
+    ACTION = "action"            # アクション提案
+    SCHEDULE = "schedule"        # スケジュール登録
+    REMINDER = "reminder"        # リマインダー
+    OBSERVATION = "observation"  # 観察者の事後報告
 
 
 class ProposalCreateRequest(BaseModel):

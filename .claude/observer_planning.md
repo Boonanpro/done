@@ -1,7 +1,7 @@
 # 観察チェックリスト: 計画の記録
 
 会話の一区切り後に自動で呼ばれる。直前の会話で計画や方針の合意・進捗変化があれば記録せよ。
-該当なしなら何もせず終了。
+該当なしなら何も返答せず終了。（「変更なし」「計画なし」等の返答も不要）
 
 ---
 
@@ -15,12 +15,20 @@
   1. 合意内容（計画のタイトル、ステップ、方針）を抽出する
   2. **プロンプトで渡された `ROOM_ID` を使って** 以下のパスに書き出す:
      `~/.dan/workspace/plans/{ROOM_ID}.md`
-  3. フォーマット:
+  3. **プロジェクト名はDBから取得する。** 推測や会話からの抽出ではなく、以下のPythonで正確な名前を取得すること:
+     ```python
+     from app.services.supabase_client import get_supabase_client
+     sb = get_supabase_client().client
+     result = sb.table("projects").select("title").eq("room_id", "{ROOM_ID}").limit(1).execute()
+     title = result.data[0]["title"] if result.data else "不明"
+     ```
+  4. フォーマット:
 
 ```markdown
 ## 承認済み計画
 
-プロジェクト: {プロジェクト名}
+ROOM_ID: {ROOM_ID}
+プロジェクト: {DBから取得したタイトル}
 
 以下はユーザーと合意済みの計画です。この計画に従って作業してください。
 計画から逸脱する必要がある場合は、必ず理由を説明してユーザーの承認を得てください。
@@ -32,7 +40,8 @@
 - [ ] 未完了のステップ
 ```
 
-  4. 既にそのROOM_IDの計画ファイルが存在する場合は、内容を読んで更新する（完了/未完了の反映）
+  5. 既にそのROOM_IDの計画ファイルが存在する場合は、内容を読んで更新する（完了/未完了の反映）
+  6. **ファイル名は必ず `{ROOM_ID}.md` とする。** 人間が読みやすい名前（`hp-business.md`等）は使わない。
 - 合意ではなく単なる議論・検討中の場合は書き出さない。明確な承認があった場合のみ記録する。
 - → 記録先: `~/.dan/workspace/plans/{ROOM_ID}.md`
 
@@ -42,15 +51,11 @@
 以下のPythonスクリプトをBashで実行すること:
 
 ```python
-import json
-from supabase import create_client
-import os
-sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
-# ROOM_IDからプロジェクトを検索
+from app.services.supabase_client import get_supabase_client
+sb = get_supabase_client().client
 result = sb.table("projects").select("id,status").eq("room_id", "{ROOM_ID}").execute()
 if result.data:
     project = result.data[0]
-    # 新しいステータスに更新
     sb.table("projects").update({"status": "{NEW_STATUS}"}).eq("id", project["id"]).execute()
 ```
 
