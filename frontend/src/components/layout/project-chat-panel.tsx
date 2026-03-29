@@ -466,8 +466,8 @@ function ChatInput({
   }, [message]);
 
   const invalidateProjectQueries = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['session-active', roomId] });
-    // project-messages は refetch で即座に再取得（SSE断線で見逃したメッセージを確実に表示）
+    // session-active はSSEイベントで直接制御するためinvalidateしない
+    // (invalidateするとバックエンドにrefetchされ、プロセスクリーンアップ中にactive=trueが返る)
     queryClient.refetchQueries({ queryKey: ['project-messages', roomId] });
     queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
     queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
@@ -747,11 +747,12 @@ function ChatInput({
     }
 
     syncActiveStatus(false);
+    onSseStateChange?.(false);
     resetRecovery(projectId);
     setWarmupMode(projectId, null);
     invalidateProjectQueries();
     toast.info('処理を中断しました');
-  }, [invalidateProjectQueries, projectId, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
+  }, [invalidateProjectQueries, onSseStateChange, projectId, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
