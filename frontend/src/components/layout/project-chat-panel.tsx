@@ -615,6 +615,7 @@ function ChatInput({
           },
           onAIMessage: () => {
             if (streamRequestRef.current !== requestId) return;
+            syncActiveStatus(false);
             setWarmupMode(projectId, null);
             queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
