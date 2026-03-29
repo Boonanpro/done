@@ -1832,8 +1832,43 @@ async def send_dan_message_stream(
                         if result_text:
                             final_text = result_text
                         elif event.get("is_error"):
-                            # CLIがエラーで終了し応答テキストがない場合、エラー内容を表示
-                            final_text = result_text  # エラー内容（cli_runnerが組み立て済み）
+                            final_text = result_text
+
+                        # resultイベント到着時に即座にai_message+doneを送信
+                        # （ループ終了を待つとCLIプロセスの後処理分だけ遅延する）
+                        ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
+                        if cli_saved_ai_message:
+                            ai_message = {
+                                "id": "cli-saved",
+                                "room_id": room_id,
+                                "sender_id": None,
+                                "sender_name": "ダン",
+                                "sender_type": "ai",
+                                "content": ai_response_content,
+                                "created_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                            yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+                        else:
+                            ai_message_data = await service.send_dan_ai_message(
+                                current_user.user_id, ai_response_content, reasoning_steps,
+                                room_id=room_id, reasoning_full=reasoning_full,
+                            )
+                            if ai_message_data:
+                                ai_message = {
+                                    "id": ai_message_data["id"],
+                                    "room_id": ai_message_data["room_id"],
+                                    "sender_id": ai_message_data.get("sender_id"),
+                                    "sender_name": "ダン",
+                                    "sender_type": "ai",
+                                    "content": ai_message_data["content"],
+                                    "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
+                                }
+                                yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
+                        if run_id and run_state:
+                            await run_service.update_run(run_id, state=run_state)
+                        result_saved = True
+                        yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
+                        done_sent = True
 
                     elif event["type"] == "error":
                         if run_id:
@@ -1842,56 +1877,8 @@ async def send_dan_message_stream(
                         yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': event['message']})}\n\n"
                         # DB保存はCLIスレッドが実行済み（DB-first）
 
-                # キャンセル時はスキップ（cancelled ハンドラで保存済み）
-                if not result_saved:
-                    ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
-
-                    if cli_saved_ai_message:
-                        # DB-first: CLIスレッドが既にAI応答を保存済み → クライアント送信のみ
-                        ai_message = {
-                            "id": "cli-saved",
-                            "room_id": room_id,
-                            "sender_id": None,
-                            "sender_name": "ダン",
-                            "sender_type": "ai",
-                            "content": ai_response_content,
-                            "created_at": datetime.now(timezone.utc).isoformat(),
-                        }
-                        yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
-                    else:
-                        # フォールバック: CLIの保存が失敗した場合は従来通りSSEからDB保存
-                        ai_message_data = await service.send_dan_ai_message(
-                            current_user.user_id, ai_response_content, reasoning_steps,
-                            room_id=room_id, reasoning_full=reasoning_full,
-                        )
-                        if not ai_message_data:
-                            import logging
-                            logging.error(f"send_dan_ai_message returned None for user {current_user.user_id}")
-                            raise ValueError("Failed to save AI message: returned None")
-
-                        ai_message = {
-                            "id": ai_message_data["id"],
-                            "room_id": ai_message_data["room_id"],
-                            "sender_id": ai_message_data.get("sender_id"),
-                            "sender_name": "ダン",
-                            "sender_type": "ai",
-                            "content": ai_message_data["content"],
-                            "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
-                        }
-                        if ai_message_data.get("ai_context"):
-                            ai_message["ai_context"] = ai_message_data["ai_context"]
-
-                        yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
-
-                    # 提案作成は create_proposal MCPツール経由で行われる（DB-first）
-                    # SSE側での見出し検出は不要
-                    if run_id and run_state:
-                        await run_service.update_run(run_id, state=run_state)
-                    result_saved = True
-                    yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
-                    done_sent = True
-
-                    # ダンの回答完了 → 観察者を即座にバックグラウンド起動
+                # ダンの回答完了 → 観察者を即座にバックグラウンド起動
+                if result_saved:
                     _trigger_observer(room_id, current_user.user_id)
 
             # NOTE: 全チャットは統一済み。非プロジェクト分岐は削除済み (2026-03-06)
