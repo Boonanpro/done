@@ -620,6 +620,7 @@ function ChatInput({
             queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
+            queryClient.invalidateQueries({ queryKey: ['projects'] });
           },
           onProcessStep: (_step: ProcessStep) => {
             if (streamRequestRef.current !== requestId) return;
@@ -1049,6 +1050,10 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
     // Warmup block for current live run that has no events yet
     if (showWarmupBlock) {
+      // 最新のhumanメッセージの時刻に紐づけて位置を固定する
+      // (Date.now()を使うと再計算のたびにずれてメッセージとの前後が入れ替わる)
+      const lastHumanMsg = chronologicalMessages.findLast((m) => m.sender_type === 'human');
+      const anchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : Date.now();
       timedItems.push({
         item: {
           kind: 'execution-block',
@@ -1061,8 +1066,8 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           ],
           isLive: true,
         },
-        sortKey: Date.now(),
-        subKey: 0,
+        sortKey: anchorTime,
+        subKey: 2,
       });
     }
 
@@ -1094,7 +1099,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             isLive: isLiveRun,
           },
           sortKey: new Date(events[0].created_at).getTime(),
-          subKey: 0,
+          subKey: 2,
         });
       }
     }
