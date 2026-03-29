@@ -439,10 +439,13 @@ function ChatInput({
 
   // SSEストリーム接続中はポーリングを無効化するためのフラグ
   const sseConnectedRef = useRef(false);
+  // ローカルのアクティブ状態（propsの遅延を回避）
+  const [localActive, setLocalActive] = useState(false);
 
   const syncActiveStatus = useCallback(
     (active: boolean) => {
       sseConnectedRef.current = active;
+      setLocalActive(active);
       queryClient.setQueryData<ActiveSessionStatus>(['session-active', roomId], {
         active,
         session_id: roomId,
@@ -452,7 +455,8 @@ function ChatInput({
     [queryClient, roomId]
   );
 
-  const isBusy = isInterrupted || isSessionActive;
+  // ローカル状態を優先。ローカルがfalseならpropsに関係なくfalse
+  const isBusy = isInterrupted || localActive;
 
   useEffect(() => {
     const textarea = textareaRef.current;
