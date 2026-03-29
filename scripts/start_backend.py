@@ -447,7 +447,7 @@ def start_uvicorn() -> subprocess.Popen:
     print("[start] Step 4: Starting uvicorn...")
 
     cmd = [sys.executable, "-m", "uvicorn", "main:app",
-           "--host", "0.0.0.0", "--port", "8000"]
+           "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
     # CLAUDECODE を除外した環境変数を渡す
     # （Claude Code セッション内から起動しても SDK が動くようにする）

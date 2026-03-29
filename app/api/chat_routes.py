@@ -1617,7 +1617,16 @@ async def send_dan_message_stream(
 
             # ユーザーメッセージを送信（session_id付き）
             yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
-            
+
+            # Update project's updated_at on user message
+            try:
+                from datetime import datetime, timezone
+                project_service.supabase.table("projects").update({
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", project_info["id"]).execute()
+            except Exception:
+                pass
+
             # Step 1.5: 同一セッション（ルーム）の会話履歴を取得
             # 現在のメッセージより前のメッセージを取得（直近10件）
             conversation_history = []
@@ -1869,6 +1878,15 @@ async def send_dan_message_stream(
                         result_saved = True
                         yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
                         done_sent = True
+
+                        # Update project's updated_at to bubble it up in sidebar
+                        try:
+                            from datetime import datetime, timezone
+                            project_service.supabase.table("projects").update({
+                                "updated_at": datetime.now(timezone.utc).isoformat()
+                            }).eq("id", project_info["id"]).execute()
+                        except Exception:
+                            pass
 
                     elif event["type"] == "error":
                         if run_id:
