@@ -365,13 +365,13 @@ function ChatInput({
   roomId,
   isSessionActive,
   sendMessageRef,
-  onSessionComplete,
+  onSseStateChange,
 }: {
   projectId: string;
   roomId: string;
   isSessionActive: boolean;
   sendMessageRef?: React.MutableRefObject<((content: string) => void) | null>;
-  onSessionComplete?: () => void;
+  onSseStateChange?: (connected: boolean) => void;
 }) {
   const [message, setMessage] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
@@ -437,14 +437,12 @@ function ChatInput({
     []
   );
 
-  // 完了直後にポーリングが古い active=true を返して上書きするのを防ぐ
-  const completedAtRef = useRef<number>(0);
+  // SSEストリーム接続中はポーリングを無効化するためのフラグ
+  const sseConnectedRef = useRef(false);
 
   const syncActiveStatus = useCallback(
     (active: boolean) => {
-      if (!active) {
-        completedAtRef.current = Date.now();
-      }
+      sseConnectedRef.current = active;
       queryClient.setQueryData<ActiveSessionStatus>(['session-active', roomId], {
         active,
         session_id: roomId,
@@ -454,9 +452,7 @@ function ChatInput({
     [queryClient, roomId]
   );
 
-  // ポーリング結果が完了直後5秒以内なら active=true を無視
-  const effectiveSessionActive = isSessionActive && (Date.now() - completedAtRef.current > 5000);
-  const isBusy = isInterrupted || effectiveSessionActive;
+  const isBusy = isInterrupted || isSessionActive;
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -572,6 +568,7 @@ function ChatInput({
     }
 
     syncActiveStatus(true);
+    onSseStateChange?.(true);
     setInterrupted(projectId, false);
     setWarmupMode(projectId, isBusy ? 'switching' : 'thinking');
 
@@ -641,7 +638,7 @@ function ChatInput({
             syncActiveStatus(false);
             setInterrupted(projectId, false);
             setWarmupMode(projectId, null);
-            onSessionComplete?.();
+            onSseStateChange?.(false);
             invalidateProjectQueries();
 
             if (!titleGeneratedRef.current) {
@@ -680,7 +677,7 @@ function ChatInput({
             syncActiveStatus(false);
             setInterrupted(projectId, false);
             setWarmupMode(projectId, null);
-            onSessionComplete?.();
+            onSseStateChange?.(false);
             toast.error(error || 'メッセージの送信に失敗しました');
           },
           onProjectCreated: (createdProjectId) => {
@@ -932,8 +929,8 @@ function ChatInput({
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const router = useRouter();
-  // 完了直後にポーリングが古い active=true を返すのを防ぐ
-  const panelCompletedAtRef = useRef<number>(0);
+  // SSE接続中はポーリングを無効化
+  const sseConnectedRef = useRef(false);
   const selectProject = useProjectStore((s) => s.selectProject);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -965,10 +962,12 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     queryFn: () => api.sm.getActiveStatus(project!.room_id!),
     enabled: !!project?.room_id,
     retry: 1,
-    refetchInterval: (query) => (query.state.error ? 10000 : 2000),
+    // SSE接続中はポーリング不要（SSEイベントでキャッシュを直接更新する）
+    // SSE未接続時のみポーリングで状態を確認
+    refetchInterval: () => (sseConnectedRef.current ? false : 3000),
   });
 
-  const isActiveExecution = !!activeStatus?.active && (Date.now() - panelCompletedAtRef.current > 5000);
+  const isActiveExecution = !!activeStatus?.active;
 
   const { data: currentRun } = useQuery({
     queryKey: ['current-run', projectId],
@@ -1211,7 +1210,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       {/* 承認/却下ボタンは廃止。チャットでの承認を観察者が検知して計画を記録する */}
 
       {project?.room_id ? (
-        <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} sendMessageRef={sendMessageRef} onSessionComplete={() => { panelCompletedAtRef.current = Date.now(); }} />
+        <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} sendMessageRef={sendMessageRef} onSseStateChange={(connected) => { sseConnectedRef.current = connected; }} />
       ) : null}
 
       {lightboxImage && (
