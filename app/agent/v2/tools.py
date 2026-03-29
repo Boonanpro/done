@@ -331,7 +331,6 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     return [
         BROWSER_TOOL,
         READ_URL_TOOL,
-        DEEP_RESEARCH_TOOL,
         CREATE_PROPOSAL_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
@@ -397,31 +396,6 @@ Markdown形式でページ全文を返す。""",
         "required": ["url"]
     }
 }
-
-# ============================================
-# ディープリサーチツール
-# ============================================
-
-DEEP_RESEARCH_TOOL = {
-    "name": "deep_research",
-    "description": """複数ソースを検索・読み込み・検証して総合的な調査レポートを作成する。
-比較、分析、推薦、真偽確認など、複数の情報源が必要な質問に使用。
-内部で複数回の検索とページ読み込みを自動実行する（1-2分かかる）。
-
-使用例:
-- 「iPhone 16 vs Pixel 9 どちらが良いか」
-- 「来月大阪旅行、おすすめの観光プラン」
-- 「RAGの最新ベストプラクティス」""",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "description": "調査テーマ（自然言語）"},
-            "context": {"type": "string", "description": "補足情報（任意）"}
-        },
-        "required": ["query"]
-    }
-}
-
 
 # ============================================
 # 認証情報: サービス名正規化
@@ -799,9 +773,6 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     if tool_name == "create_proposal":
         return ("_create_proposal", "create")
 
-    if tool_name == "deep_research":
-        return ("_deep_research", "research")
-
     if tool_name.startswith("studio_"):
         action = tool_name[len("studio_"):]
         return ("_studio_render", action)
@@ -862,7 +833,7 @@ async def _record_issue_for_failure(
             return
         if result.get("issue_recorded"):
             return
-        if skill_name in ("_jina", "_deep_research"):
+        if skill_name == "_jina":
             return
 
         error_type = result.get("error_type")
@@ -1808,10 +1779,6 @@ async def execute_tool(
     # ★★★ URL読み込み（Jina Reader）★★★
     if skill_name == "_jina":
         return await _execute_read_url(params)
-
-    # ★★★ ディープリサーチ ★★★
-    if skill_name == "_deep_research":
-        return await _execute_deep_research(params)
 
     # ★★★ 最初にスキルの存在を確認（認証チェックより先）★★★
     # 存在しないスキルに対して「認証が必要」と誤った応答を返さないため
@@ -2802,34 +2769,3 @@ async def _execute_create_proposal(
         "success": True,
         "message": f"以下の計画を提案します。承認いただければ着手します。\n\n{content}",
     }
-
-
-async def _execute_deep_research(params: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    ディープリサーチパイプラインを実行
-
-    Args:
-        params: {query, context}
-
-    Returns:
-        調査レポート
-    """
-    from app.tools.deep_research import run_deep_research
-
-    query = params.get("query", "")
-    context = params.get("context", "")
-
-    if not query:
-        return {"success": False, "error": "調査テーマが指定されていません"}
-
-    logger.info(f"[DEEP_RESEARCH] Starting: {query}")
-
-    try:
-        result = await run_deep_research(query, context=context)
-        return result
-    except Exception as e:
-        logger.exception(f"Deep research failed: {e}")
-        return {
-            "success": False,
-            "error": f"調査中にエラーが発生しました: {e}",
-        }
