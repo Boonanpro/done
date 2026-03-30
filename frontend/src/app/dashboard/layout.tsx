@@ -2,18 +2,21 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { ArrowLeft, Home, Users, FolderKanban, Building2, Handshake, MessageSquare } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Separator } from '@/components/ui/separator';
+import { Button } from '@/components/ui/button';
 
 const b2bNavItems = [
-  { href: '/dashboard/ai-b2b-sales', label: 'ホーム' },
-  { href: '/dashboard/ai-b2b-sales/companies', label: '企業リスト' },
-  { href: '/dashboard/ai-b2b-sales/deals', label: '商談管理' },
+  { href: '/dashboard/ai-b2b-sales', label: 'ホーム', icon: Home },
+  { href: '/dashboard/ai-b2b-sales/companies', label: '企業リスト', icon: Building2 },
+  { href: '/dashboard/ai-b2b-sales/deals', label: '商談管理', icon: Handshake },
 ];
 
 const dxNavItems = [
-  { href: '/dashboard/dx', label: 'ホーム' },
-  { href: '/dashboard/dx/clients', label: 'クライアント' },
-  { href: '/dashboard/dx/projects', label: 'プロジェクト' },
+  { href: '/dashboard/dx', label: 'ホーム', icon: Home },
+  { href: '/dashboard/dx/clients', label: 'クライアント', icon: Users },
+  { href: '/dashboard/dx/projects', label: 'プロジェクト', icon: FolderKanban },
 ];
 
 export default function DashboardLayout({
@@ -31,12 +34,11 @@ export default function DashboardLayout({
   const title = isDx ? 'DX事業' : isB2b ? 'AI B2B営業' : 'Dashboard';
 
   return (
-    <div className="flex h-screen bg-neutral-950 text-neutral-100">
-      {/* Sidebar */}
+    <div className="flex h-screen bg-background text-foreground">
       {!isHub && (
-        <aside className="hidden md:flex md:w-60 flex-col border-r border-neutral-800 bg-neutral-950">
-          <div className="h-14 flex items-center px-5 border-b border-neutral-800">
-            <Link href="/dashboard" className="text-lg font-semibold tracking-tight text-white">
+        <aside className="hidden md:flex md:w-60 flex-col border-r border-border bg-background">
+          <div className="h-14 flex items-center px-5 border-b border-border">
+            <Link href="/dashboard" className="text-lg font-semibold tracking-tight text-foreground">
               {title}
             </Link>
           </div>
@@ -44,6 +46,7 @@ export default function DashboardLayout({
           <nav className="flex-1 py-4 px-3 space-y-1">
             {navItems.map((item) => {
               const isActive = pathname === item.href;
+              const Icon = item.icon;
               return (
                 <Link
                   key={item.href}
@@ -51,44 +54,39 @@ export default function DashboardLayout({
                   className={cn(
                     'flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors',
                     isActive
-                      ? 'bg-neutral-800 text-white'
-                      : 'text-neutral-400 hover:text-white hover:bg-neutral-800/60'
+                      ? 'bg-secondary text-foreground'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-secondary/60'
                   )}
                 >
+                  <Icon className="h-4 w-4" />
                   {item.label}
                 </Link>
               );
             })}
           </nav>
 
-          <div className="p-3 border-t border-neutral-800">
-            <Link
-              href="/dashboard"
-              className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-neutral-500 hover:text-white hover:bg-neutral-800/60 transition-colors"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-              </svg>
-              ダッシュボード一覧
-            </Link>
-            <Link
-              href="/chat"
-              className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-neutral-500 hover:text-white hover:bg-neutral-800/60 transition-colors"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-              </svg>
-              チャットに戻る
-            </Link>
+          <Separator />
+          <div className="p-3 space-y-1">
+            <Button variant="ghost" size="sm" className="w-full justify-start gap-2 text-muted-foreground" asChild>
+              <Link href="/dashboard">
+                <ArrowLeft className="h-4 w-4" />
+                ダッシュボード一覧
+              </Link>
+            </Button>
+            <Button variant="ghost" size="sm" className="w-full justify-start gap-2 text-muted-foreground" asChild>
+              <Link href="/chat">
+                <MessageSquare className="h-4 w-4" />
+                チャットに戻る
+              </Link>
+            </Button>
           </div>
         </aside>
       )}
 
       <div className="flex flex-col flex-1 min-w-0">
-        {/* Mobile header */}
         {!isHub && (
-          <header className="md:hidden h-14 flex items-center justify-between px-4 border-b border-neutral-800">
-            <Link href="/dashboard" className="text-lg font-semibold text-white">
+          <header className="md:hidden h-14 flex items-center justify-between px-4 border-b border-border">
+            <Link href="/dashboard" className="text-lg font-semibold text-foreground">
               {title}
             </Link>
             <nav className="flex items-center gap-3">
@@ -98,7 +96,7 @@ export default function DashboardLayout({
                   href={item.href}
                   className={cn(
                     'text-xs transition-colors',
-                    pathname === item.href ? 'text-white' : 'text-neutral-400 hover:text-white'
+                    pathname === item.href ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'
                   )}
                 >
                   {item.label}

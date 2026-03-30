@@ -2,7 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { Building2, CheckCircle, FolderKanban, Rocket } from 'lucide-react';
 import { KpiCard } from '@/app/dashboard/components/kpi-card';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Progress } from '@/components/ui/progress';
+import { Skeleton } from '@/components/ui/skeleton';
 
 const API_BASE = 'http://127.0.0.1:8000/api';
 
@@ -27,15 +32,6 @@ const projectStatusLabels: Record<string, string> = {
   archived: 'アーカイブ',
 };
 
-const projectStatusColors: Record<string, string> = {
-  planning: 'bg-yellow-500',
-  in_progress: 'bg-blue-500',
-  review: 'bg-violet-500',
-  deployed: 'bg-emerald-500',
-  maintenance: 'bg-cyan-500',
-  archived: 'bg-neutral-500',
-};
-
 export default function DxHomePage() {
   const [stats, setStats] = useState<DxStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -50,8 +46,21 @@ export default function DxHomePage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="w-6 h-6 border-2 border-neutral-600 border-t-white rounded-full animate-spin" />
+      <div className="max-w-5xl mx-auto space-y-8">
+        <div>
+          <Skeleton className="h-8 w-32 mb-2" />
+          <Skeleton className="h-4 w-64" />
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Card key={i}>
+              <CardContent className="pt-6 space-y-3">
+                <Skeleton className="h-4 w-24" />
+                <Skeleton className="h-8 w-16" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </div>
     );
   }
@@ -65,57 +74,48 @@ export default function DxHomePage() {
     <div className="max-w-5xl mx-auto space-y-8">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-white mb-1">DX事業</h1>
-          <p className="text-sm text-neutral-500">HP制作・DXツール提供の統合管理</p>
+          <h1 className="text-2xl font-semibold text-foreground mb-1">DX事業</h1>
+          <p className="text-sm text-muted-foreground">HP制作・DXツール提供の統合管理</p>
         </div>
         <div className="flex gap-2">
-          <Link
-            href="/dashboard/dx/clients"
-            className="px-4 py-2 rounded-lg text-sm bg-neutral-800 text-white hover:bg-neutral-700 transition-colors"
-          >
-            クライアント一覧
-          </Link>
-          <Link
-            href="/dashboard/dx/projects"
-            className="px-4 py-2 rounded-lg text-sm bg-white text-neutral-900 hover:bg-neutral-200 transition-colors"
-          >
-            プロジェクト一覧
-          </Link>
+          <Button variant="outline" asChild>
+            <Link href="/dashboard/dx/clients">クライアント一覧</Link>
+          </Button>
+          <Button asChild>
+            <Link href="/dashboard/dx/projects">プロジェクト一覧</Link>
+          </Button>
         </div>
       </div>
 
       {/* KPI Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KpiCard label="クライアント数" value={kpis?.client_count ?? 0} icon="🏢" />
-        <KpiCard label="アクティブ" value={kpis?.active_clients ?? 0} icon="✅" />
-        <KpiCard label="プロジェクト数" value={kpis?.project_count ?? 0} icon="📁" />
-        <KpiCard label="公開済み" value={kpis?.deployed_projects ?? 0} icon="🚀" />
+        <KpiCard label="クライアント数" value={kpis?.client_count ?? 0} icon={Building2} />
+        <KpiCard label="アクティブ" value={kpis?.active_clients ?? 0} icon={CheckCircle} />
+        <KpiCard label="プロジェクト数" value={kpis?.project_count ?? 0} icon={FolderKanban} />
+        <KpiCard label="公開済み" value={kpis?.deployed_projects ?? 0} icon={Rocket} />
       </div>
 
       {/* Project Status */}
-      <div className="rounded-xl border border-neutral-800 bg-neutral-900/50 p-5">
-        <h2 className="text-sm font-medium text-neutral-400 mb-4">プロジェクトステータス</h2>
-        <div className="space-y-3">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm font-medium text-muted-foreground">プロジェクトステータス</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
           {allStatuses.map((status) => {
             const count = projectStatus[status] || 0;
             const pct = (count / maxCount) * 100;
             return (
               <div key={status} className="flex items-center gap-3">
-                <span className="text-xs text-neutral-400 w-20 shrink-0 text-right">
+                <span className="text-sm text-muted-foreground w-20 shrink-0 text-right">
                   {projectStatusLabels[status]}
                 </span>
-                <div className="flex-1 h-6 bg-neutral-800 rounded-md overflow-hidden">
-                  <div
-                    className={`h-full rounded-md transition-all ${projectStatusColors[status] ?? 'bg-neutral-600'}`}
-                    style={{ width: `${Math.max(pct, count > 0 ? 8 : 0)}%` }}
-                  />
-                </div>
-                <span className="text-xs text-neutral-500 w-8 text-right">{count}</span>
+                <Progress value={count > 0 ? Math.max(pct, 8) : 0} className="flex-1" />
+                <span className="text-sm text-muted-foreground w-8 text-right tabular-nums">{count}</span>
               </div>
             );
           })}
-        </div>
-      </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
