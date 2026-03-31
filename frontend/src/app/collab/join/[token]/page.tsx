@@ -51,12 +51,8 @@ function formatDateSeparator(dateStr: string): string {
 export default function GuestJoinPage() {
   const params = useParams();
   const inviteToken = params.token as string;
-  const [guestName, setGuestName] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem(GUEST_NAME_KEY) || '';
-    }
-    return '';
-  });
+  const [guestName, setGuestName] = useState('');
+  const [guestNameLoaded, setGuestNameLoaded] = useState(false);
   const [guestToken, setGuestToken] = useState<string | null>(null);
   const [roomId, setRoomId] = useState<string | null>(null);
   const [roomTitle, setRoomTitle] = useState('');
@@ -103,6 +99,7 @@ export default function GuestJoinPage() {
       setRoomId(savedRoom);
       if (savedTitle) setRoomTitle(savedTitle);
     }
+    setGuestNameLoaded(true);
   }, [inviteToken]);
 
   // Fetch invite info
@@ -253,6 +250,9 @@ export default function GuestJoinPage() {
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
+
+  // Wait for localStorage to load before showing form
+  if (!guestNameLoaded) return null;
 
   // Not joined yet - show join form
   if (!guestToken || !roomId) {
