@@ -1,11 +1,31 @@
 """
 Dashboard API Routes - ダッシュボード管理画面
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from typing import Optional
 from app.services.supabase_client import get_supabase_client
+from app.services.auth_service import decode_access_token, TokenData
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+security = HTTPBearer(auto_error=False)
+
+ACCESS_TOKEN_COOKIE = "done_access_token"
+
+
+async def get_current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> TokenData:
+    token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not token and credentials:
+        token = credentials.credentials
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    data = decode_access_token(token)
+    if not data:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return data
 
 
 # ============================================================
@@ -13,9 +33,9 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 # ============================================================
 
 @router.get("/businesses")
-async def list_businesses():
+async def list_businesses(user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
-    result = sb.table("dashboard_businesses").select("*").order("created_at").execute()
+    result = sb.table("dashboard_businesses").select("*").eq("owner_id", user.user_id).order("created_at").execute()
     return {"businesses": result.data}
 
 
@@ -24,13 +44,13 @@ async def list_businesses():
 # ============================================================
 
 @router.get("/ai-b2b-sales/stats")
-async def get_b2b_stats():
+async def get_b2b_stats(user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
 
-    companies = sb.table("b2b_companies").select("id, status", count="exact").execute()
-    deals = sb.table("b2b_deals").select("id, stage, estimated_amount", count="exact").execute()
-    contracts = sb.table("b2b_contracts").select("id, amount, status").eq("status", "active").execute()
-    emails = sb.table("b2b_emails").select("id, status", count="exact").execute()
+    companies = sb.table("b2b_companies").select("id, status", count="exact").eq("owner_id", user.user_id).execute()
+    deals = sb.table("b2b_deals").select("id, stage, estimated_amount", count="exact").eq("owner_id", user.user_id).execute()
+    contracts = sb.table("b2b_contracts").select("id, amount, status").eq("owner_id", user.user_id).eq("status", "active").execute()
+    emails = sb.table("b2b_emails").select("id, status", count="exact").eq("owner_id", user.user_id).execute()
 
     company_count = companies.count or 0
     deal_count = deals.count or 0
@@ -73,6 +93,7 @@ async def get_b2b_stats():
 
 @router.get("/ai-b2b-sales/companies")
 async def list_companies(
+    user: TokenData = Depends(get_current_user),
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     limit: int = Query(50, le=200),
@@ -81,7 +102,7 @@ async def list_companies(
     sb = get_supabase_client().client
     query = sb.table("b2b_companies").select(
         "*, b2b_areas(prefecture, city)", count="exact"
-    )
+    ).eq("owner_id", user.user_id)
 
     if status:
         query = query.eq("status", status)
@@ -96,8 +117,9 @@ async def list_companies(
 
 
 @router.post("/ai-b2b-sales/companies")
-async def create_company(body: dict):
+async def create_company(body: dict, user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
+    body["owner_id"] = user.user_id
     result = sb.table("b2b_companies").insert(body).execute()
     if not result.data:
         raise HTTPException(status_code=400, detail="Failed to create company")
@@ -105,8 +127,12 @@ async def create_company(body: dict):
 
 
 @router.patch("/ai-b2b-sales/companies/{company_id}")
-async def update_company(company_id: str, body: dict):
+async def update_company(company_id: str, body: dict, user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
+    # Verify ownership
+    existing = sb.table("b2b_companies").select("owner_id").eq("id", company_id).execute()
+    if not existing.data or existing.data[0].get("owner_id") != user.user_id:
+        raise HTTPException(status_code=404, detail="Company not found")
     result = sb.table("b2b_companies").update(body).eq("id", company_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Company not found")
@@ -119,13 +145,14 @@ async def update_company(company_id: str, body: dict):
 
 @router.get("/ai-b2b-sales/deals")
 async def list_deals(
+    user: TokenData = Depends(get_current_user),
     stage: Optional[str] = Query(None),
     limit: int = Query(100, le=500),
 ):
     sb = get_supabase_client().client
     query = sb.table("b2b_deals").select(
         "*, b2b_companies(name)"
-    )
+    ).eq("owner_id", user.user_id)
     if stage:
         query = query.eq("stage", stage)
 
@@ -134,8 +161,9 @@ async def list_deals(
 
 
 @router.post("/ai-b2b-sales/deals")
-async def create_deal(body: dict):
+async def create_deal(body: dict, user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
+    body["owner_id"] = user.user_id
     result = sb.table("b2b_deals").insert(body).execute()
     if not result.data:
         raise HTTPException(status_code=400, detail="Failed to create deal")
@@ -143,8 +171,11 @@ async def create_deal(body: dict):
 
 
 @router.patch("/ai-b2b-sales/deals/{deal_id}")
-async def update_deal(deal_id: str, body: dict):
+async def update_deal(deal_id: str, body: dict, user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
+    existing = sb.table("b2b_deals").select("owner_id").eq("id", deal_id).execute()
+    if not existing.data or existing.data[0].get("owner_id") != user.user_id:
+        raise HTTPException(status_code=404, detail="Deal not found")
     result = sb.table("b2b_deals").update(body).eq("id", deal_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Deal not found")
@@ -156,11 +187,11 @@ async def update_deal(deal_id: str, body: dict):
 # ============================================================
 
 @router.get("/dx/stats")
-async def get_dx_stats():
+async def get_dx_stats(user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
 
-    clients = sb.table("dx_clients").select("id, status", count="exact").execute()
-    projects = sb.table("dx_projects").select("id, status, estimated_amount", count="exact").execute()
+    clients = sb.table("dx_clients").select("id, status", count="exact").eq("owner_id", user.user_id).execute()
+    projects = sb.table("dx_projects").select("id, status, estimated_amount", count="exact").eq("owner_id", user.user_id).execute()
 
     client_count = clients.count or 0
     project_count = projects.count or 0
@@ -199,13 +230,14 @@ async def get_dx_stats():
 
 @router.get("/dx/clients")
 async def list_dx_clients(
+    user: TokenData = Depends(get_current_user),
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     limit: int = Query(50, le=200),
     offset: int = Query(0),
 ):
     sb = get_supabase_client().client
-    query = sb.table("dx_clients").select("*", count="exact")
+    query = sb.table("dx_clients").select("*", count="exact").eq("owner_id", user.user_id)
 
     if status:
         query = query.eq("status", status)
@@ -217,21 +249,22 @@ async def list_dx_clients(
 
 
 @router.get("/dx/clients/{client_id}")
-async def get_dx_client(client_id: str):
+async def get_dx_client(client_id: str, user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
-    result = sb.table("dx_clients").select("*").eq("id", client_id).execute()
+    result = sb.table("dx_clients").select("*").eq("id", client_id).eq("owner_id", user.user_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Client not found")
     # Also fetch projects for this client
-    projects = sb.table("dx_projects").select("*").eq("client_id", client_id).order("created_at", desc=True).execute()
+    projects = sb.table("dx_projects").select("*").eq("client_id", client_id).eq("owner_id", user.user_id).order("created_at", desc=True).execute()
     client = result.data[0]
     client["projects"] = projects.data or []
     return client
 
 
 @router.post("/dx/clients")
-async def create_dx_client(body: dict):
+async def create_dx_client(body: dict, user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
+    body["owner_id"] = user.user_id
     result = sb.table("dx_clients").insert(body).execute()
     if not result.data:
         raise HTTPException(status_code=400, detail="Failed to create client")
@@ -239,8 +272,11 @@ async def create_dx_client(body: dict):
 
 
 @router.patch("/dx/clients/{client_id}")
-async def update_dx_client(client_id: str, body: dict):
+async def update_dx_client(client_id: str, body: dict, user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
+    existing = sb.table("dx_clients").select("owner_id").eq("id", client_id).execute()
+    if not existing.data or existing.data[0].get("owner_id") != user.user_id:
+        raise HTTPException(status_code=404, detail="Client not found")
     result = sb.table("dx_clients").update(body).eq("id", client_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Client not found")
@@ -248,9 +284,12 @@ async def update_dx_client(client_id: str, body: dict):
 
 
 @router.delete("/dx/clients/{client_id}")
-async def delete_dx_client(client_id: str):
+async def delete_dx_client(client_id: str, user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
-    result = sb.table("dx_clients").delete().eq("id", client_id).execute()
+    existing = sb.table("dx_clients").select("owner_id").eq("id", client_id).execute()
+    if not existing.data or existing.data[0].get("owner_id") != user.user_id:
+        raise HTTPException(status_code=404, detail="Client not found")
+    sb.table("dx_clients").delete().eq("id", client_id).execute()
     return {"deleted": True}
 
 
@@ -260,13 +299,14 @@ async def delete_dx_client(client_id: str):
 
 @router.get("/dx/projects")
 async def list_dx_projects(
+    user: TokenData = Depends(get_current_user),
     status: Optional[str] = Query(None),
     client_id: Optional[str] = Query(None),
     limit: int = Query(50, le=200),
     offset: int = Query(0),
 ):
     sb = get_supabase_client().client
-    query = sb.table("dx_projects").select("*, dx_clients(name)", count="exact")
+    query = sb.table("dx_projects").select("*, dx_clients(name)", count="exact").eq("owner_id", user.user_id)
 
     if status:
         query = query.eq("status", status)
@@ -278,8 +318,9 @@ async def list_dx_projects(
 
 
 @router.post("/dx/projects")
-async def create_dx_project(body: dict):
+async def create_dx_project(body: dict, user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
+    body["owner_id"] = user.user_id
     result = sb.table("dx_projects").insert(body).execute()
     if not result.data:
         raise HTTPException(status_code=400, detail="Failed to create project")
@@ -287,8 +328,11 @@ async def create_dx_project(body: dict):
 
 
 @router.patch("/dx/projects/{project_id}")
-async def update_dx_project(project_id: str, body: dict):
+async def update_dx_project(project_id: str, body: dict, user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
+    existing = sb.table("dx_projects").select("owner_id").eq("id", project_id).execute()
+    if not existing.data or existing.data[0].get("owner_id") != user.user_id:
+        raise HTTPException(status_code=404, detail="Project not found")
     result = sb.table("dx_projects").update(body).eq("id", project_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -296,7 +340,10 @@ async def update_dx_project(project_id: str, body: dict):
 
 
 @router.delete("/dx/projects/{project_id}")
-async def delete_dx_project(project_id: str):
+async def delete_dx_project(project_id: str, user: TokenData = Depends(get_current_user)):
     sb = get_supabase_client().client
-    result = sb.table("dx_projects").delete().eq("id", project_id).execute()
+    existing = sb.table("dx_projects").select("owner_id").eq("id", project_id).execute()
+    if not existing.data or existing.data[0].get("owner_id") != user.user_id:
+        raise HTTPException(status_code=404, detail="Project not found")
+    sb.table("dx_projects").delete().eq("id", project_id).execute()
     return {"deleted": True}

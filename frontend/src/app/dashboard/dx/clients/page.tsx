@@ -44,7 +44,7 @@ export default function DxClientsPage() {
   const fetchClients = () => {
     const params = new URLSearchParams();
     if (search) params.set('search', search);
-    fetch(`${API_BASE}/dashboard/dx/clients?${params}`)
+    fetch(`${API_BASE}/dashboard/dx/clients?${params}`, { credentials: 'include' })
       .then((r) => r.json())
       .then((d) => setClients(d.clients || []))
       .catch(() => {})
@@ -62,6 +62,7 @@ export default function DxClientsPage() {
       const res = await fetch(`${API_BASE}/dashboard/dx/clients`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           name: formData.name,
           industry: formData.industry || null,

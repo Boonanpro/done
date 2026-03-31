@@ -159,6 +159,33 @@ class CollabService:
             "role": invite["role"],
         }
 
+    async def link_user_to_invites(self, user_id: str, guest_name: str):
+        """Link a registered user to their existing guest invites by matching guest_name."""
+        await self._retry("link_user_invites",
+            lambda: self.supabase.table("collab_invites")
+                .update({"user_id": user_id})
+                .eq("guest_name", guest_name)
+                .eq("status", "joined")
+                .is_("user_id", "null")
+                .execute())
+
+    async def list_guest_rooms(self, user_id: str) -> List[dict]:
+        """List rooms where the user is a guest (via user_id in collab_invites)."""
+        invites = await self._retry("list_guest_invites",
+            lambda: self.supabase.table("collab_invites")
+                .select("*, collab_rooms(*)")
+                .eq("user_id", user_id)
+                .eq("status", "joined")
+                .execute())
+        rooms = []
+        for inv in invites.data:
+            room = inv.get("collab_rooms")
+            if room:
+                room["_invite_token"] = inv["token"]
+                room["_guest_name"] = inv.get("guest_name", "")
+                rooms.append(room)
+        return rooms
+
     # ==================== Messages ====================
 
     async def send_message(self, room_id: str, sender_type: str, sender_name: str,

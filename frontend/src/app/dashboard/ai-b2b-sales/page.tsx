@@ -54,7 +54,7 @@ export default function AiB2bSalesHomePage() {
   useEffect(() => {
     const fetchStats = async () => {
       try {
-        const res = await fetch(`${API_BASE}/dashboard/ai-b2b-sales/stats`);
+        const res = await fetch(`${API_BASE}/dashboard/ai-b2b-sales/stats`, { credentials: 'include' });
         if (res.ok) {
           const data = await res.json();
           setStats({ ...defaultStats, ...data });

@@ -52,7 +52,7 @@ export default function DxProjectsPage() {
   useEffect(() => {
     const params = new URLSearchParams();
     if (filterStatus !== 'all') params.set('status', filterStatus);
-    fetch(`${API_BASE}/dashboard/dx/projects?${params}`)
+    fetch(`${API_BASE}/dashboard/dx/projects?${params}`, { credentials: 'include' })
       .then((r) => r.json())
       .then((d) => setProjects(d.projects || []))
       .catch(() => {})

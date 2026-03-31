@@ -37,7 +37,7 @@ export default function DxHomePage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetch(`${API_BASE}/dashboard/dx/stats`)
+    fetch(`${API_BASE}/dashboard/dx/stats`, { credentials: 'include' })
       .then((r) => r.json())
       .then(setStats)
       .catch(() => {})

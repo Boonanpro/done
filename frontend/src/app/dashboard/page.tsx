@@ -43,7 +43,7 @@ export default function DashboardHubPage() {
   useEffect(() => {
     const fetchBusinesses = async () => {
       try {
-        const res = await fetch(`${API_BASE}/dashboard/businesses`);
+        const res = await fetch(`${API_BASE}/dashboard/businesses`, { credentials: 'include' });
         if (res.ok) {
           const data = await res.json();
           setBusinesses(data.businesses ?? data);

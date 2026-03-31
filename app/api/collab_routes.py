@@ -131,9 +131,17 @@ async def list_rooms(
     user: TokenData = Depends(get_current_user),
     service: CollabService = Depends(get_collab_service),
 ):
+    # Owner's rooms
     rooms = await service.list_rooms(user.user_id)
+    # Also include rooms where user is a guest
+    guest_rooms = await service.list_guest_rooms(user.user_id)
+
     room_responses = []
-    for r in rooms:
+    seen_ids = set()
+    for r in rooms + guest_rooms:
+        if r["id"] in seen_ids:
+            continue
+        seen_ids.add(r["id"])
         # Get guest count
         invites = await service.list_invites(r["id"])
         guest_count = sum(1 for i in invites if i["status"] == "joined")
@@ -156,7 +164,13 @@ async def get_room(
     service: CollabService = Depends(get_collab_service),
 ):
     room = await service.get_room(room_id)
-    if not room or room["owner_id"] != user.user_id:
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    # Allow owner or linked guest user
+    is_owner = room["owner_id"] == user.user_id
+    guest_rooms = await service.list_guest_rooms(user.user_id) if not is_owner else []
+    is_guest = any(gr["id"] == room_id for gr in guest_rooms)
+    if not is_owner and not is_guest:
         raise HTTPException(status_code=404, detail="Room not found")
     invites = await service.list_invites(room_id)
     guest_count = sum(1 for i in invites if i["status"] == "joined")
