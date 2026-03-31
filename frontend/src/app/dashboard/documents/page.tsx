@@ -1,7 +1,7 @@
 'use client';
 
 // Document Management - Dan版Notion
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { Suspense, useEffect, useState, useCallback, useRef } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import {
   FileStack, FolderOpen, Upload, Search, Grid3X3, List, Table2,
@@ -134,6 +134,14 @@ function getMimeColor(mimeType?: string): string {
 // ============================================================
 
 export default function DocumentsPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-full text-muted-foreground">読み込み中...</div>}>
+      <DocumentsPageInner />
+    </Suspense>
+  );
+}
+
+function DocumentsPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const fileInputRef = useRef<HTMLInputElement>(null);
