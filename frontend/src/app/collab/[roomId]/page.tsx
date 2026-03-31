@@ -370,15 +370,14 @@ export default function CollabRoomPage() {
                     }
                   }}
                 />
-                {/* Reply editor - right-aligned with quote reference */}
+                {/* Reply editor - right-aligned with connector line to guest message */}
                 {msg.sender_type === 'guest' && rs?.state === 'ready' && (
-                  <div className="flex justify-end mt-1.5">
-                    <div className="w-[min(75%,480px)] space-y-1.5">
-                      {/* Quote reference to original message */}
-                      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                        <div className="w-3 h-3 border-l-2 border-b-2 border-muted-foreground/30 rounded-bl-sm" />
-                        <span className="truncate">{msg.sender_name}: {msg.content.slice(0, 40)}{msg.content.length > 40 ? '...' : ''}</span>
-                      </div>
+                  <div className="flex items-stretch gap-0 mt-0">
+                    {/* Connector line: curves from left (guest msg) to right (reply editor) */}
+                    <div className="flex-1 flex items-end justify-end pr-1.5 pb-6">
+                      <div className="w-full h-[calc(100%-8px)] border-b-2 border-l-2 border-violet-500/25 rounded-bl-xl" />
+                    </div>
+                    <div className="w-[min(65%,420px)] space-y-1.5 pt-1">
                       <textarea
                         value={rs.reply}
                         onChange={(e) => setReplyStates(prev => ({ ...prev, [msg.id]: { ...prev[msg.id], reply: e.target.value } }))}
