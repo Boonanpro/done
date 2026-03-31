@@ -92,11 +92,21 @@ class CollabService:
 
     # ==================== Invites ====================
 
-    async def create_invite(self, room_id: str, owner_id: str, role: str = "reviewer",
+    async def create_invite(self, room_id: str, user_id: str, role: str = "reviewer",
                             expires_hours: int = 72) -> dict:
         room = await self.get_room(room_id)
-        if not room or room["owner_id"] != owner_id:
-            raise ValueError("Room not found or not authorized")
+        if not room:
+            raise ValueError("Room not found")
+        # Allow owner or linked guest user
+        is_owner = room["owner_id"] == user_id
+        if not is_owner:
+            invites = await self.list_invites(room_id)
+            is_member = any(
+                inv.get("user_id") == user_id and inv["status"] == "joined"
+                for inv in invites
+            )
+            if not is_member:
+                raise ValueError("Not authorized")
 
         token = generate_invite_token()
         expires_at = (datetime.now(timezone.utc) + timedelta(hours=expires_hours)).isoformat()

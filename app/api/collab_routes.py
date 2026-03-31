@@ -216,7 +216,7 @@ async def create_invite(
 ):
     invite = await service.create_invite(
         room_id=room_id,
-        owner_id=user.user_id,
+        user_id=user.user_id,
         role=req.role.value,
         expires_hours=req.expires_hours,
     )
