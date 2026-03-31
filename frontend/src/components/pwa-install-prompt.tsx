@@ -49,7 +49,7 @@ export function PWAInstallPrompt() {
   useEffect(() => {
     if (window.matchMedia('(display-mode: standalone)').matches) return;
     const dismissed = localStorage.getItem(DISMISSED_KEY);
-    if (dismissed && Date.now() - parseInt(dismissed) < 5 * 60 * 1000) return; // 5分後に再表示
+    if (dismissed) return; // 1回閉じたら再表示しない
 
     const ua = navigator.userAgent;
     const ios = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);

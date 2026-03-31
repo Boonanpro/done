@@ -4,14 +4,14 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Send, Circle, Bot, User, UserCheck, Paperclip, Pencil, Sparkles, Loader2, Reply, X } from 'lucide-react';
+import { Send, Circle, Bot, User, UserCheck, Paperclip, Pencil, Sparkles, Loader2, Reply, X, Bell } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { useCollabWebSocket } from '@/hooks/useCollabWebSocket';
 import { usePushNotification } from '@/hooks/usePushNotification';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { PWAInstallPrompt } from '@/components/pwa-install-prompt';
+import { Share, MoreVertical, Download } from 'lucide-react';
 import { OpenInBrowserPrompt } from '@/components/open-in-browser';
 import { LinkifyText } from '@/components/linkify-text';
 
@@ -72,6 +72,7 @@ export default function GuestJoinPage() {
   const [danThinking, setDanThinking] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [editNameValue, setEditNameValue] = useState('');
+  const [showInstallGuide, setShowInstallGuide] = useState(false);
   // Reply generation state - keyed by message ID
   const [replyStates, setReplyStates] = useState<Record<string, { state: 'loading' | 'ready' | 'sent'; reply: string }>>({});
   const [replyTo, setReplyTo] = useState<CollabMessageResponse | null>(null);
@@ -261,7 +262,6 @@ export default function GuestJoinPage() {
     return (
       <div className="min-h-screen flex items-start justify-center bg-background p-4 pt-[15vh]">
         <OpenInBrowserPrompt />
-        <PWAInstallPrompt />
         <Card className="w-full max-w-md">
           <CardHeader className="text-center">
             <CardTitle className="text-xl">
@@ -325,6 +325,19 @@ export default function GuestJoinPage() {
           <span className="text-sm max-w-[80px] truncate">{guestName}</span>
         </button>
       </div>
+
+      {/* Notification install banner - only on mobile, not standalone */}
+      {typeof window !== 'undefined' &&
+        !window.matchMedia('(display-mode: standalone)').matches &&
+        (/iPad|iPhone|iPod|Android/i.test(navigator.userAgent)) && (
+        <button
+          onClick={() => setShowInstallGuide(true)}
+          className="flex items-center gap-2 px-4 py-2 bg-violet-500/10 border-b border-violet-500/20 text-violet-400 text-xs shrink-0 hover:bg-violet-500/15 transition-colors"
+        >
+          <Bell className="h-3.5 w-3.5 shrink-0" />
+          <span>通知がほしい場合</span>
+        </button>
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 overscroll-contain" ref={scrollRef}>
@@ -446,7 +459,71 @@ export default function GuestJoinPage() {
         </div>
       )}
 
-      <PWAInstallPrompt />
+      {/* Install guide modal */}
+      {showInstallGuide && (
+        <div className="absolute inset-0 z-50 bg-background/90 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-card border rounded-2xl shadow-xl p-5 w-full max-w-sm space-y-4 relative max-h-[90vh] overflow-y-auto">
+            <button onClick={() => setShowInstallGuide(false)} className="absolute top-3 right-3 text-muted-foreground hover:text-foreground">
+              <X className="h-5 w-5" />
+            </button>
+            <h3 className="font-bold text-base">通知を受け取るには</h3>
+            <p className="text-xs text-muted-foreground">ホーム画面にアプリを追加すると、LINEのように新着メッセージの通知が届きます。</p>
+
+            {/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) ? (
+              <div className="space-y-3">
+                <div className="flex items-center gap-3 bg-muted/50 rounded-xl p-3">
+                  <div className="h-9 w-9 rounded-full bg-blue-500/20 flex items-center justify-center text-lg font-bold text-blue-400 shrink-0">1</div>
+                  <div>
+                    <p className="text-sm font-medium">画面下の共有ボタンをタップ</p>
+                    <div className="flex items-center gap-1 mt-0.5">
+                      <Share className="h-4 w-4 text-blue-400" />
+                      <span className="text-xs text-muted-foreground">四角に上矢印のアイコン</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 bg-muted/50 rounded-xl p-3">
+                  <div className="h-9 w-9 rounded-full bg-blue-500/20 flex items-center justify-center text-lg font-bold text-blue-400 shrink-0">2</div>
+                  <div>
+                    <p className="text-sm font-medium">「ホーム画面に追加」をタップ</p>
+                    <span className="text-xs text-muted-foreground">下にスクロールすると見つかります</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 bg-muted/50 rounded-xl p-3">
+                  <div className="h-9 w-9 rounded-full bg-green-500/20 flex items-center justify-center text-lg font-bold text-green-400 shrink-0">3</div>
+                  <div>
+                    <p className="text-sm font-medium">右上の「追加」をタップ</p>
+                    <span className="text-xs text-muted-foreground">ホーム画面にアイコンが追加されます</span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center gap-3 bg-muted/50 rounded-xl p-3">
+                  <div className="h-9 w-9 rounded-full bg-blue-500/20 flex items-center justify-center text-lg font-bold text-blue-400 shrink-0">1</div>
+                  <div>
+                    <p className="text-sm font-medium">右上の「⋮」メニューをタップ</p>
+                    <div className="flex items-center gap-1 mt-0.5">
+                      <MoreVertical className="h-4 w-4 text-blue-400" />
+                      <span className="text-xs text-muted-foreground">3つの点のアイコン</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 bg-muted/50 rounded-xl p-3">
+                  <div className="h-9 w-9 rounded-full bg-blue-500/20 flex items-center justify-center text-lg font-bold text-blue-400 shrink-0">2</div>
+                  <div>
+                    <p className="text-sm font-medium">「アプリをインストール」</p>
+                    <p className="text-sm font-medium">または「ホーム画面に追加」</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <button onClick={() => setShowInstallGuide(false)} className="w-full text-center text-xs text-muted-foreground hover:text-foreground py-1">
+              閉じる
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Input */}
       <div className="shrink-0 border-t px-4 py-3">

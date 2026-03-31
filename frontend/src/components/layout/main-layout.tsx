@@ -6,7 +6,6 @@ import { cn } from '@/lib/utils';
 import { Sidebar } from './sidebar';
 import { ProjectChatPanel } from './project-chat-panel';
 import { NotificationPanel } from '@/components/notification/notification-panel';
-import { PWAInstallPrompt } from '@/components/pwa-install-prompt';
 import { useProjectStore } from '@/stores/project-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { useCollabNotifications } from '@/hooks/useCollabNotifications';
@@ -99,7 +98,6 @@ export function MainLayout({
           </>
         )}
 
-        <PWAInstallPrompt />
 
         {/* Content: children, project chat, or empty state */}
         {children ? (
@@ -158,7 +156,6 @@ export function MainLayout({
           </div>
         )}
         {showNotifications && <NotificationPanel />}
-        <PWAInstallPrompt />
       </main>
     </div>
   );
