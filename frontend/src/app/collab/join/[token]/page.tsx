@@ -109,6 +109,19 @@ export default function GuestJoinPage() {
     enabled: !!inviteToken && !guestToken,
   });
 
+  // Auto-join if we have a saved name but no token (e.g. cache cleared)
+  const autoJoinAttempted = useRef(false);
+  useEffect(() => {
+    if (autoJoinAttempted.current) return;
+    if (!guestNameLoaded || guestToken || !guestName.trim()) return;
+    // Wait for invite info to load first — if rejoin_token exists, that path handles it
+    if (!inviteInfo) return;
+    if ((inviteInfo as any).rejoin_token) return;
+    // Auto-join with saved name
+    autoJoinAttempted.current = true;
+    handleJoin();
+  }, [guestNameLoaded, guestToken, guestName, inviteInfo]);
+
   // Auto-rejoin if invite was already used (same guest, different browser)
   useEffect(() => {
     if (inviteInfo && (inviteInfo as any).rejoin_token && !guestToken) {
