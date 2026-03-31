@@ -6,8 +6,10 @@ import { cn } from '@/lib/utils';
 import { Sidebar } from './sidebar';
 import { ProjectChatPanel } from './project-chat-panel';
 import { NotificationPanel } from '@/components/notification/notification-panel';
+import { PWAInstallPrompt } from '@/components/pwa-install-prompt';
 import { useProjectStore } from '@/stores/project-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
+import { useCollabNotifications } from '@/hooks/useCollabNotifications';
 
 interface MainLayoutProps {
   children?: React.ReactNode;
@@ -27,6 +29,9 @@ export function MainLayout({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [hasOpenedMobileSidebar, setHasOpenedMobileSidebar] = useState(false);
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
+
+  // Show toast notifications for new collab messages
+  useCollabNotifications();
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -94,6 +99,8 @@ export function MainLayout({
           </>
         )}
 
+        <PWAInstallPrompt />
+
         {/* Content: children, project chat, or empty state */}
         {children ? (
           <div className="h-full">{children}</div>
@@ -151,6 +158,7 @@ export function MainLayout({
           </div>
         )}
         {showNotifications && <NotificationPanel />}
+        <PWAInstallPrompt />
       </main>
     </div>
   );
