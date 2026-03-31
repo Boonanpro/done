@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/stores/auth-store';
-import { api, ApiError, setImmediateToken, setStoredToken, type LoginRequest, type RegisterRequest } from '@/lib/api-client';
+import { api, ApiError, OWNER_USER_ID, setImmediateToken, setStoredToken, type LoginRequest, type RegisterRequest } from '@/lib/api-client';
 
 /** Collect all collab guest tokens from localStorage */
 function collectGuestTokens(): string[] {
@@ -80,8 +80,8 @@ export function useAuth() {
         setToken(newToken);
         const userData = await api.auth.me();
         setUser(userData);
-        // Force navigation with window.location for reliability
-        window.location.href = '/chat';
+        // Redirect based on role: owner → /chat, others → /collab
+        window.location.href = userData.id === OWNER_USER_ID ? '/chat' : '/collab';
         return { success: true };
       } catch (error) {
         setLoading(false);
@@ -111,8 +111,7 @@ export function useAuth() {
         setToken(newToken);
         const userData = await api.auth.me();
         setUser(userData);
-        // Force navigation with window.location for reliability
-        window.location.href = '/chat';
+        window.location.href = userData.id === OWNER_USER_ID ? '/chat' : '/collab';
         return { success: true };
       } catch (error) {
         setLoading(false);

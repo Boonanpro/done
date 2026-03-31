@@ -13,6 +13,8 @@ const SSE_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 // ==================== Types ====================
 
+export const OWNER_USER_ID = '2582a188-ff24-4a4f-b989-6063034d90b2';
+
 export interface UserResponse {
   id: string;
   email: string;

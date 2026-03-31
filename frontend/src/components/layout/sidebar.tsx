@@ -21,7 +21,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { useAuth } from '@/hooks/use-auth';
-import { api, type ProjectResponse } from '@/lib/api-client';
+import { api, OWNER_USER_ID, type ProjectResponse } from '@/lib/api-client';
 import { useProjectStore } from '@/stores/project-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { NotificationPanel } from '@/components/notification/notification-panel';
@@ -112,6 +112,7 @@ export function Sidebar({
 
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
   const selectProject = useProjectStore((s) => s.selectProject);
+  const isOwner = user?.id === OWNER_USER_ID;
 
   const createProjectMutation = useMutation({
     mutationFn: (payload: { title: string; description?: string }) => api.projects.create(payload),
@@ -307,7 +308,7 @@ export function Sidebar({
 
         {/* Project List */}
         <ScrollArea className="flex-1 min-h-0 px-3 py-2">
-          {!isCollapsed && (
+          {isOwner && !isCollapsed && (
             <>
               <div className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs text-muted-foreground font-medium">
                 <div className="flex items-center gap-2">
@@ -333,7 +334,7 @@ export function Sidebar({
           )}
 
           <nav className="space-y-1">
-            {isLoadingProjects ? (
+            {!isOwner ? null : isLoadingProjects ? (
               <div className="flex items-center justify-center py-4">
                 <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
               </div>
@@ -455,8 +456,8 @@ export function Sidebar({
           <Separator className="my-3 bg-sidebar-border" />
 
           <nav className="space-y-1">
-            {/* チャット */}
-            {navItems.filter(item => item.href === '/chat').map((item) => {
+            {/* チャット (owner only) */}
+            {isOwner && navItems.filter(item => item.href === '/chat').map((item) => {
               const isActive = pathname.startsWith(item.href);
               const Icon = item.icon;
               return (
@@ -492,8 +493,8 @@ export function Sidebar({
               );
             })}
 
-            {/* ビジネス */}
-            <Tooltip>
+            {/* ビジネス (owner only) */}
+            {isOwner && <><Tooltip>
               <TooltipTrigger asChild>
                 <motion.div
                   whileHover={{ scale: 1.02 }}
@@ -562,9 +563,9 @@ export function Sidebar({
                   })}
                 </motion.div>
               )}
-            </AnimatePresence>
+            </AnimatePresence></>}
 
-            {/* 友達・設定 */}
+            {/* コミュニケーション・設定 */}
             {navItems.filter(item => item.href !== '/chat').map((item) => {
               const isActive = pathname.startsWith(item.href);
               const Icon = item.icon;
