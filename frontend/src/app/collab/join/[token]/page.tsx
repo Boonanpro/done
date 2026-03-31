@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Send, Circle, Bot, User, UserCheck, Paperclip, Pencil, Sparkles, Loader2 } from 'lucide-react';
+import { Send, Circle, Bot, User, UserCheck, Paperclip, Pencil, Sparkles, Loader2, Reply, X } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { useCollabWebSocket } from '@/hooks/useCollabWebSocket';
 import { usePushNotification } from '@/hooks/usePushNotification';
@@ -74,6 +74,7 @@ export default function GuestJoinPage() {
   const [editNameValue, setEditNameValue] = useState('');
   // Reply generation state - keyed by message ID
   const [replyStates, setReplyStates] = useState<Record<string, { state: 'loading' | 'ready' | 'sent'; reply: string }>>({});
+  const [replyTo, setReplyTo] = useState<CollabMessageResponse | null>(null);
 
   // Check for existing session + restore guest name
   useEffect(() => {
@@ -209,8 +210,18 @@ export default function GuestJoinPage() {
     const content = input.trim();
     if (!content) return;
     const finalContent = danMode ? `@ダン ${content}` : content;
-    wsSend(finalContent);
+    const metadata: Record<string, unknown> = {};
+    if (replyTo) {
+      metadata.reply_to = {
+        id: replyTo.id,
+        sender_name: replyTo.sender_name,
+        sender_type: replyTo.sender_type,
+        content: replyTo.content.slice(0, 200),
+      };
+    }
+    wsSend(finalContent, Object.keys(metadata).length > 0 ? metadata : undefined);
     setInput('');
+    setReplyTo(null);
     inputRef.current?.focus();
   };
 
@@ -323,7 +334,7 @@ export default function GuestJoinPage() {
             const curDate = new Date(msg.created_at).toDateString();
             const showSeparator = curDate !== prevDate;
             return (
-              <div key={msg.id}>
+              <div key={msg.id} data-collab-msg-id={msg.id}>
                 {showSeparator && (
                   <div className="flex items-center gap-3 py-2">
                     <div className="flex-1 border-t border-border" />
@@ -335,6 +346,7 @@ export default function GuestJoinPage() {
                   message={msg}
                   showRead={msg.sender_type === 'guest' && readByOther != null && messages.filter(m => m.sender_type === 'guest').pop()?.id === msg.id}
                   replyState={replyStates[msg.id]?.state}
+                  onReply={setReplyTo}
                   onGenerateReply={msg.sender_type === 'owner' && !replyStates[msg.id] ? async () => {
                     if (!roomId || !guestToken) return;
                     setReplyStates(prev => ({ ...prev, [msg.id]: { state: 'loading', reply: '' } }));
@@ -437,7 +449,24 @@ export default function GuestJoinPage() {
       <PWAInstallPrompt />
 
       {/* Input */}
-      <div className="flex items-center gap-2 px-4 py-3 border-t shrink-0">
+      <div className="shrink-0 border-t px-4 py-3">
+        {replyTo && (
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
+            <Reply className="h-3.5 w-3.5 shrink-0 text-primary" />
+            <div className="min-w-0 flex-1">
+              <span className="text-xs font-medium text-primary">
+                {replyTo.sender_type.startsWith('dan_') ? 'DAN' : replyTo.sender_name}に返信
+              </span>
+              <p className="truncate text-xs text-muted-foreground">
+                {(replyTo.content || '').slice(0, 100) || '(ファイル)'}
+              </p>
+            </div>
+            <button onClick={() => setReplyTo(null)} className="shrink-0 text-muted-foreground hover:text-foreground">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+      <div className="flex items-center gap-2">
         <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileUpload}
           accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip" />
         <Button variant="ghost" size="icon" onClick={() => fileInputRef.current?.click()} disabled={isUploading}>
@@ -482,15 +511,44 @@ export default function GuestJoinPage() {
           <Send className="h-4 w-4" />
         </Button>
       </div>
+      </div>
     </div>
   );
 }
 
-function GuestMessageBubble({ message, showRead, replyState, onGenerateReply }: {
+function GuestCollabReplyQuote({ replyTo }: { replyTo: { id: string; sender_name: string; sender_type: string; content: string } }) {
+  const truncated = (replyTo.content || '').slice(0, 80);
+  const label = replyTo.sender_type.startsWith('dan_') ? 'DAN' : replyTo.sender_name;
+
+  const handleClick = useCallback(() => {
+    const el = document.querySelector(`[data-collab-msg-id="${replyTo.id}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('ring-2', 'ring-primary/50', 'rounded-lg');
+      setTimeout(() => el.classList.remove('ring-2', 'ring-primary/50', 'rounded-lg'), 1500);
+    }
+  }, [replyTo.id]);
+
+  return (
+    <div
+      onClick={handleClick}
+      className="flex items-start gap-1.5 rounded-md bg-muted/60 border-l-2 border-primary/50 px-2.5 py-1.5 text-xs text-muted-foreground mb-1 max-w-full overflow-hidden cursor-pointer hover:bg-muted/80 transition-colors"
+    >
+      <Reply className="h-3 w-3 mt-0.5 shrink-0 rotate-180" />
+      <div className="min-w-0">
+        <span className="font-medium text-foreground/80">{label}</span>
+        <p className="truncate">{truncated || '(ファイル)'}</p>
+      </div>
+    </div>
+  );
+}
+
+function GuestMessageBubble({ message, showRead, replyState, onGenerateReply, onReply }: {
   message: CollabMessageResponse;
   showRead?: boolean;
   replyState?: 'loading' | 'ready' | 'sent';
   onGenerateReply?: () => void;
+  onReply?: (msg: CollabMessageResponse) => void;
 }) {
   const isGuest = message.sender_type === 'guest';
   const isDan = message.sender_type.startsWith('dan_');
@@ -506,59 +564,72 @@ function GuestMessageBubble({ message, showRead, replyState, onGenerateReply }: 
 
   const isPrivate = message.metadata?.visibility === 'guest_only';
   const isGuestPrivate = isGuest && isPrivate;
+  const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
   return (
-    <div className={`flex ${isGuest || isDan ? 'justify-end' : 'justify-start'}`}>
-      <div
-        className={`max-w-[75%] rounded-lg px-3 py-2 ${
-          isDan
-            ? 'bg-violet-500/10 border border-violet-500/20'
-            : isGuestPrivate
-              ? 'bg-violet-500/5 border border-dashed border-violet-500/30'
-              : isGuest
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-muted'
-        }`}
-      >
-        <div className="flex items-center gap-1.5 mb-1">
-          {isPrivate ? <Bot className="h-4 w-4 text-violet-400" /> : <SenderIcon type={message.sender_type} />}
-          <span className={`text-xs font-medium ${isPrivate ? 'text-violet-400' : 'opacity-70'}`}>
-            {isGuestPrivate ? `${message.sender_name} → DAN` : message.sender_name}
-          </span>
-          {isPrivate && (
-            <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded-full">非公開</span>
-          )}
-          <span className="text-[10px] opacity-50 ml-auto">{formatTime(message.created_at)}</span>
-        </div>
-        {(() => {
-          const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
-          const isImage = file?.type?.startsWith('image/');
-          if (file && isImage) {
-            return <a href={file.url} target="_blank" rel="noopener noreferrer"><img src={file.url} alt={file.name} className="max-w-full max-h-60 rounded mt-1" /></a>;
-          }
-          if (file) {
-            return <a href={file.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 mt-1 text-sm underline opacity-80"><Paperclip className="h-3.5 w-3.5" />{file.name}</a>;
-          }
-          return null;
-        })()}
-        <p className="text-sm whitespace-pre-wrap break-words"><LinkifyText text={message.content} /></p>
-
-        {/* Reply generation button for owner messages */}
-        {isOwner && !replyState && onGenerateReply && (
+    <div className={`flex flex-col ${isGuest || isDan ? 'items-end' : 'items-start'} max-w-[75%] ${isGuest || isDan ? 'ml-auto' : 'mr-auto'}`}>
+      {replyToData && <GuestCollabReplyQuote replyTo={replyToData} />}
+      <div className={`group flex items-start gap-1 ${isGuest || isDan ? 'flex-row' : 'flex-row-reverse'}`}>
+        {onReply && (
           <button
-            onClick={onGenerateReply}
-            className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 transition-colors"
+            onClick={() => onReply(message)}
+            className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
+            title="返信"
           >
-            <Sparkles className="h-3 w-3" />
-            返信を生成
+            <Reply className="h-3.5 w-3.5" />
           </button>
         )}
-        {isOwner && replyState === 'loading' && (
-          <div className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            生成中...
+        <div
+          className={`rounded-lg px-3 py-2 ${
+            isDan
+              ? 'bg-violet-500/10 border border-violet-500/20'
+              : isGuestPrivate
+                ? 'bg-violet-500/5 border border-dashed border-violet-500/30'
+                : isGuest
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted'
+          }`}
+        >
+          <div className="flex items-center gap-1.5 mb-1">
+            {isPrivate ? <Bot className="h-4 w-4 text-violet-400" /> : <SenderIcon type={message.sender_type} />}
+            <span className={`text-xs font-medium ${isPrivate ? 'text-violet-400' : 'opacity-70'}`}>
+              {isGuestPrivate ? `${message.sender_name} → DAN` : message.sender_name}
+            </span>
+            {isPrivate && (
+              <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded-full">非公開</span>
+            )}
+            <span className="text-[10px] opacity-50 ml-auto">{formatTime(message.created_at)}</span>
           </div>
-        )}
+          {(() => {
+            const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
+            const isImage = file?.type?.startsWith('image/');
+            if (file && isImage) {
+              return <a href={file.url} target="_blank" rel="noopener noreferrer"><img src={file.url} alt={file.name} className="max-w-full max-h-60 rounded mt-1" /></a>;
+            }
+            if (file) {
+              return <a href={file.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 mt-1 text-sm underline opacity-80"><Paperclip className="h-3.5 w-3.5" />{file.name}</a>;
+            }
+            return null;
+          })()}
+          <p className="text-sm whitespace-pre-wrap break-words"><LinkifyText text={message.content} /></p>
+
+          {/* Reply generation button for owner messages */}
+          {isOwner && !replyState && onGenerateReply && (
+            <button
+              onClick={onGenerateReply}
+              className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 transition-colors"
+            >
+              <Sparkles className="h-3 w-3" />
+              返信を生成
+            </button>
+          )}
+          {isOwner && replyState === 'loading' && (
+            <div className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              生成中...
+            </div>
+          )}
+        </div>
       </div>
       {showRead && (
         <p className="text-[10px] text-muted-foreground text-right mt-0.5 mr-1">既読</p>

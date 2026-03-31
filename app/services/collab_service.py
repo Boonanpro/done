@@ -129,10 +129,9 @@ class CollabService:
         invite = await self.get_invite_by_token(token)
         if not invite:
             raise ValueError("Invalid invite token")
-        if invite["status"] == "joined":
-            raise ValueError("Invite already used")
         if invite["status"] == "expired":
             raise ValueError("Invite expired")
+        # Allow re-joining with same invite (different browser/device)
 
         from app.services.chat_service import parse_datetime
         expires_at = parse_datetime(invite["expires_at"])
