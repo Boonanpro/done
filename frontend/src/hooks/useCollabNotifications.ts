@@ -1,67 +1,87 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { api } from '@/lib/api-client';
 import { useUnreadStore } from '@/stores/unread-store';
 
 /**
- * Polls collab rooms and:
- * 1. Shows toast when a new message arrives (if not on that room's page)
- * 2. Updates unread store for badge display
+ * Connects a per-user WebSocket for real-time cross-room notifications.
+ * Shows toast + updates unread store when a message arrives in any room.
  */
 export function useCollabNotifications() {
-  const lastMessages = useRef<Record<string, string>>({});
-  const initialized = useRef(false);
   const markUnread = useUnreadStore((s) => s.markUnread);
-
-  const { data } = useQuery({
-    queryKey: ['collab-rooms-poll'],
-    queryFn: () => api.collab.listRooms(),
-    refetchInterval: 15_000,
-    staleTime: 10_000,
-  });
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => {
-    if (!data?.rooms) return;
+    const token = localStorage.getItem('done-token');
+    if (!token) return;
 
-    if (!initialized.current) {
-      for (const room of data.rooms) {
-        if (room.last_message) {
-          lastMessages.current[room.id] = room.last_message;
+    function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const apiHost = process.env.NEXT_PUBLIC_API_URL
+        ? new URL(process.env.NEXT_PUBLIC_API_URL).host
+        : '127.0.0.1:8000';
+      const ws = new WebSocket(`${protocol}://${apiHost}/api/v1/collab/ws/notifications`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ token }));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.type === 'new_message_notification') {
+            const roomId = data.room_id;
+            const isOnRoom = window.location.pathname.includes(roomId);
+
+            if (!isOnRoom) {
+              markUnread(roomId);
+
+              toast(data.room_title || 'メッセージ', {
+                description: `${data.sender_name}: ${(data.content || '').slice(0, 60)}`,
+                action: {
+                  label: '開く',
+                  onClick: () => {
+                    window.location.href = `/collab/${roomId}`;
+                  },
+                },
+                duration: 8000,
+              });
+            }
+          }
+        } catch {
+          // ignore parse errors
         }
-      }
-      initialized.current = true;
-      return;
+      };
+
+      ws.onclose = () => {
+        wsRef.current = null;
+        // Reconnect after 5 seconds
+        reconnectTimer.current = setTimeout(connect, 5000);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
     }
 
-    for (const room of data.rooms) {
-      const prev = lastMessages.current[room.id];
-      const current = room.last_message;
+    connect();
 
-      if (current && current !== prev) {
-        const isOnRoom = window.location.pathname.includes(room.id);
-
-        if (!isOnRoom) {
-          // Mark as unread
-          markUnread(room.id);
-
-          // Toast notification
-          toast(room.title, {
-            description: current.slice(0, 80),
-            action: {
-              label: '開く',
-              onClick: () => {
-                window.location.href = `/collab/${room.id}`;
-              },
-            },
-            duration: 8000,
-          });
-        }
-
-        lastMessages.current[room.id] = current;
+    // Keep alive ping every 30 seconds
+    const pingInterval = setInterval(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'ping' }));
       }
-    }
-  }, [data, markUnread]);
+    }, 30000);
+
+    return () => {
+      clearInterval(pingInterval);
+      clearTimeout(reconnectTimer.current);
+      wsRef.current?.close();
+      wsRef.current = null;
+    };
+  }, [markUnread]);
 }

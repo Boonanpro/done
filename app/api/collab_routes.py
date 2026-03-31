@@ -410,6 +410,16 @@ async def send_message(
         metadata=req.metadata,
     )
 
+    # Real-time notification via WebSocket
+    import asyncio
+    asyncio.ensure_future(notification_manager.notify_room_users(
+        room_id,
+        {"type": "new_message_notification", "room_id": room_id,
+         "room_title": ((await service.get_room(room_id)) or {}).get("title", ""),
+         "sender_name": sender_name, "content": req.content[:100]},
+        service
+    ))
+
     # Trigger DAN assist for guest messages (REST API path)
     if sender_type == "guest":
         import asyncio
@@ -733,6 +743,90 @@ class CollabConnectionManager:
 collab_manager = CollabConnectionManager()
 
 
+class NotificationManager:
+    """Manages per-user WebSocket connections for cross-room notifications."""
+
+    def __init__(self):
+        # user_id -> list of WebSocket
+        self.connections: dict[str, list[WebSocket]] = {}
+
+    def add(self, user_id: str, ws: WebSocket):
+        if user_id not in self.connections:
+            self.connections[user_id] = []
+        self.connections[user_id].append(ws)
+
+    def remove(self, user_id: str, ws: WebSocket):
+        if user_id in self.connections:
+            self.connections[user_id] = [c for c in self.connections[user_id] if c != ws]
+            if not self.connections[user_id]:
+                del self.connections[user_id]
+
+    async def notify_room_users(self, room_id: str, message: dict, service: CollabService):
+        """Notify all users who are part of a room (owner + linked guests)."""
+        room = await service.get_room(room_id)
+        if not room:
+            return
+        user_ids = set()
+        # Owner
+        user_ids.add(room["owner_id"])
+        # Linked guest users
+        invites = await service.list_invites(room_id)
+        for inv in invites:
+            if inv.get("user_id") and inv["status"] == "joined":
+                user_ids.add(inv["user_id"])
+
+        for uid in user_ids:
+            if uid in self.connections:
+                for ws in self.connections[uid]:
+                    try:
+                        await ws.send_json(message)
+                    except Exception:
+                        pass
+
+
+notification_manager = NotificationManager()
+
+
+@router.websocket("/ws/notifications")
+async def notification_websocket(websocket: WebSocket):
+    """Per-user WebSocket for real-time cross-room notifications."""
+    await websocket.accept()
+    user_id = None
+
+    try:
+        # Wait for auth
+        auth_data = await websocket.receive_json()
+        token = auth_data.get("token")
+        if not token:
+            await websocket.send_json({"type": "error", "message": "Token required"})
+            await websocket.close()
+            return
+
+        token_data = decode_access_token(token)
+        if not token_data:
+            await websocket.send_json({"type": "error", "message": "Invalid token"})
+            await websocket.close()
+            return
+
+        user_id = token_data.user_id
+        notification_manager.add(user_id, websocket)
+        await websocket.send_json({"type": "auth_success"})
+
+        # Keep connection alive
+        while True:
+            data = await websocket.receive_json()
+            if data.get("type") == "ping":
+                await websocket.send_json({"type": "pong"})
+
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        if user_id:
+            notification_manager.remove(user_id, websocket)
+
+
 @router.websocket("/ws/{room_id}")
 async def collab_websocket(websocket: WebSocket, room_id: str):
     """
@@ -896,8 +990,17 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
                     }
                     await collab_manager.broadcast(room_id, msg_payload)
 
-                    # Push notification to the other side
+                    # Real-time notification to all room users
                     import asyncio
+                    asyncio.ensure_future(notification_manager.notify_room_users(
+                        room_id,
+                        {"type": "new_message_notification", "room_id": room_id,
+                         "room_title": (await service.get_room(room_id) or {}).get("title", ""),
+                         "sender_name": sender_name, "content": content[:100]},
+                        service
+                    ))
+
+                    # Push notification to the other side
                     asyncio.ensure_future(_send_push(
                         room_id, sender_type, sender_name, content
                     ))
