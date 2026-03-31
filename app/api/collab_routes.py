@@ -851,18 +851,22 @@ async def collab_websocket(websocket: WebSocket, room_id: str):
         token = auth_data.get("token")
 
         if auth_type == "auth" and token:
-            # Owner auth
+            # Authenticated user (owner or linked guest)
             token_data = decode_access_token(token)
             if not token_data:
                 await websocket.send_json({"type": "error", "message": "Invalid token"})
                 await websocket.close()
                 return
-            room = await service.get_room(room_id)
-            if not room or room["owner_id"] != token_data.user_id:
+            has_access = await service.verify_room_access(room_id, user_id=token_data.user_id)
+            if not has_access:
                 await websocket.send_json({"type": "error", "message": "Not authorized"})
                 await websocket.close()
                 return
-            sender_type = "owner"
+            room = await service.get_room(room_id)
+            if room and room["owner_id"] == token_data.user_id:
+                sender_type = "owner"
+            else:
+                sender_type = "guest"
             sender_name = await _get_display_name(token_data.user_id, token_data.email)
 
         elif auth_type == "auth_guest" and token:

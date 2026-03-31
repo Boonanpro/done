@@ -278,6 +278,11 @@ class CollabService:
         # Owner always has access
         if user_id and room["owner_id"] == user_id:
             return True
+        # Linked guest user access (registered user linked via collab_invites.user_id)
+        if user_id:
+            invites = await self.list_invites(room_id)
+            if any(inv.get("user_id") == user_id and inv["status"] == "joined" for inv in invites):
+                return True
         # Guest access via invite token
         if invite_token:
             invite = await self.get_invite_by_token(invite_token)
