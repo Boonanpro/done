@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { Plus, Users, MessageSquare, Clock, Archive, Copy, Link2, Trash2 } from 'lucide-react';
 import { api, type CollabRoomResponse } from '@/lib/api-client';
+import { useUnreadStore } from '@/stores/unread-store';
 import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -153,24 +154,35 @@ export default function CollabListPage() {
 }
 
 function RoomCard({ room, onClick, onDelete }: { room: CollabRoomResponse; onClick: () => void; onDelete: () => void }) {
+  const isUnread = useUnreadStore((s) => s.unreadRooms.has(room.id));
+  const markRead = useUnreadStore((s) => s.markRead);
+
+  const handleClick = () => {
+    markRead(room.id);
+    onClick();
+  };
+
   return (
     <Card
-      className="cursor-pointer hover:bg-accent/50 transition-colors"
-      onClick={onClick}
+      className={`cursor-pointer hover:bg-accent/50 transition-colors ${isUnread ? 'border-primary/50 bg-primary/5' : ''}`}
+      onClick={handleClick}
     >
       <CardContent className="flex items-center gap-4 py-4">
-        <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center shrink-0">
-          <MessageSquare className="h-5 w-5 text-primary" />
+        <div className={`h-10 w-10 rounded-full flex items-center justify-center shrink-0 ${isUnread ? 'bg-primary/20' : 'bg-primary/10'}`}>
+          <MessageSquare className={`h-5 w-5 ${isUnread ? 'text-primary' : 'text-primary'}`} />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <h3 className="font-medium truncate">{room.title}</h3>
+            <h3 className={`truncate ${isUnread ? 'font-bold' : 'font-medium'}`}>{room.title}</h3>
+            {isUnread && (
+              <span className="h-2.5 w-2.5 rounded-full bg-primary shrink-0" />
+            )}
             {room.status === 'archived' && (
               <Archive className="h-3.5 w-3.5 text-muted-foreground" />
             )}
           </div>
           {room.last_message && (
-            <p className="text-sm text-muted-foreground truncate">{room.last_message}</p>
+            <p className={`text-sm truncate ${isUnread ? 'text-foreground font-medium' : 'text-muted-foreground'}`}>{room.last_message}</p>
           )}
           {room.description && !room.last_message && (
             <p className="text-sm text-muted-foreground truncate">{room.description}</p>

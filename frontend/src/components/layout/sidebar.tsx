@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/tooltip';
 import { useAuth } from '@/hooks/use-auth';
 import { api, OWNER_USER_ID, type ProjectResponse } from '@/lib/api-client';
+import { useUnreadStore } from '@/stores/unread-store';
 import { useProjectStore } from '@/stores/project-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { NotificationPanel } from '@/components/notification/notification-panel';
@@ -113,6 +114,7 @@ export function Sidebar({
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
   const selectProject = useProjectStore((s) => s.selectProject);
   const isOwner = user?.id === OWNER_USER_ID;
+  const unreadCount = useUnreadStore((s) => s.unreadRooms.size);
 
   const createProjectMutation = useMutation({
     mutationFn: (payload: { title: string; description?: string }) => api.projects.create(payload),
@@ -569,6 +571,7 @@ export function Sidebar({
             {navItems.filter(item => item.href !== '/chat').map((item) => {
               const isActive = pathname.startsWith(item.href);
               const Icon = item.icon;
+              const showBadge = item.href === '/collab' && unreadCount > 0;
               return (
                 <Tooltip key={item.href}>
                   <TooltipTrigger asChild>
@@ -584,8 +587,20 @@ export function Sidebar({
                           isCollapsed && 'justify-center px-0'
                         )}
                       >
-                        <Icon className="h-4 w-4 shrink-0" />
-                        {!isCollapsed && <span>{item.title}</span>}
+                        <div className="relative shrink-0">
+                          <Icon className="h-4 w-4" />
+                          {showBadge && (
+                            <span className="absolute -top-1.5 -right-1.5 h-4 min-w-4 flex items-center justify-center rounded-full bg-destructive text-destructive-foreground text-[10px] font-bold px-1">
+                              {unreadCount}
+                            </span>
+                          )}
+                        </div>
+                        {!isCollapsed && <span className="flex-1">{item.title}</span>}
+                        {!isCollapsed && showBadge && (
+                          <span className="h-5 min-w-5 flex items-center justify-center rounded-full bg-destructive text-destructive-foreground text-[10px] font-bold px-1.5">
+                            {unreadCount}
+                          </span>
+                        )}
                       </motion.div>
                     </Link>
                   </TooltipTrigger>

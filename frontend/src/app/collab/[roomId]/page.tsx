@@ -9,6 +9,7 @@ import {
   Bot, User, UserCheck, Circle, Sparkles, Loader2, Reply, X,
 } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
+import { useUnreadStore } from '@/stores/unread-store';
 import { MainLayout } from '@/components/layout/main-layout';
 import { useCollabWebSocket, type OnlineUser } from '@/hooks/useCollabWebSocket';
 import { usePushNotification } from '@/hooks/usePushNotification';
@@ -69,6 +70,10 @@ export default function CollabRoomPage() {
   const router = useRouter();
   const roomId = params.roomId as string;
   const queryClient = useQueryClient();
+  const markRead = useUnreadStore((s) => s.markRead);
+
+  // Mark room as read on mount
+  useEffect(() => { markRead(roomId); }, [roomId, markRead]);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<CollabMessageResponse[]>([]);
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);

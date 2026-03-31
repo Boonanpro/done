@@ -4,27 +4,28 @@ import { useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { api } from '@/lib/api-client';
+import { useUnreadStore } from '@/stores/unread-store';
 
 /**
- * Polls collab rooms and shows a toast when a new message arrives
- * in any room the user is part of (as owner or guest).
- * Only triggers when the user is NOT on that room's chat page.
+ * Polls collab rooms and:
+ * 1. Shows toast when a new message arrives (if not on that room's page)
+ * 2. Updates unread store for badge display
  */
 export function useCollabNotifications() {
   const lastMessages = useRef<Record<string, string>>({});
   const initialized = useRef(false);
+  const markUnread = useUnreadStore((s) => s.markUnread);
 
   const { data } = useQuery({
     queryKey: ['collab-rooms-poll'],
     queryFn: () => api.collab.listRooms(),
-    refetchInterval: 15_000, // 15秒ごと
+    refetchInterval: 15_000,
     staleTime: 10_000,
   });
 
   useEffect(() => {
     if (!data?.rooms) return;
 
-    // Skip first load (don't toast existing messages)
     if (!initialized.current) {
       for (const room of data.rooms) {
         if (room.last_message) {
@@ -40,9 +41,13 @@ export function useCollabNotifications() {
       const current = room.last_message;
 
       if (current && current !== prev) {
-        // Don't toast if user is already on this room's page
         const isOnRoom = window.location.pathname.includes(room.id);
+
         if (!isOnRoom) {
+          // Mark as unread
+          markUnread(room.id);
+
+          // Toast notification
           toast(room.title, {
             description: current.slice(0, 80),
             action: {
@@ -54,8 +59,9 @@ export function useCollabNotifications() {
             duration: 8000,
           });
         }
+
         lastMessages.current[room.id] = current;
       }
     }
-  }, [data]);
+  }, [data, markUnread]);
 }
