@@ -14,6 +14,7 @@ import {
   Loader2,
   MessageSquare,
   Paperclip,
+  Reply,
   Send,
   Square,
   Terminal,
@@ -36,6 +37,7 @@ import {
   type MessageResponse,
   type ProcessStep,
   type ProjectStatusType,
+  type ReplyToMessage,
 } from '@/lib/api-client';
 import { useRouter } from 'next/navigation';
 import { useProjectRecovery } from '@/hooks/useProjectRecovery';
@@ -235,13 +237,37 @@ function parseMediaContent(content: string): { images: string[]; videos: string[
   return { images, videos, files, text };
 }
 
-const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: MessageResponse; onImageClick?: (url: string) => void }) {
+const ReplyQuote = memo(function ReplyQuote({ replyTo }: { replyTo: ReplyToMessage }) {
+  const truncated = (replyTo.content || '').replace(/\[添付[^\]]*\]/g, '').trim().slice(0, 80);
+  const label = replyTo.sender_type === 'ai' ? 'ダン' : replyTo.sender_name;
+  return (
+    <div className="flex items-start gap-1.5 rounded-md bg-muted/60 border-l-2 border-primary/50 px-2.5 py-1.5 text-xs text-muted-foreground mb-1 max-w-full overflow-hidden">
+      <Reply className="h-3 w-3 mt-0.5 shrink-0 rotate-180" />
+      <div className="min-w-0">
+        <span className="font-medium text-foreground/80">{label}</span>
+        <p className="truncate">{truncated || '(メディア)'}</p>
+      </div>
+    </div>
+  );
+});
+
+const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }: { msg: MessageResponse; onImageClick?: (url: string) => void; onReply?: (msg: MessageResponse) => void }) {
 
   if (msg.sender_type === 'human') {
     const { images, videos, files, text } = parseMediaContent(msg.content || '');
     return (
-      <div className="flex justify-end">
+      <div className="group flex justify-end gap-1 items-start">
+        {onReply && !msg.id.startsWith('temp-') && (
+          <button
+            onClick={() => onReply(msg)}
+            className="mt-2 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
+            title="返信"
+          >
+            <Reply className="h-3.5 w-3.5" />
+          </button>
+        )}
         <div className="max-w-[85%] flex flex-col items-end gap-1">
+          {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
           {images.map((url, i) => (
             <img
               key={i}
@@ -298,7 +324,17 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
   const hasMedia = aiImages.length > 0 || aiVideos.length > 0 || aiFiles.length > 0;
 
   return (
-    <div>
+    <div className="group relative">
+      {onReply && !msg.id.startsWith('temp-') && (
+        <button
+          onClick={() => onReply(msg)}
+          className="absolute -right-1 top-0 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
+          title="返信"
+        >
+          <Reply className="h-3.5 w-3.5" />
+        </button>
+      )}
+      {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
       {hasMedia && (
         <div className="flex flex-col gap-1.5 mb-2">
           {aiImages.map((url, i) => (
@@ -339,17 +375,32 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick }: { msg: 
         </div>
       )}
       {proposals.length > 0 && (
-        <div className="flex flex-col gap-1.5 mt-2">
+        <div className="flex flex-wrap gap-3 mt-2">
           {proposals.map((p, i) => (
             <a
               key={`proposal-${i}`}
               href={p.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-4 py-3 text-sm text-foreground shadow-sm transition-colors hover:bg-muted"
+              className="group/card block w-[280px] rounded-xl border border-border bg-card shadow-sm overflow-hidden transition-all hover:shadow-md hover:border-primary/40"
             >
-              <FileText className="h-4 w-4 text-primary" />
-              <span>{p.filename}</span>
+              <div className="relative w-full h-[180px] overflow-hidden bg-muted">
+                <iframe
+                  src={p.url}
+                  title={p.filename}
+                  className="absolute top-0 left-0 pointer-events-none"
+                  style={{ width: '1400px', height: '900px', transform: 'scale(0.2)', transformOrigin: 'top left', border: 'none' }}
+                  tabIndex={-1}
+                  loading="lazy"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/30 to-transparent opacity-0 group-hover/card:opacity-100 transition-opacity flex items-end justify-center pb-3">
+                  <span className="text-xs text-white bg-black/50 px-2 py-1 rounded-md">クリックで開く</span>
+                </div>
+              </div>
+              <div className="px-3 py-2.5 flex items-center gap-2">
+                <FileText className="h-4 w-4 shrink-0 text-primary" />
+                <span className="text-sm font-medium truncate">{p.filename.replace('.html', '')}</span>
+              </div>
             </a>
           ))}
         </div>
@@ -366,12 +417,16 @@ function ChatInput({
   isSessionActive,
   sendMessageRef,
   onSseStateChange,
+  replyTo,
+  onClearReply,
 }: {
   projectId: string;
   roomId: string;
   isSessionActive: boolean;
   sendMessageRef?: React.MutableRefObject<((content: string) => void) | null>;
   onSseStateChange?: (connected: boolean) => void;
+  replyTo?: MessageResponse | null;
+  onClearReply?: () => void;
 }) {
   const [message, setMessage] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
@@ -393,6 +448,13 @@ function ChatInput({
   const { resetRecovery, setInterrupted, setWarmupMode } = useRecoveryActions();
 
   useProjectRecovery({ projectId, roomId });
+
+  // Focus textarea when reply is selected
+  useEffect(() => {
+    if (replyTo) {
+      textareaRef.current?.focus();
+    }
+  }, [replyTo]);
 
   // Skill suggestions for slash commands
   const fetchSkills = useCallback(async () => {
@@ -554,7 +616,7 @@ function ChatInput({
     fileInputRef.current?.click();
   }, []);
 
-  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = []) => {
+  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = [], replyToMsg?: MessageResponse | null) => {
     if (!content.trim() && imageUrls.length === 0 && fileUrls.length === 0) return;
 
     const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
@@ -585,6 +647,16 @@ function ChatInput({
       sender_type: 'human',
       content: optimisticContent,
       created_at: new Date().toISOString(),
+      ...(replyToMsg ? {
+        reply_to_id: replyToMsg.id,
+        reply_to_message: {
+          id: replyToMsg.id,
+          sender_name: replyToMsg.sender_name,
+          sender_type: replyToMsg.sender_type,
+          content: replyToMsg.content,
+          created_at: replyToMsg.created_at,
+        },
+      } : {}),
     };
 
     const queryKey = ['project-messages', roomId];
@@ -597,7 +669,7 @@ function ChatInput({
 
     try {
       await api.sm.sendMessageStream(
-        { message: content, session_id: roomId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}) },
+        { message: content, session_id: roomId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}) },
         {
           onUserMessage: (msg) => {
             if (streamRequestRef.current !== requestId) return;
@@ -735,10 +807,14 @@ function ChatInput({
     const fileUrls = attachedFiles.filter(f => !isImageFile(f.filename)).map(f => ({ name: f.filename, url: f.url }));
 
     const content = message.trim();
+    const currentReplyTo = replyTo;
     setMessage('');
     setAttachedFiles([]);
-    await sendMessageCore(content, imageUrls, fileUrls);
-  }, [attachedFiles, message, sendMessageCore]);
+    onClearReply?.();
+    // Immediately bump this project to top of sidebar
+    queryClient.invalidateQueries({ queryKey: ['projects'] });
+    await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo);
+  }, [attachedFiles, message, sendMessageCore, queryClient, replyTo, onClearReply]);
 
   const handleCancel = useCallback(async () => {
     if (abortControllerRef.current) {
@@ -817,6 +893,25 @@ function ChatInput({
       {isDragging && (
         <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-primary/10">
           <span className="text-sm font-medium text-primary">ファイルをドロップして添付</span>
+        </div>
+      )}
+      {replyTo && (
+        <div className="mb-2 flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
+          <Reply className="h-3.5 w-3.5 shrink-0 text-primary" />
+          <div className="min-w-0 flex-1">
+            <span className="text-xs font-medium text-primary">
+              {replyTo.sender_type === 'ai' ? 'ダン' : replyTo.sender_name}に返信
+            </span>
+            <p className="truncate text-xs text-muted-foreground">
+              {(replyTo.content || '').replace(/\[添付[^\]]*\]/g, '').trim().slice(0, 100) || '(メディア)'}
+            </p>
+          </div>
+          <button
+            onClick={onClearReply}
+            className="shrink-0 text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       )}
       {showSkillSuggestions && filteredSkills.length > 0 && (
@@ -945,6 +1040,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const isNearBottomRef = useRef(true);
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  const [replyTo, setReplyTo] = useState<MessageResponse | null>(null);
   const { warmupMode } = useRecoveryState(projectId);
 
   const { data: project, isLoading } = useQuery({
@@ -1210,7 +1306,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                   );
                 }
 
-                return <MessageBubble key={item.msg.id} msg={item.msg} onImageClick={setLightboxImage} />;
+                return <MessageBubble key={item.msg.id} msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} />;
               });
             })()}
             <div ref={messagesEndRef} />
@@ -1221,7 +1317,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       {/* 承認/却下ボタンは廃止。チャットでの承認を観察者が検知して計画を記録する */}
 
       {project?.room_id ? (
-        <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} sendMessageRef={sendMessageRef} onSseStateChange={(connected) => { sseConnectedRef.current = connected; }} />
+        <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} sendMessageRef={sendMessageRef} onSseStateChange={(connected) => { sseConnectedRef.current = connected; }} replyTo={replyTo} onClearReply={() => setReplyTo(null)} />
       ) : null}
 
       {lightboxImage && (
