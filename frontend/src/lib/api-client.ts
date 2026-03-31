@@ -1673,6 +1673,13 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ message_id: messageId, content }),
       }),
+
+    generateReplyGuest: (roomId: string, messageId: string, content: string, token: string) =>
+      request<{ reply: string; message_id: string }>(`/collab/rooms/${roomId}/generate-reply-guest`, {
+        method: 'POST',
+        body: JSON.stringify({ message_id: messageId, content }),
+        headers: { 'X-Guest-Token': token },
+      }),
   },
 };
 

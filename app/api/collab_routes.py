@@ -490,6 +490,74 @@ async def generate_reply(
     return {"reply": final_text, "message_id": target_message_id}
 
 
+@router.post("/rooms/{room_id}/generate-reply-guest")
+async def generate_reply_guest(
+    room_id: str,
+    req: GenerateReplyRequest,
+    request: Request = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    """Generate a reply suggestion for a guest (lightweight, no tools)."""
+    guest_token = _get_guest_token_from_request(request, credentials)
+    if not guest_token:
+        raise HTTPException(status_code=401, detail="Guest token required")
+    guest_data = _decode_guest_token(guest_token)
+    if not guest_data or guest_data.get("room_id") != room_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    room = await service.get_room(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    guest_name = guest_data.get("guest_name", "ゲスト")
+    target_content = req.content
+
+    # Get recent messages for context
+    recent = await service.get_messages(room_id, limit=20)
+
+    history_lines = []
+    for msg in recent:
+        st = msg.get("sender_type", "?")
+        sn = msg.get("sender_name", "?")
+        c = msg.get("content", "")
+        if st == "owner":
+            history_lines.append(f"【オーナー({sn})】{c}")
+        elif st == "guest":
+            history_lines.append(f"【ゲスト({sn})】{c}")
+    history_text = "\n".join(history_lines)
+
+    # Use lightweight LLM (same as guest DAN assist)
+    from app.services.collab_dan_service import _try_anthropic, _try_gemini
+
+    system = (
+        f"あなたはゲスト（{guest_name}）の代筆者です。"
+        f"オーナーへの返信文を生成してください。返信文のみを出力し、それ以外は何も書かないでください。"
+    )
+    user_prompt = (
+        f"## ルーム情報\n"
+        f"- タイトル: {room['title']}\n"
+        f"- 説明: {room.get('description') or '(なし)'}\n\n"
+        f"## 会話履歴\n{history_text}\n\n"
+        f"## 返信対象メッセージ\n{target_content}\n\n"
+        f"## 指示\n"
+        f"このメッセージに対する返信文を1つだけ生成してください。\n"
+        f"- {guest_name}の口調で自然な返信を書く\n"
+        f"- 返信文のみを出力（説明・前置き不要）\n"
+        f"- 簡潔に（長くても3行以内）"
+    )
+
+    result = _try_anthropic(system, user_prompt) or _try_gemini(system, user_prompt)
+    if not result:
+        raise HTTPException(status_code=500, detail="Reply generation failed")
+
+    result = result.strip()
+    if result.startswith("「") and result.endswith("」"):
+        result = result[1:-1]
+
+    return {"reply": result, "message_id": req.message_id}
+
+
 # ==================== Files ====================
 
 @router.post("/rooms/{room_id}/files", response_model=CollabFileResponse)

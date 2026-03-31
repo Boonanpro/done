@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Send, Circle, Bot, User, UserCheck, Paperclip, Pencil } from 'lucide-react';
+import { Send, Circle, Bot, User, UserCheck, Paperclip, Pencil, Sparkles, Loader2 } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { useCollabWebSocket } from '@/hooks/useCollabWebSocket';
 import { usePushNotification } from '@/hooks/usePushNotification';
@@ -72,6 +72,8 @@ export default function GuestJoinPage() {
   const [danThinking, setDanThinking] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [editNameValue, setEditNameValue] = useState('');
+  // Reply generation state - keyed by message ID
+  const [replyStates, setReplyStates] = useState<Record<string, { state: 'loading' | 'ready' | 'sent'; reply: string }>>({});
 
   // Check for existing session + restore guest name
   useEffect(() => {
@@ -107,6 +109,24 @@ export default function GuestJoinPage() {
     queryFn: () => api.collab.getInviteInfo(inviteToken),
     enabled: !!inviteToken && !guestToken,
   });
+
+  // Auto-rejoin if invite was already used (same guest, different browser)
+  useEffect(() => {
+    if (inviteInfo && (inviteInfo as any).rejoin_token && !guestToken) {
+      const info = inviteInfo as any;
+      setGuestToken(info.rejoin_token);
+      setRoomId(info.room_id);
+      setRoomTitle(info.room_title);
+      if (info.guest_name) {
+        setGuestName(info.guest_name);
+        localStorage.setItem(GUEST_NAME_KEY, info.guest_name);
+      }
+      const keys = getStorageKeys(inviteToken);
+      localStorage.setItem(keys.tokenKey, info.rejoin_token);
+      localStorage.setItem(keys.roomKey, info.room_id);
+      localStorage.setItem(keys.titleKey, info.room_title);
+    }
+  }, [inviteInfo, inviteToken, guestToken]);
 
   // Fetch messages when joined
   useEffect(() => {
@@ -243,8 +263,6 @@ export default function GuestJoinPage() {
           <CardContent>
             {isExpired ? (
               <p className="text-center text-destructive">この招待リンクは期限切れです</p>
-            ) : alreadyJoined ? (
-              <p className="text-center text-muted-foreground">この招待リンクは既に使用されています</p>
             ) : (
               <div className="space-y-4">
                 <div>
@@ -316,7 +334,63 @@ export default function GuestJoinPage() {
                 <GuestMessageBubble
                   message={msg}
                   showRead={msg.sender_type === 'guest' && readByOther != null && messages.filter(m => m.sender_type === 'guest').pop()?.id === msg.id}
+                  replyState={replyStates[msg.id]?.state}
+                  onGenerateReply={msg.sender_type === 'owner' && !replyStates[msg.id] ? async () => {
+                    if (!roomId || !guestToken) return;
+                    setReplyStates(prev => ({ ...prev, [msg.id]: { state: 'loading', reply: '' } }));
+                    try {
+                      const result = await api.collab.generateReplyGuest(roomId, msg.id, msg.content, guestToken);
+                      setReplyStates(prev => ({ ...prev, [msg.id]: { state: 'ready', reply: result.reply } }));
+                    } catch {
+                      toast.error('返信の生成に失敗しました');
+                      setReplyStates(prev => { const n = { ...prev }; delete n[msg.id]; return n; });
+                    }
+                  } : undefined}
                 />
+                {/* Reply editor for owner messages - right-aligned with connector */}
+                {msg.sender_type === 'owner' && replyStates[msg.id]?.state === 'ready' && (
+                  <div className="flex items-stretch gap-0 mt-0">
+                    <div className="flex-1 flex items-end justify-end pr-1.5 pb-6">
+                      <div className="w-full h-[calc(100%-8px)] border-b-2 border-l-2 border-violet-500/25 rounded-bl-xl" />
+                    </div>
+                    <div className="w-[min(65%,420px)] space-y-1.5 pt-1">
+                      <textarea
+                        value={replyStates[msg.id].reply}
+                        onChange={(e) => setReplyStates(prev => ({ ...prev, [msg.id]: { ...prev[msg.id], reply: e.target.value } }))}
+                        className="w-full text-sm bg-background border border-violet-500/30 rounded-lg px-3 py-2 resize-none focus:outline-none focus:border-violet-500"
+                        rows={Math.min((replyStates[msg.id].reply || '').split('\n').length + 1, 5)}
+                      />
+                      <div className="flex gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="flex-1 text-xs"
+                          onClick={() => setReplyStates(prev => { const n = { ...prev }; delete n[msg.id]; return n; })}
+                        >
+                          キャンセル
+                        </Button>
+                        <Button
+                          size="sm"
+                          className="flex-1 bg-violet-600 hover:bg-violet-700 text-white"
+                          onClick={() => {
+                            const text = replyStates[msg.id].reply.trim();
+                            if (text) {
+                              wsSend(text);
+                              setReplyStates(prev => ({ ...prev, [msg.id]: { ...prev[msg.id], state: 'sent' } }));
+                            }
+                          }}
+                          disabled={!replyStates[msg.id].reply.trim()}
+                        >
+                          <Send className="h-3.5 w-3.5 mr-1" />
+                          送信
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {msg.sender_type === 'owner' && replyStates[msg.id]?.state === 'sent' && (
+                  <p className="text-[10px] text-violet-300 mt-1 text-right">返信済み</p>
+                )}
               </div>
             );
           })}
@@ -412,9 +486,15 @@ export default function GuestJoinPage() {
   );
 }
 
-function GuestMessageBubble({ message, showRead }: { message: CollabMessageResponse; showRead?: boolean }) {
+function GuestMessageBubble({ message, showRead, replyState, onGenerateReply }: {
+  message: CollabMessageResponse;
+  showRead?: boolean;
+  replyState?: 'loading' | 'ready' | 'sent';
+  onGenerateReply?: () => void;
+}) {
   const isGuest = message.sender_type === 'guest';
   const isDan = message.sender_type.startsWith('dan_');
+  const isOwner = message.sender_type === 'owner';
 
   function SenderIcon({ type }: { type: string }) {
     switch (type) {
@@ -462,6 +542,23 @@ function GuestMessageBubble({ message, showRead }: { message: CollabMessageRespo
           return null;
         })()}
         <p className="text-sm whitespace-pre-wrap break-words"><LinkifyText text={message.content} /></p>
+
+        {/* Reply generation button for owner messages */}
+        {isOwner && !replyState && onGenerateReply && (
+          <button
+            onClick={onGenerateReply}
+            className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 transition-colors"
+          >
+            <Sparkles className="h-3 w-3" />
+            返信を生成
+          </button>
+        )}
+        {isOwner && replyState === 'loading' && (
+          <div className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            生成中...
+          </div>
+        )}
       </div>
       {showRead && (
         <p className="text-[10px] text-muted-foreground text-right mt-0.5 mr-1">既読</p>

@@ -6,7 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   ArrowLeft, Send, Copy, Link2, Users, Settings2, Paperclip,
-  Bot, User, UserCheck, Circle, Sparkles, Loader2,
+  Bot, User, UserCheck, Circle, Sparkles, Loader2, Reply, X,
 } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { MainLayout } from '@/components/layout/main-layout';
@@ -81,6 +81,7 @@ export default function CollabRoomPage() {
   const [readByOther, setReadByOther] = useState<string | null>(null); // last message_id read by other side
   // Reply generation state - keyed by message ID to survive re-renders
   const [replyStates, setReplyStates] = useState<Record<string, { state: 'loading' | 'ready' | 'sent'; reply: string }>>({});
+  const [replyTo, setReplyTo] = useState<CollabMessageResponse | null>(null);
 
   // Fetch room info
   const { data: room } = useQuery({
@@ -158,8 +159,18 @@ export default function CollabRoomPage() {
     const content = input.trim();
     if (!content) return;
     const finalContent = danMode ? `@ダン ${content}` : content;
-    wsSend(finalContent);
+    const metadata: Record<string, unknown> = {};
+    if (replyTo) {
+      metadata.reply_to = {
+        id: replyTo.id,
+        sender_name: replyTo.sender_name,
+        sender_type: replyTo.sender_type,
+        content: replyTo.content.slice(0, 200),
+      };
+    }
+    wsSend(finalContent, Object.keys(metadata).length > 0 ? metadata : undefined);
     setInput('');
+    setReplyTo(null);
     inputRef.current?.focus();
   };
 
@@ -354,11 +365,13 @@ export default function CollabRoomPage() {
                     <div className="flex-1 border-t border-border" />
                   </div>
                 )}
+                <div data-collab-msg-id={msg.id}>
                 <MessageBubble
                   message={msg}
                   isOwner={msg.sender_type === 'owner'}
                   showRead={msg.sender_type === 'owner' && !msg.metadata?.visibility && readByOther != null && messages.filter(m => m.sender_type === 'owner' && !m.metadata?.visibility).pop()?.id === msg.id}
                   replyState={rs?.state}
+                  onReply={setReplyTo}
                   onGenerateReply={async () => {
                     setReplyStates(prev => ({ ...prev, [msg.id]: { state: 'loading', reply: '' } }));
                     try {
@@ -415,6 +428,7 @@ export default function CollabRoomPage() {
                 {msg.sender_type === 'guest' && rs?.state === 'sent' && (
                   <p className="text-[10px] text-violet-300 mt-1 text-right">返信済み</p>
                 )}
+                </div>
               </div>
             );
           })}
@@ -430,7 +444,24 @@ export default function CollabRoomPage() {
       </div>
 
       {/* Input */}
-      <div className="flex items-center gap-2 px-4 py-3 border-t bg-background shrink-0">
+      <div className="shrink-0 border-t bg-background px-4 py-3">
+        {replyTo && (
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
+            <Reply className="h-3.5 w-3.5 shrink-0 text-primary" />
+            <div className="min-w-0 flex-1">
+              <span className="text-xs font-medium text-primary">
+                {replyTo.sender_type.startsWith('dan_') ? 'DAN' : replyTo.sender_name}に返信
+              </span>
+              <p className="truncate text-xs text-muted-foreground">
+                {(replyTo.content || '').slice(0, 100) || '(ファイル)'}
+              </p>
+            </div>
+            <button onClick={() => setReplyTo(null)} className="shrink-0 text-muted-foreground hover:text-foreground">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+      <div className="flex items-center gap-2">
         <input
           type="file"
           ref={fileInputRef}
@@ -484,6 +515,7 @@ export default function CollabRoomPage() {
         >
           <Send className="h-4 w-4" />
         </Button>
+      </div>
       </div>
     </div>
 
@@ -540,12 +572,40 @@ export default function CollabRoomPage() {
   );
 }
 
-function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply }: {
+function CollabReplyQuote({ replyTo }: { replyTo: { id: string; sender_name: string; sender_type: string; content: string } }) {
+  const truncated = (replyTo.content || '').replace(/\[添付[^\]]*\]/g, '').trim().slice(0, 80);
+  const label = replyTo.sender_type.startsWith('dan_') ? 'DAN' : replyTo.sender_name;
+
+  const handleClick = useCallback(() => {
+    const el = document.querySelector(`[data-collab-msg-id="${replyTo.id}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('ring-2', 'ring-primary/50', 'rounded-lg');
+      setTimeout(() => el.classList.remove('ring-2', 'ring-primary/50', 'rounded-lg'), 1500);
+    }
+  }, [replyTo.id]);
+
+  return (
+    <div
+      onClick={handleClick}
+      className="flex items-start gap-1.5 rounded-md bg-muted/60 border-l-2 border-primary/50 px-2.5 py-1.5 text-xs text-muted-foreground mb-1 max-w-full overflow-hidden cursor-pointer hover:bg-muted/80 transition-colors"
+    >
+      <Reply className="h-3 w-3 mt-0.5 shrink-0 rotate-180" />
+      <div className="min-w-0">
+        <span className="font-medium text-foreground/80">{label}</span>
+        <p className="truncate">{truncated || '(ファイル)'}</p>
+      </div>
+    </div>
+  );
+}
+
+function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply, onReply }: {
   message: CollabMessageResponse;
   isOwner: boolean;
   showRead?: boolean;
   replyState?: 'loading' | 'ready' | 'sent';
   onGenerateReply?: () => void;
+  onReply?: (msg: CollabMessageResponse) => void;
 }) {
   const isDan = message.sender_type.startsWith('dan_');
   const isGuest = message.sender_type === 'guest';
@@ -553,66 +613,79 @@ function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply
   const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
   const isImage = file?.type?.startsWith('image/');
   const isOwnerPrivate = isOwner && isPrivate;
+  const replyToData = message.metadata?.reply_to as { id: string; sender_name: string; sender_type: string; content: string } | undefined;
 
   return (
-    <div className={`flex ${isOwner || isDan ? 'justify-end' : 'justify-start'}`}>
-      <div
-        className={`max-w-[75%] rounded-lg px-3 py-2 ${
-          isDan
-            ? 'bg-violet-500/10 border border-violet-500/20'
-            : isOwnerPrivate
-              ? 'bg-violet-500/5 border border-dashed border-violet-500/30'
-              : isOwner
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-muted'
-        }`}
-      >
-        <div className="flex items-center gap-1.5 mb-1">
-          {isPrivate ? <Bot className="h-4 w-4 text-violet-400" /> : <SenderIcon type={message.sender_type} />}
-          <span className={`text-xs font-medium ${isPrivate ? 'text-violet-400' : 'opacity-70'}`}>
-            {isOwnerPrivate ? `${message.sender_name} → DAN` : message.sender_name}
-          </span>
-          {isPrivate && (
-            <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded-full">非公開</span>
-          )}
-          <span className="text-[10px] opacity-50 ml-auto">
-            {formatTime(message.created_at)}
-          </span>
-        </div>
-        {file && isImage ? (
-          <a href={file.url} target="_blank" rel="noopener noreferrer">
-            <img src={file.url} alt={file.name} className="max-w-full max-h-60 rounded mt-1" />
-          </a>
-        ) : file ? (
-          <a
-            href={file.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 mt-1 text-sm underline opacity-80"
-          >
-            <Paperclip className="h-3.5 w-3.5" />
-            {file.name}
-            {file.size && <span className="text-xs opacity-50">({(file.size / 1024).toFixed(0)}KB)</span>}
-          </a>
-        ) : null}
-        <p className="text-sm whitespace-pre-wrap break-words"><LinkifyText text={message.content} /></p>
-
-        {/* Reply generation button - stays inside bubble */}
-        {isGuest && !replyState && (
+    <div className={`flex flex-col ${isOwner || isDan ? 'items-end' : 'items-start'} max-w-[75%] ${isOwner || isDan ? 'ml-auto' : 'mr-auto'}`}>
+      {replyToData && <CollabReplyQuote replyTo={replyToData} />}
+      <div className={`group flex items-start gap-1 ${isOwner || isDan ? 'flex-row' : 'flex-row-reverse'}`}>
+        {onReply && (
           <button
-            onClick={onGenerateReply}
-            className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 transition-colors"
+            onClick={() => onReply(message)}
+            className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
+            title="返信"
           >
-            <Sparkles className="h-3 w-3" />
-            返信を生成
+            <Reply className="h-3.5 w-3.5" />
           </button>
         )}
-        {isGuest && replyState === 'loading' && (
-          <div className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400">
-            <Loader2 className="h-3 w-3 animate-spin" />
-            生成中...
+        <div
+          className={`rounded-lg px-3 py-2 ${
+            isDan
+              ? 'bg-violet-500/10 border border-violet-500/20'
+              : isOwnerPrivate
+                ? 'bg-violet-500/5 border border-dashed border-violet-500/30'
+                : isOwner
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted'
+          }`}
+        >
+          <div className="flex items-center gap-1.5 mb-1">
+            {isPrivate ? <Bot className="h-4 w-4 text-violet-400" /> : <SenderIcon type={message.sender_type} />}
+            <span className={`text-xs font-medium ${isPrivate ? 'text-violet-400' : 'opacity-70'}`}>
+              {isOwnerPrivate ? `${message.sender_name} → DAN` : message.sender_name}
+            </span>
+            {isPrivate && (
+              <span className="text-[10px] bg-violet-500/20 text-violet-300 px-1.5 py-0.5 rounded-full">非公開</span>
+            )}
+            <span className="text-[10px] opacity-50 ml-auto">
+              {formatTime(message.created_at)}
+            </span>
           </div>
-        )}
+          {file && isImage ? (
+            <a href={file.url} target="_blank" rel="noopener noreferrer">
+              <img src={file.url} alt={file.name} className="max-w-full max-h-60 rounded mt-1" />
+            </a>
+          ) : file ? (
+            <a
+              href={file.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 mt-1 text-sm underline opacity-80"
+            >
+              <Paperclip className="h-3.5 w-3.5" />
+              {file.name}
+              {file.size && <span className="text-xs opacity-50">({(file.size / 1024).toFixed(0)}KB)</span>}
+            </a>
+          ) : null}
+          <p className="text-sm whitespace-pre-wrap break-words"><LinkifyText text={message.content} /></p>
+
+          {/* Reply generation button - stays inside bubble */}
+          {isGuest && !replyState && (
+            <button
+              onClick={onGenerateReply}
+              className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 transition-colors"
+            >
+              <Sparkles className="h-3 w-3" />
+              返信を生成
+            </button>
+          )}
+          {isGuest && replyState === 'loading' && (
+            <div className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              生成中...
+            </div>
+          )}
+        </div>
       </div>
       {showRead && (
         <p className="text-[10px] text-muted-foreground text-right mt-0.5 mr-1">既読</p>
