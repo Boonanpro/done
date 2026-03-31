@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard } from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, FileStack } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -74,6 +74,12 @@ const businessItems = [
     href: '/studio',
     icon: Clapperboard,
     description: 'AI Vlog 制作ダッシュボード',
+  },
+  {
+    title: '資料管理',
+    href: '/dashboard/documents',
+    icon: FileStack,
+    description: '全ファイルの一元管理・自動分類',
   },
 ];
 
@@ -179,7 +185,8 @@ export function Sidebar({
     queryKey: ['projects'],
     queryFn: () => api.projects.list(),
     enabled: hasToken,
-    staleTime: 60 * 1000,
+    staleTime: 5 * 1000,
+    refetchInterval: 10 * 1000,
   });
 
   const filteredProjects = projectsData?.projects?.filter((p) =>
