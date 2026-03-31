@@ -36,6 +36,14 @@ export interface TokenResponse {
   access_token: string;
 }
 
+export interface ReplyToMessage {
+  id: string;
+  sender_name: string;
+  sender_type: 'human' | 'ai';
+  content: string;
+  created_at: string;
+}
+
 export interface MessageResponse {
   id: string;
   room_id: string;
@@ -48,6 +56,8 @@ export interface MessageResponse {
     reasoning_steps?: string[];
     reasoning_full?: string[];
   };
+  reply_to_id?: string;
+  reply_to_message?: ReplyToMessage;
 }
 
 export interface MessagesListResponse {
@@ -227,6 +237,7 @@ export interface StateMachineMessageRequest {
   user_id?: string;
   image_urls?: string[];
   file_urls?: { name: string; url: string }[];
+  reply_to_id?: string;
 }
 
 export interface StateMachineConfirmRequest {
@@ -1063,7 +1074,7 @@ export const api = {
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify({ content: data.message, session_id: data.session_id, ...(data.image_urls?.length ? { image_urls: data.image_urls } : {}), ...(data.file_urls?.length ? { file_urls: data.file_urls } : {}) }),
+          body: JSON.stringify({ content: data.message, session_id: data.session_id, ...(data.image_urls?.length ? { image_urls: data.image_urls } : {}), ...(data.file_urls?.length ? { file_urls: data.file_urls } : {}), ...(data.reply_to_id ? { reply_to_id: data.reply_to_id } : {}) }),
           signal,  // AbortSignal追加
         });
 
@@ -1656,6 +1667,12 @@ export const api = {
       if (token) headers['X-Guest-Token'] = token;
       return request<{ files: CollabFileResponse[] }>(`/collab/rooms/${roomId}/files`, { headers });
     },
+
+    generateReply: (roomId: string, messageId: string, content: string) =>
+      request<{ reply: string; message_id: string }>(`/collab/rooms/${roomId}/generate-reply`, {
+        method: 'POST',
+        body: JSON.stringify({ message_id: messageId, content }),
+      }),
   },
 };
 

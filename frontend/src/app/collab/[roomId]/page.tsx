@@ -6,7 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   ArrowLeft, Send, Copy, Link2, Users, Settings2, Paperclip,
-  Bot, User, UserCheck, Circle,
+  Bot, User, UserCheck, Circle, Sparkles, Loader2,
 } from 'lucide-react';
 import { api, type CollabMessageResponse } from '@/lib/api-client';
 import { MainLayout } from '@/components/layout/main-layout';
@@ -79,6 +79,8 @@ export default function CollabRoomPage() {
   const [danThinking, setDanThinking] = useState(false);
   const [danMode, setDanMode] = useState(false);
   const [readByOther, setReadByOther] = useState<string | null>(null); // last message_id read by other side
+  // Reply generation state - keyed by message ID to survive re-renders
+  const [replyStates, setReplyStates] = useState<Record<string, { state: 'loading' | 'ready' | 'sent'; reply: string }>>({});
 
   // Fetch room info
   const { data: room } = useQuery({
@@ -342,6 +344,7 @@ export default function CollabRoomPage() {
             const prevDate = i > 0 ? new Date(messages[i - 1].created_at).toDateString() : '';
             const curDate = new Date(msg.created_at).toDateString();
             const showSeparator = curDate !== prevDate;
+            const rs = replyStates[msg.id];
             return (
               <div key={msg.id}>
                 {showSeparator && (
@@ -354,9 +357,65 @@ export default function CollabRoomPage() {
                 <MessageBubble
                   message={msg}
                   isOwner={msg.sender_type === 'owner'}
-                  onSendReply={wsSend}
                   showRead={msg.sender_type === 'owner' && !msg.metadata?.visibility && readByOther != null && messages.filter(m => m.sender_type === 'owner' && !m.metadata?.visibility).pop()?.id === msg.id}
+                  replyState={rs?.state}
+                  onGenerateReply={async () => {
+                    setReplyStates(prev => ({ ...prev, [msg.id]: { state: 'loading', reply: '' } }));
+                    try {
+                      const result = await api.collab.generateReply(roomId, msg.id, msg.content);
+                      setReplyStates(prev => ({ ...prev, [msg.id]: { state: 'ready', reply: result.reply } }));
+                    } catch {
+                      toast.error('返信の生成に失敗しました');
+                      setReplyStates(prev => { const n = { ...prev }; delete n[msg.id]; return n; });
+                    }
+                  }}
                 />
+                {/* Reply editor - right-aligned with quote reference */}
+                {msg.sender_type === 'guest' && rs?.state === 'ready' && (
+                  <div className="flex justify-end mt-1.5">
+                    <div className="w-[min(75%,480px)] space-y-1.5">
+                      {/* Quote reference to original message */}
+                      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                        <div className="w-3 h-3 border-l-2 border-b-2 border-muted-foreground/30 rounded-bl-sm" />
+                        <span className="truncate">{msg.sender_name}: {msg.content.slice(0, 40)}{msg.content.length > 40 ? '...' : ''}</span>
+                      </div>
+                      <textarea
+                        value={rs.reply}
+                        onChange={(e) => setReplyStates(prev => ({ ...prev, [msg.id]: { ...prev[msg.id], reply: e.target.value } }))}
+                        className="w-full text-sm bg-background border border-violet-500/30 rounded-lg px-3 py-2 resize-none focus:outline-none focus:border-violet-500"
+                        rows={Math.min((rs.reply || '').split('\n').length + 1, 5)}
+                      />
+                      <div className="flex gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="flex-1 text-xs"
+                          onClick={() => setReplyStates(prev => { const n = { ...prev }; delete n[msg.id]; return n; })}
+                        >
+                          キャンセル
+                        </Button>
+                        <Button
+                          size="sm"
+                          className="flex-1 bg-violet-600 hover:bg-violet-700 text-white"
+                          onClick={() => {
+                            const text = rs.reply.trim();
+                            if (text) {
+                              wsSend(text);
+                              setReplyStates(prev => ({ ...prev, [msg.id]: { ...prev[msg.id], state: 'sent' } }));
+                            }
+                          }}
+                          disabled={!rs.reply.trim()}
+                        >
+                          <Send className="h-3.5 w-3.5 mr-1" />
+                          送信
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {msg.sender_type === 'guest' && rs?.state === 'sent' && (
+                  <p className="text-[10px] text-violet-300 mt-1 text-right">返信済み</p>
+                )}
               </div>
             );
           })}
@@ -482,45 +541,18 @@ export default function CollabRoomPage() {
   );
 }
 
-function extractReply(content: string): { body: string; reply: string | null } {
-  // Match patterns like 返信案: 「...」 or **返信案:** 「...」 or 返信案:\n「...」
-  const patterns = [
-    /(?:\*\*)?返信案(?:\*\*)?[:：]\s*[「「]([^」」]+)[」」]/,
-    /(?:\*\*)?返信案(?:\*\*)?[:：]\s*「([^」]+)」/,
-    /(?:\*\*)?返信案(?:\*\*)?[:：]\s*\n?[「「]([^」」]+)[」」]/,
-  ];
-  for (const pattern of patterns) {
-    const match = content.match(pattern);
-    if (match) {
-      return { body: content, reply: match[1].trim() };
-    }
-  }
-  return { body: content, reply: null };
-}
-
-function MessageBubble({ message, isOwner, onSendReply, showRead }: {
+function MessageBubble({ message, isOwner, showRead, replyState, onGenerateReply }: {
   message: CollabMessageResponse;
   isOwner: boolean;
-  onSendReply?: (content: string) => void;
   showRead?: boolean;
+  replyState?: 'loading' | 'ready' | 'sent';
+  onGenerateReply?: () => void;
 }) {
-  const [sent, setSent] = useState(false);
   const isDan = message.sender_type.startsWith('dan_');
+  const isGuest = message.sender_type === 'guest';
   const isPrivate = message.metadata?.visibility === 'owner_only';
   const file = message.metadata?.file as { name: string; url: string; type: string; size: number } | undefined;
   const isImage = file?.type?.startsWith('image/');
-  const { reply } = isDan ? extractReply(message.content) : { reply: null };
-  const [editedReply, setEditedReply] = useState(reply || '');
-
-  const handleSendReply = () => {
-    const text = editedReply.trim();
-    if (text && onSendReply) {
-      onSendReply(text);
-      setSent(true);
-    }
-  };
-
-  // Private owner messages (sent via DAN mode) - show on right with dashed border
   const isOwnerPrivate = isOwner && isPrivate;
 
   return (
@@ -565,27 +597,22 @@ function MessageBubble({ message, isOwner, onSendReply, showRead }: {
           </a>
         ) : null}
         <p className="text-sm whitespace-pre-wrap break-words"><LinkifyText text={message.content} /></p>
-        {reply && !sent && (
-          <div className="mt-2 space-y-1.5">
-            <textarea
-              value={editedReply}
-              onChange={(e) => setEditedReply(e.target.value)}
-              className="w-full text-sm bg-background/50 border border-violet-500/30 rounded px-2 py-1.5 resize-none focus:outline-none focus:border-violet-500"
-              rows={Math.min(editedReply.split('\n').length + 1, 4)}
-            />
-            <Button
-              size="sm"
-              className="w-full bg-violet-600 hover:bg-violet-700 text-white"
-              onClick={handleSendReply}
-              disabled={!editedReply.trim()}
-            >
-              <Send className="h-3.5 w-3.5 mr-1.5" />
-              返信を送信
-            </Button>
-          </div>
+
+        {/* Reply generation button - stays inside bubble */}
+        {isGuest && !replyState && (
+          <button
+            onClick={onGenerateReply}
+            className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 transition-colors"
+          >
+            <Sparkles className="h-3 w-3" />
+            返信を生成
+          </button>
         )}
-        {reply && sent && (
-          <p className="text-[10px] text-violet-300 mt-1.5">送信済み</p>
+        {isGuest && replyState === 'loading' && (
+          <div className="mt-1.5 flex items-center gap-1 text-[11px] text-violet-400">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            生成中...
+          </div>
         )}
       </div>
       {showRead && (

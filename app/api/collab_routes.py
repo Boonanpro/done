@@ -21,6 +21,7 @@ from app.models.collab_schemas import (
     CollabJoinRequest, CollabJoinResponse,
     CollabMessageSendRequest, CollabMessageResponse, CollabMessageListResponse,
     CollabFileResponse, CollabFileListResponse,
+    GenerateReplyRequest,
 )
 from jose import jwt as jose_jwt
 
@@ -242,7 +243,7 @@ async def get_invite_info(
     expires_at = parse_datetime(invite["expires_at"])
     is_expired = datetime.now(timezone.utc) > expires_at or invite["status"] == "expired"
 
-    return {
+    result = {
         "room_title": room["title"] if room else "Unknown",
         "room_description": room.get("description") if room else None,
         "role": invite["role"],
@@ -250,6 +251,19 @@ async def get_invite_info(
         "already_joined": invite["status"] == "joined",
         "guest_name": invite.get("guest_name"),
     }
+
+    # If already joined, include rejoin info so the guest can re-enter directly
+    if invite["status"] == "joined" and invite.get("guest_name"):
+        rejoin_jwt = _create_guest_token(
+            invite_id=invite["id"],
+            room_id=invite["room_id"],
+            guest_name=invite["guest_name"],
+            role=invite["role"],
+        )
+        result["rejoin_token"] = rejoin_jwt
+        result["room_id"] = invite["room_id"]
+
+    return result
 
 
 @router.post("/join/{token}", response_model=CollabJoinResponse)
@@ -390,6 +404,90 @@ async def send_message(
         )
 
     return CollabMessageResponse(**message)
+
+
+# ==================== Generate Reply ====================
+
+@router.post("/rooms/{room_id}/generate-reply")
+async def generate_reply(
+    room_id: str,
+    req: GenerateReplyRequest,
+    request: Request = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    service: CollabService = Depends(get_collab_service),
+):
+    """Generate a reply suggestion for a guest message on demand."""
+    user = await get_current_user(request, credentials)
+
+    room = await service.get_room(room_id)
+    if not room or room["owner_id"] != user.user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    target_message_id = req.message_id
+    target_content = req.content
+
+    # Get recent messages for context
+    recent = await service.get_messages(room_id, limit=20)
+    owner_name = await _get_display_name(room["owner_id"], "オーナー")
+
+    history_lines = []
+    for msg in recent:
+        st = msg.get("sender_type", "?")
+        sn = msg.get("sender_name", "?")
+        c = msg.get("content", "")
+        if st == "owner":
+            history_lines.append(f"【オーナー({sn})】{c}")
+        elif st == "guest":
+            history_lines.append(f"【ゲスト({sn})】{c}")
+        elif st.startswith("dan_"):
+            history_lines.append(f"【DAN】{c}")
+    history_text = "\n".join(history_lines)
+
+    # Generate reply using CLI runner
+    from app.agent.cli_runner import process_message_cli
+
+    prompt = (
+        f"あなたはコラボルーム内でオーナー（{owner_name}）の代わりに返信文を作成します。\n\n"
+        f"## ルーム情報\n"
+        f"- タイトル: {room['title']}\n"
+        f"- 説明: {room.get('description') or '(なし)'}\n\n"
+        f"## 会話履歴\n{history_text}\n\n"
+        f"## 返信対象メッセージ\n{target_content}\n\n"
+        f"## 指示\n"
+        f"このメッセージに対する返信文を1つだけ生成してください。\n"
+        f"- オーナーの口調で自然な返信を書く\n"
+        f"- 返信文のみを出力（説明・前置き不要）\n"
+        f"- 簡潔に（長くても3行以内）"
+    )
+
+    collab_dan_room_id = f"collab_reply_{room_id}"
+    final_text = ""
+
+    async for event in process_message_cli(
+        room_id=collab_dan_room_id,
+        user_id=room["owner_id"],
+        content=prompt,
+        system_prompt=(
+            f"あなたはオーナー（{owner_name}）の代筆者です。"
+            f"ゲストへの返信文を生成してください。返信文のみを出力し、それ以外は何も書かないでください。"
+        ),
+        skip_resume=True,
+        cwd="D:/dan-workspace",
+    ):
+        if event["type"] == "text":
+            final_text += event.get("text", "")
+        elif event["type"] == "result":
+            if event.get("text"):
+                final_text = event["text"]
+        elif event["type"] == "error":
+            raise HTTPException(status_code=500, detail=event.get("message", "Generation failed"))
+
+    final_text = final_text.strip()
+    # Remove surrounding quotes if present
+    if final_text.startswith("「") and final_text.endswith("」"):
+        final_text = final_text[1:-1]
+
+    return {"reply": final_text, "message_id": target_message_id}
 
 
 # ==================== Files ====================
@@ -824,7 +922,8 @@ async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_mess
                 f"## 指示\n"
                 f"このメッセージに対してオーナーをサポートしてください。\n"
                 f"- ツールが必要なら使ってください（カレンダー確認、ファイル操作、ブラウザ操作など）\n"
-                f"- 返信文の提案がある場合は「返信案:」と明示してください\n"
+                f"- 返信案は生成しないでください（ユーザーが手動で生成します）\n"
+                f"- カレンダー・資料管理・タスク管理など作業系の提案やアクション実行のみ行ってください\n"
                 f"- 反応不要なメッセージなら何も返さないでください\n"
                 f"- 簡潔に（長くても5行以内）"
             )
@@ -860,7 +959,8 @@ async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_mess
                 f"## 重要ルール\n"
                 f"- スケジュールに関する質問には、必ずカレンダーAPIを実行して実データを確認してから回答すること\n"
                 f"- 「オーナーに聞いてください」ではなく、自分でツールを使って情報を取得すること\n"
-                f"- 返信文の提案がある場合は「返信案:「〇〇」」の形式で明示すること"
+                f"- 返信案は生成しないこと（ユーザーが手動で生成する機能があります）\n"
+                f"- カレンダー・資料管理・タスク管理など作業系のサポートのみ行うこと"
             ),
             skip_resume=True,
             cwd="D:/dan-workspace",
@@ -986,7 +1086,6 @@ async def _trigger_guest_dan_assist(service: CollabService, room_id: str, trigge
                     f"## ゲスト（{guest_name}）からの指示\n{content}\n\n"
                     f"## ルール\n"
                     f"- 日本語で簡潔に回答（5行以内）\n"
-                    f"- 返信文の提案がある場合は「返信案:「〇〇」」の形式で明示\n"
                     f"- 反応不要なら何も返さないでください"
                 ),
             ),

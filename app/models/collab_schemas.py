@@ -129,6 +129,13 @@ class CollabMessageListResponse(BaseModel):
     messages: List[CollabMessageResponse]
 
 
+# ==================== Generate Reply ====================
+
+class GenerateReplyRequest(BaseModel):
+    message_id: str
+    content: str
+
+
 # ==================== Files ====================
 
 class CollabFileResponse(BaseModel):
