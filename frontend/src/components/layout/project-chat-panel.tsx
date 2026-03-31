@@ -240,8 +240,21 @@ function parseMediaContent(content: string): { images: string[]; videos: string[
 const ReplyQuote = memo(function ReplyQuote({ replyTo }: { replyTo: ReplyToMessage }) {
   const truncated = (replyTo.content || '').replace(/\[添付[^\]]*\]/g, '').trim().slice(0, 80);
   const label = replyTo.sender_type === 'ai' ? 'ダン' : replyTo.sender_name;
+
+  const handleClick = useCallback(() => {
+    const el = document.querySelector(`[data-message-id="${replyTo.id}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('ring-2', 'ring-primary/50', 'rounded-lg');
+      setTimeout(() => el.classList.remove('ring-2', 'ring-primary/50', 'rounded-lg'), 1500);
+    }
+  }, [replyTo.id]);
+
   return (
-    <div className="flex items-start gap-1.5 rounded-md bg-muted/60 border-l-2 border-primary/50 px-2.5 py-1.5 text-xs text-muted-foreground mb-1 max-w-full overflow-hidden">
+    <div
+      onClick={handleClick}
+      className="flex items-start gap-1.5 rounded-md bg-muted/60 border-l-2 border-primary/50 px-2.5 py-1.5 text-xs text-muted-foreground mb-1 max-w-full overflow-hidden cursor-pointer hover:bg-muted/80 transition-colors"
+    >
       <Reply className="h-3 w-3 mt-0.5 shrink-0 rotate-180" />
       <div className="min-w-0">
         <span className="font-medium text-foreground/80">{label}</span>
@@ -256,18 +269,19 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
   if (msg.sender_type === 'human') {
     const { images, videos, files, text } = parseMediaContent(msg.content || '');
     return (
-      <div className="group flex justify-end gap-1 items-start">
-        {onReply && !msg.id.startsWith('temp-') && (
-          <button
-            onClick={() => onReply(msg)}
-            className="mt-2 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
-            title="返信"
-          >
-            <Reply className="h-3.5 w-3.5" />
-          </button>
-        )}
-        <div className="max-w-[85%] flex flex-col items-end gap-1">
-          {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
+      <div className="flex flex-col items-end max-w-[85%] ml-auto">
+        {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
+        <div className="group flex items-start gap-1">
+          {onReply && !msg.id.startsWith('temp-') && (
+            <button
+              onClick={() => onReply(msg)}
+              className="mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground p-1 rounded"
+              title="返信"
+            >
+              <Reply className="h-3.5 w-3.5" />
+            </button>
+          )}
+          <div className="flex flex-col items-end gap-1">
           {images.map((url, i) => (
             <img
               key={i}
@@ -303,6 +317,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
               {text}
             </div>
           )}
+          </div>
         </div>
       </div>
     );
@@ -1306,7 +1321,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                   );
                 }
 
-                return <MessageBubble key={item.msg.id} msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} />;
+                return <div key={item.msg.id} data-message-id={item.msg.id}><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>;
               });
             })()}
             <div ref={messagesEndRef} />

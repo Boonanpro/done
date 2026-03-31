@@ -195,6 +195,16 @@ class MessageSendRequest(BaseModel):
     session_id: Optional[str] = Field(None, description="Target session/room ID")
     image_urls: Optional[List[str]] = Field(default=[], description="Uploaded image URLs for vision")
     file_urls: Optional[List[dict]] = Field(default=[], description="Uploaded file URLs [{name, url}]")
+    reply_to_id: Optional[str] = Field(None, description="ID of the message being replied to")
+
+
+class ReplyToMessage(BaseModel):
+    """Embedded reply-to message summary"""
+    id: str
+    sender_name: str
+    sender_type: SenderType
+    content: str
+    created_at: datetime
 
 
 class MessageResponse(BaseModel):
@@ -207,6 +217,8 @@ class MessageResponse(BaseModel):
     content: str
     created_at: datetime
     ai_context: Optional[dict] = None  # reasoning_steps等を含む
+    reply_to_id: Optional[str] = None
+    reply_to_message: Optional[ReplyToMessage] = None
 
 
 class MessagesListResponse(BaseModel):

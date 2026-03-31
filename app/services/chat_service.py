@@ -443,7 +443,7 @@ class ChatService:
     
     # ==================== Message Management ====================
     
-    async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human") -> dict:
+    async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human", reply_to_id: str = None) -> dict:
         """Send a message to a room"""
         # Verify membership
         member = await self._execute_with_retry(
@@ -461,14 +461,18 @@ class ChatService:
         sender_name = sender.data[0]["display_name"] if sender.data else "Unknown"
         # 統合後: sender_id = users.id（done_user_idは不要）
 
+        insert_data = {
+            "room_id": room_id,
+            "sender_id": sender_id,
+            "sender_type": sender_type,
+            "content": content,
+        }
+        if reply_to_id:
+            insert_data["reply_to"] = reply_to_id
+
         result = await self._execute_with_retry(
             "send_message.insert_message",
-            lambda: self.supabase.table("chat_messages").insert({
-                "room_id": room_id,
-                "sender_id": sender_id,
-                "sender_type": sender_type,
-                "content": content,
-            }).execute(),
+            lambda: self.supabase.table("chat_messages").insert(insert_data).execute(),
         )
 
         if result.data:
@@ -550,15 +554,35 @@ class ChatService:
         query = self.supabase.table("chat_messages").select(
             "*, sender:users!sender_id(id, display_name, avatar_url)"
         ).eq("room_id", room_id).order("created_at", desc=True).limit(limit)
-        
+
         if before:
             query = query.lt("created_at", before)
-        
+
         result = await self._execute_with_retry(
             "get_messages.fetch_messages",
             lambda: query.execute(),
         )
-        
+
+        # 返信先メッセージを一括取得
+        reply_to_ids = [msg["reply_to"] for msg in (result.data or []) if msg.get("reply_to")]
+        reply_map = {}
+        if reply_to_ids:
+            try:
+                unique_ids = list(set(reply_to_ids))
+                replied_result = self.supabase.table("chat_messages").select(
+                    "id, sender_type, content, created_at, sender:users!sender_id(display_name)"
+                ).in_("id", unique_ids).execute()
+                for rm in (replied_result.data or []):
+                    reply_map[rm["id"]] = {
+                        "id": rm["id"],
+                        "sender_name": rm["sender"]["display_name"] if rm.get("sender") else "Unknown",
+                        "sender_type": rm["sender_type"],
+                        "content": rm["content"][:200],
+                        "created_at": rm["created_at"],
+                    }
+            except Exception:
+                pass
+
         messages = []
         for msg in result.data or []:
             message_dict = {
@@ -573,6 +597,11 @@ class ChatService:
             # ai_contextがあれば追加（reasoning_steps等）
             if msg.get("ai_context"):
                 message_dict["ai_context"] = msg["ai_context"]
+            # reply_to情報
+            if msg.get("reply_to"):
+                message_dict["reply_to_id"] = msg["reply_to"]
+                if msg["reply_to"] in reply_map:
+                    message_dict["reply_to_message"] = reply_map[msg["reply_to"]]
             messages.append(message_dict)
         
         return messages

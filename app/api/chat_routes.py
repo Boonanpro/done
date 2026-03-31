@@ -1326,7 +1326,7 @@ async def send_message(
 ):
     """Send a message to a room"""
     try:
-        message = await service.send_message(room_id, current_user.user_id, request.content)
+        message = await service.send_message(room_id, current_user.user_id, request.content, reply_to_id=request.reply_to_id)
 
         # プロジェクトチャットの場合、プロジェクトのupdated_atを更新（リスト繰り上げ）
         try:
@@ -1586,11 +1586,27 @@ async def send_dan_message_stream(
             # session_idが指定されていればそのルームに、なければ現在のDanルームに送信
             if request.session_id:
                 room_id = request.session_id
-                message = await service.send_message(room_id, current_user.user_id, _build_content_with_media(request.content, request.image_urls or [], request.file_urls or []), sender_type="human")
+                message = await service.send_message(room_id, current_user.user_id, _build_content_with_media(request.content, request.image_urls or [], request.file_urls or []), sender_type="human", reply_to_id=request.reply_to_id)
             else:
                 message = await service.send_dan_message(current_user.user_id, _build_content_with_media(request.content, request.image_urls or [], request.file_urls or []))
                 room_id = message["room_id"]
             user = await service.get_user_by_id(current_user.user_id)
+
+            # 返信先メッセージの内容を取得（ダンのコンテキスト注入 + SSEレスポンス用）
+            reply_context_prefix = ""
+            _reply_msg_data = None
+            if request.reply_to_id:
+                try:
+                    reply_msg_result = service.supabase.table("chat_messages").select(
+                        "id, sender_type, content, created_at, sender:users!sender_id(display_name)"
+                    ).eq("id", request.reply_to_id).execute()
+                    if reply_msg_result.data:
+                        _reply_msg_data = reply_msg_result.data[0]
+                        rm_sender = _reply_msg_data.get("sender", {}).get("display_name", "Unknown") if _reply_msg_data.get("sender") else "Unknown"
+                        rm_type = "ダン" if _reply_msg_data["sender_type"] == "ai" else rm_sender
+                        reply_context_prefix = f"[返信先メッセージ（{rm_type}）: {_reply_msg_data['content'][:500]}]\n\n"
+                except Exception:
+                    pass
 
             # 方針変更要求時は、既存の同一ルーム実行を先に止める
             if replan_requested or should_supersede_existing_run:
@@ -1614,6 +1630,16 @@ async def send_dan_message_stream(
                 "content": message["content"],
                 "created_at": message["created_at"].isoformat() if hasattr(message["created_at"], 'isoformat') else str(message["created_at"]),
             }
+            if request.reply_to_id:
+                user_message["reply_to_id"] = request.reply_to_id
+                if _reply_msg_data:
+                    user_message["reply_to_message"] = {
+                        "id": _reply_msg_data["id"],
+                        "sender_name": _reply_msg_data["sender"]["display_name"] if _reply_msg_data.get("sender") else "Unknown",
+                        "sender_type": _reply_msg_data["sender_type"],
+                        "content": _reply_msg_data["content"][:200],
+                        "created_at": _reply_msg_data["created_at"],
+                    }
 
             # ユーザーメッセージを送信（session_id付き）
             yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
@@ -1771,6 +1797,8 @@ async def send_dan_message_stream(
 
                 cli_content = _build_content_with_media(effective_content, request.image_urls or [], request.file_urls or [])
                 cli_content = await _enrich_content_with_video_analysis(cli_content, request.file_urls or [])
+                if reply_context_prefix:
+                    cli_content = reply_context_prefix + cli_content
 
                 async for event in process_message_cli(
                     room_id=room_id,
