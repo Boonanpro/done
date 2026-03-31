@@ -24,12 +24,14 @@ export interface UserResponse {
 export interface LoginRequest {
   email: string;
   password: string;
+  guest_tokens?: string[];
 }
 
 export interface RegisterRequest {
   email: string;
   password: string;
   display_name: string;
+  guest_tokens?: string[];
 }
 
 export interface TokenResponse {

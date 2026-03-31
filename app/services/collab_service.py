@@ -159,15 +159,29 @@ class CollabService:
             "role": invite["role"],
         }
 
-    async def link_user_to_invites(self, user_id: str, guest_name: str):
-        """Link a registered user to their existing guest invites by matching guest_name."""
-        await self._retry("link_user_invites",
-            lambda: self.supabase.table("collab_invites")
-                .update({"user_id": user_id})
-                .eq("guest_name", guest_name)
-                .eq("status", "joined")
-                .is_("user_id", "null")
-                .execute())
+    async def link_user_by_tokens(self, user_id: str, guest_tokens: list[str]):
+        """Link a registered user to their guest invites by decoding guest JWTs."""
+        from app.config import settings
+        from jose import jwt as jose_jwt
+        jwt_secret = settings.JWT_SECRET_KEY or settings.APP_SECRET_KEY
+
+        for token in guest_tokens:
+            try:
+                payload = jose_jwt.decode(token, jwt_secret, algorithms=["HS256"])
+                if payload.get("type") != "guest":
+                    continue
+                invite_id = payload.get("sub")
+                if not invite_id:
+                    continue
+                await self._retry("link_user_invite",
+                    lambda inv_id=invite_id: self.supabase.table("collab_invites")
+                        .update({"user_id": user_id})
+                        .eq("id", inv_id)
+                        .eq("status", "joined")
+                        .is_("user_id", "null")
+                        .execute())
+            except Exception:
+                continue  # Invalid/expired token, skip
 
     async def list_guest_rooms(self, user_id: str) -> List[dict]:
         """List rooms where the user is a guest (via user_id in collab_invites)."""

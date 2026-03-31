@@ -1043,13 +1043,14 @@ async def register(
             password=request.password,
             display_name=request.display_name,
         )
-        # Link any existing guest invites to this new user
-        try:
-            from app.services.collab_service import CollabService
-            collab = CollabService()
-            await collab.link_user_to_invites(user["id"], request.display_name)
-        except Exception:
-            pass  # Non-critical
+        # Link guest invites via guest tokens
+        if request.guest_tokens:
+            try:
+                from app.services.collab_service import CollabService
+                collab = CollabService()
+                await collab.link_user_by_tokens(user["id"], request.guest_tokens)
+            except Exception:
+                pass  # Non-critical
         return UserResponse(**user)
     except Exception as e:
         if "duplicate" in str(e).lower() or "unique" in str(e).lower():
@@ -1068,13 +1069,14 @@ async def login(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    # Link any existing guest invites to this user
-    try:
-        from app.services.collab_service import CollabService
-        collab = CollabService()
-        await collab.link_user_to_invites(user["id"], user.get("display_name", ""))
-    except Exception:
-        pass  # Non-critical
+    # Link guest invites via guest tokens
+    if request.guest_tokens:
+        try:
+            from app.services.collab_service import CollabService
+            collab = CollabService()
+            await collab.link_user_by_tokens(user["id"], request.guest_tokens)
+        except Exception:
+            pass  # Non-critical
 
     token_pair = create_token_pair(user_id=user["id"], email=user["email"])
     set_auth_cookies(response, token_pair.access_token, token_pair.refresh_token)

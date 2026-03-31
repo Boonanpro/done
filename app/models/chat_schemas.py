@@ -43,6 +43,7 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=8)
     display_name: str = Field(..., min_length=1, max_length=100)
+    guest_tokens: Optional[list[str]] = None
 
 
 class LoginRequest(BaseModel):
@@ -50,6 +51,7 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: str
     remember_me: bool = False  # ログイン状態を保持するか
+    guest_tokens: Optional[list[str]] = None
 
 
 class TokenResponse(BaseModel):

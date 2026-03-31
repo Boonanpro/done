@@ -9,6 +9,20 @@ import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/stores/auth-store';
 import { api, ApiError, setImmediateToken, setStoredToken, type LoginRequest, type RegisterRequest } from '@/lib/api-client';
 
+/** Collect all collab guest tokens from localStorage */
+function collectGuestTokens(): string[] {
+  if (typeof window === 'undefined') return [];
+  const tokens: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith('collab-guest-token-')) {
+      const val = localStorage.getItem(key);
+      if (val) tokens.push(val);
+    }
+  }
+  return tokens;
+}
+
 export function useAuth() {
   const router = useRouter();
   const { user, token, isAuthenticated, isLoading, setUser, setToken, setLoading, logout: clearAuth } = useAuthStore();
@@ -57,7 +71,8 @@ export function useAuth() {
     async (data: LoginRequest) => {
       setLoading(true);
       try {
-        const tokenResponse = await api.auth.login(data);
+        const guestTokens = collectGuestTokens();
+        const tokenResponse = await api.auth.login({ ...data, guest_tokens: guestTokens.length > 0 ? guestTokens : undefined });
         const newToken = tokenResponse.access_token;
         // Save token to localStorage and memory
         setStoredToken(newToken);
@@ -85,9 +100,10 @@ export function useAuth() {
     async (data: RegisterRequest) => {
       setLoading(true);
       try {
-        await api.auth.register(data);
+        const guestTokens = collectGuestTokens();
+        await api.auth.register({ ...data, guest_tokens: guestTokens.length > 0 ? guestTokens : undefined });
         // Auto-login after registration
-        const tokenResponse = await api.auth.login({ email: data.email, password: data.password });
+        const tokenResponse = await api.auth.login({ email: data.email, password: data.password, guest_tokens: guestTokens.length > 0 ? guestTokens : undefined });
         const newToken = tokenResponse.access_token;
         // Save token to localStorage and memory
         setStoredToken(newToken);
