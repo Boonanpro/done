@@ -54,7 +54,11 @@ export function PWAInstallPrompt() {
     const ua = navigator.userAgent;
     const ios = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     const android = /Android/.test(ua);
-    setPlatform(ios ? 'ios' : android ? 'android' : 'desktop');
+
+    // PC（デスクトップ）では表示しない — スマホのみ
+    if (!ios && !android) return;
+
+    setPlatform(ios ? 'ios' : 'android');
 
     const handler = (e: Event) => {
       e.preventDefault();
