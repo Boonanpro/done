@@ -79,22 +79,6 @@
 - その時点のスコアと改善履歴をユーザーに報告する
 - 現時点の成果物は出力する（破棄しない）
 
-### Step 4.5: アーティファクトメモリの保存
-
-品質チェックに合格したら（Step 4d で合格判定後）、成果物のビジュアルとテキスト情報を永続メモリとして保存する:
-
-1. `extract_artifact_memory` ツールを呼び出す:
-   - `artifact_file_path`: 保存先のHTMLファイルパス（Step 3 で保存した場所）
-   - `artifact_name`: ファイル名からスラッグを生成（例: `followsure-proposal`）
-   - `artifact_type`: Step 0 で判定した用途（`proposal` / `dashboard` / `hp`）
-   - `room_id`: 現在のROOM_ID（環境変数 `DAN_SESSION_ID` から取得）
-
-このステップにより、成果物のビジュアル・テキスト・機能仕様がGemini Vision APIで抽出され、
-`~/.dan/workspace/artifacts/{ROOM_ID}/` に永続保存される。
-次回セッション以降、この成果物に関連する作業時にsystem promptに自動注入される。
-
-**修正・作り直しの場合も同じ手順で呼び出す**（旧バージョンは自動バックアップされる）。
-
 ### Step 5: 出力
 
 用途に応じた方法で出力する:
@@ -145,8 +129,6 @@
                                     │   ↓
                                     │  合格? ─ No → 最低項目を改善 → ↑
                                     └── Yes
-                                            ↓
-                                    アーティファクトメモリ保存（Gemini Vision抽出）
                                             ↓
                                     成果物出力 + スコア報告
                                             ↓
