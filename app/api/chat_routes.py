@@ -66,7 +66,6 @@ import asyncio as _asyncio_observer
 _observer_last_message_index: dict[str, int] = {}
 # 現在実行中の観察者タスク（room_id → asyncio.Task）
 _observer_running: dict[str, "_asyncio_observer.Task"] = {}
-
 OBSERVER_ROOM_SUFFIX = "__observer"
 
 
@@ -133,17 +132,28 @@ async def _run_single_observer(
         return {"files": [], "summary": ""}
 
     checklist = checklist_path.read_text(encoding="utf-8")
-    prompt = (
-        f"[OBSERVER MODE] これはユーザーからのメッセージではなく、システムによる自動観察リクエストです。\n"
-        f"ユーザーには見えません。チャットに返答しないでください。\n\n"
-        f"ROOM_ID: {room_id}\n\n"
-        f"以下は直前の会話内容です:\n\n{conversation_text}\n\n"
-        f"---\n\n以下のチェックリストに従い、上記の会話を振り返ってください。\n"
-        f"該当があればファイルを直接編集してください。なければ何もしないでください。\n\n"
-        f"---\n{checklist}\n---\n\n"
-        f"何も記録しなかった場合は一切何も返答せず、空のまま終了せよ（「学びなし」「該当なし」等も返答しない）。\n"
-        f"記録した場合のみ、日本語箇条書き3行以内で要約を返答。"
-    )
+    if conversation_text:
+        prompt = (
+            f"[OBSERVER MODE] これはユーザーからのメッセージではなく、システムによる自動観察リクエストです。\n"
+            f"ユーザーには見えません。チャットに返答しないでください。\n\n"
+            f"ROOM_ID: {room_id}\n\n"
+            f"以下は直前の会話内容です:\n\n{conversation_text}\n\n"
+            f"---\n\n以下のチェックリストに従い、上記の会話を振り返ってください。\n"
+            f"該当があればファイルを直接編集してください。なければ何もしないでください。\n\n"
+            f"---\n{checklist}\n---\n\n"
+            f"何も記録しなかった場合は一切何も返答せず、空のまま終了せよ（「学びなし」「該当なし」等も返答しない）。\n"
+            f"記録した場合のみ、日本語箇条書き3行以内で要約を返答。"
+        )
+    else:
+        prompt = (
+            f"[OBSERVER MODE] これはユーザーからのメッセージではなく、システムによる自動メンテナンスリクエストです。\n"
+            f"ユーザーには見えません。チャットに返答しないでください。\n\n"
+            f"以下のチェックリストに従い、指定されたファイルの整理を行ってください。\n"
+            f"該当があればファイルを直接編集してください。なければ何もしないでください。\n\n"
+            f"---\n{checklist}\n---\n\n"
+            f"何も変更しなかった場合は一切何も返答せず、空のまま終了せよ（「変更なし」等も返答しない）。\n"
+            f"変更した場合のみ、日本語箇条書き3行以内で要約を返答。"
+        )
 
     edited_files: list[str] = []
     summary = ""
@@ -238,6 +248,7 @@ async def _run_observers(room_id: str, user_id: str):
         # 意味のあるサマリーがある場合のみ通知を作成
         if summaries:
             await _create_observer_notification(room_id, user_id, summaries)
+
     except Exception as e:
         logger.error(f"[Observer] Failed for room {room_id}: {e}")
     finally:
@@ -396,6 +407,63 @@ async def _enrich_content_with_video_analysis(content: str, file_urls: list | No
     if not analyses:
         return content
     return content + "\n" + "\n".join(analyses)
+
+
+async def _save_media_artifacts(
+    image_urls: list,
+    file_urls: list | None,
+    message_content: str,
+    room_id: str,
+) -> None:
+    """ユーザーが送った画像/動画をGeminiで抽出し、永続アーティファクトとして保存する。
+
+    CLI起動前に実行されるため、system prompt注入に間に合う。
+    """
+    import os
+    from app.services.artifact_vision import (
+        extract_and_save_media_batch,
+        IMAGE_EXTS, VIDEO_EXTS,
+    )
+
+    upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
+    upload_dir = os.path.normpath(upload_dir)
+
+    image_paths = []
+    video_paths = []
+
+    # 画像URL（添付画像）
+    for url in (image_urls or []):
+        filename = url.split("/")[-1]
+        local_path = os.path.join(upload_dir, filename)
+        if os.path.exists(local_path):
+            image_paths.append(local_path)
+
+    # ファイルURL（添付ファイル）
+    for f in (file_urls or []):
+        name = f.get("name", "file")
+        url = f.get("url", "")
+        ext = os.path.splitext(name)[1].lower()
+        filename = url.split("/")[-1]
+        local_path = os.path.join(upload_dir, filename)
+        if not os.path.exists(local_path):
+            continue
+        if ext in IMAGE_EXTS:
+            image_paths.append(local_path)
+        elif ext in VIDEO_EXTS:
+            video_paths.append(local_path)
+
+    if not image_paths and not video_paths:
+        return
+
+    # 動画分析結果は _enrich_content_with_video_analysis で既に取得済みの可能性がある
+    # が、ここでは独立して保存用に再利用しない（二重実行を避けるため空で渡す）
+    # video_analyzer側の結果は _enrich がcli_contentに埋め込み済み
+    await extract_and_save_media_batch(
+        image_paths=image_paths,
+        video_paths=video_paths,
+        video_analyses={},
+        room_id=room_id,
+    )
 
 
 def _fetch_latest_user_message_from_room(service: ChatService, room_id: str) -> str:
@@ -1817,6 +1885,18 @@ async def send_dan_message_stream(
                 if reply_context_prefix:
                     cli_content = reply_context_prefix + cli_content
 
+                # ── メディア永続化: CLI起動前に画像/動画をGeminiで抽出・保存 ──
+                # system promptに注入されるため、ダンは最初のターンから参照可能
+                try:
+                    await _save_media_artifacts(
+                        image_urls=request.image_urls or [],
+                        file_urls=request.file_urls or [],
+                        message_content=effective_content,
+                        room_id=room_id,
+                    )
+                except Exception as media_err:
+                    logger.warning("Media artifact extraction failed (non-blocking): %s", media_err)
+
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
@@ -2414,6 +2494,71 @@ class ConnectionManager:
                     await connection.send_json(message)
                 except Exception:
                     pass  # 接続が切れている場合は無視
+
+
+# ==================== 整理オブザーバー（スケジューラー用） ====================
+
+@router.post("/internal/observer-cleanup")
+async def run_observer_cleanup(request: Request):
+    """整理オブザーバーを実行する内部エンドポイント。localhostからのみ呼び出し可。"""
+    # localhostチェック
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403, detail="Internal only")
+
+    # オーナーのuser_idを取得
+    try:
+        from app.services.supabase_client import get_supabase_client
+        sb = get_supabase_client().client
+        result = sb.table("users").select("id").limit(1).execute()
+        if not result.data:
+            raise HTTPException(status_code=500, detail="No user found")
+        user_id = result.data[0]["id"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    observer_dir = Path(__file__).parent.parent.parent / ".claude"
+    checklist_path = observer_dir / "observer_cleanup.md"
+
+    if not checklist_path.exists():
+        return {"status": "skipped", "reason": "observer_cleanup.md not found"}
+
+    logger.info("[Observer:整理] Starting scheduled cleanup")
+    cleanup_result = await _run_single_observer(
+        room_id="__cleanup",
+        user_id=user_id,
+        observer_name="整理",
+        checklist_path=checklist_path,
+        conversation_text="",
+    )
+
+    # 変更があれば通知
+    summary = cleanup_result["summary"]
+
+    def _is_meaningful(text: str) -> bool:
+        if not text.strip():
+            return False
+        skip = ["変更なし", "該当なし", "特になし", "no change", "nothing"]
+        return not any(s in text.lower() for s in skip)
+
+    if _is_meaningful(summary):
+        try:
+            sb.table("dan_proposals").insert({
+                "user_id": user_id,
+                "type": "observation",
+                "title": "観察者: 記録を整理しました",
+                "content": f"【整理】{summary}",
+                "status": "pending",
+            }).execute()
+        except Exception as e:
+            logger.error(f"[Observer:整理] Failed to create notification: {e}")
+        logger.info(f"[Observer:整理] Completed with changes: {summary}")
+        return {"status": "completed", "changes": summary, "files": cleanup_result["files"]}
+    else:
+        logger.info("[Observer:整理] Completed with no changes")
+        return {"status": "completed", "changes": None}
 
 
 # グローバルな接続マネージャー
