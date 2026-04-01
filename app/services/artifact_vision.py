@@ -99,6 +99,7 @@ ARTIFACTS_DIR = Path.home() / ".dan" / "workspace" / "artifacts"
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+HTML_EXTS = {".html", ".htm"}
 
 
 # ============================================
@@ -375,6 +376,7 @@ async def extract_and_save_media_batch(
     video_paths: list[str],
     video_analyses: dict[str, str],
     room_id: str,
+    html_paths: list[str] | None = None,
 ) -> list[Path]:
     """Extract and save all media from a user message in parallel.
 
@@ -383,6 +385,7 @@ async def extract_and_save_media_batch(
         video_paths: List of video file paths
         video_analyses: {video_path: analysis_text} from _enrich_content_with_video_analysis
         room_id: Current room ID
+        html_paths: List of HTML file paths
 
     Returns:
         List of saved artifact paths
@@ -396,14 +399,26 @@ async def extract_and_save_media_batch(
         analysis = video_analyses.get(vid_path)
         tasks.append(extract_and_save_video(vid_path, room_id, analysis_text=analysis))
 
+    for html_path in (html_paths or []):
+        name = Path(html_path).stem
+        tasks.append(extract_and_save_artifact(
+            artifact_file_path=html_path,
+            artifact_name=name,
+            artifact_type="proposal",
+            room_id=room_id,
+        ))
+
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     saved = []
     for r in results:
-        if isinstance(r, Path):
-            saved.append(r)
-        elif isinstance(r, Exception):
+        if isinstance(r, Exception):
             logger.error("Media extraction failed: %s", r)
+        elif isinstance(r, Path):
+            saved.append(r)
+        elif isinstance(r, dict) and r.get("success"):
+            # extract_and_save_artifact returns dict
+            saved.append(Path(r["path"]))
 
     if saved:
         logger.info("Saved %d artifact descriptions for room %s", len(saved), room_id)

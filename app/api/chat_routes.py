@@ -433,7 +433,7 @@ async def _save_media_artifacts(
     import os
     from app.services.artifact_vision import (
         extract_and_save_media_batch,
-        IMAGE_EXTS, VIDEO_EXTS,
+        IMAGE_EXTS, VIDEO_EXTS, HTML_EXTS,
     )
 
     upload_dir = os.path.join(os.path.dirname(__file__), "..", "..", "uploads")
@@ -441,6 +441,7 @@ async def _save_media_artifacts(
 
     image_paths = []
     video_paths = []
+    html_paths = []
 
     # 画像URL（添付画像）
     for url in (image_urls or []):
@@ -462,13 +463,16 @@ async def _save_media_artifacts(
             image_paths.append(local_path)
         elif ext in VIDEO_EXTS:
             video_paths.append(local_path)
+        elif ext in HTML_EXTS:
+            html_paths.append(local_path)
 
-    if not image_paths and not video_paths:
+    if not image_paths and not video_paths and not html_paths:
         return
 
     await extract_and_save_media_batch(
         image_paths=image_paths,
         video_paths=video_paths,
+        html_paths=html_paths,
         video_analyses=video_analyses or {},
         room_id=room_id,
     )
