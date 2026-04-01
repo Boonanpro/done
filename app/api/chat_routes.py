@@ -368,17 +368,24 @@ def _build_content_with_media(content: str, image_urls: list, file_urls: list | 
     return f"{prefix}\n\n{content}" if content.strip() else prefix
 
 
-async def _enrich_content_with_video_analysis(content: str, file_urls: list | None = None) -> str:
+async def _enrich_content_with_video_analysis(
+    content: str, file_urls: list | None = None
+) -> tuple[str, dict[str, str]]:
     """動画ファイル・動画URLがあればGemini分析を実行し、結果をコンテンツに追加する。
 
     対応:
     - ファイルアップロード: .mp4/.avi/.mov/.mkv/.webm
     - URL: YouTube, Loom (メッセージ本文から自動検出)
+
+    Returns:
+        (enriched_content, video_analyses) — video_analysesは {local_path: analysis_text}
+        のdict。_save_media_artifactsで再利用して二重実行を防ぐ。
     """
     import os
     from app.services.video_analyzer import analyze_video, analyze_video_url, extract_video_urls
 
     analyses = []
+    video_analyses: dict[str, str] = {}  # {path: analysis_text}
 
     # 1. アップロードされた動画ファイル
     if file_urls:
@@ -395,6 +402,7 @@ async def _enrich_content_with_video_analysis(content: str, file_urls: list | No
                 analysis = await analyze_video(local_path)
                 if analysis:
                     analyses.append(f"[動画分析結果(Gemini):\n{analysis}\n]")
+                    video_analyses[local_path] = analysis
 
     # 2. メッセージ本文中の動画URL (YouTube, Loom)
     video_urls = extract_video_urls(content)
@@ -405,8 +413,8 @@ async def _enrich_content_with_video_analysis(content: str, file_urls: list | No
             analyses.append(f"[{v['platform']}動画分析結果(Gemini) {v['url']}:\n{analysis}\n]")
 
     if not analyses:
-        return content
-    return content + "\n" + "\n".join(analyses)
+        return content, video_analyses
+    return content + "\n" + "\n".join(analyses), video_analyses
 
 
 async def _save_media_artifacts(
@@ -414,10 +422,13 @@ async def _save_media_artifacts(
     file_urls: list | None,
     message_content: str,
     room_id: str,
+    video_analyses: dict[str, str] | None = None,
 ) -> None:
     """ユーザーが送った画像/動画をGeminiで抽出し、永続アーティファクトとして保存する。
 
     CLI起動前に実行されるため、system prompt注入に間に合う。
+    video_analysesを受け取ることで、_enrich_content_with_video_analysisで
+    既に実行済みの動画分析を再利用し、二重実行を防ぐ。
     """
     import os
     from app.services.artifact_vision import (
@@ -455,15 +466,57 @@ async def _save_media_artifacts(
     if not image_paths and not video_paths:
         return
 
-    # 動画分析結果は _enrich_content_with_video_analysis で既に取得済みの可能性がある
-    # が、ここでは独立して保存用に再利用しない（二重実行を避けるため空で渡す）
-    # video_analyzer側の結果は _enrich がcli_contentに埋め込み済み
     await extract_and_save_media_batch(
         image_paths=image_paths,
         video_paths=video_paths,
-        video_analyses={},
+        video_analyses=video_analyses or {},
         room_id=room_id,
     )
+
+
+async def _save_written_artifacts(written_file_paths: list[str], room_id: str) -> None:
+    """CLI完了後、ダンが書き出したファイルからビジュアル成果物を検知してGemini抽出・保存する。
+
+    対象: HTML, 画像, 動画ファイル
+    """
+    import os
+    from app.services.artifact_vision import (
+        extract_and_save_artifact, extract_and_save_image, extract_and_save_video,
+        IMAGE_EXTS, VIDEO_EXTS,
+    )
+
+    HTML_EXTS = {".html", ".htm"}
+    tasks = []
+
+    for path in written_file_paths:
+        if not os.path.exists(path):
+            continue
+        ext = os.path.splitext(path)[1].lower()
+        name = os.path.splitext(os.path.basename(path))[0]
+
+        if ext in HTML_EXTS:
+            # HTML → スクショ+ソース抽出
+            artifact_type = "proposal"
+            if "dashboard" in path.lower():
+                artifact_type = "dashboard"
+            elif "hp-projects" in path.lower():
+                artifact_type = "hp"
+            tasks.append(extract_and_save_artifact(
+                artifact_file_path=path,
+                artifact_name=name,
+                artifact_type=artifact_type,
+                room_id=room_id,
+            ))
+        elif ext in IMAGE_EXTS:
+            tasks.append(extract_and_save_image(path, room_id))
+        elif ext in VIDEO_EXTS:
+            tasks.append(extract_and_save_video(path, room_id))
+
+    if tasks:
+        import asyncio
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        saved = sum(1 for r in results if not isinstance(r, Exception) and r)
+        logger.info("Post-CLI artifact extraction: %d/%d saved for room %s", saved, len(tasks), room_id)
 
 
 def _fetch_latest_user_message_from_room(service: ChatService, room_id: str) -> str:
@@ -1774,6 +1827,7 @@ async def send_dan_message_stream(
                 reasoning_steps = []   # 短いラベル（プロセスモニター表示用）
                 reasoning_full = []    # 全文（DB保存用、フロントで展開表示）
                 step_counter = 0
+                written_file_paths = []  # CLIが書き出したファイルパスを収集
                 run_state = None
                 if current_project_run is None and should_supersede_existing_run:
                     try:
@@ -1881,18 +1935,20 @@ async def send_dan_message_stream(
                         pass
 
                 cli_content = _build_content_with_media(effective_content, request.image_urls or [], request.file_urls or [])
-                cli_content = await _enrich_content_with_video_analysis(cli_content, request.file_urls or [])
+                cli_content, video_analyses = await _enrich_content_with_video_analysis(cli_content, request.file_urls or [])
                 if reply_context_prefix:
                     cli_content = reply_context_prefix + cli_content
 
                 # ── メディア永続化: CLI起動前に画像/動画をGeminiで抽出・保存 ──
                 # system promptに注入されるため、ダンは最初のターンから参照可能
+                # video_analysesを渡すことで動画分析の二重実行を防ぐ
                 try:
                     await _save_media_artifacts(
                         image_urls=request.image_urls or [],
                         file_urls=request.file_urls or [],
                         message_content=effective_content,
                         room_id=room_id,
+                        video_analyses=video_analyses,
                     )
                 except Exception as media_err:
                     logger.warning("Media artifact extraction failed (non-blocking): %s", media_err)
@@ -1944,6 +2000,12 @@ async def send_dan_message_stream(
                         yield f"data: {json.dumps({'type': 'process', 'session_id': room_id, 'step': {'id': f'cli-{step_counter}', 'label': f'🔧 {tool_label}', 'status': 'running'}})}\n\n"
                         step_counter += 1
                         # DB保存はCLIスレッドが実行済み（DB-first）
+
+                        # ファイル書き出しを追跡（CLI完了後のartifact保存用）
+                        tool_name = event.get("name", "")
+                        tool_input = event.get("input", {})
+                        if tool_name == "write_file" and tool_input.get("path"):
+                            written_file_paths.append(tool_input["path"])
 
                     elif event["type"] == "text":
                         # textイベントは暫定的に記録（最終回答はresultイベントで確定する）
@@ -2023,6 +2085,13 @@ async def send_dan_message_stream(
                 # ダンの回答完了 → 観察者を即座にバックグラウンド起動
                 if result_saved:
                     _trigger_observer(room_id, current_user.user_id)
+
+                    # ダンが書き出したビジュアル成果物を検知 → Gemini抽出 → 永続保存
+                    if written_file_paths:
+                        try:
+                            await _save_written_artifacts(written_file_paths, room_id)
+                        except Exception as e:
+                            logger.warning("Post-CLI artifact extraction failed (non-blocking): %s", e)
 
             # NOTE: 全チャットは統一済み。非プロジェクト分岐は削除済み (2026-03-06)
         except Exception as e:
