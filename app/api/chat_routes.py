@@ -417,6 +417,23 @@ async def _enrich_content_with_video_analysis(
     return content + "\n" + "\n".join(analyses), video_analyses
 
 
+_PROPOSALS_DIR = "D:/dan-workspace/proposals"
+_UPLOADS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads")) if 'os' in dir() else None
+
+def _get_uploads_dir():
+    import os as _os
+    return _os.path.normpath(_os.path.join(_os.path.dirname(__file__), "..", "..", "uploads"))
+
+_URL_TO_LOCAL_PATTERNS = [
+    # /api/v1/proposals/{filename} → D:/dan-workspace/proposals/{filename}
+    (re.compile(r'https?://localhost[:\d]*/api/v1/proposals/([\w._-]+\.html?)'), lambda m: f"{_PROPOSALS_DIR}/{m.group(1)}"),
+    # /api/v1/files/{filename} → D:/done/uploads/{filename}
+    (re.compile(r'https?://localhost[:\d]*/api/v1/files/([\w._-]+)'), lambda m: f"{_get_uploads_dir()}/{m.group(1)}"),
+    # D:/path/to/file.html (Windows absolute paths in message text)
+    (re.compile(r'(?<!\w)([A-Za-z]:/[\w./_-]+\.(?:html?|png|jpe?g|gif|webp|mp4|avi|mov|mkv|webm|pdf))(?!\w)'), lambda m: m.group(1)),
+]
+
+
 async def _save_media_artifacts(
     image_urls: list,
     file_urls: list | None,
@@ -424,11 +441,16 @@ async def _save_media_artifacts(
     room_id: str,
     video_analyses: dict[str, str] | None = None,
 ) -> None:
-    """ユーザーが送った画像/動画をGeminiで抽出し、永続アーティファクトとして保存する。
+    """ユーザーが送った画像/動画/HTMLをGeminiで抽出し、永続アーティファクトとして保存する。
 
     CLI起動前に実行されるため、system prompt注入に間に合う。
     video_analysesを受け取ることで、_enrich_content_with_video_analysisで
     既に実行済みの動画分析を再利用し、二重実行を防ぐ。
+
+    検知対象:
+    - image_urls: フロントエンドから添付された画像
+    - file_urls: フロントエンドから添付されたファイル
+    - message_content内のURL: localhost URL、ローカルファイルパス
     """
     import os
     from app.services.artifact_vision import (
@@ -443,14 +465,14 @@ async def _save_media_artifacts(
     video_paths = []
     html_paths = []
 
-    # 画像URL（添付画像）
+    # 1. 添付画像（image_urls）
     for url in (image_urls or []):
         filename = url.split("/")[-1]
         local_path = os.path.join(upload_dir, filename)
         if os.path.exists(local_path):
             image_paths.append(local_path)
 
-    # ファイルURL（添付ファイル）
+    # 2. 添付ファイル（file_urls）
     for f in (file_urls or []):
         name = f.get("name", "file")
         url = f.get("url", "")
@@ -465,6 +487,22 @@ async def _save_media_artifacts(
             video_paths.append(local_path)
         elif ext in HTML_EXTS:
             html_paths.append(local_path)
+
+    # 3. メッセージテキスト中のURL・ファイルパスを検知
+    seen_paths = set(image_paths + video_paths + html_paths)
+    for pattern, resolver in _URL_TO_LOCAL_PATTERNS:
+        for match in pattern.finditer(message_content or ""):
+            local_path = os.path.normpath(resolver(match))
+            if local_path in seen_paths or not os.path.exists(local_path):
+                continue
+            seen_paths.add(local_path)
+            ext = os.path.splitext(local_path)[1].lower()
+            if ext in IMAGE_EXTS:
+                image_paths.append(local_path)
+            elif ext in VIDEO_EXTS:
+                video_paths.append(local_path)
+            elif ext in HTML_EXTS:
+                html_paths.append(local_path)
 
     if not image_paths and not video_paths and not html_paths:
         return
