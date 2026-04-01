@@ -344,6 +344,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         STUDIO_PROBE_TOOL,
         STUDIO_EXTRACT_FRAME_TOOL,
         STUDIO_EVALUATE_TOOL,
+        EXTRACT_ARTIFACT_MEMORY_TOOL,
     ]
 
 
@@ -739,6 +740,34 @@ STUDIO_EXTRACT_FRAME_TOOL = {
     },
 }
 
+EXTRACT_ARTIFACT_MEMORY_TOOL = {
+    "name": "extract_artifact_memory",
+    "description": "デザイン成果物（提案書HTML/ダッシュボード/HP）のスクリーンショットとHTMLソースからGemini Vision APIで構造化された記述を抽出し、永続メモリとして保存する。designスキルの品質チェック通過後に使用する。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "artifact_file_path": {
+                "type": "string",
+                "description": "成果物のHTMLファイルパス（例: D:/dan-workspace/proposals/example.html）",
+            },
+            "artifact_name": {
+                "type": "string",
+                "description": "成果物の識別名（スラッグ形式、例: followsure-proposal）",
+            },
+            "artifact_type": {
+                "type": "string",
+                "enum": ["proposal", "dashboard", "hp"],
+                "description": "成果物の種類",
+            },
+            "room_id": {
+                "type": "string",
+                "description": "現在のROOM_ID",
+            },
+        },
+        "required": ["artifact_file_path", "artifact_name", "artifact_type", "room_id"],
+    },
+}
+
 
 def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
     """
@@ -772,6 +801,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "create_proposal":
         return ("_create_proposal", "create")
+
+    if tool_name == "extract_artifact_memory":
+        return ("_artifact_memory", "extract")
 
     if tool_name.startswith("studio_"):
         action = tool_name[len("studio_"):]
@@ -1383,6 +1415,21 @@ async def execute_tool(
     skill_name = tool_call["skill"]
     action = tool_call["action"]
     params = tool_call["params"]
+
+    # ★★★ アーティファクトメモリ抽出（Gemini Vision）★★★
+    if skill_name == "_artifact_memory":
+        from app.services.artifact_vision import extract_and_save_artifact
+        try:
+            result = await extract_and_save_artifact(
+                artifact_file_path=params["artifact_file_path"],
+                artifact_name=params["artifact_name"],
+                artifact_type=params["artifact_type"],
+                room_id=params["room_id"],
+            )
+            return result
+        except Exception as e:
+            logger.error(f"[artifact_memory] Error: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
 
     # ★★★ スタジオ録画/エンコード（バックエンド実行）★★★
     if skill_name == "_studio_render":

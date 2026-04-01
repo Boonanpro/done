@@ -80,6 +80,44 @@ def _get_project_title(room_id: str) -> str:
     return ""
 
 
+def load_artifact_descriptions(room_id: str = "") -> str:
+    """Load artifact descriptions for the given room if any exist.
+
+    Returns formatted markdown with all current artifact descriptions,
+    or empty string if none exist.
+    """
+    import re as _re
+
+    if not room_id:
+        return ""
+    artifacts_dir = WORKSPACE_DIR / "artifacts" / room_id
+    if not artifacts_dir.exists():
+        return ""
+
+    parts = []
+    for md_file in sorted(artifacts_dir.glob("*.md")):
+        # Skip version backups (e.g., name.v1.md)
+        if _re.match(r".*\.v\d+\.md$", md_file.name):
+            continue
+        try:
+            content = md_file.read_text(encoding="utf-8")
+            if len(content) > 4000:
+                content = content[:4000] + "\n\n... (以下省略)"
+            parts.append(content)
+        except Exception:
+            continue
+
+    if not parts:
+        return ""
+
+    header = (
+        "## 承認済み成果物の記述\n\n"
+        "以下は過去に作成されたデザイン成果物の詳細記述です。\n"
+        "実装時はこの記述に忠実に従ってください。\n\n"
+    )
+    return header + "\n\n---\n\n".join(parts)
+
+
 def load_active_plan(room_id: str = "") -> str:
     """Load active plan if one exists. Returns empty string if none.
 

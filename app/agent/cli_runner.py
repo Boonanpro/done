@@ -280,6 +280,7 @@ def _build_system_prompt(
     """
     from app.agent.bootstrap_context import (
         get_core_prompt, load_all_bootstrap_files, load_active_plan,
+        load_artifact_descriptions,
     )
 
     parts = []
@@ -304,6 +305,11 @@ def _build_system_prompt(
             description=description,
             status=status,
         ))
+
+    # Artifact descriptions — injected before plan for context.
+    artifact_desc = load_artifact_descriptions(room_id=room_id)
+    if artifact_desc:
+        parts.append(artifact_desc)
 
     # Approved plan — injected near the end for recency bias.
     active_plan = load_active_plan(room_id=room_id)
