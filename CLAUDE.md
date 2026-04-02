@@ -104,6 +104,11 @@ v2アーキテクチャに基づいて開発中。旧計画書（phase*.md）は
 
 Git Bash（mintty）とPowerShellの間でパイプが正しく閉じられず、コマンドが永久にハングする。ハングした状態は「まだ実行中」に見えるため、失敗として検知できない。
 
+## 環境で繰り返しハマった制約
+
+- **Google系サービスにPlaywrightでログインできない**: bot検出でブロックされる。APIキー + Pythonライブラリで操作すること
+- **Windowsでasyncio.create_subprocess_execが使えない**: uvicornがSelectorEventLoopを使うため。`subprocess.run` + `asyncio.to_thread()` で代替する
+
 ## スキル開発ルール
 
 ### 1. ブラウザ自動化にはセレクタ調査が必須
