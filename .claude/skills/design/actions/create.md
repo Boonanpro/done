@@ -35,7 +35,8 @@
 1. SKILL.md の用途別ルールに従う
 2. Step 1 の確立済みパターンを全て反映する
 3. criteria.md の該当用途の品質基準を意識して、初版から高スコアを狙う
-4. 用途に応じた場所に保存する:
+4. **A/Bの場合はバックエンドファーストで実装する**: DB設計 → API実装 → UI実装の順。UIを先に作らない
+5. 用途に応じた場所に保存する:
    - ダッシュボード → `frontend/src/app/dashboard/` 配下
    - クライアントHP → `D:/dan-workspace/hp-projects/` 配下
    - 提案書 → `D:/dan-workspace/proposals/` 配下
