@@ -153,16 +153,21 @@ def cmd_import_media(resolve, params):
     media_pool = project.GetMediaPool()
 
     file_paths = params["file_paths"]
-    # パスをWindowsネイティブパスに変換
     file_paths = [os.path.abspath(p) for p in file_paths]
 
-    items = media_pool.ImportMedia(file_paths)
-    if items is None or len(items) == 0:
+    # 画像の連番シーケンス誤検出を防ぐため、1ファイルずつインポート
+    all_items = []
+    for path in file_paths:
+        items = media_pool.ImportMedia([path])
+        if items:
+            all_items.extend(items)
+
+    if not all_items:
         raise RuntimeError(f"メディアの読み込みに失敗: {file_paths}")
 
     return {
-        "imported": [item.GetName() for item in items],
-        "count": len(items),
+        "imported": [item.GetName() for item in all_items],
+        "count": len(all_items),
     }
 
 
@@ -187,12 +192,51 @@ def cmd_append_to_timeline(resolve, params):
         if not clips:
             raise RuntimeError(f"指定されたクリップが見つかりません: {clip_names}")
 
-    result = media_pool.AppendToTimeline(clips)
+    # duration指定がある場合はclipInfo形式で追加
+    duration = params.get("duration_frames")
+    if duration:
+        clip_infos = [{
+            "mediaPoolItem": clip,
+            "startFrame": 0,
+            "endFrame": duration - 1,
+        } for clip in clips]
+        result = media_pool.AppendToTimeline(clip_infos)
+    else:
+        result = media_pool.AppendToTimeline(clips)
+
     if result is None:
         raise RuntimeError("タイムラインへの追加に失敗")
 
     return {
         "appended": len(result) if result else 0,
+        "items": [{"name": item.GetName(), "duration": item.GetDuration()} for item in result] if result else [],
+    }
+
+
+def cmd_add_audio(resolve, params):
+    """オーディオファイルをインポートしてオーディオトラックに配置"""
+    pm = resolve.GetProjectManager()
+    project = pm.GetCurrentProject()
+    media_pool = project.GetMediaPool()
+    timeline = project.GetCurrentTimeline()
+    if timeline is None:
+        raise RuntimeError("タイムラインがありません")
+
+    file_path = os.path.abspath(params["file_path"])
+    clips = media_pool.ImportMedia([file_path])
+    if not clips:
+        raise RuntimeError(f"オーディオの読み込みに失敗: {file_path}")
+
+    appended = media_pool.AppendToTimeline([{
+        "mediaPoolItem": clips[0],
+        "mediaType": 2,  # 2 = Audio only
+    }])
+    if not appended:
+        raise RuntimeError("オーディオのタイムライン追加に失敗")
+
+    return {
+        "name": appended[0].GetName(),
+        "duration": appended[0].GetDuration(),
     }
 
 
@@ -290,6 +334,7 @@ COMMANDS = {
     "import_media": cmd_import_media,
     "append_to_timeline": cmd_append_to_timeline,
     "render": cmd_render,
+    "add_audio": cmd_add_audio,
     "close_project": cmd_close_project,
 }
 

@@ -112,9 +112,18 @@ def import_media(file_paths: list[str]) -> dict:
     return _run_worker("import_media", {"file_paths": file_paths})
 
 
-def append_to_timeline(clip_names: list[str] | None = None) -> dict:
+def append_to_timeline(clip_names: list[str] | None = None,
+                       duration_frames: int = 150) -> dict:
     """メディアプールのクリップをタイムラインに追加"""
-    return _run_worker("append_to_timeline", {"clip_names": clip_names})
+    return _run_worker("append_to_timeline", {
+        "clip_names": clip_names,
+        "duration_frames": duration_frames,
+    })
+
+
+def add_audio(file_path: str) -> dict:
+    """オーディオファイルをタイムラインのオーディオトラックに追加"""
+    return _run_worker("add_audio", {"file_path": file_path})
 
 
 def render(output_dir: str, filename: str = "output",
