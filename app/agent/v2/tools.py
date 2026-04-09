@@ -331,7 +331,6 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     return [
         BROWSER_TOOL,
         READ_URL_TOOL,
-        CREATE_PROPOSAL_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
         CHECK_SKILL_TOOL,
@@ -597,30 +596,6 @@ BASH_TOOL = {
 }
 
 # ============================================
-# プロジェクト管理ツール
-# ============================================
-
-CREATE_PROPOSAL_TOOL = {
-    "name": "create_proposal",
-    "description": "ユーザーに承認を求める提案を作成する。新しい作業を始める前や、重要な方針変更を行う時に使用。UIに承認/却下ボタンが自動表示される。軽微な質問・調査・修正には使わない。",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "title": {
-                "type": "string",
-                "description": "提案のタイトル（例: HP制作計画）"
-            },
-            "steps": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "実行ステップのリスト。各ステップは「何を」「どうやって」を含む（例: ['v0.devでプロ品質コンポーネント生成', 'Claude Codeでコード調整・統合']）"
-            },
-        },
-        "required": ["title", "steps"]
-    }
-}
-
-# ============================================
 # コード探索ツール
 # ============================================
 
@@ -768,9 +743,6 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "read_url":
         return ("_jina", "read")
-
-    if tool_name == "create_proposal":
-        return ("_create_proposal", "create")
 
     if tool_name.startswith("studio_"):
         action = tool_name[len("studio_"):]
@@ -1764,10 +1736,6 @@ async def execute_tool(
             "available_actions": available_actions,
         }
 
-    # ★★★ 提案作成ツール ★★★
-    if skill_name == "_create_proposal":
-        return await _execute_create_proposal(params, user_id, session_id)
-
     # ★★★ ブラウザ直接操作ツール ★★★
     if skill_name == "_browser":
         real_action = action
@@ -2739,32 +2707,3 @@ def _get_project_service():
         return service
 
 
-async def _execute_create_proposal(
-    params: Dict[str, Any],
-    user_id: str,
-    session_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    構造化された提案テキストを生成する。
-
-    DB保存や承認フローは行わない。チャットのテキストとして返すだけ。
-    ユーザーが「OK」「やって」等で承認すれば、観察者が計画を記録する。
-    """
-    title = params.get("title", "")
-    steps_raw = params.get("steps", [])
-
-    if not title:
-        return {"success": False, "error": "タイトルが必要です"}
-    if not steps_raw:
-        return {"success": False, "error": "ステップが必要です"}
-
-    # 提案内容をマークダウンで構築
-    content_lines = [f"## 提案: {title}", ""]
-    for i, desc in enumerate(steps_raw, 1):
-        content_lines.append(f"{i}. {desc}")
-    content = "\n".join(content_lines)
-
-    return {
-        "success": True,
-        "message": f"以下の計画を提案します。承認いただければ着手します。\n\n{content}",
-    }

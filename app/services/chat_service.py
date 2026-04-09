@@ -1211,60 +1211,8 @@ class ChatService:
             "new_active_session_id": new_active_session_id,
         }
     
-    # ==================== Proposals (Phase 2G) ====================
-    
-    async def create_proposal(
-        self,
-        user_id: str,
-        proposal_type: str,
-        title: str,
-        content: str,
-        source_room_id: Optional[str] = None,
-        source_message_id: Optional[str] = None,
-        action_data: Optional[dict] = None,
-        expires_at: Optional[datetime] = None,
-    ) -> dict:
-        """
-        ダンからユーザーへの提案を作成
-        
-        Args:
-            user_id: 対象ユーザーID
-            proposal_type: 提案タイプ（reply, action, schedule, reminder）
-            title: タイトル
-            content: 提案内容
-            source_room_id: 元のチャットルームID
-            source_message_id: 元のメッセージID
-            action_data: アクション実行データ
-            expires_at: 有効期限
-            
-        Returns:
-            作成された提案
-        """
-        dan_room = await self.get_or_create_dan_room(user_id)
-        
-        result = self.supabase.table("dan_proposals").insert({
-            "user_id": user_id,
-            "dan_room_id": dan_room["id"],
-            "type": proposal_type,
-            "title": title,
-            "content": content,
-            "source_room_id": source_room_id,
-            "source_message_id": source_message_id,
-            "action_data": action_data,
-            "expires_at": expires_at.isoformat() if expires_at else None,
-        }).execute()
-        
-        if result.data:
-            proposal = result.data[0]
-            
-            # ダンページに通知メッセージを送信
-            notification_msg = f"📋 新しい提案があります\n\n**{title}**\n{content[:100]}{'...' if len(content) > 100 else ''}"
-            await self.send_dan_ai_message(user_id, notification_msg)
-            
-            return await self._enrich_proposal(proposal)
-        
-        raise ValueError("Failed to create proposal")
-    
+    # ==================== Observer Notifications ====================
+
     async def get_proposals(
         self,
         user_id: str,
