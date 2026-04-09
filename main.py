@@ -1,5 +1,5 @@
 """
-AI Secretary System - Main Entry Point (Phase 6 reload)
+AI Secretary System - Main Entry Point (Phase 7 reload)
 """
 import sys
 import asyncio
@@ -32,7 +32,6 @@ from app.api.note_routes import router as note_router
 from app.api.file_routes import router as file_router
 from app.api.studio_routes import router as studio_router
 from app.api.dashboard_routes import router as dashboard_router
-from app.api.document_routes import router as document_router
 from app.api.collab_routes import router as collab_router
 from app.api.calendar_routes import router as calendar_router
 from app.api.push_routes import router as push_router
@@ -102,7 +101,6 @@ app.include_router(note_router, prefix="/api/v1")
 app.include_router(file_router, prefix="/api/v1/files")
 app.include_router(studio_router, prefix="/api/v1")
 app.include_router(dashboard_router, prefix="/api")
-app.include_router(document_router, prefix="/api")
 app.include_router(collab_router, prefix="/api/v1")
 app.include_router(calendar_router, prefix="/api/v1")
 app.include_router(push_router, prefix="/api/v1")
