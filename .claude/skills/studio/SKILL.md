@@ -40,17 +40,26 @@ updated: 2026-04-09
 
 - 字幕テキストはUI要素と被りやすいため、音声ナレーションが望ましい
 - ElevenLabsまたはGoogle TTSで生成
-- DaVinciのオーディオトラックに配置
+- Remotionの`<Audio>`コンポーネントでタイムラインに配置
 
 ---
 
-## 制作技術
+## 制作技術: Playwright操作録画 + Remotion編集
 
-### A方式: Playwright操作録画 + DaVinci Resolve編集
+### 概要
 
-プロトタイプやWebページを実際に操作する様子を録画して動画にする。
+実物のプロトタイプやWebページをPlaywrightで操作録画し、Remotionで編集してMP4出力する。
+DaVinci Resolveのインストールは不要。コードの差分だけで修正・量産可能。
 
-**録画:**
+### フロー
+
+1. **Playwrightで操作録画**（PNG連番 + カーソル合成）
+2. **PNG連番を直接Remotionに読み込む**（MP4変換を挟まない。二重圧縮による画質劣化を防ぐ）
+3. **Remotionコードでイントロ/アウトロ、テキストラベル、BGM、トランジションを追加**
+4. **`npx remotion render` でMP4出力**
+
+### 操作録画
+
 - `scripts/record_notion_demo.py` を参照（パターンとして使える）
 - `smooth_move(x1,y1,x2,y2,steps)` — イージング付きマウス移動
 - `capture(n)` — nフレーム分スクリーンショット
@@ -60,29 +69,28 @@ updated: 2026-04-09
 - Playwrightのscreenshot()はカーソルを含まない
 - Pillowで全フレームにカーソル画像を合成する（28px、白地に黒アウトライン、完全不透明）
 
-**DaVinci Resolve編集:**
-- Python 3.13必須（`C:\Users\Owner\AppData\Local\Programs\Python\Python313\python.exe`）
-- `app/tools/davinci.py` → `davinci_worker.py` 経由
-- V1: 映像素材、V2: タイトルオーバーレイ（trackIndex=2, recordFrameで位置指定）、A1: BGM/音声
+### Remotion編集
 
-### B方式: Playwright操作録画 + Remotion編集
+**基本API:**
+- `interpolate(frame, inputRange, outputRange)` — 数値アニメーション
+- `spring({frame, fps, config})` — 自然なバウンスアニメーション
+- `<Sequence from={frame} durationInFrames={n}>` — シーンの時間制御
+- `<Audio src={staticFile("bgm.mp3")} volume={...} />` — BGM/効果音
+- `@remotion/transitions` — シーン間トランジション（fade, wipe, slide）
 
-A方式と同じくPlaywrightで実物を操作録画するが、編集をDaVinciではなくRemotionで行う。
-DaVinci Resolveのインストールが不要。コードの差分だけで修正・量産可能。
-
-**フロー:**
-1. Playwrightで操作録画（PNG連番 + カーソル合成）— A方式と共通
-2. PNG連番を直接Remotionに読み込む（MP4変換を挟まない。二重圧縮による画質劣化を防ぐ）
-3. Remotionコードでイントロ/アウトロ、テキストラベル、BGM、トランジションを追加
-4. `npx remotion render` でMP4出力
-
-**操作映像のウィンドウ表示ルール:**
+**操作映像の表示ルール:**
 - 全体表示時に映像の端が見切れていないこと（ズーム等の意図的な演出は除く）
 - `objectFit: "contain"` を使うか、マージン分を考慮したサイズで表示する
 
 **テキスト・字幕の品質:**
 - Remotionで直接Reactコンポーネントとして描画するため、テキストはベクター品質で劣化しない
 - 操作映像部分のみラスタ画像（PNG）
+
+**エフェクト拡張:**
+- Remotionは普通のReactコンポーネントなので、カスタムエフェクトを自作可能
+- パーティクル（Canvas/WebGL）、3D変換（CSS transform/React Three Fiber）、カラー調整（CSSフィルタ）等
+- `@remotion/motion-blur` — モーションブラー（公式パッケージ）
+- 必要に応じてnpmパッケージとしてエフェクトを追加・作成していく
 
 参考事例: Hotfix社（Gemini→絵コンテ、Claude Code→Remotionコード、ElevenLabs→音声）
 
@@ -126,9 +134,9 @@ HTMLアニメーションから動画を作る場合の専用ツール。
    - モックデータでOK。ただし実ファイルを数点含めると説得力が上がる
    - `frontend/src/app/demo/` 配下に作成
 
-3. **操作録画** — Playwrightで録画+カーソル合成（A方式・B方式共通）
+3. **操作録画** — Playwrightで録画+カーソル合成
 
-4. **編集** — A方式（DaVinci）またはB方式（Remotion）でタイトル・BGM・音声追加
+4. **編集** — Remotionでタイトル・BGM・音声追加
 
 5. **品質チェック** — 共通チェックリスト + 以下を追加確認
    - [ ] 要件の核心機能が全てデモに含まれているか？
