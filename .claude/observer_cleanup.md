@@ -19,15 +19,15 @@
 
 RULES.mdの各ルールについて、以下の手順で1つずつ評価する。
 
-**手順: ルールごとに経緯（括弧内）を読み、特定スキルの固有名詞が含まれるか確認する。**
+**手順: ルールごとに以下を判断する。**
 
-含まれていたら該当スキルのlearned.mdに移動する:
-- 「吉川特装」「バードSTC」「五条」「Formspree」「LINE href」「HP」「写真マッチ」「おばんざい」→ `.claude/skills/design/learned.md`（セクションB: クライアントHP）
-- 「提案書」「create_proposal」「モックアップ」→ `.claude/skills/design/learned.md`（セクションC: 提案書HTML）
-- 「ダッシュボード」「管理画面」「KPI」→ `.claude/skills/design/learned.md`（セクションA: ダッシュボード）
-- 「動画」「ffmpeg」「フレーム」「Playwright録画」→ `.claude/skills/studio/learned.md`
+1. このルールは**特定のスキルを使う時だけ**必要か？ → 該当スキルのlearned.mdに移動
+2. **ダンの全ての振る舞いに常に適用**されるべきか？ → RULES.mdに残す
 
-含まれていなければRULES.mdに残す。
+移動先の判断:
+- デザイン・UI・HP・提案書に関する学び → `.claude/skills/design/learned.md`（該当セクションA/B/Cに振り分け）
+- 動画制作に関する学び → `.claude/skills/studio/learned.md`
+- その他のスキルに関する学び → `.claude/skills/{該当スキル}/learned.md`（なければ作成）
 
 **迷ったら移動する。** RULES.mdは常にコンテキストに注入されるのでコストが高い。learned.mdはスキル実行時だけ読まれるので、移動しても忘れることはない。
 
