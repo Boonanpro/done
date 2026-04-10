@@ -1762,13 +1762,26 @@ async def send_dan_message_stream(
                     pass
             # 観察者はダンの回答完了後に起動する（1807行目付近）
 
-            # Step 1: ユーザーメッセージを保存
-            # session_idが指定されていればそのルームに、なければ現在のDanルームに送信
-            if request.session_id:
+            # Step 1: ユーザーメッセージを保存（or 既存メッセージを上書き）
+            media_content = _build_content_with_media(request.content, request.image_urls or [], request.file_urls or [])
+            if request.replace_message_id:
+                # キャンセル後の再送信: 既存メッセージの内容を上書き（INSERTしない）
                 room_id = request.session_id
-                message = await service.send_message(room_id, current_user.user_id, _build_content_with_media(request.content, request.image_urls or [], request.file_urls or []), sender_type="human", reply_to_id=request.reply_to_id)
+                try:
+                    service.supabase.table("chat_messages").update(
+                        {"content": media_content}
+                    ).eq("id", request.replace_message_id).eq("sender_type", "human").execute()
+                    # 更新後のメッセージを取得
+                    updated = service.supabase.table("chat_messages").select("*").eq("id", request.replace_message_id).execute()
+                    message = updated.data[0] if updated.data else {"id": request.replace_message_id, "sender_id": current_user.user_id, "sender_type": "human", "room_id": room_id, "content": media_content}
+                except Exception as e:
+                    logger.warning("Failed to update message %s, falling back to insert: %s", request.replace_message_id, e)
+                    message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id)
+            elif request.session_id:
+                room_id = request.session_id
+                message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id)
             else:
-                message = await service.send_dan_message(current_user.user_id, _build_content_with_media(request.content, request.image_urls or [], request.file_urls or []))
+                message = await service.send_dan_message(current_user.user_id, media_content)
                 room_id = message["room_id"]
             user = await service.get_user_by_id(current_user.user_id)
 

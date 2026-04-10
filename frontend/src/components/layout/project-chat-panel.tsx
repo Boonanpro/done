@@ -454,6 +454,12 @@ function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const pendingMessageRef = useRef<{ text: string; files: typeof attachedFiles; replyTo: typeof replyTo } | null>(null);
+  const aiRespondedRef = useRef(false);
+  // キャンセル後の再送信時にUPDATEすべきDBメッセージID
+  const replaceMessageIdRef = useRef<string | null>(null);
+  // 今回のSSEで受信したサーバー上のメッセージID
+  const serverMessageIdRef = useRef<string | null>(null);
   const titleGeneratedRef = useRef(false);
   const streamRequestRef = useRef(0);
   const queryClient = useQueryClient();
@@ -463,6 +469,12 @@ function ChatInput({
   const { resetRecovery, setInterrupted, setWarmupMode } = useRecoveryActions();
 
   useProjectRecovery({ projectId, roomId });
+
+  // プロジェクト切り替え時にreplace状態をリセット
+  useEffect(() => {
+    replaceMessageIdRef.current = null;
+    serverMessageIdRef.current = null;
+  }, [roomId]);
 
   // Focus textarea when reply is selected
   useEffect(() => {
@@ -675,30 +687,56 @@ function ChatInput({
     };
 
     const queryKey = ['project-messages', roomId];
-    queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
-      messages: [optimisticUserMessage, ...(old?.messages || [])],
-    }));
+    const currentReplaceId = replaceMessageIdRef.current;
+    if (currentReplaceId) {
+      // 再送信: 既存メッセージの内容を楽観的に上書き
+      queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
+        messages: (old?.messages || []).map((m: MessageResponse) =>
+          m.id === currentReplaceId ? { ...m, content: optimisticContent } : m
+        ),
+      }));
+      replaceMessageIdRef.current = null;
+    } else {
+      // 新規送信: 楽観的メッセージを追加
+      queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
+        messages: [optimisticUserMessage, ...(old?.messages || [])],
+      }));
+    }
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
     try {
       await api.sm.sendMessageStream(
-        { message: content, session_id: roomId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}) },
+        { message: content, session_id: roomId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}), ...(currentReplaceId ? { replace_message_id: currentReplaceId } : {}) },
         {
           onUserMessage: (msg) => {
             if (streamRequestRef.current !== requestId) return;
-            queryClient.setQueryData(
-              queryKey,
-              (old: { messages: MessageResponse[] } | undefined) => ({
-                messages: [
-                  msg,
-                  ...(old?.messages || []).filter(
-                    (current: MessageResponse) => current.id !== tempUserMessageId
+            serverMessageIdRef.current = msg.id;
+            if (currentReplaceId) {
+              // replace: 既存メッセージの内容をサーバー版で上書き
+              queryClient.setQueryData(
+                queryKey,
+                (old: { messages: MessageResponse[] } | undefined) => ({
+                  messages: (old?.messages || []).map((m: MessageResponse) =>
+                    m.id === currentReplaceId ? msg : m
                   ),
-                ],
-              })
-            );
+                })
+              );
+            } else {
+              // 新規: tempメッセージをサーバー版で置換
+              queryClient.setQueryData(
+                queryKey,
+                (old: { messages: MessageResponse[] } | undefined) => ({
+                  messages: [
+                    msg,
+                    ...(old?.messages || []).filter(
+                      (current: MessageResponse) => current.id !== tempUserMessageId
+                    ),
+                  ],
+                })
+              );
+            }
           },
           onAIMessage: () => {
             if (streamRequestRef.current !== requestId) return;
@@ -711,6 +749,9 @@ function ChatInput({
           },
           onProcessStep: (_step: ProcessStep) => {
             if (streamRequestRef.current !== requestId) return;
+            aiRespondedRef.current = true;
+            pendingMessageRef.current = null;
+            replaceMessageIdRef.current = null;
             setWarmupMode(projectId, null);
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
@@ -823,6 +864,9 @@ function ChatInput({
 
     const content = message.trim();
     const currentReplyTo = replyTo;
+    pendingMessageRef.current = { text: message, files: [...attachedFiles], replyTo };
+    aiRespondedRef.current = false;
+    serverMessageIdRef.current = null;
     setMessage('');
     setAttachedFiles([]);
     onClearReply?.();
@@ -832,10 +876,24 @@ function ChatInput({
   }, [attachedFiles, message, sendMessageCore, queryClient, replyTo, onClearReply]);
 
   const handleCancel = useCallback(async () => {
+    const pending = pendingMessageRef.current;
+    const wasBeforeAI = !aiRespondedRef.current && !!pending;
+
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+
+    // AI未応答キャンセル → テキストを入力欄に復元 + 次回送信でUPDATEするIDを記録
+    if (wasBeforeAI) {
+      setMessage(pending.text);
+      setAttachedFiles(pending.files);
+      if (serverMessageIdRef.current) {
+        replaceMessageIdRef.current = serverMessageIdRef.current;
+      }
+    }
+    pendingMessageRef.current = null;
+    serverMessageIdRef.current = null;
 
     try {
       await api.sm.cancelSession(roomId);
@@ -848,7 +906,9 @@ function ChatInput({
     resetRecovery(projectId);
     setWarmupMode(projectId, null);
     invalidateProjectQueries();
-    toast.info('処理を中断しました');
+    if (!wasBeforeAI) {
+      toast.info('処理を中断しました');
+    }
   }, [invalidateProjectQueries, onSseStateChange, projectId, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
 
   const handleKeyDown = useCallback(

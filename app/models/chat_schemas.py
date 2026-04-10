@@ -198,6 +198,7 @@ class MessageSendRequest(BaseModel):
     image_urls: Optional[List[str]] = Field(default=[], description="Uploaded image URLs for vision")
     file_urls: Optional[List[dict]] = Field(default=[], description="Uploaded file URLs [{name, url}]")
     reply_to_id: Optional[str] = Field(None, description="ID of the message being replied to")
+    replace_message_id: Optional[str] = Field(None, description="ID of existing user message to update instead of creating new")
 
 
 class ReplyToMessage(BaseModel):

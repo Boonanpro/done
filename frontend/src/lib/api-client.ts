@@ -242,6 +242,7 @@ export interface StateMachineMessageRequest {
   image_urls?: string[];
   file_urls?: { name: string; url: string }[];
   reply_to_id?: string;
+  replace_message_id?: string;
 }
 
 export interface StateMachineConfirmRequest {
@@ -1078,7 +1079,7 @@ export const api = {
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify({ content: data.message, session_id: data.session_id, ...(data.image_urls?.length ? { image_urls: data.image_urls } : {}), ...(data.file_urls?.length ? { file_urls: data.file_urls } : {}), ...(data.reply_to_id ? { reply_to_id: data.reply_to_id } : {}) }),
+          body: JSON.stringify({ content: data.message, session_id: data.session_id, ...(data.image_urls?.length ? { image_urls: data.image_urls } : {}), ...(data.file_urls?.length ? { file_urls: data.file_urls } : {}), ...(data.reply_to_id ? { reply_to_id: data.reply_to_id } : {}), ...(data.replace_message_id ? { replace_message_id: data.replace_message_id } : {}) }),
           signal,  // AbortSignal追加
         });
 
