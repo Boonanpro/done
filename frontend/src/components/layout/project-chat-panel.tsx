@@ -463,6 +463,7 @@ function ChatInput({
   const titleGeneratedRef = useRef(false);
   const streamRequestRef = useRef(0);
   const queryClient = useQueryClient();
+  const router = useRouter();
   const user = useAuthStore((state) => state.user);
   const selectProject = useProjectStore((s) => s.selectProject);
   const { isInterrupted } = useRecoveryState(projectId);
@@ -819,6 +820,7 @@ function ChatInput({
             queryClient.invalidateQueries({ queryKey: ['projects'] });
             if (createdProjectId !== projectId) {
               selectProject(createdProjectId);
+              router.push(`/chat/${createdProjectId}`);
             }
           },
         },
@@ -1182,6 +1184,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     mutationFn: () => api.projects.delete(projectId),
     onSuccess: () => {
       selectProject(null);
+      router.push('/chat');
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       toast.success('プロジェクトを削除しました');
     },

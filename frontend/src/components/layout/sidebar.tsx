@@ -115,6 +115,7 @@ export function Sidebar({
     onSuccess: (project) => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       selectProject(project.id);
+      router.push(`/chat/${project.id}`);
     },
     onError: () => {
       toast.error('プロジェクト作成に失敗しました');
@@ -193,12 +194,10 @@ export function Sidebar({
   const handleProjectClick = (project: ProjectResponse) => {
     if (project.id === selectedProjectId) {
       selectProject(null);
+      router.push('/chat');
     } else {
       selectProject(project.id);
-      // チャットページ以外にいる場合は /chat に遷移
-      if (!pathname.startsWith('/chat')) {
-        router.push('/chat');
-      }
+      router.push(`/chat/${project.id}`);
       if (isMobile) {
         onToggleCollapse();
       }
