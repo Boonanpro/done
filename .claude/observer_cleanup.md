@@ -1,6 +1,6 @@
 # 観察チェックリスト: 記録の整理
 
-1日1回、自動で呼ばれる。RULES.mdとlearned/の内容を整理する。
+1日1回、自動で呼ばれる。RULES.mdとスキル内learned.mdの内容を整理する。
 変更がなければ何も返答せず終了。（「変更なし」等の返答も不要）
 
 ---
@@ -11,26 +11,28 @@
 
 以下のファイルをすべて読む:
 - `~/.dan/workspace/RULES.md`
-- `~/.dan/workspace/learned/` 配下の全 `learned.md`
+- `.claude/skills/design/learned.md`
+- `.claude/skills/studio/learned.md`
+- その他 `.claude/skills/*/learned.md` が存在すれば読む
 
-### 2. RULES.md → learned/ への移動
+### 2. RULES.md → スキルのlearned.md への移動
 
 RULES.mdの各ルールについて、以下の手順で1つずつ評価する。
 
 **手順: ルールごとに経緯（括弧内）を読み、特定スキルの固有名詞が含まれるか確認する。**
 
-含まれていたら移動する:
-- 「吉川特装」「バードSTC」「五条」「Formspree」「LINE href」「HP」「写真マッチ」「おばんざい」→ `learned/hp-production/learned.md`
-- 「提案書」「create_proposal」→ `learned/proposal-design/learned.md`
-- 「AMEX」「PDF注釈」「仕訳」「税理士」→ `learned/bookkeeping/learned.md`
-- 「動画」「ffmpeg」「フレーム」→ `learned/studio/learned.md`
+含まれていたら該当スキルのlearned.mdに移動する:
+- 「吉川特装」「バードSTC」「五条」「Formspree」「LINE href」「HP」「写真マッチ」「おばんざい」→ `.claude/skills/design/learned.md`（セクションB: クライアントHP）
+- 「提案書」「create_proposal」「モックアップ」→ `.claude/skills/design/learned.md`（セクションC: 提案書HTML）
+- 「ダッシュボード」「管理画面」「KPI」→ `.claude/skills/design/learned.md`（セクションA: ダッシュボード）
+- 「動画」「ffmpeg」「フレーム」「Playwright録画」→ `.claude/skills/studio/learned.md`
 
 含まれていなければRULES.mdに残す。
 
-**迷ったら移動する。** RULES.mdは常にコンテキストに注入されるのでコストが高い。learned/はスキル実行時だけ読まれるので、移動しても忘れることはない。
+**迷ったら移動する。** RULES.mdは常にコンテキストに注入されるのでコストが高い。learned.mdはスキル実行時だけ読まれるので、移動しても忘れることはない。
 
 移動時の作法:
-- learned.md側の既存フォーマットに合わせて追記する
+- learned.md側の既存フォーマット（仮説パターン H{番号} 形式）に合わせて追記する
 - RULES.mdから該当ルールを削除する
 - 経緯（「なぜこのルールができたか」）も一緒に移動する
 
@@ -62,4 +64,4 @@ RULES.mdの各ルールについて、以下の手順で1つずつ評価する�
 
 - 何も変更しなかった場合: 何も返答せず終了
 - 変更した場合のみ: 日本語箇条書き3行以内で要約を返答
-  - 例: 「- RULES.mdから2件をlearned/hp-productionに移動」「- RULES.md内の重複3件を1件に統合」
+  - 例: 「- RULES.mdから2件をdesign/learned.md(セクションB)に移動」「- RULES.md内の重複3件を1件に統合」
