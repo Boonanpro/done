@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 Observer Scheduler — 毎日JST 02:00に整理オブザーバーを実行する常駐スクリプト。
 
@@ -27,14 +28,15 @@ import requests
 JST = timezone(timedelta(hours=9))
 BACKEND_URL = "http://127.0.0.1:8000/api/v1/chat/internal/observer-cleanup"
 
+_handlers = [logging.FileHandler("observer_scheduler.log", encoding="utf-8")]
+if sys.stdout is not None:
+    _handlers.append(logging.StreamHandler(sys.stdout))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler("observer_scheduler.log", encoding="utf-8"),
-    ],
+    handlers=_handlers,
 )
 logger = logging.getLogger(__name__)
 
