@@ -144,4 +144,3 @@ if __name__ == "__main__":
         port=8000,
         reload=settings.APP_ENV == "development",
     )
-
