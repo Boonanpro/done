@@ -345,8 +345,8 @@ async def stream_run_traces(run_id: str, request: Request):
             last_id_seen.add(row["id"])
             yield f"data: {_json.dumps(row, default=str, ensure_ascii=False)}\n\n"
 
-        # 以降 500ms polling
-        for _ in range(600):  # 最大 5 分
+        # 以降 500ms polling, 最大 30 分
+        for _ in range(3600):
             if await request.is_disconnected():
                 break
             await asyncio.sleep(0.5)
