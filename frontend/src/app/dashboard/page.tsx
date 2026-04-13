@@ -27,6 +27,13 @@ const statusConfig: Record<string, { label: string; className: string }> = {
 
 const fallbackBusinesses: Business[] = [
   {
+    slug: 'documents',
+    name: 'Dan Docs',
+    description: 'ドキュメント・ファイル管理（Notion風エディタ）',
+    icon: 'file-text',
+    status: 'active',
+  },
+  {
     slug: 'ai-b2b-sales',
     name: 'AI B2B自動営業',
     description: 'AIを活用したB2B企業向け自動営業パイプライン管理',

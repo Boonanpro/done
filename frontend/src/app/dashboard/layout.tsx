@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ArrowLeft, Home, Users, FolderKanban, Building2, Handshake, MessageSquare } from 'lucide-react';
+import { ArrowLeft, Home, Users, FolderKanban, Building2, Handshake, MessageSquare, FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Separator } from '@/components/ui/separator';
 import { Button } from '@/components/ui/button';
@@ -19,6 +19,11 @@ const dxNavItems = [
   { href: '/dashboard/dx/projects', label: 'プロジェクト', icon: FolderKanban },
 ];
 
+const docsNavItems = [
+  { href: '/dashboard/documents', label: 'すべて', icon: FileText },
+  { href: '/dashboard/documents?starred=true', label: 'スター付き', icon: Home },
+];
+
 
 export default function DashboardLayout({
   children,
@@ -29,10 +34,11 @@ export default function DashboardLayout({
 
   const isDx = pathname.startsWith('/dashboard/dx');
   const isB2b = pathname.startsWith('/dashboard/ai-b2b-sales');
+  const isDocs = pathname.startsWith('/dashboard/documents');
   const isHub = pathname === '/dashboard';
 
-  const navItems = isDx ? dxNavItems : isB2b ? b2bNavItems : [];
-  const title = isDx ? 'DX事業' : isB2b ? 'AI B2B営業' : 'Dashboard';
+  const navItems = isDx ? dxNavItems : isB2b ? b2bNavItems : isDocs ? docsNavItems : [];
+  const title = isDx ? 'DX事業' : isB2b ? 'AI B2B営業' : isDocs ? 'Dan Docs' : 'Dashboard';
 
   return (
     <div className="flex h-screen bg-background text-foreground">

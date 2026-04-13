@@ -59,16 +59,10 @@ const navItems = [
 
 const businessItems = [
   {
-    title: 'ワークスペース',
-    href: '/workspace',
+    title: 'ノート',
+    href: '/notebook',
     icon: Notebook,
-    description: '情報ハブ（ブロック/ページ）',
-  },
-  {
-    title: 'トリガー',
-    href: '/triggers',
-    icon: Zap,
-    description: '自動化とエージェント',
+    description: 'ページ・自動化の統合ハブ',
   },
   {
     title: 'DX事業',
