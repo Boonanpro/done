@@ -20,7 +20,6 @@ import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 
 const API = '/api/v1/dan-notion';
@@ -82,6 +81,7 @@ function DanNotionInner() {
   const [newPageTitle, setNewPageTitle] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Array<{ block_id: string; similarity: number; summary: string | null }> | null>(null);
+  const [notifOpen, setNotifOpen] = useState(false);
 
   const runSearch = async () => {
     if (!searchQuery.trim()) {
@@ -213,13 +213,15 @@ function DanNotionInner() {
     [pagesQ.data, selectedPageId]
   );
 
+  const unreadCount = notifQ.data?.filter((n) => !n.read_at).length || 0;
+
   return (
-    <div className="flex h-screen bg-background text-foreground">
+    <div className="flex h-screen bg-white text-slate-900">
       {/* ========== 左: ページツリー ========== */}
-      <aside className="w-64 border-r border-border flex flex-col">
-        <div className="p-4 border-b border-border">
+      <aside className="w-64 border-r border-slate-200 flex flex-col bg-slate-50">
+        <div className="p-4 border-b border-slate-200">
           <div className="flex items-center gap-2 mb-3">
-            <Notebook className="h-5 w-5 text-primary" />
+            <Notebook className="h-5 w-5 text-indigo-600" />
             <h2 className="font-semibold">ダン用Notion</h2>
           </div>
           <div className="flex gap-2">
@@ -246,12 +248,12 @@ function DanNotionInner() {
         <ScrollArea className="flex-1">
           <div className="p-2 space-y-1">
             {pagesQ.isLoading && (
-              <div className="p-3 text-sm text-muted-foreground flex items-center gap-2">
+              <div className="p-3 text-sm text-slate-500 flex items-center gap-2">
                 <Loader2 className="h-3 w-3 animate-spin" /> 読込中...
               </div>
             )}
             {pagesQ.error && (
-              <div className="p-3 text-sm text-destructive">
+              <div className="p-3 text-sm text-red-600">
                 APIエラー: マイグレーション 036 を適用してください
               </div>
             )}
@@ -262,21 +264,21 @@ function DanNotionInner() {
                 className={cn(
                   'w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm text-left transition-colors',
                   selectedPageId === p.id
-                    ? 'bg-accent text-accent-foreground'
-                    : 'hover:bg-accent/50'
+                    ? 'bg-white border border-slate-200 shadow-sm text-slate-900'
+                    : 'hover:bg-slate-100 text-slate-700'
                 )}
               >
                 <span>{p.icon || '📄'}</span>
                 <span className="truncate flex-1">
                   {p.properties?.title || '無題'}
                 </span>
-                <Badge variant="secondary" className="text-[10px] h-4">
+                <Badge variant="secondary" className="text-[10px] h-4 bg-slate-200 text-slate-600">
                   v{p.version}
                 </Badge>
               </button>
             ))}
             {pagesQ.data?.length === 0 && (
-              <div className="p-3 text-sm text-muted-foreground">
+              <div className="p-3 text-sm text-slate-500">
                 ページがありません。上から作成してください。
               </div>
             )}
@@ -285,18 +287,18 @@ function DanNotionInner() {
       </aside>
 
       {/* ========== 中央: ブロックエディタ ========== */}
-      <main className="flex-1 flex flex-col min-w-0">
-        {/* 自然言語検索バー */}
-        <div className="border-b border-border p-3 flex items-center gap-2">
-          <Search className="h-4 w-4 text-muted-foreground" />
+      <main className="flex-1 flex flex-col min-w-0 bg-white">
+        {/* 自然言語検索バー + 通知ベル */}
+        <div className="border-b border-slate-200 p-3 flex items-center gap-2 relative">
+          <Search className="h-4 w-4 text-slate-500" />
           <Input
             placeholder="自然言語検索 (例: 前回の請求書を見せて)"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && runSearch()}
-            className="h-8 text-sm"
+            className="h-8 text-sm bg-white border-slate-200"
           />
-          <Button size="sm" variant="outline" onClick={runSearch}>
+          <Button size="sm" variant="outline" onClick={runSearch} className="bg-white border-slate-200 text-slate-700">
             検索
           </Button>
           {searchResults !== null && (
@@ -304,26 +306,91 @@ function DanNotionInner() {
               クリア
             </Button>
           )}
+
+          {/* 通知ベル */}
+          <div className="ml-2 relative">
+            <button
+              onClick={() => setNotifOpen((o) => !o)}
+              className="relative p-2 rounded-md hover:bg-slate-100 text-slate-600"
+              aria-label="通知"
+            >
+              <Bell className="h-4 w-4" />
+              {unreadCount > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 h-4 min-w-4 px-1 rounded-full bg-red-500 text-white text-[10px] font-bold flex items-center justify-center">
+                  {unreadCount}
+                </span>
+              )}
+            </button>
+
+            {notifOpen && (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setNotifOpen(false)}
+                />
+                <div className="absolute right-0 top-full mt-2 w-96 max-h-[70vh] overflow-y-auto bg-white border border-slate-200 rounded-lg shadow-xl z-50">
+                  <div className="p-3 border-b border-slate-200 flex items-center justify-between">
+                    <h3 className="font-semibold text-sm text-slate-900">通知</h3>
+                    <span className="text-[10px] text-slate-500">
+                      未読 {unreadCount} / 全 {notifQ.data?.length || 0}
+                    </span>
+                  </div>
+                  <div className="p-2 space-y-2">
+                    {notifQ.data?.length === 0 && (
+                      <p className="text-xs text-slate-500 p-3">通知なし</p>
+                    )}
+                    {notifQ.data?.map((n) => (
+                      <div
+                        key={n.id}
+                        className={cn(
+                          'p-3 rounded-md border',
+                          !n.read_at ? 'border-indigo-300 bg-indigo-50' : 'border-slate-200 bg-white',
+                          n.severity === 'urgent' && 'border-red-400 bg-red-50'
+                        )}
+                      >
+                        <div className="flex items-start gap-2">
+                          {n.severity === 'urgent' && (
+                            <AlertCircle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <p className="text-xs font-medium text-slate-900">{n.title}</p>
+                            {n.body && (
+                              <p className="text-[11px] text-slate-600 mt-1">{n.body}</p>
+                            )}
+                            {n.due_at && (
+                              <p className="text-[10px] text-slate-500 mt-1">
+                                期限: {new Date(n.due_at).toLocaleString('ja-JP')}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
         {searchResults !== null ? (
           <ScrollArea className="flex-1">
             <div className="max-w-3xl mx-auto p-6 space-y-2">
-              <h2 className="text-sm font-semibold text-muted-foreground mb-2">
+              <h2 className="text-sm font-semibold text-slate-500 mb-2">
                 検索結果: {searchResults.length}件
               </h2>
               {searchResults.length === 0 && (
-                <p className="text-sm text-muted-foreground">
+                <p className="text-sm text-slate-500">
                   該当なし。pgvector インデックスに登録された後に再試行してください。
                 </p>
               )}
               {searchResults.map((r) => (
-                <Card key={r.block_id} className="p-3">
+                <Card key={r.block_id} className="p-3 bg-white border-slate-200">
                   <div className="flex items-center justify-between mb-1">
-                    <Badge variant="secondary" className="text-[10px]">
+                    <Badge variant="secondary" className="text-[10px] bg-slate-100 text-slate-700">
                       類似度 {(r.similarity * 100).toFixed(0)}%
                     </Badge>
-                    <span className="text-[10px] text-muted-foreground">{r.block_id.slice(0, 8)}</span>
+                    <span className="text-[10px] text-slate-500">{r.block_id.slice(0, 8)}</span>
                   </div>
                   <p className="text-sm">{r.summary || '(要約なし)'}</p>
                 </Card>
@@ -331,33 +398,33 @@ function DanNotionInner() {
             </div>
           </ScrollArea>
         ) : !selectedPage ? (
-          <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground gap-2">
+          <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-2">
             <Notebook className="h-12 w-12 opacity-30" />
             <p className="text-sm">左からページを選択するか、新規作成してください</p>
           </div>
         ) : (
           <>
-            <div className="border-b border-border p-6 flex items-start justify-between">
+            <div className="border-b border-slate-200 p-6 flex items-start justify-between">
               <div className="flex items-start gap-3">
                 <span className="text-3xl">{selectedPage.icon || '📄'}</span>
                 <div>
-                  <h1 className="text-2xl font-bold">
+                  <h1 className="text-2xl font-bold text-slate-900">
                     {selectedPage.properties?.title || '無題'}
                   </h1>
-                  <p className="text-xs text-muted-foreground mt-1">
+                  <p className="text-xs text-slate-500 mt-1">
                     v{selectedPage.version} ・ 更新:{' '}
                     {new Date(selectedPage.updated_at).toLocaleString('ja-JP')}
                   </p>
                 </div>
               </div>
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => addBlock.mutate('paragraph')}>
+                <Button size="sm" variant="outline" onClick={() => addBlock.mutate('paragraph')} className="bg-white border-slate-200 text-slate-700">
                   <Plus className="h-4 w-4 mr-1" /> テキスト
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => addBlock.mutate('checklist')}>
+                <Button size="sm" variant="outline" onClick={() => addBlock.mutate('checklist')} className="bg-white border-slate-200 text-slate-700">
                   <Plus className="h-4 w-4 mr-1" /> タスク
                 </Button>
-                <Button size="sm" variant="outline" onClick={() => addBlock.mutate('heading')}>
+                <Button size="sm" variant="outline" onClick={() => addBlock.mutate('heading')} className="bg-white border-slate-200 text-slate-700">
                   <Plus className="h-4 w-4 mr-1" /> 見出し
                 </Button>
                 <Button
@@ -377,10 +444,10 @@ function DanNotionInner() {
             <ScrollArea className="flex-1">
               <div className="max-w-3xl mx-auto p-6 space-y-2">
                 {blocksQ.isLoading && (
-                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                  <Loader2 className="h-5 w-5 animate-spin text-slate-400" />
                 )}
                 {blocksQ.data?.length === 0 && (
-                  <p className="text-sm text-muted-foreground">
+                  <p className="text-sm text-slate-500">
                     上のボタンからブロックを追加してください
                   </p>
                 )}
@@ -397,7 +464,7 @@ function DanNotionInner() {
 
             {/* バージョン履歴 */}
             {versionsQ.data && versionsQ.data.length > 0 && (
-              <div className="border-t border-border p-3 flex items-center gap-2 text-xs text-muted-foreground">
+              <div className="border-t border-slate-200 p-3 flex items-center gap-2 text-xs text-slate-500">
                 <History className="h-3 w-3" />
                 {versionsQ.data.length} 件の編集履歴 (自動世代管理)
               </div>
@@ -406,127 +473,75 @@ function DanNotionInner() {
         )}
       </main>
 
-      {/* ========== 右: Autopilot + 通知 ========== */}
-      <aside className="w-80 border-l border-border flex flex-col">
-        <Tabs defaultValue="autopilot" className="flex-1 flex flex-col">
-          <TabsList className="m-3 grid grid-cols-2">
-            <TabsTrigger value="autopilot">
-              <Activity className="h-3 w-3 mr-1" />
-              Autopilot
-            </TabsTrigger>
-            <TabsTrigger value="notifications">
-              <Bell className="h-3 w-3 mr-1" />
-              通知
-              {notifQ.data && notifQ.data.filter((n) => !n.read_at).length > 0 && (
-                <Badge variant="destructive" className="ml-1 h-4 text-[10px]">
-                  {notifQ.data.filter((n) => !n.read_at).length}
-                </Badge>
+      {/* ========== 右: Autopilot ========== */}
+      <aside className="w-80 border-l border-slate-200 flex flex-col bg-slate-50">
+        <div className="p-3 border-b border-slate-200 flex items-center gap-2">
+          <Activity className="h-4 w-4 text-indigo-600" />
+          <h3 className="font-semibold text-sm text-slate-900">Autopilot</h3>
+        </div>
+        <ScrollArea className="flex-1 px-3 pb-3 pt-3">
+          <div className="space-y-3">
+            <div>
+              <h4 className="text-[10px] font-semibold text-slate-500 uppercase mb-2">
+                トリガー ({triggersQ.data?.length || 0})
+              </h4>
+              {triggersQ.data?.length === 0 && (
+                <p className="text-xs text-slate-500">トリガー未設定</p>
               )}
-            </TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="autopilot" className="flex-1 mt-0">
-            <ScrollArea className="h-full px-3 pb-3">
-              <div className="space-y-3">
-                <div>
-                  <h3 className="text-xs font-semibold text-muted-foreground uppercase mb-2">
-                    トリガー ({triggersQ.data?.length || 0})
-                  </h3>
-                  {triggersQ.data?.length === 0 && (
-                    <p className="text-xs text-muted-foreground">
-                      トリガー未設定
-                    </p>
-                  )}
-                  {triggersQ.data?.map((t) => (
-                    <Card key={t.id} className="p-2 mb-2">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <Sparkles className="h-3 w-3 text-primary shrink-0" />
-                          <span className="text-xs truncate">{t.name}</span>
-                        </div>
-                        <Badge variant={t.is_enabled ? 'default' : 'secondary'} className="text-[10px] h-4">
-                          {t.kind}
-                        </Badge>
-                      </div>
-                      <p className="text-[10px] text-muted-foreground mt-1">
-                        実行: {t.fire_count}回
-                      </p>
-                    </Card>
-                  ))}
-                </div>
-
-                <div>
-                  <h3 className="text-xs font-semibold text-muted-foreground uppercase mb-2">
-                    最近の実行
-                  </h3>
-                  {runsQ.data?.length === 0 && (
-                    <p className="text-xs text-muted-foreground">実行履歴なし</p>
-                  )}
-                  {runsQ.data?.slice(0, 5).map((r) => (
-                    <Card key={r.id} className="p-2 mb-2">
-                      <div className="flex items-center justify-between">
-                        <Badge
-                          variant={
-                            r.status === 'succeeded'
-                              ? 'default'
-                              : r.status === 'failed'
-                              ? 'destructive'
-                              : 'secondary'
-                          }
-                          className="text-[10px] h-4"
-                        >
-                          {r.status}
-                        </Badge>
-                        <span className="text-[10px] text-muted-foreground">
-                          {new Date(r.started_at).toLocaleTimeString('ja-JP')}
-                        </span>
-                      </div>
-                    </Card>
-                  ))}
-                </div>
-              </div>
-            </ScrollArea>
-          </TabsContent>
-
-          <TabsContent value="notifications" className="flex-1 mt-0">
-            <ScrollArea className="h-full px-3 pb-3">
-              <div className="space-y-2">
-                {notifQ.data?.length === 0 && (
-                  <p className="text-xs text-muted-foreground">通知なし</p>
-                )}
-                {notifQ.data?.map((n) => (
-                  <Card
-                    key={n.id}
-                    className={cn(
-                      'p-3',
-                      !n.read_at && 'border-primary',
-                      n.severity === 'urgent' && 'border-destructive'
-                    )}
-                  >
-                    <div className="flex items-start gap-2">
-                      {n.severity === 'urgent' && (
-                        <AlertCircle className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
-                      )}
-                      <div className="min-w-0 flex-1">
-                        <p className="text-xs font-medium">{n.title}</p>
-                        {n.body && (
-                          <p className="text-[10px] text-muted-foreground mt-1">
-                            {n.body}
-                          </p>
-                        )}
-                        {n.due_at && (
-                          <p className="text-[10px] text-muted-foreground mt-1">
-                            期限: {new Date(n.due_at).toLocaleString('ja-JP')}
-                          </p>
-                        )}
-                      </div>
+              {triggersQ.data?.map((t) => (
+                <Card key={t.id} className="p-2 mb-2 bg-white border-slate-200">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Sparkles className="h-3 w-3 text-indigo-600 shrink-0" />
+                      <span className="text-xs truncate text-slate-900">{t.name}</span>
                     </div>
-                  </Card>
-                ))}
-              </div>
-            </ScrollArea>
-          </TabsContent>
-        </Tabs>
+                    <Badge
+                      className={cn(
+                        'text-[10px] h-4',
+                        t.is_enabled
+                          ? 'bg-indigo-100 text-indigo-700'
+                          : 'bg-slate-200 text-slate-600'
+                      )}
+                    >
+                      {t.kind}
+                    </Badge>
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    実行: {t.fire_count}回
+                  </p>
+                </Card>
+              ))}
+            </div>
+
+            <div>
+              <h4 className="text-[10px] font-semibold text-slate-500 uppercase mb-2">
+                最近の実行
+              </h4>
+              {runsQ.data?.length === 0 && (
+                <p className="text-xs text-slate-500">実行履歴なし</p>
+              )}
+              {runsQ.data?.slice(0, 5).map((r) => (
+                <Card key={r.id} className="p-2 mb-2 bg-white border-slate-200">
+                  <div className="flex items-center justify-between">
+                    <Badge
+                      className={cn(
+                        'text-[10px] h-4',
+                        r.status === 'succeeded' && 'bg-emerald-100 text-emerald-700',
+                        r.status === 'failed' && 'bg-red-100 text-red-700',
+                        r.status === 'running' && 'bg-amber-100 text-amber-700'
+                      )}
+                    >
+                      {r.status}
+                    </Badge>
+                    <span className="text-[10px] text-slate-500">
+                      {new Date(r.started_at).toLocaleTimeString('ja-JP')}
+                    </span>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          </div>
+        </ScrollArea>
       </aside>
     </div>
   );
