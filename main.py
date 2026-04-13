@@ -35,6 +35,7 @@ from app.api.dashboard_routes import router as dashboard_router
 from app.api.collab_routes import router as collab_router
 from app.api.calendar_routes import router as calendar_router
 from app.api.push_routes import router as push_router
+from app.api.block_routes import router as block_router
 
 
 # v3: Executorは不使用（汎用ツールで処理）
@@ -104,6 +105,7 @@ app.include_router(dashboard_router, prefix="/api")
 app.include_router(collab_router, prefix="/api/v1")
 app.include_router(calendar_router, prefix="/api/v1")
 app.include_router(push_router, prefix="/api/v1")
+app.include_router(block_router, prefix="/api/v1")
 
 
 
