@@ -103,10 +103,13 @@ quote / code / divider / callout / image / video / audio / pdf / file / embed /
 email / calendar_event / table / database / bookmark / invoice / meeting_note / proposal_ref
 
 # ページ/フォルダ規約 (重要)
-- ルートページ = テキストエディタ的な文書ページ (通常 view_mode='list')
-- サブページ = フォルダとして使う。メディア整理ならば必ず
-  properties.view_mode='grid' を付けて作成すること
-  例: {"type":"page","parent_id":"<root>","properties":{"title":"請求書","view_mode":"grid"},"icon":"💳"}
+- ルートページ = テキストエディタ的な文書ページ (ビュー切替なし)
+- フォルダ = メディア整理用のサブページ。以下の両方を必ず設定すること:
+    properties.is_folder = true
+    properties.view_mode = 'grid'   (初期表示。ユーザーが後で list に切替可能)
+  例: {"type":"page","parent_id":"<root>","properties":{"title":"請求書","is_folder":true,"view_mode":"grid"},"icon":"💳"}
+- フォルダ配下にさらにサブフォルダを作る場合も同じ規約を適用
+- メディアファイル (image/video/pdf/file) はフォルダ配下に入れる
 - 絵文字の二重表示を避けるため、properties.title には絵文字を入れないこと。
   代わりに icon フィールドに絵文字だけを設定する
   ❌ {"title":"📄 PDF資料","icon":"📄"}
