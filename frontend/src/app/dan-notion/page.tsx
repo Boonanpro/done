@@ -103,7 +103,8 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
 
 /**
  * SSE で agent_traces を購読する Hook
- * fetch + ReadableStream で Authorization ヘッダ対応
+ * - fetch + ReadableStream で Authorization ヘッダ対応
+ * - 並行して trigger_runs の status を 5秒間隔で polling (SSE切断時のフォールバック)
  */
 function useTraceStream(runId: string | null): { traces: Trace[]; done: boolean } {
   const [traces, setTraces] = useState<Trace[]>([]);
@@ -120,14 +121,37 @@ function useTraceStream(runId: string | null): { traces: Trace[]; done: boolean 
 
     const ctrl = new AbortController();
     const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+
+    let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+    // Fallback: run status を polling し、succeeded/failed を検出したら done=true
+    const startStatusPoll = () => {
+      if (pollTimer) return;
+      pollTimer = setInterval(async () => {
+        try {
+          const res = await fetch(`${API}/trigger-runs?limit=10`, { headers });
+          if (!res.ok) return;
+          const runs = await res.json();
+          const match = runs.find?.((r: any) => r.id === runId);
+          if (match && ['succeeded', 'failed', 'cancelled'].includes(match.status)) {
+            setDone(true);
+          }
+        } catch {}
+      }, 5000);
+    };
 
     (async () => {
       try {
         const res = await fetch(`${API}/runs/${runId}/traces/stream`, {
-          headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          headers,
           signal: ctrl.signal,
         });
-        if (!res.body) return;
+        if (!res.body) {
+          startStatusPoll();
+          return;
+        }
+        startStatusPoll();
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = '';
@@ -159,13 +183,16 @@ function useTraceStream(runId: string | null): { traces: Trace[]; done: boolean 
             } catch {}
           }
         }
-        setDone(true);
+        // SSE 側が切れても polling が生きているので done を即セットしない
       } catch (e) {
         if ((e as any)?.name !== 'AbortError') console.warn('SSE error', e);
       }
     })();
 
-    return () => ctrl.abort();
+    return () => {
+      ctrl.abort();
+      if (pollTimer) clearInterval(pollTimer);
+    };
   }, [runId]);
 
   return { traces, done };
@@ -304,10 +331,18 @@ function DanNotionInner() {
     },
   });
 
-  const selectedPage = useMemo(
+  // 選択中のページ: root pages に含まれていなければ API から取得
+  const selectedPageFromRoot = useMemo(
     () => pagesQ.data?.find((p) => p.id === selectedPageId) || null,
     [pagesQ.data, selectedPageId]
   );
+  const selectedSubPageQ = useQuery({
+    queryKey: ['dan-notion', 'block', selectedPageId],
+    queryFn: () =>
+      selectedPageId ? fetchJSON<Block>(`${API}/blocks/${selectedPageId}`) : Promise.resolve(null),
+    enabled: !!selectedPageId && !selectedPageFromRoot,
+  });
+  const selectedPage: Block | null = selectedPageFromRoot || selectedSubPageQ.data || null;
 
   const unreadCount = notifQ.data?.filter((n) => !n.read_at).length || 0;
 
@@ -590,6 +625,15 @@ function DanNotionInner() {
               <div className="flex items-start gap-3">
                 <span className="text-3xl">{selectedPage.icon || '📄'}</span>
                 <div>
+                  {selectedPage.parent_id && (
+                    <button
+                      onClick={() => setSelectedPageId(selectedPage.parent_id)}
+                      className="text-xs text-indigo-600 hover:underline flex items-center gap-1 mb-1"
+                    >
+                      <ChevronRight className="h-3 w-3 rotate-180" />
+                      親ページへ戻る
+                    </button>
+                  )}
                   <h1 className="text-2xl font-bold text-slate-900">
                     {selectedPage.properties?.title || '無題'}
                   </h1>
@@ -638,7 +682,13 @@ function DanNotionInner() {
                     key={b.id}
                     block={b}
                     onUpdate={(content) => updateBlock.mutate({ id: b.id, content })}
-                    onDelete={() => removeBlock.mutate(b.id)}
+                    onDelete={() => {
+                      if (b.type === 'page') {
+                        if (!confirm(`ページ「${b.properties?.title || '無題'}」を削除しますか？\n配下のブロックも一緒に非表示になります（元に戻せます）。`)) return;
+                      }
+                      removeBlock.mutate(b.id);
+                    }}
+                    onOpenPage={(id) => setSelectedPageId(id)}
                   />
                 ))}
               </div>
@@ -1112,10 +1162,12 @@ function BlockRow({
   block,
   onUpdate,
   onDelete,
+  onOpenPage,
 }: {
   block: Block;
   onUpdate: (content: any) => void;
   onDelete: () => void;
+  onOpenPage?: (pageId: string) => void;
 }) {
   const initialText = useMemo(() => {
     if (typeof block.content === 'string') return block.content;
@@ -1131,6 +1183,69 @@ function BlockRow({
   const commit = () => {
     if (text !== initialText) onUpdate([{ type: 'text', text }]);
   };
+
+  // ページ型: クリックで遷移するナビリンクとして表示
+  if (block.type === 'page') {
+    const title = block.properties?.title || '無題のページ';
+    return (
+      <div className="group flex items-center gap-2 rounded-md hover:bg-slate-50 border border-transparent hover:border-slate-200 transition">
+        <button
+          onClick={() => onOpenPage?.(block.id)}
+          className="flex items-center gap-2 flex-1 text-left px-3 py-2 min-w-0"
+        >
+          <span className="text-lg shrink-0">{block.icon || '📄'}</span>
+          <span className="text-sm font-medium text-slate-800 truncate">{title}</span>
+          <ChevronRight className="h-4 w-4 text-slate-400 shrink-0" />
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          className="opacity-0 group-hover:opacity-100 p-1.5 mr-2 text-slate-400 hover:text-red-600 transition"
+          title="ページを削除"
+        >
+          <Trash2 className="h-3 w-3" />
+        </button>
+      </div>
+    );
+  }
+
+  // ファイル系: 読み取り専用プレビュー
+  if (['image', 'video', 'pdf', 'file', 'audio'].includes(block.type)) {
+    const title =
+      block.properties?.title ||
+      block.properties?.original_name ||
+      (Array.isArray(block.content) && block.content[0]?.text) ||
+      `${block.type} ${block.id.slice(0, 8)}`;
+    const url = block.properties?.url || block.properties?.storage_path;
+    const icon =
+      block.type === 'image' ? '🖼️' :
+      block.type === 'video' ? '🎬' :
+      block.type === 'pdf' ? '📄' :
+      block.type === 'audio' ? '🎵' : '📎';
+    return (
+      <div className="group flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+        <span className="text-lg shrink-0">{icon}</span>
+        <div className="flex-1 min-w-0">
+          {url ? (
+            <a href={url} target="_blank" rel="noopener noreferrer" className="text-sm text-indigo-600 hover:underline truncate block">
+              {title}
+            </a>
+          ) : (
+            <span className="text-sm text-slate-700 truncate block">{title}</span>
+          )}
+          <span className="text-[10px] text-slate-500">{block.type}</span>
+        </div>
+        <button
+          onClick={onDelete}
+          className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-red-600 transition"
+        >
+          <Trash2 className="h-3 w-3" />
+        </button>
+      </div>
+    );
+  }
 
   if (block.type === 'heading') {
     return (
