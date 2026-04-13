@@ -140,7 +140,7 @@ class AgentService:
                     "content": content_blocks,
                     "tags": [category],
                     "source": "agent",
-                    "created_by": "agent",
+                    "created_by": "ai",
                 },
             )
             result = {
