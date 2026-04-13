@@ -57,32 +57,7 @@ const navItems = [
   },
 ];
 
-const businessItems = [
-  {
-    title: 'ノート',
-    href: '/notebook',
-    icon: Notebook,
-    description: 'ページ・自動化の統合ハブ',
-  },
-  {
-    title: 'DX事業',
-    href: '/dashboard/dx',
-    icon: LayoutDashboard,
-    description: 'HP制作・DXツール管理ダッシュボード',
-  },
-  {
-    title: 'note投稿',
-    href: '/notes',
-    icon: FileEdit,
-    description: 'note記事の下書き・投稿管理',
-  },
-  {
-    title: 'Studio',
-    href: '/studio',
-    icon: Clapperboard,
-    description: 'AI Vlog 制作ダッシュボード',
-  },
-];
+const businessItems: typeof navItems = [];
 
 interface SidebarProps {
   className?: string;

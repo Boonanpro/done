@@ -31,13 +31,9 @@ from app.api.project_routes import router as project_router
 from app.api.note_routes import router as note_router
 from app.api.file_routes import router as file_router
 from app.api.studio_routes import router as studio_router
-from app.api.dashboard_routes import router as dashboard_router
 from app.api.collab_routes import router as collab_router
 from app.api.calendar_routes import router as calendar_router
 from app.api.push_routes import router as push_router
-from app.api.block_routes import router as block_router
-from app.api.trigger_routes import router as trigger_router
-from app.api.agent_routes import router as agent_router
 
 
 # v3: Executorは不使用（汎用ツールで処理）
@@ -103,13 +99,9 @@ app.include_router(project_router, prefix="/api/v1")
 app.include_router(note_router, prefix="/api/v1")
 app.include_router(file_router, prefix="/api/v1/files")
 app.include_router(studio_router, prefix="/api/v1")
-app.include_router(dashboard_router, prefix="/api")
 app.include_router(collab_router, prefix="/api/v1")
 app.include_router(calendar_router, prefix="/api/v1")
 app.include_router(push_router, prefix="/api/v1")
-app.include_router(block_router, prefix="/api/v1")
-app.include_router(trigger_router, prefix="/api/v1")
-app.include_router(agent_router, prefix="/api/v1")
 
 
 
