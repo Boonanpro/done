@@ -1765,3 +1765,435 @@ export interface CollabFileResponse {
   file_size: number | null;
   created_at: string;
 }
+
+// ==================== Document Types ====================
+
+export type DocType = 'folder' | 'file' | 'collection';
+
+export interface DocumentResponse {
+  id: string;
+  parent_id: string | null;
+  title: string;
+  description: string | null;
+  content: Record<string, unknown>[] | null;
+  doc_type: DocType;
+  category_id: string | null;
+  icon: string | null;
+  tags: string[];
+  metadata: Record<string, unknown> | null;
+  sort_order: number;
+  is_starred: boolean;
+  is_deleted: boolean;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+  children_count?: number;
+  files?: DocumentFileResponse[];
+  category?: DocumentCategoryResponse | null;
+}
+
+export interface DocumentTreeNode {
+  id: string;
+  title: string;
+  doc_type: DocType;
+  icon: string | null;
+  parent_id: string | null;
+  children_count: number;
+  is_starred: boolean;
+}
+
+export interface DocumentFileResponse {
+  id: string;
+  document_id: string;
+  filename: string;
+  original_name: string;
+  file_url: string;
+  mime_type: string | null;
+  file_size: number;
+  version: number;
+  is_current: boolean;
+  created_at: string;
+}
+
+export interface DocumentCategoryResponse {
+  id: string;
+  name: string;
+  slug: string;
+  icon: string | null;
+  parent_id: string | null;
+  description: string | null;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentSearchResult {
+  documents: DocumentResponse[];
+  total: number;
+  query: string;
+}
+
+// ==================== Document API ====================
+
+export function listDocuments(params?: {
+  parent_id?: string | null;
+  category_id?: string;
+  doc_type?: DocType;
+  starred?: boolean;
+  deleted?: boolean;
+  limit?: number;
+  offset?: number;
+}) {
+  const searchParams = new URLSearchParams();
+  if (params) {
+    if (params.parent_id !== undefined) searchParams.set('parent_id', params.parent_id ?? '');
+    if (params.category_id) searchParams.set('category_id', params.category_id);
+    if (params.doc_type) searchParams.set('doc_type', params.doc_type);
+    if (params.starred !== undefined) searchParams.set('starred', String(params.starred));
+    if (params.deleted !== undefined) searchParams.set('deleted', String(params.deleted));
+    if (params.limit) searchParams.set('limit', String(params.limit));
+    if (params.offset) searchParams.set('offset', String(params.offset));
+  }
+  const qs = searchParams.toString();
+  return request<DocumentResponse[]>(`/documents${qs ? `?${qs}` : ''}`);
+}
+
+export function createDocument(data: {
+  title: string;
+  doc_type?: DocType;
+  parent_id?: string | null;
+  content?: Record<string, unknown>[];
+  description?: string;
+  category_id?: string;
+  icon?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}) {
+  return request<DocumentResponse>('/documents', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function getDocument(id: string) {
+  return request<DocumentResponse>(`/documents/${id}`);
+}
+
+export function updateDocument(id: string, data: {
+  title?: string;
+  content?: Record<string, unknown>[];
+  description?: string;
+  category_id?: string;
+  icon?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+  is_starred?: boolean;
+  sort_order?: number;
+}) {
+  return request<DocumentResponse>(`/documents/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteDocument(id: string) {
+  return request<void>(`/documents/${id}`, { method: 'DELETE' });
+}
+
+export function restoreDocument(id: string) {
+  return request<DocumentResponse>(`/documents/${id}/restore`, { method: 'POST' });
+}
+
+export function moveDocument(id: string, data: { parent_id?: string | null; sort_order?: number }) {
+  return request<DocumentResponse>(`/documents/${id}/move`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function getDocumentTree() {
+  return request<DocumentTreeNode[]>('/documents/tree');
+}
+
+export function getRecentDocuments(limit?: number) {
+  const qs = limit ? `?limit=${limit}` : '';
+  return request<DocumentResponse[]>(`/documents/recent${qs}`);
+}
+
+export function getStarredDocuments() {
+  return request<DocumentResponse[]>('/documents/starred');
+}
+
+export function searchDocuments(q: string, params?: { category_id?: string; limit?: number }) {
+  const searchParams = new URLSearchParams({ q });
+  if (params?.category_id) searchParams.set('category_id', params.category_id);
+  if (params?.limit) searchParams.set('limit', String(params.limit));
+  return request<DocumentSearchResult>(`/documents/search?${searchParams.toString()}`);
+}
+
+export function listCategories() {
+  return request<DocumentCategoryResponse[]>('/documents/categories');
+}
+
+export function createCategory(data: {
+  name: string;
+  slug: string;
+  icon?: string;
+  parent_id?: string;
+  description?: string;
+  sort_order?: number;
+}) {
+  return request<DocumentCategoryResponse>('/documents/categories', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function listDocumentFiles(docId: string) {
+  return request<DocumentFileResponse[]>(`/documents/${docId}/files`);
+}
+
+export function uploadDocumentFile(docId: string, file: File) {
+  return uploadFile(`/documents/${docId}/files`, file);
+}
+
+export function deleteDocumentFile(fileId: string) {
+  return request<void>(`/documents/files/${fileId}`, { method: 'DELETE' });
+}
+
+// ==================== Blocks API (Dan Workspace) ====================
+
+export type BlockType =
+  | 'page' | 'paragraph' | 'heading' | 'bullet_list' | 'numbered_list'
+  | 'checklist' | 'task' | 'quote' | 'code' | 'divider' | 'callout'
+  | 'image' | 'video' | 'audio' | 'pdf' | 'file' | 'embed'
+  | 'email' | 'calendar_event' | 'table' | 'database' | 'bookmark';
+
+export type BlockSource =
+  | 'manual' | 'gmail' | 'calendar' | 'collab' | 'chat' | 'file_upload' | 'agent';
+
+export interface BlockFileResponse {
+  id: string;
+  storage_path: string;
+  original_name: string;
+  mime_type: string;
+  file_size: number;
+  version: number;
+  is_current: boolean;
+  thumbnail_path: string | null;
+  width: number | null;
+  height: number | null;
+  duration_ms: number | null;
+  created_at: string;
+}
+
+export interface BlockResponse {
+  id: string;
+  user_id: string;
+  parent_id: string | null;
+  type: BlockType;
+  order_key: string;
+  properties: Record<string, unknown>;
+  content: unknown[];
+  icon: string | null;
+  cover_url: string | null;
+  is_starred: boolean;
+  tags: string[];
+  created_by: 'user' | 'ai' | 'system';
+  source: BlockSource;
+  source_id: string | null;
+  created_at: string;
+  updated_at: string;
+  files?: BlockFileResponse[];
+  children_count?: number;
+}
+
+export interface BlockTreeNode {
+  id: string;
+  parent_id: string | null;
+  type: BlockType;
+  title: string;
+  icon: string | null;
+  is_starred: boolean;
+  order_key: string;
+  has_children: boolean;
+}
+
+export function createBlock(data: {
+  type: BlockType;
+  parent_id?: string | null;
+  properties?: Record<string, unknown>;
+  content?: unknown[];
+  icon?: string;
+  cover_url?: string;
+  tags?: string[];
+  after_block_id?: string;
+  before_block_id?: string;
+  source?: BlockSource;
+  source_id?: string;
+  created_by?: 'user' | 'ai' | 'system';
+}) {
+  return request<BlockResponse>('/blocks', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function getBlockTree() {
+  return request<{ nodes: BlockTreeNode[] }>('/blocks/tree');
+}
+
+export function getStarredBlocks() {
+  return request<{ blocks: BlockResponse[] }>('/blocks/starred');
+}
+
+export function getRecentBlocks(limit = 20) {
+  return request<{ blocks: BlockResponse[] }>(`/blocks/recent?limit=${limit}`);
+}
+
+export function listChildBlocks(parentId: string | null) {
+  const qs = parentId ? `?parent_id=${parentId}` : '';
+  return request<{ blocks: BlockResponse[]; total: number }>(`/blocks/children${qs}`);
+}
+
+export function getBlock(blockId: string) {
+  return request<BlockResponse>(`/blocks/${blockId}`);
+}
+
+export function updateBlock(blockId: string, data: {
+  type?: BlockType;
+  properties?: Record<string, unknown>;
+  content?: unknown[];
+  icon?: string;
+  cover_url?: string;
+  is_starred?: boolean;
+  tags?: string[];
+}) {
+  return request<BlockResponse>(`/blocks/${blockId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteBlock(blockId: string) {
+  return request<{ deleted: boolean }>(`/blocks/${blockId}`, { method: 'DELETE' });
+}
+
+export function restoreBlock(blockId: string) {
+  return request<{ restored: boolean }>(`/blocks/${blockId}/restore`, { method: 'POST' });
+}
+
+export function moveBlock(blockId: string, data: {
+  parent_id?: string | null;
+  after_block_id?: string;
+  before_block_id?: string;
+}) {
+  return request<BlockResponse>(`/blocks/${blockId}/move`, {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function uploadBlockFile(blockId: string, file: File) {
+  return uploadFile(`/blocks/${blockId}/files`, file);
+}
+
+export function listBlockFiles(blockId: string) {
+  return request<{ files: BlockFileResponse[] }>(`/blocks/${blockId}/files`);
+}
+
+// ==================== Triggers / Agents (Phase 3/4) ====================
+
+export type TriggerKind = 'gmail' | 'calendar' | 'file' | 'cron' | 'collab' | 'chat_command';
+
+export interface TriggerResponse {
+  id: string;
+  user_id: string;
+  name: string;
+  description: string | null;
+  kind: TriggerKind;
+  config: Record<string, unknown>;
+  actions: Array<Record<string, unknown>>;
+  is_enabled: boolean;
+  last_fired_at: string | null;
+  fire_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TriggerRunResponse {
+  id: string;
+  trigger_id: string;
+  user_id: string;
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled';
+  payload: Record<string, unknown>;
+  result: Record<string, unknown>;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface AgentTrace {
+  id: string;
+  user_id: string;
+  trigger_run_id: string | null;
+  agent_name: string;
+  event_type: string;
+  content: Record<string, unknown>;
+  parent_trace_id: string | null;
+  created_at: string;
+}
+
+export function listTriggers(kind?: TriggerKind) {
+  const q = kind ? `?kind=${kind}` : '';
+  return request<{ triggers: TriggerResponse[] }>(`/triggers${q}`);
+}
+
+export function createTrigger(data: {
+  name: string;
+  description?: string;
+  kind: TriggerKind;
+  config?: Record<string, unknown>;
+  actions?: Array<Record<string, unknown>>;
+  is_enabled?: boolean;
+}) {
+  return request<TriggerResponse>('/triggers', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function updateTrigger(id: string, data: Partial<{
+  name: string;
+  description: string;
+  config: Record<string, unknown>;
+  actions: Array<Record<string, unknown>>;
+  is_enabled: boolean;
+}>) {
+  return request<TriggerResponse>(`/triggers/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteTrigger(id: string) {
+  return request<{ ok: boolean }>(`/triggers/${id}`, { method: 'DELETE' });
+}
+
+export function fireTrigger(id: string, payload: Record<string, unknown> = {}) {
+  return request<TriggerRunResponse>(`/triggers/${id}/fire`, {
+    method: 'POST',
+    body: JSON.stringify({ payload }),
+  });
+}
+
+export function listTriggerRuns(id: string, limit = 50) {
+  return request<{ runs: TriggerRunResponse[] }>(`/triggers/${id}/runs?limit=${limit}`);
+}
+
+export function listAgentTraces(triggerRunId?: string, limit = 200) {
+  const q = new URLSearchParams();
+  if (triggerRunId) q.set('trigger_run_id', triggerRunId);
+  q.set('limit', String(limit));
+  return request<{ traces: AgentTrace[] }>(`/agents/traces?${q}`);
+}
