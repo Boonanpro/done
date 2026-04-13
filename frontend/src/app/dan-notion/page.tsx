@@ -120,11 +120,19 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
 /**
  * SSE で agent_traces を購読する Hook
  * - fetch + ReadableStream で Authorization ヘッダ対応
- * - 並行して trigger_runs の status を 5秒間隔で polling (SSE切断時のフォールバック)
+ * - complete trace を受信したら onComplete(runId, text) を呼ぶ (1 run につき1回)
+ * - stale state 問題回避のため onComplete は useRef 経由
  */
-function useTraceStream(runId: string | null): { traces: Trace[]; done: boolean } {
+function useTraceStream(
+  runId: string | null,
+  onComplete?: (runId: string, text: string) => void
+): { traces: Trace[]; done: boolean } {
   const [traces, setTraces] = useState<Trace[]>([]);
   const [done, setDone] = useState(false);
+
+  // onComplete は毎レンダで新しい関数インスタンスでも effect を再実行しない
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
     if (!runId) {
@@ -140,6 +148,13 @@ function useTraceStream(runId: string | null): { traces: Trace[]; done: boolean 
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
 
     let pollTimer: ReturnType<typeof setInterval> | null = null;
+    let completedFired = false;
+
+    const fireComplete = (text: string) => {
+      if (completedFired) return;
+      completedFired = true;
+      onCompleteRef.current?.(runId, text);
+    };
 
     // Fallback: run status を polling し、succeeded/failed を検出したら done=true
     const startStatusPoll = () => {
@@ -152,6 +167,17 @@ function useTraceStream(runId: string | null): { traces: Trace[]; done: boolean 
           const match = runs.find?.((r: any) => r.id === runId);
           if (match && ['succeeded', 'failed', 'cancelled'].includes(match.status)) {
             setDone(true);
+            // polling で気付いた場合、complete text を取得
+            if (!completedFired) {
+              try {
+                const tracesRes = await fetch(`${API}/trigger-runs/${runId}/traces`, { headers });
+                if (tracesRes.ok) {
+                  const trs = await tracesRes.json();
+                  const comp = [...(trs || [])].reverse().find((t: any) => t.event_type === 'complete');
+                  if (comp) fireComplete(comp.content?.result || '');
+                }
+              } catch {}
+            }
           }
         } catch {}
       }, 5000);
@@ -196,10 +222,12 @@ function useTraceStream(runId: string | null): { traces: Trace[]; done: boolean 
                 if (prev.some((t) => t.id === trace.id)) return prev;
                 return [...prev, trace];
               });
+              if (trace.event_type === 'complete') {
+                fireComplete(trace.content?.result || '');
+              }
             } catch {}
           }
         }
-        // SSE 側が切れても polling が生きているので done を即セットしない
       } catch (e) {
         if ((e as any)?.name !== 'AbortError') console.warn('SSE error', e);
       }
@@ -400,8 +428,32 @@ function DanNotionInner() {
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
+  // ガントドロップダウンで run 選んだ時にチャットを該当メッセージへスクロールさせる指令
+  const [scrollToRunId, setScrollToRunId] = useState<string | null>(null);
 
-  const { traces, done: traceDone } = useTraceStream(activeRunId);
+  // onComplete: run_id を使って履歴を確実に更新 (レース条件なし)
+  const handleRunComplete = useCallback((runId: string, text: string) => {
+    setChatHistory((prev) => {
+      // 既に assistant メッセージが入っていたら上書き (text が揃ったケース)
+      const idx = prev.findIndex((m) => m.run_id === runId && m.role === 'assistant');
+      const newMsg: ChatMessage = {
+        id: `assistant-${runId}`,
+        role: 'assistant',
+        text: text || '(完了)',
+        run_id: runId,
+        ts: Date.now(),
+      };
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx] = newMsg;
+        return copy;
+      }
+      return [...prev, newMsg];
+    });
+    qc.invalidateQueries({ queryKey: ['dan-notion'] });
+  }, [qc]);
+
+  const { traces, done: traceDone } = useTraceStream(activeRunId, handleRunComplete);
 
   // 直近の run 一覧 (切替ドロップダウン用)
   const recentRunsQ = useQuery({
@@ -410,40 +462,65 @@ function DanNotionInner() {
     refetchInterval: 10_000,
   });
 
-  // run 完了時に assistant メッセージを履歴に追加
+  // チャット履歴を DB から復元 (mount 時 + 完了時に再取得)
+  const chatHistoryQ = useQuery({
+    queryKey: ['dan-notion', 'chat-history'],
+    queryFn: () =>
+      fetchJSON<Array<{
+        run_id: string;
+        status: string;
+        started_at: string;
+        user_text: string | null;
+        assistant_text: string | null;
+      }>>(`${API}/chat/history?limit=50`),
+    refetchInterval: 10_000,
+  });
+
+  // DB 履歴を chatHistory に反映 (ローカルの optimistic msg は保持、既存は差し替え)
   useEffect(() => {
-    if (!traceDone || !activeRunId) return;
-    const completeTrace = [...traces].reverse().find((t) => t.event_type === 'complete');
-    if (!completeTrace) return;
-    setChatHistory((prev) => {
-      const exists = prev.some((m) => m.run_id === activeRunId && m.role === 'assistant');
-      if (exists) return prev;
-      return [
-        ...prev,
-        {
-          id: `assistant-${activeRunId}`,
+    if (!chatHistoryQ.data) return;
+    const dbMessages: ChatMessage[] = [];
+    for (const r of chatHistoryQ.data) {
+      if (r.user_text) {
+        dbMessages.push({
+          id: `user-${r.run_id}`,
+          role: 'user',
+          text: r.user_text,
+          run_id: r.run_id,
+          ts: new Date(r.started_at).getTime(),
+        });
+      }
+      if (r.assistant_text) {
+        dbMessages.push({
+          id: `assistant-${r.run_id}`,
           role: 'assistant',
-          text: completeTrace.content?.result || '(完了)',
-          run_id: activeRunId,
-          ts: Date.now(),
-        },
-      ];
+          text: r.assistant_text,
+          run_id: r.run_id,
+          ts: new Date(r.started_at).getTime() + 1,
+        });
+      }
+    }
+    setChatHistory((prev) => {
+      // DB にない optimistic msg (run_id 未設定 or DB に未反映) を末尾に残す
+      const dbRunIds = new Set(dbMessages.map((m) => m.run_id));
+      const optimistic = prev.filter(
+        (m) => !m.run_id || (m.run_id && !dbRunIds.has(m.run_id))
+      );
+      return [...dbMessages, ...optimistic];
     });
-    qc.invalidateQueries({ queryKey: ['dan-notion'] });
-  }, [traceDone, activeRunId, traces, qc]);
+  }, [chatHistoryQ.data]);
 
   const sendChat = async () => {
     const msg = chatInput.trim();
     if (!msg || chatSending) return;
     setChatSending(true);
     setChatInput('');
-    const userMsg: ChatMessage = {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      text: msg,
-      ts: Date.now(),
-    };
-    setChatHistory((prev) => [...prev, userMsg]);
+    // optimistic: ローカルに即表示 (run_id はまだ不明)
+    const tempId = `pending-user-${Date.now()}`;
+    setChatHistory((prev) => [
+      ...prev,
+      { id: tempId, role: 'user', text: msg, ts: Date.now() },
+    ]);
     try {
       const res = await fetchJSON<{ run_id: string }>(`${API}/chat`, {
         method: 'POST',
@@ -451,6 +528,14 @@ function DanNotionInner() {
       });
       setActiveRunId(res.run_id);
       setGanttExpanded(true);
+      // pending を run_id 付きに更新 (以降 DB 履歴が追いつけば差し替えられる)
+      setChatHistory((prev) =>
+        prev.map((m) =>
+          m.id === tempId
+            ? { ...m, id: `user-${res.run_id}`, run_id: res.run_id }
+            : m
+        )
+      );
     } catch (e) {
       setChatHistory((prev) => [
         ...prev,
@@ -466,6 +551,13 @@ function DanNotionInner() {
     }
   };
 
+  // ガントドロップダウンで run 選択 → チャットを該当メッセージへスクロール要求
+  const selectRunFromGantt = useCallback((runId: string) => {
+    setActiveRunId(runId);
+    setScrollToRunId(runId);
+    setChatOpen(true);
+  }, []);
+
   return (
     <div className="flex flex-col h-screen bg-white text-slate-900">
       {/* ========== 上: ガントタイムライン ========== */}
@@ -473,7 +565,7 @@ function DanNotionInner() {
         traces={traces}
         runId={activeRunId}
         runs={recentRunsQ.data || []}
-        onSelectRun={setActiveRunId}
+        onSelectRun={selectRunFromGantt}
         expanded={ganttExpanded}
         onToggle={() => setGanttExpanded((e) => !e)}
         running={!traceDone && !!activeRunId}
@@ -824,6 +916,12 @@ function DanNotionInner() {
         onSend={sendChat}
         sending={chatSending}
         runId={activeRunId}
+        scrollToRunId={scrollToRunId}
+        onDidScroll={() => setScrollToRunId(null)}
+        onSelectMessage={(runId) => {
+          setActiveRunId(runId);
+          setGanttExpanded(true);
+        }}
       />
     </div>
   );
@@ -1064,6 +1162,9 @@ function ChatDock({
   onSend,
   sending,
   runId,
+  scrollToRunId,
+  onDidScroll,
+  onSelectMessage,
 }: {
   open: boolean;
   onToggle: () => void;
@@ -1073,14 +1174,32 @@ function ChatDock({
   onSend: () => void;
   sending: boolean;
   runId: string | null;
+  scrollToRunId?: string | null;
+  onDidScroll?: () => void;
+  onSelectMessage?: (runId: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const msgRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
+  // 末尾スクロール
   useEffect(() => {
-    if (scrollRef.current) {
+    if (scrollRef.current && !scrollToRunId) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [history.length, open]);
+  }, [history.length, open, scrollToRunId]);
+
+  // ガントから指定された run の位置へスクロール
+  useEffect(() => {
+    if (!scrollToRunId || !open) return;
+    const el = msgRefs.current[scrollToRunId];
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      // ハイライトを一時的に付与
+      el.classList.add('ring-2', 'ring-indigo-400');
+      setTimeout(() => el.classList.remove('ring-2', 'ring-indigo-400'), 1500);
+    }
+    onDidScroll?.();
+  }, [scrollToRunId, open, onDidScroll]);
 
   if (!open) {
     return (
@@ -1141,14 +1260,21 @@ function ChatDock({
           <div
             key={m.id}
             className={cn('flex gap-2', m.role === 'user' ? 'justify-end' : 'justify-start')}
+            ref={(el) => {
+              if (m.run_id) msgRefs.current[m.run_id] = el;
+            }}
           >
             <div
+              onClick={() => m.run_id && onSelectMessage?.(m.run_id)}
               className={cn(
-                'max-w-[80%] rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap break-words',
+                'max-w-[80%] rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap break-words transition-shadow',
+                m.run_id && 'cursor-pointer hover:shadow-md',
                 m.role === 'user'
                   ? 'bg-indigo-600 text-white rounded-br-sm'
-                  : 'bg-slate-100 text-slate-900 border border-slate-200 rounded-bl-sm'
+                  : 'bg-slate-100 text-slate-900 border border-slate-200 rounded-bl-sm',
+                m.run_id === runId && m.role === 'assistant' && 'ring-1 ring-indigo-300'
               )}
+              title={m.run_id ? `クリックで run ${m.run_id.slice(0, 8)} をガントで表示` : undefined}
             >
               {m.text}
             </div>

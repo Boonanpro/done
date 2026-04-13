@@ -280,6 +280,77 @@ def _get_or_create_chat_trigger(svc: DanNotionService, user_id: str) -> dict:
     })
 
 
+@router.get("/chat/history")
+async def chat_history(
+    limit: int = 50,
+    user: TokenData = Depends(get_current_user),
+):
+    """manual_chat run を時系列で user+assistant ペアとして返す"""
+    from app.services.supabase_client import get_supabase_client
+    sb = get_supabase_client().client
+
+    # __manual_chat__ トリガー取得
+    triggers = _svc().list_triggers(user.user_id)
+    chat_trig = next((t for t in triggers if t["name"] == "__manual_chat__"), None)
+    if not chat_trig:
+        return []
+
+    runs = (
+        sb.table("trigger_runs")
+        .select("id,status,started_at,finished_at")
+        .eq("trigger_id", chat_trig["id"])
+        .eq("user_id", user.user_id)
+        .order("started_at", desc=True)
+        .limit(limit)
+        .execute()
+        .data
+        or []
+    )
+    if not runs:
+        return []
+
+    run_ids = [r["id"] for r in runs]
+    traces = (
+        sb.table("agent_traces")
+        .select("trigger_run_id,event_type,content,created_at")
+        .in_("trigger_run_id", run_ids)
+        .in_("event_type", ["message", "complete", "error"])
+        .order("created_at")
+        .execute()
+        .data
+        or []
+    )
+
+    # run_id ごとに user / assistant を抽出
+    by_run: dict[str, dict] = {}
+    for r in runs:
+        by_run[r["id"]] = {
+            "run_id": r["id"],
+            "status": r["status"],
+            "started_at": r["started_at"],
+            "finished_at": r.get("finished_at"),
+            "user_text": None,
+            "assistant_text": None,
+            "error_text": None,
+        }
+    for t in traces:
+        rid = t["trigger_run_id"]
+        if rid not in by_run:
+            continue
+        c = t.get("content") or {}
+        if t["event_type"] == "message" and c.get("role") == "user":
+            if by_run[rid]["user_text"] is None:
+                by_run[rid]["user_text"] = c.get("text", "")
+        elif t["event_type"] == "complete":
+            # 最後の complete を採用
+            by_run[rid]["assistant_text"] = c.get("result", "")
+        elif t["event_type"] == "error":
+            by_run[rid]["error_text"] = str(c)[:500]
+
+    # 時系列昇順 (古い→新しい) で返す
+    return sorted(by_run.values(), key=lambda x: x["started_at"])
+
+
 @router.post("/chat")
 async def chat(
     req: ChatRequest,
