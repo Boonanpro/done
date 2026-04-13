@@ -12,13 +12,13 @@ import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Notebook, Plus, Loader2, Bell, Activity, FileText, Trash2,
-  ChevronRight, ChevronDown, ChevronUp, History, Sparkles, AlertCircle, Search,
+  ChevronRight, ChevronDown, ChevronUp, History, Sparkles, AlertCircle,
   Send, MessageSquare, Brain, Wrench, CheckCircle2, XCircle, RotateCcw,
+  LayoutGrid, List as ListIcon,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
@@ -202,25 +202,8 @@ function DanNotionInner() {
   const qc = useQueryClient();
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [newPageTitle, setNewPageTitle] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<Array<{ block_id: string; similarity: number; summary: string | null }> | null>(null);
   const [notifOpen, setNotifOpen] = useState(false);
-
-  const runSearch = async () => {
-    if (!searchQuery.trim()) {
-      setSearchResults(null);
-      return;
-    }
-    try {
-      const data = await fetchJSON<Array<{ block_id: string; similarity: number; summary: string | null }>>(
-        `${API}/search`,
-        { method: 'POST', body: JSON.stringify({ query: searchQuery, limit: 20 }) }
-      );
-      setSearchResults(data);
-    } catch (e) {
-      setSearchResults([]);
-    }
-  };
+  const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
 
   // ページ一覧
   const pagesQ = useQuery({
@@ -462,7 +445,7 @@ function DanNotionInner() {
             </Button>
           </div>
         </div>
-        <ScrollArea className="flex-1">
+        <div className="flex-1 min-h-0 overflow-y-auto">
           <div className="p-2 space-y-1">
             {pagesQ.isLoading && (
               <div className="p-3 text-sm text-slate-500 flex items-center gap-2">
@@ -500,32 +483,47 @@ function DanNotionInner() {
               </div>
             )}
           </div>
-        </ScrollArea>
+        </div>
       </aside>
 
       {/* ========== 中央: ブロックエディタ ========== */}
-      <main className="flex-1 flex flex-col min-w-0 bg-white">
-        {/* 自然言語検索バー + 通知ベル */}
-        <div className="border-b border-slate-200 p-3 flex items-center gap-2 relative">
-          <Search className="h-4 w-4 text-slate-500" />
-          <Input
-            placeholder="自然言語検索 (例: 前回の請求書を見せて)"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && runSearch()}
-            className="h-8 text-sm bg-white border-slate-200"
-          />
-          <Button size="sm" variant="outline" onClick={runSearch} className="bg-white border-slate-200 text-slate-700">
-            検索
-          </Button>
-          {searchResults !== null && (
-            <Button size="sm" variant="ghost" onClick={() => { setSearchResults(null); setSearchQuery(''); }}>
-              クリア
-            </Button>
-          )}
+      <main className="flex-1 flex flex-col min-w-0 bg-white overflow-hidden">
+        {/* ツールバー (ビュー切替 + 通知ベル) */}
+        <div className="border-b border-slate-200 px-3 py-2 flex items-center gap-2 relative shrink-0">
+          {/* ビュー切替 */}
+          <div className="inline-flex rounded-md border border-slate-200 overflow-hidden">
+            <button
+              onClick={() => setViewMode('list')}
+              className={cn(
+                'px-3 py-1.5 text-xs flex items-center gap-1 transition',
+                viewMode === 'list'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-white text-slate-600 hover:bg-slate-50'
+              )}
+              title="リスト表示"
+            >
+              <ListIcon className="h-3.5 w-3.5" />
+              リスト
+            </button>
+            <button
+              onClick={() => setViewMode('grid')}
+              className={cn(
+                'px-3 py-1.5 text-xs flex items-center gap-1 border-l border-slate-200 transition',
+                viewMode === 'grid'
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-white text-slate-600 hover:bg-slate-50'
+              )}
+              title="サムネイル表示"
+            >
+              <LayoutGrid className="h-3.5 w-3.5" />
+              サムネ
+            </button>
+          </div>
+
+          <div className="flex-1" />
 
           {/* 通知ベル */}
-          <div className="ml-2 relative">
+          <div className="relative">
             <button
               onClick={() => setNotifOpen((o) => !o)}
               className="relative p-2 rounded-md hover:bg-slate-100 text-slate-600"
@@ -590,38 +588,14 @@ function DanNotionInner() {
           </div>
         </div>
 
-        {searchResults !== null ? (
-          <ScrollArea className="flex-1">
-            <div className="max-w-3xl mx-auto p-6 space-y-2">
-              <h2 className="text-sm font-semibold text-slate-500 mb-2">
-                検索結果: {searchResults.length}件
-              </h2>
-              {searchResults.length === 0 && (
-                <p className="text-sm text-slate-500">
-                  該当なし。pgvector インデックスに登録された後に再試行してください。
-                </p>
-              )}
-              {searchResults.map((r) => (
-                <Card key={r.block_id} className="p-3 bg-white border-slate-200">
-                  <div className="flex items-center justify-between mb-1">
-                    <Badge variant="secondary" className="text-[10px] bg-slate-100 text-slate-700">
-                      類似度 {(r.similarity * 100).toFixed(0)}%
-                    </Badge>
-                    <span className="text-[10px] text-slate-500">{r.block_id.slice(0, 8)}</span>
-                  </div>
-                  <p className="text-sm">{r.summary || '(要約なし)'}</p>
-                </Card>
-              ))}
-            </div>
-          </ScrollArea>
-        ) : !selectedPage ? (
+        {!selectedPage ? (
           <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-2">
             <Notebook className="h-12 w-12 opacity-30" />
             <p className="text-sm">左からページを選択するか、新規作成してください</p>
           </div>
         ) : (
           <>
-            <div className="border-b border-slate-200 p-6 flex items-start justify-between">
+            <div className="border-b border-slate-200 p-6 flex items-start justify-between shrink-0">
               <div className="flex items-start gap-3">
                 <span className="text-3xl">{selectedPage.icon || '📄'}</span>
                 <div>
@@ -639,7 +613,7 @@ function DanNotionInner() {
                   </h1>
                   <p className="text-xs text-slate-500 mt-1">
                     v{selectedPage.version} ・ 更新:{' '}
-                    {new Date(selectedPage.updated_at).toLocaleString('ja-JP')}
+                    {new Date(selectedPage.updated_at).toLocaleString('ja-JP')} ・ 配下 {blocksQ.data?.length || 0} 件
                   </p>
                 </div>
               </div>
@@ -667,8 +641,14 @@ function DanNotionInner() {
               </div>
             </div>
 
-            <ScrollArea className="flex-1">
-              <div className="max-w-3xl mx-auto p-6 space-y-2">
+            {/* 本文 - 直接 overflow-y-auto でスクロール確実化 */}
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <div
+                className={cn(
+                  'mx-auto p-6',
+                  viewMode === 'list' ? 'max-w-3xl space-y-2' : 'max-w-6xl'
+                )}
+              >
                 {blocksQ.isLoading && (
                   <Loader2 className="h-5 w-5 animate-spin text-slate-400" />
                 )}
@@ -677,7 +657,28 @@ function DanNotionInner() {
                     上のボタンからブロックを追加してください
                   </p>
                 )}
-                {blocksQ.data?.map((b) => (
+
+                {/* グリッドビュー (サムネイル) */}
+                {viewMode === 'grid' && blocksQ.data && blocksQ.data.length > 0 && (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                    {blocksQ.data.map((b) => (
+                      <ThumbnailCard
+                        key={b.id}
+                        block={b}
+                        onOpenPage={(id) => setSelectedPageId(id)}
+                        onDelete={() => {
+                          if (b.type === 'page') {
+                            if (!confirm(`ページ「${b.properties?.title || '無題'}」を削除しますか？\n配下のブロックも一緒に非表示になります。`)) return;
+                          }
+                          removeBlock.mutate(b.id);
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* リストビュー */}
+                {viewMode === 'list' && blocksQ.data?.map((b) => (
                   <BlockRow
                     key={b.id}
                     block={b}
@@ -692,11 +693,11 @@ function DanNotionInner() {
                   />
                 ))}
               </div>
-            </ScrollArea>
+            </div>
 
             {/* バージョン履歴 */}
             {versionsQ.data && versionsQ.data.length > 0 && (
-              <div className="border-t border-slate-200 p-3 flex items-center gap-2 text-xs text-slate-500">
+              <div className="border-t border-slate-200 p-3 flex items-center gap-2 text-xs text-slate-500 shrink-0">
                 <History className="h-3 w-3" />
                 {versionsQ.data.length} 件の編集履歴 (自動世代管理)
               </div>
@@ -711,7 +712,7 @@ function DanNotionInner() {
           <Activity className="h-4 w-4 text-indigo-600" />
           <h3 className="font-semibold text-sm text-slate-900">Autopilot</h3>
         </div>
-        <ScrollArea className="flex-1 px-3 pb-3 pt-3">
+        <div className="flex-1 min-h-0 overflow-y-auto px-3 pb-3 pt-3">
           <div className="space-y-3">
             <div>
               <h4 className="text-[10px] font-semibold text-slate-500 uppercase mb-2">
@@ -773,7 +774,7 @@ function DanNotionInner() {
               ))}
             </div>
           </div>
-        </ScrollArea>
+        </div>
       </aside>
       </div>
 
@@ -1154,6 +1155,112 @@ function ChatDock({
     </div>
   );
 }
+
+/**
+ * サムネイル/カードビュー用
+ */
+function ThumbnailCard({
+  block,
+  onOpenPage,
+  onDelete,
+}: {
+  block: Block;
+  onOpenPage: (id: string) => void;
+  onDelete: () => void;
+}) {
+  const title =
+    block.properties?.title ||
+    block.properties?.original_name ||
+    (Array.isArray(block.content) && block.content[0]?.text) ||
+    `${block.type} ${block.id.slice(0, 6)}`;
+  const url = block.properties?.url || block.properties?.storage_path;
+
+  const isPage = block.type === 'page';
+  const isImage = block.type === 'image';
+  const isVideo = block.type === 'video';
+  const isPdf = block.type === 'pdf';
+
+  const handleClick = () => {
+    if (isPage) onOpenPage(block.id);
+    else if (url) window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
+  return (
+    <div className="group relative rounded-lg border border-slate-200 bg-white overflow-hidden hover:shadow-md hover:border-indigo-300 transition cursor-pointer">
+      <button
+        onClick={handleClick}
+        className="w-full text-left"
+      >
+        {/* プレビューエリア */}
+        <div className="aspect-square bg-slate-100 flex items-center justify-center relative overflow-hidden">
+          {isImage && url ? (
+            <img
+              src={url}
+              alt={title}
+              className="w-full h-full object-cover"
+              loading="lazy"
+              onError={(e) => {
+                (e.target as HTMLImageElement).style.display = 'none';
+              }}
+            />
+          ) : isVideo && url ? (
+            <>
+              <video
+                src={url}
+                className="w-full h-full object-cover"
+                preload="metadata"
+                muted
+              />
+              <div className="absolute inset-0 flex items-center justify-center bg-black/20">
+                <div className="h-10 w-10 rounded-full bg-white/90 flex items-center justify-center">
+                  <svg className="h-5 w-5 text-slate-900 ml-0.5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                </div>
+              </div>
+            </>
+          ) : isPdf ? (
+            <div className="flex flex-col items-center gap-1 text-slate-500">
+              <span className="text-4xl">📄</span>
+              <span className="text-[10px] font-bold">PDF</span>
+            </div>
+          ) : isPage ? (
+            <div className="flex flex-col items-center gap-2 text-slate-600">
+              <span className="text-5xl">{block.icon || '📁'}</span>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-1 text-slate-500">
+              <span className="text-3xl">
+                {block.type === 'audio' ? '🎵' : block.type === 'file' ? '📎' : '📝'}
+              </span>
+              <span className="text-[10px] uppercase">{block.type}</span>
+            </div>
+          )}
+        </div>
+        {/* タイトル */}
+        <div className="px-3 py-2 border-t border-slate-100">
+          <p className="text-xs font-medium text-slate-900 truncate">{title}</p>
+          <p className="text-[10px] text-slate-500 mt-0.5">
+            {new Date(block.updated_at).toLocaleDateString('ja-JP')}
+          </p>
+        </div>
+      </button>
+
+      {/* 削除ボタン */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete();
+        }}
+        className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 p-1.5 bg-white/90 rounded-md text-slate-600 hover:text-red-600 shadow transition"
+        title="削除"
+      >
+        <Trash2 className="h-3 w-3" />
+      </button>
+    </div>
+  );
+}
+
 
 /**
  * 個別ブロック表示・編集
