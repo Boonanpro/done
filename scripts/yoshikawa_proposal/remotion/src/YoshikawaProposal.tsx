@@ -1,7 +1,7 @@
+import React from "react";
 import {
   AbsoluteFill,
   Audio,
-  Easing,
   Img,
   Sequence,
   interpolate,
@@ -9,163 +9,120 @@ import {
   useCurrentFrame,
 } from "remotion";
 
-// --- カーソルコンポーネント ---
-const Cursor = ({ x, y, visible }: { x: number; y: number; visible: boolean }) => {
-  if (!visible) return null;
-  return (
-    <svg
-      style={{
-        position: "absolute",
-        left: x,
-        top: y,
-        width: 60,
-        height: 60,
-        zIndex: 100,
-        filter: "drop-shadow(3px 3px 5px rgba(0,0,0,0.4))",
-      }}
-      viewBox="0 0 320 320"
-    >
-      <path
-        d="M 50 50 L 100 250 L 140 180 L 220 180 Z"
-        fill="black"
-        stroke="white"
-        strokeWidth="10"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
+const TOTAL_REC = 1022;
+const TOTAL = 1382;
+
+// Timeline:
+// 0-89:       Intro text
+// 90-509:     Rec 0-419 (HP top → 選ばれる理由 → サービス → 対応車種)
+// 510-599:    Text 1 "新明和認定のプロフェッショナルを、Webで伝える。"
+// 600-1021:   Rec 420-841 (お問い合わせクリック → フォーム入力)
+// 1022-1111:  Text 2 "お客様からの問い合わせを、24時間受け付ける。"
+// 1112-1291:  Rec 842-1021 (フォーム後半 → 送信)
+// 1292-1381:  Outro
+
+const recToGlobal = (rf: number): number => {
+  if (rf < 420) return 90 + rf;
+  if (rf < 842) return 180 + rf;     // +90 for intro, +90 for text1
+  return 270 + rf;                    // +90 for intro, +90 for text1, +90 for text2
 };
 
-// --- テキストオーバーレイコンポーネント ---
-const TextOverlay = ({ text, startFrame, duration }: { text: string; startFrame: number; duration: number }) => {
-  const frame = useCurrentFrame();
-
-  const opacity = interpolate(
-    frame,
-    [startFrame, startFrame + 15, startFrame + duration - 15, startFrame + duration],
-    [0, 1, 1, 0],
-    { extrapolateLeft: "clamp", extrapolateRight: "clamp", easing: Easing.bezier(0.25, 0.1, 0.25, 1) }
-  );
-
-  if (frame < startFrame || frame > startFrame + duration) return null;
-
-  return (
-    <AbsoluteFill style={{ backgroundColor: "#0f172a", opacity, justifyContent: "center", alignItems: "center" }}>
-      {text.split("\n").map((line, i) => (
-        <h1 key={i} style={{ color: "white", fontSize: 64, fontWeight: "bold", margin: "10px 0", fontFamily: "'Yu Gothic UI', sans-serif" }}>
-          {line}
-        </h1>
-      ))}
-    </AbsoluteFill>
-  );
+const getRecFrame = (frame: number): number | null => {
+  if (frame >= 90 && frame < 510) return frame - 90;
+  if (frame >= 600 && frame < 1022) return 420 + (frame - 600);
+  if (frame >= 1112 && frame < 1292) return 842 + (frame - 1112);
+  return null;
 };
 
-// --- メインコンポーネント ---
-export const YoshikawaProposal = () => {
+// Events from recording
+const CLICK_EVENTS = [440, 555, 615, 657, 726, 813, 848, 932];
+const TYPE_RANGES = [
+  [560, 590], [620, 632], [662, 701], [731, 788], [853, 907],
+];
+
+const TextSlide: React.FC<{ text: string; sub?: string }> = ({ text, sub }) => (
+  <AbsoluteFill style={{
+    background: "#0f172a", justifyContent: "center", alignItems: "center",
+    fontFamily: "'Yu Gothic UI', 'Hiragino Sans', sans-serif",
+  }}>
+    <div style={{ textAlign: "center", maxWidth: 1200, padding: "0 80px" }}>
+      <div style={{ fontSize: 52, fontWeight: 700, color: "#ebebeb", lineHeight: 1.6, whiteSpace: "pre-line" }}>{text}</div>
+      {sub && <div style={{ fontSize: 24, color: "#999", marginTop: 20 }}>{sub}</div>}
+    </div>
+  </AbsoluteFill>
+);
+
+export const YoshikawaProposal: React.FC = () => {
   const frame = useCurrentFrame();
+  const recFrame = getRecFrame(frame);
+  const showRec = recFrame !== null;
 
-  // ==========================================
-  // 1. ズーム（Scale & Translate Y）の計算
-  // ==========================================
-  const scale = interpolate(
-    frame,
-    [
-      0, 40, 70,       // Scene1: 検索窓→リンクへズームイン
-      80, 110,         // Scene1: HP遷移後ズームアウト
-      165, 195,        // Scene2: キャッチコピーズームイン
-      240, 269,        // Scene2: ズームアウト
-      330,
-      390, 420,        // Scene4: サービス一覧ズームイン
-      490, 520,        // Scene4: ズームアウト
-      600,
-      645, 675,        // Scene6: 電話番号ズームイン
-      720, 749         // Scene6: ズームアウト
-    ],
-    [
-      1, 1, 1.4,
-      1.4, 1,
-      1, 1.3,
-      1.3, 1,
-      1,
-      1, 1.3,
-      1.3, 1,
-      1,
-      1, 1.5,
-      1.5, 1
-    ],
-    { extrapolateLeft: "clamp", extrapolateRight: "clamp", easing: Easing.bezier(0.25, 0.1, 0.25, 1) }
-  );
+  const fade = (start: number, end: number) =>
+    interpolate(frame, [start, start + 12, end - 12, end], [0, 1, 1, 0], {
+      extrapolateRight: "clamp", extrapolateLeft: "clamp",
+    });
 
-  const translateY = interpolate(
-    frame,
-    [
-      0, 40, 70,
-      80, 110,
-      165, 195,
-      240, 269,
-      330,
-      390, 420,
-      490, 520,
-      600,
-      645, 675,
-      720, 749
-    ],
-    [
-      0, 0, 200,
-      200, 0,
-      0, 100,
-      100, 0,
-      0,
-      0, 0,
-      0, 0,
-      0,
-      0, -150,
-      -150, 0
-    ],
-    { extrapolateLeft: "clamp", extrapolateRight: "clamp", easing: Easing.bezier(0.25, 0.1, 0.25, 1) }
-  );
-
-  // ==========================================
-  // 2. カーソルの制御
-  // ==========================================
-  // Scene1: 検索結果のリンククリック
-  const showCursor1 = frame >= 30 && frame <= 65;
-  const cursorX1 = interpolate(frame, [30, 50], [1200, 600], { extrapolateRight: "clamp", easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
-  const cursorY1 = interpolate(frame, [30, 50], [800, 310], { extrapolateRight: "clamp", easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
-
-  // Scene6: 電話番号クリック
-  const showCursor2 = frame >= 630 && frame <= 710;
-  const cursorX2 = interpolate(frame, [630, 670], [1200, 960], { extrapolateRight: "clamp", easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
-  const cursorY2 = interpolate(frame, [630, 670], [1000, 750], { extrapolateRight: "clamp", easing: Easing.bezier(0.25, 0.1, 0.25, 1) });
-
-  // 現在のフレームに該当する画像
-  const frameString = String(Math.floor(frame)).padStart(5, "0");
-  const imgSrc = staticFile(`frames/f_${frameString}.png`);
+  const clampedRec = showRec ? Math.min(Math.max(0, recFrame!), TOTAL_REC - 1) : 0;
+  const padded = String(clampedRec).padStart(5, "0");
 
   return (
-    <AbsoluteFill style={{ backgroundColor: "black" }}>
-
-      {/* 録画フレームとズーム */}
-      <AbsoluteFill
-        style={{
-          transform: `scale(${scale}) translateY(${translateY}px)`,
-          transformOrigin: "center center",
-          willChange: "transform",
-        }}
-      >
-        <Img src={imgSrc} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-        <Cursor x={cursorX1} y={cursorY1} visible={showCursor1} />
-        <Cursor x={cursorX2} y={cursorY2} visible={showCursor2} />
-      </AbsoluteFill>
-
-      {/* テキスト挿入 */}
-      <TextOverlay text="特装車のトラブル、ネットで探すお客様に選ばれるために。" startFrame={270} duration={60} />
-      <TextOverlay text="専門技術と実績を、一目で伝わる形に。" startFrame={540} duration={60} />
-      <TextOverlay text={"吉川特装自動車\n新しいWebサイトのご提案"} startFrame={750} duration={90} />
-
+    <AbsoluteFill style={{ background: "#0a0a0a" }}>
       {/* BGM */}
-      <Audio src={staticFile("bgm.mp3")} volume={0.15} />
+      <Audio
+        src={staticFile("bgm.mp3")}
+        volume={(f) => interpolate(f, [0, 60, TOTAL - 60, TOTAL], [0, 0.15, 0.15, 0], {
+          extrapolateLeft: "clamp", extrapolateRight: "clamp",
+        })}
+      />
 
+      {/* Intro */}
+      {frame < 90 && (
+        <AbsoluteFill style={{ opacity: fade(0, 90) }}>
+          <TextSlide text="吉川特装自動車" sub="ホームページのご提案" />
+        </AbsoluteFill>
+      )}
+
+      {/* Recording */}
+      {showRec && (
+        <AbsoluteFill>
+          <Img src={staticFile(`frames/f_${padded}.png`)} style={{ width: 1920, height: 1080 }} />
+        </AbsoluteFill>
+      )}
+
+      {/* Text 1 */}
+      {frame >= 510 && frame < 600 && (
+        <AbsoluteFill style={{ opacity: fade(510, 600) }}>
+          <TextSlide text={"新明和認定のプロフェッショナルを、\nWebで伝える。"} />
+        </AbsoluteFill>
+      )}
+
+      {/* Text 2 */}
+      {frame >= 1022 && frame < 1112 && (
+        <AbsoluteFill style={{ opacity: fade(1022, 1112) }}>
+          <TextSlide text={"お客様からの問い合わせを、\n24時間受け付ける。"} />
+        </AbsoluteFill>
+      )}
+
+      {/* Outro */}
+      {frame >= 1292 && (
+        <AbsoluteFill style={{ opacity: fade(1292, TOTAL) }}>
+          <TextSlide text="吉川特装自動車" sub="yoshikawa-tokuso.vercel.app" />
+        </AbsoluteFill>
+      )}
+
+      {/* Click SE */}
+      {CLICK_EVENTS.map((rf, i) => (
+        <Sequence key={`click-${i}`} from={recToGlobal(rf)} durationInFrames={15}>
+          <Audio src={staticFile("click.mp3")} volume={0.5} />
+        </Sequence>
+      ))}
+
+      {/* Typing SE */}
+      {TYPE_RANGES.map(([start, end], i) => (
+        <Sequence key={`type-${i}`} from={recToGlobal(start)} durationInFrames={end - start}>
+          <Audio src={staticFile("typing.mp3")} volume={0.3} />
+        </Sequence>
+      ))}
     </AbsoluteFill>
   );
 };

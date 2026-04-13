@@ -1,0 +1,70 @@
+[
+  {
+    "type": "click",
+    "frame": 455
+  },
+  {
+    "type": "click",
+    "frame": 585
+  },
+  {
+    "type": "type_start",
+    "frame": 590
+  },
+  {
+    "type": "type_end",
+    "frame": 620
+  },
+  {
+    "type": "click",
+    "frame": 645
+  },
+  {
+    "type": "type_start",
+    "frame": 650
+  },
+  {
+    "type": "type_end",
+    "frame": 662
+  },
+  {
+    "type": "click",
+    "frame": 687
+  },
+  {
+    "type": "type_start",
+    "frame": 692
+  },
+  {
+    "type": "type_end",
+    "frame": 731
+  },
+  {
+    "type": "click",
+    "frame": 756
+  },
+  {
+    "type": "type_start",
+    "frame": 761
+  },
+  {
+    "type": "type_end",
+    "frame": 818
+  },
+  {
+    "type": "click",
+    "frame": 883
+  },
+  {
+    "type": "type_start",
+    "frame": 888
+  },
+  {
+    "type": "type_end",
+    "frame": 942
+  },
+  {
+    "type": "click",
+    "frame": 997
+  }
+]
