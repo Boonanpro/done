@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard } from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -42,6 +42,18 @@ const navItems = [
     href: '/chat',
     icon: MessageSquare,
     description: 'ダンとの会話',
+  },
+  {
+    title: 'ワークスペース',
+    href: '/workspace',
+    icon: Notebook,
+    description: '情報ハブ（ブロック/ページ）',
+  },
+  {
+    title: 'トリガー',
+    href: '/triggers',
+    icon: Zap,
+    description: '自動化とエージェント',
   },
   {
     title: 'コミュニケーション',
