@@ -313,7 +313,10 @@ function DanNotionInner() {
   const insertBlock = useMutation({
     mutationFn: ({ after_block_id, type }: { after_block_id: string | null; type: string }) => {
       const defaultsByType: Record<string, any> = {
-        page: { properties: { title: '新規サブページ', view_mode: 'grid' }, icon: '📁' },
+        page: {
+          properties: { title: '新規フォルダ', is_folder: true, view_mode: 'grid' },
+          icon: '📁',
+        },
         heading: { properties: {} },
         paragraph: { properties: {} },
         checklist: { properties: { checked: false } },
@@ -368,9 +371,11 @@ function DanNotionInner() {
   });
   const selectedPage: Block | null = selectedPageFromRoot || selectedSubPageQ.data || null;
 
-  // ページの view_mode ('list' | 'grid') をプロパティから取得・更新
+  // フォルダのみ view_mode を持つ。フォルダでない場合は常に list (= テキスト文書表示)
   const viewMode: 'list' | 'grid' =
-    (selectedPage?.properties?.view_mode === 'grid' ? 'grid' : 'list');
+    selectedPage?.properties?.is_folder
+      ? (selectedPage?.properties?.view_mode === 'grid' ? 'grid' : 'list')
+      : 'list';
 
   const togglePageViewMode = useMutation({
     mutationFn: (mode: 'list' | 'grid') =>
@@ -647,35 +652,37 @@ function DanNotionInner() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {/* このページのビュー切替 */}
-                <div className="inline-flex rounded-md border border-slate-200 overflow-hidden mr-2">
-                  <button
-                    onClick={() => togglePageViewMode.mutate('list')}
-                    className={cn(
-                      'px-2 py-1 text-[11px] flex items-center gap-1 transition',
-                      viewMode === 'list'
-                        ? 'bg-indigo-600 text-white'
-                        : 'bg-white text-slate-600 hover:bg-slate-50'
-                    )}
-                    title="リスト表示"
-                  >
-                    <ListIcon className="h-3 w-3" />
-                    リスト
-                  </button>
-                  <button
-                    onClick={() => togglePageViewMode.mutate('grid')}
-                    className={cn(
-                      'px-2 py-1 text-[11px] flex items-center gap-1 border-l border-slate-200 transition',
-                      viewMode === 'grid'
-                        ? 'bg-indigo-600 text-white'
-                        : 'bg-white text-slate-600 hover:bg-slate-50'
-                    )}
-                    title="サムネイル表示"
-                  >
-                    <LayoutGrid className="h-3 w-3" />
-                    サムネ
-                  </button>
-                </div>
+                {/* ビュー切替: フォルダのみ表示 */}
+                {selectedPage.properties?.is_folder && (
+                  <div className="inline-flex rounded-md border border-slate-200 overflow-hidden mr-2">
+                    <button
+                      onClick={() => togglePageViewMode.mutate('list')}
+                      className={cn(
+                        'px-2 py-1 text-[11px] flex items-center gap-1 transition',
+                        viewMode === 'list'
+                          ? 'bg-indigo-600 text-white'
+                          : 'bg-white text-slate-600 hover:bg-slate-50'
+                      )}
+                      title="リスト表示"
+                    >
+                      <ListIcon className="h-3 w-3" />
+                      リスト
+                    </button>
+                    <button
+                      onClick={() => togglePageViewMode.mutate('grid')}
+                      className={cn(
+                        'px-2 py-1 text-[11px] flex items-center gap-1 border-l border-slate-200 transition',
+                        viewMode === 'grid'
+                          ? 'bg-indigo-600 text-white'
+                          : 'bg-white text-slate-600 hover:bg-slate-50'
+                      )}
+                      title="サムネイル表示"
+                    >
+                      <LayoutGrid className="h-3 w-3" />
+                      サムネ
+                    </button>
+                  </div>
+                )}
                 <Button
                   size="sm"
                   variant="ghost"
@@ -1340,7 +1347,7 @@ function InlineInsertMenu({
     { type: 'paragraph', icon: '📝', label: 'テキスト' },
     { type: 'heading', icon: '📌', label: '見出し' },
     { type: 'checklist', icon: '☑️', label: 'タスク' },
-    { type: 'page', icon: '📁', label: 'サブページ (フォルダ)' },
+    { type: 'page', icon: '📁', label: 'フォルダ (メディア整理用)' },
     { type: 'bullet_list', icon: '•', label: '箇条書き' },
     { type: 'quote', icon: '❝', label: '引用' },
     { type: 'divider', icon: '—', label: '区切り線' },
@@ -1467,7 +1474,10 @@ function ThumbnailCard({
             </div>
           ) : isPage ? (
             <div className="flex flex-col items-center gap-2 text-slate-600">
-              <span className="text-5xl">{block.icon || '📁'}</span>
+              <span className="text-5xl">{block.icon || (block.properties?.is_folder ? '📁' : '📄')}</span>
+              {block.properties?.is_folder && (
+                <span className="text-[9px] font-bold text-indigo-600 uppercase">フォルダ</span>
+              )}
             </div>
           ) : (
             <div className="flex flex-col items-center gap-1 text-slate-500">
