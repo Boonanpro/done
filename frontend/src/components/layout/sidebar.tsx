@@ -50,6 +50,12 @@ const navItems = [
     description: 'コラボルーム・外部連携',
   },
   {
+    title: 'ダン用Notion',
+    href: '/dan-notion',
+    icon: Notebook,
+    description: '情報管理 + 自律エージェント',
+  },
+  {
     title: '設定',
     href: '/settings',
     icon: Settings,
@@ -541,15 +547,25 @@ export function Sidebar({
               )}
             </AnimatePresence></>}
 
-            {/* コミュニケーション・設定 */}
+            {/* コミュニケーション・ダン用Notion・設定 */}
             {navItems.filter(item => item.href !== '/chat').map((item) => {
               const isActive = pathname.startsWith(item.href);
               const Icon = item.icon;
               const showBadge = item.href === '/collab' && unreadCount > 0;
+              const openInNewTab = item.href === '/dan-notion';
+              const LinkWrapper = openInNewTab
+                ? ({ children }: { children: React.ReactNode }) => (
+                    <a href={item.href} target="_blank" rel="noopener noreferrer">
+                      {children}
+                    </a>
+                  )
+                : ({ children }: { children: React.ReactNode }) => (
+                    <Link href={item.href}>{children}</Link>
+                  );
               return (
                 <Tooltip key={item.href}>
                   <TooltipTrigger asChild>
-                    <Link href={item.href}>
+                    <LinkWrapper>
                       <motion.div
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
@@ -576,7 +592,7 @@ export function Sidebar({
                           </span>
                         )}
                       </motion.div>
-                    </Link>
+                    </LinkWrapper>
                   </TooltipTrigger>
                   {isCollapsed && (
                     <TooltipContent side="right">
