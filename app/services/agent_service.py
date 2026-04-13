@@ -113,16 +113,49 @@ class AgentService:
         run_id: Optional[str],
         parent: Optional[str],
     ) -> dict:
+        from app.services.block_service import get_block_service
         await self.record(
             user_id, "organizer", "thinking",
             {"category": category}, run_id, parent,
         )
-        # ブロック作成: Phase 5 で block_service と連携
-        result = {
-            "block_created": False,
-            "category": category,
-            "reason": "organizer stub — Phase 5 で block_service 連携予定",
-        }
+        blocks = get_block_service()
+        title = (
+            payload.get("subject")
+            or payload.get("title")
+            or f"[{category}] 自動取込"
+        )
+        text = payload.get("text") or payload.get("body") or ""
+        content_blocks: list[dict[str, Any]] = [
+            {
+                "type": "paragraph",
+                "content": [{"type": "text", "text": str(text)[:2000]}],
+            }
+        ] if text else []
+        try:
+            block = await blocks.create_block(
+                user_id,
+                {
+                    "type": "page",
+                    "properties": {"title": str(title)[:200]},
+                    "content": content_blocks,
+                    "tags": [category],
+                    "source": "agent",
+                    "created_by": "agent",
+                },
+            )
+            result = {
+                "block_created": True,
+                "block_id": block["id"],
+                "category": category,
+                "title": str(title)[:200],
+            }
+        except Exception as e:
+            logger.exception("organizer block creation failed")
+            await self.record(
+                user_id, "organizer", "error",
+                {"error": str(e)}, run_id, parent,
+            )
+            result = {"block_created": False, "error": str(e), "category": category}
         await self.record(
             user_id, "organizer", "complete", result, run_id, parent,
         )
