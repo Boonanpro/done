@@ -77,14 +77,62 @@ def _build_env() -> dict:
     return env
 
 
+CHAT_SYSTEM_PROMPT = """あなたはダンの「ダン用Notion」を操作するAIアシスタントです。
+ユーザーがチャットで指示を送ってきました。
+
+# 利用可能な操作
+ローカルで動いているバックエンドAPI (http://127.0.0.1:8000/api/v1/dan-notion) を Bash + curl で操作してください。
+認証は環境変数 DAN_NOTION_JWT を Bearer ヘッダで使ってください: `-H "Authorization: Bearer $DAN_NOTION_JWT"`
+
+# エンドポイント
+- GET  /pages                                    全ルートページ
+- GET  /blocks/{id}                              単一ブロック取得
+- GET  /blocks/{id}/children                     子ブロック一覧
+- POST /blocks                                   作成 {type, parent_id, properties, content, icon, tags, after_block_id}
+- PATCH /blocks/{id}                             更新 {properties?, content?, icon?, is_starred?, tags?}
+- DELETE /blocks/{id}                            削除（論理）
+- POST /blocks/{id}/move                         移動 {parent_id, after_block_id, before_block_id}
+- GET  /blocks/{id}/versions                     バージョン履歴
+- POST /blocks/{id}/restore/{version}            指定バージョンに戻す
+- POST /search   {query, limit}                  自然言語検索
+- GET  /notifications                            通知一覧
+
+# Block の type
+page / paragraph / heading / bullet_list / numbered_list / checklist / task /
+quote / code / divider / callout / image / video / audio / pdf / file / embed /
+email / calendar_event / table / database / bookmark / invoice / meeting_note / proposal_ref
+
+# 振る舞い
+1. ユーザーの依頼を理解し、必要なAPI呼び出しを計画
+2. Bash ツールで curl を実行
+3. 結果を簡潔に報告（実行したアクション + 作成/更新したブロックのIDやURL）
+4. 不可逆な操作（削除、外部送信）を行う場合は最初にユーザーへ確認のメッセージを返してから実行
+
+# 制約
+- 必ず日本語で応答する
+- 余計な前置きはせず、簡潔に
+"""
+
+
 class AutopilotRunner:
     """単一の trigger_run を実行するヘッドレスエージェント"""
 
-    def __init__(self, user_id: str, trigger: dict, payload: dict):
+    def __init__(
+        self,
+        user_id: str,
+        trigger: dict,
+        payload: dict,
+        mode: str = "trigger",
+        chat_message: Optional[str] = None,
+        user_jwt: Optional[str] = None,
+    ):
         self.sb = get_supabase_client().client
         self.user_id = user_id
         self.trigger = trigger
         self.payload = payload
+        self.mode = mode
+        self.chat_message = chat_message
+        self.user_jwt = user_jwt
         self.run_id: Optional[str] = None
         self.cli_session_id: Optional[str] = None
 
@@ -143,6 +191,9 @@ class AutopilotRunner:
 
     def _build_prompt(self) -> str:
         """トリガー設定とペイロードからプロンプトを構築"""
+        if self.mode == "chat" and self.chat_message:
+            return f"# ユーザーからのチャット\n{self.chat_message}\n"
+
         actions_desc = json.dumps(self.trigger.get("actions") or [], ensure_ascii=False, indent=2)
         payload_desc = json.dumps(self.payload, ensure_ascii=False, indent=2)
         return f"""# トリガー: {self.trigger['name']}
@@ -221,6 +272,8 @@ class AutopilotRunner:
             self._trace("error", {"message": "claude CLI が見つかりません"})
             return 127, {"error": "cli_not_found"}
 
+        system_prompt = CHAT_SYSTEM_PROMPT if self.mode == "chat" else AUTOPILOT_SYSTEM_PROMPT
+
         cmd = [claude_cmd] + ([cli_js] if cli_js else []) + [
             "-p", prompt,
             "--output-format", "stream-json",
@@ -229,9 +282,12 @@ class AutopilotRunner:
             "--dangerously-skip-permissions",
             "--model", "opus",
             "--max-turns", "50",
+            "--append-system-prompt", system_prompt,
         ]
 
         env = _build_env()
+        if self.user_jwt:
+            env["DAN_NOTION_JWT"] = self.user_jwt
         last_result: dict = {}
 
         try:
@@ -325,3 +381,44 @@ def execute_trigger_async(user_id: str, trigger: dict, payload: dict | None = No
     t = threading.Thread(target=_worker, daemon=True, name=f"autopilot-{trigger['id']}")
     t.start()
     return f"started:{trigger['id']}"
+
+
+def execute_chat_async(
+    user_id: str, trigger: dict, message: str, user_jwt: str
+) -> str:
+    """チャットからの呼び出し。run_id を作成してすぐ返し、別スレッドで実行"""
+    runner = AutopilotRunner(
+        user_id=user_id,
+        trigger=trigger,
+        payload={"kind": "chat", "message": message},
+        mode="chat",
+        chat_message=message,
+        user_jwt=user_jwt,
+    )
+    runner._create_run()
+    run_id = runner.run_id
+    runner._trace("message", {"role": "user", "text": message})
+
+    def _worker():
+        try:
+            prompt = runner._build_prompt()
+            attempt = 0
+            result: dict = {}
+            while attempt <= 1:
+                runner._trace("decision", {"phase": "attempt", "attempt": attempt + 1})
+                rc, result = runner._spawn_cli(prompt)
+                if rc == 0 and not result.get("is_error"):
+                    runner._finish_run("succeeded", result)
+                    return
+                attempt += 1
+            runner._finish_run("failed", result, error=str(result)[:500])
+        except Exception as e:
+            logger.exception("chat worker crashed")
+            try:
+                runner._finish_run("failed", {}, error=str(e)[:500])
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_worker, daemon=True, name=f"chat-{run_id}")
+    t.start()
+    return run_id
