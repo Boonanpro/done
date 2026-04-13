@@ -314,7 +314,7 @@ function DanNotionInner() {
   // ===== Active run / Gantt / Chat 状態 =====
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [ganttExpanded, setGanttExpanded] = useState(false);
-  const [chatOpen, setChatOpen] = useState(true);
+  const [chatOpen, setChatOpen] = useState(false);
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [chatSending, setChatSending] = useState(false);
@@ -963,6 +963,11 @@ function GanttTimeline({
 /* ========================================================== */
 /*  下部チャットドック                                        */
 /* ========================================================== */
+/**
+ * Notion AI ライクの右下フローティングチャット。
+ * 閉じている時: 円形 FAB (右下固定)
+ * 開いている時: 384x520 のパネル (右下から上に展開)
+ */
 function ChatDock({
   open,
   onToggle,
@@ -988,86 +993,114 @@ function ChatDock({
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [history.length]);
+  }, [history.length, open]);
+
+  if (!open) {
+    return (
+      <button
+        onClick={onToggle}
+        className="fixed bottom-6 right-6 z-50 h-14 w-14 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg shadow-indigo-600/30 flex items-center justify-center transition-all hover:scale-105"
+        aria-label="ダンに話しかける"
+      >
+        <Sparkles className="h-6 w-6" />
+        {sending && (
+          <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-amber-400 animate-pulse" />
+        )}
+      </button>
+    );
+  }
 
   return (
     <div
-      className="border-t border-slate-200 bg-white transition-all duration-200"
-      style={{ height: open ? 280 : 48 }}
+      className="fixed bottom-6 right-6 z-50 w-96 h-[520px] bg-white border border-slate-200 rounded-xl shadow-2xl flex flex-col overflow-hidden"
+      style={{ maxHeight: 'calc(100vh - 48px)' }}
     >
-      <div className="flex items-center gap-2 px-4 py-2 border-b border-slate-200">
+      {/* ヘッダー */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 bg-gradient-to-r from-indigo-50 to-violet-50">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="h-7 w-7 rounded-full bg-indigo-600 flex items-center justify-center shrink-0">
+            <Sparkles className="h-4 w-4 text-white" />
+          </div>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-slate-900 truncate">ダンに話しかける</p>
+            <p className="text-[10px] text-slate-500 truncate">
+              {sending ? '実行中…' : runId ? `run: ${runId.slice(0, 8)}` : 'Notion風 AI アシスタント'}
+            </p>
+          </div>
+        </div>
         <button
           onClick={onToggle}
-          className="flex items-center gap-1 text-sm font-medium text-slate-700 hover:text-slate-900"
+          className="h-7 w-7 rounded-md hover:bg-white/60 text-slate-600 flex items-center justify-center"
+          aria-label="閉じる"
         >
-          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
-          <MessageSquare className="h-4 w-4 text-indigo-600" />
-          <span>ダンに話しかける</span>
+          <ChevronDown className="h-4 w-4" />
         </button>
-        {sending && (
-          <span className="flex items-center gap-1 text-xs text-amber-700">
-            <Loader2 className="h-3 w-3 animate-spin" />送信中
-          </span>
+      </div>
+
+      {/* メッセージ履歴 */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+        {history.length === 0 && (
+          <div className="text-xs text-slate-500 space-y-2">
+            <p className="font-medium text-slate-700">何でも聞いてください:</p>
+            <ul className="space-y-1 list-disc pl-4">
+              <li>「今日の議事録ページを作って」</li>
+              <li>「請求書ブロックを期限順に並べて」</li>
+              <li>「税理士宛の下書きを作って」</li>
+              <li>「経理ページの未読タスクを一覧化して」</li>
+            </ul>
+          </div>
         )}
-        {runId && !sending && (
-          <span className="text-[10px] text-slate-500">run: {runId.slice(0, 8)}</span>
+        {history.map((m) => (
+          <div
+            key={m.id}
+            className={cn('flex gap-2', m.role === 'user' ? 'justify-end' : 'justify-start')}
+          >
+            <div
+              className={cn(
+                'max-w-[80%] rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap break-words',
+                m.role === 'user'
+                  ? 'bg-indigo-600 text-white rounded-br-sm'
+                  : 'bg-slate-100 text-slate-900 border border-slate-200 rounded-bl-sm'
+              )}
+            >
+              {m.text}
+            </div>
+          </div>
+        ))}
+        {sending && (
+          <div className="flex justify-start">
+            <div className="bg-slate-100 border border-slate-200 rounded-2xl rounded-bl-sm px-3 py-2 text-xs text-slate-500 flex items-center gap-2">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              ダンが考えています...
+            </div>
+          </div>
         )}
       </div>
 
-      {open && (
-        <div className="flex flex-col" style={{ height: 280 - 48 }}>
-          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
-            {history.length === 0 && (
-              <p className="text-xs text-slate-500">
-                例: 「今日の議事録ページを作って」「請求書ブロックを期限順に並べて」「税理士宛の下書きを作って」
-              </p>
-            )}
-            {history.map((m) => (
-              <div
-                key={m.id}
-                className={cn(
-                  'flex gap-2',
-                  m.role === 'user' ? 'justify-end' : 'justify-start'
-                )}
-              >
-                <div
-                  className={cn(
-                    'max-w-[70%] rounded-lg px-3 py-2 text-sm',
-                    m.role === 'user'
-                      ? 'bg-indigo-600 text-white'
-                      : 'bg-slate-100 text-slate-900 border border-slate-200'
-                  )}
-                >
-                  {m.text}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="border-t border-slate-200 p-3 flex gap-2">
-            <Input
-              placeholder="メッセージを入力 (Enter で送信)"
-              value={input}
-              onChange={(e) => onInputChange(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  onSend();
-                }
-              }}
-              disabled={sending}
-              className="bg-white border-slate-200"
-            />
-            <Button
-              onClick={onSend}
-              disabled={sending || !input.trim()}
-              className="bg-indigo-600 hover:bg-indigo-700 text-white"
-            >
-              <Send className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
-      )}
+      {/* 入力欄 */}
+      <div className="border-t border-slate-200 p-3 flex gap-2 bg-white">
+        <Input
+          placeholder="メッセージを入力 (Enter で送信)"
+          value={input}
+          onChange={(e) => onInputChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              onSend();
+            }
+          }}
+          disabled={sending}
+          className="bg-white border-slate-200"
+          autoFocus
+        />
+        <Button
+          onClick={onSend}
+          disabled={sending || !input.trim()}
+          className="bg-indigo-600 hover:bg-indigo-700 text-white"
+        >
+          <Send className="h-4 w-4" />
+        </Button>
+      </div>
     </div>
   );
 }
