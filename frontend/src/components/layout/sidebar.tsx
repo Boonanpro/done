@@ -44,18 +44,6 @@ const navItems = [
     description: 'ダンとの会話',
   },
   {
-    title: 'ワークスペース',
-    href: '/workspace',
-    icon: Notebook,
-    description: '情報ハブ（ブロック/ページ）',
-  },
-  {
-    title: 'トリガー',
-    href: '/triggers',
-    icon: Zap,
-    description: '自動化とエージェント',
-  },
-  {
     title: 'コミュニケーション',
     href: '/collab',
     icon: Users,
@@ -70,6 +58,18 @@ const navItems = [
 ];
 
 const businessItems = [
+  {
+    title: 'ワークスペース',
+    href: '/workspace',
+    icon: Notebook,
+    description: '情報ハブ（ブロック/ページ）',
+  },
+  {
+    title: 'トリガー',
+    href: '/triggers',
+    icon: Zap,
+    description: '自動化とエージェント',
+  },
   {
     title: 'DX事業',
     href: '/dashboard/dx',
