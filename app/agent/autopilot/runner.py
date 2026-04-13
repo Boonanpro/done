@@ -102,6 +102,16 @@ page / paragraph / heading / bullet_list / numbered_list / checklist / task /
 quote / code / divider / callout / image / video / audio / pdf / file / embed /
 email / calendar_event / table / database / bookmark / invoice / meeting_note / proposal_ref
 
+# ページ/フォルダ規約 (重要)
+- ルートページ = テキストエディタ的な文書ページ (通常 view_mode='list')
+- サブページ = フォルダとして使う。メディア整理ならば必ず
+  properties.view_mode='grid' を付けて作成すること
+  例: {"type":"page","parent_id":"<root>","properties":{"title":"請求書","view_mode":"grid"},"icon":"💳"}
+- 絵文字の二重表示を避けるため、properties.title には絵文字を入れないこと。
+  代わりに icon フィールドに絵文字だけを設定する
+  ❌ {"title":"📄 PDF資料","icon":"📄"}
+  ✅ {"title":"PDF資料","icon":"📄"}
+
 # 振る舞い
 1. ユーザーの依頼を理解し、必要なAPI呼び出しを計画
 2. Bash ツールで curl を実行

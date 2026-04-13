@@ -87,6 +87,22 @@ type ChatMessage = {
   ts: number;
 };
 
+/**
+ * タイトル先頭に絵文字がありかつ icon も設定されている場合、絵文字を除去して返す
+ * 例: title="📥 受信箱", icon="📥" → "受信箱"
+ */
+function stripLeadingEmoji(title: string, hasIcon: boolean): string {
+  if (!hasIcon || !title) return title;
+  // Unicode emoji の範囲 + 空白を先頭から除去
+  return title.replace(/^[\p{Emoji_Presentation}\p{Extended_Pictographic}\u{FE0F}\u{200D}]+\s*/u, '').trim() || title;
+}
+
+function displayTitle(block: Block): string {
+  const t = block.properties?.title || '';
+  return stripLeadingEmoji(t, !!block.icon);
+}
+
+
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
   const res = await fetch(url, {
@@ -203,7 +219,6 @@ function DanNotionInner() {
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
   const [newPageTitle, setNewPageTitle] = useState('');
   const [notifOpen, setNotifOpen] = useState(false);
-  const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
 
   // ページ一覧
   const pagesQ = useQuery({
@@ -294,6 +309,32 @@ function DanNotionInner() {
     },
   });
 
+  // 指定ブロックの直後に新規ブロックを挿入 (inline + ボタン用)
+  const insertBlock = useMutation({
+    mutationFn: ({ after_block_id, type }: { after_block_id: string | null; type: string }) => {
+      const defaultsByType: Record<string, any> = {
+        page: { properties: { title: '新規サブページ', view_mode: 'grid' }, icon: '📁' },
+        heading: { properties: {} },
+        paragraph: { properties: {} },
+        checklist: { properties: { checked: false } },
+      };
+      const base = defaultsByType[type] || { properties: {} };
+      return fetchJSON<Block>(`${API}/blocks`, {
+        method: 'POST',
+        body: JSON.stringify({
+          type,
+          parent_id: selectedPageId,
+          content: [],
+          after_block_id: after_block_id || undefined,
+          ...base,
+        }),
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dan-notion', 'blocks', selectedPageId] });
+    },
+  });
+
   const updateBlock = useMutation({
     mutationFn: ({ id, content }: { id: string; content: any }) =>
       fetchJSON<Block>(`${API}/blocks/${id}`, {
@@ -326,6 +367,24 @@ function DanNotionInner() {
     enabled: !!selectedPageId && !selectedPageFromRoot,
   });
   const selectedPage: Block | null = selectedPageFromRoot || selectedSubPageQ.data || null;
+
+  // ページの view_mode ('list' | 'grid') をプロパティから取得・更新
+  const viewMode: 'list' | 'grid' =
+    (selectedPage?.properties?.view_mode === 'grid' ? 'grid' : 'list');
+
+  const togglePageViewMode = useMutation({
+    mutationFn: (mode: 'list' | 'grid') =>
+      fetchJSON<Block>(`${API}/blocks/${selectedPageId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          properties: { ...(selectedPage?.properties || {}), view_mode: mode },
+        }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dan-notion', 'pages'] });
+      qc.invalidateQueries({ queryKey: ['dan-notion', 'block', selectedPageId] });
+    },
+  });
 
   const unreadCount = notifQ.data?.filter((n) => !n.read_at).length || 0;
 
@@ -470,7 +529,7 @@ function DanNotionInner() {
               >
                 <span>{p.icon || '📄'}</span>
                 <span className="truncate flex-1">
-                  {p.properties?.title || '無題'}
+                  {displayTitle(p) || '無題'}
                 </span>
                 <Badge variant="secondary" className="text-[10px] h-4 bg-slate-200 text-slate-600">
                   v{p.version}
@@ -488,38 +547,8 @@ function DanNotionInner() {
 
       {/* ========== 中央: ブロックエディタ ========== */}
       <main className="flex-1 flex flex-col min-w-0 bg-white overflow-hidden">
-        {/* ツールバー (ビュー切替 + 通知ベル) */}
+        {/* ツールバー (通知ベルのみ) */}
         <div className="border-b border-slate-200 px-3 py-2 flex items-center gap-2 relative shrink-0">
-          {/* ビュー切替 */}
-          <div className="inline-flex rounded-md border border-slate-200 overflow-hidden">
-            <button
-              onClick={() => setViewMode('list')}
-              className={cn(
-                'px-3 py-1.5 text-xs flex items-center gap-1 transition',
-                viewMode === 'list'
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-white text-slate-600 hover:bg-slate-50'
-              )}
-              title="リスト表示"
-            >
-              <ListIcon className="h-3.5 w-3.5" />
-              リスト
-            </button>
-            <button
-              onClick={() => setViewMode('grid')}
-              className={cn(
-                'px-3 py-1.5 text-xs flex items-center gap-1 border-l border-slate-200 transition',
-                viewMode === 'grid'
-                  ? 'bg-indigo-600 text-white'
-                  : 'bg-white text-slate-600 hover:bg-slate-50'
-              )}
-              title="サムネイル表示"
-            >
-              <LayoutGrid className="h-3.5 w-3.5" />
-              サムネ
-            </button>
-          </div>
-
           <div className="flex-1" />
 
           {/* 通知ベル */}
@@ -609,7 +638,7 @@ function DanNotionInner() {
                     </button>
                   )}
                   <h1 className="text-2xl font-bold text-slate-900">
-                    {selectedPage.properties?.title || '無題'}
+                    {displayTitle(selectedPage) || '無題'}
                   </h1>
                   <p className="text-xs text-slate-500 mt-1">
                     v{selectedPage.version} ・ 更新:{' '}
@@ -617,16 +646,36 @@ function DanNotionInner() {
                   </p>
                 </div>
               </div>
-              <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => addBlock.mutate('paragraph')} className="bg-white border-slate-200 text-slate-700">
-                  <Plus className="h-4 w-4 mr-1" /> テキスト
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => addBlock.mutate('checklist')} className="bg-white border-slate-200 text-slate-700">
-                  <Plus className="h-4 w-4 mr-1" /> タスク
-                </Button>
-                <Button size="sm" variant="outline" onClick={() => addBlock.mutate('heading')} className="bg-white border-slate-200 text-slate-700">
-                  <Plus className="h-4 w-4 mr-1" /> 見出し
-                </Button>
+              <div className="flex items-center gap-2">
+                {/* このページのビュー切替 */}
+                <div className="inline-flex rounded-md border border-slate-200 overflow-hidden mr-2">
+                  <button
+                    onClick={() => togglePageViewMode.mutate('list')}
+                    className={cn(
+                      'px-2 py-1 text-[11px] flex items-center gap-1 transition',
+                      viewMode === 'list'
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-white text-slate-600 hover:bg-slate-50'
+                    )}
+                    title="リスト表示"
+                  >
+                    <ListIcon className="h-3 w-3" />
+                    リスト
+                  </button>
+                  <button
+                    onClick={() => togglePageViewMode.mutate('grid')}
+                    className={cn(
+                      'px-2 py-1 text-[11px] flex items-center gap-1 border-l border-slate-200 transition',
+                      viewMode === 'grid'
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-white text-slate-600 hover:bg-slate-50'
+                    )}
+                    title="サムネイル表示"
+                  >
+                    <LayoutGrid className="h-3 w-3" />
+                    サムネ
+                  </button>
+                </div>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -643,55 +692,35 @@ function DanNotionInner() {
 
             {/* 本文 - 直接 overflow-y-auto でスクロール確実化 */}
             <div className="flex-1 min-h-0 overflow-y-auto">
-              <div
-                className={cn(
-                  'mx-auto p-6',
-                  viewMode === 'list' ? 'max-w-3xl space-y-2' : 'max-w-6xl'
-                )}
-              >
+              <div className="max-w-6xl mx-auto p-6">
                 {blocksQ.isLoading && (
                   <Loader2 className="h-5 w-5 animate-spin text-slate-400" />
                 )}
                 {blocksQ.data?.length === 0 && (
-                  <p className="text-sm text-slate-500">
-                    上のボタンからブロックを追加してください
+                  <p className="text-sm text-slate-500 mb-3">
+                    左側 + ボタンから最初のブロックを追加してください
                   </p>
                 )}
 
-                {/* グリッドビュー (サムネイル) */}
-                {viewMode === 'grid' && blocksQ.data && blocksQ.data.length > 0 && (
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                    {blocksQ.data.map((b) => (
-                      <ThumbnailCard
-                        key={b.id}
-                        block={b}
-                        onOpenPage={(id) => setSelectedPageId(id)}
-                        onDelete={() => {
-                          if (b.type === 'page') {
-                            if (!confirm(`ページ「${b.properties?.title || '無題'}」を削除しますか？\n配下のブロックも一緒に非表示になります。`)) return;
-                          }
-                          removeBlock.mutate(b.id);
-                        }}
-                      />
-                    ))}
-                  </div>
-                )}
-
-                {/* リストビュー */}
-                {viewMode === 'list' && blocksQ.data?.map((b) => (
-                  <BlockRow
-                    key={b.id}
-                    block={b}
-                    onUpdate={(content) => updateBlock.mutate({ id: b.id, content })}
-                    onDelete={() => {
-                      if (b.type === 'page') {
-                        if (!confirm(`ページ「${b.properties?.title || '無題'}」を削除しますか？\n配下のブロックも一緒に非表示になります（元に戻せます）。`)) return;
-                      }
-                      removeBlock.mutate(b.id);
-                    }}
-                    onOpenPage={(id) => setSelectedPageId(id)}
-                  />
-                ))}
+                {/* 混在レンダリング: テキスト/タスク/見出しは常にインライン、
+                    メディア(image/video/pdf/file/page)は viewMode に従う */}
+                <BlockList
+                  blocks={blocksQ.data || []}
+                  viewMode={viewMode}
+                  onUpdate={(id, content) => updateBlock.mutate({ id, content })}
+                  onDelete={(b) => {
+                    if (b.type === 'page') {
+                      if (!confirm(`ページ「${displayTitle(b) || '無題'}」を削除しますか？\n配下のブロックも一緒に非表示になります（元に戻せます）。`)) return;
+                    }
+                    removeBlock.mutate(b.id);
+                  }}
+                  onOpenPage={(id) => setSelectedPageId(id)}
+                  onInsertAfter={(afterId, type) => {
+                    insertBlock.mutate({ after_block_id: afterId, type });
+                  }}
+                  parentPageId={selectedPage.id}
+                  onCreateFirst={(type) => insertBlock.mutate({ after_block_id: null, type })}
+                />
               </div>
             </div>
 
@@ -1156,6 +1185,204 @@ function ChatDock({
   );
 }
 
+/* ========================================================== */
+/*  BlockList: 混在レンダリング + inline + ボタン            */
+/* ========================================================== */
+const MEDIA_TYPES = new Set(['image', 'video', 'pdf', 'file', 'audio', 'page']);
+
+function BlockList({
+  blocks,
+  viewMode,
+  onUpdate,
+  onDelete,
+  onOpenPage,
+  onInsertAfter,
+  onCreateFirst,
+  parentPageId,
+}: {
+  blocks: Block[];
+  viewMode: 'list' | 'grid';
+  onUpdate: (id: string, content: any) => void;
+  onDelete: (block: Block) => void;
+  onOpenPage: (id: string) => void;
+  onInsertAfter: (afterId: string, type: string) => void;
+  onCreateFirst: (type: string) => void;
+  parentPageId: string;
+}) {
+  // ブロックを「リストとして縦積み」と「メディアをグリッドでまとめる」に分離
+  // grid mode: メディアブロックを連続するグループごとにまとめてグリッド描画
+  // list mode: 全部そのまま縦積み
+  if (viewMode === 'list') {
+    return (
+      <div className="max-w-3xl mx-auto space-y-0.5">
+        {blocks.length === 0 && (
+          <InlineInsertMenu onInsert={onCreateFirst} label="最初のブロックを追加" />
+        )}
+        {blocks.map((b) => (
+          <div key={b.id} className="group/row relative flex items-start gap-1 py-0.5">
+            {/* 左側ホバーで inline + ボタン */}
+            <div className="absolute -left-8 top-1 opacity-0 group-hover/row:opacity-100 transition">
+              <InlineInsertMenu
+                onInsert={(type) => onInsertAfter(b.id, type)}
+                size="sm"
+              />
+            </div>
+            <div className="flex-1 min-w-0">
+              <BlockRow
+                block={b}
+                onUpdate={(c) => onUpdate(b.id, c)}
+                onDelete={() => onDelete(b)}
+                onOpenPage={onOpenPage}
+                onInsertAfter={(type) => onInsertAfter(b.id, type)}
+              />
+            </div>
+          </div>
+        ))}
+        {/* 末尾への追加 */}
+        {blocks.length > 0 && (
+          <div className="pt-3 pl-1">
+            <InlineInsertMenu
+              onInsert={(type) => onInsertAfter(blocks[blocks.length - 1].id, type)}
+              label="ブロックを追加"
+            />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // grid mode: 連続するメディアブロックをまとめてグリッド化、テキスト系は間に挟む
+  const segments: Array<
+    { kind: 'text'; block: Block } | { kind: 'grid'; items: Block[] }
+  > = [];
+  for (const b of blocks) {
+    if (MEDIA_TYPES.has(b.type)) {
+      const last = segments[segments.length - 1];
+      if (last && last.kind === 'grid') last.items.push(b);
+      else segments.push({ kind: 'grid', items: [b] });
+    } else {
+      segments.push({ kind: 'text', block: b });
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      {blocks.length === 0 && (
+        <div className="max-w-3xl mx-auto">
+          <InlineInsertMenu onInsert={onCreateFirst} label="最初のブロックを追加" />
+        </div>
+      )}
+      {segments.map((seg, i) => {
+        if (seg.kind === 'text') {
+          return (
+            <div key={`text-${seg.block.id}`} className="max-w-3xl mx-auto">
+              <div className="group/row relative flex items-start gap-1 py-0.5">
+                <div className="absolute -left-8 top-1 opacity-0 group-hover/row:opacity-100 transition">
+                  <InlineInsertMenu
+                    onInsert={(type) => onInsertAfter(seg.block.id, type)}
+                    size="sm"
+                  />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <BlockRow
+                    block={seg.block}
+                    onUpdate={(c) => onUpdate(seg.block.id, c)}
+                    onDelete={() => onDelete(seg.block)}
+                    onOpenPage={onOpenPage}
+                    onInsertAfter={(type) => onInsertAfter(seg.block.id, type)}
+                  />
+                </div>
+              </div>
+            </div>
+          );
+        }
+        return (
+          <div key={`grid-${i}`} className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+            {seg.items.map((b) => (
+              <ThumbnailCard
+                key={b.id}
+                block={b}
+                onOpenPage={onOpenPage}
+                onDelete={() => onDelete(b)}
+                onInsertAfter={(type) => onInsertAfter(b.id, type)}
+              />
+            ))}
+          </div>
+        );
+      })}
+      {/* 末尾への追加 */}
+      {blocks.length > 0 && (
+        <div className="max-w-3xl mx-auto pt-3 pl-1">
+          <InlineInsertMenu
+            onInsert={(type) => onInsertAfter(blocks[blocks.length - 1].id, type)}
+            label="ブロックを追加"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Inline + ボタン + ブロック型選択メニュー
+ */
+function InlineInsertMenu({
+  onInsert,
+  label = '',
+  size = 'md',
+}: {
+  onInsert: (type: string) => void;
+  label?: string;
+  size?: 'sm' | 'md';
+}) {
+  const [open, setOpen] = useState(false);
+  const types = [
+    { type: 'paragraph', icon: '📝', label: 'テキスト' },
+    { type: 'heading', icon: '📌', label: '見出し' },
+    { type: 'checklist', icon: '☑️', label: 'タスク' },
+    { type: 'page', icon: '📁', label: 'サブページ (フォルダ)' },
+    { type: 'bullet_list', icon: '•', label: '箇条書き' },
+    { type: 'quote', icon: '❝', label: '引用' },
+    { type: 'divider', icon: '—', label: '区切り線' },
+  ];
+
+  return (
+    <div className="relative inline-block">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={cn(
+          'flex items-center gap-1 rounded-md text-slate-400 hover:text-indigo-600 hover:bg-slate-100 transition',
+          size === 'sm' ? 'h-5 w-5 text-xs' : 'h-6 px-2 text-xs'
+        )}
+        title="ブロックを挿入"
+      >
+        <Plus className={size === 'sm' ? 'h-3 w-3' : 'h-4 w-4'} />
+        {label && <span>{label}</span>}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full mt-1 z-50 w-52 bg-white border border-slate-200 rounded-lg shadow-xl py-1">
+            {types.map((t) => (
+              <button
+                key={t.type}
+                onClick={() => {
+                  onInsert(t.type);
+                  setOpen(false);
+                }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 text-left"
+              >
+                <span className="text-base">{t.icon}</span>
+                <span>{t.label}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /**
  * サムネイル/カードビュー用
  */
@@ -1163,13 +1390,15 @@ function ThumbnailCard({
   block,
   onOpenPage,
   onDelete,
+  onInsertAfter,
 }: {
   block: Block;
   onOpenPage: (id: string) => void;
   onDelete: () => void;
+  onInsertAfter?: (type: string) => void;
 }) {
   const title =
-    block.properties?.title ||
+    displayTitle(block) ||
     block.properties?.original_name ||
     (Array.isArray(block.content) && block.content[0]?.text) ||
     `${block.type} ${block.id.slice(0, 6)}`;
@@ -1217,6 +1446,18 @@ function ThumbnailCard({
                     <path d="M8 5v14l11-7z" />
                   </svg>
                 </div>
+              </div>
+            </>
+          ) : isPdf && url ? (
+            <>
+              {/* PDF の 1ページ目プレビュー (browser native) */}
+              <iframe
+                src={`${url}#toolbar=0&navpanes=0&scrollbar=0&view=FitH`}
+                className="w-full h-full pointer-events-none"
+                title={title}
+              />
+              <div className="absolute top-1 right-1 bg-red-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow">
+                PDF
               </div>
             </>
           ) : isPdf ? (
@@ -1270,11 +1511,13 @@ function BlockRow({
   onUpdate,
   onDelete,
   onOpenPage,
+  onInsertAfter,
 }: {
   block: Block;
   onUpdate: (content: any) => void;
   onDelete: () => void;
   onOpenPage?: (pageId: string) => void;
+  onInsertAfter?: (type: string) => void;
 }) {
   const initialText = useMemo(() => {
     if (typeof block.content === 'string') return block.content;
@@ -1293,7 +1536,7 @@ function BlockRow({
 
   // ページ型: クリックで遷移するナビリンクとして表示
   if (block.type === 'page') {
-    const title = block.properties?.title || '無題のページ';
+    const title = displayTitle(block) || '無題のページ';
     return (
       <div className="group flex items-center gap-2 rounded-md hover:bg-slate-50 border border-transparent hover:border-slate-200 transition">
         <button
@@ -1321,7 +1564,7 @@ function BlockRow({
   // ファイル系: 読み取り専用プレビュー
   if (['image', 'video', 'pdf', 'file', 'audio'].includes(block.type)) {
     const title =
-      block.properties?.title ||
+      displayTitle(block) ||
       block.properties?.original_name ||
       (Array.isArray(block.content) && block.content[0]?.text) ||
       `${block.type} ${block.id.slice(0, 8)}`;
