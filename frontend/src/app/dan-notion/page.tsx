@@ -8,11 +8,12 @@
  *   - 中央: 選択ページのブロックエディタ
  *   - 右: Autopilot トレース + 通知センター
  */
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Notebook, Plus, Loader2, Bell, Activity, FileText, Trash2,
-  ChevronRight, History, Sparkles, AlertCircle, Search,
+  ChevronRight, ChevronDown, ChevronUp, History, Sparkles, AlertCircle, Search,
+  Send, MessageSquare, Brain, Wrench, CheckCircle2, XCircle, RotateCcw,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -61,6 +62,31 @@ type Notification = {
   created_at: string;
 };
 
+type Trace = {
+  id: string;
+  trigger_run_id: string | null;
+  agent_name: string;
+  event_type: 'thinking' | 'tool_call' | 'tool_result' | 'message' | 'decision' | 'error' | 'complete' | 'sub_agent_start' | 'self_repair';
+  content: Record<string, any>;
+  parent_trace_id: string | null;
+  created_at: string;
+};
+
+type RunSummary = {
+  id: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+};
+
+type ChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  run_id?: string;
+  ts: number;
+};
+
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
   const res = await fetch(url, {
@@ -73,6 +99,76 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.json() as Promise<T>;
+}
+
+/**
+ * SSE で agent_traces を購読する Hook
+ * fetch + ReadableStream で Authorization ヘッダ対応
+ */
+function useTraceStream(runId: string | null): { traces: Trace[]; done: boolean } {
+  const [traces, setTraces] = useState<Trace[]>([]);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    if (!runId) {
+      setTraces([]);
+      setDone(false);
+      return;
+    }
+    setTraces([]);
+    setDone(false);
+
+    const ctrl = new AbortController();
+    const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
+
+    (async () => {
+      try {
+        const res = await fetch(`${API}/runs/${runId}/traces/stream`, {
+          headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          signal: ctrl.signal,
+        });
+        if (!res.body) return;
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { value, done: streamDone } = await reader.read();
+          if (streamDone) break;
+          buf += decoder.decode(value, { stream: true });
+          const events = buf.split('\n\n');
+          buf = events.pop() || '';
+          for (const ev of events) {
+            const lines = ev.split('\n');
+            let dataLine = '';
+            let isDone = false;
+            for (const l of lines) {
+              if (l.startsWith('event: done')) isDone = true;
+              if (l.startsWith('data: ')) dataLine = l.slice(6);
+            }
+            if (isDone) {
+              setDone(true);
+              continue;
+            }
+            if (!dataLine) continue;
+            try {
+              const trace = JSON.parse(dataLine) as Trace;
+              setTraces((prev) => {
+                if (prev.some((t) => t.id === trace.id)) return prev;
+                return [...prev, trace];
+              });
+            } catch {}
+          }
+        }
+        setDone(true);
+      } catch (e) {
+        if ((e as any)?.name !== 'AbortError') console.warn('SSE error', e);
+      }
+    })();
+
+    return () => ctrl.abort();
+  }, [runId]);
+
+  return { traces, done };
 }
 
 function DanNotionInner() {
@@ -215,8 +311,94 @@ function DanNotionInner() {
 
   const unreadCount = notifQ.data?.filter((n) => !n.read_at).length || 0;
 
+  // ===== Active run / Gantt / Chat 状態 =====
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [ganttExpanded, setGanttExpanded] = useState(false);
+  const [chatOpen, setChatOpen] = useState(true);
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatSending, setChatSending] = useState(false);
+
+  const { traces, done: traceDone } = useTraceStream(activeRunId);
+
+  // 直近の run 一覧 (切替ドロップダウン用)
+  const recentRunsQ = useQuery({
+    queryKey: ['dan-notion', 'recent-runs'],
+    queryFn: () => fetchJSON<RunSummary[]>(`${API}/runs/recent?limit=10`),
+    refetchInterval: 10_000,
+  });
+
+  // run 完了時に assistant メッセージを履歴に追加
+  useEffect(() => {
+    if (!traceDone || !activeRunId) return;
+    const completeTrace = [...traces].reverse().find((t) => t.event_type === 'complete');
+    if (!completeTrace) return;
+    setChatHistory((prev) => {
+      const exists = prev.some((m) => m.run_id === activeRunId && m.role === 'assistant');
+      if (exists) return prev;
+      return [
+        ...prev,
+        {
+          id: `assistant-${activeRunId}`,
+          role: 'assistant',
+          text: completeTrace.content?.result || '(完了)',
+          run_id: activeRunId,
+          ts: Date.now(),
+        },
+      ];
+    });
+    qc.invalidateQueries({ queryKey: ['dan-notion'] });
+  }, [traceDone, activeRunId, traces, qc]);
+
+  const sendChat = async () => {
+    const msg = chatInput.trim();
+    if (!msg || chatSending) return;
+    setChatSending(true);
+    setChatInput('');
+    const userMsg: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      text: msg,
+      ts: Date.now(),
+    };
+    setChatHistory((prev) => [...prev, userMsg]);
+    try {
+      const res = await fetchJSON<{ run_id: string }>(`${API}/chat`, {
+        method: 'POST',
+        body: JSON.stringify({ message: msg }),
+      });
+      setActiveRunId(res.run_id);
+      setGanttExpanded(true);
+    } catch (e) {
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          id: `error-${Date.now()}`,
+          role: 'assistant',
+          text: `エラー: ${(e as Error).message}`,
+          ts: Date.now(),
+        },
+      ]);
+    } finally {
+      setChatSending(false);
+    }
+  };
+
   return (
-    <div className="flex h-screen bg-white text-slate-900">
+    <div className="flex flex-col h-screen bg-white text-slate-900">
+      {/* ========== 上: ガントタイムライン ========== */}
+      <GanttTimeline
+        traces={traces}
+        runId={activeRunId}
+        runs={recentRunsQ.data || []}
+        onSelectRun={setActiveRunId}
+        expanded={ganttExpanded}
+        onToggle={() => setGanttExpanded((e) => !e)}
+        running={!traceDone && !!activeRunId}
+      />
+
+      {/* ========== 中央 3ペイン ========== */}
+      <div className="flex flex-1 min-h-0">
       {/* ========== 左: ページツリー ========== */}
       <aside className="w-64 border-r border-slate-200 flex flex-col bg-slate-50">
         <div className="p-4 border-b border-slate-200">
@@ -543,6 +725,349 @@ function DanNotionInner() {
           </div>
         </ScrollArea>
       </aside>
+      </div>
+
+      {/* ========== 下: チャットドック ========== */}
+      <ChatDock
+        open={chatOpen}
+        onToggle={() => setChatOpen((o) => !o)}
+        history={chatHistory}
+        input={chatInput}
+        onInputChange={setChatInput}
+        onSend={sendChat}
+        sending={chatSending}
+        runId={activeRunId}
+      />
+    </div>
+  );
+}
+
+/* ========================================================== */
+/*  上部ガントタイムライン                                    */
+/* ========================================================== */
+function GanttTimeline({
+  traces,
+  runId,
+  runs,
+  onSelectRun,
+  expanded,
+  onToggle,
+  running,
+}: {
+  traces: Trace[];
+  runId: string | null;
+  runs: RunSummary[];
+  onSelectRun: (id: string) => void;
+  expanded: boolean;
+  onToggle: () => void;
+  running: boolean;
+}) {
+  // エージェント行 (agent_name -> row index)
+  const rows = useMemo(() => {
+    const seen = new Map<string, number>();
+    traces.forEach((t) => {
+      if (!seen.has(t.agent_name)) seen.set(t.agent_name, seen.size);
+    });
+    return seen;
+  }, [traces]);
+
+  // 時間範囲
+  const startMs = useMemo(() => {
+    if (traces.length === 0) return Date.now();
+    return new Date(traces[0].created_at).getTime();
+  }, [traces]);
+
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(id);
+  }, [running]);
+
+  const endMs = useMemo(() => {
+    if (!running && traces.length > 0) {
+      const last = traces[traces.length - 1];
+      return new Date(last.created_at).getTime() + 1000;
+    }
+    return Math.max(now, startMs + 5000);
+  }, [now, running, traces, startMs]);
+
+  const totalMs = Math.max(endMs - startMs, 1000);
+
+  const colorFor = (et: Trace['event_type']) => {
+    switch (et) {
+      case 'thinking': return 'bg-indigo-400';
+      case 'tool_call': return 'bg-blue-500';
+      case 'tool_result': return 'bg-emerald-400';
+      case 'message': return 'bg-slate-400';
+      case 'decision': return 'bg-violet-400';
+      case 'self_repair': return 'bg-amber-400';
+      case 'error': return 'bg-red-500';
+      case 'complete': return 'bg-emerald-600';
+      default: return 'bg-slate-300';
+    }
+  };
+
+  const iconFor = (et: Trace['event_type']) => {
+    switch (et) {
+      case 'thinking': return <Brain className="h-3 w-3" />;
+      case 'tool_call': return <Wrench className="h-3 w-3" />;
+      case 'tool_result': return <CheckCircle2 className="h-3 w-3" />;
+      case 'error': return <XCircle className="h-3 w-3" />;
+      case 'self_repair': return <RotateCcw className="h-3 w-3" />;
+      default: return null;
+    }
+  };
+
+  const [hoveredTrace, setHoveredTrace] = useState<Trace | null>(null);
+
+  const rowHeight = 28;
+  const headerHeight = 36;
+  const ganttHeight = expanded ? Math.max(180, headerHeight + rows.size * rowHeight + 20) : 56;
+
+  return (
+    <div
+      className="border-b border-slate-200 bg-slate-50 transition-all duration-200 overflow-hidden"
+      style={{ height: ganttHeight }}
+    >
+      {/* ヘッダー */}
+      <div className="flex items-center gap-3 px-4 py-2 border-b border-slate-200 bg-white">
+        <button
+          onClick={onToggle}
+          className="flex items-center gap-1 text-sm font-medium text-slate-700 hover:text-slate-900"
+        >
+          {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+          <Activity className="h-4 w-4 text-indigo-600" />
+          <span>エージェント活動</span>
+        </button>
+
+        {running && (
+          <span className="flex items-center gap-1 text-xs text-amber-700">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
+            実行中...
+          </span>
+        )}
+
+        {!running && runId && (
+          <span className="text-xs text-emerald-700 flex items-center gap-1">
+            <CheckCircle2 className="h-3 w-3" />完了
+          </span>
+        )}
+
+        <div className="flex-1" />
+
+        <span className="text-xs text-slate-500">
+          {traces.length} イベント
+        </span>
+
+        {runs.length > 0 && (
+          <select
+            value={runId || ''}
+            onChange={(e) => e.target.value && onSelectRun(e.target.value)}
+            className="text-xs border border-slate-200 rounded px-2 py-1 bg-white"
+          >
+            <option value="">直近の実行を選択...</option>
+            {runs.map((r) => (
+              <option key={r.id} value={r.id}>
+                {new Date(r.started_at).toLocaleTimeString('ja-JP')} ・ {r.status}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {/* タイムライン本体 */}
+      {expanded && (
+        <div className="relative h-full overflow-y-auto" style={{ paddingTop: 4 }}>
+          {traces.length === 0 ? (
+            <div className="px-4 py-6 text-xs text-slate-500">
+              {runId ? '待機中...' : '下のチャットからダンに話しかけると、ここに思考プロセスが時系列で表示されます'}
+            </div>
+          ) : (
+            <div className="relative px-2" style={{ height: rows.size * rowHeight + 8 }}>
+              {/* 時刻グリッド (5本) */}
+              {[0, 1, 2, 3, 4].map((i) => (
+                <div
+                  key={i}
+                  className="absolute top-0 bottom-0 border-l border-slate-200"
+                  style={{ left: `${(i / 4) * 100}%` }}
+                />
+              ))}
+
+              {/* 各エージェント行 */}
+              {[...rows.entries()].map(([agentName, rowIdx]) => (
+                <div
+                  key={agentName}
+                  className="absolute left-0 right-0 flex items-center"
+                  style={{ top: rowIdx * rowHeight + 4, height: rowHeight }}
+                >
+                  <span className="absolute left-2 text-[10px] text-slate-500 z-10 bg-slate-50 px-1 truncate max-w-[140px]">
+                    {agentName.replace('autopilot:', '').replace('__manual_chat__', 'チャット')}
+                  </span>
+                </div>
+              ))}
+
+              {/* イベントバー */}
+              {traces.map((t, i) => {
+                const ts = new Date(t.created_at).getTime();
+                const startPct = ((ts - startMs) / totalMs) * 100;
+                const nextSameAgent = traces.slice(i + 1).find((x) => x.agent_name === t.agent_name);
+                const endTs = nextSameAgent ? new Date(nextSameAgent.created_at).getTime() : ts + 800;
+                const widthPct = Math.max(((endTs - ts) / totalMs) * 100, 1);
+                const rowIdx = rows.get(t.agent_name) || 0;
+                return (
+                  <div
+                    key={t.id}
+                    onMouseEnter={() => setHoveredTrace(t)}
+                    onMouseLeave={() => setHoveredTrace((h) => (h?.id === t.id ? null : h))}
+                    className={cn(
+                      'absolute rounded-sm cursor-pointer border border-white/40 hover:scale-y-110 transition-transform',
+                      colorFor(t.event_type)
+                    )}
+                    style={{
+                      left: `calc(${Math.min(startPct, 99)}% + 150px)`,
+                      width: `max(${Math.min(widthPct, 99 - startPct)}%, 6px)`,
+                      top: rowIdx * rowHeight + 8,
+                      height: rowHeight - 12,
+                    }}
+                    title={`${t.event_type}: ${JSON.stringify(t.content).slice(0, 200)}`}
+                  >
+                    <span className="absolute inset-0 flex items-center justify-start pl-1 text-white">
+                      {iconFor(t.event_type)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* 凡例 */}
+          <div className="px-4 py-2 flex items-center gap-3 text-[10px] text-slate-600 border-t border-slate-200">
+            <span className="flex items-center gap-1"><span className="w-3 h-2 bg-indigo-400 rounded-sm" />思考</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-2 bg-blue-500 rounded-sm" />ツール呼び出し</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-2 bg-emerald-400 rounded-sm" />結果</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-2 bg-amber-400 rounded-sm" />自己修復</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-2 bg-red-500 rounded-sm" />エラー</span>
+            {hoveredTrace && (
+              <span className="ml-auto text-slate-700 truncate max-w-[60%]">
+                {hoveredTrace.event_type}: {JSON.stringify(hoveredTrace.content).slice(0, 120)}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ========================================================== */
+/*  下部チャットドック                                        */
+/* ========================================================== */
+function ChatDock({
+  open,
+  onToggle,
+  history,
+  input,
+  onInputChange,
+  onSend,
+  sending,
+  runId,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  history: ChatMessage[];
+  input: string;
+  onInputChange: (v: string) => void;
+  onSend: () => void;
+  sending: boolean;
+  runId: string | null;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [history.length]);
+
+  return (
+    <div
+      className="border-t border-slate-200 bg-white transition-all duration-200"
+      style={{ height: open ? 280 : 48 }}
+    >
+      <div className="flex items-center gap-2 px-4 py-2 border-b border-slate-200">
+        <button
+          onClick={onToggle}
+          className="flex items-center gap-1 text-sm font-medium text-slate-700 hover:text-slate-900"
+        >
+          {open ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+          <MessageSquare className="h-4 w-4 text-indigo-600" />
+          <span>ダンに話しかける</span>
+        </button>
+        {sending && (
+          <span className="flex items-center gap-1 text-xs text-amber-700">
+            <Loader2 className="h-3 w-3 animate-spin" />送信中
+          </span>
+        )}
+        {runId && !sending && (
+          <span className="text-[10px] text-slate-500">run: {runId.slice(0, 8)}</span>
+        )}
+      </div>
+
+      {open && (
+        <div className="flex flex-col" style={{ height: 280 - 48 }}>
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+            {history.length === 0 && (
+              <p className="text-xs text-slate-500">
+                例: 「今日の議事録ページを作って」「請求書ブロックを期限順に並べて」「税理士宛の下書きを作って」
+              </p>
+            )}
+            {history.map((m) => (
+              <div
+                key={m.id}
+                className={cn(
+                  'flex gap-2',
+                  m.role === 'user' ? 'justify-end' : 'justify-start'
+                )}
+              >
+                <div
+                  className={cn(
+                    'max-w-[70%] rounded-lg px-3 py-2 text-sm',
+                    m.role === 'user'
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-slate-100 text-slate-900 border border-slate-200'
+                  )}
+                >
+                  {m.text}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="border-t border-slate-200 p-3 flex gap-2">
+            <Input
+              placeholder="メッセージを入力 (Enter で送信)"
+              value={input}
+              onChange={(e) => onInputChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  onSend();
+                }
+              }}
+              disabled={sending}
+              className="bg-white border-slate-200"
+            />
+            <Button
+              onClick={onSend}
+              disabled={sending || !input.trim()}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white"
+            >
+              <Send className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

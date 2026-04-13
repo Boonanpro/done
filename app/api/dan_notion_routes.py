@@ -4,8 +4,13 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import asyncio
+import json as _json
+
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
 
 from app.models.dan_notion_schemas import (
     BLOCK_TYPES,
@@ -249,3 +254,129 @@ async def reindex(user: TokenData = Depends(get_current_user)):
         return reindex_user(user.user_id)
     except ImportError:
         raise HTTPException(status_code=503, detail="sentence-transformers 未インストール")
+
+
+# ============================================================
+# Chat (手動トリガー) + リアルタイムトレース
+# ============================================================
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+def _get_or_create_chat_trigger(svc: DanNotionService, user_id: str) -> dict:
+    """Manual Chat 用の hidden トリガーを取得・なければ作成"""
+    existing = [t for t in svc.list_triggers(user_id) if t["name"] == "__manual_chat__"]
+    if existing:
+        return existing[0]
+    return svc.create_trigger(user_id, {
+        "name": "__manual_chat__",
+        "description": "ダン用Notionチャットからの手動実行（非表示）",
+        "kind": "manual",
+        "config": {},
+        "logic": {},
+        "actions": [],
+        "is_enabled": True,
+    })
+
+
+@router.post("/chat")
+async def chat(
+    req: ChatRequest,
+    request: Request,
+    user: TokenData = Depends(get_current_user),
+):
+    """チャットメッセージを受け取り、AutopilotRunner を非同期起動。run_id を即返す"""
+    trigger = _get_or_create_chat_trigger(_svc(), user.user_id)
+
+    # CLI が自分の API を叩くために JWT を渡す
+    auth = request.headers.get("authorization") or ""
+    user_jwt = auth.removeprefix("Bearer ").strip() if auth.lower().startswith("bearer ") else ""
+    if not user_jwt:
+        user_jwt = request.cookies.get(ACCESS_TOKEN_COOKIE) or ""
+
+    from app.agent.autopilot.runner import execute_chat_async
+    run_id = execute_chat_async(user.user_id, trigger, req.message, user_jwt)
+    return {"run_id": run_id}
+
+
+@router.get("/runs/recent")
+async def recent_runs(limit: int = 10, user: TokenData = Depends(get_current_user)):
+    """直近の run 一覧 (ガント切替UI 用)"""
+    return _svc().list_trigger_runs(user.user_id, limit=limit)
+
+
+@router.get("/runs/{run_id}/traces/stream")
+async def stream_run_traces(run_id: str, request: Request):
+    """SSE: agent_traces を 500ms ポーリングして新規行を逐次配信
+
+    認証は SSE では Authorization ヘッダが扱いにくいので、cookie を使う。
+    """
+    from app.services.supabase_client import get_supabase_client
+
+    token = request.cookies.get(ACCESS_TOKEN_COOKIE)
+    if not token:
+        # Bearer も試す
+        auth = request.headers.get("authorization") or ""
+        if auth.lower().startswith("bearer "):
+            token = auth.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    td = decode_access_token(token)
+    if not td:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    sb = get_supabase_client().client
+
+    async def event_gen():
+        last_id_seen: set[str] = set()
+        # 既存全件を最初に流す
+        prior = (
+            sb.table("agent_traces")
+            .select("*")
+            .eq("user_id", td.user_id)
+            .eq("trigger_run_id", run_id)
+            .order("created_at")
+            .execute()
+            .data
+            or []
+        )
+        for row in prior:
+            last_id_seen.add(row["id"])
+            yield f"data: {_json.dumps(row, default=str, ensure_ascii=False)}\n\n"
+
+        # 以降 500ms polling
+        for _ in range(600):  # 最大 5 分
+            if await request.is_disconnected():
+                break
+            await asyncio.sleep(0.5)
+            new_rows = (
+                sb.table("agent_traces")
+                .select("*")
+                .eq("user_id", td.user_id)
+                .eq("trigger_run_id", run_id)
+                .order("created_at")
+                .execute()
+                .data
+                or []
+            )
+            for row in new_rows:
+                if row["id"] in last_id_seen:
+                    continue
+                last_id_seen.add(row["id"])
+                yield f"data: {_json.dumps(row, default=str, ensure_ascii=False)}\n\n"
+
+            # run が終了しているか確認
+            run_row = (
+                sb.table("trigger_runs")
+                .select("status")
+                .eq("id", run_id)
+                .limit(1)
+                .execute()
+                .data
+            )
+            if run_row and run_row[0]["status"] in ("succeeded", "failed", "cancelled"):
+                yield f"event: done\ndata: {run_row[0]['status']}\n\n"
+                break
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
