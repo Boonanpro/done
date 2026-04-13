@@ -249,9 +249,9 @@ class AutopilotRunner:
             for block in msg.get("content", []):
                 btype = block.get("type")
                 if btype == "thinking":
-                    self._trace("thinking", {"text": block.get("thinking", "")[:2000]})
+                    self._trace("thinking", {"text": block.get("thinking", "")[:20000]})
                 elif btype == "text":
-                    self._trace("message", {"text": block.get("text", "")[:2000]})
+                    self._trace("message", {"text": block.get("text", "")[:20000]})
                 elif btype == "tool_use":
                     self._trace("tool_call", {
                         "tool": block.get("name"),
@@ -265,20 +265,20 @@ class AutopilotRunner:
             for block in msg.get("content", []):
                 if block.get("type") == "tool_result":
                     content = block.get("content")
-                    text = content if isinstance(content, str) else json.dumps(content)[:1000]
+                    text = content if isinstance(content, str) else json.dumps(content)[:3000]
                     self._trace("tool_result", {
                         "tool_use_id": block.get("tool_use_id"),
-                        "text": text[:1500],
+                        "text": text[:3000],
                     })
             return
 
         if ev_type == "result":
             self._trace("complete", {
-                "result": ev.get("result", "")[:2000],
+                "result": ev.get("result", "")[:20000],
                 "is_error": ev.get("is_error", False),
             })
 
-    def _spawn_cli(self, prompt: str) -> tuple[int, dict]:
+    def _spawn_cli(self, prompt: str, resume_session_id: Optional[str] = None) -> tuple[int, dict]:
         """CLI を起動して stream-json を逐次パース。終了コードと最終結果を返す"""
         claude_cmd, cli_js = _resolve_claude_cli()
         if not claude_cmd:
@@ -297,6 +297,9 @@ class AutopilotRunner:
             "--max-turns", "50",
             "--append-system-prompt", system_prompt,
         ]
+
+        if resume_session_id:
+            cmd.extend(["--resume", resume_session_id])
 
         env = _build_env()
         if self.user_jwt:
@@ -399,7 +402,11 @@ def execute_trigger_async(user_id: str, trigger: dict, payload: dict | None = No
 def execute_chat_async(
     user_id: str, trigger: dict, message: str, user_jwt: str
 ) -> str:
-    """チャットからの呼び出し。run_id を作成してすぐ返し、別スレッドで実行"""
+    """チャットからの呼び出し。run_id を作成してすぐ返し、別スレッドで実行
+
+    文脈保持: trigger.config.last_session_id があれば --resume で継続し、
+             完了時に最新の cli_session_id を上書き保存する
+    """
     runner = AutopilotRunner(
         user_id=user_id,
         trigger=trigger,
@@ -410,20 +417,36 @@ def execute_chat_async(
     )
     runner._create_run()
     run_id = runner.run_id
-    runner._trace("message", {"role": "user", "text": message})
+    runner._trace("message", {"role": "user", "text": message[:20000]})
+
+    resume_session_id: Optional[str] = (trigger.get("config") or {}).get("last_session_id")
 
     def _worker():
         try:
             prompt = runner._build_prompt()
             attempt = 0
             result: dict = {}
+            resume = resume_session_id
             while attempt <= 1:
-                runner._trace("decision", {"phase": "attempt", "attempt": attempt + 1})
-                rc, result = runner._spawn_cli(prompt)
+                runner._trace("decision", {"phase": "attempt", "attempt": attempt + 1, "resume": bool(resume)})
+                rc, result = runner._spawn_cli(prompt, resume_session_id=resume)
+                # resume が無効だったらリトライ時は新規セッションで
                 if rc == 0 and not result.get("is_error"):
                     runner._finish_run("succeeded", result)
+                    # 次回のために session_id を保存
+                    if runner.cli_session_id:
+                        try:
+                            from app.services.supabase_client import get_supabase_client
+                            sb = get_supabase_client().client
+                            cfg = dict(trigger.get("config") or {})
+                            cfg["last_session_id"] = runner.cli_session_id
+                            sb.table("triggers").update({"config": cfg}).eq("id", trigger["id"]).execute()
+                        except Exception as e:
+                            logger.warning("failed to persist last_session_id: %s", e)
                     return
                 attempt += 1
+                # リトライ時は resume を外す (セッション切れ等のリカバリ)
+                resume = None
             runner._finish_run("failed", result, error=str(result)[:500])
         except Exception as e:
             logger.exception("chat worker crashed")
