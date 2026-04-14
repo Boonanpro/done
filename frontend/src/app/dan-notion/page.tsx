@@ -1187,12 +1187,36 @@ function ChatDock({
   const onSendRef = useRef(onSend);
   onSendRef.current = onSend;
 
-  // 末尾スクロール (新規メッセージ追加時)
+  // 最新の scrollToRunId を ref で参照 (末尾スクロール抑制用)
+  const scrollToRunIdRef = useRef(scrollToRunId);
+  scrollToRunIdRef.current = scrollToRunId;
+
+  // 末尾スクロール (history.length 増加時のみ)
+  // scrollToRunId を deps から除外: 完了後の null 化でスクロールを上書きしないため
+  const prevLenRef = useRef(0);
   useEffect(() => {
-    if (scrollRef.current && !scrollToRunId) {
+    if (!scrollRef.current) return;
+    const prev = prevLenRef.current;
+    prevLenRef.current = history.length;
+    // history が実際に増えた時のみ末尾へ、ただしターゲット指定中はスキップ
+    if (history.length > prev && !scrollToRunIdRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [history.length, open, scrollToRunId]);
+  }, [history.length]);
+
+  // open が閉→開に変わった時、ターゲット指定が無ければ末尾へ
+  const prevOpenRef = useRef(open);
+  useEffect(() => {
+    const wasOpen = prevOpenRef.current;
+    prevOpenRef.current = open;
+    if (!wasOpen && open && !scrollToRunIdRef.current) {
+      requestAnimationFrame(() => {
+        if (scrollRef.current && !scrollToRunIdRef.current) {
+          scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }
+      });
+    }
+  }, [open]);
 
   // ガントから指定された run の位置へスクロール
   // onDidScroll を deps から除外して毎レンダの再実行を防ぐ
@@ -1316,14 +1340,28 @@ function ChatDock({
         )}
       </div>
 
-      {/* 入力欄 (Shift+Enter で改行、Enter で送信) */}
+      {/* 入力欄 (デスクトップ: Enter 送信/Shift+Enter 改行、モバイル: Enter 改行/ボタンで送信) */}
       <div className="border-t border-slate-200 p-3 flex gap-2 items-end bg-white">
         <textarea
-          placeholder="メッセージを入力 (Enter 送信 / Shift+Enter 改行)"
+          placeholder={
+            typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches
+              ? 'メッセージを入力 (送信ボタンで送信)'
+              : 'メッセージを入力 (Enter 送信 / Shift+Enter 改行)'
+          }
           value={input}
           onChange={(e) => onInputChange(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !(e.nativeEvent as any).isComposing) {
+            // モバイル (touch device) では Enter = 改行のみ、送信はボタンのみ
+            const isMobile =
+              typeof window !== 'undefined' &&
+              (window.matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window);
+            if (isMobile) return;
+            if (
+              e.key === 'Enter' &&
+              !e.shiftKey &&
+              !e.isComposing &&
+              !(e.nativeEvent as any).isComposing
+            ) {
               e.preventDefault();
               onSendRef.current?.();
             }
@@ -1575,7 +1613,15 @@ function ThumbnailCard({
   };
 
   return (
-    <div className="group relative rounded-lg border border-slate-200 bg-white overflow-hidden hover:shadow-md hover:border-indigo-300 transition cursor-pointer">
+    <div
+      className="group relative rounded-lg border border-slate-200 bg-white overflow-hidden hover:shadow-md hover:border-indigo-300 transition cursor-pointer"
+      title={title}
+    >
+      {/* ホバー時に全文表示されるカスタムツールチップ */}
+      <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-2 z-20 opacity-0 group-hover:opacity-100 transition-opacity delay-150 whitespace-normal break-words max-w-[240px] min-w-[120px] px-2.5 py-1.5 rounded-md bg-slate-900 text-white text-[11px] leading-snug shadow-lg">
+        {title}
+        <div className="absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-x-4 border-x-transparent border-t-4 border-t-slate-900" />
+      </div>
       <button
         onClick={handleClick}
         className="w-full text-left"
