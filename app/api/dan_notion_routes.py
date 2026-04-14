@@ -342,10 +342,21 @@ async def chat_history(
             if by_run[rid]["user_text"] is None:
                 by_run[rid]["user_text"] = c.get("text", "")
         elif t["event_type"] == "complete":
-            # 最後の complete を採用
-            by_run[rid]["assistant_text"] = c.get("result", "")
+            # 有効な complete のみ採用 (is_error=false かつ text 非空)
+            result_text = c.get("result", "") or ""
+            if result_text and not c.get("is_error"):
+                by_run[rid]["assistant_text"] = result_text
         elif t["event_type"] == "error":
             by_run[rid]["error_text"] = str(c)[:500]
+
+    # assistant_text がまだ None の run は、fallback で any complete (空でも) を拾う
+    for t in traces:
+        rid = t["trigger_run_id"]
+        if rid not in by_run or by_run[rid]["assistant_text"]:
+            continue
+        c = t.get("content") or {}
+        if t["event_type"] == "complete":
+            by_run[rid]["assistant_text"] = c.get("result", "") or ""
 
     # 時系列昇順 (古い→新しい) で返す
     return sorted(by_run.values(), key=lambda x: x["started_at"])
