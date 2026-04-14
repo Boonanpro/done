@@ -1181,7 +1181,13 @@ function ChatDock({
   const scrollRef = useRef<HTMLDivElement>(null);
   const msgRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
-  // 末尾スクロール
+  // callback を ref に逃がして effect の deps から外す (不要な再実行防止)
+  const onDidScrollRef = useRef(onDidScroll);
+  onDidScrollRef.current = onDidScroll;
+  const onSendRef = useRef(onSend);
+  onSendRef.current = onSend;
+
+  // 末尾スクロール (新規メッセージ追加時)
   useEffect(() => {
     if (scrollRef.current && !scrollToRunId) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -1189,38 +1195,37 @@ function ChatDock({
   }, [history.length, open, scrollToRunId]);
 
   // ガントから指定された run の位置へスクロール
-  // DOM 再構築の完了を待つため 2段階 setTimeout (RAF + 100ms)
+  // onDidScroll を deps から除外して毎レンダの再実行を防ぐ
   useEffect(() => {
     if (!scrollToRunId || !open) return;
     let cancelled = false;
+    let retries = 0;
     const doScroll = () => {
       if (cancelled) return;
       const el = msgRefs.current[scrollToRunId];
-      if (el && scrollRef.current) {
-        // scrollIntoView は親の overflow を正しく検知しない場合があるので
-        // 親コンテナ内での offsetTop を手動計算してスクロール
-        const container = scrollRef.current;
+      const container = scrollRef.current;
+      if (el && container && container.clientHeight > 0) {
         const elRect = el.getBoundingClientRect();
         const containerRect = container.getBoundingClientRect();
         const relativeTop = elRect.top - containerRect.top + container.scrollTop;
         const targetScroll = relativeTop - container.clientHeight / 2 + elRect.height / 2;
         container.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' });
-        // ハイライトを一時的に付与
         el.classList.add('ring-2', 'ring-indigo-400', 'ring-offset-2');
         setTimeout(() => el.classList.remove('ring-2', 'ring-indigo-400', 'ring-offset-2'), 1800);
-        onDidScroll?.();
+        onDidScrollRef.current?.();
+      } else if (retries < 20) {
+        retries++;
+        setTimeout(doScroll, 50);
       } else {
-        // ref がまだ未設定ならリトライ
-        setTimeout(doScroll, 100);
+        onDidScrollRef.current?.();
       }
     };
-    // RAF + 100ms で DOM 更新後を確実に待つ
-    const rafId = requestAnimationFrame(() => setTimeout(doScroll, 100));
+    const rafId = requestAnimationFrame(() => setTimeout(doScroll, 80));
     return () => {
       cancelled = true;
       cancelAnimationFrame(rafId);
     };
-  }, [scrollToRunId, open, onDidScroll]);
+  }, [scrollToRunId, open]);
 
   if (!open) {
     return (
@@ -1311,26 +1316,27 @@ function ChatDock({
         )}
       </div>
 
-      {/* 入力欄 */}
-      <div className="border-t border-slate-200 p-3 flex gap-2 bg-white">
-        <Input
-          placeholder="メッセージを入力 (Enter で送信)"
+      {/* 入力欄 (Shift+Enter で改行、Enter で送信) */}
+      <div className="border-t border-slate-200 p-3 flex gap-2 items-end bg-white">
+        <textarea
+          placeholder="メッセージを入力 (Enter 送信 / Shift+Enter 改行)"
           value={input}
           onChange={(e) => onInputChange(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
+            if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !(e.nativeEvent as any).isComposing) {
               e.preventDefault();
-              onSend();
+              onSendRef.current?.();
             }
           }}
           disabled={sending}
-          className="bg-white border-slate-200"
+          rows={Math.min(6, Math.max(1, input.split('\n').length))}
+          className="flex-1 resize-none bg-white border border-slate-200 rounded-md px-3 py-2 text-sm outline-none focus:border-indigo-400 focus:ring-1 focus:ring-indigo-200 min-h-[36px] max-h-[144px]"
           autoFocus
         />
         <Button
           onClick={onSend}
           disabled={sending || !input.trim()}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white"
+          className="bg-indigo-600 hover:bg-indigo-700 text-white shrink-0"
         >
           <Send className="h-4 w-4" />
         </Button>
