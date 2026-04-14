@@ -1189,16 +1189,37 @@ function ChatDock({
   }, [history.length, open, scrollToRunId]);
 
   // ガントから指定された run の位置へスクロール
+  // DOM 再構築の完了を待つため 2段階 setTimeout (RAF + 100ms)
   useEffect(() => {
     if (!scrollToRunId || !open) return;
-    const el = msgRefs.current[scrollToRunId];
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      // ハイライトを一時的に付与
-      el.classList.add('ring-2', 'ring-indigo-400');
-      setTimeout(() => el.classList.remove('ring-2', 'ring-indigo-400'), 1500);
-    }
-    onDidScroll?.();
+    let cancelled = false;
+    const doScroll = () => {
+      if (cancelled) return;
+      const el = msgRefs.current[scrollToRunId];
+      if (el && scrollRef.current) {
+        // scrollIntoView は親の overflow を正しく検知しない場合があるので
+        // 親コンテナ内での offsetTop を手動計算してスクロール
+        const container = scrollRef.current;
+        const elRect = el.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        const relativeTop = elRect.top - containerRect.top + container.scrollTop;
+        const targetScroll = relativeTop - container.clientHeight / 2 + elRect.height / 2;
+        container.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' });
+        // ハイライトを一時的に付与
+        el.classList.add('ring-2', 'ring-indigo-400', 'ring-offset-2');
+        setTimeout(() => el.classList.remove('ring-2', 'ring-indigo-400', 'ring-offset-2'), 1800);
+        onDidScroll?.();
+      } else {
+        // ref がまだ未設定ならリトライ
+        setTimeout(doScroll, 100);
+      }
+    };
+    // RAF + 100ms で DOM 更新後を確実に待つ
+    const rafId = requestAnimationFrame(() => setTimeout(doScroll, 100));
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(rafId);
+    };
   }, [scrollToRunId, open, onDidScroll]);
 
   if (!open) {
