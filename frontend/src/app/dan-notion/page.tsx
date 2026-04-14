@@ -103,6 +103,14 @@ function displayTitle(block: Block): string {
 }
 
 
+class FetchError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
   const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
   const res = await fetch(url, {
@@ -113,7 +121,14 @@ async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
       ...(init?.headers || {}),
     },
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const j = await res.clone().json();
+      detail = j?.detail || '';
+    } catch {}
+    throw new FetchError(res.status, `${res.status} ${res.statusText}${detail ? ': ' + detail : ''}`);
+  }
   return res.json() as Promise<T>;
 }
 
@@ -609,8 +624,23 @@ function DanNotionInner() {
               </div>
             )}
             {pagesQ.error && (
-              <div className="p-3 text-sm text-red-600">
-                APIエラー: マイグレーション 036 を適用してください
+              <div className="p-3 text-xs text-red-600 space-y-2">
+                <div className="font-semibold">APIエラー</div>
+                <div className="text-[10px] text-red-500 break-words">
+                  {(pagesQ.error as any)?.message || String(pagesQ.error)}
+                </div>
+                {((pagesQ.error as any)?.status === 401 ||
+                  (pagesQ.error as any)?.status === 403) && (
+                  <div className="text-[10px] text-slate-600 border-t border-red-200 pt-2">
+                    認証切れの可能性があります。メインタブ (http://localhost:3000/chat) を再読み込みして再ログインし、このタブもリロードしてください。
+                  </div>
+                )}
+                <button
+                  onClick={() => pagesQ.refetch()}
+                  className="text-[10px] px-2 py-1 rounded bg-red-100 hover:bg-red-200 text-red-700"
+                >
+                  再試行
+                </button>
               </div>
             )}
             {pagesQ.data?.map((p) => (
