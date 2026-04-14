@@ -321,6 +321,20 @@ class AutopilotRunner:
             return 1, {"error": str(e)}
 
         assert proc.stdout is not None
+        assert proc.stderr is not None
+
+        # stderr を別スレッドで吸い取る
+        stderr_lines: list[str] = []
+
+        def _drain_stderr():
+            try:
+                for line in proc.stderr:  # type: ignore
+                    stderr_lines.append(line.rstrip())
+            except Exception:
+                pass
+
+        threading.Thread(target=_drain_stderr, daemon=True).start()
+
         for line in proc.stdout:
             line = line.strip()
             if not line:
@@ -337,6 +351,32 @@ class AutopilotRunner:
                 pass
 
         rc = proc.wait()
+
+        # 失敗していたら stderr を error trace に保存
+        is_failure = rc != 0 or last_result.get("is_error") or not last_result.get("text")
+        if is_failure:
+            stderr_text = "\n".join(stderr_lines)[-2000:]
+            self._trace("error", {
+                "phase": "cli_exit",
+                "rc": rc,
+                "stderr": stderr_text,
+                "last_result": last_result,
+            })
+            # session not found 判定: stderr に該当メッセージがあれば
+            lower = stderr_text.lower()
+            session_invalid = any(
+                kw in lower
+                for kw in (
+                    "no conversation found with session id",
+                    "could not find session",
+                    "session not found",
+                    "invalid session",
+                    "session_id",
+                )
+            )
+            last_result["_session_invalid"] = session_invalid
+            last_result["_stderr"] = stderr_text
+
         return rc, last_result
 
     # ============================================================
@@ -427,11 +467,18 @@ def execute_chat_async(
             attempt = 0
             result: dict = {}
             resume = resume_session_id
-            while attempt <= 1:
-                runner._trace("decision", {"phase": "attempt", "attempt": attempt + 1, "resume": bool(resume)})
+            max_attempts = 2
+            while attempt < max_attempts:
+                runner._trace("decision", {
+                    "phase": "attempt",
+                    "attempt": attempt + 1,
+                    "resume": bool(resume),
+                })
                 rc, result = runner._spawn_cli(prompt, resume_session_id=resume)
-                # resume が無効だったらリトライ時は新規セッションで
-                if rc == 0 and not result.get("is_error"):
+
+                # 成功条件: rc=0 かつ is_error=false かつ text 非空
+                text_ok = bool(result.get("text"))
+                if rc == 0 and not result.get("is_error") and text_ok:
                     runner._finish_run("succeeded", result)
                     # 次回のために session_id を保存
                     if runner.cli_session_id:
@@ -444,10 +491,20 @@ def execute_chat_async(
                         except Exception as e:
                             logger.warning("failed to persist last_session_id: %s", e)
                     return
+
                 attempt += 1
-                # リトライ時は resume を外す (セッション切れ等のリカバリ)
-                resume = None
-            runner._finish_run("failed", result, error=str(result)[:500])
+                # リトライの resume 判定:
+                # - stderr に session 無効を示すパターンがあれば resume を外す
+                # - それ以外は resume を維持して文脈を保つ
+                if result.get("_session_invalid"):
+                    runner._trace("decision", {"phase": "resume_drop", "reason": "session_invalid"})
+                    resume = None
+
+            runner._finish_run(
+                "failed",
+                result,
+                error=(result.get("_stderr") or result.get("text") or f"rc={rc}")[:1000],
+            )
         except Exception as e:
             logger.exception("chat worker crashed")
             try:

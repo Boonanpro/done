@@ -163,11 +163,22 @@ function useTraceStream(
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
 
     let pollTimer: ReturnType<typeof setInterval> | null = null;
-    let completedFired = false;
+    // 有効な complete が見つかるたびに更新して親へ送る。
+    // 最新の成功テキストで親側の history が上書きされるため、試行1 の空 complete は無視される
+    let bestCompleteText: string | null = null;
 
-    const fireComplete = (text: string) => {
-      if (completedFired) return;
-      completedFired = true;
+    const maybeFireComplete = (trace: Trace) => {
+      if (trace.event_type !== 'complete') return;
+      const text = trace.content?.result || '';
+      const isError = trace.content?.is_error === true;
+      if (!text || isError) return;
+      bestCompleteText = text;
+      onCompleteRef.current?.(runId, text);
+    };
+
+    const fireFromPollFetch = (text: string) => {
+      if (!text) return;
+      bestCompleteText = text;
       onCompleteRef.current?.(runId, text);
     };
 
@@ -182,14 +193,24 @@ function useTraceStream(
           const match = runs.find?.((r: any) => r.id === runId);
           if (match && ['succeeded', 'failed', 'cancelled'].includes(match.status)) {
             setDone(true);
-            // polling で気付いた場合、complete text を取得
-            if (!completedFired) {
+            // polling で気付いた場合、有効な complete trace を取得
+            if (!bestCompleteText) {
               try {
                 const tracesRes = await fetch(`${API}/trigger-runs/${runId}/traces`, { headers });
                 if (tracesRes.ok) {
                   const trs = await tracesRes.json();
-                  const comp = [...(trs || [])].reverse().find((t: any) => t.event_type === 'complete');
-                  if (comp) fireComplete(comp.content?.result || '');
+                  // 有効 (is_error=false かつ text 非空) な最後の complete を探す
+                  const validComp = [...(trs || [])]
+                    .reverse()
+                    .find(
+                      (t: any) =>
+                        t.event_type === 'complete' &&
+                        t.content?.result &&
+                        t.content?.is_error !== true
+                    );
+                  if (validComp) {
+                    fireFromPollFetch(validComp.content?.result || '');
+                  }
                 }
               } catch {}
             }
@@ -237,9 +258,7 @@ function useTraceStream(
                 if (prev.some((t) => t.id === trace.id)) return prev;
                 return [...prev, trace];
               });
-              if (trace.event_type === 'complete') {
-                fireComplete(trace.content?.result || '');
-              }
+              maybeFireComplete(trace);
             } catch {}
           }
         }
