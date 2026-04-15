@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap } from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap, Contact } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -63,7 +63,14 @@ const navItems = [
   },
 ];
 
-const businessItems: typeof navItems = [];
+const businessItems: typeof navItems = [
+  {
+    title: '連絡先',
+    href: '/dashboard/contacts',
+    icon: Contact,
+    description: 'クライアント・取引先の連絡先管理',
+  },
+];
 
 interface SidebarProps {
   className?: string;
@@ -524,7 +531,7 @@ export function Sidebar({
                     return (
                       <Tooltip key={item.href}>
                         <TooltipTrigger asChild>
-                          <a href={item.href} target="_blank" rel="noopener noreferrer">
+                          <Link href={item.href}>
                             <motion.div
                               whileHover={{ scale: 1.02 }}
                               whileTap={{ scale: 0.98 }}
@@ -538,7 +545,7 @@ export function Sidebar({
                               <Icon className="h-4 w-4 shrink-0" />
                               <span>{item.title}</span>
                             </motion.div>
-                          </a>
+                          </Link>
                         </TooltipTrigger>
                       </Tooltip>
                     );
