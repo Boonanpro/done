@@ -14,8 +14,9 @@ import {
   Notebook, Plus, Loader2, Bell, Activity, FileText, Trash2,
   ChevronRight, ChevronDown, ChevronUp, History, Sparkles, AlertCircle,
   Send, MessageSquare, Brain, Wrench, CheckCircle2, XCircle, RotateCcw,
-  LayoutGrid, List as ListIcon,
+  LayoutGrid, List as ListIcon, Target,
 } from 'lucide-react';
+import { TasksView } from './tasks-view';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -279,6 +280,7 @@ function useTraceStream(
 function DanNotionInner() {
   const qc = useQueryClient();
   const [selectedPageId, setSelectedPageId] = useState<string | null>(null);
+  const [showTasksView, setShowTasksView] = useState(false);
   const [newPageTitle, setNewPageTitle] = useState('');
   const [notifOpen, setNotifOpen] = useState(false);
 
@@ -637,6 +639,20 @@ function DanNotionInner() {
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto">
           <div className="p-2 space-y-1">
+            {/* やりたいことリストボタン */}
+            <button
+              onClick={() => { setShowTasksView(true); setSelectedPageId(null); }}
+              className={cn(
+                'w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm text-left transition-colors',
+                showTasksView
+                  ? 'bg-white border border-indigo-200 shadow-sm text-indigo-700'
+                  : 'hover:bg-slate-100 text-slate-700'
+              )}
+            >
+              <Target className="h-4 w-4" />
+              <span className="font-medium">やりたいこと</span>
+            </button>
+            <div className="h-px bg-slate-200 my-1" />
             {pagesQ.isLoading && (
               <div className="p-3 text-sm text-slate-500 flex items-center gap-2">
                 <Loader2 className="h-3 w-3 animate-spin" /> 読込中...
@@ -665,7 +681,7 @@ function DanNotionInner() {
             {pagesQ.data?.map((p) => (
               <button
                 key={p.id}
-                onClick={() => setSelectedPageId(p.id)}
+                onClick={() => { setSelectedPageId(p.id); setShowTasksView(false); }}
                 className={cn(
                   'w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm text-left transition-colors',
                   selectedPageId === p.id
@@ -763,7 +779,9 @@ function DanNotionInner() {
           </div>
         </div>
 
-        {!selectedPage ? (
+        {showTasksView ? (
+          <TasksView />
+        ) : !selectedPage ? (
           <div className="flex-1 flex flex-col items-center justify-center text-slate-400 gap-2">
             <Notebook className="h-12 w-12 opacity-30" />
             <p className="text-sm">左からページを選択するか、新規作成してください</p>
@@ -1026,7 +1044,120 @@ function GanttTimeline({
     return Math.max(now, startMs + 5000);
   }, [now, running, traces, startMs]);
 
-  const totalMs = Math.max(endMs - startMs, 1000);
+  const autoTotalMs = Math.max(endMs - startMs, 1000);
+
+  // ===== zoom + pan =====
+  // viewStart/viewEnd が null なら自動フィット、値ありならその範囲
+  const [viewStart, setViewStart] = useState<number | null>(null);
+  const [viewEnd, setViewEnd] = useState<number | null>(null);
+  const isZoomed = viewStart !== null && viewEnd !== null;
+
+  // run/traces が変わったら zoom リセット
+  useEffect(() => {
+    setViewStart(null);
+    setViewEnd(null);
+  }, [runId]);
+
+  const effectiveStart = isZoomed ? (viewStart as number) : startMs;
+  const effectiveEnd = isZoomed ? (viewEnd as number) : endMs;
+  const totalMs = Math.max(effectiveEnd - effectiveStart, 100);
+
+  const barAreaRef = useRef<HTMLDivElement>(null);
+
+  // ズーム関連の state を ref に逃がして native listener から参照
+  const zoomStateRef = useRef({ effectiveStart, totalMs, autoTotalMs, isZoomed });
+  zoomStateRef.current = { effectiveStart, totalMs, autoTotalMs, isZoomed };
+
+  // Native wheel listener ({passive:false} で preventDefault 可能)
+  useEffect(() => {
+    const area = barAreaRef.current;
+    if (!area || !expanded) return;
+    const onWheel = (e: WheelEvent) => {
+      const { effectiveStart: es, totalMs: tm, autoTotalMs: auto } = zoomStateRef.current;
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = area.getBoundingClientRect();
+      const cursorX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+      const cursorPct = rect.width > 0 ? cursorX / rect.width : 0;
+      const cursorMs = es + cursorPct * tm;
+
+      const zoomFactor = e.deltaY < 0 ? 0.82 : 1.22;
+      const minTotal = 200;
+      const maxTotal = auto * 1.2;
+      let newTotal = tm * zoomFactor;
+      newTotal = Math.max(minTotal, Math.min(maxTotal, newTotal));
+
+      const newStart = cursorMs - cursorPct * newTotal;
+      const newEnd = newStart + newTotal;
+
+      if (newTotal >= auto) {
+        setViewStart(null);
+        setViewEnd(null);
+      } else {
+        setViewStart(newStart);
+        setViewEnd(newEnd);
+      }
+    };
+    area.addEventListener('wheel', onWheel, { passive: false });
+    return () => area.removeEventListener('wheel', onWheel);
+  }, [expanded]);
+
+  const dragRef = useRef<{ startX: number; startVS: number; startVE: number } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isZoomed || e.button !== 0) return;
+    e.preventDefault();
+    dragRef.current = {
+      startX: e.clientX,
+      startVS: viewStart as number,
+      startVE: viewEnd as number,
+    };
+    setIsDragging(true);
+  };
+
+  useEffect(() => {
+    if (!isDragging) return;
+    const onMove = (e: MouseEvent) => {
+      const d = dragRef.current;
+      const area = barAreaRef.current;
+      if (!d || !area) return;
+      const rect = area.getBoundingClientRect();
+      const dx = e.clientX - d.startX;
+      const range = d.startVE - d.startVS;
+      const shift = -(dx / rect.width) * range;
+      // 全体範囲 [startMs, endMs] を越えて大きくパンしないようクランプ
+      const globalStart = startMs - autoTotalMs * 0.1;
+      const globalEnd = endMs + autoTotalMs * 0.1;
+      let ns = d.startVS + shift;
+      let ne = d.startVE + shift;
+      if (ns < globalStart) {
+        ns = globalStart;
+        ne = ns + range;
+      }
+      if (ne > globalEnd) {
+        ne = globalEnd;
+        ns = ne - range;
+      }
+      setViewStart(ns);
+      setViewEnd(ne);
+    };
+    const onUp = () => {
+      dragRef.current = null;
+      setIsDragging(false);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [isDragging, startMs, endMs, autoTotalMs]);
+
+  const resetZoom = () => {
+    setViewStart(null);
+    setViewEnd(null);
+  };
 
   const colorFor = (et: Trace['event_type']) => {
     switch (et) {
@@ -1094,6 +1225,16 @@ function GanttTimeline({
           {traces.length} イベント
         </span>
 
+        {isZoomed && (
+          <button
+            onClick={resetZoom}
+            className="text-[10px] px-2 py-0.5 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200"
+            title="ズーム解除 (全体表示)"
+          >
+            🔍 全体
+          </button>
+        )}
+
         {runs.length > 0 && (
           <select
             value={runId || ''}
@@ -1133,8 +1274,15 @@ function GanttTimeline({
               ))}
 
               {/* バー描画領域: 150px offset + right 2px padding、この中で 0-100% 計算 */}
+              {/* wheel で zoom (native listener)、drag で pan */}
               <div
-                className="absolute top-0 bottom-0"
+                ref={barAreaRef}
+                onMouseDown={handleMouseDown}
+                className={cn(
+                  'absolute top-0 bottom-0 overflow-hidden',
+                  isZoomed && (isDragging ? 'cursor-grabbing' : 'cursor-grab'),
+                  !isZoomed && 'cursor-default'
+                )}
                 style={{ left: 150, right: 8 }}
               >
                 {/* 時刻グリッド (5本) */}
@@ -1146,18 +1294,20 @@ function GanttTimeline({
                   />
                 ))}
 
-                {/* イベントバー */}
+                {/* イベントバー (effectiveStart/totalMs ベース、zoom対応) */}
                 {traces.map((t, i) => {
                   const ts = new Date(t.created_at).getTime();
-                  const startPct = ((ts - startMs) / totalMs) * 100;
+                  const startPct = ((ts - effectiveStart) / totalMs) * 100;
                   const nextSameAgent = traces.slice(i + 1).find((x) => x.agent_name === t.agent_name);
                   const endTs = nextSameAgent ? new Date(nextSameAgent.created_at).getTime() : ts + 800;
-                  const widthPct = Math.max(((endTs - ts) / totalMs) * 100, 1);
+                  const endPct = ((endTs - effectiveStart) / totalMs) * 100;
                   const rowIdx = rows.get(t.agent_name) || 0;
-                  // 右端を超えないように clamp
-                  const clampedStart = Math.min(startPct, 100);
-                  const maxWidth = Math.max(100 - clampedStart, 0);
-                  const clampedWidth = Math.min(widthPct, maxWidth);
+                  // 完全に画面外のバーはスキップ
+                  if (endPct < -5 || startPct > 105) return null;
+                  // クリップ (ただし overflow-hidden があるのでオーバーでも切られる)
+                  const clampedStart = Math.max(startPct, -5);
+                  const clampedEnd = Math.min(endPct, 105);
+                  const clampedWidth = Math.max(clampedEnd - clampedStart, 0.3);
                   return (
                     <div
                       key={t.id}
@@ -1170,7 +1320,6 @@ function GanttTimeline({
                       style={{
                         left: `${clampedStart}%`,
                         width: `calc(max(${clampedWidth}%, 6px))`,
-                        maxWidth: `calc(100% - ${clampedStart}%)`,
                         top: rowIdx * rowHeight + 8,
                         height: rowHeight - 12,
                       }}
