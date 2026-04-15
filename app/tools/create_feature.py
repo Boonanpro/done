@@ -15,6 +15,7 @@ BACKEND_MODELS = PROJECT_ROOT / "app" / "models"
 BACKEND_SERVICES = PROJECT_ROOT / "app" / "services"
 BACKEND_API = PROJECT_ROOT / "app" / "api"
 FRONTEND_DASHBOARD = PROJECT_ROOT / "frontend" / "src" / "app" / "dashboard"
+FRONTEND_DEMO = PROJECT_ROOT / "frontend" / "src" / "app" / "demo"
 SCRIPTS = PROJECT_ROOT / "scripts"
 
 # 実行済みfeatureを追跡するファイル
@@ -43,9 +44,36 @@ def get_next_migration_number() -> str:
     return "001"
 
 
+def _move_prototype(kebab: str) -> list[str]:
+    """
+    demo/ にプロトタイプが存在すれば本番パスに移動する。
+    承認されたプロトタイプをそのまま本番のベースにするため。
+    """
+    import shutil
+    moved = []
+    demo_dir = FRONTEND_DEMO / kebab
+    target_dir = FRONTEND_DASHBOARD / kebab
+
+    if not demo_dir.exists():
+        return moved
+
+    # 本番パスに既にファイルがある場合は移動しない（手動対応を促す）
+    if target_dir.exists():
+        print(f"WARNING: {target_dir} already exists. Skipping prototype move.")
+        return moved
+
+    # demo/ → dashboard/ に移動
+    shutil.move(str(demo_dir), str(target_dir))
+    moved.append(f"MOVED: {demo_dir} → {target_dir}")
+
+    # demo/ 直下が空になったら demo/ 自体は残す（他のプロトタイプがあるかもしれない）
+    return moved
+
+
 def create_feature(feature_name: str, description: str = "") -> dict:
     """
     機能の雛形ファイル一式を生成する。
+    demo/ に承認済みプロトタイプがあれば本番パスに移動してから雛形を生成。
 
     Args:
         feature_name: 機能名（英語推奨、例: "notebook", "invoice_manager"）
@@ -59,6 +87,14 @@ def create_feature(feature_name: str, description: str = "") -> dict:
     migration_num = get_next_migration_number()
 
     created_files = []
+
+    # ==========================================
+    # 0. プロトタイプの移動（demo/ → dashboard/）
+    # ==========================================
+    moved = _move_prototype(kebab)
+    for m in moved:
+        print(m)
+        created_files.append(m)
 
     # ==========================================
     # 1. DB Migration
@@ -278,13 +314,17 @@ async def delete_{snake}(
     created_files.append(str(routes_path))
 
     # ==========================================
-    # 5. Frontend Page
+    # 5. Frontend Page（プロトタイプ移動済みなら雛形生成をスキップ）
     # ==========================================
     page_dir = FRONTEND_DASHBOARD / kebab
-    page_dir.mkdir(parents=True, exist_ok=True)
-
     page_path = page_dir / "page.tsx"
-    page_path.write_text(f"""'use client';
+
+    if page_path.exists():
+        # プロトタイプが移動済み or 既存ページがある → 雛形で上書きしない
+        created_files.append(f"SKIPPED (exists): {page_path}")
+    else:
+        page_dir.mkdir(parents=True, exist_ok=True)
+        page_path.write_text(f"""'use client';
 
 /**
  * {feature_name} ページ
@@ -354,7 +394,7 @@ export default function {snake.title().replace("_", "")}Page() {{
   );
 }}
 """, encoding="utf-8")
-    created_files.append(str(page_path))
+        created_files.append(str(page_path))
 
     # ==========================================
     # 6. Seed Script
