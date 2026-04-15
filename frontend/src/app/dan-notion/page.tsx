@@ -1062,17 +1062,18 @@ function GanttTimeline({
   const effectiveEnd = isZoomed ? (viewEnd as number) : endMs;
   const totalMs = Math.max(effectiveEnd - effectiveStart, 100);
 
-  const barAreaRef = useRef<HTMLDivElement>(null);
+  const barAreaRef = useRef<HTMLDivElement | null>(null);
 
   // ズーム関連の state を ref に逃がして native listener から参照
   const zoomStateRef = useRef({ effectiveStart, totalMs, autoTotalMs, isZoomed });
   zoomStateRef.current = { effectiveStart, totalMs, autoTotalMs, isZoomed };
 
-  // Native wheel listener ({passive:false} で preventDefault 可能)
-  useEffect(() => {
-    const area = barAreaRef.current;
-    if (!area || !expanded) return;
-    const onWheel = (e: WheelEvent) => {
+  // wheel ハンドラを ref に保持 (再定義されても listener は同じ参照を使う)
+  const wheelHandlerRef = useRef<((e: WheelEvent) => void) | null>(null);
+  if (!wheelHandlerRef.current) {
+    wheelHandlerRef.current = (e: WheelEvent) => {
+      const area = barAreaRef.current;
+      if (!area) return;
       const { effectiveStart: es, totalMs: tm, autoTotalMs: auto } = zoomStateRef.current;
       e.preventDefault();
       e.stopPropagation();
@@ -1098,24 +1099,43 @@ function GanttTimeline({
         setViewEnd(newEnd);
       }
     };
-    area.addEventListener('wheel', onWheel, { passive: false });
-    return () => area.removeEventListener('wheel', onWheel);
-  }, [expanded]);
+  }
+
+  // コールバック ref: 要素がマウントされた瞬間に {passive:false} で listener を付ける
+  const setBarAreaRef = useCallback((el: HTMLDivElement | null) => {
+    if (barAreaRef.current && wheelHandlerRef.current) {
+      barAreaRef.current.removeEventListener('wheel', wheelHandlerRef.current);
+    }
+    barAreaRef.current = el;
+    if (el && wheelHandlerRef.current) {
+      el.addEventListener('wheel', wheelHandlerRef.current, { passive: false });
+    }
+  }, []);
 
   const dragRef = useRef<{ startX: number; startVS: number; startVE: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
+  // ドラッグ中の global state 参照用
+  const dragBoundsRef = useRef({ globalStart: 0, globalEnd: 0 });
+  dragBoundsRef.current = {
+    globalStart: startMs - autoTotalMs * 0.1,
+    globalEnd: endMs + autoTotalMs * 0.1,
+  };
+
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!isZoomed || e.button !== 0) return;
+    if (!zoomStateRef.current.isZoomed || e.button !== 0) return;
+    const vs = zoomStateRef.current.effectiveStart;
+    const ve = vs + zoomStateRef.current.totalMs;
     e.preventDefault();
     dragRef.current = {
       startX: e.clientX,
-      startVS: viewStart as number,
-      startVE: viewEnd as number,
+      startVS: vs,
+      startVE: ve,
     };
     setIsDragging(true);
   };
 
+  // ドラッグ中 global listener (deps を isDragging のみに絞る)
   useEffect(() => {
     if (!isDragging) return;
     const onMove = (e: MouseEvent) => {
@@ -1126,9 +1146,7 @@ function GanttTimeline({
       const dx = e.clientX - d.startX;
       const range = d.startVE - d.startVS;
       const shift = -(dx / rect.width) * range;
-      // 全体範囲 [startMs, endMs] を越えて大きくパンしないようクランプ
-      const globalStart = startMs - autoTotalMs * 0.1;
-      const globalEnd = endMs + autoTotalMs * 0.1;
+      const { globalStart, globalEnd } = dragBoundsRef.current;
       let ns = d.startVS + shift;
       let ne = d.startVE + shift;
       if (ns < globalStart) {
@@ -1152,7 +1170,7 @@ function GanttTimeline({
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [isDragging, startMs, endMs, autoTotalMs]);
+  }, [isDragging]);
 
   const resetZoom = () => {
     setViewStart(null);
@@ -1274,9 +1292,9 @@ function GanttTimeline({
               ))}
 
               {/* バー描画領域: 150px offset + right 2px padding、この中で 0-100% 計算 */}
-              {/* wheel で zoom (native listener)、drag で pan */}
+              {/* wheel で zoom (callback ref で native listener)、drag で pan */}
               <div
-                ref={barAreaRef}
+                ref={setBarAreaRef}
                 onMouseDown={handleMouseDown}
                 className={cn(
                   'absolute top-0 bottom-0 overflow-hidden',
