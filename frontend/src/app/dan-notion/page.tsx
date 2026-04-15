@@ -1456,6 +1456,9 @@ function BlockList({
   onCreateFirst: (type: string) => void;
   parentPageId: string;
 }) {
+  // サムネホバー時のツールチップ表示用 (Rules of Hooks: 早期returnより前で宣言)
+  const [hoveredTitle, setHoveredTitle] = useState<string | null>(null);
+
   // ブロックを「リストとして縦積み」と「メディアをグリッドでまとめる」に分離
   // grid mode: メディアブロックを連続するグループごとにまとめてグリッド描画
   // list mode: 全部そのまま縦積み
@@ -1552,6 +1555,7 @@ function BlockList({
                 onOpenPage={onOpenPage}
                 onDelete={() => onDelete(b)}
                 onInsertAfter={(type) => onInsertAfter(b.id, type)}
+                onHover={setHoveredTitle}
               />
             ))}
           </div>
@@ -1564,6 +1568,11 @@ function BlockList({
             onInsert={(type) => onInsertAfter(blocks[blocks.length - 1].id, type)}
             label="ブロックを追加"
           />
+        </div>
+      )}
+      {hoveredTitle && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-slate-900 text-white text-sm shadow-lg max-w-md text-center break-words animate-in fade-in duration-150">
+          {hoveredTitle}
         </div>
       )}
     </div>
@@ -1638,11 +1647,13 @@ function ThumbnailCard({
   onOpenPage,
   onDelete,
   onInsertAfter,
+  onHover,
 }: {
   block: Block;
   onOpenPage: (id: string) => void;
   onDelete: () => void;
   onInsertAfter?: (type: string) => void;
+  onHover?: (title: string | null) => void;
 }) {
   const title =
     displayTitle(block) ||
@@ -1664,13 +1675,9 @@ function ThumbnailCard({
   return (
     <div
       className="group relative rounded-lg border border-slate-200 bg-white overflow-hidden hover:shadow-md hover:border-indigo-300 transition cursor-pointer"
-      title={title}
+      onMouseEnter={() => onHover?.(title)}
+      onMouseLeave={() => onHover?.(null)}
     >
-      {/* ホバー時に全文表示されるカスタムツールチップ */}
-      <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-2 z-20 opacity-0 group-hover:opacity-100 transition-opacity delay-150 whitespace-normal break-words max-w-[240px] min-w-[120px] px-2.5 py-1.5 rounded-md bg-slate-900 text-white text-[11px] leading-snug shadow-lg">
-        {title}
-        <div className="absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-x-4 border-x-transparent border-t-4 border-t-slate-900" />
-      </div>
       <button
         onClick={handleClick}
         className="w-full text-left"
