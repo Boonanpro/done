@@ -1119,59 +1119,70 @@ function GanttTimeline({
             </div>
           ) : (
             <div className="relative px-2" style={{ height: rows.size * rowHeight + 8 }}>
-              {/* 時刻グリッド (5本) */}
-              {[0, 1, 2, 3, 4].map((i) => (
-                <div
-                  key={i}
-                  className="absolute top-0 bottom-0 border-l border-slate-200"
-                  style={{ left: `${(i / 4) * 100}%` }}
-                />
-              ))}
-
-              {/* 各エージェント行 */}
+              {/* 各エージェント行のラベル領域 (左 150px) */}
               {[...rows.entries()].map(([agentName, rowIdx]) => (
                 <div
                   key={agentName}
-                  className="absolute left-0 right-0 flex items-center"
-                  style={{ top: rowIdx * rowHeight + 4, height: rowHeight }}
+                  className="absolute flex items-center"
+                  style={{ top: rowIdx * rowHeight + 4, height: rowHeight, left: 0, width: 150 }}
                 >
-                  <span className="absolute left-2 text-[10px] text-slate-500 z-10 bg-slate-50 px-1 truncate max-w-[140px]">
+                  <span className="text-[10px] text-slate-500 px-2 truncate">
                     {agentName.replace('autopilot:', '').replace('__manual_chat__', 'チャット')}
                   </span>
                 </div>
               ))}
 
-              {/* イベントバー */}
-              {traces.map((t, i) => {
-                const ts = new Date(t.created_at).getTime();
-                const startPct = ((ts - startMs) / totalMs) * 100;
-                const nextSameAgent = traces.slice(i + 1).find((x) => x.agent_name === t.agent_name);
-                const endTs = nextSameAgent ? new Date(nextSameAgent.created_at).getTime() : ts + 800;
-                const widthPct = Math.max(((endTs - ts) / totalMs) * 100, 1);
-                const rowIdx = rows.get(t.agent_name) || 0;
-                return (
+              {/* バー描画領域: 150px offset + right 2px padding、この中で 0-100% 計算 */}
+              <div
+                className="absolute top-0 bottom-0"
+                style={{ left: 150, right: 8 }}
+              >
+                {/* 時刻グリッド (5本) */}
+                {[0, 1, 2, 3, 4].map((i) => (
                   <div
-                    key={t.id}
-                    onMouseEnter={() => setHoveredTrace(t)}
-                    onMouseLeave={() => setHoveredTrace((h) => (h?.id === t.id ? null : h))}
-                    className={cn(
-                      'absolute rounded-sm cursor-pointer border border-white/40 hover:scale-y-110 transition-transform',
-                      colorFor(t.event_type)
-                    )}
-                    style={{
-                      left: `calc(${Math.min(startPct, 99)}% + 150px)`,
-                      width: `max(${Math.min(widthPct, 99 - startPct)}%, 6px)`,
-                      top: rowIdx * rowHeight + 8,
-                      height: rowHeight - 12,
-                    }}
-                    title={`${t.event_type}: ${JSON.stringify(t.content).slice(0, 200)}`}
-                  >
-                    <span className="absolute inset-0 flex items-center justify-start pl-1 text-white">
-                      {iconFor(t.event_type)}
-                    </span>
-                  </div>
-                );
-              })}
+                    key={i}
+                    className="absolute top-0 bottom-0 border-l border-slate-200"
+                    style={{ left: `${(i / 4) * 100}%` }}
+                  />
+                ))}
+
+                {/* イベントバー */}
+                {traces.map((t, i) => {
+                  const ts = new Date(t.created_at).getTime();
+                  const startPct = ((ts - startMs) / totalMs) * 100;
+                  const nextSameAgent = traces.slice(i + 1).find((x) => x.agent_name === t.agent_name);
+                  const endTs = nextSameAgent ? new Date(nextSameAgent.created_at).getTime() : ts + 800;
+                  const widthPct = Math.max(((endTs - ts) / totalMs) * 100, 1);
+                  const rowIdx = rows.get(t.agent_name) || 0;
+                  // 右端を超えないように clamp
+                  const clampedStart = Math.min(startPct, 100);
+                  const maxWidth = Math.max(100 - clampedStart, 0);
+                  const clampedWidth = Math.min(widthPct, maxWidth);
+                  return (
+                    <div
+                      key={t.id}
+                      onMouseEnter={() => setHoveredTrace(t)}
+                      onMouseLeave={() => setHoveredTrace((h) => (h?.id === t.id ? null : h))}
+                      className={cn(
+                        'absolute rounded-sm cursor-pointer border border-white/40 hover:scale-y-110 transition-transform',
+                        colorFor(t.event_type)
+                      )}
+                      style={{
+                        left: `${clampedStart}%`,
+                        width: `calc(max(${clampedWidth}%, 6px))`,
+                        maxWidth: `calc(100% - ${clampedStart}%)`,
+                        top: rowIdx * rowHeight + 8,
+                        height: rowHeight - 12,
+                      }}
+                      title={`${t.event_type}: ${JSON.stringify(t.content).slice(0, 200)}`}
+                    >
+                      <span className="absolute inset-0 flex items-center justify-start pl-1 text-white">
+                        {iconFor(t.event_type)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
 
