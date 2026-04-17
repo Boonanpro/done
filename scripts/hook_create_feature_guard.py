@@ -22,6 +22,7 @@ GUARDED_PATTERNS = [
     (r"app[/\\]services[/\\](\w+)_service\.py", "service"),
     (r"app[/\\]models[/\\](\w+)_schemas\.py", "schemas"),
     (r"frontend[/\\]src[/\\]app[/\\]dashboard[/\\]([\w-]+)[/\\]page\.tsx", "page"),
+    (r"frontend[/\\]src[/\\]app[/\\]demo[/\\]([\w-]+)[/\\]page\.tsx", "demo_page"),
     (r"supabase[/\\]migrations[/\\]\d+_([\w]+)\.sql", "migration"),
 ]
 
