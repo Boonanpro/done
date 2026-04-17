@@ -70,18 +70,33 @@ def _move_prototype(kebab: str) -> list[str]:
     return moved
 
 
-def create_feature(feature_name: str, description: str = "") -> dict:
+def create_feature(feature_name: str, description: str = "", demo: bool = False, scenes: list[str] | None = None) -> dict:
     """
     機能の雛形ファイル一式を生成する。
-    demo/ に承認済みプロトタイプがあれば本番パスに移動してから雛形を生成。
+
+    demo=False（本番モード）:
+        demo/ に承認済みプロトタイプがあれば本番パスに移動してから雛形を生成。
+    demo=True（提案モード）:
+        提案動画用のプロトタイプ雛形をdemo/に生成。
+        scenes引数（デモシーンのリスト）が必須。
 
     Args:
         feature_name: 機能名（英語推奨、例: "notebook", "invoice_manager"）
         description: 機能の説明
+        demo: Trueなら提案用デモモード
+        scenes: デモで見せるシーンのリスト（demo=True時に必須）
 
     Returns:
         生成されたファイルのリスト
     """
+    # demo=True時はシーンリスト必須
+    if demo and (not scenes or len(scenes) == 0):
+        raise ValueError(
+            "demo=True の場合、scenes（デモで見せるシーンのリスト）が必須です。\n"
+            "例: scenes=['ダッシュボード全体表示', 'KPIカードのクリック', 'グラフのフィルタ操作']\n"
+            "まずデモシーン抽出（何を見せるか）を行ってからcreate_featureを呼んでください。"
+        )
+
     snake = to_snake(feature_name)
     kebab = to_kebab(feature_name)
     migration_num = get_next_migration_number()
@@ -89,12 +104,13 @@ def create_feature(feature_name: str, description: str = "") -> dict:
     created_files = []
 
     # ==========================================
-    # 0. プロトタイプの移動（demo/ → dashboard/）
+    # 0. 本番モード: プロトタイプの移動（demo/ → dashboard/）
     # ==========================================
-    moved = _move_prototype(kebab)
-    for m in moved:
-        print(m)
-        created_files.append(m)
+    if not demo:
+        moved = _move_prototype(kebab)
+        for m in moved:
+            print(m)
+            created_files.append(m)
 
     # ==========================================
     # 1. DB Migration
@@ -314,9 +330,13 @@ async def delete_{snake}(
     created_files.append(str(routes_path))
 
     # ==========================================
-    # 5. Frontend Page（プロトタイプ移動済みなら雛形生成をスキップ）
+    # 5. Frontend Page
     # ==========================================
-    page_dir = FRONTEND_DASHBOARD / kebab
+    # demoモードならdemo/、本番ならdashboard/
+    if demo:
+        page_dir = FRONTEND_DEMO / kebab
+    else:
+        page_dir = FRONTEND_DASHBOARD / kebab
     page_path = page_dir / "page.tsx"
 
     if page_path.exists():
@@ -443,27 +463,70 @@ if __name__ == "__main__":
     created_files.append(str(seed_path))
 
     # ==========================================
-    # 7. Feature Registry に記録
+    # 7. シーン設計書の生成（demoモード時のみ）
+    # ==========================================
+    if demo and scenes:
+        scenes_dir = PROJECT_ROOT / "docs" / "proposals"
+        scenes_dir.mkdir(parents=True, exist_ok=True)
+        scene_doc_path = scenes_dir / f"{snake}_scenes.md"
+
+        scene_lines = [
+            f"# {feature_name} — シーン設計書\n",
+            f"**説明**: {description}\n",
+            f"**生成日時**: {datetime.now().isoformat()}\n",
+            "---\n",
+        ]
+        for i, scene in enumerate(scenes, 1):
+            scene_lines.append(f"""
+### シーン {i}: {scene}
+
+**秒数**: （未定）
+**物語上の役割**: フック / アクセス手順 / タスク遂行 / テキスト挿入 / 締め
+**視聴者に感じさせたいこと**: （記入してください）
+**そのために何を映すか**: （記入してください）
+**操作の流れ**: （カーソル移動、クリック、画面変化を記述）
+**前のシーンからの繋がり**: （なぜこの順番か）
+**編集演出**: （ズーム、トランジション、SE等）
+""")
+
+        scene_doc_path.write_text("".join(scene_lines), encoding="utf-8")
+        created_files.append(str(scene_doc_path))
+
+    # ==========================================
+    # 8. Feature Registry に記録
     # ==========================================
     import json
     registry = {}
     if FEATURE_REGISTRY.exists():
         registry = json.loads(FEATURE_REGISTRY.read_text(encoding="utf-8"))
 
-    registry[snake] = {
+    registry_entry = {
         "name": feature_name,
         "description": description,
         "created_at": datetime.now().isoformat(),
+        "mode": "demo" if demo else "production",
         "files": created_files,
     }
+    if demo and scenes:
+        registry_entry["scenes"] = scenes
+    registry[snake] = registry_entry
 
     FEATURE_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     FEATURE_REGISTRY.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    return {
-        "feature": snake,
-        "files": created_files,
-        "next_steps": [
+    if demo:
+        next_steps = [
+            f"1. {scene_doc_path.name} のシーン設計書を埋める（各シーンの詳細を定義）",
+            f"2. {migration_path.name} のカラム定義を実装",
+            f"3. Supabase で SQL を適用",
+            f"4. {schemas_path.name} のフィールドを定義",
+            f"5. {page_path.name} のプロトタイプUIを実装（designスキルに従う）",
+            f"6. {seed_path.name} のサンプルデータを実装・実行",
+            f"7. Playwright でプロトタイプを録画",
+            f"8. Remotion で編集 → 提案動画を提出",
+        ]
+    else:
+        next_steps = [
             f"1. {migration_path.name} のカラム定義を実装",
             f"2. Supabase で SQL を適用",
             f"3. {schemas_path.name} のフィールドを定義",
@@ -472,7 +535,13 @@ if __name__ == "__main__":
             f"6. main.py にルーターを登録",
             f"7. {page_path.name} のUIを実装",
             f"8. {seed_path.name} のサンプルデータを実装・実行",
-        ],
+        ]
+
+    return {
+        "feature": snake,
+        "mode": "demo" if demo else "production",
+        "files": created_files,
+        "next_steps": next_steps,
     }
 
 
@@ -480,8 +549,15 @@ if __name__ == "__main__":
     import sys
     name = sys.argv[1] if len(sys.argv) > 1 else "test_feature"
     desc = sys.argv[2] if len(sys.argv) > 2 else ""
-    result = create_feature(name, desc)
-    print(f"Created {len(result['files'])} files for '{result['feature']}':")
+    is_demo = "--demo" in sys.argv
+    demo_scenes = None
+    if is_demo:
+        # CLI用: --scenes "シーン1,シーン2,シーン3"
+        for i, arg in enumerate(sys.argv):
+            if arg == "--scenes" and i + 1 < len(sys.argv):
+                demo_scenes = [s.strip() for s in sys.argv[i + 1].split(",")]
+    result = create_feature(name, desc, demo=is_demo, scenes=demo_scenes)
+    print(f"[{result['mode']}] Created {len(result['files'])} files for '{result['feature']}':")
     for f in result['files']:
         print(f"  {f}")
     print("\nNext steps:")
