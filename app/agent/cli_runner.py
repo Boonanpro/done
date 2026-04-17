@@ -111,6 +111,29 @@ def _save_session(room_id: str, session_id: str):
         logger.warning(f"Failed to save CLI session for {room_id}: {e}")
 
 
+def _is_disconnect_error(err: Exception) -> bool:
+    """Detect transient Supabase/httpx disconnect errors worth retrying once."""
+    msg = str(err).lower()
+    return (
+        "server disconnected" in msg
+        or "remotedisconnected" in msg
+        or "connection reset" in msg
+        or "connection aborted" in msg
+        or "read timeout" in msg
+        or "connection broken" in msg
+    )
+
+
+def _fresh_supabase_client():
+    """Rebuild the Supabase client to recover from a stale/disconnected session."""
+    from app.services import supabase_client as sbmod
+    try:
+        sbmod._supabase_client = None  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return sbmod.get_supabase_client().client
+
+
 def _save_execution_event_sync(
     room_id: str,
     event_type: str,
@@ -120,29 +143,37 @@ def _save_execution_event_sync(
     tool_label: Optional[str] = None,
     content: Optional[str] = None,
 ):
-    """CLIスレッドからDB直接保存（sync）。best-effort: 失敗してもログのみ。"""
+    """CLIスレッドからDB直接保存（sync）。disconnect時は1度だけ再接続リトライ。"""
     from app.services.execution_events import normalize_event_type
-    try:
-        from app.services.supabase_client import get_supabase_client
-        sb = get_supabase_client().client
-        normalized_type, original_type = normalize_event_type(event_type)
-        metadata = {}
-        if original_type is not None and original_type != normalized_type:
-            metadata["original_event_type"] = original_type
-        row = {
-            "room_id": room_id,
-            "run_id": run_id,
-            "event_type": normalized_type,
-            "tool_name": tool_name,
-            "tool_label": tool_label,
-            "content": content,
-            "metadata": metadata,
-        }
-        if project_id:
-            row["project_id"] = project_id
-        sb.table("execution_events").insert(row).execute()
-    except Exception as e:
-        _cli_debug(f"_save_execution_event_sync failed: {e}")
+    from app.services.supabase_client import get_supabase_client
+
+    normalized_type, original_type = normalize_event_type(event_type)
+    metadata = {}
+    if original_type is not None and original_type != normalized_type:
+        metadata["original_event_type"] = original_type
+    row = {
+        "room_id": room_id,
+        "run_id": run_id,
+        "event_type": normalized_type,
+        "tool_name": tool_name,
+        "tool_label": tool_label,
+        "content": content,
+        "metadata": metadata,
+    }
+    if project_id:
+        row["project_id"] = project_id
+
+    for attempt in (1, 2):
+        try:
+            sb = get_supabase_client().client if attempt == 1 else _fresh_supabase_client()
+            sb.table("execution_events").insert(row).execute()
+            return
+        except Exception as e:
+            if attempt == 1 and _is_disconnect_error(e):
+                _cli_debug(f"_save_execution_event_sync disconnect, retrying: {e}")
+                continue
+            _cli_debug(f"_save_execution_event_sync failed: {e}")
+            return
 
 
 def _update_run_sync(
@@ -178,32 +209,42 @@ def _save_ai_message_sync(
     reasoning_steps: Optional[list] = None,
     reasoning_full: Optional[list] = None,
 ) -> bool:
-    """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。成功=True。"""
-    try:
-        from app.services.supabase_client import get_supabase_client
-        sb = get_supabase_client().client
-        ai_context = None
-        if reasoning_steps:
-            ai_context = {"reasoning_steps": reasoning_steps}
-            if reasoning_full:
-                ai_context["reasoning_full"] = reasoning_full
-        insert_data = {
-            "room_id": room_id,
-            "sender_id": None,
-            "sender_type": "ai",
-            "content": content,
-        }
-        if ai_context:
-            insert_data["ai_context"] = ai_context
-        result = sb.table("chat_messages").insert(insert_data).execute()
-        if result.data:
-            _cli_debug(f"_save_ai_message_sync OK: msg_id={result.data[0].get('id', '?')}")
-            return True
-        _cli_debug("_save_ai_message_sync: insert returned no data")
-        return False
-    except Exception as e:
-        _cli_debug(f"_save_ai_message_sync failed: {e}")
-        return False
+    """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。成功=True。disconnect時は1度だけリトライ。"""
+    from app.services.supabase_client import get_supabase_client
+
+    ai_context = None
+    if reasoning_steps:
+        ai_context = {"reasoning_steps": reasoning_steps}
+        if reasoning_full:
+            ai_context["reasoning_full"] = reasoning_full
+    insert_data = {
+        "room_id": room_id,
+        "sender_id": None,
+        "sender_type": "ai",
+        "content": content,
+    }
+    if ai_context:
+        insert_data["ai_context"] = ai_context
+
+    for attempt in (1, 2):
+        try:
+            sb = get_supabase_client().client if attempt == 1 else _fresh_supabase_client()
+            result = sb.table("chat_messages").insert(insert_data).execute()
+            if result.data:
+                _cli_debug(
+                    f"_save_ai_message_sync OK (attempt {attempt}): msg_id={result.data[0].get('id', '?')}"
+                )
+                return True
+            _cli_debug(f"_save_ai_message_sync: insert returned no data (attempt {attempt})")
+            if attempt == 2:
+                return False
+        except Exception as e:
+            if attempt == 1 and _is_disconnect_error(e):
+                _cli_debug(f"_save_ai_message_sync disconnect, retrying: {e}")
+                continue
+            _cli_debug(f"_save_ai_message_sync failed (attempt {attempt}): {e}")
+            return False
+    return False
 
 
 def _build_runtime_contract_section() -> str:
@@ -874,10 +915,17 @@ def _run_cli_in_thread(
             if is_error and not text and errors:
                 text = f"CLIエラー: {'; '.join(errors)}"
 
+            # CLIが思考ブロックのみで終わった場合(text空)もフォールバックを必ず保存する。
+            # ここでスキップするとSSEハンドラ側のフォールバック保存パスに依存することになり、
+            # ちょうどSupabaseがdisconnectedのときにメッセージが完全に失われ、
+            # ユーザーは「終わった？」と催促するまで応答を受け取れなくなる。
+            if not text.strip():
+                text = "（内部思考のみで応答テキストが生成されませんでした。もう一度お試しください。）"
+
             # DB-first: CLIスレッドからAI応答を保存（SSE断線対策）
             # SSEハンドラに依存せず、ここで確実にDBに書き込む
             cli_saved = False
-            if text.strip() and not skip_save:
+            if not skip_save:
                 reasoning = result_data.get("reasoning_steps", [])
                 reasoning_full_list = result_data.get("reasoning_full", [])
                 cli_saved = _save_ai_message_sync(

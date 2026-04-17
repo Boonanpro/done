@@ -1,15 +1,15 @@
 {
-  "dan_notion": {
-    "name": "dan_notion",
-    "description": "ダン用Notion: Blockベース情報管理 + CMAライク自律エージェント",
-    "created_at": "2026-04-13T15:24:10.951527",
+  "contacts": {
+    "name": "contacts",
+    "description": "クライアント・取引先の連絡先管理",
+    "created_at": "2026-04-15T13:52:57.794731",
     "files": [
-      "D:\\done\\supabase\\migrations\\036_dan_notion.sql",
-      "D:\\done\\app\\models\\dan_notion_schemas.py",
-      "D:\\done\\app\\services\\dan_notion_service.py",
-      "D:\\done\\app\\api\\dan_notion_routes.py",
-      "D:\\done\\frontend\\src\\app\\dashboard\\dan-notion\\page.tsx",
-      "D:\\done\\scripts\\seed_dan_notion.py"
+      "D:\\done\\supabase\\migrations\\037_contacts.sql",
+      "D:\\done\\app\\models\\contacts_schemas.py",
+      "D:\\done\\app\\services\\contacts_service.py",
+      "D:\\done\\app\\api\\contacts_routes.py",
+      "D:\\done\\frontend\\src\\app\\dashboard\\contacts\\page.tsx",
+      "D:\\done\\scripts\\seed_contacts.py"
     ]
   }
 }
