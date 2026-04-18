@@ -11,5 +11,28 @@
       "D:\\done\\frontend\\src\\app\\dashboard\\contacts\\page.tsx",
       "D:\\done\\scripts\\seed_contacts.py"
     ]
+  },
+  "amagasaki_sales_dashboard": {
+    "name": "amagasaki_sales_dashboard",
+    "description": "尼崎B2B AIセールスパイプラインの運用ダッシュボード。企業リスト→診断→課題仮説→プロトタイプ→送信→KPIを1画面で管理。",
+    "created_at": "2026-04-18T10:27:26.263879",
+    "mode": "demo",
+    "files": [
+      "D:\\done\\supabase\\migrations\\038_amagasaki_sales_dashboard.sql",
+      "D:\\done\\app\\models\\amagasaki_sales_dashboard_schemas.py",
+      "D:\\done\\app\\services\\amagasaki_sales_dashboard_service.py",
+      "D:\\done\\app\\api\\amagasaki_sales_dashboard_routes.py",
+      "D:\\done\\frontend\\src\\app\\demo\\amagasaki-sales-dashboard\\page.tsx",
+      "D:\\done\\scripts\\seed_amagasaki_sales_dashboard.py",
+      "D:\\done\\docs\\proposals\\amagasaki_sales_dashboard_scenes.md"
+    ],
+    "scenes": [
+      "ホーム画面: 今日やることとリアルタイムKPI",
+      "企業一覧: 5000社をスコア順に並べフィルタで絞る",
+      "企業詳細: タブ切替でHP診断とAI課題仮説を確認",
+      "プロトタイプ生成: パラメータ設定して自動生成",
+      "送信キュー: AI生成メッセージを承認して送信",
+      "KPIダッシュボード: ファネルと業種別返信率"
+    ]
   }
 }
