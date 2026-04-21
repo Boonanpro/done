@@ -34,5 +34,19 @@
       "送信キュー: AI生成メッセージを承認して送信",
       "KPIダッシュボード: ファネルと業種別返信率"
     ]
+  },
+  "chat_artifact": {
+    "name": "chat_artifact",
+    "description": "チャットメッセージに紐づく成果物（ダッシュボード/HP/ツール）。プレビューペイン用のポインタ。",
+    "created_at": "2026-04-21T14:45:31.132874",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\039_chat_artifact.sql",
+      "D:\\done\\app\\models\\chat_artifact_schemas.py",
+      "D:\\done\\app\\services\\chat_artifact_service.py",
+      "D:\\done\\app\\api\\chat_artifact_routes.py",
+      "D:\\done\\frontend\\src\\app\\dashboard\\chat-artifact\\page.tsx",
+      "D:\\done\\scripts\\seed_chat_artifact.py"
+    ]
   }
 }
