@@ -213,6 +213,7 @@ function parseMediaContent(content: string): { images: string[]; videos: string[
   const videos: string[] = [];
   const files: { name: string; url: string }[] = [];
   const text = content
+    .replace(/<dan-context>[\s\S]*?<\/dan-context>/g, '')
     .replace(/\[動画分析結果\(Gemini\):\n[\s\S]*?\n\]/g, '')
     .replace(/\[添付画像: ([^\]]+)\]/g, (_, path: string) => {
       if (path.startsWith('/api/')) {
@@ -436,6 +437,7 @@ function ChatInput({
   onSseStateChange,
   replyTo,
   onClearReply,
+  onSubmitComment,
 }: {
   projectId: string;
   roomId: string;
@@ -444,7 +446,12 @@ function ChatInput({
   onSseStateChange?: (connected: boolean) => void;
   replyTo?: MessageResponse | null;
   onClearReply?: () => void;
+  onSubmitComment?: () => void;
 }) {
+  const inspectorElement = usePreviewStore((s) => s.selectedElement);
+  const inspectorDraft = usePreviewStore((s) => s.popoverDraft);
+  const clearInspectorSelection = usePreviewStore((s) => s.clearSelection);
+  const isCommentMode = !!inspectorElement;
   const [message, setMessage] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -568,6 +575,7 @@ function ChatInput({
     queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
     queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
     queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+    queryClient.invalidateQueries({ queryKey: ['chat-artifacts', projectId] });
   }, [projectId, queryClient, roomId]);
 
   const uploadFiles = useCallback(async (fileList: File[]) => {
@@ -1049,15 +1057,35 @@ function ChatInput({
           })}
         </div>
       )}
-      <div className="flex items-end gap-2 rounded-xl border border-border bg-input/30 p-2 transition-colors focus-within:border-primary/50">
+      {isCommentMode && inspectorElement && (
+        <div className="mb-2 flex items-center gap-1.5 rounded-md border border-primary/40 bg-primary/5 px-2 py-1 text-xs">
+          <span className="rounded bg-primary/20 px-1.5 py-0.5 font-mono font-medium text-primary">
+            @{inspectorElement.refId}
+          </span>
+          <span className="truncate text-muted-foreground">
+            &lt;{inspectorElement.tagName}&gt;
+            {inspectorElement.text ? ` "${inspectorElement.text}"` : ''}
+          </span>
+          <button
+            onClick={clearInspectorSelection}
+            className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
+            title="選択解除 (Esc)"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
+      <div className={`flex items-end gap-2 rounded-xl border bg-input/30 p-2 transition-colors ${isCommentMode ? 'border-primary/40' : 'border-border focus-within:border-primary/50'}`}>
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} accept="*/*" />
-        <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground" onClick={handleClickAttach} disabled={isUploading} title="ファイルを添付">
+        <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground" onClick={handleClickAttach} disabled={isUploading || isCommentMode} title="ファイルを添付">
           {isUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Paperclip className="h-3.5 w-3.5" />}
         </Button>
         <textarea
           ref={textareaRef}
-          value={message}
+          value={isCommentMode ? inspectorDraft : message}
+          readOnly={isCommentMode}
           onChange={(event) => {
+            if (isCommentMode) return;
             const val = event.target.value;
             setMessage(val);
             if (val.startsWith('/') && !val.includes(' ')) {
@@ -1068,13 +1096,32 @@ function ChatInput({
               setShowSkillSuggestions(false);
             }
           }}
-          onKeyDown={handleKeyDown}
+          onKeyDown={(event) => {
+            if (isCommentMode) {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                if (inspectorDraft.trim()) onSubmitComment?.();
+              }
+              return;
+            }
+            handleKeyDown(event);
+          }}
           onPaste={handlePaste}
-          placeholder="メッセージを入力..."
+          placeholder={isCommentMode ? '右ペインのコメント欄で入力...' : 'メッセージを入力...'}
           rows={1}
-          className="min-h-[32px] max-h-[120px] flex-1 resize-none bg-transparent py-1.5 text-base focus:outline-none md:text-[17px]"
+          className={`min-h-[32px] max-h-[120px] flex-1 resize-none bg-transparent py-1.5 text-base focus:outline-none md:text-[17px] ${isCommentMode ? 'cursor-not-allowed text-foreground/90' : ''}`}
         />
-        {message.trim() || attachedFiles.length > 0 ? (
+        {isCommentMode ? (
+          <Button
+            size="icon"
+            className="h-7 w-7 shrink-0"
+            onClick={() => onSubmitComment?.()}
+            disabled={!inspectorDraft.trim()}
+            title="コメント送信"
+          >
+            <Send className="h-3.5 w-3.5" />
+          </Button>
+        ) : message.trim() || attachedFiles.length > 0 ? (
           <Button
             size="icon"
             className="h-7 w-7 shrink-0"
@@ -1107,70 +1154,51 @@ function ChatInput({
   );
 }
 
-function composeCommentMessage(text: string, element: SelectedElement): string {
-  const header = `[要素 @${element.refId} <${element.tagName}>${
-    element.text ? ` "${element.text}"` : ''
-  }]`;
-  const snippet = element.outerHtmlSnippet
-    ? `\n\`\`\`html\n${element.outerHtmlSnippet}\n\`\`\``
-    : '';
-  return `${header}${snippet}\n\n${text}`;
+function slugToFilePath(slug: string, previewUrl: string): string {
+  // /demo/xxx → frontend/src/app/demo/xxx/page.tsx
+  // /dashboard/xxx → frontend/src/app/dashboard/xxx/page.tsx
+  const trimmed = previewUrl.replace(/^\//, '');
+  return `frontend/src/app/${trimmed}/page.tsx`;
 }
 
-function CommentMirrorBar({
-  element,
-  draft,
-  onSubmit,
-  onCancel,
-}: {
-  element: SelectedElement;
-  draft: string;
-  onSubmit: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <div className="shrink-0 border-t border-primary/50 bg-primary/5 p-3">
-      <div className="mb-2 flex items-center gap-1.5 text-xs">
-        <span className="rounded bg-primary/20 px-1.5 py-0.5 font-mono font-medium text-primary">
-          @{element.refId}
-        </span>
-        <span className="truncate text-muted-foreground">
-          &lt;{element.tagName}&gt;
-          {element.text ? ` "${element.text}"` : ''}
-        </span>
-        <span className="ml-auto shrink-0 text-muted-foreground">
-          右ペインのコメントと連動
-        </span>
-        <button
-          onClick={onCancel}
-          className="shrink-0 text-muted-foreground hover:text-foreground"
-          title="選択解除 (Esc)"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-      <div className="flex items-end gap-2 rounded-xl border border-primary/40 bg-background/60 p-2">
-        <div className="min-h-[32px] max-h-[120px] flex-1 overflow-y-auto whitespace-pre-wrap py-1.5 text-base leading-relaxed md:text-[17px]">
-          {draft ? (
-            <span className="text-foreground">{draft}</span>
-          ) : (
-            <span className="text-muted-foreground">
-              右ペインのコメント欄で入力中...
-            </span>
-          )}
-        </div>
-        <Button
-          size="icon"
-          className="h-7 w-7 shrink-0"
-          onClick={onSubmit}
-          disabled={!draft.trim()}
-          title="送信 (Enter)"
-        >
-          <Send className="h-3.5 w-3.5" />
-        </Button>
-      </div>
-    </div>
+function composeCommentMessage(
+  text: string,
+  element: SelectedElement,
+  artifact: ArtifactRecord | null
+): string {
+  const lines: string[] = ['<dan-context>'];
+  lines.push('kind: element-comment');
+  lines.push('note: |');
+  lines.push('  ユーザーは成果物上で要素を選択し、その要素について発言している。');
+  lines.push('  発言の意図は文面から判断: 修正要望 / 質問 / 議論 / 提案 など自由。');
+  lines.push('  修正を依頼された場合のみファイルを編集する。');
+  if (artifact) {
+    lines.push('artifact:');
+    lines.push(`  slug: ${artifact.slug}`);
+    lines.push(`  label: ${artifact.label || artifact.slug}`);
+    lines.push(`  file: ${slugToFilePath(artifact.slug, artifact.preview_url)}`);
+    lines.push(`  preview-url: ${artifact.preview_url}`);
+  }
+  lines.push('selection:');
+  lines.push(`  ref: @${element.refId}`);
+  lines.push(`  tag: ${element.tagName}`);
+  if (element.className) lines.push(`  class: ${JSON.stringify(element.className)}`);
+  if (element.bgColor) lines.push(`  computed-background: ${element.bgColor}`);
+  if (element.ancestors?.length) {
+    lines.push(`  ancestors: ${element.ancestors.join(' > ')}`);
+  }
+  lines.push(
+    `  bounding-rect: { x: ${Math.round(element.rect.x)}, y: ${Math.round(element.rect.y)}, w: ${Math.round(element.rect.width)}, h: ${Math.round(element.rect.height)} }`
   );
+  if (element.text) lines.push(`  text-content: ${JSON.stringify(element.text)}`);
+  if (element.outerHtmlSnippet) {
+    lines.push('  html: |');
+    element.outerHtmlSnippet.split('\n').forEach((ln) => {
+      lines.push(`    ${ln}`);
+    });
+  }
+  lines.push('</dan-context>');
+  return `${lines.join('\n')}\n\n${text}`;
 }
 
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
@@ -1221,6 +1249,24 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   });
   const [artifactMenuOpen, setArtifactMenuOpen] = useState(false);
 
+  // Auto-open newly created artifacts
+  const seenArtifactIdsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!artifacts.length) return;
+    const seen = seenArtifactIdsRef.current;
+    if (seen.size === 0) {
+      // First load: just record current state, don't auto-open
+      artifacts.forEach((a) => seen.add(a.id));
+      return;
+    }
+    const newOnes = artifacts.filter((a) => !seen.has(a.id));
+    if (newOnes.length > 0) {
+      // Most recent first (already sorted desc by created_at)
+      openArtifact(projectId, newOnes[0]);
+      newOnes.forEach((a) => seen.add(a.id));
+    }
+  }, [artifacts, projectId, openArtifact]);
+
   // Chat/Preview pane resize
   const [chatWidth, setChatWidth] = useState(520);
   const [isResizing, setIsResizing] = useState(false);
@@ -1257,9 +1303,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const handleSubmitComment = useCallback(async () => {
     const { text, element } = consumeDraft();
     if (!element || !text.trim()) return;
-    const composed = composeCommentMessage(text, element);
+    const composed = composeCommentMessage(text, element, previewArtifact);
     sendMessageRef.current?.(composed);
-  }, [consumeDraft]);
+  }, [consumeDraft, previewArtifact]);
 
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
@@ -1593,16 +1639,16 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       {/* 承認/却下ボタンは廃止。チャットでの承認を観察者が検知して計画を記録する */}
 
       {project?.room_id ? (
-        selectedElement && isPreviewOpenForProject ? (
-          <CommentMirrorBar
-            element={selectedElement}
-            draft={popoverDraft}
-            onSubmit={handleSubmitComment}
-            onCancel={() => usePreviewStore.getState().clearSelection()}
-          />
-        ) : (
-          <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} sendMessageRef={sendMessageRef} onSseStateChange={(connected) => { sseConnectedRef.current = connected; }} replyTo={replyTo} onClearReply={() => setReplyTo(null)} />
-        )
+        <ChatInput
+          projectId={projectId}
+          roomId={project.room_id}
+          isSessionActive={isActiveExecution}
+          sendMessageRef={sendMessageRef}
+          onSseStateChange={(connected) => { sseConnectedRef.current = connected; }}
+          replyTo={replyTo}
+          onClearReply={() => setReplyTo(null)}
+          onSubmitComment={handleSubmitComment}
+        />
       ) : null}
 
       {lightboxImage && (

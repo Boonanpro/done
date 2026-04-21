@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Edit3, ExternalLink, X } from 'lucide-react';
+import { ChevronDown, Edit3, ExternalLink, RefreshCw, X } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 
 import { Button } from '@/components/ui/button';
@@ -20,6 +20,24 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [loaded, setLoaded] = useState(false);
   const [showSwitcher, setShowSwitcher] = useState(false);
+  const [refreshSpinning, setRefreshSpinning] = useState(false);
+
+  const handleRefresh = () => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    setRefreshSpinning(true);
+    try {
+      iframe.contentWindow?.location.reload();
+    } catch {
+      // cross-origin fallback
+      const current = iframe.src;
+      iframe.src = '';
+      setTimeout(() => {
+        iframe.src = current;
+      }, 30);
+    }
+    setTimeout(() => setRefreshSpinning(false), 600);
+  };
 
   const { data: artifacts = [] } = useQuery<ArtifactRecord[]>({
     queryKey: ['chat-artifacts', projectId],
@@ -85,6 +103,13 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
             </div>
           )}
         </div>
+        <button
+          onClick={handleRefresh}
+          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+          title="プレビューを再読み込み"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${refreshSpinning ? 'animate-spin' : ''}`} />
+        </button>
         <a
           href={artifact.preview_url}
           target="_blank"

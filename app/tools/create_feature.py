@@ -3,6 +3,9 @@ create_feature — 新機能の雛形ファイルを自動生成するツール
 
 機能名を受け取り、DB migration + schemas + service + routes + frontend page + seed script を生成。
 ダンが機能実装を開始する際に必ず通る関門。
+
+DAN_PROJECT_ID 環境変数が設定されていれば、生成した成果物を chat_artifact テーブルに
+自動登録する（プロジェクトに紐づく成果物としてプレビューペインから開けるようにする）。
 """
 import os
 import re
@@ -513,6 +516,40 @@ if __name__ == "__main__":
 
     FEATURE_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     FEATURE_REGISTRY.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # ==========================================
+    # 9. chat_artifact への自動登録（DAN_PROJECT_ID があれば）
+    # ==========================================
+    project_id = os.environ.get("DAN_PROJECT_ID")
+    if project_id:
+        try:
+            from app.services.supabase_client import get_supabase_client
+            sb = get_supabase_client().client
+            proj_res = sb.table("projects").select("user_id").eq("id", project_id).execute()
+            owner_id = proj_res.data[0]["user_id"] if proj_res.data else None
+            if owner_id:
+                preview_url = f"/{'demo' if demo else 'dashboard'}/{kebab}"
+                # 同じプロジェクト内に同じ slug があれば重複登録しない
+                exists = (
+                    sb.table("chat_artifact")
+                    .select("id")
+                    .eq("project_id", project_id)
+                    .eq("slug", kebab)
+                    .execute()
+                )
+                if not exists.data:
+                    sb.table("chat_artifact").insert({
+                        "project_id": project_id,
+                        "slug": kebab,
+                        "kind": "demo" if demo else "production",
+                        "label": feature_name,
+                        "preview_url": preview_url,
+                        "created_by": owner_id,
+                    }).execute()
+                    print(f"[chat_artifact] registered: {kebab} -> {preview_url} (project {project_id[:8]}...)")
+                    created_files.append(f"REGISTERED: chat_artifact/{kebab}")
+        except Exception as e:
+            print(f"[chat_artifact] failed to register: {e}")
 
     if demo:
         next_steps = [
