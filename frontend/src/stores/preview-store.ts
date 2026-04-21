@@ -8,6 +8,9 @@ export interface SelectedElement {
   text: string;
   outerHtmlSnippet: string;
   rect: { x: number; y: number; width: number; height: number };
+  className?: string;
+  ancestors?: string[];
+  bgColor?: string;
 }
 
 export interface ArtifactRecord {

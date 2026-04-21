@@ -835,6 +835,8 @@ def _run_cli_in_thread(
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
     env["DAN_SESSION_ID"] = room_id
     env["CLAUDE_CODE_ENABLE_TASKS"] = "true"
+    if project_id:
+        env["DAN_PROJECT_ID"] = project_id
 
     # .env にしか定義されていない変数を settings から補完
     # （os.environ には入らないため、CLIやMCPサーバーに渡らず Supabase アクセスが失敗する）
