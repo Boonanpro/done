@@ -7,6 +7,7 @@ import { Sidebar } from './sidebar';
 import { ProjectChatPanel } from './project-chat-panel';
 import { NotificationPanel } from '@/components/notification/notification-panel';
 import { useProjectStore } from '@/stores/project-store';
+import { usePreviewStore } from '@/stores/preview-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { useCollabNotifications } from '@/hooks/useCollabNotifications';
 
@@ -27,7 +28,9 @@ export function MainLayout({
   const [isResizing, setIsResizing] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [hasOpenedMobileSidebar, setHasOpenedMobileSidebar] = useState(false);
+  const [sidebarHovered, setSidebarHovered] = useState(false);
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
+  const previewIsOpen = usePreviewStore((s) => s.isOpen);
 
   // Show toast notifications for new collab messages
   useCollabNotifications();
@@ -118,24 +121,42 @@ export function MainLayout({
 
   // ===== Desktop Layout =====
   const effectiveWidth = isCollapsed ? 64 : sidebarWidth;
+  const sidebarRevealed = !previewIsOpen || sidebarHovered;
 
   return (
     <div className="relative flex h-dvh overflow-hidden bg-background">
-      {/* Sidebar */}
+      {/* Sidebar — when preview is open, becomes a hover-revealed overlay */}
+      {previewIsOpen && (
+        <div
+          className="absolute inset-y-0 left-0 z-20 w-2"
+          onMouseEnter={() => setSidebarHovered(true)}
+        />
+      )}
       <div
         className={cn(
-          'relative shrink-0 overflow-hidden',
-          !isResizing && 'transition-[width] duration-300 ease-in-out'
+          previewIsOpen
+            ? 'absolute inset-y-0 left-0 z-30 shadow-2xl transition-transform duration-200 ease-out'
+            : 'relative shrink-0 overflow-hidden',
+          !isResizing && !previewIsOpen && 'transition-[width] duration-300 ease-in-out'
         )}
-        style={{ width: effectiveWidth }}
+        style={
+          previewIsOpen
+            ? {
+                width: sidebarWidth,
+                transform: sidebarRevealed ? 'translateX(0)' : 'translateX(-100%)',
+              }
+            : { width: effectiveWidth }
+        }
+        onMouseEnter={previewIsOpen ? () => setSidebarHovered(true) : undefined}
+        onMouseLeave={previewIsOpen ? () => setSidebarHovered(false) : undefined}
       >
         <Sidebar
-          isCollapsed={isCollapsed}
+          isCollapsed={previewIsOpen ? false : isCollapsed}
           onToggleCollapse={() => setIsCollapsed(!isCollapsed)}
         />
       </div>
-      {/* Resize handle */}
-      {!isCollapsed && (
+      {/* Resize handle (only when sidebar is permanent) */}
+      {!isCollapsed && !previewIsOpen && (
         <div
           className="absolute top-0 h-full z-10 w-3 -translate-x-1/2 cursor-col-resize group"
           style={{ left: effectiveWidth }}
@@ -155,7 +176,7 @@ export function MainLayout({
             <p className="text-sm">プロジェクトを選択してください</p>
           </div>
         )}
-        {showNotifications && <NotificationPanel />}
+        {showNotifications && !previewIsOpen && <NotificationPanel />}
       </main>
     </div>
   );

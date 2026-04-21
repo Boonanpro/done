@@ -43,6 +43,8 @@ import { useRouter } from 'next/navigation';
 import { useProjectRecovery } from '@/hooks/useProjectRecovery';
 import { useAuthStore } from '@/stores/auth-store';
 import { useProjectStore, useRecoveryActions, useRecoveryState } from '@/stores/project-store';
+import { usePreviewStore, type ArtifactRecord, type SelectedElement } from '@/stores/preview-store';
+import { PreviewPane } from '@/components/preview/preview-pane';
 
 interface ProjectChatPanelProps {
   projectId: string;
@@ -1105,6 +1107,72 @@ function ChatInput({
   );
 }
 
+function composeCommentMessage(text: string, element: SelectedElement): string {
+  const header = `[要素 @${element.refId} <${element.tagName}>${
+    element.text ? ` "${element.text}"` : ''
+  }]`;
+  const snippet = element.outerHtmlSnippet
+    ? `\n\`\`\`html\n${element.outerHtmlSnippet}\n\`\`\``
+    : '';
+  return `${header}${snippet}\n\n${text}`;
+}
+
+function CommentMirrorBar({
+  element,
+  draft,
+  onSubmit,
+  onCancel,
+}: {
+  element: SelectedElement;
+  draft: string;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="shrink-0 border-t border-primary/50 bg-primary/5 p-3">
+      <div className="mb-2 flex items-center gap-1.5 text-xs">
+        <span className="rounded bg-primary/20 px-1.5 py-0.5 font-mono font-medium text-primary">
+          @{element.refId}
+        </span>
+        <span className="truncate text-muted-foreground">
+          &lt;{element.tagName}&gt;
+          {element.text ? ` "${element.text}"` : ''}
+        </span>
+        <span className="ml-auto shrink-0 text-muted-foreground">
+          右ペインのコメントと連動
+        </span>
+        <button
+          onClick={onCancel}
+          className="shrink-0 text-muted-foreground hover:text-foreground"
+          title="選択解除 (Esc)"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <div className="flex items-end gap-2 rounded-xl border border-primary/40 bg-background/60 p-2">
+        <div className="min-h-[32px] max-h-[120px] flex-1 overflow-y-auto whitespace-pre-wrap py-1.5 text-base leading-relaxed md:text-[17px]">
+          {draft ? (
+            <span className="text-foreground">{draft}</span>
+          ) : (
+            <span className="text-muted-foreground">
+              右ペインのコメント欄で入力中...
+            </span>
+          )}
+        </div>
+        <Button
+          size="icon"
+          className="h-7 w-7 shrink-0"
+          onClick={onSubmit}
+          disabled={!draft.trim()}
+          title="送信 (Enter)"
+        >
+          <Send className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const router = useRouter();
@@ -1119,6 +1187,79 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<MessageResponse | null>(null);
   const { warmupMode } = useRecoveryState(projectId);
+
+  // Preview pane state
+  const previewProjectId = usePreviewStore((s) => s.projectId);
+  const previewArtifact = usePreviewStore((s) => s.artifact);
+  const selectedElement = usePreviewStore((s) => s.selectedElement);
+  const popoverDraft = usePreviewStore((s) => s.popoverDraft);
+  const openArtifact = usePreviewStore((s) => s.openArtifact);
+  const closePreview = usePreviewStore((s) => s.closePreview);
+  const consumeDraft = usePreviewStore((s) => s.consumeDraft);
+  const isPreviewOpenForProject =
+    !!previewArtifact && previewProjectId === projectId;
+
+  // Auto-close preview when switching projects
+  useEffect(() => {
+    if (previewProjectId && previewProjectId !== projectId) {
+      closePreview();
+    }
+  }, [projectId, previewProjectId, closePreview]);
+
+  // Artifacts for the header opener button
+  const { data: artifacts = [] } = useQuery<ArtifactRecord[]>({
+    queryKey: ['chat-artifacts', projectId],
+    queryFn: async () => {
+      const res = await fetch(`/api/v1/chat-artifact?project_id=${projectId}`, {
+        credentials: 'include',
+      });
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: !!projectId,
+    staleTime: 10_000,
+  });
+  const [artifactMenuOpen, setArtifactMenuOpen] = useState(false);
+
+  // Chat/Preview pane resize
+  const [chatWidth, setChatWidth] = useState(520);
+  const [isResizing, setIsResizing] = useState(false);
+
+  const handleResizeStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = chatWidth;
+      setIsResizing(true);
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+
+      const onMouseMove = (evt: MouseEvent) => {
+        const delta = evt.clientX - startX;
+        const containerWidth = window.innerWidth;
+        setChatWidth(
+          Math.max(280, Math.min(containerWidth - 400, startWidth + delta))
+        );
+      };
+      const onMouseUp = () => {
+        setIsResizing(false);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        window.removeEventListener('mousemove', onMouseMove);
+        window.removeEventListener('mouseup', onMouseUp);
+      };
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    },
+    [chatWidth]
+  );
+
+  const handleSubmitComment = useCallback(async () => {
+    const { text, element } = consumeDraft();
+    if (!element || !text.trim()) return;
+    const composed = composeCommentMessage(text, element);
+    sendMessageRef.current?.(composed);
+  }, [consumeDraft]);
 
   const { data: project, isLoading } = useQuery({
     queryKey: ['project', projectId],
@@ -1306,9 +1447,66 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   }, []);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-background">
-      <div className="flex shrink-0 items-center gap-3 border-b border-border py-3 pl-12 pr-4 md:px-4">
+    <div className="relative flex h-full w-full overflow-hidden">
+    <div
+      className={`flex h-full shrink-0 flex-col overflow-hidden bg-background ${
+        isPreviewOpenForProject ? '' : 'w-full'
+      }`}
+      style={isPreviewOpenForProject ? { width: chatWidth } : undefined}
+    >
+      <div className="flex shrink-0 items-center gap-3 border-b border-border py-3 pl-12 pr-16 md:pl-4 md:pr-16">
         <FolderKanban className="h-5 w-5 shrink-0 text-primary" />
+        {artifacts.length > 0 && (
+          <div className="relative shrink-0">
+            <button
+              onClick={() => {
+                if (isPreviewOpenForProject) {
+                  closePreview();
+                  return;
+                }
+                if (artifacts.length === 1) {
+                  openArtifact(projectId, artifacts[0]);
+                } else {
+                  setArtifactMenuOpen((v) => !v);
+                }
+              }}
+              className={`flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+                isPreviewOpenForProject
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : 'border-border bg-background hover:bg-muted'
+              }`}
+              title="プレビューを開く"
+            >
+              <Presentation className="h-3.5 w-3.5" />
+              <span>成果物 ({artifacts.length})</span>
+            </button>
+            {artifactMenuOpen && (
+              <>
+                <div
+                  className="fixed inset-0 z-30"
+                  onClick={() => setArtifactMenuOpen(false)}
+                />
+                <div className="absolute left-0 top-full z-40 mt-1 w-[300px] rounded-md border border-border bg-popover p-1 shadow-lg">
+                  {artifacts.map((a) => (
+                    <button
+                      key={a.id}
+                      onClick={() => {
+                        openArtifact(projectId, a);
+                        setArtifactMenuOpen(false);
+                      }}
+                      className="block w-full truncate rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
+                    >
+                      <div className="truncate font-medium">{a.label || a.slug}</div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {a.preview_url}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
         <div className="min-w-0 flex-1">
           {isLoading ? (
             <div className="flex items-center gap-2">
@@ -1395,7 +1593,16 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       {/* 承認/却下ボタンは廃止。チャットでの承認を観察者が検知して計画を記録する */}
 
       {project?.room_id ? (
-        <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} sendMessageRef={sendMessageRef} onSseStateChange={(connected) => { sseConnectedRef.current = connected; }} replyTo={replyTo} onClearReply={() => setReplyTo(null)} />
+        selectedElement && isPreviewOpenForProject ? (
+          <CommentMirrorBar
+            element={selectedElement}
+            draft={popoverDraft}
+            onSubmit={handleSubmitComment}
+            onCancel={() => usePreviewStore.getState().clearSelection()}
+          />
+        ) : (
+          <ChatInput projectId={projectId} roomId={project.room_id} isSessionActive={isActiveExecution} sendMessageRef={sendMessageRef} onSseStateChange={(connected) => { sseConnectedRef.current = connected; }} replyTo={replyTo} onClearReply={() => setReplyTo(null)} />
+        )
       ) : null}
 
       {lightboxImage && (
@@ -1417,6 +1624,24 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           </div>
         </div>
       )}
+    </div>
+    {isPreviewOpenForProject && (
+      <>
+        <div
+          className="group relative h-full w-1 shrink-0 cursor-col-resize bg-border"
+          onMouseDown={handleResizeStart}
+          title="ドラッグで幅調整"
+        >
+          <div className="absolute inset-y-0 -left-1 w-3 group-hover:bg-primary/30 transition-colors" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <PreviewPane onSubmitComment={handleSubmitComment} />
+        </div>
+      </>
+    )}
+    {isResizing && (
+      <div className="fixed inset-0 z-50 cursor-col-resize" />
+    )}
     </div>
   );
 }

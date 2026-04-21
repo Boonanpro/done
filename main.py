@@ -36,6 +36,7 @@ from app.api.calendar_routes import router as calendar_router
 from app.api.push_routes import router as push_router
 from app.api.dan_notion_routes import router as dan_notion_router
 from app.api.contacts_routes import router as contacts_router
+from app.api.chat_artifact_routes import router as chat_artifact_router
 
 
 # v3: Executorは不使用（汎用ツールで処理）
@@ -106,6 +107,7 @@ app.include_router(calendar_router, prefix="/api/v1")
 app.include_router(push_router, prefix="/api/v1")
 app.include_router(dan_notion_router, prefix="/api/v1")
 app.include_router(contacts_router, prefix="/api/v1")
+app.include_router(chat_artifact_router, prefix="/api/v1")
 
 
 
