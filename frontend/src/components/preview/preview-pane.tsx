@@ -21,16 +21,26 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const [loaded, setLoaded] = useState(false);
   const [showSwitcher, setShowSwitcher] = useState(false);
   const [refreshSpinning, setRefreshSpinning] = useState(false);
-  const autoReloadingRef = useRef(false);
 
   const handleRefresh = () => {
     const iframe = iframeRef.current;
     if (!iframe) return;
     setRefreshSpinning(true);
+    // リロード前のスクロール位置を保持 → ロード後に復元
+    const prevScrollX = iframe.contentWindow?.scrollX ?? 0;
+    const prevScrollY = iframe.contentWindow?.scrollY ?? 0;
+    const restoreScroll = () => {
+      try {
+        iframe.contentWindow?.scrollTo(prevScrollX, prevScrollY);
+      } catch {
+        /* ignore */
+      }
+      iframe.removeEventListener('load', restoreScroll);
+    };
+    iframe.addEventListener('load', restoreScroll, { once: true });
     try {
       iframe.contentWindow?.location.reload();
     } catch {
-      // cross-origin fallback
       const current = iframe.src;
       iframe.src = '';
       setTimeout(() => {
@@ -69,43 +79,6 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     return () => detachInspector(iframe);
   }, [isEditMode, loaded]);
 
-  // Next.js HMR の一過性コンパイルエラーを自動回復する
-  // ダンがファイルを書き換えた瞬間、Next.js が rebuild 中にエラー overlay を
-  // 出すことがある。少し待って iframe だけリロードで解消する
-  useEffect(() => {
-    if (!loaded) return;
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-
-    const detectOverlay = (): boolean => {
-      const doc = iframe.contentDocument;
-      if (!doc) return false;
-      return !!(
-        doc.querySelector('nextjs-portal') ||
-        doc.querySelector('[data-nextjs-dialog-overlay]') ||
-        doc.querySelector('#__next-build-watcher') ||
-        doc.querySelector('[data-nextjs-dialog]')
-      );
-    };
-
-    const interval = setInterval(() => {
-      if (autoReloadingRef.current) return;
-      if (!detectOverlay()) return;
-      autoReloadingRef.current = true;
-      setTimeout(() => {
-        try {
-          iframe.contentWindow?.location.reload();
-        } catch {
-          /* ignore */
-        }
-        setTimeout(() => {
-          autoReloadingRef.current = false;
-        }, 2500);
-      }, 1500);
-    }, 800);
-
-    return () => clearInterval(interval);
-  }, [loaded, artifact?.id]);
 
   if (!artifact) return null;
 
