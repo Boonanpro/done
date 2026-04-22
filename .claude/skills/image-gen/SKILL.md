@@ -73,6 +73,10 @@ print(result["url"])  # 使う URL
 
 ## 落とし穴
 
+- **overlay（暗転・ぼかし）は独立 div を作らず、`<img>` 自体に CSS filter で適用する**
+  - ❌ `<div className="absolute inset-0 bg-black/40">` を画像の上に重ねる
+  - ✅ `<img style={{ filter: 'brightness(0.75) blur(2px)' }}>` or Tailwind `brightness-75 blur-sm`
+  - 理由: overlay div があるとクリック時に overlay が選択されて、Inspector で画像を掴めなくなる。filter なら画像自体のプロパティとして編集できる
 - prompt が弱いと平凡になる。構図・スタイル・ライティング・色調を必ず指定
 - 生成は 5〜15 秒。UI 側はローディング必須
 - 商標ロゴ・実在人物は拒否される

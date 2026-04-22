@@ -55,6 +55,10 @@ POST /api/v1/videos/generate
 
 - `autoPlay loop muted playsInline` は LP で必須（ブラウザ自動再生の制約）
 - `<Image>` コンポーネントは不可。`<video>` を使う
+- **overlay（暗転・ぼかし・グラデーション）は独立した div を作らず、`<video>` 自体に CSS で適用する**
+  - ❌ `<div className="absolute inset-0 bg-black/40">` を video の上に重ねる
+  - ✅ `<video className="... brightness-75">` or `style={{ filter: 'brightness(0.75) blur(2px)' }}`
+  - 理由: overlay div があるとクリック時に overlay が選択されて、Inspector で video を掴めなくなる。filter なら video 自体のプロパティとして編集できる
 
 ## 典型フロー：既存画像を動画化
 
