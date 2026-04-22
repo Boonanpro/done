@@ -1179,6 +1179,13 @@ function composeCommentMessage(
     lines.push(`  file: ${slugToFilePath(artifact.slug, artifact.preview_url)}`);
     lines.push(`  preview-url: ${artifact.preview_url}`);
   }
+  if (element.tagName === 'img' || (element.className || '').match(/bg-\[url/)) {
+    lines.push('intent-hint: |');
+    lines.push('  選択要素は画像タグ（<img> または背景画像）。');
+    lines.push('  ユーザー文面が画像変更を示唆する場合は image-gen スキル経由で差し替える。');
+    lines.push('  既存 src を reference_url にして POST /api/v1/images/edit を呼び、');
+    lines.push('  返った url を対象ファイルの img src に書き換える。');
+  }
   lines.push('selection:');
   lines.push(`  ref: @${element.refId}`);
   lines.push(`  tag: ${element.tagName}`);
