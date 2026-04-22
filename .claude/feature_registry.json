@@ -62,5 +62,19 @@
       "D:\\done\\frontend\\src\\app\\dashboard\\image-generation\\page.tsx",
       "D:\\done\\scripts\\seed_image_generation.py"
     ]
+  },
+  "video_generation": {
+    "name": "video_generation",
+    "description": "Veo 3.1 Fast 経由の動画生成/image-to-video。Supabase Storage に保存。",
+    "created_at": "2026-04-22T10:40:20.639501",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\041_video_generation.sql",
+      "D:\\done\\app\\models\\video_generation_schemas.py",
+      "D:\\done\\app\\services\\video_generation_service.py",
+      "D:\\done\\app\\api\\video_generation_routes.py",
+      "D:\\done\\frontend\\src\\app\\dashboard\\video-generation\\page.tsx",
+      "D:\\done\\scripts\\seed_video_generation.py"
+    ]
   }
 }

@@ -1179,12 +1179,14 @@ function composeCommentMessage(
     lines.push(`  file: ${slugToFilePath(artifact.slug, artifact.preview_url)}`);
     lines.push(`  preview-url: ${artifact.preview_url}`);
   }
-  if (element.tagName === 'img' || (element.className || '').match(/bg-\[url/)) {
+  if (element.tagName === 'img' || element.tagName === 'video' || (element.className || '').match(/bg-\[url/)) {
     lines.push('intent-hint: |');
-    lines.push('  選択要素は画像タグ（<img> または背景画像）。');
-    lines.push('  ユーザー文面が画像変更を示唆する場合は image-gen スキル経由で差し替える。');
-    lines.push('  既存 src を reference_url にして POST /api/v1/images/edit を呼び、');
-    lines.push('  返った url を対象ファイルの img src に書き換える。');
+    lines.push('  選択要素は視覚メディア (<img> / <video> / 背景画像)。');
+    lines.push('  文面が「画像を〜に変えて」なら image-gen スキル (/api/v1/images/edit) 経由で差し替え。');
+    lines.push('  文面が「動画にして」「動かして」「アニメーションに」なら video-gen スキル');
+    lines.push('  (/api/v1/videos/generate + reference_image_url で image-to-video) を使い、');
+    lines.push('  対象ファイルの <img> を <video autoPlay loop muted playsInline> に書き換える。');
+    lines.push('  文面が曖昧なら内容を優先して判断（静止画の修正 vs 動きが欲しい）。');
   }
   lines.push('selection:');
   lines.push(`  ref: @${element.refId}`);

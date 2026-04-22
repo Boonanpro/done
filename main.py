@@ -38,6 +38,7 @@ from app.api.dan_notion_routes import router as dan_notion_router
 from app.api.contacts_routes import router as contacts_router
 from app.api.chat_artifact_routes import router as chat_artifact_router
 from app.api.image_generation_routes import router as image_generation_router
+from app.api.video_generation_routes import router as video_generation_router
 
 
 # v3: Executorは不使用（汎用ツールで処理）
@@ -110,6 +111,7 @@ app.include_router(dan_notion_router, prefix="/api/v1")
 app.include_router(contacts_router, prefix="/api/v1")
 app.include_router(chat_artifact_router, prefix="/api/v1")
 app.include_router(image_generation_router, prefix="/api/v1")
+app.include_router(video_generation_router, prefix="/api/v1")
 
 
 
