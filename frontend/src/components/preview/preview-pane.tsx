@@ -5,7 +5,7 @@ import { ChevronDown, Edit3, ExternalLink, MessageSquare, RefreshCw, Sliders, X 
 import { useQuery } from '@tanstack/react-query';
 
 import { Button } from '@/components/ui/button';
-import { usePreviewStore, type ArtifactRecord } from '@/stores/preview-store';
+import { usePreviewStore, flushInspectorEdits, type ArtifactRecord } from '@/stores/preview-store';
 import { attachInspector, detachInspector } from './iframe-inspector';
 import { CommentPopover } from './comment-popover';
 import { InspectorPanel } from './inspector-panel';
@@ -24,12 +24,16 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const [loaded, setLoaded] = useState(false);
   const [showSwitcher, setShowSwitcher] = useState(false);
   const [refreshSpinning, setRefreshSpinning] = useState(false);
+  // iframe が load するたびに increment する。attachInspector 再実行の deps に入れ、
+  // リフレッシュや内部ナビゲーション後も新 contentDocument に再アタッチする
+  const [iframeLoadSeq, setIframeLoadSeq] = useState(0);
 
-  const handleRefresh = () => {
+  const handleRefresh = async () => {
     const iframe = iframeRef.current;
     if (!iframe) return;
     setRefreshSpinning(true);
-    // リロード前のスクロール位置を保持 → ロード後に復元
+    // 未送信のインスペクタ編集をまず flush（リロードで消さないため）
+    await flushInspectorEdits();
     const prevScrollX = iframe.contentWindow?.scrollX ?? 0;
     const prevScrollY = iframe.contentWindow?.scrollY ?? 0;
     const restoreScroll = () => {
@@ -74,13 +78,13 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   useEffect(() => {
     const iframe = iframeRef.current;
     if (!iframe || !loaded) return;
+    // 古い contentDocument から念のためデタッチしてから再アタッチ
+    detachInspector(iframe);
     if (isEditMode) {
       attachInspector(iframe);
-    } else {
-      detachInspector(iframe);
     }
     return () => detachInspector(iframe);
-  }, [isEditMode, loaded]);
+  }, [isEditMode, loaded, iframeLoadSeq]);
 
 
   if (!artifact) return null;
@@ -180,7 +184,10 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
           <iframe
             ref={iframeRef}
             src={artifact.preview_url}
-            onLoad={() => setLoaded(true)}
+            onLoad={() => {
+              setLoaded(true);
+              setIframeLoadSeq((s) => s + 1);
+            }}
             className="h-full w-full border-0"
             title={artifact.label || artifact.slug}
           />

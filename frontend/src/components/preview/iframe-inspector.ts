@@ -1,6 +1,7 @@
 'use client';
 
 import { usePreviewStore } from '@/stores/preview-store';
+import { computeElementKey } from '@/components/dan/inspector-runtime';
 
 const HOVER_OVERLAY_ID = 'dan-inspector-hover';
 const ACTIVE_OVERLAY_ID = 'dan-inspector-active';
@@ -138,6 +139,8 @@ export function attachInspector(iframe: HTMLIFrameElement) {
     const bgColor = computed?.backgroundColor || '';
     const classAttr = target.getAttribute('class') || '';
 
+    const elementKey = computeElementKey(target);
+
     usePreviewStore.getState().selectElement(
       {
         tagName,
@@ -147,6 +150,7 @@ export function attachInspector(iframe: HTMLIFrameElement) {
         className: classAttr,
         ancestors,
         bgColor,
+        elementKey,
       },
       target
     );

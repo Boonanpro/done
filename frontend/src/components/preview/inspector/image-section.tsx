@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Loader2, Wand2 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 
-import { usePreviewStore, findMediaInScope } from '@/stores/preview-store';
+import { usePreviewStore, findMediaInScope, queueInspectorEdit } from '@/stores/preview-store';
 import { SectionHeader, SelectInput, SliderInput } from './controls';
 import { FocalPointPad, type FocalPoint } from './focal-point-pad';
 import { HistoryStrip, type HistoryItem } from './history-strip';
@@ -77,11 +77,13 @@ export function ImageSection() {
   const applySrc = (url: string) => {
     if (!img) return;
     img.setAttribute('src', url);
+    queueInspectorEdit({ target: img, patch: { attrs: { src: url } } });
   };
 
   const applyAlt = () => {
     if (!img) return;
     img.setAttribute('alt', altDraft);
+    queueInspectorEdit({ target: img, patch: { attrs: { alt: altDraft } } });
   };
 
   const handleRegenerate = async () => {
