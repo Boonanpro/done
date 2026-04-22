@@ -1,0 +1,61 @@
+import { InspectorRuntimeLoader } from '@/components/dan/inspector-runtime-loader';
+
+/**
+ * demo ページ共通レイアウト。
+ *
+ * ① 先頭に blocking inline script を挿入:
+ *    localStorage に記録済みの overrides を読み、CSS セレクタに変換して
+ *    <style> を head に注入する。初回 paint の時点で既に overrides が
+ *    当たっている状態になるので「一瞬元の状態が見える」flash を防ぐ。
+ *
+ * ② InspectorRuntimeLoader は React ハイドレーション後に動作:
+ *    バックエンドから最新 overrides を取得 → localStorage 同期 → DOM 再適用。
+ *    src/alt 等 CSS で表現できない属性もここで当てる。
+ */
+
+const prePaintScript = `
+(function(){
+  try {
+    var match = location.pathname.match(/\\/demo\\/([^/]+)/);
+    if (!match) return;
+    var slug = match[1];
+    var raw = localStorage.getItem('dan-inspector-overrides-' + slug);
+    if (!raw) return;
+    var rows;
+    try { rows = JSON.parse(raw); } catch (e) { return; }
+    if (!rows || !rows.length) return;
+    var css = rows.map(function(r){
+      var key = r.elementKey || r.element_key;
+      if (!key) return '';
+      var parts = key.split('>');
+      var sel = 'body';
+      for (var i = 0; i < parts.length; i++) {
+        var m = parts[i].match(/^(.+?)\\[(\\d+)\\]$/);
+        if (!m) return '';
+        sel += ' > ' + m[1] + ':nth-child(' + (parseInt(m[2], 10) + 1) + ')';
+      }
+      var styles = r.styles || {};
+      var body = Object.keys(styles).map(function(k){
+        return k + ': ' + styles[k] + ' !important';
+      }).join('; ');
+      if (!body) return '';
+      return sel + ' { ' + body + ' }';
+    }).filter(Boolean).join('\\n');
+    if (!css) return;
+    var style = document.createElement('style');
+    style.id = 'dan-inspector-prepaint';
+    style.textContent = css;
+    (document.head || document.documentElement).appendChild(style);
+  } catch (err) { /* ignore */ }
+})();
+`.trim();
+
+export default function DemoLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      <script dangerouslySetInnerHTML={{ __html: prePaintScript }} />
+      {children}
+      <InspectorRuntimeLoader />
+    </>
+  );
+}

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Loader2, Wand2 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 
-import { usePreviewStore, findMediaInScope } from '@/stores/preview-store';
+import { usePreviewStore, findMediaInScope, queueInspectorEdit } from '@/stores/preview-store';
 import { SectionHeader, SelectInput, SliderInput, ToggleGroup } from './controls';
 import { FocalPointPad, type FocalPoint } from './focal-point-pad';
 import { HistoryStrip, type HistoryItem } from './history-strip';
@@ -99,11 +99,13 @@ export function VideoSection() {
     if (!video) return;
     video.setAttribute('src', url);
     video.load();
+    queueInspectorEdit({ target: video, patch: { attrs: { src: url } } });
   };
 
   const applyPoster = () => {
     if (!video) return;
     video.setAttribute('poster', posterDraft);
+    queueInspectorEdit({ target: video, patch: { attrs: { poster: posterDraft } } });
   };
 
   const toggleAttribute = (

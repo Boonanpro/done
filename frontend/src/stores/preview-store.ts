@@ -12,6 +12,8 @@ export interface SelectedElement {
   className?: string;
   ancestors?: string[];
   bgColor?: string;
+  // DOM ツリー上のパスキー（InspectorRuntime が使う形式）
+  elementKey?: string;
 }
 
 export interface ArtifactRecord {
@@ -150,6 +152,11 @@ export const usePreviewStore = create<PreviewStore>()(
           },
           styleVersion: styleVersion + 1,
         });
+        queueInspectorEdit({
+          target: liveTarget,
+          elementKey: selectedElement.elementKey,
+          patch: { styles: { [property]: value } },
+        });
       },
 
       applyStyleTo: (target, property, value, important = false) => {
@@ -164,6 +171,10 @@ export const usePreviewStore = create<PreviewStore>()(
           /* ignore */
         }
         set((s) => ({ styleVersion: s.styleVersion + 1 }));
+        queueInspectorEdit({
+          target,
+          patch: { styles: { [property]: value } },
+        });
       },
 
       resetElementEdits: () => {
@@ -197,6 +208,150 @@ export const usePreviewStore = create<PreviewStore>()(
     }
   )
 );
+
+/* ========== Runtime Overrides Layer ==========
+ * 編集内容は iframe 内 DOM に即時反映しつつ、バックエンドの inspector_overrides
+ * 表に保存する。iframe の <InspectorRuntime /> が初回マウントと DOM 更新時に
+ * 自動で再適用する。
+ *
+ * JSX ファイルは触らないので HMR rebuild が走らない = iframe が勝手にリロード
+ * しない = 編集中の状態が維持される。*/
+
+type PendingOverride = {
+  elementKey: string;
+  styles: Record<string, string>;
+  attrs: Record<string, string>;
+};
+
+const pendingOverrides: Record<string, PendingOverride> = {};
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+const FLUSH_DEBOUNCE_MS = 100; // HMR を誘発しないので短めでよい
+
+type QueueContext = {
+  target: Element | null;
+  elementKey?: string;
+  patch: { styles?: Record<string, string>; attrs?: Record<string, string> };
+};
+
+export function queueInspectorEdit(ctx: QueueContext) {
+  if (!ctx.target && !ctx.elementKey) return;
+  const doc = ctx.target?.ownerDocument;
+  const win = doc?.defaultView as unknown as Record<string, unknown> | undefined;
+  // elementKey は ctx 優先、無ければ iframe の computeKey から取る
+  const danApi = win?.__DAN_INSPECTOR__ as
+    | { computeKey: (el: Element) => string; applyOverride: (k: string, s: Record<string, string>, a: Record<string, string>) => void; slug: string }
+    | undefined;
+  const key =
+    ctx.elementKey ||
+    (danApi && ctx.target ? danApi.computeKey(ctx.target) : '');
+  if (!key) return;
+
+  // iframe 側のキャッシュも同期（MutationObserver 再描画でも消えないように）
+  if (danApi) {
+    danApi.applyOverride(key, ctx.patch.styles || {}, ctx.patch.attrs || {});
+  }
+
+  const existing = pendingOverrides[key];
+  pendingOverrides[key] = {
+    elementKey: key,
+    styles: { ...(existing?.styles || {}), ...(ctx.patch.styles || {}) },
+    attrs: { ...(existing?.attrs || {}), ...(ctx.patch.attrs || {}) },
+  };
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = setTimeout(flushPendingOverrides, FLUSH_DEBOUNCE_MS);
+}
+
+/** 明示的に即時フラッシュ（iframe リロード前など） */
+export function flushInspectorEdits(): Promise<void> {
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  return flushPendingOverrides();
+}
+
+const LS_KEY = (slug: string) => `dan-inspector-overrides-${slug}`;
+
+/** localStorage 上の overrides を更新（pre-paint blocking script が読む） */
+function upsertLocalStorage(
+  slug: string,
+  entry: PendingOverride
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = window.localStorage.getItem(LS_KEY(slug));
+    const rows = raw ? (JSON.parse(raw) as PendingOverride[]) : [];
+    const idx = rows.findIndex((r) => r.elementKey === entry.elementKey);
+    const merged: PendingOverride = idx >= 0
+      ? {
+          elementKey: entry.elementKey,
+          styles: { ...(rows[idx].styles || {}), ...entry.styles },
+          attrs: { ...(rows[idx].attrs || {}), ...entry.attrs },
+        }
+      : entry;
+    if (idx >= 0) rows[idx] = merged;
+    else rows.push(merged);
+    window.localStorage.setItem(LS_KEY(slug), JSON.stringify(rows));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** バックエンドから取得した overrides 全量で localStorage を上書き同期 */
+export function syncLocalStorageFromServer(
+  slug: string,
+  rows: Array<{ element_key: string; styles: Record<string, string>; attrs: Record<string, string> }>
+) {
+  if (typeof window === 'undefined') return;
+  try {
+    const entries: PendingOverride[] = rows.map((r) => ({
+      elementKey: r.element_key,
+      styles: r.styles || {},
+      attrs: r.attrs || {},
+    }));
+    window.localStorage.setItem(LS_KEY(slug), JSON.stringify(entries));
+  } catch {
+    /* ignore */
+  }
+}
+
+async function flushPendingOverrides(): Promise<void> {
+  const entries = Object.entries(pendingOverrides);
+  if (!entries.length) return;
+  for (const key of entries.map(([k]) => k)) delete pendingOverrides[key];
+
+  const state = usePreviewStore.getState();
+  const slug = state.artifact?.slug;
+  if (!slug) return;
+  const projectId = state.projectId || undefined;
+
+  // localStorage には即時反映（次回リフレッシュでの flash 対策）
+  for (const [, edit] of entries) {
+    upsertLocalStorage(slug, edit);
+  }
+
+  for (const [, edit] of entries) {
+    try {
+      const res = await fetch('/api/v1/inspector-overrides', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          artifact_slug: slug,
+          element_key: edit.elementKey,
+          styles: Object.keys(edit.styles).length ? edit.styles : null,
+          attrs: Object.keys(edit.attrs).length ? edit.attrs : null,
+          project_id: projectId,
+        }),
+      });
+      if (!res.ok) {
+        console.warn('[inspector-overrides] upsert failed', res.status, await res.text());
+      }
+    } catch (err) {
+      console.warn('[inspector-overrides] upsert exception', err);
+    }
+  }
+}
 
 /** 選択要素自身 or その子孫に img/video があれば返す。
  *  先祖は辿らない（選択してない要素まで拾うと混乱するため、↑ボタンで親に遡らせる）*/

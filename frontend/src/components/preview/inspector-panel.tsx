@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { Check } from 'lucide-react';
 
 import { usePreviewStore, findMediaInScope, type SelectedElement } from '@/stores/preview-store';
 
@@ -189,31 +189,30 @@ function BoxSection() {
   void usePreviewStore((s) => s.styleVersion);
   if (!cs) return null;
 
-  // サイズ変更時、wrapper が aspect-ratio で縦横比を固定していると height を
-  // 指定しても効かない。また内側の <video>/<img> が w/h=100% でないと wrapper を
-  // 広げても中身が追従しない。まとめて揃える:
-  //   1) wrapper の aspect-ratio を auto に（inline で 16/9 等が指定されてる場合のみ）
-  //   2) 内側 media を width:100% height:100% で wrapper に追従
-  //   3) object-fit が fill/none なら cover に揃えて letterbox を防ぐ
+  // サイズ変更時、wrapper の aspect-ratio が効いていると width/height を
+  // 片方だけ動かしても他方が勝手に追従してしまう。Tailwind の aspect-video
+  // クラス等が class 経由で効くので、computedStyle で判定 → 常に auto で上書き。
   const ensureCoverOnMedia = () => {
     if (!liveTarget) return;
-    // 自身の inline style で aspect-ratio が固定されてたら解除
-    const selfStyle = (liveTarget as HTMLElement).style;
-    if (selfStyle.aspectRatio && selfStyle.aspectRatio !== 'auto') {
-      applyStyleTo(liveTarget, 'aspect-ratio', 'auto');
+    const win = (liveTarget as HTMLElement).ownerDocument?.defaultView;
+    const cs = win ? win.getComputedStyle(liveTarget) : null;
+    if (cs && cs.aspectRatio && cs.aspectRatio !== 'auto') {
+      applyStyleTo(liveTarget, 'aspect-ratio', 'auto', true);
     }
     const media =
       findMediaInScope(liveTarget, 'video') ||
       findMediaInScope(liveTarget, 'img');
     if (!media) return;
-    // wrapper に追従させる
     applyStyleTo(media, 'width', '100%', true);
     applyStyleTo(media, 'height', '100%', true);
-    // object-fit が未指定/デフォルトなら cover
     const mcs = media.ownerDocument?.defaultView?.getComputedStyle(media);
-    const current = mcs?.objectFit || 'fill';
-    if (current === 'fill' || current === 'none') {
+    const currentFit = mcs?.objectFit || 'fill';
+    if (currentFit === 'fill' || currentFit === 'none') {
       applyStyleTo(media, 'object-fit', 'cover');
+    }
+    // media の aspect-ratio も解除（<video> 等は intrinsic aspect が効くため）
+    if (mcs && mcs.aspectRatio && mcs.aspectRatio !== 'auto') {
+      applyStyleTo(media, 'aspect-ratio', 'auto', true);
     }
   };
 
@@ -370,8 +369,6 @@ export function InspectorPanel() {
   const selectedElement = usePreviewStore((s) => s.selectedElement);
   const liveTarget = usePreviewStore((s) => s.liveTarget);
   const clearSelection = usePreviewStore((s) => s.clearSelection);
-  const resetEdits = usePreviewStore((s) => s.resetElementEdits);
-  const edits = usePreviewStore((s) => s.edits);
 
   if (!selectedElement) {
     return (
@@ -387,7 +384,6 @@ export function InspectorPanel() {
   }
 
   const { isText, isImage, isVideo } = classifyElement(selectedElement);
-  const hasEdits = !!edits[selectedElement.refId];
 
   return (
     <div className="flex h-full w-[280px] shrink-0 flex-col border-l border-border bg-background">
@@ -417,24 +413,10 @@ export function InspectorPanel() {
         {isVideo && <VideoSection />}
         <BoxSection />
       </div>
-      {hasEdits && (
-        <div className="flex items-center gap-2 border-t border-border p-2">
-          <button
-            onClick={resetEdits}
-            className="flex items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:bg-muted"
-          >
-            <RefreshCw className="h-3 w-3" />
-            リセット
-          </button>
-          <button
-            className="ml-auto flex items-center gap-1 rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
-            disabled
-            title="次の更新で実装"
-          >
-            Apply to source（準備中）
-          </button>
-        </div>
-      )}
+      <div className="flex items-center gap-1 border-t border-border px-3 py-1.5 text-[10px] text-muted-foreground">
+        <Check className="h-3 w-3 text-green-500" />
+        <span>編集は自動保存されます</span>
+      </div>
     </div>
   );
 }
