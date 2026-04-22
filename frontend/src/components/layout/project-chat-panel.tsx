@@ -450,8 +450,10 @@ function ChatInput({
 }) {
   const inspectorElement = usePreviewStore((s) => s.selectedElement);
   const inspectorDraft = usePreviewStore((s) => s.popoverDraft);
+  const previewMode = usePreviewStore((s) => s.inspectorMode);
   const clearInspectorSelection = usePreviewStore((s) => s.clearSelection);
-  const isCommentMode = !!inspectorElement;
+  // ChatInput のミラーモードは「コメントモードで要素選択中」の時だけ有効
+  const isCommentMode = !!inspectorElement && previewMode === 'comment';
   const [message, setMessage] = useState('');
   const [attachedFiles, setAttachedFiles] = useState<FileUploadResponse[]>([]);
   const [isUploading, setIsUploading] = useState(false);

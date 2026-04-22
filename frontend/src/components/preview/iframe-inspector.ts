@@ -138,15 +138,18 @@ export function attachInspector(iframe: HTMLIFrameElement) {
     const bgColor = computed?.backgroundColor || '';
     const classAttr = target.getAttribute('class') || '';
 
-    usePreviewStore.getState().selectElement({
-      tagName,
-      text,
-      outerHtmlSnippet,
-      rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
-      className: classAttr,
-      ancestors,
-      bgColor,
-    });
+    usePreviewStore.getState().selectElement(
+      {
+        tagName,
+        text,
+        outerHtmlSnippet,
+        rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+        className: classAttr,
+        ancestors,
+        bgColor,
+      },
+      target
+    );
   };
 
   const keydown = (ev: Event) => {
