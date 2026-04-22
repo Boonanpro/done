@@ -32,6 +32,27 @@ export function MainLayout({
   const selectedProjectId = useProjectStore((s) => s.selectedProjectId);
   const previewIsOpen = usePreviewStore((s) => s.isOpen);
 
+  // プレビュー表示中、ダンが demo ファイルを書き換えた時に親ページ全体に
+  // 出てしまう Next.js dev overlay を抑制する（一過性のコンパイルエラーは
+  // iframe 側の auto-reload で解消されるため、overlay が邪魔）
+  useEffect(() => {
+    if (!previewIsOpen) return;
+    const style = document.createElement('style');
+    style.id = 'dan-hide-nextjs-overlay';
+    style.textContent = `
+      nextjs-portal,
+      [data-nextjs-dialog-overlay],
+      [data-nextjs-dialog],
+      #__next-build-watcher {
+        display: none !important;
+      }
+    `;
+    document.head.appendChild(style);
+    return () => {
+      document.getElementById('dan-hide-nextjs-overlay')?.remove();
+    };
+  }, [previewIsOpen]);
+
   // Show toast notifications for new collab messages
   useCollabNotifications();
 
