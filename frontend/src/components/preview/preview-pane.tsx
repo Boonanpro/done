@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ChevronDown, Edit3, ExternalLink, MessageSquare, Monitor, RefreshCw, Sliders, Smartphone, Tablet, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { ChevronDown, Edit3, ExternalLink, MessageSquare, RefreshCw, Sliders, X } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 
 import { Button } from '@/components/ui/button';
@@ -21,27 +21,9 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const openArtifact = usePreviewStore((s) => s.openArtifact);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const scaleContainerRef = useRef<HTMLDivElement>(null);
   const [loaded, setLoaded] = useState(false);
   const [showSwitcher, setShowSwitcher] = useState(false);
   const [refreshSpinning, setRefreshSpinning] = useState(false);
-  const [deviceWidth, setDeviceWidth] = useState<number>(1440);
-  const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
-
-  useLayoutEffect(() => {
-    const el = scaleContainerRef.current;
-    if (!el) return;
-    const update = () => {
-      setContainerSize({ w: el.clientWidth, h: el.clientHeight });
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  const scale = containerSize.w > 0 ? Math.min(1, containerSize.w / deviceWidth) : 1;
-  const scaledHeight = scale > 0 ? containerSize.h / scale : containerSize.h;
 
   const handleRefresh = () => {
     const iframe = iframeRef.current;
@@ -136,26 +118,6 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
             </div>
           )}
         </div>
-        <div className="flex overflow-hidden rounded-md border border-border">
-          {[
-            { w: 1440, icon: Monitor, title: 'デスクトップ (1440px)' },
-            { w: 768, icon: Tablet, title: 'タブレット (768px)' },
-            { w: 375, icon: Smartphone, title: 'モバイル (375px)' },
-          ].map(({ w, icon: Icon, title }) => (
-            <button
-              key={w}
-              onClick={() => setDeviceWidth(w)}
-              className={`px-1.5 py-1 transition-colors ${
-                deviceWidth === w
-                  ? 'bg-primary text-primary-foreground'
-                  : 'bg-background text-muted-foreground hover:bg-muted'
-              }`}
-              title={title}
-            >
-              <Icon className="h-3.5 w-3.5" />
-            </button>
-          ))}
-        </div>
         <button
           onClick={handleRefresh}
           className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -214,25 +176,14 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
         </Button>
       </div>
       <div className="flex flex-1 overflow-hidden bg-background">
-        <div
-          ref={scaleContainerRef}
-          className="relative flex-1 overflow-hidden bg-muted/30"
-        >
-          {containerSize.w > 0 && (
-            <iframe
-              ref={iframeRef}
-              src={artifact.preview_url}
-              onLoad={() => setLoaded(true)}
-              className="absolute left-0 top-0 border-0 bg-background shadow-xl"
-              style={{
-                width: deviceWidth,
-                height: scaledHeight,
-                transform: `scale(${scale})`,
-                transformOrigin: 'top left',
-              }}
-              title={artifact.label || artifact.slug}
-            />
-          )}
+        <div className="relative flex-1 overflow-hidden">
+          <iframe
+            ref={iframeRef}
+            src={artifact.preview_url}
+            onLoad={() => setLoaded(true)}
+            className="h-full w-full border-0"
+            title={artifact.label || artifact.slug}
+          />
           {isEditMode && inspectorMode === 'comment' && (
             <CommentPopover iframeRef={iframeRef} onSubmit={onSubmitComment} />
           )}
@@ -245,9 +196,6 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
               </div>
             </div>
           )}
-          <div className="pointer-events-none absolute bottom-2 right-2 rounded-md bg-background/80 px-2 py-0.5 text-[10px] text-muted-foreground backdrop-blur">
-            {deviceWidth}px × {Math.round(scale * 100)}%
-          </div>
         </div>
         {isEditMode && inspectorMode === 'edit' && <InspectorPanel />}
       </div>

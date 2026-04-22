@@ -3,7 +3,61 @@
 import { useMemo } from 'react';
 import { RefreshCw } from 'lucide-react';
 
-import { usePreviewStore, type SelectedElement } from '@/stores/preview-store';
+import { usePreviewStore, findMediaInScope, type SelectedElement } from '@/stores/preview-store';
+
+/** 選択中要素のミニプレビュー。「選択要素そのもの」を表示する。
+ *  - 選択要素が <img>/<video> → そのメディアを表示
+ *  - それ以外 → 背景色+テキストで色ブロック表示（たとえ中に img/video が
+ *    含まれていても、今編集してるのは wrapper なので wrapper を見せる）*/
+function ElementPreview({ target }: { target: Element | null }) {
+  void usePreviewStore((s) => s.styleVersion);
+  if (!target) return null;
+
+  if (target.tagName === 'IMG') {
+    const src = (target as HTMLImageElement).getAttribute('src') || '';
+    return (
+      <div className="overflow-hidden rounded border border-border bg-muted/40">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={src} alt="" className="h-32 w-full object-cover" />
+      </div>
+    );
+  }
+
+  if (target.tagName === 'VIDEO') {
+    const src = (target as HTMLVideoElement).getAttribute('src') || '';
+    return (
+      <div className="overflow-hidden rounded border border-border bg-muted/40">
+        <video
+          src={src}
+          className="h-32 w-full object-cover"
+          muted
+          autoPlay
+          loop
+          playsInline
+        />
+      </div>
+    );
+  }
+
+  // それ以外（wrapper / テキスト / カード / セクション 等）
+  const win = (target as HTMLElement).ownerDocument?.defaultView;
+  const cs = win ? win.getComputedStyle(target) : null;
+  const bgColor = cs?.backgroundColor || 'rgba(0,0,0,0)';
+  const color = cs?.color || 'inherit';
+  const text = (target.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+  const tag = target.tagName.toLowerCase();
+
+  return (
+    <div
+      className="flex min-h-[80px] items-center justify-center overflow-hidden rounded border border-border p-3 text-center"
+      style={{ backgroundColor: bgColor, color }}
+    >
+      <span className="line-clamp-3 text-xs">
+        {text || <span className="font-mono opacity-60">&lt;{tag}&gt;</span>}
+      </span>
+    </div>
+  );
+}
 import {
   SliderInput,
   ColorInput,
@@ -12,6 +66,8 @@ import {
   SectionHeader,
   parseNumericValue,
 } from './inspector/controls';
+import { ImageSection } from './inspector/image-section';
+import { VideoSection } from './inspector/video-section';
 
 /** 要素の computed style を取得 */
 function useComputedStyle(): CSSStyleDeclaration | null {
@@ -37,6 +93,7 @@ function classifyElement(el: SelectedElement | null): {
 } {
   if (!el) return { isText: false, isImage: false, isVideo: false, isContainer: false };
   const t = el.tagName;
+  // 厳密: target 自身が img/video の時だけ。wrapper が中に持っていても扱わない
   return {
     isText: TEXT_TAGS.has(t),
     isImage: t === 'img',
@@ -48,6 +105,7 @@ function classifyElement(el: SelectedElement | null): {
 function TypographySection() {
   const cs = useComputedStyle();
   const setLive = usePreviewStore((s) => s.setLiveStyle);
+  void usePreviewStore((s) => s.styleVersion);
   if (!cs) return null;
 
   const fontSize = parseNumericValue(cs.fontSize) ?? 16;
@@ -112,7 +170,6 @@ function TypographySection() {
         label="font-family"
         value={cs.fontFamily}
         options={[
-          { value: cs.fontFamily, label: '（現在）' },
           { value: 'system-ui, sans-serif', label: 'System Sans' },
           { value: 'ui-serif, Georgia, serif', label: 'Serif' },
           { value: 'ui-monospace, Menlo, monospace', label: 'Mono' },
@@ -126,19 +183,100 @@ function TypographySection() {
 function BoxSection() {
   const cs = useComputedStyle();
   const setLive = usePreviewStore((s) => s.setLiveStyle);
+  const liveTarget = usePreviewStore((s) => s.liveTarget);
+  const applyStyleTo = usePreviewStore((s) => s.applyStyleTo);
+  // style 変更の度に再描画するためのバージョン（void で購読のみ）
+  void usePreviewStore((s) => s.styleVersion);
   if (!cs) return null;
 
+  // サイズ変更時、wrapper が aspect-ratio で縦横比を固定していると height を
+  // 指定しても効かない。また内側の <video>/<img> が w/h=100% でないと wrapper を
+  // 広げても中身が追従しない。まとめて揃える:
+  //   1) wrapper の aspect-ratio を auto に（inline で 16/9 等が指定されてる場合のみ）
+  //   2) 内側 media を width:100% height:100% で wrapper に追従
+  //   3) object-fit が fill/none なら cover に揃えて letterbox を防ぐ
+  const ensureCoverOnMedia = () => {
+    if (!liveTarget) return;
+    // 自身の inline style で aspect-ratio が固定されてたら解除
+    const selfStyle = (liveTarget as HTMLElement).style;
+    if (selfStyle.aspectRatio && selfStyle.aspectRatio !== 'auto') {
+      applyStyleTo(liveTarget, 'aspect-ratio', 'auto');
+    }
+    const media =
+      findMediaInScope(liveTarget, 'video') ||
+      findMediaInScope(liveTarget, 'img');
+    if (!media) return;
+    // wrapper に追従させる
+    applyStyleTo(media, 'width', '100%', true);
+    applyStyleTo(media, 'height', '100%', true);
+    // object-fit が未指定/デフォルトなら cover
+    const mcs = media.ownerDocument?.defaultView?.getComputedStyle(media);
+    const current = mcs?.objectFit || 'fill';
+    if (current === 'fill' || current === 'none') {
+      applyStyleTo(media, 'object-fit', 'cover');
+    }
+  };
+
+  const width = parseNumericValue(cs.width) ?? 0;
+  const height = parseNumericValue(cs.height) ?? 0;
   const paddingTop = parseNumericValue(cs.paddingTop) ?? 0;
   const paddingRight = parseNumericValue(cs.paddingRight) ?? 0;
   const paddingBottom = parseNumericValue(cs.paddingBottom) ?? 0;
   const paddingLeft = parseNumericValue(cs.paddingLeft) ?? 0;
+  const marginTop = parseNumericValue(cs.marginTop) ?? 0;
+  const marginBottom = parseNumericValue(cs.marginBottom) ?? 0;
   const radius = parseNumericValue(cs.borderTopLeftRadius) ?? 0;
   const borderWidth = parseNumericValue(cs.borderTopWidth) ?? 0;
   const opacity = parseNumericValue(cs.opacity) ?? 1;
 
+  // 親幅を max とする（レスポンシブに無茶な指定を避けるため）
+  const parentWidth =
+    (liveTarget as HTMLElement | null)?.parentElement?.clientWidth || 1600;
+  const parentHeight =
+    (liveTarget as HTMLElement | null)?.parentElement?.clientHeight || 1200;
+
   return (
     <section className="flex flex-col gap-2">
       <SectionHeader title="Box" />
+      <SliderInput
+        label="width"
+        value={Math.round(width)}
+        min={0}
+        max={Math.max(parentWidth, 1600)}
+        unit="px"
+        onChange={(v) => {
+          setLive('width', `${v}px`, true);
+          ensureCoverOnMedia();
+        }}
+      />
+      <SliderInput
+        label="height"
+        value={Math.round(height)}
+        min={0}
+        max={Math.max(parentHeight, 1200)}
+        unit="px"
+        onChange={(v) => {
+          setLive('height', `${v}px`, true);
+          ensureCoverOnMedia();
+        }}
+      />
+      <SelectInput
+        label="aspect-ratio"
+        value={cs.aspectRatio || 'auto'}
+        options={[
+          { value: 'auto', label: 'auto' },
+          { value: '16 / 9', label: '16:9' },
+          { value: '4 / 3', label: '4:3' },
+          { value: '3 / 2', label: '3:2' },
+          { value: '1 / 1', label: '1:1' },
+          { value: '3 / 4', label: '3:4' },
+          { value: '9 / 16', label: '9:16' },
+        ]}
+        onChange={(v) => {
+          setLive('aspect-ratio', v);
+          ensureCoverOnMedia();
+        }}
+      />
       <SliderInput
         label="padding-top"
         value={paddingTop}
@@ -170,6 +308,22 @@ function BoxSection() {
         max={120}
         unit="px"
         onChange={(v) => setLive('padding-left', `${v}px`)}
+      />
+      <SliderInput
+        label="margin-top"
+        value={marginTop}
+        min={0}
+        max={120}
+        unit="px"
+        onChange={(v) => setLive('margin-top', `${v}px`)}
+      />
+      <SliderInput
+        label="margin-bottom"
+        value={marginBottom}
+        min={0}
+        max={120}
+        unit="px"
+        onChange={(v) => setLive('margin-bottom', `${v}px`)}
       />
       <SliderInput
         label="border-radius"
@@ -211,26 +365,10 @@ function BoxSection() {
   );
 }
 
-function ImageSectionPlaceholder() {
-  return (
-    <section className="flex flex-col gap-2 rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
-      <SectionHeader title="Image" />
-      <p>画像の focal point ドラッグ・過去版サイクルは次のアップデートで追加。</p>
-    </section>
-  );
-}
-
-function VideoSectionPlaceholder() {
-  return (
-    <section className="flex flex-col gap-2 rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
-      <SectionHeader title="Video" />
-      <p>動画の focal point ドラッグ・再生コントロール・過去版サイクルは次のアップデートで追加。</p>
-    </section>
-  );
-}
-
 export function InspectorPanel() {
+  // Hooks は必ず条件分岐より先に全部呼ぶ（React の Rules of Hooks）
   const selectedElement = usePreviewStore((s) => s.selectedElement);
+  const liveTarget = usePreviewStore((s) => s.liveTarget);
   const clearSelection = usePreviewStore((s) => s.clearSelection);
   const resetEdits = usePreviewStore((s) => s.resetElementEdits);
   const edits = usePreviewStore((s) => s.edits);
@@ -261,18 +399,22 @@ export function InspectorPanel() {
           &lt;{selectedElement.tagName}&gt;
           {selectedElement.text ? ` "${selectedElement.text.slice(0, 18)}"` : ''}
         </span>
+        <span className="ml-auto shrink-0 rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground">
+          {Math.round(selectedElement.rect.width)}×{Math.round(selectedElement.rect.height)}
+        </span>
         <button
           onClick={clearSelection}
-          className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
           title="選択解除"
         >
           ×
         </button>
       </div>
       <div className="flex-1 space-y-4 overflow-y-auto p-3">
+        <ElementPreview target={liveTarget} />
         {isText && <TypographySection />}
-        {isImage && <ImageSectionPlaceholder />}
-        {isVideo && <VideoSectionPlaceholder />}
+        {isImage && <ImageSection />}
+        {isVideo && <VideoSection />}
         <BoxSection />
       </div>
       {hasEdits && (
