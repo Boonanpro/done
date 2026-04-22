@@ -184,37 +184,9 @@ function BoxSection() {
   const cs = useComputedStyle();
   const setLive = usePreviewStore((s) => s.setLiveStyle);
   const liveTarget = usePreviewStore((s) => s.liveTarget);
-  const applyStyleTo = usePreviewStore((s) => s.applyStyleTo);
   // style 変更の度に再描画するためのバージョン（void で購読のみ）
   void usePreviewStore((s) => s.styleVersion);
   if (!cs) return null;
-
-  // サイズ変更時、wrapper の aspect-ratio が効いていると width/height を
-  // 片方だけ動かしても他方が勝手に追従してしまう。Tailwind の aspect-video
-  // クラス等が class 経由で効くので、computedStyle で判定 → 常に auto で上書き。
-  const ensureCoverOnMedia = () => {
-    if (!liveTarget) return;
-    const win = (liveTarget as HTMLElement).ownerDocument?.defaultView;
-    const cs = win ? win.getComputedStyle(liveTarget) : null;
-    if (cs && cs.aspectRatio && cs.aspectRatio !== 'auto') {
-      applyStyleTo(liveTarget, 'aspect-ratio', 'auto', true);
-    }
-    const media =
-      findMediaInScope(liveTarget, 'video') ||
-      findMediaInScope(liveTarget, 'img');
-    if (!media) return;
-    applyStyleTo(media, 'width', '100%', true);
-    applyStyleTo(media, 'height', '100%', true);
-    const mcs = media.ownerDocument?.defaultView?.getComputedStyle(media);
-    const currentFit = mcs?.objectFit || 'fill';
-    if (currentFit === 'fill' || currentFit === 'none') {
-      applyStyleTo(media, 'object-fit', 'cover');
-    }
-    // media の aspect-ratio も解除（<video> 等は intrinsic aspect が効くため）
-    if (mcs && mcs.aspectRatio && mcs.aspectRatio !== 'auto') {
-      applyStyleTo(media, 'aspect-ratio', 'auto', true);
-    }
-  };
 
   const width = parseNumericValue(cs.width) ?? 0;
   const height = parseNumericValue(cs.height) ?? 0;
@@ -243,10 +215,7 @@ function BoxSection() {
         min={0}
         max={Math.max(parentWidth, 1600)}
         unit="px"
-        onChange={(v) => {
-          setLive('width', `${v}px`, true);
-          ensureCoverOnMedia();
-        }}
+        onChange={(v) => setLive('width', `${v}px`, true)}
       />
       <SliderInput
         label="height"
@@ -254,10 +223,7 @@ function BoxSection() {
         min={0}
         max={Math.max(parentHeight, 1200)}
         unit="px"
-        onChange={(v) => {
-          setLive('height', `${v}px`, true);
-          ensureCoverOnMedia();
-        }}
+        onChange={(v) => setLive('height', `${v}px`, true)}
       />
       <SelectInput
         label="aspect-ratio"
@@ -271,10 +237,7 @@ function BoxSection() {
           { value: '3 / 4', label: '3:4' },
           { value: '9 / 16', label: '9:16' },
         ]}
-        onChange={(v) => {
-          setLive('aspect-ratio', v);
-          ensureCoverOnMedia();
-        }}
+        onChange={(v) => setLive('aspect-ratio', v)}
       />
       <SliderInput
         label="padding-top"
