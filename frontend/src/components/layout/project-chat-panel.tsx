@@ -1158,7 +1158,6 @@ function ChatInput({
 
 function slugToFilePath(slug: string, previewUrl: string): string {
   // /demo/xxx → frontend/src/app/demo/xxx/page.tsx
-  // /dashboard/xxx → frontend/src/app/dashboard/xxx/page.tsx
   const trimmed = previewUrl.replace(/^\//, '');
   return `frontend/src/app/${trimmed}/page.tsx`;
 }

@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, Briefcase, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap, Contact } from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -63,15 +63,6 @@ const navItems = [
   },
 ];
 
-const businessItems: typeof navItems = [
-  {
-    title: '連絡先',
-    href: '/dashboard/contacts',
-    icon: Contact,
-    description: 'クライアント・取引先の連絡先管理',
-  },
-];
-
 interface SidebarProps {
   className?: string;
   isCollapsed: boolean;
@@ -89,7 +80,6 @@ export function Sidebar({
   const router = useRouter();
   const { user, logout, isLoggingOut } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
-  const [isBusinessOpen, setIsBusinessOpen] = useState(false);
   const [showAllProjects, setShowAllProjects] = useState(false);
   const PROJECT_DISPLAY_LIMIT = 5;
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
@@ -482,79 +472,7 @@ export function Sidebar({
               );
             })}
 
-            {/* ビジネス (owner only) */}
-            {isOwner && <><Tooltip>
-              <TooltipTrigger asChild>
-                <motion.div
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  className={cn(
-                    'flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors cursor-pointer',
-                    (isBusinessOpen || pathname.startsWith('/notes') || pathname.startsWith('/studio') || pathname.startsWith('/dashboard/dx'))
-                      ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                      : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground',
-                    isCollapsed && 'justify-center px-0'
-                  )}
-                  onClick={() => setIsBusinessOpen(!isBusinessOpen)}
-                >
-                  <Briefcase className="h-4 w-4 shrink-0" />
-                  {!isCollapsed && (
-                    <>
-                      <span className="flex-1">ビジネス</span>
-                      <ChevronDown className={cn(
-                        'h-3.5 w-3.5 transition-transform',
-                        isBusinessOpen && 'rotate-180'
-                      )} />
-                    </>
-                  )}
-                </motion.div>
-              </TooltipTrigger>
-              {isCollapsed && (
-                <TooltipContent side="right">
-                  <p className="font-medium">ビジネス</p>
-                  <p className="text-xs text-muted-foreground">ビジネスツール</p>
-                </TooltipContent>
-              )}
-            </Tooltip>
-
-            <AnimatePresence>
-              {isBusinessOpen && !isCollapsed && (
-                <motion.div
-                  initial={{ opacity: 0, height: 0 }}
-                  animate={{ opacity: 1, height: 'auto' }}
-                  exit={{ opacity: 0, height: 0 }}
-                  className="overflow-hidden"
-                >
-                  {businessItems.map((item) => {
-                    const isActive = pathname.startsWith(item.href);
-                    const Icon = item.icon;
-                    return (
-                      <Tooltip key={item.href}>
-                        <TooltipTrigger asChild>
-                          <Link href={item.href}>
-                            <motion.div
-                              whileHover={{ scale: 1.02 }}
-                              whileTap={{ scale: 0.98 }}
-                              className={cn(
-                                'flex items-center gap-3 pl-8 pr-3 py-2 rounded-lg text-sm transition-colors',
-                                isActive
-                                  ? 'bg-sidebar-accent text-sidebar-accent-foreground'
-                                  : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'
-                              )}
-                            >
-                              <Icon className="h-4 w-4 shrink-0" />
-                              <span>{item.title}</span>
-                            </motion.div>
-                          </Link>
-                        </TooltipTrigger>
-                      </Tooltip>
-                    );
-                  })}
-                </motion.div>
-              )}
-            </AnimatePresence></>}
-
-            {/* コミュニケーション・ダン用Notion・設定 */}
+            {/* コミュニケーション・連絡先・ダン用Notion・設定 */}
             {navItems.filter(item => item.href !== '/chat').map((item) => {
               const isActive = pathname.startsWith(item.href);
               const Icon = item.icon;
