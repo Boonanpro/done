@@ -141,7 +141,13 @@ updated: 2026-04-12
 7. **品質チェック** — 共通チェックリストに従う
 
 **承認後の本番移行:**
-ユーザーが承認したら `create_feature(本番モード)` を実行する。demo/ のプロトタイプが自動的に dashboard/ に移動され、service/routes の雛形が追加される。プロトタイプを拡張して本番実装する。
+ユーザーが承認したら `create_feature(feature_name, demo=False)` を実行する。
+成果物は **demo/ のまま**保持され（移動しない）、backend の service/routes 雛形が追加される。
+`chat_artifact.kind` が `demo` → `production` に切り替わり、チャット右ペインで
+引き続きプレビュー/編集できる。プロトタイプのまま本番実装を拡張する。
+
+**重要**: 生成物を `frontend/src/app/dashboard/` に作ろうとしない。dashboard/ 配下は
+廃止済み。全成果物は `frontend/src/app/demo/{slug}/` に配置する。
 
 **参考動画ライブラリ:**
 

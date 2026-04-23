@@ -1,17 +1,4 @@
 {
-  "contacts": {
-    "name": "contacts",
-    "description": "クライアント・取引先の連絡先管理",
-    "created_at": "2026-04-15T13:52:57.794731",
-    "files": [
-      "D:\\done\\supabase\\migrations\\037_contacts.sql",
-      "D:\\done\\app\\models\\contacts_schemas.py",
-      "D:\\done\\app\\services\\contacts_service.py",
-      "D:\\done\\app\\api\\contacts_routes.py",
-      "D:\\done\\frontend\\src\\app\\dashboard\\contacts\\page.tsx",
-      "D:\\done\\scripts\\seed_contacts.py"
-    ]
-  },
   "amagasaki_sales_dashboard": {
     "name": "amagasaki_sales_dashboard",
     "description": "尼崎B2B AIセールスパイプラインの運用ダッシュボード。企業リスト→診断→課題仮説→プロトタイプ→送信→KPIを1画面で管理。",

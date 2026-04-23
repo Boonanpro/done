@@ -7,8 +7,8 @@ import { InspectorRuntime } from './inspector-runtime';
 export function InspectorRuntimeLoader() {
   const pathname = usePathname();
   if (!pathname) return null;
-  // /demo/{slug} または /dashboard/{slug}
-  const m = pathname.match(/^\/(?:demo|dashboard)\/([^/]+)/);
+  // /demo/{slug} のみ（dashboard/ は廃止）
+  const m = pathname.match(/^\/demo\/([^/]+)/);
   if (!m) return null;
   return <InspectorRuntime slug={m[1]} />;
 }
