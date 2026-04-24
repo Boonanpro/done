@@ -166,7 +166,9 @@ export function Sidebar({
   const { data: projectsData, isLoading: isLoadingProjects } = useQuery({
     queryKey: ['projects'],
     queryFn: () => api.projects.list(),
-    enabled: hasToken,
+    // localStorage gate を撤廃。Cookie 認証でも projects を取得できるようにする。
+    // 未認証なら api-client の request() が 401 → /login で処理する。
+    enabled: true,
     staleTime: 5 * 1000,
     refetchInterval: 10 * 1000,
   });
