@@ -38,7 +38,7 @@
   },
   "image_generation": {
     "name": "image_generation",
-    "description": "Nano Banana (Gemini 2.5 Flash Image) 経由の画像生成/編集。生成した画像は Supabase Storage に保存。",
+    "description": "Nano Banana (Gemini 2.5 Flash Image) 経由の画像生成/編集。GPT Image 2 への切替準備済み (OpenAI org verification 完了待ち)。",
     "created_at": "2026-04-21T19:33:51.378252",
     "mode": "production",
     "files": [
@@ -90,6 +90,44 @@
       "D:\\done\\app\\api\\inspector_overrides_routes.py",
       "D:\\done\\frontend\\src\\app\\dashboard\\inspector-overrides\\page.tsx",
       "D:\\done\\scripts\\seed_inspector_overrides.py"
+    ]
+  },
+  "public_chat": {
+    "name": "public_chat",
+    "description": "クライアントHP等の外部公開ページから叩く無認証・レート制限付きチャットAPI (Claude/Gemini 経由)。AIChatPanel Mode B のバックエンド。",
+    "created_at": "2026-04-23T00:00:00.000000",
+    "mode": "production",
+    "files": [
+      "D:\\done\\app\\models\\public_chat_schemas.py",
+      "D:\\done\\app\\services\\public_chat_service.py",
+      "D:\\done\\app\\api\\public_chat_routes.py"
+    ]
+  },
+  "inquiry": {
+    "name": "inquiry",
+    "description": "クライアントHPの問い合わせフォームが送信先とするエンドポイント。公開POST(レート制限) + 管理用GET/PATCH。",
+    "created_at": "2026-04-23T00:00:00.000000",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\044_inquiry.sql",
+      "D:\\done\\app\\models\\inquiry_schemas.py",
+      "D:\\done\\app\\services\\inquiry_service.py",
+      "D:\\done\\app\\api\\inquiry_routes.py",
+      "D:\\done\\frontend\\src\\components\\templates\\inquiry-form.tsx"
+    ]
+  },
+  "aix_dashboard": {
+    "name": "aix_dashboard",
+    "description": "AIX事業（AIで企業のDX支援）の案件管理ダッシュボード。クライアント・課題仮説・提案・営業活動・契約・運用までをワンストップで管理。",
+    "created_at": "2026-04-23T19:36:54.604879",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\045_aix_dashboard.sql",
+      "D:\\done\\app\\models\\aix_dashboard_schemas.py",
+      "D:\\done\\app\\services\\aix_dashboard_service.py",
+      "D:\\done\\app\\api\\aix_dashboard_routes.py",
+      "D:\\done\\frontend\\src\\app\\demo\\aix-dashboard\\page.tsx",
+      "D:\\done\\scripts\\seed_aix_dashboard.py"
     ]
   }
 }

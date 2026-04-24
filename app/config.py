@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = ""
     SUPABASE_KEY: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""
+    SUPABASE_ACCESS_TOKEN: str = ""  # Management API PAT for DDL migrations
+    SUPABASE_PROJECT_REF: str = "omcnusihkpfyvzglttop"
     
     # Anthropic (Claude)
     ANTHROPIC_API_KEY: str = ""

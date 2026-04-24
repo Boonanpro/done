@@ -567,7 +567,7 @@ function ChatInput({
       return;
     }
     textarea.style.height = '32px';
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 120)}px`;
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 480)}px`;
   }, [message]);
 
   const invalidateProjectQueries = useCallback(() => {
@@ -1111,7 +1111,7 @@ function ChatInput({
           onPaste={handlePaste}
           placeholder={isCommentMode ? '右ペインのコメント欄で入力...' : 'メッセージを入力...'}
           rows={1}
-          className={`min-h-[32px] max-h-[120px] flex-1 resize-none bg-transparent py-1.5 text-base focus:outline-none md:text-[17px] ${isCommentMode ? 'cursor-not-allowed text-foreground/90' : ''}`}
+          className={`min-h-[32px] max-h-[480px] flex-1 resize-none bg-transparent py-1.5 text-base focus:outline-none md:text-[17px] ${isCommentMode ? 'cursor-not-allowed text-foreground/90' : ''}`}
         />
         {isCommentMode ? (
           <Button

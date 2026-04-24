@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 import queue as thread_queue
 import unicodedata
 from datetime import datetime, timezone
@@ -535,6 +536,9 @@ def _build_cli_cmd(
         "--max-turns", "200",
         "--mcp-config", mcp_config_path,
         "--append-system-prompt", system_prompt,
+        # headless subprocess では interactive UI が無いので以下2つは機能しない
+        # → モデルが呼ばないよう無効化。質問はテキストで、計画はメッセージ本文に書く運用に寄せる。
+        "--disallowedTools", "ExitPlanMode,AskUserQuestion",
     ])
 
     if resume_session_id:
@@ -615,7 +619,42 @@ def _run_cli_process(
     stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
     stderr_thread.start()
 
+    # Watchdog: stdout に N 秒イベントが流れなければ hang とみなし強制終了する。
+    # Bash の長時間コマンド (例: npm install) を許容するためデフォルト 5 分。
+    # tool_result が来ない間 (= 実際に hang) に発火する。
+    WATCHDOG_TIMEOUT = 300  # seconds
+    _last_activity = [time.time()]
+    _watchdog_fired = [False]
+
+    def _watchdog():
+        while process.poll() is None:
+            time.sleep(15)
+            elapsed = time.time() - _last_activity[0]
+            if elapsed > WATCHDOG_TIMEOUT:
+                _watchdog_fired[0] = True
+                _cli_debug(
+                    f"WATCHDOG: no stdout activity for {elapsed:.0f}s "
+                    f"(threshold {WATCHDOG_TIMEOUT}s), killing PID={process.pid}"
+                )
+                try:
+                    event_queue.put({
+                        "type": "error",
+                        "message": (
+                            f"dan が {WATCHDOG_TIMEOUT//60} 分応答停止したため強制終了しました。"
+                            "外部コマンド (git push の credential 待ち等) でハングした可能性があります。"
+                            "もう一度メッセージを送ってください。"
+                        ),
+                    })
+                except Exception:
+                    pass
+                _terminate_process(process)
+                return
+
+    watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
+    watchdog_thread.start()
+
     for line in process.stdout:
+        _last_activity[0] = time.time()
         line = line.strip()
         if not line:
             continue
@@ -837,6 +876,17 @@ def _run_cli_in_thread(
     env["CLAUDE_CODE_ENABLE_TASKS"] = "true"
     if project_id:
         env["DAN_PROJECT_ID"] = project_id
+
+    # Hang 防止: 子プロセス (git, npm, gcloud 等) が GUI/対話入力を要求すると subprocess は永久 hang する。
+    # 全部「対話無効化」して即時失敗させる。
+    env["GIT_TERMINAL_PROMPT"] = "0"            # git: credential GUI を出さない
+    env["GIT_ASKPASS"] = "echo"                 # git: パスワード入力を空文字で即返す
+    env["GCM_INTERACTIVE"] = "Never"            # git-credential-manager: GUI 完全抑止
+    env["GH_PROMPT_DISABLED"] = "1"             # gh CLI: 確認 prompt を出さない
+    env["NPM_CONFIG_YES"] = "true"              # npm: 確認を all-yes
+    env["CI"] = "1"                             # 大半のツールが CI モードで非対話化される
+    env["DEBIAN_FRONTEND"] = "noninteractive"   # apt 系 (WSL 経由など)
+    env["NO_COLOR"] = "1"                       # 出力ノイズ削減 (パイプ詰まり緩和)
 
     # .env にしか定義されていない変数を settings から補完
     # （os.environ には入らないため、CLIやMCPサーバーに渡らず Supabase アクセスが失敗する）

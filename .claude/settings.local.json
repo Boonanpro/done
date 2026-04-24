@@ -28,6 +28,21 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python D:/done/scripts/hook_autoinstall_shadcn.py"
+          },
+          {
+            "type": "command",
+            "command": "python D:/done/scripts/hook_autoinstall_npm.py"
+          }
+        ]
+      }
     ]
   }
 }

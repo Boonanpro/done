@@ -485,6 +485,19 @@ if __name__ == "__main__":
     FEATURE_REGISTRY.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # ==========================================
+    # 8b. Migration を自動適用（SUPABASE_ACCESS_TOKEN があれば）
+    # ==========================================
+    try:
+        from app.tools.supabase_ddl import apply_migration, SupabaseDDLError
+        ddl_result = apply_migration(migration_path.name)
+        print(f"[supabase] applied migration {migration_path.name}")
+        created_files.append(f"APPLIED: supabase/migrations/{migration_path.name}")
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[supabase] migration auto-apply skipped: {e}")
+
+    # ==========================================
     # 9. chat_artifact への自動登録（DAN_PROJECT_ID があれば）
     # ==========================================
     project_id = os.environ.get("DAN_PROJECT_ID")

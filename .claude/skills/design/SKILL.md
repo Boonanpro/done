@@ -5,12 +5,33 @@ description: >
   ビジュアルを伴う成果物を作成する際に使用する。shadcn/uiコンポーネントと
   デザイントークンの使用を強制し、自己評価ループで品質を保証する。
 display_name: デザイン
-updated: 2026-04-12
+updated: 2026-04-23
 ---
 
 # デザインスキル
 
 ダッシュボード・クライアントHP・提案書など、**ビジュアルを伴う全ての成果物**に適用するデザインルール。
+
+## 🧩 まず templates を使う
+
+成果物を書き始める前に `frontend/src/components/templates/` を確認。
+ここには構造パターンが既にコンポーネント化されている（色やコピーは各案件で決める）:
+
+| コンポーネント | 用途 |
+|---|---|
+| `<PageShell>` | ダッシュボード/管理画面の外枠（max-width + padding + ヘッダー） |
+| `<LpShell>` | LP全体の外枠（sticky nav + footer） |
+| `<Section>` | セクションの縦リズム・見出し・max-width統一 |
+| `<HeroSection>` | ヒーロー（split/centered/stacked の3レイアウト） |
+| `<FeatureGrid>` | 特徴カードの3〜4カラムグリッド |
+| `<KpiCard>` | KPI表示（label / value / icon / trend） |
+| `<AIChatPanel>` | Mode B の公開チャットUI (`scope` でAPI側のコンテキスト分岐) |
+| `<InquiryForm>` | 問い合わせフォーム（送信先: `/api/v1/inquiries`） |
+| `<LocationMap>` | Google Maps iframe 埋め込み（アクセスセクション用、APIキー不要） |
+
+import 例: `import { HeroSection, Section, FeatureGrid } from "@/components/templates";`
+
+**templateで表現できない構造を毎回スクラッチで書かないこと。** 足りない場合は templates/ に足してから使う。
 
 ---
 
