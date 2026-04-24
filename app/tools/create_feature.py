@@ -4,10 +4,11 @@ create_feature — 新機能の雛形ファイルを自動生成するツール
 機能名を受け取り、DB migration + schemas + service + routes + frontend page + seed script を生成。
 ダンが機能実装を開始する際に必ず通る関門。
 
-## 新体制（2026-04-22〜）
-成果物は全て `frontend/src/app/demo/{slug}/` に作られる。
-旧「dashboard/ に昇格」フローは廃止 — 承認後も demo/ のまま使い続け、
-`chat_artifact.kind` を `demo → production` に切り替えるだけ。
+## 配置先 (2026-04-24〜)
+- demo=False (デフォルト): `frontend/src/app/artifacts/{slug}/` に通常の成果物として作る
+- demo=True (提案動画用): `frontend/src/app/demo/{slug}/` にプロトタイプとして作る
+
+`chat_artifact.kind` は `production` (artifacts/) または `demo` (demo/) で区別。
 
 DAN_PROJECT_ID 環境変数が設定されていれば、生成した成果物を chat_artifact テーブルに
 自動登録する（プロジェクトに紐づく成果物としてチャット右ペインから開けるようにする）。
@@ -23,6 +24,7 @@ BACKEND_MODELS = PROJECT_ROOT / "app" / "models"
 BACKEND_SERVICES = PROJECT_ROOT / "app" / "services"
 BACKEND_API = PROJECT_ROOT / "app" / "api"
 FRONTEND_DEMO = PROJECT_ROOT / "frontend" / "src" / "app" / "demo"
+FRONTEND_ARTIFACTS = PROJECT_ROOT / "frontend" / "src" / "app" / "artifacts"
 SCRIPTS = PROJECT_ROOT / "scripts"
 
 # 実行済みfeatureを追跡するファイル
@@ -58,8 +60,9 @@ def create_feature(feature_name: str, description: str = "", demo: bool = False,
     demo=True（提案モード）:
         提案動画用のプロトタイプ雛形を demo/ に生成。
         scenes 引数（デモシーンのリスト）が必須。
-    demo=False（本番モード）:
-        同じく demo/ に雛形を生成。承認済みプロトタイプがあれば上書きせず保持し、
+        chat_artifact.kind は 'demo' として登録される。
+    demo=False（本番モード、デフォルト）:
+        artifacts/ に雛形を生成。承認済みプロトタイプがあれば上書きせず保持し、
         backend (migration/schemas/service/routes) の雛形だけ追加生成する。
         chat_artifact.kind は 'production' として登録される。
 
@@ -304,9 +307,10 @@ async def delete_{snake}(
     created_files.append(str(routes_path))
 
     # ==========================================
-    # 5. Frontend Page（demo/production いずれも demo/ に配置）
+    # 5. Frontend Page (demo=True なら demo/、それ以外は artifacts/)
     # ==========================================
-    page_dir = FRONTEND_DEMO / kebab
+    frontend_root = FRONTEND_DEMO if demo else FRONTEND_ARTIFACTS
+    page_dir = frontend_root / kebab
     page_path = page_dir / "page.tsx"
 
     if page_path.exists():
@@ -508,8 +512,9 @@ if __name__ == "__main__":
             proj_res = sb.table("projects").select("user_id").eq("id", project_id).execute()
             owner_id = proj_res.data[0]["user_id"] if proj_res.data else None
             if owner_id:
-                # 新体制: 成果物は常に demo/ 配下。kind で提案/本番を区別
-                preview_url = f"/demo/{kebab}"
+                # demo=True なら /demo/、それ以外は /artifacts/
+                folder = "demo" if demo else "artifacts"
+                preview_url = f"/{folder}/{kebab}"
                 # 同じプロジェクト内に同じ slug があれば重複登録しない
                 exists = (
                     sb.table("chat_artifact")

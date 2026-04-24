@@ -126,7 +126,7 @@ UI を先に作らない。
 #### ページ構造の典型
 
 `<PageShell>` (templates) を外枠にして、以下のようなブロックを縦に積む。
-具体的なコードは `frontend/src/app/demo/` 配下の既存ダッシュボードを参考にする
+具体的なコードは `frontend/src/app/artifacts/` 配下の既存ダッシュボードを参考にする
 (コードサンプルをここに固定で書くと「同じ構造に収束しやすい」ため意図的に省略)。
 
 - ヘッダー: タイトル + 説明 + 主要アクション
@@ -303,7 +303,8 @@ HP生成後、以下を全て確認する:
 
 #### プロジェクト構成 (新アーキテクチャ)
 
-HP は **`frontend/src/app/demo/{slug}/` 配下** に作る (クライアント案件も社内 LP も全て同じ場所)。
+HP は **`frontend/src/app/artifacts/{slug}/` 配下** に作る (クライアント案件も社内 LP も全て同じ場所)。
+※ `frontend/src/app/artifacts/{slug}/` は提案動画用プロトタイプ専用。通常の HP / ダッシュボード制作には使わない。
 独立した Next.js プロジェクトを切らない (旧 `D:/dan-workspace/hp-projects/` フローは廃止)。
 理由: チャット右ペインのライブプレビューでそのまま見せて会話で詰められる、
 `create_feature` の guard hook が機能する、Vercel デプロイは done 本体と同居できる。
@@ -318,7 +319,7 @@ frontend/src/app/demo/yoshikawa-tokuso/
 
 #### クライアントごとのカスタマイズ
 
-同じ shadcn/ui コンポーネントを使いつつ、CSS 変数 (例: `frontend/src/app/demo/{slug}/page.tsx` 内の局所 `<style>` か、ルート `globals.css` のクライアント別セレクタ `.theme-yoshikawa` 等) でデザインを変える:
+同じ shadcn/ui コンポーネントを使いつつ、CSS 変数 (例: `frontend/src/app/artifacts/{slug}/page.tsx` 内の局所 `<style>` か、ルート `globals.css` のクライアント別セレクタ `.theme-yoshikawa` 等) でデザインを変える:
 
 ```css
 /* 例: 野性的・アウトドア系 */
@@ -346,8 +347,8 @@ frontend/src/app/demo/yoshikawa-tokuso/
 
 #### デプロイ
 
-done 本体の Vercel デプロイに自動追従する (`/demo/{slug}` パスで公開)。
-クライアント独自ドメインを使う場合は Vercel のドメイン設定で `/demo/{slug}` を別ドメインにマッピングする。
+done 本体の Vercel デプロイに自動追従する (`/artifacts/{slug}` パスで公開)。
+クライアント独自ドメインを使う場合は Vercel のドメイン設定で `/artifacts/{slug}` を別ドメインにマッピングする。
 
 ---
 

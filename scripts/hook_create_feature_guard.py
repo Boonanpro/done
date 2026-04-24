@@ -17,11 +17,12 @@ PROJECT_ROOT = r"D:\done"
 FEATURE_REGISTRY = os.path.join(PROJECT_ROOT, ".claude", "feature_registry.json")
 
 # 監視対象のパスパターン（新規ファイル作成時のみ）
-# 新体制: 成果物は全て demo/ に作成。dashboard/ は廃止したので監視対象から除外
+# 通常成果物は artifacts/、提案動画用プロトタイプは demo/。両方を guard 対象に。
 GUARDED_PATTERNS = [
     (r"app[/\\]api[/\\](\w+)_routes\.py", "routes"),
     (r"app[/\\]services[/\\](\w+)_service\.py", "service"),
     (r"app[/\\]models[/\\](\w+)_schemas\.py", "schemas"),
+    (r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)[/\\]page\.tsx", "artifacts_page"),
     (r"frontend[/\\]src[/\\]app[/\\]demo[/\\]([\w-]+)[/\\]page\.tsx", "demo_page"),
     (r"supabase[/\\]migrations[/\\]\d+_([\w]+)\.sql", "migration"),
 ]

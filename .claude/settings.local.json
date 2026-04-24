@@ -40,6 +40,10 @@
           {
             "type": "command",
             "command": "python D:/done/scripts/hook_autoinstall_npm.py"
+          },
+          {
+            "type": "command",
+            "command": "python D:/done/scripts/hook_register_artifact.py"
           }
         ]
       }
