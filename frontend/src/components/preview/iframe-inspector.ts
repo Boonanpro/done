@@ -6,12 +6,12 @@ import { computeElementKey } from '@/components/dan/inspector-runtime';
 const HOVER_OVERLAY_ID = 'dan-inspector-hover';
 const ACTIVE_OVERLAY_ID = 'dan-inspector-active';
 
-// インライン編集対象タグ (テキスト要素のみ)
-const INLINE_EDIT_TAGS = new Set([
-  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-  'p', 'span', 'a', 'button', 'label', 'li',
-  'td', 'th', 'figcaption', 'em', 'strong', 'small',
-  'blockquote', 'cite', 'caption',
+// インライン編集対象外タグ (フォーム要素や置換要素は触らない)
+const INLINE_EDIT_BLOCKED_TAGS = new Set([
+  'input', 'textarea', 'select', 'option', 'optgroup',
+  'img', 'video', 'audio', 'iframe', 'canvas', 'svg', 'embed', 'object',
+  'script', 'style', 'meta', 'link', 'br', 'hr',
+  'html', 'body', 'head',
 ]);
 
 type Handlers = {
@@ -184,10 +184,12 @@ export function attachInspector(iframe: HTMLIFrameElement) {
       target
     );
 
-    // テキスト要素 (h1/p/span/button 等) ならインライン編集を有効化
-    // 子要素を含まない leaf テキスト要素のみ対象 (構造を壊さないため)
+    // インライン編集を有効化:
+    // - フォーム/置換要素 (img, video, input 等) はスキップ
+    // - 子要素を含むものはスキップ (構造破壊防止)
+    // - それ以外なら全部対象 (div, section, header の中身など何でも)
     const hasChildElements = target.children.length > 0;
-    if (INLINE_EDIT_TAGS.has(tagName) && !hasChildElements) {
+    if (!INLINE_EDIT_BLOCKED_TAGS.has(tagName) && !hasChildElements) {
       enableInlineEdit(target as HTMLElement, doc, hover, active, overlays);
     }
   };
@@ -256,8 +258,9 @@ function pickFromStack(
   if (stack.length === 0) return null;
 
   const prev = stackState.get(doc);
+  // 同じ場所判定: 10px 以内ならドリル継続 (マウス手ブレ許容)
   const samePoint =
-    prev && Math.abs(x - prev.x) <= 5 && Math.abs(y - prev.y) <= 5;
+    prev && Math.abs(x - prev.x) <= 10 && Math.abs(y - prev.y) <= 10;
   const sameStack =
     samePoint &&
     prev &&
