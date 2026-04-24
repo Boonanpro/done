@@ -54,21 +54,52 @@ export function SliderInput({
   );
 }
 
-/** カラーピッカー + Hex 入力 */
+/** カラーピッカー + Hex 入力 + 透明化ボタン */
 export function ColorInput({
   label,
   value,
   onChange,
+  allowTransparent = true,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
+  allowTransparent?: boolean;
 }) {
   const hex = toHex(value) || '#000000';
+  // 現在透明 (rgba(0,0,0,0) や transparent) かを判定
+  const isTransparent =
+    !value ||
+    value === 'transparent' ||
+    /rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\)/.test(value);
   return (
     <div className="flex items-center justify-between gap-2 text-xs">
       <label className="text-muted-foreground">{label}</label>
       <div className="flex items-center gap-1">
+        {allowTransparent && (
+          <button
+            type="button"
+            onClick={() => onChange('transparent')}
+            title="透明にする"
+            className={`flex h-6 w-6 items-center justify-center rounded border border-border text-xs ${
+              isTransparent
+                ? 'bg-primary/20 text-primary'
+                : 'bg-background text-muted-foreground hover:bg-muted'
+            }`}
+            style={
+              isTransparent
+                ? undefined
+                : {
+                    backgroundImage:
+                      'linear-gradient(45deg, #ccc 25%, transparent 25%), linear-gradient(-45deg, #ccc 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #ccc 75%), linear-gradient(-45deg, transparent 75%, #ccc 75%)',
+                    backgroundSize: '6px 6px',
+                    backgroundPosition: '0 0, 0 3px, 3px -3px, -3px 0',
+                  }
+            }
+          >
+            ⌀
+          </button>
+        )}
         <input
           type="color"
           value={hex}
