@@ -14,6 +14,8 @@ export interface SelectedElement {
   bgColor?: string;
   // DOM ツリー上のパスキー（InspectorRuntime が使う形式）
   elementKey?: string;
+  // クリック位置の z-stack 情報 (UI ヒント用)
+  stackHint?: { index: number; total: number };
 }
 
 export interface ArtifactRecord {

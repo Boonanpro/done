@@ -129,12 +129,15 @@ export function attachInspector(iframe: HTMLIFrameElement) {
 
   const click = (ev: Event) => {
     const e = ev as MouseEvent;
-    const target = e.target as Element | null;
-    if (!target || isOverlay(target)) return;
+    const initialTarget = e.target as Element | null;
+    if (!initialTarget || isOverlay(initialTarget)) return;
     // 編集中の要素ならネイティブ click を通す (キャレット位置調整・テキスト選択のため)
-    if (isEditing(target)) return;
+    if (isEditing(initialTarget)) return;
     e.preventDefault();
     e.stopPropagation();
+
+    // z-stack drill: 同じ場所を続けて click or Alt+click で下の要素にドリル
+    const target = pickFromStack(doc, e, isOverlay) || initialTarget;
 
     overlays.activeTarget = target;
     positionTo(active, doc, target);
@@ -159,6 +162,13 @@ export function attachInspector(iframe: HTMLIFrameElement) {
 
     const elementKey = computeElementKey(target);
 
+    // スタック情報も記録 (UI ヒント表示用)
+    const stackInfo = stackState.get(doc);
+    const stackHint =
+      stackInfo && stackInfo.stack.length > 1
+        ? { index: stackInfo.index, total: stackInfo.stack.length }
+        : undefined;
+
     usePreviewStore.getState().selectElement(
       {
         tagName,
@@ -169,6 +179,7 @@ export function attachInspector(iframe: HTMLIFrameElement) {
         ancestors,
         bgColor,
         elementKey,
+        stackHint,
       },
       target
     );
@@ -212,6 +223,58 @@ export function attachInspector(iframe: HTMLIFrameElement) {
   doc.defaultView?.addEventListener('resize', resize);
 
   registry.set(iframe, { move, click, keydown, scroll, resize });
+}
+
+/**
+ * クリック位置の z-stack から「次に選ぶべき要素」を決定する。
+ * - 同じ座標 (5px 以内) を続けてクリック → 次の要素にドリル
+ * - Alt キー押下 → 明示的にドリル
+ * - 別の座標 → 一番上 (リセット)
+ *
+ * 使い方: 元の click handler から target を選んだ直後に呼んで上書き。
+ */
+const stackState = new WeakMap<
+  Document,
+  { x: number; y: number; index: number; stack: Element[] }
+>();
+
+function pickFromStack(
+  doc: Document,
+  e: MouseEvent,
+  isOverlay: (el: Element | null) => boolean
+): Element | null {
+  const x = e.clientX;
+  const y = e.clientY;
+  const altKey = e.altKey;
+
+  // 表示中の overlay 要素を一時的に隠して elementsFromPoint を取る
+  // (overlay 自身が拾われないように)
+  const stack = (doc.elementsFromPoint(x, y) as Element[])
+    .filter((el) => !isOverlay(el))
+    .filter((el) => el.tagName.toLowerCase() !== 'html');
+
+  if (stack.length === 0) return null;
+
+  const prev = stackState.get(doc);
+  const samePoint =
+    prev && Math.abs(x - prev.x) <= 5 && Math.abs(y - prev.y) <= 5;
+  const sameStack =
+    samePoint &&
+    prev &&
+    prev.stack.length === stack.length &&
+    prev.stack.every((el, i) => el === stack[i]);
+
+  let index: number;
+  if ((samePoint && sameStack) || altKey) {
+    // 続けて同じ場所をクリック or Alt+click → ドリル
+    const baseIdx = prev?.index ?? 0;
+    index = (baseIdx + 1) % stack.length;
+  } else {
+    index = 0;
+  }
+
+  stackState.set(doc, { x, y, index, stack });
+  return stack[index] ?? null;
 }
 
 export function detachInspector(iframe: HTMLIFrameElement) {

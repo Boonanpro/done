@@ -387,6 +387,14 @@ export function InspectorPanel() {
           &lt;{selectedElement.tagName}&gt;
           {selectedElement.text ? ` "${selectedElement.text.slice(0, 18)}"` : ''}
         </span>
+        {selectedElement.stackHint && selectedElement.stackHint.total > 1 && (
+          <span
+            className="ml-auto shrink-0 rounded bg-blue-500/15 px-1 font-mono text-[10px] text-blue-600 dark:text-blue-400"
+            title="同じ場所をもう一度クリック (or Alt+クリック) で次の要素にドリル"
+          >
+            {selectedElement.stackHint.index + 1}/{selectedElement.stackHint.total} ↓
+          </span>
+        )}
         <span className="ml-auto shrink-0 rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground">
           {Math.round(selectedElement.rect.width)}×{Math.round(selectedElement.rect.height)}
         </span>
