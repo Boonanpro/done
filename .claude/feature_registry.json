@@ -38,7 +38,7 @@
   },
   "image_generation": {
     "name": "image_generation",
-    "description": "Nano Banana (Gemini 2.5 Flash Image) 経由の画像生成/編集。GPT Image 2 への切替準備済み (OpenAI org verification 完了待ち)。",
+    "description": "GPT Image 2 (OpenAI) 経由の画像生成/編集。日本語テキスト描画が高精度。2026-04-24 verification 完了で本切替。",
     "created_at": "2026-04-21T19:33:51.378252",
     "mode": "production",
     "files": [

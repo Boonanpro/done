@@ -1,6 +1,10 @@
 """
 image_generation のビジネスロジック
-Nano Banana (Gemini 2.5 Flash Image) で画像を生成し、Supabase Storage に保存。
+GPT Image 2 (OpenAI) で画像を生成/編集し、Supabase Storage に保存。
+
+変更履歴:
+- 2026-04-22: Nano Banana から GPT Image 2 へ切替試行 → verification 待ちで一時ロールバック
+- 2026-04-24: OpenAI org verification 完了、GPT Image 2 に本切替
 """
 import os
 import uuid
@@ -16,7 +20,9 @@ from app.services.supabase_client import get_supabase_client
 logger = logging.getLogger(__name__)
 
 BUCKET = "generated-images"
-MODEL_ID = "gemini-2.5-flash-image"
+MODEL_ID = "gpt-image-2"
+
+SUPPORTED_SIZES = {"1024x1024", "1792x1024", "1024x1792", "auto"}
 
 
 class ImageGenerationService:
@@ -25,12 +31,12 @@ class ImageGenerationService:
         self.table = "generated_images"
 
     def _get_client(self):
-        from google import genai
+        from openai import OpenAI
         from app.config import settings
-        api_key = settings.GOOGLE_GEMINI_API_KEY or os.environ.get("GOOGLE_GEMINI_API_KEY", "")
+        api_key = settings.OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
-            raise RuntimeError("GOOGLE_GEMINI_API_KEY is not set")
-        return genai.Client(api_key=api_key)
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        return OpenAI(api_key=api_key)
 
     async def _ensure_bucket(self):
         def _do():
@@ -68,31 +74,15 @@ class ImageGenerationService:
             r.raise_for_status()
             return r.content
 
-    def _extract_image_from_response(self, response) -> Optional[bytes]:
-        for candidate in getattr(response, "candidates", []) or []:
-            content = getattr(candidate, "content", None)
-            if not content:
-                continue
-            for part in getattr(content, "parts", []) or []:
-                inline_data = getattr(part, "inline_data", None)
-                if inline_data and getattr(inline_data, "data", None):
-                    data = inline_data.data
-                    if isinstance(data, str):
-                        return base64.b64decode(data)
-                    return data
-        return None
-
-    def _extract_text_from_response(self, response) -> str:
-        parts_text: List[str] = []
-        for candidate in getattr(response, "candidates", []) or []:
-            content = getattr(candidate, "content", None)
-            if not content:
-                continue
-            for part in getattr(content, "parts", []) or []:
-                t = getattr(part, "text", None)
-                if t:
-                    parts_text.append(t)
-        return " ".join(parts_text).strip()
+    def _normalize_size(self, size: str) -> str:
+        if size in SUPPORTED_SIZES:
+            return size
+        # 旧 Nano Banana 互換: 1024x1536 等が来たら近い OpenAI サイズに寄せる
+        mapping = {
+            "1024x1536": "1024x1792",
+            "1536x1024": "1792x1024",
+        }
+        return mapping.get(size, "1024x1024")
 
     async def generate(
         self,
@@ -101,23 +91,24 @@ class ImageGenerationService:
         project_id: Optional[str] = None,
         message_id: Optional[str] = None,
         size: str = "1024x1024",
+        quality: str = "high",
     ) -> dict:
         client = self._get_client()
+        normalized_size = self._normalize_size(size)
 
         def _call():
-            return client.models.generate_content(
+            return client.images.generate(
                 model=MODEL_ID,
-                contents=[prompt],
+                prompt=prompt,
+                size=normalized_size,
+                quality=quality,
+                n=1,
             )
 
         response = await asyncio.to_thread(_call)
-        img_bytes = self._extract_image_from_response(response)
-        if not img_bytes:
-            text = self._extract_text_from_response(response)
-            raise RuntimeError(
-                f"画像データが返ってきませんでした。応答テキスト: {text[:300]}" if text
-                else "画像データが返ってきませんでした"
-            )
+        if not response.data or not response.data[0].b64_json:
+            raise RuntimeError("OpenAI 応答に画像データが含まれていません")
+        img_bytes = base64.b64decode(response.data[0].b64_json)
 
         url, path = await self._upload_to_storage(img_bytes, "generate")
 
@@ -128,7 +119,7 @@ class ImageGenerationService:
             "model": MODEL_ID,
             "kind": "generate",
             "mime_type": "image/png",
-            "size": size,
+            "size": normalized_size,
             "created_by": user_id,
         }
         if project_id:
@@ -146,28 +137,30 @@ class ImageGenerationService:
         user_id: str,
         project_id: Optional[str] = None,
         message_id: Optional[str] = None,
+        size: str = "1024x1024",
+        quality: str = "high",
     ) -> dict:
-        from google.genai import types
         client = self._get_client()
+        normalized_size = self._normalize_size(size)
         ref_bytes = await self._fetch_image_bytes(reference_url)
 
         def _call():
-            return client.models.generate_content(
+            import io
+            file_obj = io.BytesIO(ref_bytes)
+            file_obj.name = "reference.png"
+            return client.images.edit(
                 model=MODEL_ID,
-                contents=[
-                    prompt,
-                    types.Part.from_bytes(data=ref_bytes, mime_type="image/png"),
-                ],
+                image=file_obj,
+                prompt=prompt,
+                size=normalized_size,
+                quality=quality,
+                n=1,
             )
 
         response = await asyncio.to_thread(_call)
-        img_bytes = self._extract_image_from_response(response)
-        if not img_bytes:
-            text = self._extract_text_from_response(response)
-            raise RuntimeError(
-                f"画像データが返ってきませんでした。応答テキスト: {text[:300]}" if text
-                else "画像データが返ってきませんでした"
-            )
+        if not response.data or not response.data[0].b64_json:
+            raise RuntimeError("OpenAI 応答に画像データが含まれていません")
+        img_bytes = base64.b64decode(response.data[0].b64_json)
 
         url, path = await self._upload_to_storage(img_bytes, "edit")
 
@@ -179,6 +172,7 @@ class ImageGenerationService:
             "kind": "edit",
             "reference_url": reference_url,
             "mime_type": "image/png",
+            "size": normalized_size,
             "created_by": user_id,
         }
         if project_id:

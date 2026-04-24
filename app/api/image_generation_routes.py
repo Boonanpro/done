@@ -50,6 +50,7 @@ async def generate_image(
             project_id=str(data.project_id) if data.project_id else None,
             message_id=str(data.message_id) if data.message_id else None,
             size=data.size,
+            quality=data.quality,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"画像生成失敗: {e}")
@@ -68,6 +69,8 @@ async def edit_image(
             user_id=user.user_id,
             project_id=str(data.project_id) if data.project_id else None,
             message_id=str(data.message_id) if data.message_id else None,
+            size=data.size,
+            quality=data.quality,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"画像編集失敗: {e}")

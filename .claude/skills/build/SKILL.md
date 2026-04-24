@@ -1,16 +1,18 @@
 ---
-name: design
+name: build
 description: >
-  UI/デザイン全般のスキル。ダッシュボード、クライアントHP、管理画面など
-  ビジュアルを伴う成果物を作成する際に使用する。shadcn/uiコンポーネントと
-  デザイントークンの使用を強制し、自己評価ループで品質を保証する。
-display_name: デザイン
+  Next.js + shadcn/ui + Tailwind で UI とバックエンドを実装するスキル。
+  ダッシュボード・HP・管理画面・LP・問い合わせフォーム付き機能ページなど、
+  見せて使える成果物が必要な時に使う。
+display_name: ビルド
 updated: 2026-04-24
 ---
 
-# デザインスキル
+# build スキル
 
-ダッシュボード・クライアントHP など、**ビジュアルを伴う全ての成果物**に適用するデザインルール。
+ダッシュボード・HP など、**Next.js で見せて使える成果物全般**を実装するスキル。
+UI のデザインだけでなく、DB / API / フロントを通したエンドツーエンドの実装と
+自己評価ループによる品質保証までを含む。
 
 > 提案書 HTML を作る場合は `actions/proposal_html.md` を参照 (ユーザーが「提案書作って」と明示要求した時のみ)。
 
@@ -161,7 +163,7 @@ shadcn/uiのchartコンポーネント（Recharts統合）を使う。`npx shadc
 
 ---
 
-### B. クライアントHP / ツール（Next.js）
+### B. HP / LP / ツール（Next.js）
 
 ダッシュボードと同じNext.js + shadcn/uiで作る。Astroは使わない。
 同じコンポーネント（Card, Button, Badge等）を使い、**CSS変数でクライアントごとの配色・雰囲気を変える**。
@@ -301,7 +303,7 @@ HP生成後、以下を全て確認する:
 
 #### プロジェクト構成 (新アーキテクチャ)
 
-クライアント HP は **`frontend/src/app/demo/{client-slug}/` 配下** に作る。
+HP は **`frontend/src/app/demo/{slug}/` 配下** に作る (クライアント案件も社内 LP も全て同じ場所)。
 独立した Next.js プロジェクトを切らない (旧 `D:/dan-workspace/hp-projects/` フローは廃止)。
 理由: チャット右ペインのライブプレビューでそのまま見せて会話で詰められる、
 `create_feature` の guard hook が機能する、Vercel デプロイは done 本体と同居できる。

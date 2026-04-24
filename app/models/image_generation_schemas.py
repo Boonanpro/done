@@ -11,7 +11,8 @@ class ImageGenerateRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     project_id: Optional[UUID] = None
     message_id: Optional[UUID] = None
-    size: Literal["1024x1024", "1024x1536", "1536x1024"] = "1024x1024"
+    size: Literal["1024x1024", "1792x1024", "1024x1792", "auto"] = "1024x1024"
+    quality: Literal["low", "medium", "high", "auto"] = "high"
 
 
 class ImageEditRequest(BaseModel):
@@ -19,6 +20,8 @@ class ImageEditRequest(BaseModel):
     reference_url: str = Field(..., min_length=1)
     project_id: Optional[UUID] = None
     message_id: Optional[UUID] = None
+    size: Literal["1024x1024", "1792x1024", "1024x1792", "auto"] = "1024x1024"
+    quality: Literal["low", "medium", "high", "auto"] = "high"
 
 
 class GeneratedImageResponse(BaseModel):
