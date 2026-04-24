@@ -59,6 +59,7 @@ interface PreviewActions {
 
   setInspectorMode: (mode: InspectorMode) => void;
   setLiveStyle: (property: string, value: string, important?: boolean) => void;
+  setLiveText: (text: string) => void;
   applyStyleTo: (target: Element | null, property: string, value: string, important?: boolean) => void;
   resetElementEdits: () => void;
 }
@@ -156,6 +157,22 @@ export const usePreviewStore = create<PreviewStore>()(
           target: liveTarget,
           elementKey: selectedElement.elementKey,
           patch: { styles: { [property]: value } },
+        });
+      },
+
+      setLiveText: (text) => {
+        const { liveTarget, selectedElement, styleVersion } = get();
+        if (!liveTarget || !selectedElement) return;
+        try {
+          liveTarget.textContent = text;
+        } catch {
+          /* ignore */
+        }
+        set({ styleVersion: styleVersion + 1 });
+        queueInspectorEdit({
+          target: liveTarget,
+          elementKey: selectedElement.elementKey,
+          patch: { attrs: { text } },
         });
       },
 

@@ -78,6 +78,12 @@ function applyToElement(
   if (attrs) {
     for (const [name, val] of Object.entries(attrs)) {
       try {
+        // 特殊キー "text" は textContent として扱う (DOM 属性ではない)
+        // 子要素が存在する場合は wipe される。leaf text 要素向け
+        if (name === 'text') {
+          el.textContent = val;
+          continue;
+        }
         el.setAttribute(name, val);
         // <video> は src 変更後 load() しないと再ロードされない
         if (name === 'src' && el.tagName === 'VIDEO') {
