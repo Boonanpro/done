@@ -221,7 +221,7 @@ async def extract_and_save_artifact(
 ) -> dict:
     """Extract visual+text description from HTML artifact and save persistently.
 
-    Called by: extract_artifact_memory tool (design skill Step 4.5)
+    Called by: extract_artifact_memory tool (build skill)
     """
     if not settings.GOOGLE_GEMINI_API_KEY:
         return {"success": False, "error": "GOOGLE_GEMINI_API_KEY not set"}
