@@ -623,25 +623,36 @@ def _run_cli_process(
     # Watchdog: stdout に N 秒イベントが流れなければ hang とみなし強制終了する。
     # Bash の長時間コマンド (例: npm install) を許容するためデフォルト 5 分。
     # tool_result が来ない間 (= 実際に hang) に発火する。
-    WATCHDOG_TIMEOUT = 300  # seconds
+    #
+    # 特例: Task (サブエージェント) 呼び出し中は別 Claude Code インスタンスが
+    # 裏で 10〜20 分走りうる。その間 dan 本体は沈黙するので通常閾値だと誤発火する。
+    # → Task in-flight 中は閾値を 30 分に延長。
+    WATCHDOG_TIMEOUT_NORMAL = 300         # seconds
+    WATCHDOG_TIMEOUT_TASK_ACTIVE = 1800   # 30 min: Task サブエージェント実行中の特例
     _last_activity = [time.time()]
     _watchdog_fired = [False]
+    _task_active = [False]  # Task tool が走ってる間 True
+
+    def _current_timeout() -> int:
+        return WATCHDOG_TIMEOUT_TASK_ACTIVE if _task_active[0] else WATCHDOG_TIMEOUT_NORMAL
 
     def _watchdog():
         while process.poll() is None:
             time.sleep(15)
+            threshold = _current_timeout()
             elapsed = time.time() - _last_activity[0]
-            if elapsed > WATCHDOG_TIMEOUT:
+            if elapsed > threshold:
                 _watchdog_fired[0] = True
                 _cli_debug(
                     f"WATCHDOG: no stdout activity for {elapsed:.0f}s "
-                    f"(threshold {WATCHDOG_TIMEOUT}s), killing PID={process.pid}"
+                    f"(threshold {threshold}s, task_active={_task_active[0]}), "
+                    f"killing PID={process.pid}"
                 )
                 try:
                     event_queue.put({
                         "type": "error",
                         "message": (
-                            f"dan が {WATCHDOG_TIMEOUT//60} 分応答停止したため強制終了しました。"
+                            f"dan が {threshold//60} 分応答停止したため強制終了しました。"
                             "外部コマンド (git push の credential 待ち等) でハングした可能性があります。"
                             "もう一度メッセージを送ってください。"
                         ),
@@ -724,6 +735,14 @@ def _run_cli_process(
                         continue
                     if tool_id:
                         emitted_tool_use_ids.add(tool_id)
+                    # Task 系ツールが呼ばれている間は watchdog 閾値を延長
+                    # Task 以外のツールに切り替わったらサブエージェント完了扱いでリセット
+                    tool_name = ev.get("name", "")
+                    task_tools = ("Task", "TaskCreate", "TaskOutput", "TaskGet", "TaskList", "TaskUpdate", "TaskStop")
+                    if tool_name in task_tools:
+                        _task_active[0] = True
+                    else:
+                        _task_active[0] = False
                 _cli_debug(f"  Event: type={ev['type']}, name={ev.get('name', '')}, text_len={len(ev.get('text', ''))}")
                 if ev["type"] == "text":
                     final_text_parts.append(ev["text"])
