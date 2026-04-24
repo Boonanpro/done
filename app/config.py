@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_ROLE_KEY: str = ""
     SUPABASE_ACCESS_TOKEN: str = ""  # Management API PAT for DDL migrations
     SUPABASE_PROJECT_REF: str = "omcnusihkpfyvzglttop"
+
+    # fal.ai (video generation: Kling 3.0 Pro 経由)
+    FAL_KEY: str = ""
     
     # Anthropic (Claude)
     ANTHROPIC_API_KEY: str = ""

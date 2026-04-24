@@ -49,6 +49,7 @@ async def generate_video(
             project_id=str(data.project_id) if data.project_id else None,
             message_id=str(data.message_id) if data.message_id else None,
             aspect_ratio=data.aspect_ratio,
+            duration=data.duration,
             reference_image_url=data.reference_image_url,
         )
     except Exception as e:

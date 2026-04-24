@@ -1,12 +1,15 @@
 """
 video_generation のビジネスロジック
-Veo 3.1 Fast で動画を生成し、Supabase Storage に保存。
+Kling 3.0 Pro (Kuaishou) で動画を生成し、Supabase Storage に保存。
+
+変更履歴:
+- 2026-04-24: Veo 3.1 Fast から Kling 3.0 Pro に切替。品質・コスト・
+  最大尺・4K 対応すべての面で上位互換。fal.ai 経由で API アクセス。
 """
 import os
 import uuid
 import asyncio
 import logging
-import time
 from typing import Optional, List
 
 import httpx
@@ -16,9 +19,11 @@ from app.services.supabase_client import get_supabase_client
 logger = logging.getLogger(__name__)
 
 BUCKET = "generated-videos"
-MODEL_ID = "veo-3.1-fast-generate-preview"
-POLL_INTERVAL = 10
-MAX_WAIT = 300
+MODEL_ID = "kling-3.0-pro"
+FAL_T2V_ENDPOINT = "fal-ai/kling-video/v3/pro/text-to-video"
+FAL_I2V_ENDPOINT = "fal-ai/kling-video/v3/pro/image-to-video"
+
+SUPPORTED_DURATIONS = {"5", "10"}  # 秒。Kling 3.0 Pro は 5/10 秒が標準 (15 秒は一部)
 
 
 class VideoGenerationService:
@@ -26,13 +31,16 @@ class VideoGenerationService:
         self.supabase = get_supabase_client().client
         self.table = "generated_videos"
 
-    def _get_client(self):
-        from google import genai
+    def _ensure_fal_key(self):
         from app.config import settings
-        api_key = settings.GOOGLE_GEMINI_API_KEY or os.environ.get("GOOGLE_GEMINI_API_KEY", "")
-        if not api_key:
-            raise RuntimeError("GOOGLE_GEMINI_API_KEY is not set")
-        return genai.Client(api_key=api_key)
+        key = settings.FAL_KEY or os.environ.get("FAL_KEY", "")
+        if not key:
+            raise RuntimeError(
+                "FAL_KEY が未設定。https://fal.ai/dashboard/keys で API キーを取得し "
+                ".env に FAL_KEY=... を追加してください。"
+            )
+        # fal_client は環境変数から読むので export
+        os.environ["FAL_KEY"] = key
 
     async def _ensure_bucket(self):
         def _do():
@@ -62,43 +70,29 @@ class VideoGenerationService:
             url = url[:-1]
         return url, path
 
-    async def _fetch_image_bytes(self, url: str) -> tuple[bytes, str]:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+    async def _download_video(self, url: str) -> bytes:
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
             r = await client.get(url)
             r.raise_for_status()
-            mime = r.headers.get("content-type", "image/png").split(";")[0].strip()
-            return r.content, mime
+            return r.content
 
-    async def _wait_for_operation(self, client, operation):
-        start = time.time()
-        while not operation.done:
-            await asyncio.sleep(POLL_INTERVAL)
-            if time.time() - start > MAX_WAIT:
-                raise TimeoutError(f"Video generation timed out after {MAX_WAIT}s")
-            operation = await asyncio.to_thread(client.operations.get, operation)
-        return operation
+    async def _run_fal(self, endpoint: str, arguments: dict) -> dict:
+        """fal.ai の非同期ジョブを投げて結果 URL を取得。"""
+        self._ensure_fal_key()
+        import fal_client
 
-    async def _download_video_bytes(self, client, video) -> bytes:
-        def _download():
-            if hasattr(video, "video_bytes") and video.video_bytes:
-                return video.video_bytes
-            buf = client.files.download(file=video)
-            if isinstance(buf, bytes):
-                return buf
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tf:
-                tmp_path = tf.name
-            try:
-                if hasattr(video, "save"):
-                    video.save(tmp_path)
-                with open(tmp_path, "rb") as f:
-                    return f.read()
-            finally:
-                try:
-                    os.remove(tmp_path)
-                except OSError:
-                    pass
-        return await asyncio.to_thread(_download)
+        def _submit():
+            # subscribe は内部で poll して完了まで待つ同期 API
+            return fal_client.subscribe(
+                endpoint,
+                arguments=arguments,
+                with_logs=False,
+            )
+
+        result = await asyncio.to_thread(_submit)
+        if not result or "video" not in result:
+            raise RuntimeError(f"fal 応答に video フィールド無し: {str(result)[:300]}")
+        return result
 
     async def generate(
         self,
@@ -107,38 +101,45 @@ class VideoGenerationService:
         project_id: Optional[str] = None,
         message_id: Optional[str] = None,
         aspect_ratio: str = "16:9",
+        duration: str = "5",
         reference_image_url: Optional[str] = None,
     ) -> dict:
-        from google.genai import types
-        client = self._get_client()
+        """動画を生成する。reference_image_url 指定時は image-to-video、無ければ text-to-video。
 
-        image_arg = None
-        kind = "text-to-video"
+        Args:
+            prompt: 動画プロンプト (日本語でも英語でも可、英語推奨)
+            aspect_ratio: "16:9" | "9:16" | "1:1"
+            duration: "5" or "10" (秒、文字列)
+            reference_image_url: 参照画像 (image-to-video モードで使用)
+        """
+        if duration not in SUPPORTED_DURATIONS:
+            duration = "5"
+
         if reference_image_url:
-            ref_bytes, ref_mime = await self._fetch_image_bytes(reference_image_url)
-            image_arg = types.Image(image_bytes=ref_bytes, mime_type=ref_mime)
+            endpoint = FAL_I2V_ENDPOINT
             kind = "image-to-video"
+            arguments = {
+                "prompt": prompt,
+                "image_url": reference_image_url,
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+            }
+        else:
+            endpoint = FAL_T2V_ENDPOINT
+            kind = "text-to-video"
+            arguments = {
+                "prompt": prompt,
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+            }
 
-        def _start():
-            config = types.GenerateVideosConfig(aspect_ratio=aspect_ratio) if aspect_ratio else None
-            return client.models.generate_videos(
-                model=MODEL_ID,
-                prompt=prompt,
-                image=image_arg,
-                config=config,
-            )
+        result = await self._run_fal(endpoint, arguments)
+        video_url = result["video"].get("url")
+        if not video_url:
+            raise RuntimeError(f"fal 応答の video.url が空: {str(result)[:300]}")
 
-        operation = await asyncio.to_thread(_start)
-        operation = await self._wait_for_operation(client, operation)
-
-        response = operation.response
-        if not response or not getattr(response, "generated_videos", None):
-            raise RuntimeError("Veo 応答に生成動画が含まれていません")
-
-        gen_video = response.generated_videos[0]
-        video_obj = gen_video.video
-        video_bytes = await self._download_video_bytes(client, video_obj)
-
+        # fal のホストから直接公開もできるが、既存バケットに保存して URL 統一
+        video_bytes = await self._download_video(video_url)
         url, path = await self._upload_to_storage(video_bytes, kind)
 
         row = {

@@ -12,6 +12,7 @@ class VideoGenerateRequest(BaseModel):
     project_id: Optional[UUID] = None
     message_id: Optional[UUID] = None
     aspect_ratio: Literal["16:9", "9:16", "1:1"] = "16:9"
+    duration: Literal["5", "10"] = "5"
     reference_image_url: Optional[str] = None  # 指定時は image-to-video
 
 
