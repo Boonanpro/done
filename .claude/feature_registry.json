@@ -115,19 +115,5 @@
       "D:\\done\\app\\api\\inquiry_routes.py",
       "D:\\done\\frontend\\src\\components\\templates\\inquiry-form.tsx"
     ]
-  },
-  "aix_dashboard": {
-    "name": "aix_dashboard",
-    "description": "AIX事業（AIで企業のDX支援）の案件管理ダッシュボード。クライアント・課題仮説・提案・営業活動・契約・運用までをワンストップで管理。",
-    "created_at": "2026-04-23T19:36:54.604879",
-    "mode": "production",
-    "files": [
-      "D:\\done\\supabase\\migrations\\045_aix_dashboard.sql",
-      "D:\\done\\app\\models\\aix_dashboard_schemas.py",
-      "D:\\done\\app\\services\\aix_dashboard_service.py",
-      "D:\\done\\app\\api\\aix_dashboard_routes.py",
-      "D:\\done\\frontend\\src\\app\\demo\\aix-dashboard\\page.tsx",
-      "D:\\done\\scripts\\seed_aix_dashboard.py"
-    ]
   }
 }
