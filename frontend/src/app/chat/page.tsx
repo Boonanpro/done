@@ -36,20 +36,12 @@ export default function ChatPage() {
     }
   }, [router]);
 
-  // On localhost, clear stale PWA cache/service-worker state that can hide new UI.
+  // 全ホストで stale cache を除去。
+  // 以前は localhost に限定していたが、モバイル (Tailscale IP 等) で古い JS が
+  // 残ってチャット履歴が消える問題が起きたため全ホストに拡張。
+  // SW 自体は push 通知に必要なので unregister しない (fetch handler なしなのでキャッシュは無関係)。
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const host = window.location.hostname;
-    if (host !== 'localhost' && host !== '127.0.0.1') return;
-
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.getRegistrations().then((registrations) => {
-        registrations.forEach((registration) => {
-          registration.unregister();
-        });
-      });
-    }
-
     if ('caches' in window) {
       caches.keys().then((keys) => {
         keys.forEach((key) => {

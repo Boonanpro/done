@@ -300,6 +300,9 @@ def _format_tool_label(name: str, tool_input: dict) -> str:
     if "execute_command" in name or "run_command" in name:
         cmd = tool_input.get("command", "")
         return f"コマンド実行: {cmd}" if cmd else "コマンド実行"
+    if "check_skill" in name:
+        skill_name = tool_input.get("skill_name") or tool_input.get("name", "")
+        return f"スキル確認: {skill_name}" if skill_name else "スキル確認"
 
     # Claude Code SDK 内部ツール
     if name == "Read":
