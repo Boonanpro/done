@@ -5,11 +5,11 @@
 
 import { useAuthStore } from '@/stores/auth-store';
 
-// API Base URL - use environment variable or empty string (relative URL via Next.js rewrites proxy)
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
+// API Base URL - env 値に trailing whitespace / 改行が混入すると URL が壊れるので trim
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? '').trim().replace(/\/+$/, '');
 
-// SSE streaming - use relative URL so requests go through Next.js proxy (works from any device)
-const SSE_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
+// SSE streaming - 同様に trim
+const SSE_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? '').trim().replace(/\/+$/, '');
 
 // ==================== Types ====================
 

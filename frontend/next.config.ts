@@ -6,18 +6,35 @@ const nextConfig: NextConfig = {
   compress: false, // SSE ストリーミングのバッファリング防止
   devIndicators: false,
   turbopack: {},
+  images: {
+    dangerouslyAllowSVG: true,
+    contentSecurityPolicy:
+      "default-src 'self'; script-src 'none'; sandbox;",
+  },
   async rewrites() {
+    // 本番 (Vercel 等) は自宅 PC を指せないので Cloudflare tunnel 等の
+    // 公開 URL へ proxy する。BACKEND_URL 環境変数で指定、なければ localhost。
+    // Vercel ダッシュボード: Settings → Environment Variables で
+    //   BACKEND_URL=https://xxx.trycloudflare.com
+    // を設定する。tunnel URL が変わったら env 値を更新して再デプロイ。
+    const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
     return [
       {
-        // API リクエストをバックエンドにプロキシ
-        // スマホ HTTPS → Next.js HTTPS → バックエンド HTTP（混合コンテンツ回避）
         source: '/api/:path*',
-        destination: 'http://127.0.0.1:8000/api/:path*',
+        destination: `${backendUrl}/api/:path*`,
       },
       {
-        // WebSocket をバックエンドにプロキシ（同一オリジン化）
         source: '/ws/:path*',
-        destination: 'http://127.0.0.1:8000/ws/:path*',
+        destination: `${backendUrl}/ws/:path*`,
+      },
+      // 吉川特装HP: /kikkawa-tokuso で公開（旧パス artifacts/yoshikawa-tokuso）
+      {
+        source: '/kikkawa-tokuso',
+        destination: '/artifacts/yoshikawa-tokuso',
+      },
+      {
+        source: '/kikkawa-tokuso/:path*',
+        destination: '/artifacts/yoshikawa-tokuso/:path*',
       },
     ];
   },
