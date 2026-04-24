@@ -6,6 +6,14 @@ import { computeElementKey } from '@/components/dan/inspector-runtime';
 const HOVER_OVERLAY_ID = 'dan-inspector-hover';
 const ACTIVE_OVERLAY_ID = 'dan-inspector-active';
 
+// インライン編集対象タグ (テキスト要素のみ)
+const INLINE_EDIT_TAGS = new Set([
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'p', 'span', 'a', 'button', 'label', 'li',
+  'td', 'th', 'figcaption', 'em', 'strong', 'small',
+  'blockquote', 'cite', 'caption',
+]);
+
 type Handlers = {
   move: (e: Event) => void;
   click: (e: Event) => void;
@@ -104,19 +112,29 @@ export function attachInspector(iframe: HTMLIFrameElement) {
   const isOverlay = (el: Element | null): boolean =>
     el === hover || el === active || (!!el?.id && (el.id === HOVER_OVERLAY_ID || el.id === ACTIVE_OVERLAY_ID));
 
+  const isEditing = (el: Element | null): boolean =>
+    !!el && el.getAttribute('data-dan-editing') === '1';
+
   const move = (ev: Event) => {
     const e = ev as MouseEvent;
     const target = e.target as Element | null;
     if (!target || isOverlay(target)) return;
+    // インライン編集中の要素にはホバー overlay を出さない (邪魔)
+    if (isEditing(target)) {
+      hideOverlay(hover);
+      return;
+    }
     positionTo(hover, doc, target);
   };
 
   const click = (ev: Event) => {
     const e = ev as MouseEvent;
-    e.preventDefault();
-    e.stopPropagation();
     const target = e.target as Element | null;
     if (!target || isOverlay(target)) return;
+    // 編集中の要素ならネイティブ click を通す (キャレット位置調整・テキスト選択のため)
+    if (isEditing(target)) return;
+    e.preventDefault();
+    e.stopPropagation();
 
     overlays.activeTarget = target;
     positionTo(active, doc, target);
@@ -154,6 +172,13 @@ export function attachInspector(iframe: HTMLIFrameElement) {
       },
       target
     );
+
+    // テキスト要素 (h1/p/span/button 等) ならインライン編集を有効化
+    // 子要素を含まない leaf テキスト要素のみ対象 (構造を壊さないため)
+    const hasChildElements = target.children.length > 0;
+    if (INLINE_EDIT_TAGS.has(tagName) && !hasChildElements) {
+      enableInlineEdit(target as HTMLElement, doc, hover, active, overlays);
+    }
   };
 
   const keydown = (ev: Event) => {
@@ -208,6 +233,101 @@ export function detachInspector(iframe: HTMLIFrameElement) {
   overlayRegistry.delete(iframe);
 
   doc.body.style.cursor = '';
+}
+
+/**
+ * テキスト要素をインライン編集可能にする。
+ * - contentEditable=plaintext-only で plain text 入力に限定
+ * - クリック位置にキャレット移動・自動 focus
+ * - blur で commit (setLiveText で永続化)
+ * - Escape でキャンセル (元のテキストに戻す)
+ * - Enter は改行として通常通り入る
+ */
+function enableInlineEdit(
+  el: HTMLElement,
+  doc: Document,
+  hover: HTMLDivElement,
+  active: HTMLDivElement,
+  overlays: Overlays
+) {
+  if (el.getAttribute('data-dan-editing') === '1') return; // 既に編集中
+  const original = el.textContent ?? '';
+
+  // contentEditable plaintext-only は Chromium / WebKit でサポート、Firefox は true で代替
+  el.setAttribute('contenteditable', 'plaintext-only');
+  // フォールバック: plaintext-only 未対応時は true (HTML 入力可だが visually 同じ)
+  if (el.contentEditable !== 'plaintext-only') {
+    el.setAttribute('contenteditable', 'true');
+  }
+  el.setAttribute('data-dan-editing', '1');
+  el.style.setProperty('outline', '2px dashed rgb(34, 197, 94)', 'important');
+  el.style.setProperty('outline-offset', '2px', 'important');
+  el.style.setProperty('cursor', 'text', 'important');
+  // 改行を保持できるよう pre-wrap を最初から当てておく
+  el.style.setProperty('white-space', 'pre-wrap', 'important');
+
+  // 編集中はオーバーレイを邪魔にならないよう非表示
+  hideOverlay(hover);
+  hideOverlay(active);
+
+  el.focus();
+  // 文字列末尾にキャレット移動
+  try {
+    const sel = doc.defaultView?.getSelection();
+    const range = doc.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  } catch {
+    /* ignore */
+  }
+
+  let cancelled = false;
+
+  const cleanup = () => {
+    el.removeAttribute('contenteditable');
+    el.removeAttribute('data-dan-editing');
+    el.style.removeProperty('outline');
+    el.style.removeProperty('outline-offset');
+    el.style.removeProperty('cursor');
+    el.removeEventListener('blur', onBlur, true);
+    el.removeEventListener('keydown', onKeyDown, true);
+    // active overlay を再表示
+    if (overlays.activeTarget === el && doc.contains(el)) {
+      positionTo(active, doc, el);
+    }
+  };
+
+  const commit = () => {
+    if (cancelled) return;
+    const newText = el.innerText ?? el.textContent ?? '';
+    if (newText !== original) {
+      // setLiveText を呼ぶ (元の選択 + liveTarget が一致してる前提)
+      usePreviewStore.getState().setLiveText(newText);
+    }
+  };
+
+  const onBlur = () => {
+    commit();
+    cleanup();
+  };
+
+  const onKeyDown = (ev: Event) => {
+    const e = ev as KeyboardEvent;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelled = true;
+      el.textContent = original;
+      el.blur();
+    }
+    // Enter は改行として通常通り処理 (preventDefault しない)
+    // Cmd/Ctrl+Enter で確定したい場合はここに追加可能
+  };
+
+  el.addEventListener('blur', onBlur, true);
+  el.addEventListener('keydown', onKeyDown, true);
 }
 
 export function clearActiveHighlight(iframe: HTMLIFrameElement) {

@@ -163,16 +163,28 @@ export const usePreviewStore = create<PreviewStore>()(
       setLiveText: (text) => {
         const { liveTarget, selectedElement, styleVersion } = get();
         if (!liveTarget || !selectedElement) return;
+        const hasNewline = text.includes('\n');
         try {
           liveTarget.textContent = text;
+          // 改行を含む場合は white-space: pre-wrap を当てて改行を保持
+          // (デフォルトの white-space: normal だと \n が space に潰される)
+          if (hasNewline) {
+            (liveTarget as HTMLElement).style.setProperty('white-space', 'pre-wrap', 'important');
+          }
         } catch {
           /* ignore */
         }
         set({ styleVersion: styleVersion + 1 });
+        const patch: { attrs: Record<string, string>; styles?: Record<string, string> } = {
+          attrs: { text },
+        };
+        if (hasNewline) {
+          patch.styles = { 'white-space': 'pre-wrap' };
+        }
         queueInspectorEdit({
           target: liveTarget,
           elementKey: selectedElement.elementKey,
-          patch: { attrs: { text } },
+          patch,
         });
       },
 
