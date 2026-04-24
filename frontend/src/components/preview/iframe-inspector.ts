@@ -229,9 +229,8 @@ export function attachInspector(iframe: HTMLIFrameElement) {
 
 /**
  * クリック位置の z-stack から「次に選ぶべき要素」を決定する。
- * - 同じ座標 (5px 以内) を続けてクリック → 次の要素にドリル
- * - Alt キー押下 → 明示的にドリル
- * - 別の座標 → 一番上 (リセット)
+ * - 通常クリック → 一番上の要素 (常に同じ動作、繰り返しクリックでもドリルしない)
+ * - Alt+クリック → ドリル (明示的に下に潜る)
  *
  * 使い方: 元の click handler から target を選んだ直後に呼んで上書き。
  */
@@ -249,31 +248,21 @@ function pickFromStack(
   const y = e.clientY;
   const altKey = e.altKey;
 
-  // 表示中の overlay 要素を一時的に隠して elementsFromPoint を取る
-  // (overlay 自身が拾われないように)
   const stack = (doc.elementsFromPoint(x, y) as Element[])
     .filter((el) => !isOverlay(el))
     .filter((el) => el.tagName.toLowerCase() !== 'html');
 
   if (stack.length === 0) return null;
 
-  const prev = stackState.get(doc);
-  // 同じ場所判定: 10px 以内ならドリル継続 (マウス手ブレ許容)
-  const samePoint =
-    prev && Math.abs(x - prev.x) <= 10 && Math.abs(y - prev.y) <= 10;
-  const sameStack =
-    samePoint &&
-    prev &&
-    prev.stack.length === stack.length &&
-    prev.stack.every((el, i) => el === stack[i]);
-
-  let index: number;
-  if ((samePoint && sameStack) || altKey) {
-    // 続けて同じ場所をクリック or Alt+click → ドリル
-    const baseIdx = prev?.index ?? 0;
-    index = (baseIdx + 1) % stack.length;
-  } else {
-    index = 0;
+  let index = 0;
+  if (altKey) {
+    // Alt+click のみドリル動作
+    const prev = stackState.get(doc);
+    const samePoint =
+      prev && Math.abs(x - prev.x) <= 10 && Math.abs(y - prev.y) <= 10;
+    if (samePoint) {
+      index = (prev.index + 1) % stack.length;
+    }
   }
 
   stackState.set(doc, { x, y, index, stack });

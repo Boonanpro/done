@@ -85,7 +85,7 @@ const TEXT_TAGS = new Set([
   'td', 'th', 'figcaption',
 ]);
 
-function classifyElement(el: SelectedElement | null): {
+function classifyElement(el: SelectedElement | null, liveTarget: Element | null): {
   isText: boolean;
   isImage: boolean;
   isVideo: boolean;
@@ -93,12 +93,22 @@ function classifyElement(el: SelectedElement | null): {
 } {
   if (!el) return { isText: false, isImage: false, isVideo: false, isContainer: false };
   const t = el.tagName;
-  // 厳密: target 自身が img/video の時だけ。wrapper が中に持っていても扱わない
+  // 背景画像を持つ div も画像として扱う (CSS background-image を src の代わりに見る)
+  let hasBgImage = false;
+  if (liveTarget) {
+    try {
+      const bg = (liveTarget as HTMLElement).ownerDocument?.defaultView
+        ?.getComputedStyle(liveTarget).backgroundImage;
+      hasBgImage = !!bg && bg !== 'none' && bg.includes('url(');
+    } catch {
+      /* ignore */
+    }
+  }
   return {
     isText: TEXT_TAGS.has(t),
-    isImage: t === 'img',
+    isImage: t === 'img' || hasBgImage,
     isVideo: t === 'video',
-    isContainer: !TEXT_TAGS.has(t) && t !== 'img' && t !== 'video',
+    isContainer: !TEXT_TAGS.has(t) && t !== 'img' && t !== 'video' && !hasBgImage,
   };
 }
 
@@ -375,7 +385,7 @@ export function InspectorPanel() {
     );
   }
 
-  const { isText, isImage, isVideo } = classifyElement(selectedElement);
+  const { isText, isImage, isVideo } = classifyElement(selectedElement, liveTarget);
 
   return (
     <div className="flex h-full w-[280px] shrink-0 flex-col border-l border-border bg-background">
