@@ -319,7 +319,7 @@ async def delete_{snake}(
 /**
  * {feature_name} ページ
  * create_feature で自動生成。中身を実装してください。
- * designスキルのデザイントークンが適用済み。
+ * build スキルのデザイントークンが適用済み。
  */
 import {{ useState }} from 'react';
 import {{ useQuery, useMutation, useQueryClient }} from '@tanstack/react-query';
@@ -538,7 +538,7 @@ if __name__ == "__main__":
             f"2. {migration_path.name} のカラム定義を実装",
             f"3. Supabase で SQL を適用",
             f"4. {schemas_path.name} のフィールドを定義",
-            f"5. {page_path.name} のプロトタイプUIを実装（designスキルに従う）",
+            f"5. {page_path.name} のプロトタイプUIを実装（build スキルに従う）",
             f"6. {seed_path.name} のサンプルデータを実装・実行",
             f"7. Playwright でプロトタイプを録画",
             f"8. Remotion で編集 → 提案動画を提出",

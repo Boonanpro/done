@@ -116,64 +116,21 @@ UI を先に作らない。
 | `<Tooltip>` | title属性やカスタムツールチップ |
 | `<Table>` | 自作テーブル |
 
-#### 足りないコンポーネントは追加する
+#### 足りないコンポーネントは PostToolUse hook が自動 install
 
-```bash
-npx shadcn@latest add <component-name>
-```
+`hook_autoinstall_shadcn.py` が `@/components/ui/<name>` の import を検出して
+未導入なら `npx shadcn@latest add <name>` を自動実行する。手動で気にする必要なし。
 
-未導入で有用なもの: `table`, `select`, `progress`, `chart`, `textarea`, `alert`, `breadcrumb`, `collapsible`, `command`, `navigation-menu`
+#### ページ構造の典型
 
-#### ページ構造
+`<PageShell>` (templates) を外枠にして、以下のようなブロックを縦に積む。
+具体的なコードは `frontend/src/app/demo/` 配下の既存ダッシュボードを参考にする
+(コードサンプルをここに固定で書くと「同じ構造に収束しやすい」ため意図的に省略)。
 
-```tsx
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-
-export default function BusinessDashboard() {
-  return (
-    <div className="max-w-6xl mx-auto space-y-6">
-      {/* ヘッダー */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">タイトル</h1>
-          <p className="text-sm text-muted-foreground">説明</p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline">アクション</Button>
-          <Button>主要アクション</Button>
-        </div>
-      </div>
-
-      {/* KPIカード */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm text-muted-foreground">ラベル</span>
-              <Icon className="h-4 w-4 text-muted-foreground" />
-            </div>
-            <span className="text-2xl font-semibold tabular-nums">1,234</span>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* メインコンテンツ */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <Card className="lg:col-span-2">
-          <CardHeader><CardTitle>チャート</CardTitle></CardHeader>
-          <CardContent>...</CardContent>
-        </Card>
-        <Card>
-          <CardHeader><CardTitle>最近の活動</CardTitle></CardHeader>
-          <CardContent>...</CardContent>
-        </Card>
-      </div>
-    </div>
-  );
-}
-```
+- ヘッダー: タイトル + 説明 + 主要アクション
+- KPI 行: `<KpiCard>` 3〜4 個並べる
+- メインエリア: 2 カラム or 3 カラム、目的に応じて
+- リスト/テーブル: `<Table>` (詳細閲覧) または `<Card>` グリッド (概要)
 
 #### チャート
 
@@ -271,25 +228,17 @@ HP制作のデザイン判断は全て**ビジネスゴール**から逆算す�
 
 リファレンスを基にデザインを形にする。状況に応じて方法を選ぶ:
 
-**方法1: リファレンス画像をClaude Codeに直接渡す**（基本手法）
+**方法 1: リファレンス画像を直接渡す** (基本手法)
 - 保存したスクショをコンテキストに含め、パーツの組み合わせを指示する
-- Claude CodeがNext.js + shadcn/ui + Tailwindで直接コード生成
+- Next.js + shadcn/ui + Tailwind で直接コード生成
 - 最初の出力にテンプレ感があれば、追加のリファレンスを渡して再指示
 
-**方法2: 外部デザインAI経由**（Stitch, v0等）
-- リファレンスをデザインAIに渡し、ビジュアルデザインを先に生成
-- 複数バリエーションから良い部分をリミックスして洗練
-- 出力コードをClaude Codeに渡し、shadcn/ui + デザイントークンに変換して実装
-- ※各ツールの利用可否はセレクタ調査後にスキル化が必要
-
-**方法3: AI生成動画ヒーロー付き**（方法1または2と併用）
-- 画像生成AIでコンセプト画像 → 動画生成AI（Seedance等）でループ動画に変換
+**方法 2: AI 生成画像/動画ヒーロー付き** (方法 1 と併用)
+- `image-gen` スキルでコンセプト画像を生成 (日本語テキスト焼き込み可)
+- `video-gen` スキルでループ動画を生成、または image-to-video で画像から動かす
 - 開始/終了フレームを同じ画像にしてシームレスループを実現
-- ヒーロー背景として全画面配置（autoplay, muted, loop）
-- テキスト/CTAは動画上にオーバーレイ
-- ※動画生成ツールのスキル化が必要
-
-方法2/3のツールが使えない場合は**方法1にフォールバック**する。
+- ヒーロー背景として全画面配置 (autoplay, muted, loop)
+- テキスト/CTA は動画上にオーバーレイ
 
 ##### Phase 3: 実装とPolish（磨き上げ）
 
@@ -350,20 +299,24 @@ HP生成後、以下を全て確認する:
 - **完成後**: 承認 or 修正指示
 - **途中確認は原則しない**。ダンがリファレンス選定・デザイン方向性・実装判断を自律的に行い、完成物を提出する。どうしても判断できない重大な分岐（例: 完全に異なる2方向のブランド解釈）がある場合のみ確認を取る
 
-#### プロジェクト構成
+#### プロジェクト構成 (新アーキテクチャ)
 
-各クライアントHPは独立したNext.jsプロジェクトとして `D:/dan-workspace/hp-projects/` に作成する。
+クライアント HP は **`frontend/src/app/demo/{client-slug}/` 配下** に作る。
+独立した Next.js プロジェクトを切らない (旧 `D:/dan-workspace/hp-projects/` フローは廃止)。
+理由: チャット右ペインのライブプレビューでそのまま見せて会話で詰められる、
+`create_feature` の guard hook が機能する、Vercel デプロイは done 本体と同居できる。
 
-```bash
-npx create-next-app@latest {client-name} --typescript --tailwind --app
-cd {client-name}
-npx shadcn@latest init
-npx shadcn@latest add card button badge separator
+```
+frontend/src/app/demo/yoshikawa-tokuso/
+  ├─ page.tsx            ← ホーム (LpShell + 各 Section)
+  ├─ services/page.tsx   ← 子ページ
+  ├─ contact/page.tsx
+  └─ components/         ← その HP 専用コンポーネント (templates 外)
 ```
 
 #### クライアントごとのカスタマイズ
 
-同じshadcn/uiコンポーネントを使いつつ、`globals.css` のCSS変数でデザインを変える:
+同じ shadcn/ui コンポーネントを使いつつ、CSS 変数 (例: `frontend/src/app/demo/{slug}/page.tsx` 内の局所 `<style>` か、ルート `globals.css` のクライアント別セレクタ `.theme-yoshikawa` 等) でデザインを変える:
 
 ```css
 /* 例: 野性的・アウトドア系 */
@@ -391,7 +344,8 @@ npx shadcn@latest add card button badge separator
 
 #### デプロイ
 
-Vercelにデプロイ（Next.jsの標準ホスティング）。既存HPと同じ運用。
+done 本体の Vercel デプロイに自動追従する (`/demo/{slug}` パスで公開)。
+クライアント独自ドメインを使う場合は Vercel のドメイン設定で `/demo/{slug}` を別ドメインにマッピングする。
 
 ---
 
@@ -423,18 +377,3 @@ Vercelにデプロイ（Next.jsの標準ホスティング）。既存HPと同�
 > ※ 自動学習 (learned.md への自動追記) は廃止。改善パターンを記録する場合は
 > このファイル (SKILL.md) に明示的に追記する。隠れ状態を作らない方針。
 
----
-
-## 禁止事項チェックリスト（全用途共通）
-
-> ※ 一部項目（ハードコード色、手書きコンポーネント再発明）はlint hookでのコード化を予定。現時点ではセルフチェック。
-
-コード生成後、以下をセルフチェックする:
-
-- [ ] `bg-neutral-*` `text-neutral-*` `border-neutral-*` のハードコードがないか
-- [ ] Card/Button/Badge等を手書きで再発明していないか（Next.js用途）
-- [ ] 絵文字をアイコンとして使っていないか
-- [ ] ローディングスピナーを自作していないか
-- [ ] `text-white` → `text-foreground` に置換したか
-- [ ] `text-neutral-500` → `text-muted-foreground` に置換したか
-- [ ] 配色が内容に合っているか
