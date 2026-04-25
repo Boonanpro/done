@@ -192,14 +192,53 @@ export function attachInspector(iframe: HTMLIFrameElement) {
   // ダブルクリックで初めてインライン編集モードに入る
   const dblclick = (ev: Event) => {
     const e = ev as MouseEvent;
-    const target = e.target as Element | null;
-    if (!target || isOverlay(target)) return;
-    if (isEditing(target)) return;
-    const tagName = target.tagName.toLowerCase();
+    const initialTarget = e.target as Element | null;
+    if (!initialTarget || isOverlay(initialTarget)) return;
+    if (isEditing(initialTarget)) return;
+
+    // クリック位置のテキストノードから、本当に編集すべき leaf 要素を見つける。
+    // wrapper div を edit すると innerText が全子要素を連結したり、
+    // textContent 書き戻しで <span>/<strong> 等の構造が消える致命バグになる。
+    let editTarget: HTMLElement = initialTarget as HTMLElement;
+    try {
+      const range = (doc as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null })
+        .caretRangeFromPoint?.(e.clientX, e.clientY);
+      const node = range?.startContainer;
+      if (node && node.nodeType === Node.TEXT_NODE && node.parentElement) {
+        editTarget = node.parentElement;
+      } else if (node && node.nodeType === Node.ELEMENT_NODE) {
+        editTarget = node as HTMLElement;
+      }
+    } catch {
+      /* fallback: initialTarget */
+    }
+
+    const tagName = editTarget.tagName.toLowerCase();
     if (INLINE_EDIT_BLOCKED_TAGS.has(tagName)) return;
     e.preventDefault();
     e.stopPropagation();
-    enableInlineEdit(target as HTMLElement, doc, hover, active, overlays);
+
+    // 重要: selection を edit 対象に揃える (setLiveText の保存先 = liveTarget が
+    // edit 対象と一致しないと、編集反映と保存が別要素に対して起きる)。
+    const rect = editTarget.getBoundingClientRect();
+    const elementKey = computeElementKey(editTarget);
+    usePreviewStore.getState().selectElement(
+      {
+        tagName,
+        text: (editTarget.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120),
+        outerHtmlSnippet: (editTarget.outerHTML || '').slice(0, 2000),
+        rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+        className: editTarget.getAttribute('class') || '',
+        ancestors: [],
+        bgColor: '',
+        elementKey,
+      },
+      editTarget
+    );
+    overlays.activeTarget = editTarget;
+    positionTo(active, doc, editTarget);
+
+    enableInlineEdit(editTarget, doc, hover, active, overlays);
   };
 
   const keydown = (ev: Event) => {
