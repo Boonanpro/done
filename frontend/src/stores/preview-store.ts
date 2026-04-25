@@ -142,79 +142,120 @@ export const usePreviewStore = create<PreviewStore>()(
         const { liveTarget, selectedElement, edits, styleVersion, selectedRange } = get();
         if (!liveTarget || !selectedElement) return;
 
-        // 部分テキスト選択がある場合は選択範囲を <span> でラップして style を当てる
-        // (一部だけサイズ変更・色変更したい用途)
-        if (
+        const applyToWhole = () => {
+          try {
+            (liveTarget as HTMLElement).style.setProperty(
+              property,
+              value,
+              important ? 'important' : ''
+            );
+          } catch { /* ignore */ }
+          const key = selectedElement.refId;
+          set({
+            edits: { ...edits, [key]: { ...(edits[key] || {}), [property]: value } },
+            styleVersion: styleVersion + 1,
+          });
+          queueInspectorEdit({
+            target: liveTarget,
+            elementKey: selectedElement.elementKey,
+            patch: { styles: { [property]: value } },
+          });
+        };
+
+        // 部分テキスト選択判定:
+        // - selectedRange があり折りたたみされてない
+        // - liveTarget 内に収まっている
+        const hasPartialSel =
           selectedRange &&
           !selectedRange.collapsed &&
-          liveTarget.contains(selectedRange.commonAncestorContainer)
-        ) {
-          const doc = liveTarget.ownerDocument;
-          if (doc) {
-            const span = doc.createElement('span');
-            span.style.setProperty(property, value, important ? 'important' : '');
-            try {
-              // surroundContents は selection が単一テキストノード内に収まる場合のみ動作
-              selectedRange.surroundContents(span);
-            } catch {
-              // 跨ぎ選択 (複数 element に跨る) → extractContents で span に詰めて再挿入
-              try {
-                const fragment = selectedRange.extractContents();
-                span.appendChild(fragment);
-                selectedRange.insertNode(span);
-              } catch {
-                // どちらも失敗 → fallback: 要素全体に適用
-                (liveTarget as HTMLElement).style.setProperty(
-                  property,
-                  value,
-                  important ? 'important' : ''
-                );
-                set({ styleVersion: styleVersion + 1 });
-                queueInspectorEdit({
-                  target: liveTarget,
-                  elementKey: selectedElement.elementKey,
-                  patch: { styles: { [property]: value } },
-                });
-                return;
-              }
+          liveTarget.contains(selectedRange.commonAncestorContainer);
+
+        if (!hasPartialSel) {
+          applyToWhole();
+          return;
+        }
+
+        const doc = liveTarget.ownerDocument;
+        if (!doc) {
+          applyToWhole();
+          return;
+        }
+
+        // ★ 連続スライダー対応: 直前で作った span (data-dan-edit) が選択を完全に
+        //   含んでいる場合は、新たに wrap せずその span の style を更新する。
+        //   (これがないと slider 連打のたびに span がネストして innerHTML が肥大化、
+        //    かつ 1 回目以降は selectedRange が無効化されて要素全体に style が漏れる)
+        const findEnclosingDanSpan = (): HTMLElement | null => {
+          const ancestor = selectedRange.commonAncestorContainer;
+          const startEl: Element | null =
+            ancestor.nodeType === Node.TEXT_NODE
+              ? ancestor.parentElement
+              : (ancestor as Element);
+          let n: Element | null = startEl;
+          while (n && n !== liveTarget) {
+            if (n.hasAttribute && n.hasAttribute('data-dan-edit')) {
+              // 選択範囲がこの span の中身と完全一致 (or 内包) しているか
+              const r = doc.createRange();
+              r.selectNodeContents(n);
+              const startOk = r.compareBoundaryPoints(
+                Range.START_TO_START,
+                selectedRange
+              ) <= 0;
+              const endOk = r.compareBoundaryPoints(Range.END_TO_END, selectedRange) >= 0;
+              if (startOk && endOk) return n as HTMLElement;
             }
-            // 部分適用した結果の innerHTML を保存 (text override の代替)
-            set({
-              styleVersion: styleVersion + 1,
-              selectedRange: null, // span 挿入後 range は無効化
-            });
-            queueInspectorEdit({
-              target: liveTarget,
-              elementKey: selectedElement.elementKey,
-              patch: { attrs: { html: (liveTarget as HTMLElement).innerHTML } },
-            });
+            n = n.parentElement;
+          }
+          return null;
+        };
+
+        const persistHtml = () => {
+          set({ styleVersion: styleVersion + 1 });
+          queueInspectorEdit({
+            target: liveTarget,
+            elementKey: selectedElement.elementKey,
+            patch: { attrs: { html: (liveTarget as HTMLElement).innerHTML } },
+          });
+        };
+
+        const existing = findEnclosingDanSpan();
+        if (existing) {
+          // 既存の dan span を更新 (新規 wrap せずネスト回避)
+          existing.style.setProperty(property, value, important ? 'important' : '');
+          persistHtml();
+          return;
+        }
+
+        // 新規 wrap
+        const span = doc.createElement('span');
+        span.setAttribute('data-dan-edit', '1');
+        span.style.setProperty(property, value, important ? 'important' : '');
+        try {
+          selectedRange.surroundContents(span);
+        } catch {
+          // 跨ぎ選択: extractContents で代替
+          try {
+            const fragment = selectedRange.extractContents();
+            span.appendChild(fragment);
+            selectedRange.insertNode(span);
+          } catch {
+            applyToWhole();
             return;
           }
         }
 
-        // 全体に適用 (従来動作)
+        // 挿入後、選択を span の内容に再設定 → 次の slider tick で findEnclosingDanSpan が
+        // この span を見つけて style 更新するだけになる (連続変更で動作)
         try {
-          (liveTarget as HTMLElement).style.setProperty(
-            property,
-            value,
-            important ? 'important' : ''
-          );
-        } catch {
-          /* ignore */
-        }
-        const key = selectedElement.refId;
-        set({
-          edits: {
-            ...edits,
-            [key]: { ...(edits[key] || {}), [property]: value },
-          },
-          styleVersion: styleVersion + 1,
-        });
-        queueInspectorEdit({
-          target: liveTarget,
-          elementKey: selectedElement.elementKey,
-          patch: { styles: { [property]: value } },
-        });
+          const newRange = doc.createRange();
+          newRange.selectNodeContents(span);
+          const sel = doc.defaultView?.getSelection();
+          sel?.removeAllRanges();
+          sel?.addRange(newRange);
+          set({ selectedRange: newRange.cloneRange() });
+        } catch { /* ignore */ }
+
+        persistHtml();
       },
 
       setLiveText: (text) => {
