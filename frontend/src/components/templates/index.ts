@@ -7,3 +7,4 @@ export { KpiCard } from "./kpi-card";
 export { AIChatPanel } from "./ai-chat-panel";
 export { InquiryForm } from "./inquiry-form";
 export { LocationMap } from "./location-map";
+export { HeroMedia } from "./hero-media";

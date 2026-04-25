@@ -70,56 +70,42 @@ import 例: `import { HeroSection, Section, FeatureGrid } from "@/components/tem
 
 `grid-cols-1` → `sm:grid-cols-2` → `lg:grid-cols-4` の順で拡張。
 
-### 4. 写真・動画は必ず `<img>` / `<video>` タグ + overlay div 禁止
+### 4. ヒーロー画像 / 動画は **`<HeroMedia>` を使う** (overlay div を書かせない仕組み)
 
-ヒーロー画像・商品写真・人物写真・実写・ヒーロー動画など **「コンテンツとしての媒体」 は必ず `<img>` / `<video>` で実装する**。`<div style="backgroundImage">` は使わない。
-
-**さらに**: 暗転・ぼかし・色被せは **媒体自体に CSS filter で適用する**。 上に重ねる **overlay div は禁止** (空でも非空でも、半透明でも)。理由は inspector で媒体を直接クリック選択できなくなるため。
+ヒーローや大きな写真・動画は **必ず `<HeroMedia>` テンプレート** を使う。手書きで `<section>` の中に `<img>`/`<video>` + 重ね overlay `<div>` を書かない。
 
 ```tsx
-// ❌ ダメ パターン 1: background-image (媒体が <img>/<video> として存在しない)
-<div style={{ backgroundImage: `url(${HERO_IMAGE})`, backgroundSize: 'cover' }} />
+import { HeroMedia } from "@/components/templates";
 
-// ❌ ダメ パターン 2: <video> + overlay div を重ねる
-<section className="relative">
-  <video src={HERO_VIDEO} className="absolute inset-0 ..." autoPlay loop muted />
-  <div className="absolute inset-0 bg-black/40" />     {/* ← これがクリックを吸う */}
-  <div className="absolute inset-0 bg-gradient-to-r .../>{/* ← これも */}
-</section>
+// ✅ OK
+<HeroMedia kind="video" src="/hero.mp4" darken={50} blur={1} fade="left">
+  <div className="mx-auto max-w-7xl px-6 py-32">
+    <h1>働く車を、もっと賢く</h1>
+    <p>新明和認定 米子市 ...</p>
+  </div>
+</HeroMedia>
 
-// ✅ OK: 暗転・ぼかし・色被せは媒体自体の CSS filter で
-<section className="relative">
-  <video
-    src={HERO_VIDEO}
-    autoPlay loop muted playsInline
-    className="absolute inset-0 h-full w-full object-cover brightness-50 saturate-110"
-    // または style={{ filter: 'brightness(0.5) saturate(1.1) blur(2px)' }}
-  />
-  <div className="relative">{/* テキストコンテンツ */}</div>
-</section>
+// 画像版 (kind="image")
+<HeroMedia kind="image" src="/hero.png" alt="工場で作業する職人" darken={40}>
+  <div className="...">{/* テキスト */}</div>
+</HeroMedia>
 ```
 
-**「片側だけ濃いグラデーション」が欲しい場合**:
-- 単純な暗転 → `brightness-50` で全面均一に下げる (上から overlay より読みやすい場合多い)
-- どうしても方向性を出したい → **`mask-image` を `<img>`/`<video>` 自体に当てる** (overlay div は作らない)
-  ```tsx
-  <video style={{
-    maskImage: 'linear-gradient(to right, black 0%, black 60%, transparent 100%)',
-    WebkitMaskImage: 'linear-gradient(to right, black 0%, black 60%, transparent 100%)',
-  }} />
-  ```
-- それでも足りない場合のみ → overlay div 許可、ただし **`pointer-events: none` 必須**
-  ```tsx
-  <div className="absolute inset-0 pointer-events-none bg-gradient-to-r ..." />
-  ```
+**`<HeroMedia>` の props**:
+- `darken` (0-100): 暗くする度合い → 内部で CSS `filter: brightness(...)` に変換
+- `blur` (0-20px): ぼかし → 内部で CSS `filter: blur(...)` に変換
+- `fade` (`"none" | "left" | "right" | "top" | "bottom"`): 方向性のフェード → 内部で `mask-image` で実装
+- `minHeightClass`: ヒーロー高さ (デフォルト `min-h-[60vh]`)
 
-**理由**:
-- inspector で 媒体を直接クリックして選択 / 差し替え / overlay 調整 ができる
-- 余計な DOM 要素が減って Lighthouse スコアも改善
-- ユーザーが編集モードで「ここの画像/動画」を直感的に触れる
-- inspector の Overlay セクション (darken / blur) で **CSS filter ベースのオーバーレイは UI から調整可能**。dan が決め打ちで書く必要なし
+**なぜこれを使うのか**:
+- **overlay div を書く隙が無い構造**になっているので、ルール違反が起きない
+- 暗転 / ぼかし / フェードは **媒体自体の CSS filter / mask** に変換される → inspector で `<img>`/`<video>` を直接クリック選択できる
+- inspector の Overlay (darken/blur) スライダーで UI から調整可能
+- `alt` 必須、`autoplay loop muted playsInline` 自動付与、Lighthouse スコア確保
 
-**例外**: 装飾パターン (繰り返し模様、ノイズテクスチャ、subtle なグラデーション背景) は CSS background でも OK。ただしユーザーが直接認識する「主役の媒体」は必ず `<img>` / `<video>`。
+**`<HeroMedia>` で表現できない複雑なヒーロー** (例: 動画が画面分割で 2 つ並ぶ、3D Parallax) が必要になったら、 **新しい template コンポーネントを `frontend/src/components/templates/` に追加** してから使う。手書きの section + overlay 構造を残さない。
+
+**通常の画像表示** (記事中の挿絵、商品サムネ等) は `<img>` / `<Image>` を直接書いて OK。overlay 不要なら `<HeroMedia>` も不要。
 
 ### 5. 自己評価ループ（全用途共通）
 
