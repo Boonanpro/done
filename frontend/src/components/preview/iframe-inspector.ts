@@ -392,12 +392,19 @@ function enableInlineEdit(
 
   let cancelled = false;
 
-  // <a>/<button> 等のデフォルト動作 (ナビゲーション・サブミット) を抑制し、
-  // キャレット移動・テキスト編集を優先させる。
-  // stopPropagation はしない (iframe-inspector の click handler は isEditing 中なら素通りする)
-  const interceptClick = (ev: Event) => {
-    ev.preventDefault();
-  };
+  // <a>/<button> 等のデフォルト動作 (ナビゲーション・サブミット) を一時的に無効化。
+  // click イベント preventDefault は contentEditable のキャレット移動も阻害するので使わない。
+  // 代わりに href / type を一時退避して元に戻す。
+  const savedHref = el.tagName === 'A' ? el.getAttribute('href') : null;
+  const savedTarget = el.tagName === 'A' ? el.getAttribute('target') : null;
+  const savedType = el.tagName === 'BUTTON' ? el.getAttribute('type') : null;
+  if (el.tagName === 'A') {
+    el.removeAttribute('href');
+    el.removeAttribute('target');
+  }
+  if (el.tagName === 'BUTTON') {
+    el.setAttribute('type', 'button'); // submit を防ぐ
+  }
 
   const cleanup = () => {
     el.removeAttribute('contenteditable');
@@ -408,7 +415,10 @@ function enableInlineEdit(
     el.style.removeProperty('white-space'); // ★ leak fix: pre-wrap を必ず元に戻す
     el.removeEventListener('blur', onBlur, true);
     el.removeEventListener('keydown', onKeyDown, true);
-    el.removeEventListener('click', interceptClick);
+    // <a>/<button> の attrs を復元
+    if (savedHref !== null) el.setAttribute('href', savedHref);
+    if (savedTarget !== null) el.setAttribute('target', savedTarget);
+    if (savedType !== null) el.setAttribute('type', savedType);
     // active overlay を再表示
     if (overlays.activeTarget === el && doc.contains(el)) {
       positionTo(active, doc, el);
@@ -444,7 +454,6 @@ function enableInlineEdit(
 
   el.addEventListener('blur', onBlur, true);
   el.addEventListener('keydown', onKeyDown, true);
-  el.addEventListener('click', interceptClick);
 }
 
 export function clearActiveHighlight(iframe: HTMLIFrameElement) {
