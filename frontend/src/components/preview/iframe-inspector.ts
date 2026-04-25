@@ -17,6 +17,7 @@ const INLINE_EDIT_BLOCKED_TAGS = new Set([
 type Handlers = {
   move: (e: Event) => void;
   click: (e: Event) => void;
+  dblclick: (e: Event) => void;
   keydown: (e: Event) => void;
   scroll: (e: Event) => void;
   resize: (e: Event) => void;
@@ -184,12 +185,21 @@ export function attachInspector(iframe: HTMLIFrameElement) {
       target
     );
 
-    // インライン編集を有効化:
-    // - フォーム/置換要素 (img, video, input 等) はスキップ
-    // - それ以外なら全部対象 (子要素持ちでも edit 可能)
-    if (!INLINE_EDIT_BLOCKED_TAGS.has(tagName)) {
-      enableInlineEdit(target as HTMLElement, doc, hover, active, overlays);
-    }
+    // インライン編集はシングルクリックでは起動しない (見た目が変わる副作用回避)。
+    // ダブルクリック (下の dblclick handler) で明示的に編集モード突入する設計。
+  };
+
+  // ダブルクリックで初めてインライン編集モードに入る
+  const dblclick = (ev: Event) => {
+    const e = ev as MouseEvent;
+    const target = e.target as Element | null;
+    if (!target || isOverlay(target)) return;
+    if (isEditing(target)) return;
+    const tagName = target.tagName.toLowerCase();
+    if (INLINE_EDIT_BLOCKED_TAGS.has(tagName)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    enableInlineEdit(target as HTMLElement, doc, hover, active, overlays);
   };
 
   const keydown = (ev: Event) => {
@@ -218,11 +228,12 @@ export function attachInspector(iframe: HTMLIFrameElement) {
 
   doc.addEventListener('mousemove', move, true);
   doc.addEventListener('click', click, true);
+  doc.addEventListener('dblclick', dblclick, true);
   doc.addEventListener('keydown', keydown, true);
   doc.addEventListener('scroll', scroll, true);
   doc.defaultView?.addEventListener('resize', resize);
 
-  registry.set(iframe, { move, click, keydown, scroll, resize });
+  registry.set(iframe, { move, click, dblclick, keydown, scroll, resize });
 }
 
 /**
@@ -278,6 +289,7 @@ export function detachInspector(iframe: HTMLIFrameElement) {
   if (h) {
     doc.removeEventListener('mousemove', h.move, true);
     doc.removeEventListener('click', h.click, true);
+    doc.removeEventListener('dblclick', h.dblclick, true);
     doc.removeEventListener('keydown', h.keydown, true);
     doc.removeEventListener('scroll', h.scroll, true);
     doc.defaultView?.removeEventListener('resize', h.resize);
@@ -347,6 +359,7 @@ function enableInlineEdit(
     el.style.removeProperty('outline');
     el.style.removeProperty('outline-offset');
     el.style.removeProperty('cursor');
+    el.style.removeProperty('white-space'); // ★ leak fix: pre-wrap を必ず元に戻す
     el.removeEventListener('blur', onBlur, true);
     el.removeEventListener('keydown', onKeyDown, true);
     // active overlay を再表示
