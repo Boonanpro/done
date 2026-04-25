@@ -66,6 +66,10 @@ function applyToElement(
   attrs: Record<string, string> | undefined
 ) {
   const htmlEl = el as HTMLElement;
+  // 編集中の要素には textContent / src 等の上書きをしない (ユーザー入力を破壊しないため)。
+  // styles は無害なので適用しても OK。
+  const isEditing = el.getAttribute('data-dan-editing') === '1';
+
   if (styles) {
     for (const [prop, val] of Object.entries(styles)) {
       try {
@@ -75,13 +79,16 @@ function applyToElement(
       }
     }
   }
-  if (attrs) {
+  if (attrs && !isEditing) {
     for (const [name, val] of Object.entries(attrs)) {
       try {
         // 特殊キー "text" は textContent として扱う (DOM 属性ではない)
         // 子要素が存在する場合は wipe される。leaf text 要素向け
         if (name === 'text') {
-          el.textContent = val;
+          // 既に textContent が override 値と一致してたら何もしない (re-apply 無駄)
+          if (el.textContent !== val) {
+            el.textContent = val;
+          }
           continue;
         }
         el.setAttribute(name, val);
