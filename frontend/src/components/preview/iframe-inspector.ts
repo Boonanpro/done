@@ -186,10 +186,8 @@ export function attachInspector(iframe: HTMLIFrameElement) {
 
     // インライン編集を有効化:
     // - フォーム/置換要素 (img, video, input 等) はスキップ
-    // - 子要素を含むものはスキップ (構造破壊防止)
-    // - それ以外なら全部対象 (div, section, header の中身など何でも)
-    const hasChildElements = target.children.length > 0;
-    if (!INLINE_EDIT_BLOCKED_TAGS.has(tagName) && !hasChildElements) {
+    // - それ以外なら全部対象 (子要素持ちでも edit 可能)
+    if (!INLINE_EDIT_BLOCKED_TAGS.has(tagName)) {
       enableInlineEdit(target as HTMLElement, doc, hover, active, overlays);
     }
   };

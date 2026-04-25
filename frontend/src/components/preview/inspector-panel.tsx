@@ -117,10 +117,7 @@ function TextSection() {
   const selectedElement = usePreviewStore((s) => s.selectedElement);
   const setLiveText = usePreviewStore((s) => s.setLiveText);
   void usePreviewStore((s) => s.styleVersion);
-  // 現在のテキスト内容を表示 (textContent)。子要素ある時はその text 全部
   const currentText = (liveTarget?.textContent ?? selectedElement?.text ?? '').trimEnd();
-  // 子要素を持つ要素は textContent 上書きで構造が壊れる → 警告
-  const hasChildElements = !!liveTarget && (liveTarget as HTMLElement).children.length > 0;
 
   return (
     <section className="flex flex-col gap-2">
@@ -132,11 +129,6 @@ function TextSection() {
         className="w-full resize-y rounded border border-border bg-background px-2 py-1.5 text-sm font-normal leading-relaxed outline-none focus-visible:ring-1 focus-visible:ring-ring"
         spellCheck={false}
       />
-      {hasChildElements && (
-        <p className="text-[10px] leading-snug text-amber-600 dark:text-amber-400">
-          ⚠️ この要素は子要素を含みます。テキスト変更で内部構造が消えます (太字・リンク等)。
-        </p>
-      )}
     </section>
   );
 }
