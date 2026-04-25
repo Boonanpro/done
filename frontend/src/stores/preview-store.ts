@@ -211,10 +211,11 @@ export const usePreviewStore = create<PreviewStore>()(
 
         const persistHtml = () => {
           set({ styleVersion: styleVersion + 1 });
+          // html 保存時は古い text を上書き消去 (両方あると applyToElement で衝突するため)
           queueInspectorEdit({
             target: liveTarget,
             elementKey: selectedElement.elementKey,
-            patch: { attrs: { html: (liveTarget as HTMLElement).innerHTML } },
+            patch: { attrs: { html: (liveTarget as HTMLElement).innerHTML, text: '' } },
           });
         };
 
