@@ -112,27 +112,6 @@ function classifyElement(el: SelectedElement | null, liveTarget: Element | null)
   };
 }
 
-function TextSection() {
-  const liveTarget = usePreviewStore((s) => s.liveTarget);
-  const selectedElement = usePreviewStore((s) => s.selectedElement);
-  const setLiveText = usePreviewStore((s) => s.setLiveText);
-  void usePreviewStore((s) => s.styleVersion);
-  const currentText = (liveTarget?.textContent ?? selectedElement?.text ?? '').trimEnd();
-
-  return (
-    <section className="flex flex-col gap-2">
-      <SectionHeader title="Text" />
-      <textarea
-        value={currentText}
-        onChange={(e) => setLiveText(e.target.value)}
-        rows={Math.min(8, Math.max(2, currentText.split('\n').length + 1))}
-        className="w-full resize-y rounded border border-border bg-background px-2 py-1.5 text-sm font-normal leading-relaxed outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        spellCheck={false}
-      />
-    </section>
-  );
-}
-
 function TypographySection() {
   const cs = useComputedStyle();
   const setLive = usePreviewStore((s) => s.setLiveStyle);
@@ -410,7 +389,6 @@ export function InspectorPanel() {
       </div>
       <div className="flex-1 space-y-4 overflow-y-auto p-3">
         <ElementPreview target={liveTarget} />
-        {isText && <TextSection />}
         {isText && <TypographySection />}
         {isImage && <ImageSection />}
         {isVideo && <VideoSection />}

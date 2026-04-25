@@ -392,6 +392,13 @@ function enableInlineEdit(
 
   let cancelled = false;
 
+  // <a>/<button> 等のデフォルト動作 (ナビゲーション・サブミット) を抑制し、
+  // キャレット移動・テキスト編集を優先させる。
+  // stopPropagation はしない (iframe-inspector の click handler は isEditing 中なら素通りする)
+  const interceptClick = (ev: Event) => {
+    ev.preventDefault();
+  };
+
   const cleanup = () => {
     el.removeAttribute('contenteditable');
     el.removeAttribute('data-dan-editing');
@@ -401,6 +408,7 @@ function enableInlineEdit(
     el.style.removeProperty('white-space'); // ★ leak fix: pre-wrap を必ず元に戻す
     el.removeEventListener('blur', onBlur, true);
     el.removeEventListener('keydown', onKeyDown, true);
+    el.removeEventListener('click', interceptClick);
     // active overlay を再表示
     if (overlays.activeTarget === el && doc.contains(el)) {
       positionTo(active, doc, el);
@@ -436,6 +444,7 @@ function enableInlineEdit(
 
   el.addEventListener('blur', onBlur, true);
   el.addEventListener('keydown', onKeyDown, true);
+  el.addEventListener('click', interceptClick);
 }
 
 export function clearActiveHighlight(iframe: HTMLIFrameElement) {
