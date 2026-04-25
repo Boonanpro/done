@@ -237,21 +237,6 @@ const stackState = new WeakMap<
   { x: number; y: number; index: number; stack: Element[] }
 >();
 
-/**
- * 「装飾的な空 div」 (テキスト無し・interactive 属性無し・子要素無し)
- * の上に重なってる場合、下にある img/video を優先選択するためのヘルパー。
- */
-function isDecorativeOverlay(el: Element): boolean {
-  if (el.tagName !== 'DIV') return false;
-  if (el.children.length > 0) return false;
-  const text = (el.textContent || '').trim();
-  if (text.length > 0) return false;
-  // interactive 要素なら触らない
-  if (el.hasAttribute('role') || el.hasAttribute('onclick')) return false;
-  if (el.id) return false;
-  return true;
-}
-
 function pickFromStack(
   doc: Document,
   e: MouseEvent,
@@ -261,6 +246,9 @@ function pickFromStack(
   const y = e.clientY;
   const altKey = e.altKey;
 
+  // elementsFromPoint は pointer-events:none の要素を自動的に除外する。
+  // build スキルのルールで overlay div には pointer-events-none を必須化したので、
+  // 適切に書かれた成果物では overlay は自然に透過してクリックが下の媒体に届く。
   const stack = (doc.elementsFromPoint(x, y) as Element[])
     .filter((el) => !isOverlay(el))
     .filter((el) => el.tagName.toLowerCase() !== 'html');
@@ -269,30 +257,12 @@ function pickFromStack(
 
   let index = 0;
   if (altKey) {
-    // Alt+click のみドリル動作 (連続 alt+click で更に下へ)
+    // Alt+click はスタックの下にドリル (連続で更に下へ)
     const prev = stackState.get(doc);
     const samePoint =
       prev && Math.abs(x - prev.x) <= 10 && Math.abs(y - prev.y) <= 10;
     if (samePoint) {
       index = (prev.index + 1) % stack.length;
-    }
-  } else {
-    // 通常クリック: 装飾 overlay はスキップして下の媒体を選ぶ
-    // 「上から順に走査、装飾 div が連続したらスキップ、最初の意味ある要素 or 媒体を選択」
-    for (let i = 0; i < stack.length; i++) {
-      const el = stack[i];
-      // img / video が見つかったら即採用 (装飾 div 越しでも見えてるはずなので)
-      if (el.tagName === 'IMG' || el.tagName === 'VIDEO') {
-        index = i;
-        break;
-      }
-      // 装飾 div ならスキップして次へ
-      if (isDecorativeOverlay(el)) {
-        continue;
-      }
-      // それ以外の意味ある要素ならそこで採用
-      index = i;
-      break;
     }
   }
 

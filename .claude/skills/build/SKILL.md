@@ -70,37 +70,56 @@ import 例: `import { HeroSection, Section, FeatureGrid } from "@/components/tem
 
 `grid-cols-1` → `sm:grid-cols-2` → `lg:grid-cols-4` の順で拡張。
 
-### 4. 写真は必ず `<img>` タグ (CSS background-image 禁止)
+### 4. 写真・動画は必ず `<img>` / `<video>` タグ + overlay div 禁止
 
-ヒーロー画像・商品写真・人物写真・実写など **「コンテンツとしての画像」 は必ず `<img>` (Next.js なら `<Image>`) で実装する**。`<div style="backgroundImage">` は使わない。
+ヒーロー画像・商品写真・人物写真・実写・ヒーロー動画など **「コンテンツとしての媒体」 は必ず `<img>` / `<video>` で実装する**。`<div style="backgroundImage">` は使わない。
+
+**さらに**: 暗転・ぼかし・色被せは **媒体自体に CSS filter で適用する**。 上に重ねる **overlay div は禁止** (空でも非空でも、半透明でも)。理由は inspector で媒体を直接クリック選択できなくなるため。
 
 ```tsx
-// ❌ ダメ (画像が DOM に <img> として存在しない → inspector でクリック選択できない、
-//   alt 属性なし、SEO 不利、Lighthouse 減点)
+// ❌ ダメ パターン 1: background-image (媒体が <img>/<video> として存在しない)
 <div style={{ backgroundImage: `url(${HERO_IMAGE})`, backgroundSize: 'cover' }} />
 
-// ✅ OK (overlay は <img> の上に重ねる構造で書く)
+// ❌ ダメ パターン 2: <video> + overlay div を重ねる
 <section className="relative">
-  <img
-    src={HERO_IMAGE}
-    alt="工場で作業する職人"
-    className="absolute inset-0 h-full w-full object-cover"
+  <video src={HERO_VIDEO} className="absolute inset-0 ..." autoPlay loop muted />
+  <div className="absolute inset-0 bg-black/40" />     {/* ← これがクリックを吸う */}
+  <div className="absolute inset-0 bg-gradient-to-r .../>{/* ← これも */}
+</section>
+
+// ✅ OK: 暗転・ぼかし・色被せは媒体自体の CSS filter で
+<section className="relative">
+  <video
+    src={HERO_VIDEO}
+    autoPlay loop muted playsInline
+    className="absolute inset-0 h-full w-full object-cover brightness-50 saturate-110"
+    // または style={{ filter: 'brightness(0.5) saturate(1.1) blur(2px)' }}
   />
-  {/* 暗くしたいなら <img> 自体に CSS filter で。それで足りない時だけ overlay div */}
-  <div className="absolute inset-0 bg-gradient-to-r from-black/60 to-transparent" />
-  <div className="relative">
-    {/* テキストコンテンツ */}
-  </div>
+  <div className="relative">{/* テキストコンテンツ */}</div>
 </section>
 ```
 
-**理由**:
-- inspector で **画像をクリックして選択 → 差し替え / 編集** ができる
-- `alt` 属性が付き SEO・アクセシビリティ向上
-- Lighthouse / Core Web Vitals で正しく評価される
-- ユーザーが編集モードで「画像をこれに変えたい」を直感操作できる
+**「片側だけ濃いグラデーション」が欲しい場合**:
+- 単純な暗転 → `brightness-50` で全面均一に下げる (上から overlay より読みやすい場合多い)
+- どうしても方向性を出したい → **`mask-image` を `<img>`/`<video>` 自体に当てる** (overlay div は作らない)
+  ```tsx
+  <video style={{
+    maskImage: 'linear-gradient(to right, black 0%, black 60%, transparent 100%)',
+    WebkitMaskImage: 'linear-gradient(to right, black 0%, black 60%, transparent 100%)',
+  }} />
+  ```
+- それでも足りない場合のみ → overlay div 許可、ただし **`pointer-events: none` 必須**
+  ```tsx
+  <div className="absolute inset-0 pointer-events-none bg-gradient-to-r ..." />
+  ```
 
-**例外**: 装飾パターン (繰り返し模様、ノイズテクスチャ、subtle なグラデーション背景) は CSS background でも OK。ただしユーザーが直接認識する「主役の画像」は必ず `<img>`。
+**理由**:
+- inspector で 媒体を直接クリックして選択 / 差し替え / overlay 調整 ができる
+- 余計な DOM 要素が減って Lighthouse スコアも改善
+- ユーザーが編集モードで「ここの画像/動画」を直感的に触れる
+- inspector の Overlay セクション (darken / blur) で **CSS filter ベースのオーバーレイは UI から調整可能**。dan が決め打ちで書く必要なし
+
+**例外**: 装飾パターン (繰り返し模様、ノイズテクスチャ、subtle なグラデーション背景) は CSS background でも OK。ただしユーザーが直接認識する「主役の媒体」は必ず `<img>` / `<video>`。
 
 ### 5. 自己評価ループ（全用途共通）
 
