@@ -91,6 +91,13 @@ function applyToElement(
           }
           continue;
         }
+        // 特殊キー "html" は innerHTML として扱う (部分テキスト styling 用)
+        if (name === 'html') {
+          if (el.innerHTML !== val) {
+            el.innerHTML = val;
+          }
+          continue;
+        }
         el.setAttribute(name, val);
         // <video> は src 変更後 load() しないと再ロードされない
         if (name === 'src' && el.tagName === 'VIDEO') {

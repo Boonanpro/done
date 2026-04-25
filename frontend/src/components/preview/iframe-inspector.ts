@@ -21,6 +21,7 @@ type Handlers = {
   keydown: (e: Event) => void;
   scroll: (e: Event) => void;
   resize: (e: Event) => void;
+  selectionchange: (e: Event) => void;
 };
 
 type Overlays = {
@@ -265,14 +266,32 @@ export function attachInspector(iframe: HTMLIFrameElement) {
     repositionActive();
   };
 
+  // 選択範囲 (mouse drag で text を選択) を store に同期。
+  // setLiveStyle が selectedRange を見て、部分テキストへの style 適用を可能にする。
+  const selectionchange = () => {
+    const sel = doc.defaultView?.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+      usePreviewStore.setState({ selectedRange: null });
+      return;
+    }
+    const range = sel.getRangeAt(0);
+    // 文字数 0 なら null
+    if (range.toString().length === 0) {
+      usePreviewStore.setState({ selectedRange: null });
+      return;
+    }
+    usePreviewStore.setState({ selectedRange: range.cloneRange() });
+  };
+
   doc.addEventListener('mousemove', move, true);
   doc.addEventListener('click', click, true);
   doc.addEventListener('dblclick', dblclick, true);
   doc.addEventListener('keydown', keydown, true);
   doc.addEventListener('scroll', scroll, true);
+  doc.addEventListener('selectionchange', selectionchange);
   doc.defaultView?.addEventListener('resize', resize);
 
-  registry.set(iframe, { move, click, dblclick, keydown, scroll, resize });
+  registry.set(iframe, { move, click, dblclick, keydown, scroll, resize, selectionchange });
 }
 
 /**
@@ -331,6 +350,7 @@ export function detachInspector(iframe: HTMLIFrameElement) {
     doc.removeEventListener('dblclick', h.dblclick, true);
     doc.removeEventListener('keydown', h.keydown, true);
     doc.removeEventListener('scroll', h.scroll, true);
+    doc.removeEventListener('selectionchange', h.selectionchange);
     doc.defaultView?.removeEventListener('resize', h.resize);
     registry.delete(iframe);
   }

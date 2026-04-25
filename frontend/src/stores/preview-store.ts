@@ -44,6 +44,8 @@ interface PreviewState {
 
   inspectorMode: InspectorMode;
   liveTarget: Element | null;
+  /** iframe 内で現在選択されているテキスト範囲。null = 選択なし or 折りたたみ */
+  selectedRange: Range | null;
   edits: Record<string, StyleEdit>;
   /** style 変更のバージョン。変更の度にインクリメントされ、
    *  subscribe した全コンポーネントに再描画のトリガを与える */
@@ -78,6 +80,7 @@ const INITIAL: PreviewState = {
   refCounter: 0,
   inspectorMode: 'comment',
   liveTarget: null,
+  selectedRange: null,
   edits: {},
   styleVersion: 0,
 };
@@ -136,8 +139,60 @@ export const usePreviewStore = create<PreviewStore>()(
       setInspectorMode: (mode) => set({ inspectorMode: mode }),
 
       setLiveStyle: (property, value, important = false) => {
-        const { liveTarget, selectedElement, edits, styleVersion } = get();
+        const { liveTarget, selectedElement, edits, styleVersion, selectedRange } = get();
         if (!liveTarget || !selectedElement) return;
+
+        // 部分テキスト選択がある場合は選択範囲を <span> でラップして style を当てる
+        // (一部だけサイズ変更・色変更したい用途)
+        if (
+          selectedRange &&
+          !selectedRange.collapsed &&
+          liveTarget.contains(selectedRange.commonAncestorContainer)
+        ) {
+          const doc = liveTarget.ownerDocument;
+          if (doc) {
+            const span = doc.createElement('span');
+            span.style.setProperty(property, value, important ? 'important' : '');
+            try {
+              // surroundContents は selection が単一テキストノード内に収まる場合のみ動作
+              selectedRange.surroundContents(span);
+            } catch {
+              // 跨ぎ選択 (複数 element に跨る) → extractContents で span に詰めて再挿入
+              try {
+                const fragment = selectedRange.extractContents();
+                span.appendChild(fragment);
+                selectedRange.insertNode(span);
+              } catch {
+                // どちらも失敗 → fallback: 要素全体に適用
+                (liveTarget as HTMLElement).style.setProperty(
+                  property,
+                  value,
+                  important ? 'important' : ''
+                );
+                set({ styleVersion: styleVersion + 1 });
+                queueInspectorEdit({
+                  target: liveTarget,
+                  elementKey: selectedElement.elementKey,
+                  patch: { styles: { [property]: value } },
+                });
+                return;
+              }
+            }
+            // 部分適用した結果の innerHTML を保存 (text override の代替)
+            set({
+              styleVersion: styleVersion + 1,
+              selectedRange: null, // span 挿入後 range は無効化
+            });
+            queueInspectorEdit({
+              target: liveTarget,
+              elementKey: selectedElement.elementKey,
+              patch: { attrs: { html: (liveTarget as HTMLElement).innerHTML } },
+            });
+            return;
+          }
+        }
+
+        // 全体に適用 (従来動作)
         try {
           (liveTarget as HTMLElement).style.setProperty(
             property,
