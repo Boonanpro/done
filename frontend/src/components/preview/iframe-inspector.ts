@@ -1,7 +1,7 @@
 'use client';
 
 import { usePreviewStore } from '@/stores/preview-store';
-import { computeElementKey } from '@/components/dan/inspector-runtime';
+import { computeElementKey, resolveEditUnit } from '@/components/dan/inspector-runtime';
 
 const HOVER_OVERLAY_ID = 'dan-inspector-hover';
 const ACTIVE_OVERLAY_ID = 'dan-inspector-active';
@@ -139,7 +139,11 @@ export function attachInspector(iframe: HTMLIFrameElement) {
     e.stopPropagation();
 
     // z-stack drill: 同じ場所を続けて click or Alt+click で下の要素にドリル
-    const target = pickFromStack(doc, e, isOverlay) || initialTarget;
+    const stackTarget = pickFromStack(doc, e, isOverlay) || initialTarget;
+
+    // Alt+クリックでドリル中なら stack のまま、通常クリックは edit-unit に揃える
+    // （data-edit-id を持つ祖先があれば論理的編集単位を選ぶ）
+    const target = e.altKey ? stackTarget : resolveEditUnit(stackTarget);
 
     overlays.activeTarget = target;
     positionTo(active, doc, target);
@@ -213,6 +217,9 @@ export function attachInspector(iframe: HTMLIFrameElement) {
     } catch {
       /* fallback: initialTarget */
     }
+    // data-edit-id を持つ祖先があればそれを編集単位とする
+    // （部分テキストの span や子要素ではなく、論理的なまとまり全体を編集対象に）
+    editTarget = resolveEditUnit(editTarget) as HTMLElement;
 
     const tagName = editTarget.tagName.toLowerCase();
     if (INLINE_EDIT_BLOCKED_TAGS.has(tagName)) return;
@@ -268,18 +275,24 @@ export function attachInspector(iframe: HTMLIFrameElement) {
 
   // 選択範囲 (mouse drag で text を選択) を store に同期。
   // setLiveStyle が selectedRange を見て、部分テキストへの style 適用を可能にする。
+  //
+  // Sticky 仕様: 一度選択された範囲は、新しい非空の選択が入るか、liveTarget が
+  // 変わるか、明示的にクリアされるまで保持する。
+  // → 右ペインのスライダーを掴んで iframe からフォーカスが外れた瞬間に
+  //    Selection が collapsed になっても、選択を維持して部分適用を継続できる。
   const selectionchange = () => {
     const sel = doc.defaultView?.getSelection();
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
-      usePreviewStore.setState({ selectedRange: null });
+      // 空 / 折りたたみ → 何もしない（前の選択を保持）
       return;
     }
     const range = sel.getRangeAt(0);
-    // 文字数 0 なら null
     if (range.toString().length === 0) {
-      usePreviewStore.setState({ selectedRange: null });
+      // 文字数 0 → 何もしない（前の選択を保持）
       return;
     }
+    // 非空の新規選択が入ったら更新（liveTarget 内であろうとなかろうと、
+    //   setLiveStyle 側で contains() ガードしてあるので問題ない）
     usePreviewStore.setState({ selectedRange: range.cloneRange() });
   };
 

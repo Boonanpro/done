@@ -173,7 +173,7 @@ export function MultiStepInquiry() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          scope: "yoshikawa-tokuso",
+          scope: "kittoku",
           name: contact.name,
           company: contact.company,
           email: contact.email || undefined,

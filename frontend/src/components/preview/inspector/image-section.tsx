@@ -77,13 +77,13 @@ export function ImageSection() {
   const applySrc = (url: string) => {
     if (!img) return;
     img.setAttribute('src', url);
-    queueInspectorEdit({ target: img, patch: { attrs: { src: url } } });
+    queueInspectorEdit({ target: img, attrsOnly: { src: url } });
   };
 
   const applyAlt = () => {
     if (!img) return;
     img.setAttribute('alt', altDraft);
-    queueInspectorEdit({ target: img, patch: { attrs: { alt: altDraft } } });
+    queueInspectorEdit({ target: img, attrsOnly: { alt: altDraft } });
   };
 
   const handleRegenerate = async () => {

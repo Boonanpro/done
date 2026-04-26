@@ -36,7 +36,7 @@ function PageHero() {
       />
       <div className="relative mx-auto max-w-4xl px-4 sm:px-6 py-16 sm:py-20">
         <div className="flex items-center gap-2 text-xs text-white/70 mb-6">
-          <Link href="/demo/yoshikawa-tokuso" className="hover:text-white">
+          <Link href="/artifacts/kittoku" className="hover:text-white">
             ホーム
           </Link>
           <ChevronRight className="h-3 w-3" />
@@ -48,14 +48,14 @@ function PageHero() {
             Inquiry
           </span>
         </div>
-        <h1 className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black leading-tight">
+        <h1 data-edit-id="kittoku-contact-hero-h1" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black leading-tight">
           車両情報・画像をまとめて送信。
           <br className="hidden sm:inline" />
           電話を何度もかけずに、一度で。
         </h1>
         <div className="mt-6 rounded-sm bg-white/10 border border-white/20 p-5 flex gap-3 max-w-2xl">
           <Info className="h-5 w-5 text-[var(--yk-gold)] shrink-0 mt-0.5" />
-          <p className="text-sm text-white/85 leading-relaxed">
+          <p data-edit-id="kittoku-contact-hero-info" className="text-sm text-white/85 leading-relaxed">
             特装車の部品発注には
             <span className="font-mono-data font-bold text-[var(--yk-gold)]">
               {" "}

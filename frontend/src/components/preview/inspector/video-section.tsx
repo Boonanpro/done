@@ -99,13 +99,13 @@ export function VideoSection() {
     if (!video) return;
     video.setAttribute('src', url);
     video.load();
-    queueInspectorEdit({ target: video, patch: { attrs: { src: url } } });
+    queueInspectorEdit({ target: video, attrsOnly: { src: url } });
   };
 
   const applyPoster = () => {
     if (!video) return;
     video.setAttribute('poster', posterDraft);
-    queueInspectorEdit({ target: video, patch: { attrs: { poster: posterDraft } } });
+    queueInspectorEdit({ target: video, attrsOnly: { poster: posterDraft } });
   };
 
   const toggleAttribute = (

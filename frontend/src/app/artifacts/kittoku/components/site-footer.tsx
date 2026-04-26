@@ -35,7 +35,7 @@ export function SiteFooter() {
               </div>
             </div>
             <Link
-              href="/demo/yoshikawa-tokuso/contact"
+              href="/artifacts/kittoku/contact"
               className="inline-flex items-center gap-2 text-sm text-white hover:text-[var(--yk-gold)] transition-colors"
             >
               <Mail className="h-4 w-4" />
@@ -61,17 +61,17 @@ export function SiteFooter() {
               Sitemap
             </div>
             <div className="flex flex-col gap-2">
-              <FooterLink href="/demo/yoshikawa-tokuso">ホーム</FooterLink>
-              <FooterLink href="/demo/yoshikawa-tokuso/services">
+              <FooterLink href="/artifacts/kittoku">ホーム</FooterLink>
+              <FooterLink href="/artifacts/kittoku/services">
                 事業・サービス
               </FooterLink>
-              <FooterLink href="/demo/yoshikawa-tokuso/company">
+              <FooterLink href="/artifacts/kittoku/company">
                 会社情報
               </FooterLink>
-              <FooterLink href="/demo/yoshikawa-tokuso/careers">
+              <FooterLink href="/artifacts/kittoku/careers">
                 採用情報
               </FooterLink>
-              <FooterLink href="/demo/yoshikawa-tokuso/contact">
+              <FooterLink href="/artifacts/kittoku/contact">
                 お問い合わせ
               </FooterLink>
             </div>

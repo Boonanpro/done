@@ -21,14 +21,14 @@ export function Logo({
   showText = true,
   variant = "light",
   className,
-  href = "/demo/yoshikawa-tokuso",
+  href = "/artifacts/kittoku",
 }: LogoProps) {
   const s = SIZE_MAP[size];
   const content = (
     <span className={cn("inline-flex items-center gap-2.5", className)}>
       <Image
-        src="/yoshikawa/logo.png"
-        alt="吉川特装"
+        src="/kikkawa/logo.png"
+        alt="吉川特装（きっかわとくそう）"
         width={s.img}
         height={s.img}
         className="shrink-0 object-contain"
@@ -51,7 +51,7 @@ export function Logo({
               variant === "light" ? "text-[var(--yk-steel)]" : "text-white/70",
             )}
           >
-            YOSHIKAWA TOKUSOU
+            KIKKAWA TOKUSOU
           </span>
         </span>
       )}

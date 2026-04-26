@@ -8,10 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Logo } from "./logo";
 
 const NAV_ITEMS = [
-  { label: "ホーム", href: "/demo/yoshikawa-tokuso" },
-  { label: "事業・サービス", href: "/demo/yoshikawa-tokuso/services" },
-  { label: "会社情報", href: "/demo/yoshikawa-tokuso/company" },
-  { label: "採用情報", href: "/demo/yoshikawa-tokuso/careers" },
+  { label: "ホーム", href: "/artifacts/kittoku" },
+  { label: "事業・サービス", href: "/artifacts/kittoku/services" },
+  { label: "会社情報", href: "/artifacts/kittoku/company" },
+  { label: "採用情報", href: "/artifacts/kittoku/careers" },
 ];
 
 export function SiteNav() {
@@ -60,7 +60,7 @@ export function SiteNav() {
               asChild
               className="hidden sm:inline-flex bg-[var(--yk-navy)] hover:bg-[var(--yk-navy-dark)] text-white rounded-sm"
             >
-              <Link href="/demo/yoshikawa-tokuso/contact">お問い合わせ</Link>
+              <Link href="/artifacts/kittoku/contact">お問い合わせ</Link>
             </Button>
             <button
               type="button"
@@ -94,7 +94,7 @@ export function SiteNav() {
               <span className="font-mono-data">0859-27-4885</span>
             </a>
             <Link
-              href="/demo/yoshikawa-tokuso/contact"
+              href="/artifacts/kittoku/contact"
               className="mt-2 bg-[var(--yk-navy)] text-white py-3 text-center rounded-sm text-sm font-bold"
               onClick={() => setOpen(false)}
             >

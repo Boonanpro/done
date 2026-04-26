@@ -13,6 +13,20 @@ export default function YoshikawaLayout({
   children: React.ReactNode;
 }) {
   React.useEffect(() => {
+    // 手動編集で壊れた overrides を一度だけクリア。
+    // 再編集して保存した場合はまた localStorage に書き戻るので 2回目以降は無害。
+    try {
+      const RESET_FLAG = "kikkawa-inspector-reset-2026-04-25";
+      if (!localStorage.getItem(RESET_FLAG)) {
+        localStorage.removeItem("dan-inspector-overrides-yoshikawa-tokuso");
+        localStorage.removeItem("dan-inspector-overrides-kittoku");
+        document.getElementById("dan-inspector-prepaint")?.remove();
+        localStorage.setItem(RESET_FLAG, "1");
+      }
+    } catch {
+      /* ignore */
+    }
+
     const html = document.documentElement;
     const body = document.body;
     const prevClass = html.className;

@@ -15,12 +15,15 @@ class InspectorOverridesService:
         artifact_slug: str,
         element_key: str,
         styles: Optional[Dict[str, str]],
-        attrs: Optional[Dict[str, str]],
+        attrs: Optional[Dict[str, Any]],
         user_id: str,
         project_id: Optional[str] = None,
+        replace_attrs: bool = False,
     ) -> Dict[str, Any]:
         # 既存の overrides がある場合はマージする（同じ element_key に対して
-        # 複数プロパティが段階的に送信されるため）
+        # 複数プロパティが段階的に送信されるため）。
+        # ただし replace_attrs=True の場合は attrs を全置換する
+        # （v2 モデル送信時に v1 の html / text 残骸を残さないため）。
         existing = (
             self.supabase.table(self.table)
             .select("*")
@@ -31,11 +34,12 @@ class InspectorOverridesService:
             .execute()
         )
         merged_styles: Dict[str, str] = {}
-        merged_attrs: Dict[str, str] = {}
+        merged_attrs: Dict[str, Any] = {}
         if existing.data:
             row = existing.data[0]
             merged_styles = dict(row.get("styles") or {})
-            merged_attrs = dict(row.get("attrs") or {})
+            if not replace_attrs:
+                merged_attrs = dict(row.get("attrs") or {})
         if styles:
             merged_styles.update(styles)
         if attrs:

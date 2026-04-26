@@ -49,6 +49,7 @@ async def upsert_override(
         attrs=data.attrs,
         user_id=user.user_id,
         project_id=str(data.project_id) if data.project_id else None,
+        replace_attrs=data.replace_attrs,
     )
     return result
 

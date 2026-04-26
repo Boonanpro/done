@@ -27,14 +27,14 @@ const nextConfig: NextConfig = {
         source: '/ws/:path*',
         destination: `${backendUrl}/ws/:path*`,
       },
-      // 吉川特装HP: /kikkawa-tokuso で公開（旧パス artifacts/yoshikawa-tokuso）
+      // 吉川特装HP: /kikkawa-tokuso 短縮パスは /artifacts/kittoku にエイリアス
       {
         source: '/kikkawa-tokuso',
-        destination: '/artifacts/yoshikawa-tokuso',
+        destination: '/artifacts/kittoku',
       },
       {
         source: '/kikkawa-tokuso/:path*',
-        destination: '/artifacts/yoshikawa-tokuso/:path*',
+        destination: '/artifacts/kittoku/:path*',
       },
     ];
   },
