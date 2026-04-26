@@ -255,11 +255,27 @@ export const usePreviewStore = create<PreviewStore>()(
 
       /**
        * テキストを差し替える。spans の位置は自動補正される。
+       *
+       * 致命防御: liveTarget が wrapper（自身に data-edit-id が無く、配下に
+       * data-edit-id 持ち子孫がある）の場合、テキスト保存しない。
+       * （wrapper の textContent は子要素テキストの連結なので、保存して再描画すると
+       *   子要素 h2/p ごと plaintext で上書きされ構造破壊に至る）
        */
       setLiveText: (text) => {
         const { liveTarget, selectedElement, models, styleVersion } = get();
         if (!liveTarget || !selectedElement?.elementKey) return;
         const key = selectedElement.elementKey;
+        // wrapper チェック
+        const el = liveTarget as HTMLElement;
+        const isWrapper =
+          !el.getAttribute?.('data-edit-id') &&
+          !!el.querySelector?.('[data-edit-id]');
+        if (isWrapper) {
+          console.warn(
+            '[preview-store] setLiveText blocked: liveTarget is a wrapper containing data-edit-id descendants.'
+          );
+          return;
+        }
 
         const current = getOrInitModel(key, liveTarget, models);
         const next = applyText(current, text);

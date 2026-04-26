@@ -109,17 +109,26 @@ function stylesEqual(a: CSSStyle, b: CSSStyle): boolean {
  * - text/spans があれば innerHTML を再構築
  * - blockStyle は要素の inline style に !important で適用
  * - extraAttrs は href/src 等の属性に適用
+ *
+ * 致命防御: 要素自身が data-edit-id を持たず、配下に data-edit-id 持ちの子孫が
+ * 存在する場合（h2 と p を包む wrapper div など）、innerHTML 書き戻しは
+ * 構造破壊（h2 や p ごと plaintext で上書き）になるため **skip** する。
+ * blockStyle / attrs は非破壊なので適用 OK。
  */
 export function applyModelToElement(el: HTMLElement, model: EditModel): void {
-  // テキスト関連の上書き
-  if (model.text !== null) {
+  const hasOwnEditId = !!el.getAttribute('data-edit-id');
+  const hasEditIdDescendant = !!el.querySelector?.('[data-edit-id]');
+  const isWrapper = !hasOwnEditId && hasEditIdDescendant;
+
+  // テキスト関連の上書き（wrapper では実行しない）
+  if (model.text !== null && !isWrapper) {
     const html = renderToHtml(model);
     if (el.innerHTML !== html) {
       el.innerHTML = html;
     }
   }
 
-  // 全体装飾
+  // 全体装飾（非破壊なので wrapper でも適用 OK）
   for (const [prop, val] of Object.entries(model.blockStyle)) {
     try {
       el.style.setProperty(prop, val, 'important');

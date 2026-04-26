@@ -221,6 +221,22 @@ export function attachInspector(iframe: HTMLIFrameElement) {
     // （部分テキストの span や子要素ではなく、論理的なまとまり全体を編集対象に）
     editTarget = resolveEditUnit(editTarget) as HTMLElement;
 
+    // 致命防御: editTarget 自身に data-edit-id が無く、配下に data-edit-id 持ちの
+    // 子孫が存在する wrapper（h2 と p 両方を包む div など）に inline edit を許すと、
+    // contentEditable 化で plaintext 化されて子要素の構造が破壊される。
+    // → ブロックして、ユーザーに具体的な子（h2 か p か）を選び直させる。
+    if (
+      !editTarget.getAttribute('data-edit-id') &&
+      editTarget.querySelector?.('[data-edit-id]')
+    ) {
+      // 警告だけ出してリターン。アクティブオーバーレイは出す（クリック自体は通常通り選択扱い）
+      console.warn(
+        '[inspector] inline-edit blocked: clicked a wrapper that contains data-edit-id descendants. ' +
+        'Click directly on the heading or paragraph instead.'
+      );
+      return;
+    }
+
     const tagName = editTarget.tagName.toLowerCase();
     if (INLINE_EDIT_BLOCKED_TAGS.has(tagName)) return;
     e.preventDefault();
