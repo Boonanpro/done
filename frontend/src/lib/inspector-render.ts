@@ -23,6 +23,15 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => HTML_ESCAPE[c]);
 }
 
+/**
+ * HTML エスケープ + 改行を <br> に変換。
+ * 出力 HTML 内で \n をそのまま残すと白space:normal で空白に潰されるので、
+ * テキスト出力時は必ずこちらを使う。
+ */
+function escapeHtmlWithBr(s: string): string {
+  return escapeHtml(s).replace(/\n/g, '<br>');
+}
+
 function styleToString(style: CSSStyle): string {
   return Object.entries(style)
     .map(([k, v]) => `${k}: ${escapeAttr(v)}`)
@@ -43,7 +52,7 @@ export function renderToHtml(model: EditModel): string {
 
   const spans = model.spans;
   if (spans.length === 0) {
-    return escapeHtml(text);
+    return escapeHtmlWithBr(text);
   }
 
   // 文字位置 → そこに重なる span のリスト（インデックス）
@@ -88,7 +97,7 @@ export function renderToHtml(model: EditModel): string {
 
   return merged
     .map((seg) => {
-      const segText = escapeHtml(text.slice(seg.start, seg.end));
+      const segText = escapeHtmlWithBr(text.slice(seg.start, seg.end));
       const styleKeys = Object.keys(seg.style);
       if (styleKeys.length === 0) return segText;
       return `<span data-dan-edit="1" style="${styleToString(seg.style)}">${segText}</span>`;

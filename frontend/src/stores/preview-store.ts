@@ -104,6 +104,18 @@ const INITIAL: PreviewState = {
  * これがないと、サーバ保存済みの spans/blockStyle が編集開始時に空モデルで上書きされ、
  * テキストだけ編集したのに色や大きさの装飾が全消えする事故が起きる。
  */
+/**
+ * DOM 要素の表示テキスト（改行込み）を取得する。
+ * - <br> や block 要素の境界で \n が入る innerText を優先
+ * - innerText は layout を強制するので、JSDOM 等で undefined のことがある
+ *   → fallback で textContent を使う（この場合 \n は消える）
+ */
+function readDisplayText(el: Element): string {
+  const ie = (el as HTMLElement).innerText;
+  if (typeof ie === 'string') return ie;
+  return el.textContent ?? '';
+}
+
 function getOrInitModel(
   key: string,
   el: Element,
@@ -120,10 +132,8 @@ function getOrInitModel(
       | undefined;
     const fromRuntime = api?.getModel?.(key);
     if (fromRuntime) {
-      // runtime は text 未設定（legacy で text 無し）の場合があるので、
-      // DOM 内容で穴埋め
       if (fromRuntime.text === null) {
-        fromRuntime.text = el.textContent;
+        fromRuntime.text = readDisplayText(el);
       }
       return fromRuntime;
     }
@@ -131,7 +141,7 @@ function getOrInitModel(
 
   // フォールバック: 完全新規モデル
   const m = emptyModel();
-  m.text = el.textContent;
+  m.text = readDisplayText(el);
   return m;
 }
 
