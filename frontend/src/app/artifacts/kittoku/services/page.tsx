@@ -19,6 +19,7 @@ import { SiteNav } from "../components/site-nav";
 import { SiteFooter } from "../components/site-footer";
 import { DiagonalDivider } from "../components/diagonal-divider";
 import { VEHICLES, type VehicleKey } from "../components/vehicle-icons";
+import { ServiceVideoCard } from "../components/service-video-card";
 
 const ACHIEVEMENTS = [
   {
@@ -61,7 +62,9 @@ const ACHIEVEMENTS = [
 
 const SERVICE_CATEGORIES = [
   {
+    slug: "repair",
     icon: Wrench,
+    video: "/kikkawa/services/repair.mp4",
     eyebrow: "Repair",
     title: "整備・修理",
     body: "油圧・電装・機械部品の故障診断から修理、架装ごとの専門修理まで。新明和をはじめとする純正部品で対応します。",
@@ -73,7 +76,9 @@ const SERVICE_CATEGORIES = [
     ],
   },
   {
+    slug: "inspection",
     icon: FileSearch,
+    video: "/kikkawa/services/inspection.mp4",
     eyebrow: "Inspection",
     title: "点検・検査",
     body: "法定点検・車検整備に加え、特装車特有の安全装置・リミットスイッチ・油圧系統の定期点検を実施します。",
@@ -85,7 +90,9 @@ const SERVICE_CATEGORIES = [
     ],
   },
   {
+    slug: "parts",
     icon: PackageCheck,
+    video: "/kikkawa/services/parts.mp4",
     eyebrow: "Parts",
     title: "純正部品の手配",
     body: "車台番号と型式から最適な部品を特定し、メーカー純正部品を迅速に手配。過去整備履歴もお伝えします。",
@@ -97,7 +104,9 @@ const SERVICE_CATEGORIES = [
     ],
   },
   {
+    slug: "retrofit",
     icon: Truck,
+    video: "/kikkawa/services/retrofit.mp4" as string | undefined,
     eyebrow: "Retrofit",
     title: "架装・改造",
     body: "既存車両への追加架装や、用途変更に伴う改造も対応。構造変更申請まで一貫してサポートします。",
@@ -148,11 +157,11 @@ function AchievementsSection() {
           </p>
         </div>
       </div>
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <div className="flex lg:grid lg:grid-cols-3 overflow-x-auto lg:overflow-visible snap-x snap-mandatory lg:snap-none gap-4 lg:gap-5 -mx-4 lg:mx-0 px-[12.5%] lg:px-0 pb-4 lg:pb-0 scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {ACHIEVEMENTS.map((a, i) => (
           <Card
             key={a.slug}
-            className="rounded-sm border-border bg-white relative overflow-hidden"
+            className="rounded-sm border-border bg-white relative overflow-hidden snap-center shrink-0 w-[85%] sm:w-[60%] lg:w-auto lg:shrink"
           >
             <div className="relative aspect-[4/3] bg-[var(--yk-gold)]/10 overflow-hidden">
               <Image
@@ -261,9 +270,9 @@ function ComingSoonSection() {
             新しいサービス。
           </h2>
           <p data-edit-id="kittoku-services-coming-lead" className="text-[var(--yk-steel)] max-w-md leading-relaxed text-sm">
-            お客様の声からスタートする新事業を準備中です。
+            こちらのサービスは準備中です。
             <br />
-            ご関心があるお客様はお早めにお問い合わせください。
+            ご関心があるお客様はお問い合わせよりご一報ください。
           </p>
         </div>
       </div>
@@ -308,16 +317,6 @@ function ComingSoonSection() {
                 </span>
                 <span data-edit-id={`kittoku-services-coming-${p.slug}-value`} className="text-[var(--yk-navy-dark)]">{p.value}</span>
               </div>
-              <div className="rounded-sm bg-[var(--yk-navy)]/[0.03] p-4 text-xs text-[var(--yk-steel)] leading-relaxed">
-                ※ こちらのサービスは現在準備段階です。ご関心がある方は
-                <Link
-                  href="/artifacts/kittoku/contact"
-                  className="text-[var(--yk-navy)] font-bold underline decoration-[var(--yk-gold)] decoration-2 underline-offset-2 mx-1"
-                >
-                  お問い合わせ
-                </Link>
-                よりご一報ください。開始時にご案内いたします。
-              </div>
             </CardContent>
           </Card>
         ))}
@@ -353,7 +352,7 @@ function PageHero() {
         <h1 data-edit-id="kittoku-services-hero-h1" className="font-headline text-4xl sm:text-5xl lg:text-6xl font-black leading-tight max-w-3xl">
           整備・修理・点検・架装。
           <br />
-          働く車のすべてを、一か所で。
+          すべてご対応します
         </h1>
         <p data-edit-id="kittoku-services-hero-lead" className="text-white/80 mt-6 text-base leading-relaxed max-w-2xl">
           特装車の整備は、一般乗用車の整備とは別物です。メーカーごとの構造理解、専用工具、純正部品の手配ルート。
@@ -381,10 +380,17 @@ function CategoriesSection() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {SERVICE_CATEGORIES.map((cat) => {
           const Icon = cat.icon;
-          const catSlug = cat.eyebrow.toLowerCase();
+          const catSlug = cat.slug;
           return (
-            <Card key={cat.title} className="border-border rounded-sm">
-              <CardContent className="p-8 space-y-6">
+            <Card key={cat.title} className="border-border rounded-sm overflow-hidden flex flex-col">
+              {cat.video ? (
+                <ServiceVideoCard src={cat.video} alt={cat.title} />
+              ) : (
+                <div className="relative aspect-[16/9] bg-gradient-to-br from-[var(--yk-navy)]/10 to-[var(--yk-navy)]/[0.03] flex items-center justify-center">
+                  <Icon className="h-16 w-16 text-[var(--yk-navy)]/30" />
+                </div>
+              )}
+              <CardContent className="p-8 space-y-6 flex-1">
                 <div className="flex items-start justify-between">
                   <div className="space-y-2">
                     <div data-edit-id={`kittoku-services-categories-${catSlug}-eyebrow`} className="font-eyebrow text-xs text-[var(--yk-gold-dark)]">
@@ -436,7 +442,7 @@ function VehicleListSection() {
           対応できる車種
         </h2>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-5">
         {keys.map((key) => {
           const v = VEHICLES[key];
           return (
@@ -483,9 +489,9 @@ function FlowReminderSection() {
               </span>
             </div>
             <h2 data-edit-id="kittoku-services-flow-h2" className="font-headline text-3xl font-black leading-tight">
-              お問い合わせの前に、
+              ご依頼は
               <br />
-              ご準備いただきたいこと
+              お問い合わせください
             </h2>
             <p data-edit-id="kittoku-services-flow-lead" className="text-white/80 leading-relaxed">
               特装車の部品特定には、いくつか固有の情報が必要です。お手元にご用意いただくとスムーズにご案内できます。

@@ -14,14 +14,34 @@ export default function YoshikawaLayout({
 }) {
   React.useEffect(() => {
     // 手動編集で壊れた overrides を一度だけクリア。
-    // 再編集して保存した場合はまた localStorage に書き戻るので 2回目以降は無害。
     try {
-      const RESET_FLAG = "kikkawa-inspector-reset-2026-04-25";
+      const RESET_FLAG = "kikkawa-inspector-reset-2026-04-26-v2";
       if (!localStorage.getItem(RESET_FLAG)) {
         localStorage.removeItem("dan-inspector-overrides-yoshikawa-tokuso");
         localStorage.removeItem("dan-inspector-overrides-kittoku");
         document.getElementById("dan-inspector-prepaint")?.remove();
         localStorage.setItem(RESET_FLAG, "1");
+      }
+    } catch {
+      /* ignore */
+    }
+
+    // クライアント共有ドメインでは PWA Service Worker を unregister し、
+    // CacheStorage を全クリアして「古いHP状態が残る」現象を防ぐ。
+    try {
+      if (
+        typeof navigator !== "undefined" &&
+        "serviceWorker" in navigator &&
+        window.location.hostname.startsWith("kittoku")
+      ) {
+        navigator.serviceWorker.getRegistrations().then((regs) => {
+          regs.forEach((r) => r.unregister());
+        });
+        if ("caches" in window) {
+          caches.keys().then((keys) => {
+            keys.forEach((k) => caches.delete(k));
+          });
+        }
       }
     } catch {
       /* ignore */

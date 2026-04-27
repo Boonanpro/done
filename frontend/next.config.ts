@@ -27,6 +27,18 @@ const nextConfig: NextConfig = {
         source: '/ws/:path*',
         destination: `${backendUrl}/ws/:path*`,
       },
+      // 吉川特装HP専用ドメイン: ルート(/)だけ /artifacts/kittoku にマップする。
+      // 内部リンクは /artifacts/kittoku/... 形式なのでそのまま動く。
+      {
+        source: '/',
+        has: [{ type: 'host', value: 'kittoku.vercel.app' }],
+        destination: '/artifacts/kittoku',
+      },
+      {
+        source: '/',
+        has: [{ type: 'host', value: 'kittoku-tokuso.vercel.app' }],
+        destination: '/artifacts/kittoku',
+      },
       // 吉川特装HP: /kikkawa-tokuso 短縮パスは /artifacts/kittoku にエイリアス
       {
         source: '/kikkawa-tokuso',

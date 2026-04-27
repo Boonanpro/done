@@ -144,9 +144,7 @@ function PageHero() {
           </span>
         </div>
         <h1 data-edit-id="kittoku-company-hero-h1" className="font-headline text-4xl sm:text-5xl lg:text-6xl font-black leading-tight max-w-3xl">
-          米子の地で、
-          <br />
-          働く車を、30年以上。
+          米子で、働く車を、30年。
         </h1>
       </div>
     </section>
@@ -284,17 +282,24 @@ function HistorySection() {
         </h2>
       </div>
       <div className="relative">
-        <div className="absolute left-6 sm:left-24 top-0 bottom-0 w-px bg-[var(--yk-navy)]/15 hidden sm:block" />
+        {/* 縦線: スマホは左端、PCは年カラムの右端 */}
+        <div className="absolute left-3 sm:left-24 top-0 bottom-0 w-px bg-[var(--yk-navy)]/20" />
         <div className="space-y-5">
           {HISTORY.map((h) => (
             <div
               key={h.year}
-              className="grid grid-cols-1 sm:grid-cols-[120px_1fr] gap-4 sm:gap-8 relative"
+              className="grid grid-cols-1 sm:grid-cols-[120px_1fr] gap-3 sm:gap-8 relative pl-8 sm:pl-0"
             >
+              {/* スマホ用: 縦線上のドット */}
+              <span
+                className="sm:hidden absolute left-3 top-3 h-2 w-2 rounded-full bg-[var(--yk-gold)] -translate-x-1/2"
+                aria-hidden
+              />
               <div className="flex sm:flex-col items-baseline sm:items-end gap-2 sm:gap-0 sm:text-right">
                 <div data-edit-id={`kittoku-company-history-${h.year}-year`} className="font-mono-data text-3xl font-black text-[var(--yk-gold-dark)]">
                   {h.year}
                 </div>
+                {/* PC用: 縦線上のドット */}
                 <span className="hidden sm:block h-2 w-2 rounded-full bg-[var(--yk-gold)] ml-auto translate-x-[calc(50%+1rem)] relative -mt-1" aria-hidden />
               </div>
               <div className="rounded-sm border border-border bg-white p-6 space-y-2">

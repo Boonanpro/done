@@ -22,10 +22,15 @@ import { SiteFooter } from "./components/site-footer";
 import { Logo } from "./components/logo";
 import { CertifiedBadge } from "./components/certified-badge";
 import { DiagonalDivider } from "./components/diagonal-divider";
+import { HeroVideo } from "./components/hero-video";
 import { VEHICLES, type VehicleKey } from "./components/vehicle-icons";
 
-const HERO_VIDEO = "/kikkawa/hero.mp4";
-const HERO_POSTER = "/kikkawa/hero.png";
+// 動画/画像にバージョンクエリを付けて、ブラウザ強キャッシュを破棄する
+const ASSET_VERSION = "2026-04-27-v1";
+const HERO_VIDEO = `/kikkawa/hero.mp4?v=${ASSET_VERSION}`;
+// poster は動画の1フレーム目を使う。元の hero.png（整備士のクローズアップ静止画）を出すと
+// 動画ロード前に「全く違う絵」がチラ見えする問題が起きるため。
+const HERO_POSTER = `/kikkawa/hero-poster.jpg?v=${ASSET_VERSION}`;
 
 const STATS = [
   { slug: "founded", label: "創業", value: "1988", unit: "年", hint: "37年以上の整備実績" },
@@ -62,6 +67,7 @@ const MANUFACTURERS: {
   logo?: string;
   siteUrl?: string;
   accent?: boolean;
+  logoStyle?: React.CSSProperties;
 }[] = [
   {
     slug: "shinmaywa",
@@ -70,6 +76,7 @@ const MANUFACTURERS: {
     logo: "/kikkawa/manufacturers/shinmaywa.svg",
     siteUrl: "https://www.shinmaywa.co.jp/",
     accent: true,
+    logoStyle: { width: "146px", height: "auto", objectPosition: "69.9% 35.1%" },
   },
   {
     slug: "kyokuto",
@@ -77,6 +84,7 @@ const MANUFACTURERS: {
     en: "KYOKUTO KAIHATSU",
     logo: "/kikkawa/manufacturers/kyokuto.png",
     siteUrl: "https://www.kyokuto.com/",
+    logoStyle: { width: "166px", height: "auto" },
   },
   {
     slug: "toho",
@@ -89,6 +97,7 @@ const MANUFACTURERS: {
     en: "AICHI CORPORATION",
     logo: "/kikkawa/manufacturers/aichi-corp.png",
     siteUrl: "https://www.aichi-corp.co.jp/",
+    logoStyle: { width: "180px", height: "auto" },
   },
   {
     slug: "tadano",
@@ -96,6 +105,7 @@ const MANUFACTURERS: {
     en: "TADANO",
     logo: "/kikkawa/manufacturers/tadano.svg",
     siteUrl: "https://www.tadano.co.jp/",
+    logoStyle: { width: "190px", height: "auto" },
   },
   {
     slug: "furukawa-unic",
@@ -103,6 +113,7 @@ const MANUFACTURERS: {
     en: "FURUKAWA UNIC",
     logo: "/kikkawa/manufacturers/furukawa-unic.png",
     siteUrl: "https://www.furukawaunic.co.jp/",
+    logoStyle: { width: "142px", height: "auto" },
   },
 ];
 
@@ -136,17 +147,7 @@ export default function YoshikawaHomePage() {
 function HeroSection() {
   return (
     <section className="relative overflow-hidden">
-      <video
-        className="absolute inset-0 w-full h-full object-cover"
-        style={{ filter: "brightness(0.5) saturate(1.05)" }}
-        src={HERO_VIDEO}
-        poster={HERO_POSTER}
-        autoPlay
-        loop
-        muted
-        playsInline
-        preload="metadata"
-      />
+      <HeroVideo src={HERO_VIDEO} poster={HERO_POSTER} />
       <div
         className="absolute inset-0"
         style={{
@@ -257,7 +258,7 @@ function VehiclesSection() {
           </p>
         </div>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-5">
         {keys.map((key) => {
           const v = VEHICLES[key];
           return (
@@ -308,16 +309,14 @@ function FlowSection() {
           </div>
           <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
             <h2 data-edit-id="kittoku-top-flow-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black leading-tight">
-              電話だけの問い合わせ、
-              <br className="sm:hidden" />
-              もう終わりにしませんか。
+              修理・部品交換など
+              <br />
+              ぜひお問い合わせください
             </h2>
-            <p data-edit-id="kittoku-top-flow-lead" className="text-white/80 max-w-md leading-relaxed">
-              特装車の部品手配・修理には
-              <span className="font-mono-data font-bold text-[var(--yk-gold)]">
-                車台番号・型式
-              </span>
-              などが必須です。Webフォームなら必要な情報を一度に整理してお送りいただけます。
+            <p data-edit-id="kittoku-top-flow-lead" className="text-white/80 max-w-[344px] leading-relaxed">
+              便利な「Webフォーム」か「お電話」で
+              <br />
+              お問い合わせいただけます
             </p>
           </div>
         </div>
@@ -328,13 +327,10 @@ function FlowSection() {
             className="bg-[var(--yk-gold)] hover:bg-[var(--yk-gold-dark)] text-[var(--yk-navy-dark)] font-bold rounded-sm h-12 px-6"
           >
             <Link data-edit-id="kittoku-top-flow-cta" href="/artifacts/kittoku/contact">
-              Webフォームで問い合わせ
+              WEB問い合わせ
               <ArrowRight className="h-4 w-4 ml-1.5" />
             </Link>
           </Button>
-          <div data-edit-id="kittoku-top-flow-note" className="text-white/70 text-sm">
-            入力の途中で分からない項目があっても、そのまま送信OK。折り返しご連絡します。
-          </div>
         </div>
       </div>
     </section>
@@ -425,7 +421,7 @@ function ManufacturersSection() {
                   width={200}
                   height={64}
                   className="max-h-[56px] w-auto object-contain"
-                  style={{ height: "auto" }}
+                  style={m.logoStyle ?? { height: "auto" }}
                 />
               ) : (
                 <div className="text-center space-y-1">
@@ -468,14 +464,11 @@ function CompanyBriefSection() {
             </span>
           </div>
           <h2 data-edit-id="kittoku-top-company-h2" className="font-headline text-3xl sm:text-4xl font-black text-[var(--yk-navy)] leading-tight">
-            米子の地で、
-            <br />
-            30年以上。
+            米子で30年以上。
           </h2>
           <p data-edit-id="kittoku-top-company-body" className="text-[var(--yk-steel)] leading-relaxed">
             有限会社吉川特装自動車は、1988年の創業以来、鳥取県米子市から山陰地域の働く車を支え続けてきました。
-            新明和工業の指定サービス工場としての知識と経験をもとに、お客様の大切な業務車両を、
-            確かな技術で最短復帰させることを使命としています。
+            お客様の大切な業務車両を、確かな技術で最短復帰させることを使命としています。
           </p>
           <div className="grid grid-cols-2 gap-6 pt-2">
             <InfoRow label="所在地">
@@ -580,9 +573,7 @@ function CareersCtaSection() {
               </span>
             </div>
             <h2 data-edit-id="kittoku-top-careers-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black text-white leading-tight">
-              働く車を支える、
-              <br />
-              私たちの仕事を、一緒に。
+              一緒に働く社員を募集中です。
             </h2>
             <p data-edit-id="kittoku-top-careers-body" className="text-white/80 leading-relaxed max-w-2xl">
               特装車の整備は、普通の自動車整備では経験できない奥深い世界です。

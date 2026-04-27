@@ -49,9 +49,7 @@ function PageHero() {
           </span>
         </div>
         <h1 data-edit-id="kittoku-contact-hero-h1" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black leading-tight">
-          車両情報・画像をまとめて送信。
-          <br className="hidden sm:inline" />
-          電話を何度もかけずに、一度で。
+          車両情報・画像をまとめて送信いただけます
         </h1>
         <div className="mt-6 rounded-sm bg-white/10 border border-white/20 p-5 flex gap-3 max-w-2xl">
           <Info className="h-5 w-5 text-[var(--yk-gold)] shrink-0 mt-0.5" />
@@ -61,7 +59,7 @@ function PageHero() {
               {" "}
               車台番号 / 型式 / 類別区分番号{" "}
             </span>
-            が必要です。本フォームなら一度で必要な情報と画像をお送りいただけるので、折り返しが格段に早くなります。
+            が必要です。本フォームなら一度で必要な情報と画像をお送りいただけるので、折り返しとご対応が格段に早くなります。
           </p>
         </div>
       </div>

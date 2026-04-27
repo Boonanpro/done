@@ -7,6 +7,7 @@ import {
   Briefcase,
   CheckCircle2,
   ArrowRight,
+  ChevronDown,
 } from "lucide-react";
 import { LpShell } from "@/components/templates/lp-shell";
 import { Section } from "@/components/templates/section";
@@ -254,19 +255,32 @@ function BenefitsSection() {
           福利厚生
         </h2>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {BENEFITS.map((b) => (
-          <div
-            key={b.slug}
-            className="rounded-sm bg-white border border-border p-5 space-y-2"
-          >
-            <div data-edit-id={`kittoku-careers-benefits-${b.slug}-title`} className="font-headline font-bold text-[var(--yk-navy)]">
-              {b.title}
-            </div>
-            <div data-edit-id={`kittoku-careers-benefits-${b.slug}-body`} className="text-sm text-[var(--yk-steel)]">{b.body}</div>
+      <details className="group rounded-sm border border-border bg-white overflow-hidden">
+        <summary className="cursor-pointer list-none flex items-center justify-between px-6 py-5 hover:bg-[var(--yk-navy)]/[0.02] transition-colors">
+          <div className="flex items-center gap-3">
+            <span className="font-headline font-bold text-[var(--yk-navy)]">
+              福利厚生 全{BENEFITS.length}項目を見る
+            </span>
+            <span className="text-xs text-[var(--yk-steel)]">
+              社会保険・賞与・休暇など
+            </span>
           </div>
-        ))}
-      </div>
+          <ChevronDown className="h-5 w-5 text-[var(--yk-navy)] group-open:rotate-180 transition-transform shrink-0" />
+        </summary>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 p-6 pt-2 border-t border-border">
+          {BENEFITS.map((b) => (
+            <div
+              key={b.slug}
+              className="rounded-sm bg-[var(--yk-navy)]/[0.02] border border-border p-5 space-y-2"
+            >
+              <div data-edit-id={`kittoku-careers-benefits-${b.slug}-title`} className="font-headline font-bold text-[var(--yk-navy)]">
+                {b.title}
+              </div>
+              <div data-edit-id={`kittoku-careers-benefits-${b.slug}-body`} className="text-sm text-[var(--yk-steel)]">{b.body}</div>
+            </div>
+          ))}
+        </div>
+      </details>
     </Section>
   );
 }
@@ -288,9 +302,9 @@ function VoicesSection() {
           実際に働く整備士・事務スタッフがどんな気持ちで仕事に向き合っているか。
         </p>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+      <div className="flex md:grid md:grid-cols-3 overflow-x-auto md:overflow-visible snap-x snap-mandatory md:snap-none gap-4 md:gap-5 -mx-4 md:mx-0 px-[12.5%] md:px-0 pb-4 md:pb-0 scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {VOICES.map((v) => (
-          <Card key={v.slug} className="rounded-sm border-border overflow-hidden">
+          <Card key={v.slug} className="rounded-sm border-border overflow-hidden snap-center shrink-0 w-[85%] sm:w-[60%] md:w-auto md:shrink">
             <div className="aspect-[4/3] bg-[var(--yk-navy)]/5 relative">
               <Image
                 data-edit-id={`kittoku-careers-voices-${v.slug}-photo`}
