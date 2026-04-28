@@ -358,14 +358,24 @@ export const usePreviewStore = create<PreviewStore>()(
     }),
     {
       name: 'dan-preview-state',
+      // version bump: 既存ユーザの localStorage に残っている artifact / projectId / isOpen を
+      // 強制破棄するため。migrate() が version < 2 を検知したら state 全部捨てる。
+      version: 2,
       storage: createJSONStorage(() => (typeof window !== 'undefined' ? localStorage : undefined as unknown as Storage)),
+      // 永続化はUI 嗜好のみ（モード）。
+      // artifact / projectId / isOpen など「コンテンツ系」は session 限り。
+      // 未ログイン状態でも見えてしまう「幽霊プレビュー」を防ぐ。
       partialize: (s) => ({
-        isOpen: s.isOpen,
-        projectId: s.projectId,
-        artifact: s.artifact,
         isEditMode: s.isEditMode,
         inspectorMode: s.inspectorMode,
       }),
+      migrate: (_persisted, version) => {
+        if (version < 2) {
+          // v1 で保存されていた artifact 等を捨てて、デフォルトを返す
+          return { isEditMode: false, inspectorMode: 'comment' as const };
+        }
+        return _persisted as { isEditMode: boolean; inspectorMode: 'comment' | 'edit' };
+      },
     }
   )
 );

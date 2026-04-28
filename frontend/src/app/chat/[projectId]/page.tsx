@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 
 import { MainLayout } from '@/components/layout/main-layout';
 import { useProjectStore } from '@/stores/project-store';
+import { usePreviewStore } from '@/stores/preview-store';
 import { OWNER_USER_ID } from '@/lib/api-client';
 
 /**
@@ -25,6 +26,8 @@ export default function ChatProjectPage() {
     setHasToken(!!token);
     setChecked(true);
     if (!token) {
+      // 幽霊プレビュー防止
+      try { usePreviewStore.getState().closePreview(); } catch {}
       router.push('/login');
       return;
     }

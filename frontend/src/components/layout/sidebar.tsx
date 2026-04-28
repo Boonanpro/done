@@ -24,6 +24,7 @@ import { useAuth } from '@/hooks/use-auth';
 import { api, OWNER_USER_ID, type ProjectResponse } from '@/lib/api-client';
 import { useUnreadStore } from '@/stores/unread-store';
 import { useProjectStore } from '@/stores/project-store';
+import { usePreviewStore } from '@/stores/preview-store';
 import { useIsMobile } from '@/hooks/useIsMobile';
 import { NotificationPanel } from '@/components/notification/notification-panel';
 
@@ -199,6 +200,8 @@ export function Sidebar({
   const handleLogout = async () => {
     try {
       await logout();
+      // 幽霊プレビュー防止: ログアウト時に preview state を完全リセット
+      usePreviewStore.getState().closePreview();
       router.push('/login');
     } catch {
       toast.error('ログアウトに失敗しました');

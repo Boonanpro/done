@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 
 import { MainLayout } from '@/components/layout/main-layout';
 import { OWNER_USER_ID } from '@/lib/api-client';
+import { usePreviewStore } from '@/stores/preview-store';
 
 /**
  * /chat - メインページ
@@ -21,6 +22,8 @@ export default function ChatPage() {
     setHasToken(!!token);
     setChecked(true);
     if (!token) {
+      // 幽霊プレビュー防止: 未ログイン検知時に preview state を確実にクリア
+      try { usePreviewStore.getState().closePreview(); } catch {}
       router.push('/login');
       return;
     }
