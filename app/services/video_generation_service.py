@@ -160,7 +160,21 @@ class VideoGenerationService:
             row["reference_url"] = reference_image_url
 
         result = self.supabase.table(self.table).insert(row).execute()
-        return result.data[0] if result.data else row
+        record = result.data[0] if result.data else row
+        # dan-notion 自動整理（best-effort）
+        if project_id and record.get("id"):
+            try:
+                from app.services.dan_notion_service import get_dan_notion_service
+                pr = self.supabase.table("projects").select("title").eq("id", str(project_id)).limit(1).execute()
+                title = pr.data[0]["title"] if pr.data else None
+                get_dan_notion_service().add_asset_block_to_project(
+                    user_id=user_id, project_id=str(project_id),
+                    project_title=title, asset=record,
+                    asset_type="video", source_id=record["id"],
+                )
+            except Exception:
+                logger.exception("dan-notion sync failed for video %s", record.get("id"))
+        return record
 
     async def list(
         self,

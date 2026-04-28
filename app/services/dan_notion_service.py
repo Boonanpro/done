@@ -105,6 +105,164 @@ class DanNotionService:
         # 末尾に追加
         return key_between(keys[-1], None)
 
+    def get_or_create_project_page(
+        self, user_id: str, project_id: str, project_title: Optional[str] = None
+    ) -> dict[str, Any]:
+        """
+        プロジェクトに対応する dan-notion 上の root page block を取得 or 作成する。
+        生成物（HP / 画像 / 動画 / ファイル）はこの page の配下に追加していくことで、
+        プロジェクト単位の自動整理を実現する。
+
+        識別子: source='agent' + source_id=project_id + properties.kind='project_root' でユニーク。
+        （DB スキーマの source CHECK 制約に合わせるため source は 'agent' を使う）
+        """
+        existing = (
+            self.sb.table("blocks")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("source", "agent")
+            .eq("source_id", str(project_id))
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        # properties.kind='project_root' でフィルタ（複数 source=agent 行に対応）
+        for b in (existing.data or []):
+            if (b.get("properties") or {}).get("kind") == "project_root":
+                return b
+
+        # 無ければ root page として作成
+        title = project_title or "プロジェクト"
+        order_key = self._compute_order_key(user_id, None, after_block_id=None)
+        row = {
+            "user_id": user_id,
+            "parent_id": None,
+            "type": "page",
+            "order_key": order_key,
+            "properties": {"kind": "project_root", "project_id": str(project_id)},
+            "content": [{"type": "text", "text": title}],
+            "tags": ["project", str(project_id)],
+            "source": "agent",
+            "source_id": str(project_id),
+            "created_by": "system",
+        }
+        res = self.sb.table("blocks").insert(row).execute()
+        return res.data[0] if res.data else row
+
+    def add_artifact_block_to_project(
+        self,
+        user_id: str,
+        project_id: str,
+        project_title: Optional[str],
+        artifact: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        """
+        chat_artifact (HP/ツール) を該当プロジェクトの root page 配下に
+        block として追加する。既に同じ artifact_id の block があれば skip。
+        """
+        # 重複チェック (source='chat' + source_id=artifact_id + properties.kind='artifact')
+        already = (
+            self.sb.table("blocks")
+            .select("id,properties")
+            .eq("user_id", user_id)
+            .eq("source", "chat")
+            .eq("source_id", str(artifact["id"]))
+            .is_("deleted_at", "null")
+            .limit(5)
+            .execute()
+        )
+        for b in (already.data or []):
+            if (b.get("properties") or {}).get("kind") == "artifact":
+                return b
+
+        page = self.get_or_create_project_page(user_id, project_id, project_title)
+        if not page:
+            return None
+
+        label = artifact.get("label") or artifact.get("slug") or "成果物"
+        kind = artifact.get("kind") or "production"
+        preview_url = artifact.get("preview_url") or ""
+        order_key = self._compute_order_key(user_id, page["id"], after_block_id=None)
+        row = {
+            "user_id": user_id,
+            "parent_id": page["id"],
+            "type": "page",
+            "order_key": order_key,
+            "properties": {
+                "kind": "artifact",
+                "artifact_kind": kind,
+                "slug": artifact.get("slug"),
+                "preview_url": preview_url,
+                "project_id": str(project_id),
+            },
+            "content": [{"type": "text", "text": f"📄 {label}"}],
+            "tags": ["artifact", str(project_id)],
+            "source": "chat",
+            "source_id": str(artifact["id"]),
+            "created_by": "system",
+        }
+        res = self.sb.table("blocks").insert(row).execute()
+        return res.data[0] if res.data else None
+
+    def add_asset_block_to_project(
+        self,
+        user_id: str,
+        project_id: str,
+        project_title: Optional[str],
+        asset: dict[str, Any],
+        asset_type: str,  # 'image' / 'video' / 'file' / 'pdf'
+        source_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """
+        画像 / 動画 / ファイル等の asset を該当プロジェクトの root page 配下に
+        block として追加する。重複は source + source_id でガード。
+        """
+        already = (
+            self.sb.table("blocks")
+            .select("id,properties")
+            .eq("user_id", user_id)
+            .eq("source", "chat")
+            .eq("source_id", str(source_id))
+            .is_("deleted_at", "null")
+            .limit(5)
+            .execute()
+        )
+        for b in (already.data or []):
+            if (b.get("properties") or {}).get("kind") == f"asset_{asset_type}":
+                return b
+
+        page = self.get_or_create_project_page(user_id, project_id, project_title)
+        if not page:
+            return None
+
+        url = asset.get("url") or asset.get("preview_url") or ""
+        prompt = asset.get("prompt") or ""
+        label = (prompt[:40] if prompt else asset_type) or asset_type
+        order_key = self._compute_order_key(user_id, page["id"], after_block_id=None)
+
+        icon_map = {"image": "🖼️", "video": "🎬", "file": "📎", "pdf": "📄"}
+        prefix = icon_map.get(asset_type, "📦")
+
+        row = {
+            "user_id": user_id,
+            "parent_id": page["id"],
+            "type": asset_type if asset_type in ("image", "video", "pdf", "file") else "file",
+            "order_key": order_key,
+            "properties": {
+                "kind": f"asset_{asset_type}",
+                "url": url,
+                "prompt": prompt,
+                "project_id": str(project_id),
+            },
+            "content": [{"type": "text", "text": f"{prefix} {label}"}],
+            "tags": [asset_type, str(project_id)],
+            "source": "chat",
+            "source_id": str(source_id),
+            "created_by": "system",
+        }
+        res = self.sb.table("blocks").insert(row).execute()
+        return res.data[0] if res.data else None
+
     def create_block(self, user_id: str, data: dict[str, Any]) -> dict[str, Any]:
         parent_id = data.get("parent_id")
         order_key = self._compute_order_key(

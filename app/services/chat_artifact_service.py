@@ -43,7 +43,34 @@ class ChatArtifactService:
         if payload.get("message_id"):
             payload["message_id"] = str(payload["message_id"])
         result = self.supabase.table(self.table).insert(payload).execute()
-        return result.data[0] if result.data else None
+        artifact = result.data[0] if result.data else None
+
+        # dan-notion 自動整理: project 配下に block を追加
+        # 失敗しても artifact 作成自体は成功扱いにする（best-effort）
+        if artifact and artifact.get("project_id"):
+            try:
+                from app.services.dan_notion_service import get_dan_notion_service
+                project_row = (
+                    self.supabase.table("projects")
+                    .select("title")
+                    .eq("id", artifact["project_id"])
+                    .limit(1)
+                    .execute()
+                )
+                project_title = project_row.data[0]["title"] if project_row.data else None
+                get_dan_notion_service().add_artifact_block_to_project(
+                    user_id=user_id,
+                    project_id=artifact["project_id"],
+                    project_title=project_title,
+                    artifact=artifact,
+                )
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "dan-notion sync failed for artifact %s", artifact.get("id")
+                )
+
+        return artifact
 
     async def update(self, artifact_id: str, data: dict, user_id: str) -> Optional[dict]:
         result = (
