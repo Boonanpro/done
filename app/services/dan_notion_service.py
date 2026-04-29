@@ -139,11 +139,81 @@ class DanNotionService:
             "parent_id": None,
             "type": "page",
             "order_key": order_key,
-            "properties": {"kind": "project_root", "project_id": str(project_id)},
+            "properties": {
+                "kind": "project_root",
+                "project_id": str(project_id),
+                "title": title,  # サイドバー表示用（content fallbackより明示的）
+            },
             "content": [{"type": "text", "text": title}],
             "tags": ["project", str(project_id)],
             "source": "agent",
             "source_id": str(project_id),
+            "created_by": "system",
+        }
+        res = self.sb.table("blocks").insert(row).execute()
+        return res.data[0] if res.data else row
+
+    # ---- サブフォルダ (画像素材 / 動画素材 / 制作物 / 資料 / とりあえず) ----
+
+    SUBFOLDER_DEFS = {
+        # folder_kind: (label, icon)
+        "folder_production": ("制作物", "🎨"),
+        "folder_image": ("画像素材", "🖼️"),
+        "folder_video": ("動画素材", "🎬"),
+        "folder_document": ("資料", "📄"),
+        "folder_inbox": ("とりあえず", "📥"),
+    }
+
+    def get_or_create_subfolder(
+        self,
+        user_id: str,
+        project_id: str,
+        project_title: Optional[str],
+        folder_kind: str,
+    ) -> Optional[dict[str, Any]]:
+        """
+        project_root 配下に「制作物」「画像素材」等のサブフォルダ page を idempotent に作成。
+        識別子: source='agent' + source_id=f'{project_id}:{folder_kind}' でユニーク。
+        """
+        if folder_kind not in self.SUBFOLDER_DEFS:
+            raise ValueError(f"unknown folder_kind: {folder_kind}")
+        label, icon = self.SUBFOLDER_DEFS[folder_kind]
+        sid = f"{project_id}:{folder_kind}"
+
+        existing = (
+            self.sb.table("blocks")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("source", "agent")
+            .eq("source_id", sid)
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        for b in (existing.data or []):
+            if (b.get("properties") or {}).get("kind") == folder_kind:
+                return b
+
+        root = self.get_or_create_project_page(user_id, project_id, project_title)
+        if not root:
+            return None
+        order_key = self._compute_order_key(user_id, root["id"], after_block_id=None)
+        row = {
+            "user_id": user_id,
+            "parent_id": root["id"],
+            "type": "page",
+            "order_key": order_key,
+            "properties": {
+                "kind": folder_kind,
+                "project_id": str(project_id),
+                "title": label,
+                "is_folder": True,
+            },
+            "content": [{"type": "text", "text": label}],
+            "icon": icon,
+            "tags": ["folder", str(project_id), folder_kind],
+            "source": "agent",
+            "source_id": sid,
             "created_by": "system",
         }
         res = self.sb.table("blocks").insert(row).execute()
@@ -175,17 +245,19 @@ class DanNotionService:
             if (b.get("properties") or {}).get("kind") == "artifact":
                 return b
 
-        page = self.get_or_create_project_page(user_id, project_id, project_title)
-        if not page:
+        folder = self.get_or_create_subfolder(
+            user_id, project_id, project_title, "folder_production"
+        )
+        if not folder:
             return None
 
         label = artifact.get("label") or artifact.get("slug") or "成果物"
         kind = artifact.get("kind") or "production"
         preview_url = artifact.get("preview_url") or ""
-        order_key = self._compute_order_key(user_id, page["id"], after_block_id=None)
+        order_key = self._compute_order_key(user_id, folder["id"], after_block_id=None)
         row = {
             "user_id": user_id,
-            "parent_id": page["id"],
+            "parent_id": folder["id"],
             "type": "page",
             "order_key": order_key,
             "properties": {
@@ -194,8 +266,10 @@ class DanNotionService:
                 "slug": artifact.get("slug"),
                 "preview_url": preview_url,
                 "project_id": str(project_id),
+                "title": label,
             },
-            "content": [{"type": "text", "text": f"📄 {label}"}],
+            "content": [{"type": "text", "text": label}],
+            "icon": "🎨",
             "tags": ["artifact", str(project_id)],
             "source": "chat",
             "source_id": str(artifact["id"]),
@@ -231,21 +305,28 @@ class DanNotionService:
             if (b.get("properties") or {}).get("kind") == f"asset_{asset_type}":
                 return b
 
-        page = self.get_or_create_project_page(user_id, project_id, project_title)
-        if not page:
+        # asset_type → サブフォルダ kind 振り分け
+        folder_kind_map = {
+            "image": "folder_image",
+            "video": "folder_video",
+            "pdf": "folder_document",
+            "file": "folder_document",
+        }
+        folder_kind = folder_kind_map.get(asset_type, "folder_document")
+        folder = self.get_or_create_subfolder(
+            user_id, project_id, project_title, folder_kind
+        )
+        if not folder:
             return None
 
         url = asset.get("url") or asset.get("preview_url") or ""
         prompt = asset.get("prompt") or ""
         label = (prompt[:40] if prompt else asset_type) or asset_type
-        order_key = self._compute_order_key(user_id, page["id"], after_block_id=None)
-
-        icon_map = {"image": "🖼️", "video": "🎬", "file": "📎", "pdf": "📄"}
-        prefix = icon_map.get(asset_type, "📦")
+        order_key = self._compute_order_key(user_id, folder["id"], after_block_id=None)
 
         row = {
             "user_id": user_id,
-            "parent_id": page["id"],
+            "parent_id": folder["id"],
             "type": asset_type if asset_type in ("image", "video", "pdf", "file") else "file",
             "order_key": order_key,
             "properties": {
@@ -253,8 +334,10 @@ class DanNotionService:
                 "url": url,
                 "prompt": prompt,
                 "project_id": str(project_id),
+                "title": label,
+                "original_name": label,
             },
-            "content": [{"type": "text", "text": f"{prefix} {label}"}],
+            "content": [{"type": "text", "text": label}],
             "tags": [asset_type, str(project_id)],
             "source": "chat",
             "source_id": str(source_id),
