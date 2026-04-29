@@ -164,6 +164,10 @@ amazon_vision_test/
 # Generated video frames (large, recoverable from record_v9.py)
 scripts/yoshikawa_proposal/frames_v*/
 
+# Test screenshots
+tests/screenshot_*.png
+tests/**/screenshot_*.png
+
 # Node modules (all subdirectories)
 **/node_modules/
 
