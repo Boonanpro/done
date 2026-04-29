@@ -190,8 +190,15 @@ async def fetch_provider(user_id: str, provider_key: str, max_messages: int = 30
         for raw_uid in uids:
             uid = int(raw_uid.decode())
             try:
-                typ, msg_data = M.uid("FETCH", str(uid).encode(), "(RFC822)")
+                # BODY.PEEK[] は Gmail / iCloud 双方互換 (RFC822 は iCloud で metadata のみ返却される)
+                # PEEK は \Seen フラグを立てない (未読のまま)
+                typ, msg_data = M.uid("FETCH", str(uid).encode(), "(BODY.PEEK[])")
                 if typ != "OK" or not msg_data:
+                    continue
+                # 期待構造: [(b"<seq> (UID <uid> BODY[] {<size>}", b"<raw rfc822>"), b")"]
+                # iCloud で metadata のみ ([b"<seq> (UID <uid>)"]) が返るケースもあり得るのでガード
+                if not isinstance(msg_data[0], tuple) or len(msg_data[0]) < 2:
+                    errors.append(f"uid={uid}: unexpected fetch response")
                     continue
                 raw = msg_data[0][1]
                 msg = email.message_from_bytes(raw)
