@@ -68,12 +68,31 @@ class MessageDetectionService:
             "metadata": metadata,
             "status": DetectionStatus.PENDING.value,
         }).execute()
-        
-        if result.data:
-            logger.info(f"Message detected: {source.value}/{source_id or result.data[0]['id']}")
-            return result.data[0]
-        
-        raise ValueError("Failed to save detected message")
+
+        if not result.data:
+            raise ValueError("Failed to save detected message")
+
+        record = result.data[0]
+        logger.info(f"Message detected: {source.value}/{source_id or record['id']}")
+
+        # dan-notion 自動整理: メール/外部メッセージを 📥 とりあえず inbox に投入
+        # AI 後段仕分け (Phase 2) で client/folder に振り分けられる想定
+        try:
+            from app.services.dan_notion_service import get_dan_notion_service
+            get_dan_notion_service().add_detected_message_to_inbox(
+                user_id=user_id,
+                source=source.value,
+                source_id=source_id,
+                subject=subject,
+                content=content,
+                sender_info=sender_info or {},
+                metadata=metadata or {},
+                detected_message_id=record["id"],
+            )
+        except Exception:
+            logger.exception("dan-notion inbox sync failed for detected message %s", record.get("id"))
+
+        return record
     
     async def get_detected_message(self, message_id: str) -> Optional[dict]:
         """検知メッセージを取得"""
