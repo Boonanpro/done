@@ -14,8 +14,10 @@ export const runtime = 'nodejs';
 export async function POST(request: Request) {
   const body = await request.text();
 
+  // チャットはダンコア(port 9000)へ。CORE_BACKEND_URL で上書き可（本番tunnel等）。
+  const coreUrl = process.env.CORE_BACKEND_URL || 'http://127.0.0.1:9000';
   const backendResponse = await fetch(
-    'http://127.0.0.1:8000/api/v1/chat/dan/messages/stream',
+    `${coreUrl}/api/v1/chat/dan/messages/stream`,
     {
       method: 'POST',
       headers: {
