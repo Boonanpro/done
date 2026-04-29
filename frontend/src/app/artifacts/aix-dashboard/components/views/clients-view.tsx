@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { Search, Building2, Plus, MapPin, Phone, User } from "lucide-react";
+import { Search, Building2, MapPin, Phone, User } from "lucide-react";
+import { AddClientDialog } from "../add-client-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -41,10 +42,7 @@ export function ClientsView({ onOpen }: Props) {
             DXで支援する企業の一覧。ダンが自律的に課題分析・提案を進めます。
           </p>
         </div>
-        <Button size="sm" className="rounded-sm">
-          <Plus className="h-4 w-4 mr-1" />
-          企業を追加
-        </Button>
+        <AddClientDialog />
       </div>
 
       <Card>

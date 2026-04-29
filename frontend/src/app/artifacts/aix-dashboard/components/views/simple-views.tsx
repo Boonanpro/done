@@ -15,6 +15,8 @@ import {
 import { useAix } from "../../data/store";
 import { StageBadge, ProposalStatusBadge, OpsStatusChip, ActionStatusBadge, PriorityBadge } from "../ui-bits";
 import type { OpsTask } from "../../data/mock";
+import { AddHypothesisDialog } from "../add-hypothesis-dialog";
+import { AddTaskDialog } from "../add-task-dialog";
 
 /* ==================== Hypotheses View ==================== */
 export function HypothesesView() {
@@ -27,14 +29,17 @@ export function HypothesesView() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
-          <Lightbulb className="h-5 w-5 text-amber-400" />
-          課題分析ボード
-        </h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          クライアントの課題に対するダンの仮説と解決アイデア。影響度×確度で優先順位を決めます。
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
+            <Lightbulb className="h-5 w-5 text-amber-400" />
+            課題分析ボード
+          </h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            クライアントの課題に対するダンの仮説と解決アイデア。影響度×確度で優先順位を決めます。
+          </p>
+        </div>
+        <AddHypothesisDialog />
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <HypothesisColumn title="検証済" items={validated} getClient={byClient} accent="emerald" />
@@ -424,14 +429,17 @@ export function OpsView({ onOpenClient }: { onOpenClient: (id: string) => void }
   const { opsTasks, contracts, clients, moveOpsTask } = useAix();
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
-          <Briefcase className="h-5 w-5 text-amber-400" />
-          契約・運用
-        </h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          契約済みクライアントへの運用タスクをかんばん形式で。
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight flex items-center gap-2">
+            <Briefcase className="h-5 w-5 text-amber-400" />
+            契約・運用
+          </h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            契約済みクライアントへの運用タスクをかんばん形式で。
+          </p>
+        </div>
+        <AddTaskDialog />
       </div>
 
       {/* 契約一覧 */}

@@ -73,14 +73,14 @@ export function HomeView({ onNavigate, onOpenClient }: HomeViewProps) {
           value={proposals.filter((p) => ["sent", "responded"].includes(p.status)).length}
           hint="反応待ち"
           icon={<Film className="h-3.5 w-3.5" />}
-          onClick={() => onNavigate("proposals")}
+          onClick={() => onNavigate("clients")}
         />
         <KpiBox
           label="プロトタイプ"
           value={prototypes.filter((p) => p.status !== "retired").length}
           hint={`${prototypes.filter((p) => p.status === "live").length}個が稼働中`}
           icon={<Rocket className="h-3.5 w-3.5" />}
-          onClick={() => onNavigate("prototypes")}
+          onClick={() => onNavigate("deliverables")}
         />
         <KpiBox
           label="ダン承認待ち"
@@ -88,7 +88,7 @@ export function HomeView({ onNavigate, onOpenClient }: HomeViewProps) {
           hint="あなたの判断待ち"
           icon={<Sparkles className="h-3.5 w-3.5" />}
           highlight
-          onClick={() => onNavigate("actions")}
+          onClick={() => onNavigate("home")}
         />
         <KpiBox
           label="実行済みアクション"
@@ -138,7 +138,7 @@ export function HomeView({ onNavigate, onOpenClient }: HomeViewProps) {
                 variant="ghost"
                 size="sm"
                 className="h-7 text-xs"
-                onClick={() => onNavigate("actions")}
+                onClick={() => onNavigate("home")}
               >
                 すべて
                 <ArrowRight className="h-3 w-3 ml-1" />
@@ -174,7 +174,7 @@ export function HomeView({ onNavigate, onOpenClient }: HomeViewProps) {
               variant="ghost"
               size="sm"
               className="h-7 text-xs"
-              onClick={() => onNavigate("meetings")}
+              onClick={() => onNavigate("home")}
             >
               商談一覧
               <ArrowRight className="h-3 w-3 ml-1" />

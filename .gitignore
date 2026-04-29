@@ -111,16 +111,58 @@ dmypy.json
 
 # Playwright
 .playwright/
+.playwright-*/
 
 **/__pycache__/**
 
-# Temporary test files (screenshots, audio)
-*.png
-*.mp3
+# Temporary test files (screenshots, audio) — root level only
+# HP assets under frontend/public/ MUST be tracked for Vercel deploy
+/*.png
+/*.mp3
+scripts/**/*.png
+scripts/**/*.mp3
 
 # Test tokens and credentials
 test_token.txt
 test_*.txt
+
+# Runtime state
+.last_deploy_hash
+.owner_token
+.tunnel_url
+data/email_sync_state.json
+.claude/mcp_*.json
+.claude/scheduled_tasks.lock
+
+# Local user uploads
+app/uploads/
+uploads/
+
+# Frigate camera surveillance config (separate concern, not part of dan)
+/config.yml
+frigate_config.yml
+
+# Rendered HTML inspection dumps at root
+/services*.html
+
+# Tmp debug files at root
+/tmp_*
+
+# Auto-start log
+dan_core_autostart.log
+sandbox.log
+dan_core.log
+test_backend.log
+backend.log
+deploy.log
+frontend.log
+
+# Test screenshot dirs
+screenshots/
+amazon_vision_test/
+
+# Generated video frames (large, recoverable from record_v9.py)
+scripts/yoshikawa_proposal/frames_v*/
 
 # Node modules (all subdirectories)
 **/node_modules/

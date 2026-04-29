@@ -1,21 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { AixProvider } from "./data/store";
+import { AixProvider, useAix } from "./data/store";
 import { AixSidebar, type AixView } from "./components/sidebar";
 import { HomeView } from "./components/views/home-view";
 import { ClientsView } from "./components/views/clients-view";
 import { ClientDetailView } from "./components/views/client-detail-view";
-import {
-  HypothesesView,
-  ProposalsView,
-  PrototypesView,
-  OutreachView,
-  MeetingsView,
-  OpsView,
-  ActionsView,
-} from "./components/views/simple-views";
-import { useAix } from "./data/store";
+import { DeliverablesView } from "./components/views/deliverables-view";
+import { RevenueView } from "./components/views/revenue-view";
 
 type ViewState =
   | { kind: AixView }
@@ -58,24 +50,17 @@ function Shell() {
             onBack={() => setView({ kind: "clients" })}
           />
         );
-      case "hypotheses":
-        return <HypothesesView />;
-      case "proposals":
-        return <ProposalsView onOpenClient={openClient} />;
-      case "prototypes":
-        return <PrototypesView onOpenClient={openClient} />;
-      case "outreach":
-        return <OutreachView onOpenClient={openClient} />;
-      case "meetings":
-        return <MeetingsView onOpenClient={openClient} />;
-      case "ops":
-        return <OpsView onOpenClient={openClient} />;
-      case "actions":
-        return <ActionsView onOpenClient={openClient} />;
+      case "deliverables":
+        return <DeliverablesView onOpenClient={openClient} />;
+      case "revenue":
+        return <RevenueView onOpenClient={openClient} />;
       default:
         return null;
     }
   };
+
+  // クライアント詳細はチャットを最大幅で使うため、コンテナの max-w を外す
+  const isDetail = view.kind === "client-detail";
 
   return (
     <div className="flex h-screen bg-background text-foreground">
@@ -85,7 +70,9 @@ function Shell() {
         pendingActions={pendingActions}
       />
       <main className="flex-1 overflow-auto">
-        <div className="mx-auto max-w-7xl px-6 py-8">{renderView()}</div>
+        <div className={isDetail ? "px-6 py-6" : "mx-auto max-w-7xl px-6 py-8"}>
+          {renderView()}
+        </div>
       </main>
     </div>
   );

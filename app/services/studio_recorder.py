@@ -44,7 +44,9 @@ class StudioRecorder:
 
         self.frame_idx = 0
         self.current_mouse: List[float] = [width / 2, height / 2]
-        self.cursor_visible = True
+        # Default HIDDEN. Only shown during click/type/select_option operations
+        # (including the cursor motion _move_to and the action itself).
+        self.cursor_visible = False
         self.events: List[dict] = []
         self.mouse_positions: List[Tuple[float, float]] = []
 
@@ -161,15 +163,38 @@ class StudioRecorder:
             self.cursor_visible = prev_visible
 
     async def _ensure_in_viewport(self, el, margin: int = 80):
-        """Before any interaction: verify target is fully visible. If not, smooth-scroll.
-        Prevents Playwright's instant auto-scroll from breaking the layout."""
+        """Legacy: used only for large elements where centering is not possible.
+        For normal interactions use _scroll_to_center."""
         box = await el.bounding_box()
         if not box:
             return
         if box["y"] >= margin and box["y"] + box["height"] <= self.height - margin:
-            return  # already visible with margin
+            return
         target_y = await el.evaluate("el => el.getBoundingClientRect().top + window.scrollY")
         await self._smooth_scroll_to_y(max(0, target_y - margin), steps=30)
+
+    async def _scroll_to_center(self, el, tolerance: int = 100):
+        """Scroll so the target element's center aligns with viewport center.
+        Essential for pan-follow zoom: if all targets are centered, the editor doesn't
+        need large pans (which hit translation clamps and cause off-screen jumps).
+
+        tolerance: if element center is within this many pixels of viewport center,
+        don't scroll (prevents micro-scrolls for closely-placed elements)."""
+        box = await el.bounding_box()
+        if not box:
+            return
+        # If element is TALLER than viewport, we can't center it; use top alignment
+        if box["height"] > self.height - 80:
+            await self._ensure_in_viewport(el)
+            return
+        el_center_y = box["y"] + box["height"] / 2
+        if abs(el_center_y - self.height / 2) <= tolerance:
+            return
+        target_scroll = await el.evaluate(
+            "el => { const r = el.getBoundingClientRect(); "
+            "return r.top + window.scrollY - (window.innerHeight - r.height) / 2; }"
+        )
+        await self._smooth_scroll_to_y(max(0, target_scroll), steps=30)
 
     # ------------------------- public scene API -------------------------
 
@@ -190,28 +215,42 @@ class StudioRecorder:
             print(f"[recorder] WARN element not found: {selector or text}")
             return None
 
-        # Ensure target is visible BEFORE any motion (prevents Playwright instant-scroll)
+        # Center target in viewport so pan-follow zoom works without off-screen jumps
         await self._ensure_in_viewport(el)
 
+        # Pre-pause: cursor stays hidden so the ring display isn't cluttered
         await self._hold_still(pre_pause)
-        xy = await self._move_to(el, steps=move_steps)
-        if not xy:
-            return None
-        cx, cy = xy
 
-        metadata = await self._get_metadata(el)
-        self.events.append(
-            {
-                "t": round(self._time, 3),
-                "type": "click",
-                "x": round(cx, 1),
-                "y": round(cy, 1),
-                "target": metadata,
-            }
-        )
-        await self._page.mouse.click(cx, cy)
-        await asyncio.sleep(0.1)
-        await self._capture(5)
+        # Show cursor for motion and action
+        self.cursor_visible = True
+        try:
+            xy = await self._move_to(el, steps=move_steps)
+            if not xy:
+                return None
+            cx, cy = xy
+
+            metadata = await self._get_metadata(el)
+            self.events.append(
+                {
+                    "t": round(self._time, 3),
+                    "type": "click",
+                    "x": round(cx, 1),
+                    "y": round(cy, 1),
+                    "target": metadata,
+                }
+            )
+            # Pre-focus with preventScroll to suppress browser's native focus-scroll,
+            # then click (which would otherwise trigger focus-scroll again).
+            try:
+                await el.evaluate("el => el.focus && el.focus({ preventScroll: true })")
+            except Exception:
+                pass
+            await self._page.mouse.click(cx, cy)
+            await asyncio.sleep(0.1)
+            await self._capture(5)
+        finally:
+            # Hide cursor after operation
+            self.cursor_visible = False
         return el
 
     async def type(
@@ -232,41 +271,53 @@ class StudioRecorder:
             print(f"[recorder] WARN element not found: {selector or text}")
             return None
 
-        # Ensure target is visible BEFORE any motion (prevents Playwright instant-scroll)
+        # Center target in viewport so pan-follow zoom works without off-screen jumps
         await self._ensure_in_viewport(el)
 
+        # Pre-pause: cursor stays hidden so the ring display isn't cluttered
         await self._hold_still(pre_pause)
-        xy = await self._move_to(el, steps=move_steps)
-        if not xy:
-            return None
 
-        metadata = await self._get_metadata(el)
-        box = await el.bounding_box()
-        start_t = self._time
+        # Show cursor for motion, click, and typing
+        self.cursor_visible = True
+        try:
+            xy = await self._move_to(el, steps=move_steps)
+            if not xy:
+                return None
 
-        await self._page.mouse.click(xy[0], xy[1])
-        await asyncio.sleep(0.1)
-        await self._capture(3)
+            metadata = await self._get_metadata(el)
+            box = await el.bounding_box()
+            start_t = self._time
 
-        # Use keyboard.type (into focused element) to avoid Playwright auto-scroll
-        for ch in value:
-            await self._page.keyboard.type(ch)
-            await asyncio.sleep(typing_speed)
+            # Pre-focus with preventScroll to suppress browser's native focus-scroll
+            try:
+                await el.evaluate("el => el.focus && el.focus({ preventScroll: true })")
+            except Exception:
+                pass
+            await self._page.mouse.click(xy[0], xy[1])
+            await asyncio.sleep(0.1)
             await self._capture(3)
 
-        end_t = self._time
-        self.events.append(
-            {
-                "t": round(start_t, 3),
-                "type": "type",
-                "x": round(xy[0], 1),
-                "y": round(xy[1], 1),
-                "duration": round(end_t - start_t, 3),
-                "text": value,
-                "target": metadata,
-            }
-        )
-        await self._capture(5)
+            # keyboard.type uses focused element, no auto-scroll
+            for ch in value:
+                await self._page.keyboard.type(ch)
+                await asyncio.sleep(typing_speed)
+                await self._capture(3)
+
+            end_t = self._time
+            self.events.append(
+                {
+                    "t": round(start_t, 3),
+                    "type": "type",
+                    "x": round(xy[0], 1),
+                    "y": round(xy[1], 1),
+                    "duration": round(end_t - start_t, 3),
+                    "text": value,
+                    "target": metadata,
+                }
+            )
+            await self._capture(5)
+        finally:
+            self.cursor_visible = False
         return el
 
     async def select_option(
@@ -283,24 +334,34 @@ class StudioRecorder:
 
         await self._ensure_in_viewport(el)
         await self._hold_still(pre_pause)
-        xy = await self._move_to(el, steps=move_steps)
-        if not xy:
-            return None
 
-        metadata = await self._get_metadata(el)
-        self.events.append(
-            {
-                "t": round(self._time, 3),
-                "type": "click",
-                "x": round(xy[0], 1),
-                "y": round(xy[1], 1),
-                "target": metadata,
-                "extra": {"selected_label": label},
-            }
-        )
-        await self._page.select_option(selector, label=label)
-        await asyncio.sleep(0.1)
-        await self._capture(15)
+        self.cursor_visible = True
+        try:
+            xy = await self._move_to(el, steps=move_steps)
+            if not xy:
+                return None
+
+            metadata = await self._get_metadata(el)
+            self.events.append(
+                {
+                    "t": round(self._time, 3),
+                    "type": "click",
+                    "x": round(xy[0], 1),
+                    "y": round(xy[1], 1),
+                    "target": metadata,
+                    "extra": {"selected_label": label},
+                }
+            )
+            # Pre-focus with preventScroll to suppress browser's native focus-scroll
+            try:
+                await el.evaluate("el => el.focus && el.focus({ preventScroll: true })")
+            except Exception:
+                pass
+            await self._page.select_option(selector, label=label)
+            await asyncio.sleep(0.1)
+            await self._capture(15)
+        finally:
+            self.cursor_visible = False
         return el
 
     async def scroll_to(

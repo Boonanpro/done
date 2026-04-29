@@ -1,11 +1,8 @@
 """
-吉川特装 HP提案動画 v9 — 共通 StudioRecorder で撮影
+吉川特装 HP提案動画 — 録画スクリプト
 
-SKILL.md のルールは recorder 側がデフォルトで自動的に守る:
-  - 瞬間スクロール禁止 → scroll_to_top / scroll_to_y で滑らかスクロール
-  - 無操作時カーソル非表示 → scroll/fit/wait で自動非表示
-  - フォーム維持 → 各インタラクション前に _ensure_in_viewport で自動
-このファイルは純粋にシーン指示だけ記述する。
+設計書: D:/done/docs/proposals/yoshikawa_scenes.md
+各シーンの "操作の流れ" を忠実に実行する。
 """
 import asyncio
 import sys
@@ -13,7 +10,6 @@ import traceback
 from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)
-
 print("[v9] starting", flush=True)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -40,39 +36,41 @@ async def main():
     await rec.start(URL)
     print("[v9] browser ready", flush=True)
 
-    # シーン 1: トップページ概観
-    print("[v9] scene 1 (top overview)", flush=True)
-    await rec.scroll_to_top()  # 滑らか + カーソル自動非表示
-    page_h = await rec.page.evaluate("document.body.scrollHeight")
-    # 下までゆっくりスクロールして戻る
-    await rec.scroll_to_y(min(int(page_h) - 500, 3000), steps=60)
-    await rec.scroll_to_top(steps=60)
-    await rec.wait(2.0)
+    # ==========================================
+    # シーン 1: トップページ概観 (0-6s)
+    # ==========================================
+    print("[v9] scene 1: top page", flush=True)
+    await rec.scroll_to_top()
+    await rec.wait(4.0)
 
-    # シーン 2: 選ばれる理由
-    print("[v9] scene 2 (reasons)", flush=True)
-    await rec.scroll_to(text="選ばれる理由", margin=120, steps=60)
-    await rec.wait(2.0)
+    # ==========================================
+    # シーン 2: サービス一覧 (6-12s)
+    # ==========================================
+    print("[v9] scene 2: services", flush=True)
+    await rec.scroll_to(text="サービス一覧", margin=80, steps=60)
+    await rec.wait(5.0)
 
-    # シーン 3: サービス一覧
-    print("[v9] scene 3 (services)", flush=True)
-    await rec.scroll_to(text="サービス一覧", margin=120, steps=60)
-    await rec.wait(2.0)
+    # ==========================================
+    # シーン 3: 対応車種 (12-18s)
+    # ==========================================
+    print("[v9] scene 3: vehicles", flush=True)
+    await rec.scroll_to(text="対応車種", margin=80, steps=60)
+    await rec.wait(5.0)
 
-    # シーン 4: 対応車種
-    print("[v9] scene 4 (vehicles)", flush=True)
-    await rec.scroll_to(text="対応車種", margin=120, steps=60)
-    await rec.wait(2.0)
-
-    # シーン 5: ナビの「お問い合わせ」をクリック
-    # トップに滑らか戻ってからクリック
-    print("[v9] scene 5 (nav click)", flush=True)
-    await rec.scroll_to_top(steps=60)
+    # ==========================================
+    # シーン 4: ナビから /contact へ遷移 (18-23s)
+    # ==========================================
+    print("[v9] scene 4: nav click", flush=True)
+    await rec.scroll_to_top(steps=50)
     await rec.click(selector='a[href="/contact"]')
-    await rec.wait(1.5)  # 遷移後の静止
+    await rec.wait(2.0)
 
-    # シーン 6: フォーム全体を収めてから入力
-    print("[v9] scene 6 (form input)", flush=True)
+    # ==========================================
+    # シーン 5: フォーム入力 (23-39s)
+    # ==========================================
+    # A 案: セッション開始時に全フィールドが viewport に収まるよう1回だけスクロール。
+    # 以降は固定されたビューのまま、カーソルだけが各フィールドを移動して入力。
+    print("[v9] scene 5: form input", flush=True)
     await rec.fit_elements_in_viewport(
         [
             'input[name="company"]',
@@ -85,7 +83,7 @@ async def main():
         ],
         margin=40,
     )
-    await rec.wait(1.0)
+    await rec.wait(1.0)  # フォーム全体の引きの絵を見せる
 
     await rec.type(selector='input[name="company"]', value="サンプル運送株式会社")
     await rec.type(selector='input[name="name"]', value="山田太郎")
@@ -94,10 +92,12 @@ async def main():
     await rec.select_option(selector='select[name="vehicle"]', label="ダンプカー")
     await rec.type(selector='textarea[name="message"]', value="ダンプカーの修理をお願いしたいです。")
 
-    # シーン 7: 送信ボタン
-    print("[v9] scene 7 (submit)", flush=True)
+    # ==========================================
+    # シーン 6: 送信 (39-45s)
+    # ==========================================
+    print("[v9] scene 6: submit", flush=True)
     await rec.click(text="送信する")
-    await rec.wait(2.0)
+    await rec.wait(3.0)
 
     print("[v9] finalizing (composite + encode)", flush=True)
     await rec.finalize(output_name="yoshikawa")

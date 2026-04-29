@@ -266,7 +266,7 @@ export const SEED_PROPOSALS: Proposal[] = [
     hypothesisId: "hyp_yk_01",
     title: "吉川特装 HP + スマート問い合わせフォーム",
     status: "won",
-    prototypeUrl: "/demo/yoshikawa-tokuso",
+    prototypeUrl: "/artifacts/kittoku",
     sentAt: "2026-04-22",
     summary:
       "認定修理工場としての信頼性訴求と、車両情報・画像をまとめて送信するマルチステップ問い合わせフォーム。",
@@ -299,7 +299,7 @@ export const SEED_PROTOTYPES: Prototype[] = [
     proposalId: "prop_yk_01",
     name: "吉川特装 公式HP",
     description: "認定修理工場としてのブランディング + 問い合わせフォーム。",
-    url: "/demo/yoshikawa-tokuso",
+    url: "/artifacts/kittoku",
     status: "live",
     coreFeatures: [
       "新明和認定バッジ",
@@ -455,7 +455,7 @@ export const SEED_DAN_ACTIONS: DanAction[] = [
     status: "executed",
     proposedAt: "2026-04-24T10:00:00+09:00",
     executedAt: "2026-04-24T12:30:00+09:00",
-    artifactUrl: "/demo/yoshikawa-tokuso",
+    artifactUrl: "/artifacts/kittoku",
     riskLevel: "green",
   },
   {
