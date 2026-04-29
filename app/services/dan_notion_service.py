@@ -347,13 +347,14 @@ class DanNotionService:
     def add_artifact_block_to_project(
         self,
         user_id: str,
-        project_id: str,
+        project_id: Optional[str],
         project_title: Optional[str],
         artifact: dict[str, Any],
     ) -> Optional[dict[str, Any]]:
         """
-        chat_artifact (HP/ツール) を該当プロジェクトの root page 配下に
-        block として追加する。既に同じ artifact_id の block があれば skip。
+        chat_artifact (HP/ツール) を inbox に投入。AI 後段仕分けで client 配下に移動される想定。
+        既に同じ artifact_id の block があれば skip。
+        メソッド名は API 互換維持のため残しているが、project_id は metadata 扱い (None 可)。
         """
         # 重複チェック (source='chat' + source_id=artifact_id + properties.kind='artifact')
         already = (
@@ -405,15 +406,16 @@ class DanNotionService:
     def add_asset_block_to_project(
         self,
         user_id: str,
-        project_id: str,
+        project_id: Optional[str],
         project_title: Optional[str],
         asset: dict[str, Any],
         asset_type: str,  # 'image' / 'video' / 'file' / 'pdf'
         source_id: str,
     ) -> Optional[dict[str, Any]]:
         """
-        画像 / 動画 / ファイル等の asset を該当プロジェクトの root page 配下に
-        block として追加する。重複は source + source_id でガード。
+        画像 / 動画 / ファイル等の asset を inbox に投入。AI 後段仕分けで適切な場所へ移動。
+        重複は source + source_id でガード。
+        メソッド名は API 互換維持のため残しているが、project_id は metadata 扱い (None 可)。
         """
         already = (
             self.sb.table("blocks")

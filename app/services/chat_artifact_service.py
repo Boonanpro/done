@@ -47,20 +47,24 @@ class ChatArtifactService:
 
         # dan-notion 自動整理: project 配下に block を追加
         # 失敗しても artifact 作成自体は成功扱いにする（best-effort）
-        if artifact and artifact.get("project_id"):
+        # dan-notion 自動整理: project_id 有無に関係なく inbox に投入し AI 後段仕分けに委ねる
+        if artifact:
             try:
                 from app.services.dan_notion_service import get_dan_notion_service
-                project_row = (
-                    self.supabase.table("projects")
-                    .select("title")
-                    .eq("id", artifact["project_id"])
-                    .limit(1)
-                    .execute()
-                )
-                project_title = project_row.data[0]["title"] if project_row.data else None
+                project_title = None
+                pid = artifact.get("project_id")
+                if pid:
+                    project_row = (
+                        self.supabase.table("projects")
+                        .select("title")
+                        .eq("id", pid)
+                        .limit(1)
+                        .execute()
+                    )
+                    project_title = project_row.data[0]["title"] if project_row.data else None
                 get_dan_notion_service().add_artifact_block_to_project(
                     user_id=user_id,
-                    project_id=artifact["project_id"],
+                    project_id=pid,
                     project_title=project_title,
                     artifact=artifact,
                 )
