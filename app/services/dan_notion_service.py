@@ -153,7 +153,8 @@ class DanNotionService:
         res = self.sb.table("blocks").insert(row).execute()
         return res.data[0] if res.data else row
 
-    # ---- サブフォルダ (画像素材 / 動画素材 / 制作物 / 資料 / とりあえず) ----
+    # ---- 素材サブフォルダ (制作物 / 画像素材 / 動画素材 / 資料) ----
+    # client_root 配下に作る。inbox はトップレベルなのでここには含めない。
 
     SUBFOLDER_DEFS = {
         # folder_kind: (label, icon)
@@ -161,24 +162,24 @@ class DanNotionService:
         "folder_image": ("画像素材", "🖼️"),
         "folder_video": ("動画素材", "🎬"),
         "folder_document": ("資料", "📄"),
-        "folder_inbox": ("とりあえず", "📥"),
     }
 
     def get_or_create_subfolder(
         self,
         user_id: str,
-        project_id: str,
-        project_title: Optional[str],
+        owner_root_id: str,   # client_root or project_root の block id
+        owner_scope_id: str,  # client_id or project_id (source_id 構築用)
         folder_kind: str,
     ) -> Optional[dict[str, Any]]:
         """
-        project_root 配下に「制作物」「画像素材」等のサブフォルダ page を idempotent に作成。
-        識別子: source='agent' + source_id=f'{project_id}:{folder_kind}' でユニーク。
+        オーナー root (client_root か project_root) 配下に
+        「制作物」「画像素材」等のサブフォルダ page を idempotent に作成。
+        識別子: source='agent' + source_id=f'{owner_scope_id}:{folder_kind}'。
         """
         if folder_kind not in self.SUBFOLDER_DEFS:
             raise ValueError(f"unknown folder_kind: {folder_kind}")
         label, icon = self.SUBFOLDER_DEFS[folder_kind]
-        sid = f"{project_id}:{folder_kind}"
+        sid = f"{owner_scope_id}:{folder_kind}"
 
         existing = (
             self.sb.table("blocks")
@@ -194,26 +195,150 @@ class DanNotionService:
             if (b.get("properties") or {}).get("kind") == folder_kind:
                 return b
 
-        root = self.get_or_create_project_page(user_id, project_id, project_title)
-        if not root:
-            return None
-        order_key = self._compute_order_key(user_id, root["id"], after_block_id=None)
+        order_key = self._compute_order_key(user_id, owner_root_id, after_block_id=None)
         row = {
             "user_id": user_id,
-            "parent_id": root["id"],
+            "parent_id": owner_root_id,
             "type": "page",
             "order_key": order_key,
             "properties": {
                 "kind": folder_kind,
-                "project_id": str(project_id),
+                "scope_id": str(owner_scope_id),
                 "title": label,
                 "is_folder": True,
             },
             "content": [{"type": "text", "text": label}],
             "icon": icon,
-            "tags": ["folder", str(project_id), folder_kind],
+            "tags": ["folder", str(owner_scope_id), folder_kind],
             "source": "agent",
             "source_id": sid,
+            "created_by": "system",
+        }
+        res = self.sb.table("blocks").insert(row).execute()
+        return res.data[0] if res.data else row
+
+    # ---- トップレベル: 📥 とりあえず inbox ----
+
+    def get_or_create_inbox(self, user_id: str) -> dict[str, Any]:
+        """
+        ユーザーの dan-notion トップレベル『📥 とりあえず』inbox block を取得 or 作成。
+        AI が中身を読んで仕分ける universal バケツ。
+        識別子: source='agent' + source_id='__inbox__' + properties.kind='inbox'。
+        """
+        existing = (
+            self.sb.table("blocks")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("source", "agent")
+            .eq("source_id", "__inbox__")
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        for b in (existing.data or []):
+            if (b.get("properties") or {}).get("kind") == "inbox":
+                return b
+
+        order_key = self._compute_order_key(user_id, None, after_block_id=None)
+        row = {
+            "user_id": user_id,
+            "parent_id": None,
+            "type": "page",
+            "order_key": order_key,
+            "properties": {"kind": "inbox", "title": "とりあえず", "is_folder": True},
+            "content": [{"type": "text", "text": "とりあえず"}],
+            "icon": "📥",
+            "tags": ["inbox"],
+            "source": "agent",
+            "source_id": "__inbox__",
+            "created_by": "system",
+        }
+        res = self.sb.table("blocks").insert(row).execute()
+        return res.data[0] if res.data else row
+
+    # ---- トップレベル: 📇 クライアント container ----
+
+    def get_or_create_client_index(self, user_id: str) -> dict[str, Any]:
+        """
+        トップレベル『📇 クライアント』container を取得 or 作成。
+        各 client_root はこの直下にぶら下がる。
+        識別子: source='agent' + source_id='__client_index__' + kind='client_index'。
+        """
+        existing = (
+            self.sb.table("blocks")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("source", "agent")
+            .eq("source_id", "__client_index__")
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        for b in (existing.data or []):
+            if (b.get("properties") or {}).get("kind") == "client_index":
+                return b
+
+        order_key = self._compute_order_key(user_id, None, after_block_id=None)
+        row = {
+            "user_id": user_id,
+            "parent_id": None,
+            "type": "page",
+            "order_key": order_key,
+            "properties": {"kind": "client_index", "title": "クライアント", "is_folder": True},
+            "content": [{"type": "text", "text": "クライアント"}],
+            "icon": "📇",
+            "tags": ["client_index"],
+            "source": "agent",
+            "source_id": "__client_index__",
+            "created_by": "system",
+        }
+        res = self.sb.table("blocks").insert(row).execute()
+        return res.data[0] if res.data else row
+
+    # ---- 個別クライアント root ----
+
+    def get_or_create_client_root(
+        self,
+        user_id: str,
+        client_id: str,
+        client_name: str,
+    ) -> dict[str, Any]:
+        """
+        個別クライアントの root page を 📇 クライアント 配下に取得 or 作成。
+        識別子: source='agent' + source_id=client_id + kind='client_root'。
+        """
+        existing = (
+            self.sb.table("blocks")
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("source", "agent")
+            .eq("source_id", str(client_id))
+            .is_("deleted_at", "null")
+            .limit(1)
+            .execute()
+        )
+        for b in (existing.data or []):
+            if (b.get("properties") or {}).get("kind") == "client_root":
+                return b
+
+        index = self.get_or_create_client_index(user_id)
+        order_key = self._compute_order_key(user_id, index["id"], after_block_id=None)
+        row = {
+            "user_id": user_id,
+            "parent_id": index["id"],
+            "type": "page",
+            "order_key": order_key,
+            "properties": {
+                "kind": "client_root",
+                "client_id": str(client_id),
+                "title": client_name,
+                "is_folder": True,
+            },
+            "content": [{"type": "text", "text": client_name}],
+            "icon": "🏢",
+            "tags": ["client", str(client_id)],
+            "source": "agent",
+            "source_id": str(client_id),
             "created_by": "system",
         }
         res = self.sb.table("blocks").insert(row).execute()
@@ -245,19 +370,17 @@ class DanNotionService:
             if (b.get("properties") or {}).get("kind") == "artifact":
                 return b
 
-        folder = self.get_or_create_subfolder(
-            user_id, project_id, project_title, "folder_production"
-        )
-        if not folder:
-            return None
+        # 新方針 (2026-04-29~): 受信時はトップレベル inbox に投入。
+        # 後段の AI 仕分けで client_root/制作物 へ移動される想定。
+        inbox = self.get_or_create_inbox(user_id)
 
         label = artifact.get("label") or artifact.get("slug") or "成果物"
         kind = artifact.get("kind") or "production"
         preview_url = artifact.get("preview_url") or ""
-        order_key = self._compute_order_key(user_id, folder["id"], after_block_id=None)
+        order_key = self._compute_order_key(user_id, inbox["id"], after_block_id=None)
         row = {
             "user_id": user_id,
-            "parent_id": folder["id"],
+            "parent_id": inbox["id"],
             "type": "page",
             "order_key": order_key,
             "properties": {
@@ -265,12 +388,13 @@ class DanNotionService:
                 "artifact_kind": kind,
                 "slug": artifact.get("slug"),
                 "preview_url": preview_url,
-                "project_id": str(project_id),
+                "project_id": str(project_id) if project_id else None,
                 "title": label,
+                "needs_sorting": True,
             },
             "content": [{"type": "text", "text": label}],
             "icon": "🎨",
-            "tags": ["artifact", str(project_id)],
+            "tags": ["artifact", "inbox"] + ([str(project_id)] if project_id else []),
             "source": "chat",
             "source_id": str(artifact["id"]),
             "created_by": "system",
@@ -305,40 +429,29 @@ class DanNotionService:
             if (b.get("properties") or {}).get("kind") == f"asset_{asset_type}":
                 return b
 
-        # asset_type → サブフォルダ kind 振り分け
-        folder_kind_map = {
-            "image": "folder_image",
-            "video": "folder_video",
-            "pdf": "folder_document",
-            "file": "folder_document",
-        }
-        folder_kind = folder_kind_map.get(asset_type, "folder_document")
-        folder = self.get_or_create_subfolder(
-            user_id, project_id, project_title, folder_kind
-        )
-        if not folder:
-            return None
-
+        # 新方針 (2026-04-29~): まず inbox に投入、AI が後で仕分け。
+        inbox = self.get_or_create_inbox(user_id)
         url = asset.get("url") or asset.get("preview_url") or ""
         prompt = asset.get("prompt") or ""
         label = (prompt[:40] if prompt else asset_type) or asset_type
-        order_key = self._compute_order_key(user_id, folder["id"], after_block_id=None)
+        order_key = self._compute_order_key(user_id, inbox["id"], after_block_id=None)
 
         row = {
             "user_id": user_id,
-            "parent_id": folder["id"],
+            "parent_id": inbox["id"],
             "type": asset_type if asset_type in ("image", "video", "pdf", "file") else "file",
             "order_key": order_key,
             "properties": {
                 "kind": f"asset_{asset_type}",
                 "url": url,
                 "prompt": prompt,
-                "project_id": str(project_id),
+                "needs_sorting": True,
+                "project_id": str(project_id) if project_id else None,
                 "title": label,
                 "original_name": label,
             },
             "content": [{"type": "text", "text": label}],
-            "tags": [asset_type, str(project_id)],
+            "tags": [asset_type, "inbox"] + ([str(project_id)] if project_id else []),
             "source": "chat",
             "source_id": str(source_id),
             "created_by": "system",

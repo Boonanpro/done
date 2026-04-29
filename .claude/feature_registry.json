@@ -1,4 +1,13 @@
 {
+  "clients": {
+    "name": "clients",
+    "description": "dan-notion におけるクライアント (案件先) 単位の管理。1クライアント : N 素材 (制作物/画像/動画/資料)。projects テーブルがゴミ多すぎるため別軸として導入。",
+    "created_at": "2026-04-29T00:00:00.000000",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\047_clients.sql"
+    ]
+  },
   "amagasaki_sales_dashboard": {
     "name": "amagasaki_sales_dashboard",
     "description": "尼崎B2B AIセールスパイプラインの運用ダッシュボード。企業リスト→診断→課題仮説→プロトタイプ→送信→KPIを1画面で管理。",
@@ -114,6 +123,20 @@
       "D:\\done\\app\\services\\inquiry_service.py",
       "D:\\done\\app\\api\\inquiry_routes.py",
       "D:\\done\\frontend\\src\\components\\templates\\inquiry-form.tsx"
+    ]
+  },
+  "aix_dashboard": {
+    "name": "aix_dashboard",
+    "description": "",
+    "created_at": "2026-04-27T17:20:22.221559",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\046_aix_dashboard.sql",
+      "D:\\done\\app\\models\\aix_dashboard_schemas.py",
+      "D:\\done\\app\\services\\aix_dashboard_service.py",
+      "D:\\done\\app\\api\\aix_dashboard_routes.py",
+      "SKIPPED (exists): D:\\done\\frontend\\src\\app\\artifacts\\aix-dashboard\\page.tsx",
+      "D:\\done\\scripts\\seed_aix_dashboard.py"
     ]
   }
 }
