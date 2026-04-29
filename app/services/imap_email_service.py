@@ -41,8 +41,9 @@ PROVIDERS = {
 
 STATE_FILE = Path("D:/done/data/email_sync_state.json")
 STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-ATTACHMENT_DIR = Path(settings.ATTACHMENT_STORAGE_PATH if hasattr(settings, "ATTACHMENT_STORAGE_PATH") else "./data/attachments")
-ATTACHMENT_DIR.mkdir(parents=True, exist_ok=True)
+# 添付は /uploads/ に置く (ファイルアップロードと同じディレクトリ → /api/v1/files/{name} で配信可能)
+UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _load_state() -> dict:
@@ -101,7 +102,8 @@ def _extract_body(msg: email.message.Message) -> str:
 
 
 def _extract_and_save_attachments(msg: email.message.Message, message_id: str) -> list[dict]:
-    """添付を ATTACHMENT_DIR に保存して metadata を返す。"""
+    """添付を /uploads/ に保存して metadata を返す。url は /api/v1/files/{name} 経由で取得可。"""
+    import uuid as _uuid
     out = []
     if not msg.is_multipart():
         return out
@@ -117,13 +119,15 @@ def _extract_and_save_attachments(msg: email.message.Message, message_id: str) -
             if not data:
                 continue
             safe_name = re.sub(r"[^\w\.\-]", "_", filename)
-            target = ATTACHMENT_DIR / f"{message_id}_{safe_name}"
+            stored_name = f"{_uuid.uuid4().hex[:12]}_{safe_name}"
+            target = UPLOAD_DIR / stored_name
             target.write_bytes(data)
             out.append({
                 "filename": filename,
                 "size": len(data),
                 "content_type": part.get_content_type(),
                 "storage_path": str(target),
+                "url": f"/api/v1/files/{stored_name}",
             })
         except Exception:
             logger.exception("attachment save failed: %s", filename)

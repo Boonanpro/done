@@ -418,7 +418,54 @@ class DanNotionService:
             "created_by": "system",
         }
         res = self.sb.table("blocks").insert(row).execute()
-        return res.data[0] if res.data else None
+        message_block = res.data[0] if res.data else None
+        if not message_block:
+            return None
+
+        # 添付ファイルを子 block として展開 (image/pdf/video/audio/file 自動判定)
+        for idx, att in enumerate(attachments):
+            try:
+                att_url = att.get("url") or att.get("storage_path") or ""
+                if not att_url:
+                    continue
+                fname = att.get("filename") or "attachment"
+                content_type = (att.get("content_type") or "").lower()
+                if content_type.startswith("image/"):
+                    btype = "image"
+                elif content_type == "application/pdf" or fname.lower().endswith(".pdf"):
+                    btype = "pdf"
+                elif content_type.startswith("video/"):
+                    btype = "video"
+                elif content_type.startswith("audio/"):
+                    btype = "audio"
+                else:
+                    btype = "file"
+                child_order = self._compute_order_key(user_id, message_block["id"], after_block_id=None)
+                self.sb.table("blocks").insert({
+                    "user_id": user_id,
+                    "parent_id": message_block["id"],
+                    "type": btype,
+                    "order_key": child_order,
+                    "properties": {
+                        "kind": f"asset_{btype}",
+                        "url": att_url,
+                        "title": fname,
+                        "original_name": fname,
+                        "size": att.get("size"),
+                        "content_type": content_type,
+                        "from_email": True,
+                        "needs_sorting": True,
+                    },
+                    "content": [{"type": "text", "text": fname}],
+                    "tags": [btype, "attachment", "inbox", source],
+                    "source": source,
+                    "source_id": f"{guard_id}::att{idx}",
+                    "created_by": "system",
+                }).execute()
+            except Exception:
+                logger.exception("attach child block failed for %s", att.get("filename"))
+
+        return message_block
 
     def add_artifact_block_to_project(
         self,
