@@ -99,8 +99,13 @@ function stripLeadingEmoji(title: string, hasIcon: boolean): string {
 }
 
 function displayTitle(block: Block): string {
-  const t = block.properties?.title || '';
-  return stripLeadingEmoji(t, !!block.icon);
+  const propsTitle = block.properties?.title || '';
+  if (propsTitle) return stripLeadingEmoji(propsTitle, !!block.icon);
+  if (Array.isArray(block.content) && block.content[0]?.text) {
+    // content fallback: 必ず先頭絵文字を剥がす（content には自動生成時に '📄 〜' のように prefix が入る）
+    return stripLeadingEmoji(String(block.content[0].text), true);
+  }
+  return '';
 }
 
 
@@ -161,7 +166,7 @@ function useTraceStream(
 
     const ctrl = new AbortController();
     const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 
     let pollTimer: ReturnType<typeof setInterval> | null = null;
     // 有効な complete が見つかるたびに更新して親へ送る。
@@ -1586,8 +1591,8 @@ function ChatDock({
             if (
               e.key === 'Enter' &&
               !e.shiftKey &&
-              !e.isComposing &&
-              !(e.nativeEvent as any).isComposing
+              !(e as unknown as { isComposing?: boolean }).isComposing &&
+              !(e.nativeEvent as unknown as { isComposing?: boolean }).isComposing
             ) {
               e.preventDefault();
               onSendRef.current?.();
@@ -1836,7 +1841,6 @@ function ThumbnailCard({
   const title =
     displayTitle(block) ||
     block.properties?.original_name ||
-    (Array.isArray(block.content) && block.content[0]?.text) ||
     `${block.type} ${block.id.slice(0, 6)}`;
   const url = block.properties?.url || block.properties?.storage_path;
 
@@ -1844,10 +1848,19 @@ function ThumbnailCard({
   const isImage = block.type === 'image';
   const isVideo = block.type === 'video';
   const isPdf = block.type === 'pdf';
+  const isArtifact = isPage && block.properties?.kind === 'artifact';
+  const artifactUrl =
+    block.properties?.preview_url ||
+    (block.properties?.slug ? `/artifacts/${block.properties.slug}` : null);
 
   const handleClick = () => {
-    if (isPage) onOpenPage(block.id);
-    else if (url) window.open(url, '_blank', 'noopener,noreferrer');
+    if (isArtifact && artifactUrl) {
+      window.open(artifactUrl, '_blank', 'noopener,noreferrer');
+    } else if (isPage) {
+      onOpenPage(block.id);
+    } else if (url) {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
   };
 
   return (
@@ -1905,6 +1918,20 @@ function ThumbnailCard({
               <span className="text-4xl">📄</span>
               <span className="text-[10px] font-bold">PDF</span>
             </div>
+          ) : isArtifact && artifactUrl ? (
+            <>
+              <iframe
+                src={artifactUrl}
+                className="w-full h-full pointer-events-none origin-top-left"
+                style={{ transform: 'scale(0.5)', width: '200%', height: '200%' }}
+                title={title}
+                sandbox="allow-scripts allow-same-origin"
+                loading="lazy"
+              />
+              <div className="absolute top-1 right-1 bg-indigo-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow uppercase">
+                {block.properties?.artifact_kind || 'artifact'}
+              </div>
+            </>
           ) : isPage ? (
             <div className="flex flex-col items-center gap-2 text-slate-600">
               <span className="text-5xl">{block.icon || (block.properties?.is_folder ? '📁' : '📄')}</span>
@@ -1979,15 +2006,31 @@ function BlockRow({
 
   // ページ型: クリックで遷移するナビリンクとして表示
   if (block.type === 'page') {
+    const isArtifact = block.properties?.kind === 'artifact';
+    const artifactUrl =
+      block.properties?.preview_url ||
+      (block.properties?.slug ? `/artifacts/${block.properties.slug}` : null);
     const title = displayTitle(block) || '無題のページ';
+    const handleClick = () => {
+      if (isArtifact && artifactUrl) {
+        window.open(artifactUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        onOpenPage?.(block.id);
+      }
+    };
     return (
       <div className="group flex items-center gap-2 rounded-md hover:bg-slate-50 border border-transparent hover:border-slate-200 transition">
         <button
-          onClick={() => onOpenPage?.(block.id)}
+          onClick={handleClick}
           className="flex items-center gap-2 flex-1 text-left px-3 py-2 min-w-0"
         >
-          <span className="text-lg shrink-0">{block.icon || '📄'}</span>
+          <span className="text-lg shrink-0">{block.icon || (isArtifact ? '🎨' : '📄')}</span>
           <span className="text-sm font-medium text-slate-800 truncate">{title}</span>
+          {isArtifact && (
+            <span className="text-[9px] font-bold uppercase text-indigo-600 bg-indigo-50 border border-indigo-200 rounded px-1.5 py-0.5 shrink-0">
+              {block.properties?.artifact_kind || 'artifact'}
+            </span>
+          )}
           <ChevronRight className="h-4 w-4 text-slate-400 shrink-0" />
         </button>
         <button
