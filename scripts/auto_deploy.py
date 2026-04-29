@@ -52,9 +52,13 @@ def setup_logging(to_file: bool = False):
     )
 
 
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+
 def run(cmd: list[str], cwd: Path = REPO_DIR, timeout: int = 60) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+        creationflags=_NO_WINDOW,
     )
 
 
@@ -114,12 +118,43 @@ def npm_install():
         logging.error(f"npm install failed: {r.stderr.strip()}")
 
 
+DAN_CORE_URL = "http://127.0.0.1:9000"
+
+
 def restart_backend():
-    """requirements.txt変更時のみフル再起動（通常はuvicorn --reloadに任せる）"""
-    logging.info("Restarting backend via start_backend.py...")
+    """
+    アプリサンドボックスを再起動する。
+
+    新アーキ: ダンコア (port 9000) の /api/v1/sandbox/restart を叩く。
+    ダンコア自体は再起動しないので、チャットセッションは維持される。
+
+    旧アーキ (ダンコア未起動) フォールバック: start_backend.py を実行。
+    """
+    import urllib.error
+    import urllib.request
+
+    # まずダンコア経由で試す
+    try:
+        req = urllib.request.Request(
+            f"{DAN_CORE_URL}/api/v1/sandbox/restart",
+            method="POST",
+            headers={"User-Agent": "auto_deploy.py"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status == 200:
+                logging.info("Sandbox restarted via dan_core.")
+                return
+    except (urllib.error.URLError, ConnectionRefusedError, TimeoutError) as e:
+        logging.warning(
+            "dan_core unreachable (%s) — falling back to legacy start_backend.py",
+            e,
+        )
+
+    # フォールバック: 旧 start_backend.py
+    logging.info("Restarting backend via start_backend.py (legacy)...")
     r = run([sys.executable, "scripts/start_backend.py"], timeout=60)
     if r.returncode == 0:
-        logging.info("Backend restarted.")
+        logging.info("Backend restarted (legacy).")
     else:
         logging.error(f"Backend restart failed: {r.stderr.strip()}")
 

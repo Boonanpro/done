@@ -18,11 +18,61 @@ const nextConfig: NextConfig = {
     //   BACKEND_URL=https://xxx.trycloudflare.com
     // を設定する。tunnel URL が変わったら env 値を更新して再デプロイ。
     const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
+    // ダンコア(チャット・認証・ボイス) の URL。dev はデフォルトで 9000、
+    // 本番は CORE_BACKEND_URL を別途設定する想定。未設定なら BACKEND_URL に
+    // フォールバック（旧アーキの単一プロセスでも動くように）。
+    const coreBackendUrl =
+      process.env.CORE_BACKEND_URL || 'http://127.0.0.1:9000';
     return [
+      // ダンコア向け: 具体的な path を先に評価させる
+      {
+        source: '/api/v1/chat/:path*',
+        destination: `${coreBackendUrl}/api/v1/chat/:path*`,
+      },
+      {
+        source: '/api/v1/voice/:path*',
+        destination: `${coreBackendUrl}/api/v1/voice/:path*`,
+      },
+      {
+        source: '/api/v1/credentials/:path*',
+        destination: `${coreBackendUrl}/api/v1/credentials/:path*`,
+      },
+      {
+        source: '/api/v1/credentials',
+        destination: `${coreBackendUrl}/api/v1/credentials`,
+      },
+      {
+        source: '/api/v1/public-chat/:path*',
+        destination: `${coreBackendUrl}/api/v1/public-chat/:path*`,
+      },
+      // ダンコア管理API (内部用だが念のため)
+      {
+        source: '/api/v1/sandbox/:path*',
+        destination: `${coreBackendUrl}/api/v1/sandbox/:path*`,
+      },
+      // 上記以外の /api/* は業務系サンドボックスへ
       {
         source: '/api/:path*',
         destination: `${backendUrl}/api/:path*`,
       },
+      // ボイス系 WebSocket はダンコアへ
+      {
+        source: '/ws/voice',
+        destination: `${coreBackendUrl}/ws/voice`,
+      },
+      {
+        source: '/ws/voice/:path*',
+        destination: `${coreBackendUrl}/ws/voice/:path*`,
+      },
+      {
+        source: '/ws/gemini-voice',
+        destination: `${coreBackendUrl}/ws/gemini-voice`,
+      },
+      {
+        source: '/ws/gemini-voice/:path*',
+        destination: `${coreBackendUrl}/ws/gemini-voice/:path*`,
+      },
+      // 上記以外の WebSocket は業務系サンドボックスへ
       {
         source: '/ws/:path*',
         destination: `${backendUrl}/ws/:path*`,

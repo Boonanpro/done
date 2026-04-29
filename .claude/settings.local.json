@@ -5,20 +5,14 @@
       "Edit(*)",
       "Write(*)",
       "WebFetch(*)",
-      "WebSearch"
+      "WebSearch",
+      "PowerShell(Get-ScheduledTask *)",
+      "PowerShell(Get-Process *)",
+      "PowerShell(Get-NetTCPConnection *)"
     ]
   },
   "hooks": {
     "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python D:/done/scripts/hook_cleanup_uvicorn.py"
-          }
-        ]
-      },
       {
         "matcher": "Write",
         "hooks": [

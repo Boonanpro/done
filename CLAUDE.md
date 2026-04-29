@@ -9,44 +9,57 @@
 
 どちらかに変更がなければスキップしてよい。
 
-## ⚠️ 最重要ルール: バックエンド起動 ⚠️
+## アーキテクチャ: 2プロセス分離（ダンコア / アプリサンドボックス）
 
-**バックエンド起動は以下のコマンドのみ使用可能:**
+**ダンコア（不変）と アプリサンドボックス（可変）を別プロセスで動かす。**
+ユーザーがコードを書き換えてもサンドボックスだけが再起動し、ダンコアは生き続ける。
 
-```bash
-python scripts/start_backend.py
+```
+┌─ Dan Core (port 9000) ─────────┐    ┌─ App Sandbox (port 8000) ─┐
+│  app/core/main.py              │    │  app/sandbox/main.py      │
+│  - chat / voice / credentials  │    │  - 業務系ルーター全部     │
+│  - agent (LLM/CLI)             │←──→│  - dan_notion / aix       │
+│  - SandboxManager              │    │  - studio / project / etc │
+│  - 再起動しない                │    │  - 自由に再起動OK         │
+└────────────────────────────────┘    └───────────────────────────┘
+              ↑                                    ↑
+              └───── Frontend (port 3000) ─────────┘
+                     next.config.ts rewrites:
+                     /api/v1/chat/* → 9000
+                     /api/v1/voice/* → 9000
+                     /api/v1/credentials/* → 9000
+                     /api/v1/* (それ以外) → 8000
 ```
 
-**これ以外の方法でuvicornを起動することは禁止。**
+### 起動
 
-### 禁止事項
+```bash
+python scripts/start_dan_core.py
+```
 
-❌ `python -m uvicorn ...` （直接起動）
-❌ `cd "D:/done" && python -m uvicorn ...` （直接起動）
-❌ `cleanup_port_8000.py && uvicorn ...` （古い方法）
-❌ uvicornを含む任意のコマンド
+ダンコア(9000)が起動 → 自動でサンドボックス(8000)を spawn。
+OS 起動時に自動起動するよう Windows タスクスケジューラに登録済み。
 
-### なぜ start_backend.py だけを使うのか
+### サンドボックス再起動（コード変更を反映する場合）
 
-1. wmicでuvicornプロセスを確実に検出・終了
-2. ポートが空くまで待機
-3. その後uvicornを起動
+```bash
+curl -X POST http://127.0.0.1:9000/api/v1/sandbox/restart
+```
 
-netstatのPIDは信頼できない（実際のPIDと一致しないことがある）。
-hookは完了を待たない可能性がある。
-だから起動スクリプトで全てを制御する。
+または auto_deploy.py が git pull 検知時に自動的にこの API を叩く。
+**ダンコアは再起動しないので、ユーザーとのチャットセッションは維持される。**
 
-### 手動で行う場合
+### 環境変数
 
-1. **ポート確認**: `netstat -ano | findstr :8000 | findstr LISTENING`
-2. **重複プロセス終了**: `taskkill //F //PID <PID>` で全て終了
-3. **起動**: `cd "D:/done" && python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload`
+- `DAN_CORE_PORT` (default: 9000)
+- `DAN_SANDBOX_PORT` (default: 8000) — テスト時に変更可能
+- `DAN_AUTO_START_SANDBOX` (default: 1) — ダンコア起動時の自動 spawn 有効/無効
 
-**理由**: 複数のバックエンドプロセスが同時に動くと、古いコードが実行され続けてデバッグが困難になる。
+### トラブルシュート
 
-### Hook設定（自動化）
-
-`.claude/settings.local.json` に PreToolUse hook を設定済み。uvicornコマンド実行前に自動でポート8000をクリーンアップする。（Claude Code再起動後に有効になる場合がある）
+- ダンコアが死んだ場合: `python scripts/start_dan_core.py` を再実行
+- サンドボックスだけ落ちた場合: `curl -X POST http://127.0.0.1:9000/api/v1/sandbox/restart`
+- ポート占有を疑う場合: `netstat -ano | findstr ":8000\|:9000" | findstr LISTENING`
 
 ## ⚠️ リモート開発（Claude App コードタブ）のルール ⚠️
 
@@ -77,10 +90,11 @@ Playwrightが使えない環境ではSQLファイル作成のみで報告する�
 
 ## 開発環境
 
-- バックエンド: FastAPI (port 8000)
+- ダンコア: FastAPI (port 9000) — 不変、再起動しない
+- アプリサンドボックス: FastAPI (port 8000) — 業務系、自由に再起動OK
 - フロントエンド: Next.js (port 3000)
 - データベース: Supabase
-- 自動デプロイ: `python scripts/auto_deploy.py` （常駐スクリプト）
+- 自動デプロイ: `python scripts/auto_deploy.py` （常駐スクリプト、変更検知でサンドボックス再起動）
 
 ## 現在の実装計画
 
@@ -157,7 +171,7 @@ Playwright等でブラウザ操作するスキルを新規作成・修正する�
 
 1. `check_skill self-dev` でスキルを参照する
 2. 自由に実装（コード変更・新規ファイル作成）
-3. self-devの手順に従いテスト環境（port 8001）で検証する
+3. サンドボックスを再起動して動作確認: `curl -X POST http://127.0.0.1:9000/api/v1/sandbox/restart`
 4. `git diff` で変更内容を確認
 5. ユーザーに「テスト済みです。変更内容:（日本語の要約）」と報告
 6. 承認されたら以下を自動実行:
