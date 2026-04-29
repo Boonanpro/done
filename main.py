@@ -20,6 +20,7 @@ from app.config import settings
 from app.api.chat_routes import router as chat_router
 from app.api.credentials_routes import router as credentials_router
 from app.api.gmail_routes import router as gmail_router
+from app.api.imap_email_routes import router as imap_email_router
 from app.api.detection_routes import router as detection_router
 from app.api.content_routes import router as content_router
 # from app.api.invoice_routes import router as invoice_router  # v3で無効化
@@ -42,6 +43,7 @@ from app.api.inspector_routes import router as inspector_router
 from app.api.inspector_overrides_routes import router as inspector_overrides_router
 from app.api.public_chat_routes import router as public_chat_router
 from app.api.inquiry_routes import router as inquiry_router
+from app.api.aix_dashboard_routes import router as aix_dashboard_router
 
 
 # v3: Executorは不使用（汎用ツールで処理）
@@ -95,6 +97,7 @@ app.add_middleware(
 app.include_router(chat_router, prefix="/api/v1")
 app.include_router(credentials_router, prefix="/api/v1")
 app.include_router(gmail_router, prefix="/api/v1")
+app.include_router(imap_email_router, prefix="/api/v1")
 app.include_router(detection_router, prefix="/api/v1")
 app.include_router(content_router, prefix="/api/v1")
 # app.include_router(invoice_router, prefix="/api/v1")  # v3で無効化
@@ -118,6 +121,7 @@ app.include_router(inspector_router, prefix="/api/v1")
 app.include_router(inspector_overrides_router, prefix="/api/v1")
 app.include_router(public_chat_router, prefix="/api/v1")
 app.include_router(inquiry_router, prefix="/api/v1")
+app.include_router(aix_dashboard_router, prefix="/api/v1")
 
 
 

@@ -51,9 +51,13 @@ class Settings(BaseSettings):
     GMAIL_REDIRECT_URI: str = "http://localhost:8000/api/v1/gmail/callback"
     GMAIL_POLL_INTERVAL_SECONDS: int = 300  # 5分
 
-    # Gmail App Password (Phase 9: SMS OTP via Gmail)
+    # Gmail App Password (Phase 9: SMS OTP via Gmail / dan-notion IMAP fetch)
     GMAIL_APP_PASSWORD: str = ""
     GMAIL_ADDRESS: str = ""
+
+    # iCloud Mail App-specific Password (dan-notion IMAP fetch)
+    ICLOUD_ADDRESS: str = ""
+    ICLOUD_APP_PASSWORD: str = ""
     
     # Attachment Storage (Phase 5C)
     ATTACHMENT_STORAGE_PATH: str = "./data/attachments"

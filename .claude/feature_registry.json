@@ -1,4 +1,14 @@
 {
+  "imap_email": {
+    "name": "imap_email",
+    "description": "Gmail / iCloud などを IMAP 経由で fetch し、新着メッセージを dan-notion inbox に投入する。.env から ADDRESS / APP_PASSWORD を読む。",
+    "created_at": "2026-04-29T00:00:00.000000",
+    "mode": "production",
+    "files": [
+      "D:\\done\\app\\services\\imap_email_service.py",
+      "D:\\done\\app\\api\\imap_email_routes.py"
+    ]
+  },
   "clients": {
     "name": "clients",
     "description": "dan-notion におけるクライアント (案件先) 単位の管理。1クライアント : N 素材 (制作物/画像/動画/資料)。projects テーブルがゴミ多すぎるため別軸として導入。",
