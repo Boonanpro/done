@@ -460,6 +460,125 @@ function DanNotionInner() {
     },
   });
 
+  // ===== ファイル drag-drop / paste で現在ページに block 追加 =====
+  const fileTypeFromName = (name: string): 'image' | 'video' | 'pdf' | 'audio' | 'file' => {
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    if (['png','jpg','jpeg','gif','webp','bmp'].includes(ext)) return 'image';
+    if (['mp4','avi','mov','mkv','webm'].includes(ext)) return 'video';
+    if (ext === 'pdf') return 'pdf';
+    if (['mp3','wav','ogg','m4a','flac'].includes(ext)) return 'audio';
+    return 'file';
+  };
+
+  const uploadDroppedFiles = useMutation({
+    mutationFn: async ({ files, parentId }: { files: File[]; parentId: string }) => {
+      const created: Block[] = [];
+      const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') : null;
+      for (const f of files) {
+        // 1. ファイルアップロード
+        const fd = new FormData();
+        fd.append('file', f);
+        const upRes = await fetch('/api/v1/files/upload', {
+          method: 'POST',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          body: fd,
+        });
+        if (!upRes.ok) throw new Error(`upload failed: ${f.name}`);
+        const up = await upRes.json();
+        // 2. dan-notion block 作成 (現在ページ配下)
+        const t = fileTypeFromName(f.name);
+        await fetchJSON<Block>(`${API}/blocks`, {
+          method: 'POST',
+          body: JSON.stringify({
+            type: t,
+            parent_id: parentId,
+            content: [{ type: 'text', text: f.name }],
+            properties: {
+              url: up.url,
+              original_name: f.name,
+              title: f.name,
+              size: up.size,
+              uploaded_via: 'drag_drop',
+              needs_sorting: true,
+            },
+          }),
+        }).then((b) => created.push(b));
+      }
+      return created;
+    },
+    onSuccess: (created) => {
+      qc.invalidateQueries({ queryKey: ['dan-notion', 'blocks', selectedPageId] });
+      qc.invalidateQueries({ queryKey: ['dan-notion', 'pages'] });
+      // 簡易フィードバック
+      if (created.length > 0 && typeof window !== 'undefined') {
+        const msg = created.length === 1 ? `「${(created[0].content as any)?.[0]?.text || 'ファイル'}」を追加しました` : `${created.length} 件のファイルを追加しました`;
+        // toast が無いので、コンソールログのみ。視覚的には block が現れる
+        console.log('[upload]', msg);
+      }
+    },
+    onError: (e) => {
+      console.error('[upload error]', e);
+      if (typeof window !== 'undefined') alert(`アップロード失敗: ${(e as Error).message}`);
+    },
+  });
+
+  const [dragOver, setDragOver] = useState(false);
+  const dragCounter = useRef(0);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    if (!selectedPageId) return;
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    e.preventDefault();
+    dragCounter.current++;
+    setDragOver(true);
+  }, [selectedPageId]);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current = Math.max(0, dragCounter.current - 1);
+    if (dragCounter.current === 0) setDragOver(false);
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current = 0;
+    setDragOver(false);
+    if (!selectedPageId) return;
+    const files = Array.from(e.dataTransfer?.files || []);
+    if (files.length === 0) return;
+    uploadDroppedFiles.mutate({ files, parentId: selectedPageId });
+  }, [selectedPageId, uploadDroppedFiles]);
+
+  // クリップボード貼り付けで画像ファイルを直接追加
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (!selectedPageId) return;
+      // input/textarea にフォーカス中はスキップ
+      const tgt = e.target as HTMLElement | null;
+      if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const files: File[] = [];
+      for (const it of Array.from(items)) {
+        if (it.kind === 'file') {
+          const f = it.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length === 0) return;
+      e.preventDefault();
+      uploadDroppedFiles.mutate({ files, parentId: selectedPageId });
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [selectedPageId, uploadDroppedFiles]);
+
   const unreadCount = notifQ.data?.filter((n) => !n.read_at).length || 0;
 
   // ===== Active run / Gantt / Chat 状態 =====
@@ -713,7 +832,31 @@ function DanNotionInner() {
       </aside>
 
       {/* ========== 中央: ブロックエディタ ========== */}
-      <main className="flex-1 flex flex-col min-w-0 bg-white overflow-hidden">
+      <main
+        className="flex-1 flex flex-col min-w-0 bg-white overflow-hidden relative"
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
+        {/* drag overlay */}
+        {dragOver && selectedPageId && (
+          <div className="absolute inset-0 z-40 bg-indigo-50/90 border-4 border-dashed border-indigo-400 rounded-lg flex items-center justify-center pointer-events-none">
+            <div className="text-center">
+              <div className="text-4xl mb-2">📥</div>
+              <p className="text-lg font-semibold text-indigo-900">
+                ファイルをドロップして「{displayTitle(selectedPage as any) || 'このページ'}」に追加
+              </p>
+              <p className="text-xs text-indigo-700 mt-1">画像 / 動画 / PDF / その他なんでも</p>
+            </div>
+          </div>
+        )}
+        {uploadDroppedFiles.isPending && (
+          <div className="absolute top-2 right-2 z-30 bg-white border border-indigo-200 rounded-md shadow px-3 py-2 text-xs text-indigo-700 flex items-center gap-2">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            アップロード中…
+          </div>
+        )}
         {/* ツールバー (通知ベルのみ) */}
         <div className="border-b border-slate-200 px-3 py-2 flex items-center gap-2 relative shrink-0">
           <div className="flex-1" />
