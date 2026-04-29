@@ -344,6 +344,82 @@ class DanNotionService:
         res = self.sb.table("blocks").insert(row).execute()
         return res.data[0] if res.data else row
 
+    # ---- 受信メッセージ (Gmail / iCloud / LINE / 外部チャット) → inbox ----
+
+    SOURCE_ICONS = {
+        "gmail": "📧",
+        "icloud_mail": "📧",
+        "line": "💬",
+        "slack": "💬",
+        "done_chat": "💬",
+    }
+
+    def add_detected_message_to_inbox(
+        self,
+        user_id: str,
+        source: str,
+        source_id: Optional[str],
+        subject: Optional[str],
+        content: Optional[str],
+        sender_info: dict[str, Any],
+        metadata: dict[str, Any],
+        detected_message_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """
+        外部メッセージ (メール等) を 📥 とりあえず inbox に block として追加する。
+        重複は source + source_id でガード (source_id が無ければ detected_message_id)。
+        """
+        guard_id = source_id or detected_message_id
+        already = (
+            self.sb.table("blocks")
+            .select("id,properties")
+            .eq("user_id", user_id)
+            .eq("source", source)
+            .eq("source_id", str(guard_id))
+            .is_("deleted_at", "null")
+            .limit(3)
+            .execute()
+        )
+        for b in (already.data or []):
+            if (b.get("properties") or {}).get("kind") == "message":
+                return b
+
+        inbox = self.get_or_create_inbox(user_id)
+        order_key = self._compute_order_key(user_id, inbox["id"], after_block_id=None)
+        title = subject or (content or "")[:60] or f"({source})"
+        excerpt = (content or "").strip()[:300]
+        attachments = metadata.get("attachments") or []
+        from_addr = sender_info.get("from") or sender_info.get("email") or ""
+        date_str = sender_info.get("date") or ""
+        icon = self.SOURCE_ICONS.get(source, "📬")
+
+        row = {
+            "user_id": user_id,
+            "parent_id": inbox["id"],
+            "type": "page",
+            "order_key": order_key,
+            "properties": {
+                "kind": "message",
+                "source_kind": source,
+                "title": title,
+                "subject": subject,
+                "from": from_addr,
+                "date": date_str,
+                "excerpt": excerpt,
+                "attachments_count": len(attachments),
+                "detected_message_id": str(detected_message_id),
+                "needs_sorting": True,
+            },
+            "content": [{"type": "text", "text": title}],
+            "icon": icon,
+            "tags": ["message", source, "inbox"],
+            "source": source,
+            "source_id": str(guard_id),
+            "created_by": "system",
+        }
+        res = self.sb.table("blocks").insert(row).execute()
+        return res.data[0] if res.data else None
+
     def add_artifact_block_to_project(
         self,
         user_id: str,
