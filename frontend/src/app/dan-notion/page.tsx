@@ -378,6 +378,23 @@ function DanNotionInner() {
     },
   });
 
+  // block を別ページ/フォルダ配下に移動 (drag&drop で利用)
+  const moveBlock = useMutation({
+    mutationFn: ({ id, parent_id }: { id: string; parent_id: string }) =>
+      fetchJSON<Block>(`${API}/blocks/${id}/move`, {
+        method: 'POST',
+        body: JSON.stringify({ parent_id }),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['dan-notion', 'pages'] });
+      qc.invalidateQueries({ queryKey: ['dan-notion', 'blocks', selectedPageId] });
+    },
+    onError: (e) => {
+      console.error('[moveBlock]', e);
+      if (typeof window !== 'undefined') alert(`移動失敗: ${(e as Error).message}`);
+    },
+  });
+
   // 指定ブロックの直後に新規ブロックを挿入 (inline + ボタン用)
   const insertBlock = useMutation({
     mutationFn: ({ after_block_id, type }: { after_block_id: string | null; type: string }) => {
@@ -806,6 +823,23 @@ function DanNotionInner() {
               <button
                 key={p.id}
                 onClick={() => { setSelectedPageId(p.id); setShowTasksView(false); }}
+                onDragOver={(e) => {
+                  if (e.dataTransfer.types.includes('application/x-dan-block')) {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    e.currentTarget.classList.add('ring-2', 'ring-indigo-400');
+                  }
+                }}
+                onDragLeave={(e) => {
+                  e.currentTarget.classList.remove('ring-2', 'ring-indigo-400');
+                }}
+                onDrop={(e) => {
+                  const blockId = e.dataTransfer.getData('application/x-dan-block');
+                  e.currentTarget.classList.remove('ring-2', 'ring-indigo-400');
+                  if (blockId && blockId !== p.id) {
+                    moveBlock.mutate({ id: blockId, parent_id: p.id });
+                  }
+                }}
                 className={cn(
                   'w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm text-left transition-colors',
                   selectedPageId === p.id
@@ -1034,6 +1068,9 @@ function DanNotionInner() {
                   }}
                   parentPageId={selectedPage.id}
                   onCreateFirst={(type) => insertBlock.mutate({ after_block_id: null, type })}
+                  onMoveBlockToFolder={(blockId, folderId) => {
+                    if (blockId !== folderId) moveBlock.mutate({ id: blockId, parent_id: folderId });
+                  }}
                 />
               </div>
             </div>
@@ -1772,6 +1809,7 @@ function BlockList({
   onInsertAfter,
   onCreateFirst,
   parentPageId,
+  onMoveBlockToFolder,
 }: {
   blocks: Block[];
   viewMode: 'list' | 'grid';
@@ -1781,6 +1819,7 @@ function BlockList({
   onInsertAfter: (afterId: string, type: string) => void;
   onCreateFirst: (type: string) => void;
   parentPageId: string;
+  onMoveBlockToFolder?: (blockId: string, folderId: string) => void;
 }) {
   // サムネホバー時のツールチップ表示用 (Rules of Hooks: 早期returnより前で宣言)
   const [hoveredTitle, setHoveredTitle] = useState<string | null>(null);
@@ -1810,6 +1849,7 @@ function BlockList({
                 onDelete={() => onDelete(b)}
                 onOpenPage={onOpenPage}
                 onInsertAfter={(type) => onInsertAfter(b.id, type)}
+                onMoveBlockToFolder={onMoveBlockToFolder}
               />
             </div>
           </div>
@@ -1866,6 +1906,7 @@ function BlockList({
                     onDelete={() => onDelete(seg.block)}
                     onOpenPage={onOpenPage}
                     onInsertAfter={(type) => onInsertAfter(seg.block.id, type)}
+                    onMoveBlockToFolder={onMoveBlockToFolder}
                   />
                 </div>
               </div>
@@ -1882,6 +1923,7 @@ function BlockList({
                 onDelete={() => onDelete(b)}
                 onInsertAfter={(type) => onInsertAfter(b.id, type)}
                 onHover={setHoveredTitle}
+                onMoveBlockToFolder={onMoveBlockToFolder}
               />
             ))}
           </div>
@@ -1974,12 +2016,14 @@ function ThumbnailCard({
   onDelete,
   onInsertAfter,
   onHover,
+  onMoveBlockToFolder,
 }: {
   block: Block;
   onOpenPage: (id: string) => void;
   onDelete: () => void;
   onInsertAfter?: (type: string) => void;
   onHover?: (title: string | null) => void;
+  onMoveBlockToFolder?: (blockId: string, folderId: string) => void;
 }) {
   const title =
     displayTitle(block) ||
@@ -1992,6 +2036,8 @@ function ThumbnailCard({
   const isVideo = block.type === 'video';
   const isPdf = block.type === 'pdf';
   const isArtifact = isPage && block.properties?.kind === 'artifact';
+  const isFolder =
+    isPage && (block.properties?.is_folder === true || ['client_root','client_index','folder_production','folder_image','folder_video','folder_document','inbox'].includes(block.properties?.kind || ''));
   const artifactUrl =
     block.properties?.preview_url ||
     (block.properties?.slug ? `/artifacts/${block.properties.slug}` : null);
@@ -2009,6 +2055,32 @@ function ThumbnailCard({
   return (
     <div
       className="group relative rounded-lg border border-slate-200 bg-white overflow-hidden hover:shadow-md hover:border-indigo-300 transition cursor-pointer"
+      draggable={true}
+      onDragStart={(e) => {
+        e.dataTransfer.setData('application/x-dan-block', block.id);
+        e.dataTransfer.effectAllowed = 'move';
+      }}
+      onDragOver={(e) => {
+        if (isFolder && e.dataTransfer.types.includes('application/x-dan-block')) {
+          e.preventDefault();
+          e.stopPropagation();
+          e.dataTransfer.dropEffect = 'move';
+          e.currentTarget.classList.add('ring-2', 'ring-indigo-500');
+        }
+      }}
+      onDragLeave={(e) => {
+        e.currentTarget.classList.remove('ring-2', 'ring-indigo-500');
+      }}
+      onDrop={(e) => {
+        e.currentTarget.classList.remove('ring-2', 'ring-indigo-500');
+        if (!isFolder) return;
+        const blockId = e.dataTransfer.getData('application/x-dan-block');
+        if (blockId && blockId !== block.id) {
+          e.preventDefault();
+          e.stopPropagation();
+          onMoveBlockToFolder?.(blockId, block.id);
+        }
+      }}
       onMouseEnter={() => onHover?.(title)}
       onMouseLeave={() => onHover?.(null)}
     >
@@ -2125,13 +2197,48 @@ function BlockRow({
   onDelete,
   onOpenPage,
   onInsertAfter,
+  onMoveBlockToFolder,
 }: {
   block: Block;
   onUpdate: (content: any) => void;
   onDelete: () => void;
   onOpenPage?: (pageId: string) => void;
   onInsertAfter?: (type: string) => void;
+  onMoveBlockToFolder?: (blockId: string, folderId: string) => void;
 }) {
+  // drag-source / drop-target 用の共通 props
+  const isFolder =
+    block.type === 'page' &&
+    (block.properties?.is_folder === true ||
+      ['client_root','client_index','folder_production','folder_image','folder_video','folder_document','inbox'].includes(block.properties?.kind || ''));
+  const dragProps = {
+    draggable: true,
+    onDragStart: (e: React.DragEvent) => {
+      e.dataTransfer.setData('application/x-dan-block', block.id);
+      e.dataTransfer.effectAllowed = 'move';
+    },
+    onDragOver: (e: React.DragEvent) => {
+      if (isFolder && e.dataTransfer.types.includes('application/x-dan-block')) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = 'move';
+        e.currentTarget.classList.add('ring-2', 'ring-indigo-500');
+      }
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      e.currentTarget.classList.remove('ring-2', 'ring-indigo-500');
+    },
+    onDrop: (e: React.DragEvent) => {
+      e.currentTarget.classList.remove('ring-2', 'ring-indigo-500');
+      if (!isFolder) return;
+      const blockId = e.dataTransfer.getData('application/x-dan-block');
+      if (blockId && blockId !== block.id) {
+        e.preventDefault();
+        e.stopPropagation();
+        onMoveBlockToFolder?.(blockId, block.id);
+      }
+    },
+  };
   const initialText = useMemo(() => {
     if (typeof block.content === 'string') return block.content;
     if (Array.isArray(block.content) && block.content.length > 0) {
@@ -2162,7 +2269,7 @@ function BlockRow({
       }
     };
     return (
-      <div className="group flex items-center gap-2 rounded-md hover:bg-slate-50 border border-transparent hover:border-slate-200 transition">
+      <div {...dragProps} className="group flex items-center gap-2 rounded-md hover:bg-slate-50 border border-transparent hover:border-slate-200 transition">
         <button
           onClick={handleClick}
           className="flex items-center gap-2 flex-1 text-left px-3 py-2 min-w-0"
@@ -2204,7 +2311,7 @@ function BlockRow({
       block.type === 'pdf' ? '📄' :
       block.type === 'audio' ? '🎵' : '📎';
     return (
-      <div className="group flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+      <div {...dragProps} className="group flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 cursor-grab active:cursor-grabbing">
         <span className="text-lg shrink-0">{icon}</span>
         <div className="flex-1 min-w-0">
           {url ? (
