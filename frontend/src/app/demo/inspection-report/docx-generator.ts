@@ -1,0 +1,191 @@
+"use client";
+
+import PizZip from "pizzip";
+import Docxtemplater from "docxtemplater";
+import { saveAs } from "file-saver";
+import type { Client, ReportData } from "./types";
+
+// ReportData → docxtemplater が期待するネストオブジェクトに変換
+function buildContext(report: ReportData, client: Client): Record<string, unknown> {
+  const ctx: Record<string, unknown> = {};
+
+  ctx.rpt = {
+    year_wareki: report.year_wareki,
+    month: report.month,
+    day: report.day,
+    weather: report.weather,
+    temperature: report.temperature,
+    humidity: report.humidity,
+    inspector: report.inspector,
+  };
+
+  ctx.client = {
+    name: client.name,
+    facility_name: client.facility_name,
+  };
+
+  // sum.r01 ... r23: { no, label, result } のネストオブジェクト
+  // result が「空」(空文字)のときは no/label も空にして「項目ごと消えた」見た目にする
+  const sum: Record<string, { no: string; label: string; result: string }> = {};
+  for (const s of report.summary) {
+    if (s.result === "") {
+      sum[s.id] = { no: "", label: "", result: "" };
+    } else {
+      sum[s.id] = { no: s.no, label: s.label, result: s.result };
+    }
+  }
+  ctx.sum = sum;
+
+  const ext: Record<string, string> = {};
+  for (const e of report.external) ext[e.id] = e.result;
+  ctx.ext = ext;
+
+  const ground: Record<string, unknown> = {};
+  report.ground.forEach((g, i) => {
+    ground[`r${i + 1}`] = { name: g.name, type: g.type, value: g.value, judge: g.judge };
+  });
+  ctx.ground = ground;
+
+  const hv: Record<string, unknown> = {};
+  report.hv.forEach((h, i) => {
+    hv[`r${i + 1}`] = { name: h.name, voltage: h.voltage, value: h.value, judge: h.judge };
+  });
+  ctx.hv = hv;
+
+  ctx.dgr = {
+    pas: {
+      maker: report.dgr.pas_maker,
+      model: report.dgr.pas_model,
+      serial: report.dgr.pas_serial,
+      mfg_date: report.dgr.pas_mfg_date,
+    },
+    relay: {
+      maker: report.dgr.relay_maker,
+      model: report.dgr.relay_model,
+      serial: report.dgr.relay_serial,
+      mfg_date: report.dgr.relay_mfg_date,
+      setting: report.dgr.relay_setting,
+      setting2: report.dgr.relay_setting2,
+    },
+    v_tap: report.dgr.v_tap,
+    v_min: report.dgr.v_min,
+    i_tap: report.dgr.i_tap,
+    i_min: report.dgr.i_min,
+    phase_lead: report.dgr.phase_lead,
+    phase_lag: report.dgr.phase_lag,
+    t_tap: report.dgr.t_tap,
+    t_i_a: report.dgr.t_i_a,
+    t_i_b: report.dgr.t_i_b,
+    t_a: report.dgr.t_a,
+    t_b: report.dgr.t_b,
+    linked_time: report.dgr.linked_time,
+    judge: report.dgr.judge,
+  };
+
+  ctx.ocr = { ...report.ocr };
+  ctx.ovgr = { ...report.ovgr };
+
+  const array: Record<string, unknown> = {};
+  report.array.forEach((a) => {
+    array[`r${a.id}`] = { value: a.value, judge: a.judge };
+  });
+  ctx.array = array;
+
+  const box: Record<string, unknown> = {};
+  report.box.forEach((b) => {
+    box[`r${b.id}`] = { value: b.value, judge: b.judge };
+  });
+  ctx.box = box;
+
+  const lv: Record<string, unknown> = {};
+  report.lv.forEach((l) => {
+    lv[`r${l.id}`] = { rp: l.rp, rn: l.rn, judge: l.judge };
+  });
+  ctx.lv = lv;
+
+  const pcs: Record<string, unknown> = {};
+  report.pcs.forEach((p) => {
+    pcs[p.id] = { date: p.date, state: p.state, note: p.note };
+  });
+  ctx.pcs = pcs;
+
+  const inst: Record<string, unknown> = {};
+  report.inst.forEach((i, idx) => {
+    inst[`r${idx + 1}`] = { name: i.name, maker: i.maker, model: i.model, serial: i.serial };
+  });
+  ctx.inst = inst;
+
+  return ctx;
+}
+
+export async function generateDocxBlob(report: ReportData, client: Client): Promise<Blob> {
+  const res = await fetch("/inspection-template.docx");
+  if (!res.ok) throw new Error("テンプレートの読み込みに失敗しました");
+  const arrayBuf = await res.arrayBuffer();
+
+  const zip = new PizZip(arrayBuf);
+  const doc = new Docxtemplater(zip, {
+    paragraphLoop: true,
+    linebreaks: true,
+    delimiters: { start: "{{", end: "}}" },
+    nullGetter: () => "",
+    // ドット記法 `{{rpt.year_wareki}}` をネストオブジェクトとして解釈
+    parser: (tag: string) => ({
+      get: (scope: unknown) => {
+        if (tag === ".") return scope;
+        const keys = tag.split(".");
+        let result: unknown = scope;
+        for (const k of keys) {
+          if (result == null || typeof result !== "object") return "";
+          result = (result as Record<string, unknown>)[k];
+        }
+        return result == null ? "" : result;
+      },
+    }),
+  });
+
+  doc.render(buildContext(report, client));
+
+  const out = doc.getZip().generate({
+    type: "blob",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  });
+  return out;
+}
+
+export async function downloadDocx(
+  report: ReportData,
+  client: Client,
+  saveDir: FileSystemDirectoryHandle | null,
+): Promise<{ savedTo: string }> {
+  const blob = await generateDocxBlob(report, client);
+  const filename = makeFilename(report, client, "docx");
+
+  if (saveDir) {
+    try {
+      const fileHandle = await saveDir.getFileHandle(filename, { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return { savedTo: `フォルダ「${saveDir.name}」内に保存` };
+    } catch (e) {
+      console.warn("フォルダ保存に失敗、通常DLにフォールバック", e);
+    }
+  }
+
+  saveAs(blob, filename);
+  return { savedTo: "ブラウザの既定ダウンロードフォルダ" };
+}
+
+export async function downloadPdf(
+  report: ReportData,
+  client: Client,
+  saveDir: FileSystemDirectoryHandle | null,
+): Promise<{ savedTo: string }> {
+  return downloadDocx(report, client, saveDir);
+}
+
+function makeFilename(report: ReportData, client: Client, ext: string): string {
+  const safeName = client.name.replace(/[\\/:*?"<>|]/g, "");
+  return `R${report.year_wareki}_${safeName}_年次点検記録_${report.year_wareki}-${report.month}-${report.day}.${ext}`;
+}
