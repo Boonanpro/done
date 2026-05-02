@@ -26,7 +26,7 @@ import { HeroVideo } from "./components/hero-video";
 import { VEHICLES, type VehicleKey } from "./components/vehicle-icons";
 
 // 動画/画像にバージョンクエリを付けて、ブラウザ強キャッシュを破棄する
-const ASSET_VERSION = "2026-04-27-v1";
+const ASSET_VERSION = "2026-05-02-v1";
 const HERO_VIDEO = `/kikkawa/hero.mp4?v=${ASSET_VERSION}`;
 // poster は動画の1フレーム目を使う。元の hero.png（整備士のクローズアップ静止画）を出すと
 // 動画ロード前に「全く違う絵」がチラ見えする問題が起きるため。
