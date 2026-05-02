@@ -32,9 +32,21 @@ from pathlib import Path
 
 REPO_DIR = Path("D:/done")
 FRONTEND_DIR = REPO_DIR / "frontend"
+WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
 LOG_FILE = REPO_DIR / "deploy.log"
 LAST_DEPLOY_FILE = REPO_DIR / ".last_deploy_hash"
 POLL_INTERVAL = 30  # seconds
+
+DAN_CORE_PORT = 9000
+
+# パスがこの prefix で始まる .py 変更は ダンコア (port 9000) を再起動する。
+# サンドボックスだけ再起動しても、これらのモジュールは
+# ダンコアプロセスにキャッシュされたままで反映されない。
+DAN_CORE_PATH_PREFIXES = (
+    "app/agent/",
+    "app/core/",
+    "app/services/",
+)
 
 
 def setup_logging(to_file: bool = False):
@@ -90,6 +102,27 @@ def git_pull() -> bool:
     return True
 
 
+def pull_workspace() -> None:
+    """Pull ~/.dan/workspace (RULES.md / plans / artifacts) — read by dan-core's
+    bootstrap_context on every prompt build, no restart needed.
+    """
+    if not WORKSPACE_DIR.exists():
+        return
+    try:
+        run(["git", "fetch", "origin", "master"], cwd=WORKSPACE_DIR, timeout=30)
+        r = run(
+            ["git", "pull", "origin", "master", "--ff-only"],
+            cwd=WORKSPACE_DIR,
+            timeout=30,
+        )
+        if r.returncode == 0 and "Already up to date" not in r.stdout:
+            logging.info(f"workspace pulled: {r.stdout.strip().splitlines()[0]}")
+        elif r.returncode != 0:
+            logging.warning(f"workspace pull failed: {r.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        logging.warning("workspace pull timed out")
+
+
 def get_changed_files(old_head: str, new_head: str) -> list[str]:
     r = run(["git", "diff", "--name-only", old_head, new_head])
     if r.returncode != 0:
@@ -118,7 +151,52 @@ def npm_install():
         logging.error(f"npm install failed: {r.stderr.strip()}")
 
 
-DAN_CORE_URL = "http://127.0.0.1:9000"
+DAN_CORE_URL = f"http://127.0.0.1:{DAN_CORE_PORT}"
+
+
+def _find_pid_on_port(port: int) -> int | None:
+    """Return the PID listening on `port`, or None if not found."""
+    r = run(["netstat", "-ano"], cwd=REPO_DIR, timeout=10)
+    if r.returncode != 0:
+        return None
+    needle = f":{port} "
+    for line in r.stdout.splitlines():
+        if needle in line and "LISTENING" in line.upper():
+            parts = line.split()
+            if parts:
+                try:
+                    return int(parts[-1])
+                except ValueError:
+                    continue
+    return None
+
+
+def restart_dan_core():
+    """Kill dan-core (port 9000) then start a fresh process via start_dan_core.py.
+
+    Used when files under DAN_CORE_PATH_PREFIXES change. Sandbox is auto-spawned
+    by start_dan_core.py, so a single restart_dan_core() call replaces both.
+
+    Note: this drops any in-flight chat sessions on dan-core. Acceptable cost
+    since the alternative is running with stale code (the issue this fix addresses).
+    """
+    logging.info("Restarting dan-core (port 9000)...")
+    pid = _find_pid_on_port(DAN_CORE_PORT)
+    if pid:
+        logging.info(f"Killing dan-core PID={pid}")
+        run(["taskkill", "/F", "/PID", str(pid)], cwd=REPO_DIR, timeout=10)
+        time.sleep(2)
+    else:
+        logging.info("No process on port 9000 — starting fresh.")
+
+    proc = subprocess.Popen(
+        [sys.executable, "scripts/start_dan_core.py"],
+        cwd=str(REPO_DIR),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=_NO_WINDOW,
+    )
+    logging.info(f"start_dan_core.py launched (wrapper PID={proc.pid})")
 
 
 def restart_backend():
@@ -173,6 +251,10 @@ def save_last_deploy_hash(commit_hash: str) -> None:
 
 def check_and_deploy() -> bool:
     """1回のチェック＆デプロイサイクル。変更があればTrueを返す。"""
+    # workspace は dan-core の bootstrap が毎回ディスクから読むので、
+    # 再起動なしで反映される。done と並行で同期する。
+    pull_workspace()
+
     if not git_fetch():
         return False
 
@@ -218,8 +300,19 @@ def check_and_deploy() -> bool:
         # uvicorn --reload はWindows上で機能しないため、Pythonファイル変更時は明示的に再起動
         py_changed = [f for f in changed if f.endswith(".py")]
         if py_changed:
-            logging.info(f"Python files changed ({len(py_changed)}) → restarting backend")
-            restart_backend()
+            dan_core_changed = [
+                f for f in py_changed
+                if f.startswith(DAN_CORE_PATH_PREFIXES)
+            ]
+            if dan_core_changed:
+                logging.info(
+                    f"Dan-core code changed ({len(dan_core_changed)}/{len(py_changed)} py files): "
+                    f"{', '.join(dan_core_changed[:5])} → restarting dan-core"
+                )
+                restart_dan_core()
+            else:
+                logging.info(f"Sandbox-only py changed ({len(py_changed)}) → restarting sandbox")
+                restart_backend()
 
     ts_changed = [f for f in changed if f.endswith((".ts", ".tsx", ".js", ".jsx", ".css"))]
     if ts_changed:
