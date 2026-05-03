@@ -18,7 +18,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python D:/done/scripts/hook_create_feature_guard.py"
+            "command": "python $CLAUDE_PROJECT_DIR/scripts/hook_create_feature_guard.py"
+          },
+          {
+            "type": "command",
+            "command": "python $CLAUDE_PROJECT_DIR/scripts/hook_demo_guard.py"
           }
         ]
       }
@@ -29,19 +33,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python D:/done/scripts/hook_autoinstall_shadcn.py"
+            "command": "python $CLAUDE_PROJECT_DIR/scripts/hook_autoinstall_shadcn.py"
           },
           {
             "type": "command",
-            "command": "python D:/done/scripts/hook_autoinstall_npm.py"
+            "command": "python $CLAUDE_PROJECT_DIR/scripts/hook_autoinstall_npm.py"
           },
           {
             "type": "command",
-            "command": "python D:/done/scripts/hook_register_artifact.py"
+            "command": "python $CLAUDE_PROJECT_DIR/scripts/hook_register_artifact.py"
           },
           {
             "type": "command",
-            "command": "python D:/done/scripts/hook_forbid_overlay_pattern.py"
+            "command": "python $CLAUDE_PROJECT_DIR/scripts/hook_forbid_overlay_pattern.py"
           }
         ]
       }
