@@ -1,11 +1,22 @@
 import type { NextConfig } from 'next';
 import withPWA from 'next-pwa';
 
+// 静的アセットのキャッシュバスト用バージョン文字列を build-time に決定する。
+// Vercel では VERCEL_GIT_COMMIT_SHA が自動付与される。ローカル dev ではタイムスタンプ。
+// 各 page で `process.env.NEXT_PUBLIC_ASSET_VERSION` を参照して使う。
+const ASSET_VERSION =
+  process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 8) ||
+  process.env.NEXT_PUBLIC_ASSET_VERSION ||
+  `dev-${Date.now()}`;
+
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   compress: false, // SSE ストリーミングのバッファリング防止
   devIndicators: false,
   turbopack: {},
+  env: {
+    NEXT_PUBLIC_ASSET_VERSION: ASSET_VERSION,
+  },
   images: {
     dangerouslyAllowSVG: true,
     contentSecurityPolicy:

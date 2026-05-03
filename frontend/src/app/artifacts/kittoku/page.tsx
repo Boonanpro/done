@@ -25,8 +25,9 @@ import { DiagonalDivider } from "./components/diagonal-divider";
 import { HeroVideo } from "./components/hero-video";
 import { VEHICLES, type VehicleKey } from "./components/vehicle-icons";
 
-// 動画/画像にバージョンクエリを付けて、ブラウザ強キャッシュを破棄する
-const ASSET_VERSION = "2026-05-02-v1";
+// 動画/画像にバージョンクエリを付けて、ブラウザ強キャッシュを破棄する。
+// next.config.ts で git commit SHA から build-time に注入される。
+const ASSET_VERSION = process.env.NEXT_PUBLIC_ASSET_VERSION || "dev";
 const HERO_VIDEO = `/kikkawa/hero.mp4?v=${ASSET_VERSION}`;
 // poster は動画の1フレーム目を使う。元の hero.png（整備士のクローズアップ静止画）を出すと
 // 動画ロード前に「全く違う絵」がチラ見えする問題が起きるため。
