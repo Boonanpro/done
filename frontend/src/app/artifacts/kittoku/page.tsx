@@ -219,7 +219,6 @@ export default function YoshikawaHomePage() {
       <VehiclesSection />
       <FlowSection />
       <StrengthsSection />
-      <CompanyBriefSection />
       <CareersCtaSection />
     </LpShell>
   );
@@ -630,53 +629,39 @@ function InfoRow({
 
 function CareersCtaSection() {
   return (
-    <section className="relative overflow-hidden">
-      <div
-        className="absolute inset-0 bg-[var(--yk-navy-dark)]"
-        style={{
-          backgroundImage:
-            "linear-gradient(135deg, var(--yk-navy-dark) 0%, var(--yk-navy) 100%)",
-        }}
-      />
-      <div
-        className="absolute inset-0 opacity-[0.06]"
-        style={{
-          backgroundImage:
-            "repeating-linear-gradient(-45deg, var(--yk-gold) 0 1px, transparent 1px 12px)",
-        }}
-      />
-      <div className="relative mx-auto max-w-7xl px-4 sm:px-6 py-20 sm:py-28">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-center">
-          <div className="lg:col-span-2 space-y-5">
-            <div className="flex items-center gap-3">
-              <DiagonalDivider color="var(--yk-gold)" />
-              <span className="font-eyebrow text-xs text-[var(--yk-gold)]">
-                Careers
-              </span>
-            </div>
-            <h2 data-edit-id="kittoku-top-careers-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black text-white leading-tight">
-              一緒に働く社員を募集中です。
-            </h2>
-            <p data-edit-id="kittoku-top-careers-body" className="text-white/80 leading-relaxed max-w-2xl">
-              特装車の整備は、普通の自動車整備では経験できない奥深い世界です。
-              油圧、電装、機構。ひとつひとつの工程にクライアントの事業が乗っている。
-              そんな誇りを持って働ける仲間を募集しています。
-            </p>
+    <Section padding="xl" width="xl" className="bg-background">
+      <Link
+        data-edit-id="kittoku-top-careers-card"
+        href="/artifacts/kittoku/careers"
+        className="group relative block overflow-hidden rounded-sm border border-border bg-[var(--yk-navy-dark)] aspect-[16/7] sm:aspect-[16/5] transition-all hover:shadow-2xl"
+      >
+        <Image
+          src="/kikkawa/careers-cta.jpg"
+          alt="吉川特装で働く社員"
+          fill
+          sizes="(max-width: 1024px) 100vw, 1280px"
+          className="object-cover opacity-70 transition-transform duration-500 group-hover:scale-105"
+        />
+        <div className="absolute inset-0 bg-gradient-to-t from-[var(--yk-navy-dark)]/85 via-[var(--yk-navy-dark)]/40 to-transparent" />
+        <div className="absolute inset-0 p-6 sm:p-10 flex flex-col justify-end">
+          <div className="flex items-center gap-3 mb-3">
+            <DiagonalDivider color="var(--yk-gold)" />
+            <span className="font-eyebrow text-xs text-[var(--yk-gold)]">
+              Careers
+            </span>
           </div>
-          <div className="flex justify-start lg:justify-end">
-            <Button
-              asChild
-              size="lg"
-              className="bg-[var(--yk-gold)] hover:bg-[var(--yk-gold-dark)] text-[var(--yk-navy-dark)] font-bold rounded-sm h-12 px-8"
-            >
-              <Link data-edit-id="kittoku-top-careers-cta" href="/artifacts/kittoku/careers">
-                採用情報を見る
-                <ArrowRight className="h-4 w-4 ml-1.5" />
-              </Link>
-            </Button>
+          <h2
+            data-edit-id="kittoku-top-careers-h2"
+            className="font-headline text-2xl sm:text-3xl lg:text-4xl font-black text-white leading-tight"
+          >
+            一緒に働く仲間を、募集しています。
+          </h2>
+          <div className="inline-flex items-center gap-2 text-[var(--yk-gold)] font-bold text-sm sm:text-base mt-3 group-hover:gap-3 transition-all">
+            採用情報を見る
+            <ArrowRight className="h-4 w-4" />
           </div>
         </div>
-      </div>
-    </section>
+      </Link>
+    </Section>
   );
 }

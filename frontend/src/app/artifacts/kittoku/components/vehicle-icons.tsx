@@ -8,6 +8,8 @@ import {
   RotateCcw,
   Boxes,
   Package,
+  Snowflake,
+  Wind,
   type LucideIcon,
 } from "lucide-react";
 
@@ -20,7 +22,9 @@ export type VehicleKey =
   | "aerial"
   | "mixer"
   | "feed"
-  | "hook";
+  | "hook"
+  | "snowplow"
+  | "vacuum";
 
 export const VEHICLES: Record<
   VehicleKey,
@@ -79,5 +83,17 @@ export const VEHICLES: Record<
     icon: Package,
     image: "/kikkawa/vehicles/hook.png",
     description: "フック・アーム・油圧ユニット整備",
+  },
+  snowplow: {
+    label: "除雪車",
+    icon: Snowflake,
+    image: "/kikkawa/vehicles/snowplow.png",
+    description: "プラウ・スピンナ・油圧装置の整備",
+  },
+  vacuum: {
+    label: "強力吸引車",
+    icon: Wind,
+    image: "/kikkawa/vehicles/vacuum.png",
+    description: "ブロワ・タンク・吸引配管の整備",
   },
 };

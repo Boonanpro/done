@@ -53,6 +53,11 @@ def _delete_overrides(ids):
 
 
 def _normalize_to_v2(row):
+    """v2 (attrs.v=2) または v1 (styles のみ) の override を統一形式に。
+
+    全部空（styles={}, text/blockStyle/extraAttrs/spans 全て空）なら None を返す
+    → 呼び出し側で「ゴミ行」としてスキップ＋削除候補にできる。
+    """
     attrs = row.get("attrs") or {}
     styles = row.get("styles") or {}
     out = {"text": None, "blockStyle": dict(styles), "spans": [], "extraAttrs": {}}
@@ -65,8 +70,14 @@ def _normalize_to_v2(row):
             out["spans"] = attrs["spans"]
         if isinstance(attrs.get("extraAttrs"), dict):
             out["extraAttrs"] = attrs["extraAttrs"]
-        return out
-    return None
+    # v1 でも attrs に html/text が入ってることがある（後方互換）
+    elif isinstance(attrs.get("text"), str) and attrs.get("text"):
+        out["text"] = attrs["text"]
+
+    # 何も中身が無ければ None（ゴミ行）
+    if not out["text"] and not out["blockStyle"] and not out["extraAttrs"] and not out["spans"]:
+        return None
+    return out
 
 
 def _find_tsx_files(slug):
@@ -203,6 +214,7 @@ def main():
     files = _find_tsx_files(args.slug)
     print("[writeback] target .tsx files: {}".format(len(files)))
     applied_ids = []
+    empty_ids = []  # 中身ゼロのゴミ行（消すだけ）
     skipped = []
     for row in overrides:
         ek = row.get("element_key", "")
@@ -212,7 +224,7 @@ def main():
         edit_id = ek[1:]
         model = _normalize_to_v2(row)
         if not model:
-            skipped.append((row.get("id"), "non-v2 attrs"))
+            empty_ids.append(row["id"])
             continue
         applied = False
         for f in files:
@@ -226,12 +238,17 @@ def main():
             skipped.append((row.get("id"), "data-edit-id={} not found".format(edit_id)))
     print()
     print("[writeback] applied: {}".format(len(applied_ids)))
+    print("[writeback] empty (will delete): {}".format(len(empty_ids)))
     print("[writeback] skipped: {}".format(len(skipped)))
     for sid, reason in skipped[:10]:
         print("  - {}: {}".format(sid, reason))
-    if applied_ids and not args.dry_run and not args.keep_overrides:
-        deleted = _delete_overrides(applied_ids)
-        print("[writeback] deleted {} rows from DB".format(deleted))
+    if not args.dry_run and not args.keep_overrides:
+        to_delete = applied_ids + empty_ids
+        if to_delete:
+            deleted = _delete_overrides(to_delete)
+            print("[writeback] deleted {} rows from DB ({} applied + {} empty)".format(
+                deleted, len(applied_ids), len(empty_ids)
+            ))
     elif args.dry_run:
         print("[writeback] dry-run: files modified but DB intact")
     return 0
