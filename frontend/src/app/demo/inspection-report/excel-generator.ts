@@ -1,23 +1,18 @@
 "use client";
 
 import { saveAs } from "file-saver";
-import * as XLSX from "xlsx";
+import PizZip from "pizzip";
 import type { Client, ReportData } from "./types";
 
-type Cell = string | number | null | undefined;
-
-type SheetSpec = {
-  name: string;
-  rows: Cell[][];
-};
+type CellValue = string | number | null | undefined;
 
 export async function downloadExcel(
   report: ReportData,
   client: Client,
   saveDir: FileSystemDirectoryHandle | null,
 ): Promise<{ savedTo: string }> {
-  const blob = generateExcelBlob(report, client);
-  const filename = makeFilename(report, client, "xlsx");
+  const blob = await generateExcelBlob(report, client);
+  const filename = makeFilename(report, client, "xlsm");
 
   if (saveDir) {
     try {
@@ -35,151 +30,266 @@ export async function downloadExcel(
   return { savedTo: "ブラウザの既定ダウンロードフォルダ" };
 }
 
-function generateExcelBlob(report: ReportData, client: Client): Blob {
-  const workbook = XLSX.utils.book_new();
+async function generateExcelBlob(report: ReportData, client: Client): Promise<Blob> {
+  const res = await fetch("/inspection-template.xlsm");
+  if (!res.ok) throw new Error("Excelテンプレートの読み込みに失敗しました");
 
-  for (const spec of buildSheets(report, client)) {
-    const worksheet = XLSX.utils.aoa_to_sheet(spec.rows);
-    worksheet["!cols"] = columnWidths(spec.rows);
-    worksheet["!freeze"] = { xSplit: 0, ySplit: 1 };
-    XLSX.utils.book_append_sheet(workbook, worksheet, spec.name);
+  const zip = new PizZip(await res.arrayBuffer());
+  const dateSerial = excelDateSerial(report);
+  const weatherLine = `天候 ： ${report.weather} 気温${report.temperature}℃ 湿度${report.humidity}%`;
+
+  mutateSheet(zip, "xl/worksheets/sheet1.xml", {
+    B12: client.facility_name,
+    B15: report.inspector,
+    B16: dateSerial,
+    B30: "良",
+  });
+
+  mutateSheet(zip, "xl/worksheets/sheet2.xml", {
+    A2: dateSerial,
+    A3: `天候：${report.weather}`,
+    ...cellsFromList("C", 4, 17, report.external.map((item) => item.result), "良"),
+  });
+
+  mutateSheet(zip, "xl/worksheets/sheet3.xml", {
+    B2: dateSerial,
+    D2: weatherLine,
+    ...groundCells(report),
+  });
+
+  mutateSheet(zip, "xl/worksheets/sheet4.xml", {
+    L2: dateSerial,
+    I3: weatherLine,
+    N6: firstJudge(report.hv, "良"),
+    ...instrumentRow(report, 14, 0),
+    ...instrumentRow(report, 15, 4),
+    ...instrumentRow(report, 16, 5),
+    ...instrumentRow(report, 17, 0),
+    ...instrumentRow(report, 18, 1),
+  });
+
+  mutateSheet(zip, "xl/worksheets/sheet5.xml", {
+    E2: dateSerial,
+    B6: report.dgr.relay_maker,
+    C6: report.dgr.relay_model,
+    D6: report.dgr.relay_mfg_date,
+    E6: report.dgr.relay_serial,
+    F6: joinNonEmpty([report.dgr.relay_setting, report.dgr.relay_setting2], " "),
+    B9: "良",
+    B12: report.dgr.i_tap,
+    E12: report.dgr.v_tap,
+    B13: report.dgr.i_min,
+    E13: report.dgr.v_min,
+    B17: report.dgr.t_a,
+    C17: report.dgr.t_b,
+    D17: report.dgr.t_a,
+    E17: report.dgr.t_b,
+    B25: report.dgr.judge || "良",
+    ...instrumentRow(report, 32, 6, ["A", "B", "C", "D", "E"]),
+  });
+
+  mutateSheet(zip, "xl/worksheets/sheet6.xml", {
+    K10: report.ocr.maker,
+    V10: report.ocr.maker,
+    K11: report.ocr.model,
+    V11: report.ocr.model,
+    K12: report.ocr.serial,
+    V12: report.ocr.serial,
+    K13: report.ocr.mfg_date,
+    V13: report.ocr.mfg_date,
+    K17: report.ocr.setting_limit,
+    V17: report.ocr.setting_limit,
+    K18: report.ocr.tap_at,
+    V18: report.ocr.tap_at,
+    K19: report.ocr.setting_inst,
+    V19: report.ocr.setting_inst,
+    K23: report.ocr.r_current,
+    V23: report.ocr.t_current,
+    K28: report.ocr.r_300,
+    V28: report.ocr.t_300,
+    K35: report.ocr.inst_tap,
+    V35: report.ocr.inst_tap,
+    K37: report.ocr.vcb_time,
+    V37: report.ocr.vcb_time,
+    K39: "良",
+    V39: "良",
+    K40: "無",
+    V40: "無",
+    K41: report.ocr.judge || "良",
+    V41: report.ocr.judge || "良",
+  });
+
+  mutateSheet(zip, "xl/worksheets/sheet8.xml", {
+    K9: report.ovgr.maker,
+    K10: report.ovgr.model,
+    K11: report.ovgr.serial,
+    K12: report.ovgr.model_no,
+    K13: report.ovgr.mfg_date,
+    K15: report.ovgr.setting,
+    W20: report.ovgr.v_op_3_5_a,
+    W22: report.ovgr.t_op_3,
+    K28: "良",
+    K30: "無",
+    K31: report.ovgr.judge || "良",
+  });
+
+  mutateSheet(zip, "xl/worksheets/sheet9.xml", lowVoltageCells(report));
+  mutateSheet(zip, "xl/worksheets/sheet10.xml", majorEquipmentCells(report));
+
+  return zip.generate({
+    type: "blob",
+    mimeType: "application/vnd.ms-excel.sheet.macroEnabled.12",
+  });
+}
+
+function mutateSheet(zip: PizZip, path: string, values: Record<string, CellValue>) {
+  const file = zip.file(path);
+  if (!file) return;
+
+  let xml = file.asText();
+  for (const [address, value] of Object.entries(values)) {
+    if (value == null || value === "") continue;
+    xml = setCellValue(xml, address, value);
+  }
+  zip.file(path, xml);
+}
+
+function setCellValue(xml: string, address: string, value: CellValue): string {
+  const cellPattern = new RegExp(`<c\\b(?=[^>]*\\br="${escapeRegex(address)}"\\b)([^>]*)>([\\s\\S]*?)<\\/c>`);
+  const selfClosingPattern = new RegExp(`<c\\b(?=[^>]*\\br="${escapeRegex(address)}"\\b)([^>]*)\\/>`);
+
+  if (cellPattern.test(xml)) {
+    return xml.replace(cellPattern, (_match, attrs: string) => buildCell(address, attrs, value));
+  }
+  return xml.replace(selfClosingPattern, (_match, attrs: string) => buildCell(address, attrs, value));
+}
+
+function buildCell(address: string, attrs: string, value: CellValue): string {
+  const style = attrs.match(/\bs="[^"]*"/)?.[0];
+  const baseAttrs = `r="${address}"${style ? ` ${style}` : ""}`;
+
+  if (typeof value === "number") {
+    return `<c ${baseAttrs}><v>${value}</v></c>`;
   }
 
-  const output = XLSX.write(workbook, {
-    bookType: "xlsx",
-    type: "array",
-    compression: true,
-  });
-
-  return new Blob([output], {
-    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  });
+  return `<c ${baseAttrs} t="inlineStr"><is><t>${escapeXml(String(value))}</t></is></c>`;
 }
 
-function buildSheets(report: ReportData, client: Client): SheetSpec[] {
-  return [
-    {
-      name: "基本情報",
-      rows: [
-        ["年次点検報告書"],
-        [],
-        ["顧客名", client.name],
-        ["設備名", client.facility_name],
-        ["実施日", `令和${report.year_wareki}年${report.month}月${report.day}日`],
-        ["天候", report.weather],
-        ["温度", `${report.temperature}℃`],
-        ["湿度", `${report.humidity}%`],
-        ["点検者", report.inspector],
-      ],
-    },
-    {
-      name: "判定",
-      rows: [
-        ["区分", "番号", "項目", "判定"],
-        ...report.summary.map((s) => ["総合", s.no, s.label, s.result]),
-        [],
-        ...report.external.map((e) => ["外観点検", "", e.label, e.result]),
-        [],
-        ...report.ground.map((g) => ["接地抵抗", "", `${g.name} ${g.type}`, g.judge]),
-        ["DGR", "", "総合判定", report.dgr.judge],
-        ["OCR", "", "総合判定", report.ocr.judge],
-        ["OVGR", "", "総合判定", report.ovgr.judge],
-        ...report.array.map((a) => ["太陽電池アレイ", String(a.id), "", a.judge]),
-        ...report.box.map((b) => ["接続箱", String(b.id), "", b.judge]),
-        ...report.lv.map((l) => ["低圧絶縁抵抗", String(l.id), "", l.judge]),
-      ],
-    },
-    {
-      name: "測定値",
-      rows: [
-        ["区分", "名称", "種別", "測定値", "判定"],
-        ...report.ground.map((g) => ["接地抵抗", g.name, g.type, g.value, g.judge]),
-        ...report.hv.map((h) => ["高圧絶縁抵抗", h.name, h.voltage, h.value, h.judge]),
-        ...report.array.map((a) => ["太陽電池アレイ", `No.${a.id}`, "", a.value, a.judge]),
-        ...report.box.map((b) => ["接続箱", `No.${b.id}`, "", b.value, b.judge]),
-        ...report.lv.map((l) => ["低圧絶縁抵抗", `回路 ${l.id}`, "R-P", l.rp, l.judge]),
-        ...report.lv.map((l) => ["低圧絶縁抵抗", `回路 ${l.id}`, "R-N", l.rn, l.judge]),
-      ],
-    },
-    {
-      name: "継電器",
-      rows: [
-        ["区分", "項目", "値"],
-        ["DGR PAS", "メーカー", report.dgr.pas_maker],
-        ["DGR PAS", "型式", report.dgr.pas_model],
-        ["DGR PAS", "製造番号", report.dgr.pas_serial],
-        ["DGR PAS", "製造年月", report.dgr.pas_mfg_date],
-        ["DGR リレー", "メーカー", report.dgr.relay_maker],
-        ["DGR リレー", "型式", report.dgr.relay_model],
-        ["DGR リレー", "製造番号", report.dgr.relay_serial],
-        ["DGR リレー", "製造年月", report.dgr.relay_mfg_date],
-        ["DGR リレー", "整定", report.dgr.relay_setting],
-        ["DGR リレー", "整定2", report.dgr.relay_setting2],
-        ["DGR 試験", "Vタップ", report.dgr.v_tap],
-        ["DGR 試験", "V最小", report.dgr.v_min],
-        ["DGR 試験", "Iタップ", report.dgr.i_tap],
-        ["DGR 試験", "I最小", report.dgr.i_min],
-        ["DGR 試験", "位相進み", report.dgr.phase_lead],
-        ["DGR 試験", "位相遅れ", report.dgr.phase_lag],
-        ["DGR 試験", "Tタップ", report.dgr.t_tap],
-        ["DGR 試験", "試験電流A", report.dgr.t_i_a],
-        ["DGR 試験", "試験電流B", report.dgr.t_i_b],
-        ["DGR 試験", "動作時間A", report.dgr.t_a],
-        ["DGR 試験", "動作時間B", report.dgr.t_b],
-        ["DGR 試験", "連動時間", report.dgr.linked_time],
-        [],
-        ["OCR", "メーカー", report.ocr.maker],
-        ["OCR", "型式", report.ocr.model],
-        ["OCR", "製造番号", report.ocr.serial],
-        ["OCR", "製造年月", report.ocr.mfg_date],
-        ["OCR", "限時整定", report.ocr.setting_limit],
-        ["OCR", "瞬時整定", report.ocr.setting_inst],
-        ["OCR", "タップ", report.ocr.tap_at],
-        ["OCR", "R相動作電流", report.ocr.r_current],
-        ["OCR", "T相動作電流", report.ocr.t_current],
-        ["OCR", "試験タップ", report.ocr.test_tap],
-        ["OCR", "300% R相", report.ocr.r_300],
-        ["OCR", "300% T相", report.ocr.t_300],
-        ["OCR", "瞬時タップ", report.ocr.inst_tap],
-        ["OCR", "VCB時間", report.ocr.vcb_time],
-        [],
-        ["OVGR", "メーカー", report.ovgr.maker],
-        ["OVGR", "型式", report.ovgr.model],
-        ["OVGR", "型番", report.ovgr.model_no],
-        ["OVGR", "製造番号", report.ovgr.serial],
-        ["OVGR", "製造年月", report.ovgr.mfg_date],
-        ["OVGR", "整定", report.ovgr.setting],
-        ["OVGR", "動作電圧A", report.ovgr.v_op_3_5_a],
-        ["OVGR", "動作電圧B", report.ovgr.v_op_3_5_b],
-        ["OVGR", "動作時間3%", report.ovgr.t_op_3],
-      ],
-    },
-    {
-      name: "計測器",
-      rows: [
-        ["名称", "メーカー", "型式", "製造番号"],
-        ...report.inst.map((i) => [i.name, i.maker, i.model, i.serial]),
-        [],
-        ["PCS確認", "確認日", "状態", "備考"],
-        ...report.pcs.map((p) => [p.label, p.date, p.state, p.note]),
-      ],
-    },
-  ];
+function groundCells(report: ReportData): Record<string, CellValue> {
+  const cells: Record<string, CellValue> = {};
+  report.ground.slice(0, 10).forEach((item, index) => {
+    const row = index < 5 ? index + 4 : index + 5;
+    cells[`A${row}`] = item.name;
+    cells[`B${row}`] = item.type;
+    cells[`D${row}`] = item.value;
+    cells[`E${row}`] = item.judge || "良";
+  });
+  return cells;
 }
 
-function columnWidths(rows: Cell[][]): XLSX.ColInfo[] {
-  const maxColumns = Math.max(...rows.map((row) => row.length));
-  return Array.from({ length: maxColumns }, (_, columnIndex) => {
-    const maxLength = rows.reduce((max, row) => {
-      const value = row[columnIndex];
-      return Math.max(max, value == null ? 0 : String(value).length);
-    }, 8);
-
-    return { wch: Math.min(Math.max(maxLength + 2, 10), 36) };
+function lowVoltageCells(report: ReportData): Record<string, CellValue> {
+  const cells: Record<string, CellValue> = {};
+  report.lv.slice(0, 23).forEach((item, index) => {
+    const row = index + 3;
+    cells[`A${row}`] = `回路 ${item.id}`;
+    cells[`C${row}`] = joinNonEmpty([item.rp, item.rn], " / ");
+    cells[`D${row}`] = item.judge || "良";
   });
+  return cells;
+}
+
+function majorEquipmentCells(report: ReportData): Record<string, CellValue> {
+  return {
+    A3: "区分開閉器（PAS）",
+    C3: report.dgr.pas_model,
+    D3: report.dgr.pas_mfg_date,
+    E3: report.dgr.pas_serial,
+    F3: report.dgr.pas_maker,
+    A4: "SOG制御器",
+    C4: report.dgr.relay_model,
+    D4: report.dgr.relay_mfg_date,
+    E4: report.dgr.relay_serial,
+    F4: report.dgr.relay_maker,
+    A14: "OCR",
+    B14: joinNonEmpty([report.ocr.setting_limit, report.ocr.setting_inst], " / "),
+    C14: report.ocr.model,
+    D14: report.ocr.mfg_date,
+    E14: report.ocr.serial,
+    F14: report.ocr.maker,
+    A17: "OVGR",
+    B17: report.ovgr.setting,
+    C17: report.ovgr.model,
+    D17: report.ovgr.mfg_date,
+    E17: report.ovgr.serial,
+    F17: report.ovgr.maker,
+  };
+}
+
+function instrumentRow(
+  report: ReportData,
+  row: number,
+  index: number,
+  columns: [string, string, string, string, string] = ["A", "D", "F", "H", "J"],
+): Record<string, CellValue> {
+  const item = report.inst[index];
+  if (!item) return {};
+
+  const [nameCol, makerCol, modelCol, serialCol, yearCol] = columns;
+  return {
+    [`${nameCol}${row}`]: item.name,
+    [`${makerCol}${row}`]: item.maker,
+    [`${modelCol}${row}`]: item.model,
+    [`${serialCol}${row}`]: item.serial,
+    [`${yearCol}${row}`]: "",
+  };
+}
+
+function cellsFromList(
+  column: string,
+  startRow: number,
+  endRow: number,
+  values: CellValue[],
+  fallback: CellValue,
+): Record<string, CellValue> {
+  const cells: Record<string, CellValue> = {};
+  for (let row = startRow; row <= endRow; row++) {
+    cells[`${column}${row}`] = values[row - startRow] ?? fallback;
+  }
+  return cells;
+}
+
+function firstJudge(items: { judge: string }[], fallback: string): string {
+  return items.find((item) => item.judge)?.judge || fallback;
+}
+
+function excelDateSerial(report: ReportData): number {
+  const year = 2018 + report.year_wareki;
+  const date = Date.UTC(year, report.month - 1, report.day);
+  const excelEpoch = Date.UTC(1899, 11, 30);
+  return Math.round((date - excelEpoch) / 86400000);
+}
+
+function joinNonEmpty(values: CellValue[], separator: string): string {
+  return values
+    .map((value) => (value == null ? "" : String(value).trim()))
+    .filter(Boolean)
+    .join(separator);
 }
 
 function makeFilename(report: ReportData, client: Client, ext: string): string {
   const safeName = client.name.replace(/[\\/:*?"<>|]/g, "");
   return `R${report.year_wareki}_${safeName}_年次点検報告書_${report.year_wareki}-${report.month}-${report.day}.${ext}`;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
