@@ -85,15 +85,15 @@ export const VEHICLES: Record<
     description: "フック・アーム・油圧ユニット整備",
   },
   snowplow: {
-    label: "除雪車",
+    label: "圧雪車",
     icon: Snowflake,
     image: "/kikkawa/vehicles/snowplow.png",
-    description: "プラウ・スピンナ・油圧装置の整備",
+    description: "ブレード・ローラー・油圧駆動部の整備",
   },
   vacuum: {
-    label: "強力吸引車",
+    label: "吸引車",
     icon: Wind,
     image: "/kikkawa/vehicles/vacuum.png",
-    description: "ブロワ・タンク・吸引配管の整備",
+    description: "真空ポンプ・タンク・配管の点検修理",
   },
 };

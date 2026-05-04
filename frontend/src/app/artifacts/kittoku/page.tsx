@@ -132,7 +132,7 @@ const MANUFACTURERS: {
     en: "CARGOTEC JAPAN (HIAB)",
     logo: "/kikkawa/manufacturers/hiab-japan.svg",
     siteUrl: "https://www.hiab.com/ja/",
-    logoStyle: { height: "75px" },
+    logoStyle: { width: "auto", height: "75px", maxHeight: "75px" },
   },
   {
     slug: "maeda",
@@ -171,7 +171,7 @@ const MANUFACTURERS: {
     name: "日本トレクス",
     en: "NIPPON TREX",
     logo: "/kikkawa/manufacturers/nippon-trex.png",
-    siteUrl: "https://www.nippon-trex.co.jp/",
+    siteUrl: "https://www.trex.co.jp/",
     logoStyle: { width: "180px", height: "auto" },
   },
   {
@@ -179,7 +179,7 @@ const MANUFACTURERS: {
     name: "ミラージャパン",
     en: "MILLER JAPAN",
     logo: "/kikkawa/manufacturers/miller-japan.png",
-    siteUrl: "https://www.miller-japan.co.jp/",
+    siteUrl: "https://www.millerjapan.com/",
     logoStyle: { width: "180px", height: "auto" },
   },
   {
@@ -187,7 +187,7 @@ const MANUFACTURERS: {
     name: "東邦車輛",
     en: "TOHO SHARYO",
     logo: "/kikkawa/manufacturers/toho-sharyo.png",
-    siteUrl: "https://www.toho-sharyo.co.jp/",
+    siteUrl: "https://www.shinmaywa.co.jp/toho/",
     logoStyle: { width: "200px", height: "auto" },
   },
   {
@@ -195,7 +195,7 @@ const MANUFACTURERS: {
     name: "モリタエコノス",
     en: "MORITA ECONOS",
     logo: "/kikkawa/manufacturers/morita-econos.png",
-    siteUrl: "https://www.morita-econos.co.jp/",
+    siteUrl: "https://www.morita-econos.com/",
     logoStyle: { width: "180px", height: "auto" },
   },
 ];
@@ -218,7 +218,6 @@ export default function YoshikawaHomePage() {
       <ManufacturersSection />
       <VehiclesSection />
       <FlowSection />
-      <StrengthsSection />
       <CareersCtaSection />
     </LpShell>
   );
@@ -292,24 +291,30 @@ function HeroSection() {
 function StatsSection() {
   return (
     <div className="bg-white border-b border-border">
-      <div className="mx-auto max-w-7xl px-4 sm:px-6">
-        <div className="grid grid-cols-2 lg:grid-cols-4 divide-x divide-border">
-          {STATS.map((s) => (
-            <div key={s.slug} className="px-6 py-8 space-y-2">
-              <div data-edit-id={`kittoku-top-stats-${s.slug}-label`} className="font-eyebrow text-xs text-[var(--yk-gold-dark)]">
-                {s.label}
-              </div>
-              <div className="flex items-baseline gap-1.5">
-                <span data-edit-id={`kittoku-top-stats-${s.slug}-value`} className="font-headline text-4xl sm:text-5xl font-black text-[var(--yk-navy)] font-mono-data">
-                  {s.value}
-                </span>
-                <span data-edit-id={`kittoku-top-stats-${s.slug}-unit`} className="text-sm font-bold text-[var(--yk-steel)]">
-                  {s.unit}
-                </span>
-              </div>
-              <div data-edit-id={`kittoku-top-stats-${s.slug}-hint`} className="text-xs text-[var(--yk-steel)]">{s.hint}</div>
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 py-8 sm:py-10">
+        <div className="flex flex-row items-center justify-center gap-6 sm:gap-10">
+          <div className="space-y-1.5 text-[var(--yk-steel)] font-headline">
+            <p data-edit-id="kittoku-top-stats-line1" className="text-sm sm:text-base leading-relaxed">
+              1988年創業
+            </p>
+            <p data-edit-id="kittoku-top-stats-line2" className="text-sm sm:text-base leading-relaxed">
+              山陰地方を中心に、
+              <br className="sm:hidden" />
+              中国地方の働く車を支えています。
+            </p>
+          </div>
+          <div className="shrink-0 w-[180px] sm:w-[260px]">
+            <div className="relative w-full">
+              <Image
+                src="/kikkawa/chugoku-map-v3.png"
+                alt="中国地方マップ - 吉川特装は鳥取県米子市"
+                width={1024}
+                height={1024}
+                className="w-full h-auto"
+                sizes="(max-width: 640px) 180px, 260px"
+              />
             </div>
-          ))}
+          </div>
         </div>
       </div>
     </div>
