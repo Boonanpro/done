@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowLeft, FileDown, Sliders, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, FileDown, FileSpreadsheet, Sliders, CheckCircle2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,6 +9,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { useInspectionStore } from "../store";
 import { downloadDocx } from "../docx-generator";
+import { downloadExcel } from "../excel-generator";
 import type { Judge, ReportData } from "../types";
 
 const JUDGE_OPTIONS: Judge[] = ["良", "不良", "－", ""];
@@ -88,6 +89,20 @@ export function ConfirmView({
     }
   };
 
+  const handleDownloadExcel = async () => {
+    setDownloading(true);
+    setDownloadMsg(null);
+    try {
+      const result = await downloadExcel(report, client, saveDirHandle);
+      setDownloadMsg(`Excel出力完了: ${result.savedTo}`);
+    } catch (e) {
+      console.error(e);
+      setDownloadMsg(`エラー: ${(e as Error).message}`);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -98,6 +113,10 @@ export function ConfirmView({
           <Button onClick={handleDownloadWord} disabled={downloading}>
             <FileDown className="h-4 w-4 mr-2" />
             Wordをダウンロード
+          </Button>
+          <Button variant="outline" onClick={handleDownloadExcel} disabled={downloading}>
+            <FileSpreadsheet className="h-4 w-4 mr-2" />
+            Excelをダウンロード
           </Button>
         </div>
       </div>
