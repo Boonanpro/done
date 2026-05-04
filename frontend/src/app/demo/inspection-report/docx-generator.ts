@@ -124,6 +124,7 @@ export async function generateDocxBlob(report: ReportData, client: Client): Prom
   const arrayBuf = await res.arrayBuffer();
 
   const zip = new PizZip(arrayBuf);
+  removeSkippedWordSections(zip, report);
   const doc = new Docxtemplater(zip, {
     paragraphLoop: true,
     linebreaks: true,
@@ -183,6 +184,93 @@ export async function downloadPdf(
   saveDir: FileSystemDirectoryHandle | null,
 ): Promise<{ savedTo: string }> {
   return downloadDocx(report, client, saveDir);
+}
+
+const WORD_SECTION_RULES: { summaryId: string; start: string; end?: string }[] = [
+  { summaryId: "r07", start: "接地抵抗測定", end: "高 圧 関 係 絶 縁 抵 抗 試 験" },
+  { summaryId: "r06", start: "高 圧 関 係 絶 縁 抵 抗 試 験", end: "地 絡 方 向 継 電 器 試 験" },
+  { summaryId: "r02", start: "地 絡 方 向 継 電 器 試 験", end: "過 電 流 継 電 器 試 験" },
+  { summaryId: "r01", start: "過 電 流 継 電 器 試 験", end: "地絡過電圧継電器試験" },
+  { summaryId: "r03", start: "地絡過電圧継電器試験", end: "アレイNO" },
+  { summaryId: "r22", start: "アレイNO", end: "絶縁抵抗測定(太陽電池アレイ)" },
+  { summaryId: "r11", start: "絶縁抵抗測定(太陽電池アレイ)", end: "【PCSの保護継電器の機能確認及び総合連動試験】" },
+  { summaryId: "r23", start: "【PCSの保護継電器の機能確認及び総合連動試験】" },
+];
+
+function removeSkippedWordSections(zip: PizZip, report: ReportData) {
+  const skipped = new Set(report.summary.filter((item) => item.result === "").map((item) => item.id));
+  if (skipped.size === 0) return;
+
+  const file = zip.file("word/document.xml");
+  if (!file) return;
+
+  let xml = file.asText();
+  for (const rule of WORD_SECTION_RULES) {
+    if (!skipped.has(rule.summaryId)) continue;
+    xml = removeWordSection(xml, rule.start, rule.end);
+  }
+
+  zip.file("word/document.xml", xml);
+}
+
+function removeWordSection(xml: string, startText: string, endText?: string): string {
+  const startTextIndex = findWordTextIndex(xml, startText);
+  if (startTextIndex < 0) return xml;
+
+  const endTextIndex = endText
+    ? findWordTextIndex(xml, endText, startTextIndex + 1)
+    : xml.indexOf("<w:sectPr", startTextIndex);
+  if (endTextIndex < 0) return xml;
+
+  const startIndex = findContainingBlockStart(xml, startTextIndex);
+  const endIndex = endText ? findContainingBlockStart(xml, endTextIndex) : endTextIndex;
+  if (startIndex < 0 || endIndex <= startIndex) return xml;
+
+  return xml.slice(0, startIndex) + xml.slice(endIndex);
+}
+
+function findContainingBlockStart(xml: string, index: number): number {
+  const paragraphIndex = xml.lastIndexOf("<w:p", index);
+  const tableIndex = xml.lastIndexOf("<w:tbl", index);
+  return Math.max(paragraphIndex, tableIndex);
+}
+
+function findWordTextIndex(xml: string, searchText: string, fromIndex = 0): number {
+  const target = normalizeSearchText(searchText);
+  if (!target) return -1;
+
+  let text = "";
+  const map: number[] = [];
+  const textPattern = /<w:t[^>]*>([\s\S]*?)<\/w:t>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = textPattern.exec(xml))) {
+    const raw = unescapeXmlText(match[1]);
+    const rawStart = match.index + match[0].indexOf(">") + 1;
+    for (let i = 0; i < raw.length; i++) {
+      const char = raw[i];
+      if (/\s/.test(char)) continue;
+      text += char;
+      map.push(rawStart + i);
+    }
+  }
+
+  const normalizedFrom = map.findIndex((xmlIndex) => xmlIndex >= fromIndex);
+  const found = text.indexOf(target, Math.max(0, normalizedFrom));
+  return found >= 0 ? map[found] : -1;
+}
+
+function normalizeSearchText(value: string): string {
+  return value.replace(/\s/g, "");
+}
+
+function unescapeXmlText(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
 }
 
 function makeFilename(report: ReportData, client: Client, ext: string): string {

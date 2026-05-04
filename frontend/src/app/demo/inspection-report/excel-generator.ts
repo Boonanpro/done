@@ -37,12 +37,14 @@ async function generateExcelBlob(report: ReportData, client: Client): Promise<Bl
   const zip = new PizZip(await res.arrayBuffer());
   const dateSerial = excelDateSerial(report);
   const weatherLine = `天候 ： ${report.weather} 気温${report.temperature}℃ 湿度${report.humidity}%`;
+  const skipped = skippedSummaryIds(report);
 
   mutateSheet(zip, "xl/worksheets/sheet1.xml", {
     B12: client.facility_name,
     B15: report.inspector,
     B16: dateSerial,
     B30: "良",
+    ...coverInspectionListCells(skipped),
   });
 
   mutateSheet(zip, "xl/worksheets/sheet2.xml", {
@@ -135,11 +137,58 @@ async function generateExcelBlob(report: ReportData, client: Client): Promise<Bl
 
   mutateSheet(zip, "xl/worksheets/sheet9.xml", lowVoltageCells(report));
   mutateSheet(zip, "xl/worksheets/sheet10.xml", majorEquipmentCells(report));
+  hideSkippedSheets(zip, skipped);
 
   return zip.generate({
     type: "blob",
     mimeType: "application/vnd.ms-excel.sheet.macroEnabled.12",
   });
+}
+
+function skippedSummaryIds(report: ReportData): Set<string> {
+  return new Set(report.summary.filter((item) => item.result === "").map((item) => item.id));
+}
+
+function coverInspectionListCells(skipped: Set<string>): Record<string, CellValue> {
+  return {
+    B20: skipped.has("r07") ? "" : undefined,
+    B21: skipped.has("r06") ? "" : undefined,
+    B22: skipped.has("r02") ? "" : undefined,
+    B23: skipped.has("r01") ? "" : undefined,
+    B24: skipped.has("r03") ? "" : undefined,
+    B25: skipped.has("r03") ? "" : undefined,
+    B26: skipped.has("r11") ? "" : undefined,
+  };
+}
+
+function hideSkippedSheets(zip: PizZip, skipped: Set<string>) {
+  const sheetsToHide = new Set<string>();
+  if (skipped.has("r07")) sheetsToHide.add("接地抵抗試験");
+  if (skipped.has("r06")) sheetsToHide.add("耐圧");
+  if (skipped.has("r02")) sheetsToHide.add("地絡継電器");
+  if (skipped.has("r01")) sheetsToHide.add("過電流継電器");
+  if (skipped.has("r03")) {
+    sheetsToHide.add("不足電圧");
+    sheetsToHide.add("地絡過電圧");
+  }
+  if (skipped.has("r11")) sheetsToHide.add("低圧幹線絶縁抵抗測定");
+
+  if (sheetsToHide.size === 0) return;
+
+  const workbookFile = zip.file("xl/workbook.xml");
+  if (!workbookFile) return;
+
+  let xml = workbookFile.asText();
+  for (const sheetName of sheetsToHide) {
+    xml = hideWorkbookSheet(xml, sheetName);
+  }
+  zip.file("xl/workbook.xml", xml);
+}
+
+function hideWorkbookSheet(xml: string, sheetName: string): string {
+  const escapedName = escapeXml(sheetName);
+  const pattern = new RegExp(`(<sheet\\b(?=[^>]*\\bname="${escapeRegex(escapedName)}"\\b)(?![^>]*\\bstate=)[^>]*)/>`);
+  return xml.replace(pattern, '$1 state="hidden"/>');
 }
 
 function mutateSheet(zip: PizZip, path: string, values: Record<string, CellValue>) {
@@ -148,7 +197,7 @@ function mutateSheet(zip: PizZip, path: string, values: Record<string, CellValue
 
   let xml = file.asText();
   for (const [address, value] of Object.entries(values)) {
-    if (value == null || value === "") continue;
+    if (value == null) continue;
     xml = setCellValue(xml, address, value);
   }
   zip.file(path, xml);
