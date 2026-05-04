@@ -163,6 +163,41 @@ Playwright等でブラウザ操作するスキルを新規作成・修正する�
 テスト実行・ブラウザ操作・動作確認・コマンド実行など、ツールで可能な作業をユーザーに委ねない。
 「テストしてください」「確認してください」ではなく、自分でテストし結果を報告する。
 
+## クライアント artifact の公開ルール
+
+クライアント納品物（`/artifacts/<slug>/`）の編集を**確実に公開URL（`<slug>.vercel.app`）に届ける**ためのワークフロー：
+
+### 編集の置き場所
+
+| 種類 | 置き場所 | 公開URLに反映される？ |
+|---|---|---|
+| JSXコード変更 | git commit | ✅ 自動（push → Vercel build） |
+| 画像/動画ファイル変更 | git commit | ✅ 自動 |
+| Inspector の text/style/attr 編集 | DB の `inspector_overrides` | ❌ **書き戻し必要** |
+
+### 「公開して」と言われたら
+
+1. `python scripts/inspector_writeback.py --slug <slug>` で DB の override を JSX に書き戻す
+2. `git add frontend/src/app/artifacts/<slug>/` → commit → push
+3. Vercel が自動デプロイ（30秒〜2分）
+4. ユーザーに「mainにpushしました。約30秒〜2分で <slug>.vercel.app に反映されます」と伝える
+
+### 「ローカルで動いた」≠ 「完了」
+
+ライブプレビュー（`100.x.x.x:3000/artifacts/<slug>`）は DB override が適用されるので、
+公開URLとは見た目が違う場合がある。完了報告の前に必ず：
+1. writeback 実行（差分があるか確認）
+2. commit + push
+3. Vercel公開URL を curl もしくはブラウザで確認
+
+を行うこと。
+
+### 一時的な編集 / 試行錯誤
+
+`/scratch/<name>` または `/demo/<id>`（後者は manifest 必須）で行う。
+これらは Inspector 編集を残したまま放置してOK。クライアント納品物 (`/artifacts`) には
+書き戻し未実施の override を残さない。
+
 ## 開発ワークフロー（PR方式）
 
 本プロジェクトのファイルを変更する際は、以下のワークフローに従うこと。
