@@ -1,0 +1,21 @@
+# This repository contains the backend, scripts, and generated local artifacts.
+# The Vercel project is configured with rootDirectory = "frontend", so only the
+# frontend subtree should be uploaded when deploying from the repository root.
+*
+!frontend
+!frontend/**
+
+# Keep local/generated frontend files out of the deployment bundle.
+frontend/node_modules
+frontend/.next
+frontend/out
+frontend/build
+frontend/coverage
+frontend/.vercel
+frontend/*.tsbuildinfo
+frontend/.env
+frontend/.env.*
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/.pnpm-debug.log*
