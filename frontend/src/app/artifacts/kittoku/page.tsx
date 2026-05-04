@@ -36,7 +36,6 @@ const HERO_POSTER = `/kikkawa/hero-poster.jpg?v=${ASSET_VERSION}`;
 const STATS = [
   { slug: "founded", label: "創業", value: "1988", unit: "年", hint: "37年以上の整備実績" },
   { slug: "vehicles", label: "対応車種", value: "9", unit: "機種", hint: "特装車全機種カバー" },
-  { slug: "area", label: "対応エリア", value: "中国", unit: "5県", hint: "山陰から広域に即応" },
   { slug: "certified", label: "認定工場", value: "新明和", unit: "認定", hint: "指定サービス工場" },
 ];
 
@@ -270,19 +269,18 @@ function HeroSection() {
                 <ArrowRight className="h-4 w-4 ml-1.5" />
               </Link>
             </Button>
-            <a
-              data-edit-id="kittoku-top-hero-tel"
-              href="tel:0859-27-4885"
-              className="flex items-center gap-3 text-white hover:text-[var(--yk-gold)] transition-colors"
+            <div
+              data-edit-id="kittoku-top-hero-hours"
+              className="flex items-center gap-3 text-white"
             >
-              <Phone className="h-5 w-5" />
+              <Clock className="h-5 w-5" />
               <div className="flex flex-col leading-tight">
-                <span data-edit-id="kittoku-top-hero-tel-number" className="font-mono-data text-2xl font-bold">
-                  0859-27-4885
+                <span data-edit-id="kittoku-top-hero-hours-label" className="text-xs text-white/60">営業時間</span>
+                <span data-edit-id="kittoku-top-hero-hours-value" className="font-mono-data text-lg font-bold">
+                  月〜土 9:00〜17:00
                 </span>
-                <span data-edit-id="kittoku-top-hero-tel-hours" className="text-xs text-white/60">平日 8:00〜17:00</span>
               </div>
-            </a>
+            </div>
           </div>
         </div>
       </div>
