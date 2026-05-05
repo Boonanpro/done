@@ -209,6 +209,7 @@ function removeSkippedWordSections(zip: PizZip, report: ReportData) {
     if (!skipped.has(rule.summaryId)) continue;
     xml = removeWordSection(xml, rule.start, rule.end);
   }
+  xml = removeOrphanedBookmarkMarkers(xml);
 
   zip.file("word/document.xml", xml);
 }
@@ -233,6 +234,23 @@ function findContainingBlockStart(xml: string, index: number): number {
   const paragraphIndex = xml.lastIndexOf("<w:p", index);
   const tableIndex = xml.lastIndexOf("<w:tbl", index);
   return Math.max(paragraphIndex, tableIndex);
+}
+
+function removeOrphanedBookmarkMarkers(xml: string): string {
+  const startIds = new Set(
+    Array.from(xml.matchAll(/<w:bookmarkStart\b[^>]*\bw:id="([^"]+)"[^>]*\/>/g)).map((match) => match[1]),
+  );
+  const endIds = new Set(
+    Array.from(xml.matchAll(/<w:bookmarkEnd\b[^>]*\bw:id="([^"]+)"[^>]*\/>/g)).map((match) => match[1]),
+  );
+
+  let cleaned = xml.replace(/<w:bookmarkStart\b[^>]*\bw:id="([^"]+)"[^>]*\/>/g, (match, id: string) =>
+    endIds.has(id) ? match : "",
+  );
+  cleaned = cleaned.replace(/<w:bookmarkEnd\b[^>]*\bw:id="([^"]+)"[^>]*\/>/g, (match, id: string) =>
+    startIds.has(id) ? match : "",
+  );
+  return cleaned;
 }
 
 function findWordTextIndex(xml: string, searchText: string, fromIndex = 0): number {
