@@ -13,15 +13,23 @@ import { downloadExcel } from "../excel-generator";
 import type { Judge, ReportData } from "../types";
 
 const JUDGE_OPTIONS: Judge[] = ["良", "不良", "－", ""];
+const SUMMARY_JUDGE_LABELS: Record<Judge, string> = {
+  良: "出力する（良）",
+  不良: "出力する（不良）",
+  "－": "出力する（－）",
+  "": "出力しない",
+};
 
 function JudgeButton({
   value,
   onChange,
   options = JUDGE_OPTIONS,
+  labels,
 }: {
   value: Judge | string;
   onChange: (v: Judge) => void;
   options?: readonly Judge[];
+  labels?: Partial<Record<Judge, string>>;
 }) {
   return (
     <div className="inline-flex rounded-md border border-border overflow-hidden text-xs">
@@ -37,7 +45,7 @@ function JudgeButton({
               : "bg-background hover:bg-secondary"
           }`}
         >
-          {o === "" ? "出力しない" : o}
+          {labels?.[o] ?? (o === "" ? "出力しない" : o)}
         </button>
       ))}
     </div>
@@ -305,6 +313,7 @@ export function ConfirmView({
                   </span>
                   <JudgeButton
                     value={s.result}
+                    labels={SUMMARY_JUDGE_LABELS}
                     onChange={(v) => {
                       const next = [...report.summary];
                       next[i] = { ...s, result: v };

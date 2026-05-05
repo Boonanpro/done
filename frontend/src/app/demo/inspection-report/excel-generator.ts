@@ -46,6 +46,7 @@ async function generateExcelBlob(report: ReportData, client: Client): Promise<Bl
     B30: "良",
     ...coverInspectionListCells(skipped),
   });
+  clearCells(zip, "xl/worksheets/sheet1.xml", coverInspectionListCellsToClear(skipped));
 
   mutateSheet(zip, "xl/worksheets/sheet2.xml", {
     A2: dateSerial,
@@ -162,6 +163,12 @@ function coverInspectionListCells(skipped: Set<string>): Record<string, CellValu
   };
 }
 
+function coverInspectionListCellsToClear(skipped: Set<string>): string[] {
+  return Object.entries(coverInspectionListCells(skipped))
+    .filter(([, value]) => value === "")
+    .map(([address]) => address);
+}
+
 function hideSkippedSheets(zip: PizZip, skipped: Set<string>) {
   const sheetsToHide = new Set<string>();
   if (skipped.has("r07")) sheetsToHide.add("接地抵抗試験");
@@ -223,6 +230,33 @@ function mutateSheet(zip: PizZip, path: string, values: Record<string, CellValue
     xml = setCellValue(xml, address, value);
   }
   zip.file(path, xml);
+}
+
+function clearCells(zip: PizZip, path: string, addresses: string[]) {
+  if (addresses.length === 0) return;
+
+  const file = zip.file(path);
+  if (!file) return;
+
+  let xml = file.asText();
+  for (const address of addresses) {
+    xml = clearCellValue(xml, address);
+  }
+  zip.file(path, xml);
+}
+
+function clearCellValue(xml: string, address: string): string {
+  const cellPattern = new RegExp(`<c\\b(?=[^>]*\\br="${escapeRegex(address)}"\\b)([^>]*)>([\\s\\S]*?)<\\/c>`);
+  const selfClosingPattern = new RegExp(`<c\\b(?=[^>]*\\br="${escapeRegex(address)}"\\b)([^>]*)\\/>`);
+  const clearCell = (_match: string, attrs: string) => {
+    const style = attrs.match(/\bs="[^"]*"/)?.[0];
+    return `<c r="${address}"${style ? ` ${style}` : ""}/>`;
+  };
+
+  if (cellPattern.test(xml)) {
+    return xml.replace(cellPattern, clearCell);
+  }
+  return xml.replace(selfClosingPattern, clearCell);
 }
 
 function setCellValue(xml: string, address: string, value: CellValue): string {
