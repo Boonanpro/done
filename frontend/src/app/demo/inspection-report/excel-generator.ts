@@ -137,6 +137,7 @@ async function generateExcelBlob(report: ReportData, client: Client): Promise<Bl
 
   mutateSheet(zip, "xl/worksheets/sheet9.xml", lowVoltageCells(report));
   mutateSheet(zip, "xl/worksheets/sheet10.xml", majorEquipmentCells(report));
+  keepCoverStampInsidePrintArea(zip);
   hideSkippedSheets(zip, skipped);
 
   return zip.generate({
@@ -191,10 +192,25 @@ function hideWorkbookSheet(xml: string, sheetName: string): string {
     if (name?.trim() !== sheetName) return sheetTag;
 
     if (/\bstate="/.test(sheetTag)) {
-      return sheetTag.replace(/\bstate="[^"]*"/, 'state="hidden"');
+      return sheetTag.replace(/\bstate="[^"]*"/, 'state="veryHidden"');
     }
-    return sheetTag.replace(/\/>$/, ' state="hidden"/>');
+    return sheetTag.replace(/\/>$/, ' state="veryHidden"/>');
   });
+}
+
+function keepCoverStampInsidePrintArea(zip: PizZip) {
+  const drawingFile = zip.file("xl/drawings/drawing1.xml");
+  if (!drawingFile) return;
+
+  const stampColOffset = "3800000";
+  const stampXOffset = "5171600";
+  const xml = drawingFile.asText().replace(/<xdr:oneCellAnchor>[\s\S]*?<\/xdr:oneCellAnchor>/, (anchor) => {
+    if (!/<xdr:cNvPr\b[^>]*\bname="図 1"/.test(anchor)) return anchor;
+    return anchor
+      .replace(/(<xdr:colOff>)-?\d+(<\/xdr:colOff>)/, `$1${stampColOffset}$2`)
+      .replace(/(<a:off\b[^>]*\bx=")-?\d+("[^>]*\/>)/, `$1${stampXOffset}$2`);
+  });
+  zip.file("xl/drawings/drawing1.xml", xml);
 }
 
 function mutateSheet(zip: PizZip, path: string, values: Record<string, CellValue>) {
