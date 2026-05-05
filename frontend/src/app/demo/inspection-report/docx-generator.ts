@@ -209,6 +209,7 @@ function removeSkippedWordSections(zip: PizZip, report: ReportData) {
     if (!skipped.has(rule.summaryId)) continue;
     xml = removeWordSection(xml, rule.start, rule.end);
   }
+  xml = repairBodySectionProperties(xml);
   xml = removeOrphanedBookmarkMarkers(xml);
 
   zip.file("word/document.xml", xml);
@@ -234,6 +235,10 @@ function findContainingBlockStart(xml: string, index: number): number {
   const paragraphIndex = xml.lastIndexOf("<w:p", index);
   const tableIndex = xml.lastIndexOf("<w:tbl", index);
   return Math.max(paragraphIndex, tableIndex);
+}
+
+function repairBodySectionProperties(xml: string): string {
+  return xml.replace(/<w:p\b[^>]*>(?:<w:pPr>[\s\S]*?<\/w:pPr>)?(<w:sectPr\b[\s\S]*?<\/w:sectPr>)/g, "$1");
 }
 
 function removeOrphanedBookmarkMarkers(xml: string): string {
