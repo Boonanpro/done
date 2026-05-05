@@ -37,7 +37,7 @@ function JudgeButton({
               : "bg-background hover:bg-secondary"
           }`}
         >
-          {o === "" ? "空" : o}
+          {o === "" ? "出力しない" : o}
         </button>
       ))}
     </div>
@@ -289,7 +289,7 @@ export function ConfirmView({
         <TabsContent value="judges" className="space-y-4">
           <SectionCard title="総括チェック表（23項目）">
             <p className="text-xs text-muted-foreground mb-3">
-              「空」を選ぶと、その項目はWord/Excel出力時に該当ページが出力されません（総括表の番号と項目名も空白になります）。
+              「出力しない」を選ぶと、総括表では空欄になり、対応する詳細ページやExcelシートも出力対象から外れます。
             </p>
             <div className="space-y-2 text-sm">
               {report.summary.map((s, i) => (

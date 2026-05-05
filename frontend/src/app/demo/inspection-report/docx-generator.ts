@@ -197,14 +197,22 @@ const WORD_SECTION_RULES: { summaryId: string; start: string; end?: string }[] =
   { summaryId: "r23", start: "【PCSの保護継電器の機能確認及び総合連動試験】" },
 ];
 
+const COVER_STAMP_LEFT_OFFSET = "5020000";
+
 function removeSkippedWordSections(zip: PizZip, report: ReportData) {
   const skipped = new Set(report.summary.filter((item) => item.result === "").map((item) => item.id));
-  if (skipped.size === 0) return;
 
   const file = zip.file("word/document.xml");
   if (!file) return;
 
   let xml = file.asText();
+  xml = keepCoverStampInsidePage(xml);
+
+  if (skipped.size === 0) {
+    zip.file("word/document.xml", xml);
+    return;
+  }
+
   for (const rule of WORD_SECTION_RULES) {
     if (!skipped.has(rule.summaryId)) continue;
     xml = removeWordSection(xml, rule.start, rule.end);
@@ -213,6 +221,16 @@ function removeSkippedWordSections(zip: PizZip, report: ReportData) {
   xml = removeOrphanedBookmarkMarkers(xml);
 
   zip.file("word/document.xml", xml);
+}
+
+function keepCoverStampInsidePage(xml: string): string {
+  return xml.replace(/<wp:anchor\b[\s\S]*?<\/wp:anchor>/g, (anchor) => {
+    if (!/<wp:docPr\b[^>]*\bname="図 32"/.test(anchor)) return anchor;
+    return anchor.replace(
+      /(<wp:positionH\b[^>]*\brelativeFrom="margin"[^>]*>\s*<wp:posOffset>)-?\d+(<\/wp:posOffset>)/,
+      `$1${COVER_STAMP_LEFT_OFFSET}$2`,
+    );
+  });
 }
 
 function removeWordSection(xml: string, startText: string, endText?: string): string {
