@@ -186,9 +186,15 @@ function hideSkippedSheets(zip: PizZip, skipped: Set<string>) {
 }
 
 function hideWorkbookSheet(xml: string, sheetName: string): string {
-  const escapedName = escapeXml(sheetName);
-  const pattern = new RegExp(`(<sheet\\b(?=[^>]*\\bname="${escapeRegex(escapedName)}"\\b)(?![^>]*\\bstate=)[^>]*)/>`);
-  return xml.replace(pattern, '$1 state="hidden"/>');
+  return xml.replace(/<sheet\b[^>]*\/>/g, (sheetTag) => {
+    const name = getXmlAttribute(sheetTag, "name");
+    if (name?.trim() !== sheetName) return sheetTag;
+
+    if (/\bstate="/.test(sheetTag)) {
+      return sheetTag.replace(/\bstate="[^"]*"/, 'state="hidden"');
+    }
+    return sheetTag.replace(/\/>$/, ' state="hidden"/>');
+  });
 }
 
 function mutateSheet(zip: PizZip, path: string, values: Record<string, CellValue>) {
@@ -332,6 +338,20 @@ function makeFilename(report: ReportData, client: Client, ext: string): string {
 
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getXmlAttribute(tag: string, name: string): string | null {
+  const match = tag.match(new RegExp(`\\b${escapeRegex(name)}="([^"]*)"`));
+  return match ? unescapeXml(match[1]) : null;
+}
+
+function unescapeXml(value: string): string {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&");
 }
 
 function escapeXml(value: string): string {
