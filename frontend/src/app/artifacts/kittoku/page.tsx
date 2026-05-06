@@ -23,6 +23,7 @@ import { Logo } from "./components/logo";
 import { CertifiedBadge } from "./components/certified-badge";
 import { DiagonalDivider } from "./components/diagonal-divider";
 import { HeroVideo } from "./components/hero-video";
+import { LineInquiryMockup } from "./components/line-inquiry-mockup";
 import { VEHICLES, type VehicleKey } from "./components/vehicle-icons";
 
 // 動画/画像にバージョンクエリを付けて、ブラウザ強キャッシュを破棄する。
@@ -313,6 +314,17 @@ function StatsSection() {
                 className="w-full h-auto"
                 sizes="(max-width: 640px) 180px, 260px"
               />
+              <div
+                className="absolute left-[54%] top-[37%] -translate-x-1/2 -translate-y-full"
+                aria-label="吉川特装 所在地 鳥取県米子市"
+              >
+                <div className="relative flex items-center gap-1.5">
+                  <MapPin className="h-7 w-7 sm:h-9 sm:w-9 fill-red-600 text-white drop-shadow-[0_2px_3px_rgba(15,23,42,0.35)]" />
+                  <div className="whitespace-nowrap rounded-sm bg-white px-2 py-1 text-[10px] sm:text-xs font-bold text-[var(--yk-navy)] shadow-md ring-1 ring-[var(--yk-navy)]/10">
+                    吉川特装
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -406,7 +418,7 @@ function FlowSection() {
             </p>
           </div>
         </div>
-        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 pt-8">
+        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-10 lg:gap-14 pt-8">
           <Button
             asChild
             size="lg"
@@ -417,6 +429,7 @@ function FlowSection() {
               <ArrowRight className="h-4 w-4 ml-1.5" />
             </Link>
           </Button>
+          <LineInquiryMockup />
         </div>
       </div>
     </section>
