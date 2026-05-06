@@ -27,6 +27,16 @@ export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const host = request.headers.get('host') || '';
 
+  // ----- Public preview: /preview/<slug> mirrors /artifacts/<slug> without auth -----
+  if (pathname.startsWith('/preview/')) {
+    const segments = pathname.split('/').filter(Boolean); // ['preview','slug', ...]
+    if (segments.length >= 2) {
+      const url = request.nextUrl.clone();
+      url.pathname = `/artifacts/${segments.slice(1).join('/')}`;
+      return NextResponse.rewrite(url);
+    }
+  }
+
   // ----- 吉川特装HP 専用ドメイン: ルートを /artifacts/kittoku に rewrite -----
   if (
     host === 'kittoku.vercel.app' ||
