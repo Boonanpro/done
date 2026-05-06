@@ -21,6 +21,7 @@ Usage: python scripts/inspector_writeback.py --slug kittoku [--dry-run] [--keep-
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -61,6 +62,22 @@ def _normalize_to_v2(row):
     attrs = row.get("attrs") or {}
     styles = row.get("styles") or {}
     out = {"text": None, "blockStyle": dict(styles), "spans": [], "extraAttrs": {}}
+    if isinstance(attrs.get("model_v2"), str):
+        try:
+            model = json.loads(attrs["model_v2"])
+        except json.JSONDecodeError:
+            model = None
+        if isinstance(model, dict):
+            if model.get("v") == 2:
+                if isinstance(model.get("text"), str):
+                    out["text"] = model["text"]
+                if isinstance(model.get("blockStyle"), dict):
+                    out["blockStyle"].update(model["blockStyle"])
+                if isinstance(model.get("spans"), list):
+                    out["spans"] = model["spans"]
+                extra = model.get("attrs") or model.get("extraAttrs")
+                if isinstance(extra, dict):
+                    out["extraAttrs"].update(extra)
     if attrs.get("v") == 2:
         if isinstance(attrs.get("text"), str):
             out["text"] = attrs["text"]
@@ -173,11 +190,12 @@ def _set_attr(tag_html, attr_name, value):
     return tag_html[:cut] + " " + new_assign + tag_html[cut:]
 
 
-def _apply_to_file(file_path, edit_id, model):
+def _apply_to_file(file_path, edit_id, model, dry_run=False):
     src = file_path.read_text(encoding="utf-8")
+    original = src
     found = _find_open_tag(src, edit_id)
     if not found:
-        return False
+        return False, False
     open_start, open_end, tag_html = found
     new_tag = tag_html
     if model.get("blockStyle"):
@@ -198,8 +216,10 @@ def _apply_to_file(file_path, edit_id, model):
         if model.get("spans"):
             sys.stderr.write("  [warn spans] {} partial-style not supported\n".format(edit_id))
         src = _apply_text(src, open_start, open_end, new_tag, model["text"])
-    file_path.write_text(src, encoding="utf-8")
-    return True
+    changed = src != original
+    if changed and not dry_run:
+        file_path.write_text(src, encoding="utf-8")
+    return True, changed
 
 
 def main():
@@ -228,8 +248,10 @@ def main():
             continue
         applied = False
         for f in files:
-            if _apply_to_file(f, edit_id, model):
-                print("  [apply] {} -> {}".format(edit_id, f.relative_to(PROJECT_ROOT)))
+            found, changed = _apply_to_file(f, edit_id, model, dry_run=args.dry_run)
+            if found:
+                action = "would apply" if args.dry_run else ("apply" if changed else "already")
+                print("  [{}] {} -> {}".format(action, edit_id, f.relative_to(PROJECT_ROOT)))
                 applied = True
                 break
         if applied:

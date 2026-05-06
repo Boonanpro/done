@@ -25,7 +25,11 @@ export function middleware(request: NextRequest) {
   const host = request.headers.get('host') || '';
 
   // ----- 吉川特装HP 専用ドメイン: ルートを /artifacts/kittoku に rewrite -----
-  if (host === 'kittoku.vercel.app' || host === 'kittoku-tokuso.vercel.app') {
+  if (
+    host === 'kittoku.vercel.app' ||
+    host === 'kittoku-tokuso.vercel.app' ||
+    host === 'yoshikawa-tokuso.vercel.app'
+  ) {
     if (pathname === '/') {
       const url = request.nextUrl.clone();
       url.pathname = '/artifacts/kittoku';

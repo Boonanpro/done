@@ -100,6 +100,11 @@ const nextConfig: NextConfig = {
         has: [{ type: 'host', value: 'kittoku-tokuso.vercel.app' }],
         destination: '/artifacts/kittoku',
       },
+      {
+        source: '/',
+        has: [{ type: 'host', value: 'yoshikawa-tokuso.vercel.app' }],
+        destination: '/artifacts/kittoku',
+      },
       // 吉川特装HP: /kikkawa-tokuso 短縮パスは /artifacts/kittoku にエイリアス
       {
         source: '/kikkawa-tokuso',
