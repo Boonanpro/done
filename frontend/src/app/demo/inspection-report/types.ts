@@ -1,4 +1,5 @@
 export type Judge = "良" | "不良" | "" | "－";
+export type ReportKind = "annual" | "completion";
 
 // 機器マスタ（PAS / 各種継電器 / 変圧器 など）
 export type Equipment = {
@@ -80,6 +81,7 @@ export type Client = {
 // 1回の点検レポートで生成される全データ
 export type ReportData = {
   client_id: string;
+  report_kind: ReportKind;
 
   // 表紙
   year_wareki: number;

@@ -82,6 +82,10 @@ export function ConfirmView({
   }
 
   const update = (patch: Partial<ReportData>) => updateReport(patch);
+  const reportKindLabel =
+    report.report_kind === "completion"
+      ? "電力設備試験結果報告書（竣工報告書）"
+      : "自家用電気工作物年次点検試験報告書";
 
   const handleDownloadWord = async () => {
     setDownloading(true);
@@ -141,6 +145,7 @@ export function ConfirmView({
         <CardContent className="py-4">
           <div className="flex items-center gap-4 text-sm">
             <Badge variant="outline">{client.name}</Badge>
+            <Badge variant="secondary">{reportKindLabel}</Badge>
             <span className="text-muted-foreground">{client.facility_name}</span>
             <span className="text-muted-foreground">
               令和{report.year_wareki}年{report.month}月{report.day}日

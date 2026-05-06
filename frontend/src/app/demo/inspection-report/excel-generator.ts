@@ -31,6 +31,60 @@ export async function downloadExcel(
 }
 
 async function generateExcelBlob(report: ReportData, client: Client): Promise<Blob> {
+  if (report.report_kind === "completion") {
+    return generateCompletionExcelBlob(report, client);
+  }
+  return generateAnnualExcelBlob(report, client);
+}
+
+async function generateAnnualExcelBlob(report: ReportData, client: Client): Promise<Blob> {
+  const res = await fetch("/annual-inspection-template.xlsm");
+  if (!res.ok) throw new Error("年次点検Excelテンプレートの読み込みに失敗しました");
+
+  const zip = new PizZip(await res.arrayBuffer());
+  const skipped = skippedSummaryIds(report);
+  mutateSheet(zip, "xl/worksheets/sheet1.xml", annualCoverCells(report, client));
+  mutateSheet(zip, "xl/worksheets/sheet15.xml", annualLowVoltageCells(report));
+  hideAnnualSkippedSheets(zip, skipped);
+
+  return zip.generate({
+    type: "blob",
+    mimeType: "application/vnd.ms-excel.sheet.macroEnabled.12",
+  });
+}
+
+function annualCoverCells(report: ReportData, client: Client): Record<string, CellValue> {
+  return {
+    B6: `${client.name}　様`,
+    F8: `${client.facility_name}　　      ㊞　　　　　　　　　　　　　　　　　${report.inspector}   　`,
+    C11: `実施日:${2018 + report.year_wareki}年  ${report.month}月  ${report.day}日 天候：${report.weather} 気温：${report.temperature}℃ 湿度${report.humidity}％`,
+    ...annualSummaryResultCells(report),
+  };
+}
+
+function annualSummaryResultCells(report: ReportData): Record<string, CellValue> {
+  const cells: Record<string, CellValue> = {};
+  report.summary.slice(0, 12).forEach((item, index) => {
+    cells[`D${17 + index}`] = item.result;
+  });
+  report.summary.slice(12, 23).forEach((item, index) => {
+    cells[`G${17 + index}`] = item.result;
+  });
+  return cells;
+}
+
+function annualLowVoltageCells(report: ReportData): Record<string, CellValue> {
+  const cells: Record<string, CellValue> = {};
+  report.lv.slice(0, 8).forEach((item, index) => {
+    const row = 9 + index;
+    cells[`C${row}`] = `回路 ${item.id}`;
+    cells[`D${row}`] = joinNonEmpty([item.rp, item.rn], " / ");
+    cells[`E${row}`] = item.judge || "良";
+  });
+  return cells;
+}
+
+async function generateCompletionExcelBlob(report: ReportData, client: Client): Promise<Blob> {
   const res = await fetch("/inspection-template.xlsm");
   if (!res.ok) throw new Error("Excelテンプレートの読み込みに失敗しました");
 
@@ -145,6 +199,38 @@ async function generateExcelBlob(report: ReportData, client: Client): Promise<Bl
     type: "blob",
     mimeType: "application/vnd.ms-excel.sheet.macroEnabled.12",
   });
+}
+
+function hideAnnualSkippedSheets(zip: PizZip, skipped: Set<string>) {
+  const sheetsToHide = new Set<string>();
+
+  if (skipped.has("r01")) sheetsToHide.add("過電流継電器");
+  if (skipped.has("r02")) sheetsToHide.add("SOG");
+  if (skipped.has("r03")) {
+    sheetsToHide.add("OVGR");
+    sheetsToHide.add("不足電圧");
+    sheetsToHide.add("低圧OVGR");
+  }
+  if (skipped.has("r06") && skipped.has("r07")) sheetsToHide.add("接地・高圧絶縁");
+  if (skipped.has("r11")) sheetsToHide.add("低圧絶縁");
+  if (skipped.has("r22")) {
+    sheetsToHide.add("アレイ絶縁A1-A4");
+    sheetsToHide.add("アレイ絶縁A5-B2");
+    sheetsToHide.add("アレイ絶縁B3-C1");
+    sheetsToHide.add("アレイ絶縁C2-C5");
+    sheetsToHide.add("アレイ絶縁C6-C8");
+    sheetsToHide.add("アレイ絶縁D1-D3");
+  }
+  if (skipped.has("r23")) sheetsToHide.add("総合保護連動");
+
+  const workbookFile = zip.file("xl/workbook.xml");
+  if (!workbookFile) return;
+
+  let xml = workbookFile.asText();
+  for (const sheetName of sheetsToHide) {
+    xml = hideWorkbookSheet(xml, sheetName);
+  }
+  zip.file("xl/workbook.xml", xml);
 }
 
 function skippedSummaryIds(report: ReportData): Set<string> {
@@ -388,7 +474,8 @@ function joinNonEmpty(values: CellValue[], separator: string): string {
 
 function makeFilename(report: ReportData, client: Client, ext: string): string {
   const safeName = client.name.replace(/[\\/:*?"<>|]/g, "");
-  return `R${report.year_wareki}_${safeName}_年次点検報告書_${report.year_wareki}-${report.month}-${report.day}.${ext}`;
+  const reportName = report.report_kind === "completion" ? "竣工報告書" : "年次点検報告書";
+  return `R${report.year_wareki}_${safeName}_${reportName}_${report.year_wareki}-${report.month}-${report.day}.${ext}`;
 }
 
 function escapeRegex(value: string): string {

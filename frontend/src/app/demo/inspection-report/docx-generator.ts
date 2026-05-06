@@ -119,6 +119,10 @@ function buildContext(report: ReportData, client: Client): Record<string, unknow
 }
 
 export async function generateDocxBlob(report: ReportData, client: Client): Promise<Blob> {
+  if (report.report_kind === "completion") {
+    throw new Error("竣工報告書のWordひな形が未登録です。竣工用のWordひな形を追加すると出力できます。");
+  }
+
   const res = await fetch("/inspection-template.docx");
   if (!res.ok) throw new Error("テンプレートの読み込みに失敗しました");
   const arrayBuf = await res.arrayBuffer();
@@ -316,5 +320,6 @@ function unescapeXmlText(value: string): string {
 
 function makeFilename(report: ReportData, client: Client, ext: string): string {
   const safeName = client.name.replace(/[\\/:*?"<>|]/g, "");
-  return `R${report.year_wareki}_${safeName}_年次点検記録_${report.year_wareki}-${report.month}-${report.day}.${ext}`;
+  const reportName = report.report_kind === "completion" ? "竣工報告書" : "年次点検記録";
+  return `R${report.year_wareki}_${safeName}_${reportName}_${report.year_wareki}-${report.month}-${report.day}.${ext}`;
 }

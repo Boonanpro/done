@@ -1,4 +1,4 @@
-import type { Client, Equipment, Judge, MeasuringInstrument, ReportData } from "./types";
+import type { Client, Equipment, Judge, MeasuringInstrument, ReportData, ReportKind } from "./types";
 
 // 範囲内の値を小数1桁または整数で返す
 function rand(min: number, max: number, digits = 1): string {
@@ -75,6 +75,7 @@ export function generateReport(
   todayWareki = 8,
   todayMonth = 4,
   todayDay = 7,
+  reportKind: ReportKind = "annual",
 ): ReportData {
   const pas = client.pas_equipment_id ? equipmentMap.get(client.pas_equipment_id) : undefined;
   const dgrRelay = client.dgr_relay_id ? equipmentMap.get(client.dgr_relay_id) : undefined;
@@ -234,6 +235,7 @@ export function generateReport(
 
   return {
     client_id: client.id,
+    report_kind: reportKind,
     year_wareki: todayWareki,
     month: todayMonth,
     day: todayDay,

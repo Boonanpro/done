@@ -1,13 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { Sparkles, Building2 } from "lucide-react";
+import { Sparkles, Building2, FileText } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useInspectionStore } from "../store";
 import { generateReport } from "../random";
+import type { ReportKind } from "../types";
 
 export function GenerateView({ onGenerated }: { onGenerated: () => void }) {
   const clients = useInspectionStore((s) => s.clients);
@@ -16,6 +17,7 @@ export function GenerateView({ onGenerated }: { onGenerated: () => void }) {
   const setCurrentReport = useInspectionStore((s) => s.setCurrentReport);
 
   const [selectedId, setSelectedId] = useState<string>(clients[0]?.id ?? "");
+  const [reportKind, setReportKind] = useState<ReportKind>("annual");
   const today = new Date();
   const [year, setYear] = useState<number>(today.getFullYear() - 2018); // 令和=西暦-2018
   const [month, setMonth] = useState<number>(today.getMonth() + 1);
@@ -27,7 +29,7 @@ export function GenerateView({ onGenerated }: { onGenerated: () => void }) {
     if (!client) return;
     const eqMap = new Map(equipments.map((e) => [e.id, e]));
     const instMap = new Map(instruments.map((m) => [m.id, m]));
-    const r = generateReport(client, eqMap, instMap, year, month, day);
+    const r = generateReport(client, eqMap, instMap, year, month, day, reportKind);
     setCurrentReport(r, client.id);
     onGenerated();
   };
@@ -40,6 +42,48 @@ export function GenerateView({ onGenerated }: { onGenerated: () => void }) {
           クライアントを選んで「生成」を押すと、検査項目の値が正常範囲内で自動生成されます。
         </p>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">報告書の種類を選ぶ</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          {[
+            {
+              value: "annual" as const,
+              title: "自家用電気工作物年次点検試験報告書",
+              note: "毎年1回の年次点検。Wordは島津組ひな形、Excelは倉吉第1ひな形を使います。",
+            },
+            {
+              value: "completion" as const,
+              title: "電力設備試験結果報告書（竣工報告書）",
+              note: "新設時など初回用。Excelは大崎1ひな形を使います。Wordはひな形追加後に出力できます。",
+            },
+          ].map((item) => (
+            <label
+              key={item.value}
+              className={`flex items-start gap-3 p-3 rounded-md cursor-pointer border ${
+                reportKind === item.value
+                  ? "border-primary bg-primary/5"
+                  : "border-border hover:bg-secondary/30"
+              }`}
+            >
+              <input
+                type="radio"
+                name="reportKind"
+                className="sr-only"
+                checked={reportKind === item.value}
+                onChange={() => setReportKind(item.value)}
+              />
+              <FileText className="h-5 w-5 text-muted-foreground mt-0.5" />
+              <div>
+                <p className="font-medium">{item.title}</p>
+                <p className="text-sm text-muted-foreground">{item.note}</p>
+              </div>
+            </label>
+          ))}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
