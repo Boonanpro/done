@@ -232,7 +232,7 @@ export function InspectorRuntime({ slug }: { slug: string }) {
           `/api/v1/inspector-overrides?slug=${encodeURIComponent(slug)}`,
           { credentials: 'include' }
         );
-        if (res.status === 401 || res.status === 403) {
+        if (!res.ok) {
           res = await fetch(
             `/api/v1/inspector-overrides/public?slug=${encodeURIComponent(slug)}`,
             { credentials: 'omit' }

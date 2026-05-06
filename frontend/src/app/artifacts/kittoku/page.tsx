@@ -218,6 +218,7 @@ export default function YoshikawaHomePage() {
       <ManufacturersSection />
       <VehiclesSection />
       <FlowSection />
+      <CompanyBriefSection />
       <CareersCtaSection />
     </LpShell>
   );
@@ -353,7 +354,7 @@ function VehiclesSection() {
               href="/artifacts/kittoku/services"
               className="group relative bg-white border border-border rounded-sm overflow-hidden hover:border-[var(--yk-navy)] hover:-translate-y-0.5 transition-all duration-200"
             >
-              <div className="aspect-[4/3] relative bg-[var(--yk-navy)]/[0.03] overflow-hidden">
+              <div className="aspect-[4/3] relative bg-white overflow-hidden">
                 <Image
                   data-edit-id={`kittoku-top-vehicles-${key}-img`}
                   src={v.image}
