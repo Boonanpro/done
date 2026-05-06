@@ -315,7 +315,7 @@ function StatsSection() {
                 sizes="(max-width: 640px) 180px, 260px"
               />
               <div
-                className="absolute left-[54%] top-[37%] -translate-x-1/2 -translate-y-full"
+                className="absolute left-[60%] top-[38%] -translate-x-1/2 -translate-y-full"
                 aria-label="吉川特装 所在地 鳥取県米子市"
               >
                 <div className="relative flex items-center gap-1.5">
