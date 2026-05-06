@@ -232,9 +232,11 @@ function removeWordSection(xml: string, startText: string, endText?: string): st
 }
 
 function findContainingBlockStart(xml: string, index: number): number {
-  const paragraphIndex = findLastOpenTagStart(xml, "p", index);
   const tableIndex = findLastOpenTagStart(xml, "tbl", index);
-  return Math.max(paragraphIndex, tableIndex);
+  const tableEndIndex = xml.lastIndexOf("</w:tbl>", index);
+  if (tableIndex > tableEndIndex) return tableIndex;
+
+  return findLastOpenTagStart(xml, "p", index);
 }
 
 function findLastOpenTagStart(xml: string, tagName: string, beforeIndex: number): number {
