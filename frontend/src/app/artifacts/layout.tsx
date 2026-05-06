@@ -16,12 +16,37 @@ import { InspectorRuntimeLoader } from '@/components/dan/inspector-runtime-loade
  *    src/alt 等 CSS で表現できない属性もここで当てる。
  */
 
+const publicArtifactHostMap = JSON.stringify({
+  'kittoku.vercel.app': 'kittoku',
+  'kittoku-tokuso.vercel.app': 'kittoku',
+  'yoshikawa-tokuso.vercel.app': 'kittoku',
+});
+
+const envArtifactHostMap = JSON.stringify(
+  process.env.NEXT_PUBLIC_ARTIFACT_HOST_MAP || '',
+);
+
 const prePaintScript = `
 (function(){
   try {
-    var match = location.pathname.match(/\\/artifacts\\/([^/]+)/);
-    if (!match) return;
-    var slug = match[1];
+    var match = location.pathname.match(/\\/(?:artifacts|preview)\\/([^/]+)/);
+    var slug = match && match[1];
+    if (!slug) {
+      var hosts = ${publicArtifactHostMap};
+      slug = hosts[location.host];
+    }
+    if (!slug) {
+      var rawHostMap = ${envArtifactHostMap};
+      rawHostMap.split(',').some(function(pair){
+        var parts = pair.split(':').map(function(s){ return s.trim(); });
+        if (parts[0] && parts[1] && parts[0] === location.host) {
+          slug = parts[1];
+          return true;
+        }
+        return false;
+      });
+    }
+    if (!slug) return;
     var raw = localStorage.getItem('dan-inspector-overrides-' + slug);
     if (!raw) return;
     var rows;

@@ -16,9 +16,12 @@ const ACCESS_TOKEN_COOKIE = 'done_access_token';
 
 // 公開してよい artifact slug の一覧（クライアント案件など）
 // 新しい公開案件を作ったらここに追加する。
-const PUBLIC_ARTIFACT_SLUGS = new Set<string>([
-  'kittoku',
-]);
+const PUBLIC_ARTIFACT_SLUGS = new Set<string>(
+  (process.env.NEXT_PUBLIC_ARTIFACT_SLUGS || 'kittoku')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -41,6 +44,16 @@ export function middleware(request: NextRequest) {
   // ----- ダン本体ドメイン: root → /login -----
   if (pathname === '/') {
     return NextResponse.redirect(new URL('/login', request.url));
+  }
+
+  // ----- Public preview: /preview/<slug> mirrors /artifacts/<slug> without auth -----
+  if (pathname.startsWith('/preview/')) {
+    const segments = pathname.split('/').filter(Boolean); // ['preview','slug', ...]
+    if (segments.length >= 2) {
+      const url = request.nextUrl.clone();
+      url.pathname = `/artifacts/${segments.slice(1).join('/')}`;
+      return NextResponse.rewrite(url);
+    }
   }
 
   // ----- /artifacts/* の保護 -----
@@ -73,5 +86,6 @@ export const config = {
      */
     '/',
     '/artifacts/:path*',
+    '/preview/:path*',
   ],
 };

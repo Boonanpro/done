@@ -2,6 +2,7 @@
 inspector_overrides のビジネスロジック
 """
 from typing import Optional, List, Dict, Any
+import os
 from app.services.supabase_client import get_supabase_client
 
 
@@ -82,6 +83,38 @@ class InspectorOverridesService:
             .select("*")
             .eq("artifact_slug", artifact_slug)
             .eq("created_by", user_id)
+            .execute()
+        )
+        return result.data or []
+
+    def _public_slug_allowlist(self) -> set[str]:
+        raw = os.environ.get("PUBLIC_ARTIFACT_SLUGS", "kittoku")
+        return {s.strip() for s in raw.split(",") if s.strip()}
+
+    async def is_public_preview_slug(self, artifact_slug: str) -> bool:
+        if artifact_slug in self._public_slug_allowlist():
+            return True
+
+        # Any generated chat artifact can be exposed through the explicit
+        # /preview/<slug> route. Direct /artifacts/<slug> remains protected by
+        # the frontend middleware unless the slug is allowlisted there.
+        result = (
+            self.supabase.table("chat_artifact")
+            .select("id")
+            .eq("slug", artifact_slug)
+            .in_("kind", ["production", "demo"])
+            .limit(1)
+            .execute()
+        )
+        return bool(result.data)
+
+    async def list_public_by_slug(self, artifact_slug: str) -> List[dict]:
+        if not await self.is_public_preview_slug(artifact_slug):
+            return []
+        result = (
+            self.supabase.table(self.table)
+            .select("*")
+            .eq("artifact_slug", artifact_slug)
             .execute()
         )
         return result.data or []

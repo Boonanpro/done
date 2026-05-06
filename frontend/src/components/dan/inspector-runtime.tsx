@@ -228,10 +228,16 @@ export function InspectorRuntime({ slug }: { slug: string }) {
 
     const fetchAndApply = async () => {
       try {
-        const res = await fetch(
+        let res = await fetch(
           `/api/v1/inspector-overrides?slug=${encodeURIComponent(slug)}`,
           { credentials: 'include' }
         );
+        if (res.status === 401 || res.status === 403) {
+          res = await fetch(
+            `/api/v1/inspector-overrides/public?slug=${encodeURIComponent(slug)}`,
+            { credentials: 'omit' }
+          );
+        }
         if (!res.ok) return;
         const rows = (await res.json()) as Array<{
           element_key: string;

@@ -63,6 +63,14 @@ async def list_overrides(
     return await service.list_by_slug(slug, user.user_id)
 
 
+@router.get("/public", response_model=List[OverrideResponse])
+async def list_public_overrides(
+    slug: str = Query(..., min_length=1),
+    service: InspectorOverridesService = Depends(get_service),
+):
+    return await service.list_public_by_slug(slug)
+
+
 @router.delete("")
 async def clear_overrides(
     slug: str = Query(..., min_length=1),

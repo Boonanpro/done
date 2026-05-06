@@ -89,6 +89,10 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
 
   if (!artifact) return null;
 
+  const publicPreviewUrl = artifact.preview_url.startsWith('/artifacts/')
+    ? artifact.preview_url.replace(/^\/artifacts\//, '/preview/')
+    : artifact.preview_url;
+
   return (
     <div className="flex h-full flex-col border-l border-border bg-muted/20">
       <div className="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-2">
@@ -130,11 +134,11 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
           <RefreshCw className={`h-3.5 w-3.5 ${refreshSpinning ? 'animate-spin' : ''}`} />
         </button>
         <a
-          href={artifact.preview_url}
+          href={publicPreviewUrl}
           target="_blank"
           rel="noopener noreferrer"
           className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="新しいタブで開く"
+          title="仮公開URLを開く"
         >
           <ExternalLink className="h-3.5 w-3.5" />
         </a>
