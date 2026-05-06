@@ -35,6 +35,10 @@ const nextConfig: NextConfig = {
     const coreBackendUrl =
       process.env.CORE_BACKEND_URL || 'http://127.0.0.1:9000';
     return [
+      {
+        source: '/preview/:path*',
+        destination: '/artifacts/:path*',
+      },
       // ダンコア向け: 具体的な path を先に評価させる
       {
         source: '/api/v1/chat/:path*',
