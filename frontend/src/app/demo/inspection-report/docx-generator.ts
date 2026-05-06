@@ -232,9 +232,21 @@ function removeWordSection(xml: string, startText: string, endText?: string): st
 }
 
 function findContainingBlockStart(xml: string, index: number): number {
-  const paragraphIndex = xml.lastIndexOf("<w:p", index);
-  const tableIndex = xml.lastIndexOf("<w:tbl", index);
+  const paragraphIndex = findLastOpenTagStart(xml, "p", index);
+  const tableIndex = findLastOpenTagStart(xml, "tbl", index);
   return Math.max(paragraphIndex, tableIndex);
+}
+
+function findLastOpenTagStart(xml: string, tagName: string, beforeIndex: number): number {
+  const pattern = new RegExp(`<w:${escapeRegex(tagName)}(?:\\s|>)`, "g");
+  let lastIndex = -1;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(xml))) {
+    if (match.index > beforeIndex) break;
+    lastIndex = match.index;
+  }
+  return lastIndex;
 }
 
 function repairBodySectionProperties(xml: string): string {
@@ -285,6 +297,10 @@ function findWordTextIndex(xml: string, searchText: string, fromIndex = 0): numb
 
 function normalizeSearchText(value: string): string {
   return value.replace(/\s/g, "");
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function unescapeXmlText(value: string): string {

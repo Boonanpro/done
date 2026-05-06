@@ -181,17 +181,22 @@ function hideSkippedSheets(zip: PizZip, skipped: Set<string>) {
   }
   if (skipped.has("r11")) sheetsToHide.add("低圧幹線絶縁抵抗測定");
 
-  if (sheetsToHide.size === 0) return;
-
   const workbookFile = zip.file("xl/workbook.xml");
   if (!workbookFile) return;
 
   let xml = workbookFile.asText();
-  for (const sheetName of sheetsToHide) {
+  for (const sheetName of ALWAYS_HIDDEN_SHEETS) {
     xml = hideWorkbookSheet(xml, sheetName);
+  }
+  if (sheetsToHide.size > 0) {
+    for (const sheetName of sheetsToHide) {
+      xml = hideWorkbookSheet(xml, sheetName);
+    }
   }
   zip.file("xl/workbook.xml", xml);
 }
+
+const ALWAYS_HIDDEN_SHEETS = ["アルバム", "アルバム (2)", "アルバム (3)", "アルバム (4)", "アルバム (5)", "用語集"];
 
 function hideWorkbookSheet(xml: string, sheetName: string): string {
   return xml.replace(/<sheet\b[^>]*\/>/g, (sheetTag) => {
