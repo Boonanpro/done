@@ -1,6 +1,9 @@
 import Link from "next/link";
-import { Phone, MapPin, Mail, Clock } from "lucide-react";
+import { Clock, Mail, MapPin, Phone } from "lucide-react";
 import { Logo } from "./logo";
+
+const MAP_SRC =
+  "https://www.google.com/maps?q=%E9%B3%A5%E5%8F%96%E7%9C%8C%E7%B1%B3%E5%AD%90%E5%B8%82%E5%8F%A4%E8%B1%8A%E5%8D%83775-6&output=embed";
 
 export function SiteFooter() {
   return (
@@ -30,7 +33,7 @@ export function SiteFooter() {
             <div className="flex items-start gap-2 text-sm text-white/80">
               <Clock className="h-4 w-4 shrink-0 mt-0.5" />
               <div>
-                <div>平日 8:00〜17:00</div>
+                <div>平日 8:00-17:00</div>
                 <div className="text-xs text-white/60">土日祝休</div>
               </div>
             </div>
@@ -53,6 +56,16 @@ export function SiteFooter() {
                 <div>〒689-3537</div>
                 <div>鳥取県米子市古豊千775-6</div>
               </div>
+            </div>
+            <div className="relative overflow-hidden rounded-sm border border-white/15 bg-white/5 aspect-[16/9]">
+              <iframe
+                src={MAP_SRC}
+                loading="lazy"
+                referrerPolicy="no-referrer-when-downgrade"
+                allowFullScreen
+                className="absolute inset-0 h-full w-full border-0"
+                title="吉川特装 所在地"
+              />
             </div>
           </div>
 
