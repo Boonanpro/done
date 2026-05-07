@@ -12,7 +12,7 @@ import { DiagonalDivider } from "../components/diagonal-divider";
 export const metadata = {
   title: "会社情報 | 吉川特装",
   description:
-    "有限会社吉川特装自動車の会社概要・沿革・アクセス情報。鳥取県米子市で特装車整備を手掛ける新明和工業認定修理工場。",
+    "有限会社吉川特装自動車の会社概要・沿革・アクセス情報。鳥取県米子市で主要架装メーカー各社の指定工場として特装車整備を手掛けています。",
 };
 
 const COMPANY_INFO = [
@@ -27,7 +27,7 @@ const COMPANY_INFO = [
     icon: MapPin,
   },
   { slug: "tel", label: "電話", value: "0859-27-4885", icon: Phone, mono: true },
-  { slug: "hours", label: "営業時間", value: "平日 8:00〜17:00（土日祝休）", icon: Clock },
+  { slug: "hours", label: "営業時間", value: "月〜土 9:00〜17:00（日祝休）", icon: Clock },
   {
     slug: "business",
     label: "事業内容",
@@ -44,8 +44,8 @@ const HISTORY = [
   },
   {
     year: "1995",
-    title: "新明和工業 指定サービス工場 認定",
-    body: "特装車大手メーカー・新明和工業株式会社の指定サービス工場として正式認定。純正部品の直接取扱いと正規整備体制を確立。",
+    title: "主要架装メーカー各社の指定工場体制を確立",
+    body: "取扱メーカー各社の指定工場として、純正部品の取扱いと正規整備体制を確立。メーカーごとの構造・点検基準に沿った整備品質を強化。",
   },
   {
     year: "2003",
@@ -143,7 +143,7 @@ function PageHero() {
             Company
           </span>
         </div>
-        <h1 data-edit-id="kittoku-company-hero-h1" className="font-headline text-4xl sm:text-5xl lg:text-6xl font-black leading-tight max-w-3xl">
+        <h1 data-edit-id="kittoku-company-hero-h1" className="font-headline text-3xl sm:text-5xl lg:text-6xl font-black leading-tight max-w-3xl">
           米子で、働く車を、30年。
         </h1>
       </div>
@@ -154,9 +154,9 @@ function PageHero() {
 function GreetingSection() {
   return (
     <Section padding="xl" width="xl" className="bg-background">
-      <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] gap-8 lg:gap-x-14 lg:gap-y-7">
+      <div className="mx-auto max-w-4xl">
         {/* ラベル + 見出し: スマホ1番目 / PC右上 */}
-        <div className="space-y-3 lg:col-start-2 lg:row-start-1">
+        <div className="space-y-3">
           <div className="flex items-center gap-3">
             <DiagonalDivider />
             <span className="font-eyebrow text-xs text-[var(--yk-gold-dark)]">
@@ -169,7 +169,7 @@ function GreetingSection() {
         </div>
 
         {/* 画像 + 肩書き: スマホ2番目 / PC左カラム(2行スパン) */}
-        <div className="space-y-4 lg:col-start-1 lg:row-start-1 lg:row-span-2">
+        <div className="hidden">
           <div className="rounded-sm overflow-hidden border border-border bg-[var(--yk-navy)]/5 relative aspect-[3/4] max-w-[260px]">
             <Image
               src="/kikkawa/people/daihyo.png"
@@ -193,7 +193,7 @@ function GreetingSection() {
         </div>
 
         {/* 本文: スマホ3番目 / PC右下 */}
-        <div className="space-y-5 text-[var(--yk-navy-dark)] leading-relaxed lg:col-start-2 lg:row-start-2">
+        <div className="mt-8 space-y-5 rounded-2xl border border-border bg-white p-6 leading-relaxed text-[var(--yk-navy-dark)] shadow-sm sm:p-8">
           <p data-edit-id="kittoku-company-greeting-body-1">
             有限会社吉川特装自動車のホームページをご覧いただき、誠にありがとうございます。
           </p>
@@ -203,7 +203,7 @@ function GreetingSection() {
               1988年に先代・吉川 誠一
             </span>
             が創業して以来、米子の地で特装車の整備・修理一筋に歩んでまいりました。
-            新明和工業の認定修理工場として、働く車を支える皆様の事業を、一台一台、確実な技術でお守りすることが私たちの使命です。
+            取扱メーカー各社の指定工場として、働く車を支える皆様の事業を、一台一台、確実な技術でお守りすることが私たちの使命です。
           </p>
           <p data-edit-id="kittoku-company-greeting-body-3">
             特装車は、ごみ収集・建設・物流・清掃・農業など、社会のあらゆる現場を支える車両です。
@@ -354,8 +354,8 @@ function AccessSection() {
             <div className="flex items-start gap-3">
               <Clock className="h-5 w-5 text-[var(--yk-navy)] shrink-0 mt-0.5" />
               <div>
-                <div>平日 8:00〜17:00</div>
-                <div className="text-sm text-[var(--yk-steel)]">土日祝休</div>
+                <div>月〜土 9:00〜17:00</div>
+                <div className="text-sm text-[var(--yk-steel)]">日祝休</div>
               </div>
             </div>
           </div>

@@ -30,7 +30,7 @@ export function CertifiedBadge({
       )}
     >
       <Award className={cn(iconSize, "text-[var(--yk-gold)] fill-[var(--yk-gold)]/30")} />
-      <span className="font-headline">新明和工業 認定修理工場</span>
+      <span className="font-headline">主要メーカー指定工場</span>
     </span>
   );
 }

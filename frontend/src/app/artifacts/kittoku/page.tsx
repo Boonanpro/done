@@ -37,15 +37,15 @@ const HERO_POSTER = `/kikkawa/hero-poster.jpg?v=${ASSET_VERSION}`;
 const STATS = [
   { slug: "founded", label: "創業", value: "1988", unit: "年", hint: "37年以上の整備実績" },
   { slug: "vehicles", label: "対応車種", value: "9", unit: "機種", hint: "特装車全機種カバー" },
-  { slug: "certified", label: "認定工場", value: "新明和", unit: "認定", hint: "指定サービス工場" },
+  { slug: "certified", label: "指定工場", value: "各社", unit: "対応", hint: "主要メーカー指定工場" },
 ];
 
 const STRENGTHS = [
   {
     slug: "shinmeiwa",
     icon: Award,
-    title: "新明和工業 認定修理工場",
-    body: "特装車のリーディングメーカー、新明和工業の指定サービス工場としてメーカー純正部品と正規の整備ノウハウで対応します。",
+    title: "主要メーカー各社の指定工場",
+    body: "取扱メーカー各社の指定工場として、純正部品と正規の整備ノウハウで幅広い特装車に対応します。",
   },
   {
     slug: "all-models",
@@ -202,9 +202,9 @@ const MANUFACTURERS: {
 ];
 
 export const metadata = {
-  title: "吉川特装 | 新明和工業 認定修理工場（米子）",
+  title: "吉川特装 | 主要メーカー指定工場（米子）",
   description:
-    "鳥取県米子市の特装車専門整備工場。新明和工業の認定修理工場としてダンプ・塵芥車・テールゲートリフタ・クレーン・ローリ・高所作業車などの整備・修理・点検に対応。",
+    "鳥取県米子市の特装車専門整備工場。主要架装メーカー各社の指定工場としてダンプ・塵芥車・テールゲートリフタ・クレーン・ローリ・高所作業車などの整備・修理・点検に対応。",
 };
 
 export default function YoshikawaHomePage() {
@@ -255,7 +255,7 @@ function HeroSection() {
             鳥取・米子の特装車専門整備工場。
             <br className="hidden sm:inline" />
             ダンプ・塵芥車・テールゲートリフタ・クレーンまで、
-            新明和工業の認定修理工場として正規の技術でお応えします。
+            主要架装メーカー各社の指定工場として正規の技術でお応えします。
           </p>
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 pt-2">
             <Button
@@ -346,7 +346,7 @@ function VehiclesSection() {
             お任せください。
           </h2>
           <p data-edit-id="kittoku-top-vehicles-lead" className="text-[var(--yk-steel)] max-w-md leading-relaxed">
-            新明和の認定工場として蓄積した専門知識で、
+            取扱メーカー各社の指定工場として蓄積した専門知識で、
             メーカー純正部品の手配から点検・整備・修理・架装までワンストップで対応します。
           </p>
         </div>
@@ -516,7 +516,7 @@ function ManufacturersSection() {
             取扱メーカー
           </h2>
           <p data-edit-id="kittoku-top-manufacturers-lead" className="text-sm text-[var(--yk-steel)] leading-relaxed">
-            新明和工業の認定工場であることに加え、主要架装メーカーの整備実績があります。
+            取扱メーカー各社の指定工場として、主要架装メーカーの純正部品と整備ノウハウに対応しています。
           </p>
         </div>
         <div className="lg:col-span-2 grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -556,11 +556,11 @@ function ManufacturersSection() {
               {m.accent && (
                 <div
                   className="absolute -top-px -right-px flex items-center gap-1 bg-[var(--yk-gold)] text-[var(--yk-navy-dark)] px-2 py-1 rounded-bl-sm shadow-sm"
-                  title="新明和工業 認定修理工場"
+                  title="主要メーカー指定工場"
                 >
                   <Award className="h-3 w-3" />
                   <span className="font-headline font-bold text-[10px] tracking-wide">
-                    認定工場
+                    指定工場
                   </span>
                 </div>
               )}
@@ -603,8 +603,8 @@ function CompanyBriefSection() {
             <InfoRow label="営業時間">
               <Clock className="h-4 w-4 text-[var(--yk-navy)] shrink-0 mt-0.5" />
               <div className="space-y-0.5">
-                <div className="text-sm">平日 8:00〜17:00</div>
-                <div className="text-xs text-[var(--yk-steel)]">土日祝休</div>
+                <div className="text-sm">月〜土 9:00〜17:00</div>
+                <div className="text-xs text-[var(--yk-steel)]">日祝休</div>
               </div>
             </InfoRow>
             <InfoRow label="代表電話">

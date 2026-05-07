@@ -2,18 +2,15 @@ import Link from "next/link";
 import { Clock, Mail, MapPin, Phone } from "lucide-react";
 import { Logo } from "./logo";
 
-const MAP_SRC =
-  "https://www.google.com/maps?q=%E9%B3%A5%E5%8F%96%E7%9C%8C%E7%B1%B3%E5%AD%90%E5%B8%82%E5%8F%A4%E8%B1%8A%E5%8D%83775-6&output=embed";
-
 export function SiteFooter() {
   return (
     <div className="w-full bg-[var(--yk-navy-dark)] text-white">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 py-14 sm:py-20">
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-10">
-          <div className="lg:col-span-1 space-y-4">
+        <div className="grid grid-cols-1 gap-10 md:grid-cols-2 lg:grid-cols-[1.4fr_1fr_1fr_1fr]">
+          <div className="space-y-4">
             <Logo size="md" variant="dark" />
-            <p className="text-sm text-white/70 leading-relaxed">
-              新明和工業 認定修理工場として山陰・中国地方の特装車修理を支えています。
+            <p className="max-w-sm text-sm leading-relaxed text-white/70">
+              取扱メーカー各社の指定工場として、山陰・中国地方の特装車修理を支えています。
             </p>
           </div>
 
@@ -23,7 +20,7 @@ export function SiteFooter() {
             </div>
             <a
               href="tel:0859-27-4885"
-              className="flex items-center gap-2 text-white hover:text-[var(--yk-gold)] transition-colors"
+              className="flex items-center gap-2 text-white transition-colors hover:text-[var(--yk-gold)]"
             >
               <Phone className="h-4 w-4 shrink-0" />
               <span className="font-mono-data text-xl font-bold">
@@ -31,18 +28,18 @@ export function SiteFooter() {
               </span>
             </a>
             <div className="flex items-start gap-2 text-sm text-white/80">
-              <Clock className="h-4 w-4 shrink-0 mt-0.5" />
+              <Clock className="mt-0.5 h-4 w-4 shrink-0" />
               <div>
-                <div>平日 8:00-17:00</div>
-                <div className="text-xs text-white/60">土日祝休</div>
+                <div>月〜土 9:00〜17:00</div>
+                <div className="text-xs text-white/60">日祝休</div>
               </div>
             </div>
             <Link
               href="/artifacts/kittoku/contact"
-              className="inline-flex items-center gap-2 text-sm text-white hover:text-[var(--yk-gold)] transition-colors"
+              className="inline-flex items-center gap-2 text-sm text-white transition-colors hover:text-[var(--yk-gold)]"
             >
               <Mail className="h-4 w-4" />
-              Webからお問い合わせ
+              LINE・Webから問い合わせ
             </Link>
           </div>
 
@@ -51,21 +48,14 @@ export function SiteFooter() {
               Access
             </div>
             <div className="flex items-start gap-2 text-sm text-white/80">
-              <MapPin className="h-4 w-4 shrink-0 mt-0.5" />
+              <MapPin className="mt-0.5 h-4 w-4 shrink-0" />
               <div className="space-y-1">
                 <div>〒689-3537</div>
                 <div>鳥取県米子市古豊千775-6</div>
               </div>
             </div>
-            <div className="relative overflow-hidden rounded-sm border border-white/15 bg-white/5 aspect-[16/9]">
-              <iframe
-                src={MAP_SRC}
-                loading="lazy"
-                referrerPolicy="no-referrer-when-downgrade"
-                allowFullScreen
-                className="absolute inset-0 h-full w-full border-0"
-                title="吉川特装 所在地"
-              />
+            <div className="rounded-sm border border-white/10 bg-white/[0.04] p-4 text-xs leading-relaxed text-white/60">
+              JR米子駅より車で約10分 / 山陰道 米子ICより約5分
             </div>
           </div>
 
@@ -91,11 +81,9 @@ export function SiteFooter() {
           </div>
         </div>
 
-        <div className="mt-14 pt-6 border-t border-white/10 flex flex-col sm:flex-row justify-between gap-2 text-xs text-white/50">
+        <div className="mt-14 flex flex-col justify-between gap-2 border-t border-white/10 pt-6 text-xs text-white/50 sm:flex-row">
           <div>© {new Date().getFullYear()} 有限会社吉川特装自動車</div>
-          <div className="font-eyebrow">
-            Shinmeiwa Certified Repair Facility
-          </div>
+          <div className="font-eyebrow">Authorized Service Facility</div>
         </div>
       </div>
     </div>
@@ -112,7 +100,7 @@ function FooterLink({
   return (
     <Link
       href={href}
-      className="text-sm text-white/70 hover:text-white transition-colors"
+      className="text-sm text-white/70 transition-colors hover:text-white"
     >
       {children}
     </Link>
