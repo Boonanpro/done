@@ -194,6 +194,14 @@ function GreetingSection() {
 
         {/* 本文: スマホ3番目 / PC右下 */}
         <div className="mt-8 space-y-5 rounded-2xl border border-border bg-white p-6 leading-relaxed text-[var(--yk-navy-dark)] shadow-sm sm:p-8">
+          <div className="border-b border-border pb-5">
+            <div className="font-eyebrow text-[10px] text-[var(--yk-gold-dark)]">
+              Representative director
+            </div>
+            <div className="mt-1 font-headline text-xl font-black text-[var(--yk-navy)]">
+              代表取締役 細田 かおり
+            </div>
+          </div>
           <p data-edit-id="kittoku-company-greeting-body-1">
             有限会社吉川特装自動車のホームページをご覧いただき、誠にありがとうございます。
           </p>
@@ -283,24 +291,23 @@ function HistorySection() {
       </div>
       <div className="relative">
         {/* 縦線: スマホは左端、PCは年カラムの右端 */}
-        <div className="absolute left-3 sm:left-24 top-0 bottom-0 w-px bg-[var(--yk-navy)]/20" />
+        <div className="absolute bottom-0 left-3 top-0 w-px bg-[var(--yk-navy)]/20 sm:left-[136px]" />
         <div className="space-y-5">
           {HISTORY.map((h) => (
             <div
               key={h.year}
-              className="grid grid-cols-1 sm:grid-cols-[120px_1fr] gap-3 sm:gap-8 relative pl-8 sm:pl-0"
+              className="relative grid grid-cols-1 gap-3 pl-8 sm:grid-cols-[112px_1fr] sm:gap-12 sm:pl-0"
             >
               {/* スマホ用: 縦線上のドット */}
               <span
-                className="sm:hidden absolute left-3 top-3 h-2 w-2 rounded-full bg-[var(--yk-gold)] -translate-x-1/2"
+                className="absolute left-3 top-3 h-2.5 w-2.5 -translate-x-1/2 rounded-full border-2 border-white bg-[var(--yk-gold)] shadow-sm sm:left-[136px]"
                 aria-hidden
               />
-              <div className="flex sm:flex-col items-baseline sm:items-end gap-2 sm:gap-0 sm:text-right">
+              <div className="flex items-baseline gap-2 sm:justify-end sm:text-right">
                 <div data-edit-id={`kittoku-company-history-${h.year}-year`} className="font-mono-data text-3xl font-black text-[var(--yk-gold-dark)]">
                   {h.year}
                 </div>
                 {/* PC用: 縦線上のドット */}
-                <span className="hidden sm:block h-2 w-2 rounded-full bg-[var(--yk-gold)] ml-auto translate-x-[calc(50%+1rem)] relative -mt-1" aria-hidden />
               </div>
               <div className="rounded-sm border border-border bg-white p-6 space-y-2">
                 <div data-edit-id={`kittoku-company-history-${h.year}-title`} className="font-headline font-bold text-[var(--yk-navy)]">

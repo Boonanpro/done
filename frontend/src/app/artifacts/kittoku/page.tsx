@@ -67,7 +67,6 @@ const MANUFACTURERS: {
   en: string;
   logo?: string;
   siteUrl?: string;
-  accent?: boolean;
   logoStyle?: React.CSSProperties;
 }[] = [
   {
@@ -76,7 +75,6 @@ const MANUFACTURERS: {
     en: "SHINMAYWA INDUSTRIES",
     logo: "/kikkawa/manufacturers/shinmaywa.svg",
     siteUrl: "https://www.shinmaywa.co.jp/",
-    accent: true,
     logoStyle: { width: "146px", height: "auto", objectPosition: "69.9% 35.1%" },
   },
   {
@@ -527,11 +525,7 @@ function ManufacturersSection() {
               href={m.siteUrl}
               target="_blank"
               rel="noreferrer noopener"
-              className={`group relative bg-white border rounded-sm overflow-hidden transition-all flex items-center justify-center h-[120px] p-5 ${
-                m.accent
-                  ? "border-[var(--yk-gold)] border-2"
-                  : "border-border hover:border-[var(--yk-navy)]/40"
-              }`}
+              className="group relative flex h-[120px] items-center justify-center overflow-hidden rounded-sm border border-border bg-white p-5 transition-all hover:border-[var(--yk-navy)]/40"
             >
               {m.logo ? (
                 <Image
@@ -551,17 +545,6 @@ function ManufacturersSection() {
                   <div data-edit-id={`kittoku-top-manufacturers-${m.slug}-en`} className="font-eyebrow text-[10px] text-[var(--yk-steel)] tracking-wider">
                     {m.en}
                   </div>
-                </div>
-              )}
-              {m.accent && (
-                <div
-                  className="absolute -top-px -right-px flex items-center gap-1 bg-[var(--yk-gold)] text-[var(--yk-navy-dark)] px-2 py-1 rounded-bl-sm shadow-sm"
-                  title="主要メーカー指定工場"
-                >
-                  <Award className="h-3 w-3" />
-                  <span className="font-headline font-bold text-[10px] tracking-wide">
-                    指定工場
-                  </span>
                 </div>
               )}
             </a>
