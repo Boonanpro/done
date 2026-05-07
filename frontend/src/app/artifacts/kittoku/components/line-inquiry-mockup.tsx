@@ -7,7 +7,7 @@ import {
   useReducedMotion,
   type Variants,
 } from "framer-motion";
-import { CheckCheck, Image as ImageIcon, Send } from "lucide-react";
+import { CheckCheck, Image as ImageIcon } from "lucide-react";
 
 const messages = [
   {
@@ -60,11 +60,10 @@ export function LineInquiryMockup() {
 
   useEffect(() => {
     if (reduceMotion) {
-      setVisibleCount(messages.length);
       return;
     }
 
-    const delays = [500, 1200, 1150, 1450, 1250, 2800];
+    const delays = [900, 2400, 2600, 2800, 7200];
     const timer = window.setTimeout(() => {
       setVisibleCount((current) =>
         current >= messages.length ? 0 : current + 1,
@@ -74,19 +73,20 @@ export function LineInquiryMockup() {
     return () => window.clearTimeout(timer);
   }, [visibleCount, reduceMotion]);
 
-  const visibleMessages = messages.slice(0, visibleCount);
-  const nextMessage = messages[visibleCount];
-  const showTyping = !reduceMotion && visibleCount > 0 && Boolean(nextMessage);
+  const messageCount = reduceMotion ? messages.length : visibleCount;
+  const visibleMessages = messages.slice(0, messageCount);
+  const nextMessage = messages[messageCount];
+  const showTyping = !reduceMotion && messageCount > 0 && Boolean(nextMessage);
 
   return (
-    <div className="relative mx-auto w-full max-w-[360px]">
+    <div className="relative mx-auto h-[544px] w-[min(360px,calc(100vw-32px))]">
       <motion.div
         className="absolute -inset-4 bg-[var(--yk-gold)]/10 blur-2xl"
         animate={reduceMotion ? undefined : { opacity: [0.55, 0.85, 0.55] }}
         transition={{ duration: 3.4, repeat: Infinity, ease: "easeInOut" }}
       />
-      <div className="relative overflow-hidden rounded-[28px] border border-white/15 bg-[#101820] p-2 shadow-2xl">
-        <div className="overflow-hidden rounded-[22px] bg-[#8fb6d8]">
+      <div className="relative h-full overflow-hidden rounded-[28px] border border-white/15 bg-[#101820] p-2 shadow-2xl">
+        <div className="h-full overflow-hidden rounded-[22px] bg-[#8fb6d8]">
           <div className="flex items-center gap-3 bg-[#06c755] px-4 py-3 text-white">
             <div className="grid h-8 w-8 place-items-center rounded-full bg-white/20 text-xs font-black">
               吉
@@ -97,20 +97,16 @@ export function LineInquiryMockup() {
                 LINEでかんたん相談
               </div>
             </div>
-            <div className="ml-auto text-[10px] font-medium text-white/80">
-              10:16
-            </div>
           </div>
 
-          <div className="relative min-h-[386px] px-3 py-4">
+          <div className="relative h-[470px] overflow-hidden px-3 py-5">
             <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(255,255,255,0.15)_0,rgba(255,255,255,0)_48%)]" />
-            <div className="relative space-y-3 pb-14">
-              <AnimatePresence mode="popLayout">
+            <div className="relative space-y-3">
+              <AnimatePresence initial={false}>
                 {visibleMessages.map((message, index) => {
                   const isCustomer = message.side === "customer";
                   return (
                     <motion.div
-                      layout
                       key={`${message.time}-${message.text}`}
                       className={`flex ${isCustomer ? "justify-end" : "justify-start"}`}
                       variants={bubbleVariants}
@@ -175,16 +171,6 @@ export function LineInquiryMockup() {
                 ) : null}
               </AnimatePresence>
             </div>
-
-            <motion.div
-              className="absolute bottom-3 left-3 right-3 flex items-center gap-2 rounded-full bg-white px-3 py-2 shadow-lg"
-              layout
-            >
-              <div className="h-2 flex-1 rounded-full bg-slate-200" />
-              <div className="grid h-7 w-7 place-items-center rounded-full bg-[#06c755] text-white">
-                <Send className="h-3.5 w-3.5" />
-              </div>
-            </motion.div>
           </div>
         </div>
       </div>

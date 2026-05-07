@@ -292,38 +292,33 @@ function HeroSection() {
 function StatsSection() {
   return (
     <div className="bg-white border-b border-border">
-      <div className="mx-auto max-w-7xl px-4 sm:px-6 py-8 sm:py-10">
-        <div className="flex flex-row items-center justify-center gap-6 sm:gap-10">
-          <div className="space-y-1.5 text-[var(--yk-steel)] font-headline">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 py-10 sm:py-12">
+        <div className="flex flex-col items-center justify-center gap-5 text-center sm:flex-row sm:gap-8 sm:text-left">
+          <div className="space-y-1.5 text-[var(--yk-steel)]">
             <p data-edit-id="kittoku-top-stats-line1" className="text-sm sm:text-base leading-relaxed">
               1988年創業
             </p>
-            <p data-edit-id="kittoku-top-stats-line2" className="text-sm sm:text-base leading-relaxed">
+            <p data-edit-id="kittoku-top-stats-line2" className="max-w-2xl text-sm sm:text-base leading-relaxed">
               山陰地方を中心に、
               <br className="sm:hidden" />
               中国地方の働く車を支えています。
             </p>
           </div>
-          <div className="shrink-0 w-[180px] sm:w-[260px]">
-            <div className="relative w-full">
+          <div className="shrink-0">
+            <div className="relative w-[220px] overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 p-3 shadow-sm sm:w-[260px]">
               <Image
-                src="/kikkawa/chugoku-map-v3.png"
+                src="/kikkawa/chugoku-map-yonago.png"
                 alt="中国地方マップ - 吉川特装は鳥取県米子市"
                 width={1024}
                 height={1024}
                 className="w-full h-auto"
-                sizes="(max-width: 640px) 180px, 260px"
+                sizes="(max-width: 640px) 220px, 260px"
               />
               <div
-                className="absolute left-[60%] top-[38%] -translate-x-1/2 -translate-y-full"
+                className="absolute left-[60%] top-[20%] -translate-x-1/2 -translate-y-full whitespace-nowrap rounded-full bg-white px-2.5 py-1 text-[10px] font-bold text-[var(--yk-navy)] shadow-md ring-1 ring-slate-200 sm:text-xs"
                 aria-label="吉川特装 所在地 鳥取県米子市"
               >
-                <div className="relative flex items-center gap-1.5">
-                  <MapPin className="h-7 w-7 sm:h-9 sm:w-9 fill-red-600 text-white drop-shadow-[0_2px_3px_rgba(15,23,42,0.35)]" />
-                  <div className="whitespace-nowrap rounded-sm bg-white px-2 py-1 text-[10px] sm:text-xs font-bold text-[var(--yk-navy)] shadow-md ring-1 ring-[var(--yk-navy)]/10">
-                    吉川特装
-                  </div>
-                </div>
+                吉川特装
               </div>
             </div>
           </div>
@@ -396,40 +391,66 @@ function VehiclesSection() {
 
 function FlowSection() {
   return (
-    <section className="bg-[var(--yk-navy)] text-white">
-      <div className="mx-auto max-w-7xl px-4 sm:px-6 py-20 sm:py-28">
-        <div className="space-y-3 mb-12">
+    <section className="relative overflow-hidden bg-[var(--yk-navy)] text-white">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_78%_35%,rgba(255,196,0,0.16),transparent_30%),linear-gradient(135deg,rgba(255,255,255,0.08),transparent_45%)]" />
+      <div className="relative mx-auto max-w-7xl px-4 sm:px-6 py-20 sm:py-24">
+        <div className="grid items-center gap-12 lg:grid-cols-[minmax(0,1fr)_400px] lg:gap-16">
+          <div className="max-w-2xl space-y-8">
+            <div className="space-y-3">
           <div className="flex items-center gap-3">
             <DiagonalDivider color="var(--yk-gold)" />
             <span className="font-eyebrow text-xs text-[var(--yk-gold)]">
               Inquiry flow
             </span>
           </div>
-          <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
+          <div className="space-y-4">
             <h2 data-edit-id="kittoku-top-flow-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black leading-tight">
               修理・部品交換など
               <br />
               ぜひお問い合わせください
             </h2>
-            <p data-edit-id="kittoku-top-flow-lead" className="text-white/80 max-w-[344px] leading-relaxed">
-              便利な「Webフォーム」か「お電話」で
+            <p className="text-white/80 max-w-xl leading-relaxed">
+              LINEで車両の状態や写真を送るだけ。
               <br />
-              お問い合わせいただけます
+              担当者が内容を確認し、折り返しご連絡します。
             </p>
           </div>
         </div>
-        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-10 lg:gap-14 pt-8">
-          <Button
+            <div className="space-y-6">
+          <div className="max-w-2xl space-y-6">
+            <div className="grid gap-3 sm:grid-cols-3">
+              {[
+                "LINEで相談内容を送信",
+                "写真を添えて状態共有",
+                "担当者が折り返し連絡",
+              ].map((step, index) => (
+                <div
+                  key={step}
+                  className="rounded-xl border border-white/12 bg-white/[0.06] p-4 backdrop-blur"
+                >
+                  <div className="mb-3 font-mono-data text-xs font-bold text-[var(--yk-gold)]">
+                    0{index + 1}
+                  </div>
+                  <div className="text-sm font-bold leading-relaxed">{step}</div>
+                </div>
+              ))}
+            </div>
+            <Button
             asChild
             size="lg"
             className="bg-[var(--yk-gold)] hover:bg-[var(--yk-gold-dark)] text-[var(--yk-navy-dark)] font-bold rounded-sm h-12 px-6"
           >
             <Link data-edit-id="kittoku-top-flow-cta" href="/artifacts/kittoku/contact">
-              WEB問い合わせ
+              LINEで問い合わせ
               <ArrowRight className="h-4 w-4 ml-1.5" />
             </Link>
-          </Button>
-          <LineInquiryMockup />
+            </Button>
+          </div>
+            </div>
+          </div>
+          <div className="justify-self-center lg:justify-self-end">
+            <LineInquiryMockup />
+          </div>
         </div>
       </div>
     </section>
