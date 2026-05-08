@@ -163,14 +163,20 @@ export function ConfirmView({
 
       <Tabs defaultValue="output">
         <TabsList>
-          <TabsTrigger value="output">出力構成</TabsTrigger>
-          <TabsTrigger value="numbers">数値（{countNumbers(report)}箇所）</TabsTrigger>
-          <TabsTrigger value="judges">判定（{countJudges(report)}箇所）</TabsTrigger>
+          <TabsTrigger value="output">提出するページ</TabsTrigger>
+          <TabsTrigger value="details">検査内容（{countDetails(report)}箇所）</TabsTrigger>
           <TabsTrigger value="cover">表紙</TabsTrigger>
         </TabsList>
 
         <TabsContent value="output" className="space-y-4">
-          <SectionCard title="詳細ページ">
+          <div className="rounded-md border border-primary/30 bg-primary/5 px-4 py-3">
+            <p className="text-sm font-medium">Excel・Wordに含めるページを選びます</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              ONのページだけを出力します。OFFにしたページは総括チェック表と詳細シートの両方から外れます。
+            </p>
+          </div>
+
+          <SectionCard title="提出する詳細ページ">
             <div className="space-y-3">
               {getOutputPagesForReportKind(report.report_kind).map((page) => {
                 const checked =
@@ -186,16 +192,21 @@ export function ConfirmView({
                       <Label className="text-sm font-medium">{page.label}</Label>
                       <p className="text-xs text-muted-foreground">{page.description}</p>
                     </div>
-                    <Switch
-                      checked={checked}
-                      onCheckedChange={(next) => {
-                        if (page.key === "lvInsulation") {
-                          updateOutput({ lvInsulationPageCount: next ? 1 : 0 });
-                          return;
-                        }
-                        updateOutput({ pages: { [page.key]: next } });
-                      }}
-                    />
+                    <div className="flex items-center gap-3">
+                      <span className={`text-xs ${checked ? "text-primary" : "text-muted-foreground"}`}>
+                        {checked ? "出力する" : "出力しない"}
+                      </span>
+                      <Switch
+                        checked={checked}
+                        onCheckedChange={(next) => {
+                          if (page.key === "lvInsulation") {
+                            updateOutput({ lvInsulationPageCount: next ? 1 : 0 });
+                            return;
+                          }
+                          updateOutput({ pages: { [page.key]: next } });
+                        }}
+                      />
+                    </div>
                   </div>
                 );
               })}
@@ -257,8 +268,8 @@ export function ConfirmView({
           </SectionCard>
         </TabsContent>
 
-        {/* 数値タブ */}
-        <TabsContent value="numbers" className="space-y-4">
+        {/* 検査内容タブ */}
+        <TabsContent value="details" className="space-y-4">
           {/* 接地抵抗 */}
           <SectionCard title="接地抵抗">
             <div className="space-y-2">
@@ -389,13 +400,10 @@ export function ConfirmView({
               ))}
             </div>
           </SectionCard>
-        </TabsContent>
 
-        {/* 判定タブ */}
-        <TabsContent value="judges" className="space-y-4">
           <SectionCard title="総括チェック表（23項目）">
             <p className="text-xs text-muted-foreground mb-3">
-              出す/出さないは「出力構成」タブで変更します。ここでは表示する項目の判定だけを編集します。
+              出す/出さないは「提出するページ」タブで変更します。ここでは表示する項目の判定だけを編集します。
             </p>
             <div className="space-y-2 text-sm">
               {report.summary.filter((s) => s.result !== "").map((s) => {
@@ -622,7 +630,7 @@ function NumField({
   );
 }
 
-function countNumbers(r: ReportData): number {
+function countDetails(r: ReportData): number {
   return (
     r.ground.length +
     r.hv.length +
@@ -630,12 +638,7 @@ function countNumbers(r: ReportData): number {
     5 + // ocr
     3 + // ovgr
     r.array.length +
-    r.lv.length * 2
-  );
-}
-
-function countJudges(r: ReportData): number {
-  return (
+    r.lv.length * 2 +
     r.summary.filter((item) => item.result !== "").length +
     r.external.length +
     r.ground.length +
