@@ -68,6 +68,7 @@ export function ConfirmView({
 
   const [downloading, setDownloading] = useState(false);
   const [downloadMsg, setDownloadMsg] = useState<string | null>(null);
+  const [previewIndex, setPreviewIndex] = useState(0);
 
   if (!report || !client) {
     return (
@@ -173,13 +174,13 @@ export function ConfirmView({
         </CardContent>
       </Card>
 
-      <Tabs defaultValue="output">
-        <TabsList>
-          <TabsTrigger value="output">提出するページ</TabsTrigger>
-          <TabsTrigger value="details">検査内容（{countDetails(report)}箇所）</TabsTrigger>
-          <TabsTrigger value="preview">出力プレビュー</TabsTrigger>
-          <TabsTrigger value="cover">表紙</TabsTrigger>
-        </TabsList>
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_430px]">
+        <Tabs defaultValue="output" className="min-w-0">
+          <TabsList>
+            <TabsTrigger value="output">提出するページ</TabsTrigger>
+            <TabsTrigger value="details">検査内容（{countDetails(report)}箇所）</TabsTrigger>
+            <TabsTrigger value="cover">表紙</TabsTrigger>
+          </TabsList>
 
         <TabsContent value="output" className="space-y-4">
           <div className="rounded-md border border-primary/30 bg-primary/5 px-4 py-3">
@@ -539,10 +540,6 @@ export function ConfirmView({
           </SectionCard>
         </TabsContent>
 
-        <TabsContent value="preview" className="space-y-4">
-          <OutputPreview report={report} client={client} reportKindLabel={reportKindLabel} />
-        </TabsContent>
-
         {/* 表紙タブ */}
         <TabsContent value="cover" className="space-y-4">
           <SectionCard title="実施日・気象条件">
@@ -611,119 +608,263 @@ export function ConfirmView({
             </div>
           </SectionCard>
         </TabsContent>
-      </Tabs>
+        </Tabs>
+
+        <LiveReportPreview
+          report={report}
+          client={client}
+          reportKindLabel={reportKindLabel}
+          selectedIndex={previewIndex}
+          onSelectIndex={setPreviewIndex}
+        />
+      </div>
     </div>
   );
 }
 
-function OutputPreview({
+function LiveReportPreview({
   report,
   client,
   reportKindLabel,
+  selectedIndex,
+  onSelectIndex,
 }: {
   report: ReportData;
   client: Client;
   reportKindLabel: string;
+  selectedIndex: number;
+  onSelectIndex: (index: number) => void;
 }) {
-  const visibleSummary = report.summary.filter((item) => item.result !== "");
-  const hiddenSummary = report.summary.filter((item) => item.result === "");
-  const outputPages = buildOutputPagePreview(report);
+  const pages = buildPreviewPages(report);
+  const safeIndex = Math.min(selectedIndex, Math.max(pages.length - 1, 0));
+  const selected = pages[safeIndex] ?? pages[0];
 
   return (
-    <div className="space-y-4">
-      <div className="rounded-md border border-primary/30 bg-primary/5 px-4 py-3">
-        <div className="flex items-center gap-2">
-          <Eye className="h-4 w-4 text-primary" />
-          <p className="text-sm font-medium">現在の設定で出力される内容です</p>
-        </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          実際のExcel/Word生成と同じ出力構成・同じ入力値を使って表示しています。印刷時のセル幅や余白はExcel/Word側で最終確認してください。
-        </p>
-      </div>
-
-      <SectionCard title="出力されるページ">
-        <div className="grid gap-2 sm:grid-cols-2">
-          {outputPages.map((page, index) => (
-            <div key={`${page}-${index}`} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
-              <Badge variant="secondary" className="tabular-nums">
-                {index + 1}
-              </Badge>
-              <span>{page}</span>
+    <aside className="xl:sticky xl:top-6 xl:h-[calc(100vh-3rem)]">
+      <Card className="h-full overflow-hidden border-primary/20">
+        <CardHeader className="border-b bg-secondary/30 py-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Eye className="h-4 w-4 text-primary" />
+            ライブプレビュー
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex h-[calc(100%-57px)] flex-col gap-3 p-3">
+          <div className="min-h-0 flex-1 overflow-auto rounded-md bg-muted/40 p-3">
+            <div className="mx-auto min-h-[560px] w-[340px] bg-white p-5 text-slate-950 shadow-sm ring-1 ring-border">
+              {selected && renderPreviewPage(selected, report, client, reportKindLabel)}
             </div>
-          ))}
-        </div>
-      </SectionCard>
+          </div>
 
-      <SectionCard title="表紙">
-        <div className="grid gap-3 text-sm sm:grid-cols-2">
-          <PreviewRow label="帳票種別" value={reportKindLabel} />
-          <PreviewRow label="宛先" value={client.name} />
-          <PreviewRow label="事業場" value={client.facility_name} />
-          <PreviewRow label="実施日" value={`令和${report.year_wareki}年${report.month}月${report.day}日`} />
-          <PreviewRow label="天候・気温・湿度" value={`${report.weather} / ${report.temperature}℃ / ${report.humidity}%`} />
-          <PreviewRow label="点検者" value={report.inspector} />
-        </div>
-      </SectionCard>
-
-      <SectionCard title={`総括チェック表（表示 ${visibleSummary.length}項目）`}>
-        <div className="space-y-2 text-sm">
-          {visibleSummary.map((item) => (
-            <div key={item.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-              <span className="text-muted-foreground">
-                {item.no}. {item.label}
+          <div className="border-t pt-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={safeIndex === 0}
+                onClick={() => onSelectIndex(Math.max(safeIndex - 1, 0))}
+              >
+                前
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                {safeIndex + 1} / {pages.length}
               </span>
-              <Badge variant={item.result === "不良" ? "destructive" : "secondary"}>{item.result}</Badge>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={safeIndex >= pages.length - 1}
+                onClick={() => onSelectIndex(Math.min(safeIndex + 1, pages.length - 1))}
+              >
+                次
+              </Button>
             </div>
-          ))}
-          {hiddenSummary.length > 0 && (
-            <p className="pt-2 text-xs text-muted-foreground">
-              非表示: {hiddenSummary.map((item) => `${item.no}. ${item.label}`).join(" / ")}
-            </p>
-          )}
-        </div>
-      </SectionCard>
-
-      <SectionCard title="検査内容の要約">
-        <div className="grid gap-3 text-sm sm:grid-cols-2">
-          <PreviewRow label="接地抵抗" value={`${report.ground.length}件`} />
-          <PreviewRow label="高圧絶縁" value={`${report.hv.length}件`} />
-          <PreviewRow label="低圧絶縁" value={`${report.lv.length}回路 / 出力 ${report.outputConfig.lvInsulationPageCount}枚`} />
-          <PreviewRow label="太陽電池アレイ" value={`${report.array.length}台`} />
-          <PreviewRow label="外観点検" value={`${report.external.length}項目`} />
-          <PreviewRow label="計測器" value={`${report.inst.filter((item) => item.name || item.model || item.serial).length}件`} />
-        </div>
-      </SectionCard>
-    </div>
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {pages.map((page, index) => (
+                <button
+                  key={`${page.kind}-${index}`}
+                  type="button"
+                  className={`min-w-28 rounded-md border px-2 py-2 text-left text-xs transition ${
+                    index === safeIndex
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border bg-background hover:bg-secondary"
+                  }`}
+                  onClick={() => onSelectIndex(index)}
+                >
+                  <span className="block text-[10px] text-muted-foreground">{index + 1}</span>
+                  <span className="line-clamp-2 font-medium">{page.title}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </aside>
   );
 }
 
-function PreviewRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border border-border px-3 py-2">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="mt-1 font-medium">{value || "未入力"}</p>
-    </div>
-  );
-}
+type PreviewPage = { kind: string; title: string; pageNumber?: number };
 
-function buildOutputPagePreview(report: ReportData): string[] {
-  const pages = ["表紙", "総括チェック表", "外観点検"];
+function buildPreviewPages(report: ReportData): PreviewPage[] {
+  const pages: PreviewPage[] = [
+    { kind: "cover", title: "表紙" },
+    { kind: "summary", title: "総括チェック表" },
+    { kind: "external", title: "外観点検" },
+  ];
 
   for (const page of getOutputPagesForReportKind(report.report_kind)) {
     if (page.key === "lvInsulation") {
       for (let index = 1; index <= report.outputConfig.lvInsulationPageCount; index++) {
-        pages.push(`低圧絶縁 ${index}枚目`);
+        pages.push({ kind: "lvInsulation", title: `低圧絶縁 ${index}枚目`, pageNumber: index });
       }
       continue;
     }
-
     if (report.outputConfig.pages[page.key]) {
-      pages.push(page.label);
+      pages.push({ kind: page.key, title: page.label });
     }
   }
 
-  pages.push("計測器一覧");
+  pages.push({ kind: "instruments", title: "計測器一覧" });
   return pages;
+}
+
+function renderPreviewPage(page: PreviewPage, report: ReportData, client: Client, reportKindLabel: string) {
+  if (page.kind === "cover") {
+    return (
+      <PreviewSheet title={reportKindLabel} subtitle={client.facility_name}>
+        <PreviewLine label="宛先" value={`${client.name} 様`} />
+        <PreviewLine label="実施日" value={`令和${report.year_wareki}年${report.month}月${report.day}日`} />
+        <PreviewLine label="天候" value={`${report.weather} / ${report.temperature}℃ / ${report.humidity}%`} />
+        <PreviewLine label="点検者" value={report.inspector} />
+      </PreviewSheet>
+    );
+  }
+
+  if (page.kind === "summary") {
+    return (
+      <PreviewSheet title="総括チェック表" subtitle={client.facility_name}>
+        <PreviewTable
+          headers={["No", "項目", "判定"]}
+          rows={report.summary
+            .filter((item) => item.result !== "")
+            .map((item) => [item.no, item.label, item.result])}
+        />
+      </PreviewSheet>
+    );
+  }
+
+  if (page.kind === "groundResistance") {
+    return (
+      <PreviewSheet title="接地抵抗測定" subtitle={client.facility_name}>
+        <PreviewTable headers={["接地", "種別", "測定値", "判定"]} rows={report.ground.map((g) => [g.name, g.type, g.value, g.judge])} />
+      </PreviewSheet>
+    );
+  }
+
+  if (page.kind === "hvInsulation") {
+    return (
+      <PreviewSheet title="高圧関係 絶縁抵抗試験" subtitle={client.facility_name}>
+        <PreviewTable headers={["回路", "電圧", "測定値", "判定"]} rows={report.hv.map((h) => [h.name, h.voltage, h.value, h.judge])} />
+      </PreviewSheet>
+    );
+  }
+
+  if (page.kind === "lvInsulation") {
+    return (
+      <PreviewSheet title={`低圧絶縁抵抗測定 ${page.pageNumber ?? 1}枚目`} subtitle={client.facility_name}>
+        <PreviewTable headers={["回路", "R-P", "R-N", "判定"]} rows={report.lv.map((l) => [String(l.id), l.rp, l.rn, l.judge])} />
+      </PreviewSheet>
+    );
+  }
+
+  if (page.kind === "arrayInsulation") {
+    return (
+      <PreviewSheet title="太陽電池アレイ 絶縁測定" subtitle={client.facility_name}>
+        <PreviewTable headers={["No", "測定値", "判定"]} rows={report.array.map((a) => [String(a.id), a.value, a.judge])} />
+      </PreviewSheet>
+    );
+  }
+
+  if (page.kind === "generatorInspection") {
+    return (
+      <PreviewSheet title="非常用予備発電装置 点検記録" subtitle={client.facility_name}>
+        <PreviewLine label="蓄電池点検" value="未入力" />
+        <PreviewLine label="自動起動・自動停止" value="未入力" />
+        <PreviewLine label="絶縁抵抗測定" value="発電機 / 制御盤" />
+        <PreviewLine label="特記事項" value="特に異常を認めず" />
+      </PreviewSheet>
+    );
+  }
+
+  if (page.kind === "external") {
+    return (
+      <PreviewSheet title="外観点検" subtitle={client.facility_name}>
+        <PreviewTable headers={["項目", "判定"]} rows={report.external.map((e) => [e.label, e.result])} />
+      </PreviewSheet>
+    );
+  }
+
+  if (page.kind === "instruments") {
+    return (
+      <PreviewSheet title="計測器一覧" subtitle={client.facility_name}>
+        <PreviewTable headers={["名称", "メーカー", "型式", "製造番号"]} rows={report.inst.map((i) => [i.name, i.maker, i.model, i.serial])} />
+      </PreviewSheet>
+    );
+  }
+
+  return (
+    <PreviewSheet title={page.title} subtitle={client.facility_name}>
+      <PreviewLine label="出力" value="このページは出力対象です" />
+    </PreviewSheet>
+  );
+}
+
+function PreviewSheet({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-4 text-xs">
+      <div className="border-b border-slate-300 pb-3 text-center">
+        <h3 className="text-base font-bold tracking-normal">{title}</h3>
+        <p className="mt-1 text-[11px] text-slate-600">{subtitle}</p>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function PreviewLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[84px_1fr] border-b border-slate-200 py-2 text-xs">
+      <span className="font-medium text-slate-600">{label}</span>
+      <span>{value || "未入力"}</span>
+    </div>
+  );
+}
+
+function PreviewTable({ headers, rows }: { headers: string[]; rows: string[][] }) {
+  return (
+    <table className="w-full border-collapse text-[10px]">
+      <thead>
+        <tr>
+          {headers.map((header) => (
+            <th key={header} className="border border-slate-400 bg-slate-100 px-1 py-1 text-left font-semibold">
+              {header}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row, rowIndex) => (
+          <tr key={rowIndex}>
+            {row.map((cell, cellIndex) => (
+              <td key={cellIndex} className="border border-slate-300 px-1 py-1 align-top">
+                {cell || "?"}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
 }
 
 function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
