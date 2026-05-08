@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowLeft, FileDown, FileSpreadsheet, Sliders, CheckCircle2 } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Eye, Sliders } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,7 +17,7 @@ import {
   getOutputPagesForReportKind,
   updateReportOutputConfig,
 } from "../output-config";
-import type { Judge, ReportData } from "../types";
+import type { Client, Judge, ReportData } from "../types";
 
 const JUDGE_OPTIONS: Judge[] = ["良", "不良", "－"];
 
@@ -126,13 +126,25 @@ export function ConfirmView({
           <ArrowLeft className="h-4 w-4 mr-2" />クライアント選択に戻る
         </Button>
         <div className="flex gap-2">
-          <Button onClick={handleDownloadWord} disabled={downloading}>
-            <FileDown className="h-4 w-4 mr-2" />
-            Wordをダウンロード
+          <Button
+            onClick={handleDownloadWord}
+            disabled={downloading}
+            className="bg-[#185ABD] text-white hover:bg-[#2B579A]"
+          >
+            <span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-sm bg-white text-xs font-bold text-[#185ABD]">
+              W
+            </span>
+            Wordで出力
           </Button>
-          <Button variant="outline" onClick={handleDownloadExcel} disabled={downloading}>
-            <FileSpreadsheet className="h-4 w-4 mr-2" />
-            Excelをダウンロード
+          <Button
+            onClick={handleDownloadExcel}
+            disabled={downloading}
+            className="bg-[#107C41] text-white hover:bg-[#217346]"
+          >
+            <span className="mr-2 inline-flex h-5 w-5 items-center justify-center rounded-sm bg-white text-xs font-bold text-[#107C41]">
+              X
+            </span>
+            Excelで出力
           </Button>
         </div>
       </div>
@@ -165,6 +177,7 @@ export function ConfirmView({
         <TabsList>
           <TabsTrigger value="output">提出するページ</TabsTrigger>
           <TabsTrigger value="details">検査内容（{countDetails(report)}箇所）</TabsTrigger>
+          <TabsTrigger value="preview">出力プレビュー</TabsTrigger>
           <TabsTrigger value="cover">表紙</TabsTrigger>
         </TabsList>
 
@@ -526,6 +539,10 @@ export function ConfirmView({
           </SectionCard>
         </TabsContent>
 
+        <TabsContent value="preview" className="space-y-4">
+          <OutputPreview report={report} client={client} reportKindLabel={reportKindLabel} />
+        </TabsContent>
+
         {/* 表紙タブ */}
         <TabsContent value="cover" className="space-y-4">
           <SectionCard title="実施日・気象条件">
@@ -597,6 +614,116 @@ export function ConfirmView({
       </Tabs>
     </div>
   );
+}
+
+function OutputPreview({
+  report,
+  client,
+  reportKindLabel,
+}: {
+  report: ReportData;
+  client: Client;
+  reportKindLabel: string;
+}) {
+  const visibleSummary = report.summary.filter((item) => item.result !== "");
+  const hiddenSummary = report.summary.filter((item) => item.result === "");
+  const outputPages = buildOutputPagePreview(report);
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-primary/30 bg-primary/5 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Eye className="h-4 w-4 text-primary" />
+          <p className="text-sm font-medium">現在の設定で出力される内容です</p>
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          実際のExcel/Word生成と同じ出力構成・同じ入力値を使って表示しています。印刷時のセル幅や余白はExcel/Word側で最終確認してください。
+        </p>
+      </div>
+
+      <SectionCard title="出力されるページ">
+        <div className="grid gap-2 sm:grid-cols-2">
+          {outputPages.map((page, index) => (
+            <div key={`${page}-${index}`} className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm">
+              <Badge variant="secondary" className="tabular-nums">
+                {index + 1}
+              </Badge>
+              <span>{page}</span>
+            </div>
+          ))}
+        </div>
+      </SectionCard>
+
+      <SectionCard title="表紙">
+        <div className="grid gap-3 text-sm sm:grid-cols-2">
+          <PreviewRow label="帳票種別" value={reportKindLabel} />
+          <PreviewRow label="宛先" value={client.name} />
+          <PreviewRow label="事業場" value={client.facility_name} />
+          <PreviewRow label="実施日" value={`令和${report.year_wareki}年${report.month}月${report.day}日`} />
+          <PreviewRow label="天候・気温・湿度" value={`${report.weather} / ${report.temperature}℃ / ${report.humidity}%`} />
+          <PreviewRow label="点検者" value={report.inspector} />
+        </div>
+      </SectionCard>
+
+      <SectionCard title={`総括チェック表（表示 ${visibleSummary.length}項目）`}>
+        <div className="space-y-2 text-sm">
+          {visibleSummary.map((item) => (
+            <div key={item.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+              <span className="text-muted-foreground">
+                {item.no}. {item.label}
+              </span>
+              <Badge variant={item.result === "不良" ? "destructive" : "secondary"}>{item.result}</Badge>
+            </div>
+          ))}
+          {hiddenSummary.length > 0 && (
+            <p className="pt-2 text-xs text-muted-foreground">
+              非表示: {hiddenSummary.map((item) => `${item.no}. ${item.label}`).join(" / ")}
+            </p>
+          )}
+        </div>
+      </SectionCard>
+
+      <SectionCard title="検査内容の要約">
+        <div className="grid gap-3 text-sm sm:grid-cols-2">
+          <PreviewRow label="接地抵抗" value={`${report.ground.length}件`} />
+          <PreviewRow label="高圧絶縁" value={`${report.hv.length}件`} />
+          <PreviewRow label="低圧絶縁" value={`${report.lv.length}回路 / 出力 ${report.outputConfig.lvInsulationPageCount}枚`} />
+          <PreviewRow label="太陽電池アレイ" value={`${report.array.length}台`} />
+          <PreviewRow label="外観点検" value={`${report.external.length}項目`} />
+          <PreviewRow label="計測器" value={`${report.inst.filter((item) => item.name || item.model || item.serial).length}件`} />
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+function PreviewRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-border px-3 py-2">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 font-medium">{value || "未入力"}</p>
+    </div>
+  );
+}
+
+function buildOutputPagePreview(report: ReportData): string[] {
+  const pages = ["表紙", "総括チェック表", "外観点検"];
+
+  for (const page of getOutputPagesForReportKind(report.report_kind)) {
+    if (page.key === "lvInsulation") {
+      for (let index = 1; index <= report.outputConfig.lvInsulationPageCount; index++) {
+        pages.push(`低圧絶縁 ${index}枚目`);
+      }
+      continue;
+    }
+
+    if (report.outputConfig.pages[page.key]) {
+      pages.push(page.label);
+    }
+  }
+
+  pages.push("計測器一覧");
+  return pages;
 }
 
 function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
