@@ -106,7 +106,7 @@ export default function InspectionReportPage() {
 
       {/* メイン */}
       <main className="flex-1 overflow-y-auto">
-        <div className="p-8 max-w-6xl">
+        <div className={`p-8 ${view.kind === "confirm" ? "max-w-none" : "max-w-6xl"}`}>
           {view.kind === "home" && <HomeView onNavigate={(v) => setView(v)} />}
           {view.kind === "clients" && (
             <ClientsView onSelect={(id) => setView({ kind: "client_detail", id })} />

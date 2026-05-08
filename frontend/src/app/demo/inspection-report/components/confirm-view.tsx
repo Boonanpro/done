@@ -174,7 +174,7 @@ export function ConfirmView({
         </CardContent>
       </Card>
 
-      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_430px]">
+      <div className="grid gap-8 2xl:grid-cols-[minmax(720px,1fr)_minmax(560px,0.9fr)] xl:grid-cols-[minmax(640px,1fr)_520px]">
         <Tabs defaultValue="output" className="min-w-0">
           <TabsList>
             <TabsTrigger value="output">提出するページ</TabsTrigger>
@@ -643,42 +643,51 @@ function LiveReportPreview({
     <aside className="xl:sticky xl:top-6 xl:h-[calc(100vh-3rem)]">
       <Card className="h-full overflow-hidden border-primary/20">
         <CardHeader className="border-b bg-secondary/30 py-3">
-          <CardTitle className="flex items-center gap-2 text-sm">
-            <Eye className="h-4 w-4 text-primary" />
-            ライブプレビュー
-          </CardTitle>
+          <div className="space-y-1">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <Eye className="h-4 w-4 text-primary" />
+              ライブプレビュー
+            </CardTitle>
+            <p className="text-xs text-muted-foreground">
+              内容確認用のイメージです。実際のExcel/Wordではセル幅・余白・改ページが異なる場合があります。
+            </p>
+          </div>
         </CardHeader>
-        <CardContent className="flex h-[calc(100%-57px)] flex-col gap-3 p-3">
+        <CardContent className="flex h-[calc(100%-73px)] flex-col gap-3 p-3">
           <div className="min-h-0 flex-1 overflow-auto rounded-md bg-muted/40 p-3">
-            <div className="mx-auto min-h-[560px] w-[340px] bg-white p-5 text-slate-950 shadow-sm ring-1 ring-border">
-              {selected && renderPreviewPage(selected, report, client, reportKindLabel)}
+            <div className="flex min-h-full items-center justify-center gap-3">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-12 w-10 shrink-0 px-0 text-lg"
+                disabled={safeIndex === 0}
+                onClick={() => onSelectIndex(Math.max(safeIndex - 1, 0))}
+                aria-label="前のページ"
+              >
+                ←
+              </Button>
+              <div className="min-h-[620px] w-[420px] bg-white p-6 text-slate-950 shadow-sm ring-1 ring-border">
+                {selected && renderPreviewPage(selected, report, client, reportKindLabel)}
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-12 w-10 shrink-0 px-0 text-lg"
+                disabled={safeIndex >= pages.length - 1}
+                onClick={() => onSelectIndex(Math.min(safeIndex + 1, pages.length - 1))}
+                aria-label="次のページ"
+              >
+                →
+              </Button>
             </div>
           </div>
 
           <div className="border-t pt-3">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={safeIndex === 0}
-                onClick={() => onSelectIndex(Math.max(safeIndex - 1, 0))}
-              >
-                前
-              </Button>
-              <span className="text-xs text-muted-foreground">
-                {safeIndex + 1} / {pages.length}
-              </span>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={safeIndex >= pages.length - 1}
-                onClick={() => onSelectIndex(Math.min(safeIndex + 1, pages.length - 1))}
-              >
-                次
-              </Button>
-            </div>
+            <p className="mb-2 text-xs text-muted-foreground">
+              {safeIndex + 1} / {pages.length}　表示するページを選択
+            </p>
             <div className="flex gap-2 overflow-x-auto pb-1">
               {pages.map((page, index) => (
                 <button
