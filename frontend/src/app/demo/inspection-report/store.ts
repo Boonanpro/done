@@ -149,5 +149,5 @@ export const useInspectionStore = create<State>()(
 );
 
 function reportConfigKey(clientId: string, reportKind: ReportKind): string {
-  return `${clientId}:${reportKind}:v3`;
+  return `${clientId}:${reportKind}:v4`;
 }

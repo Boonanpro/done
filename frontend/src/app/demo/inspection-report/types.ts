@@ -9,11 +9,13 @@ export type OutputPageKey =
   | "groundResistance"
   | "lvInsulation"
   | "arrayInsulation"
-  | "pcs";
+  | "pcs"
+  | "generatorInspection";
 
 export type ReportOutputConfig = {
   pages: Record<OutputPageKey, boolean>;
   lvInsulationPageCount: number;
+  summaryVisibility: Record<string, boolean>;
 };
 
 export type ReportConfigSnapshot = {

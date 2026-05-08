@@ -9,9 +9,10 @@ import type {
 
 export const OUTPUT_PAGE_DEFINITIONS: {
   key: OutputPageKey;
-  summaryId: string;
+  summaryId?: string;
   label: string;
   description: string;
+  reportKinds?: ReportKind[];
 }[] = [
   { key: "ocr", summaryId: "r01", label: "過電流継電器", description: "OCR 試験ページ" },
   { key: "dgr", summaryId: "r02", label: "地絡継電器", description: "DGR/SOG 試験ページ" },
@@ -21,11 +22,25 @@ export const OUTPUT_PAGE_DEFINITIONS: {
   { key: "lvInsulation", summaryId: "r11", label: "低圧絶縁", description: "低圧絶縁抵抗測定ページ" },
   { key: "arrayInsulation", summaryId: "r22", label: "太陽電池アレイ", description: "アレイ絶縁測定ページ" },
   { key: "pcs", summaryId: "r23", label: "PCS", description: "PCS 保護継電器・総合連動試験" },
+  {
+    key: "generatorInspection",
+    label: "発電機点検記録",
+    description: "非常用予備発電装置の点検記録。年次点検のみ使用します。",
+    reportKinds: ["annual"],
+  },
 ];
 
 const PAGE_KEY_BY_SUMMARY_ID = new Map(
-  OUTPUT_PAGE_DEFINITIONS.map((page) => [page.summaryId, page.key]),
+  OUTPUT_PAGE_DEFINITIONS.flatMap((page) => (page.summaryId ? [[page.summaryId, page.key] as const] : [])),
 );
+
+export function getOutputPageKeyForSummaryId(summaryId: string): OutputPageKey | undefined {
+  return PAGE_KEY_BY_SUMMARY_ID.get(summaryId);
+}
+
+export function getOutputPagesForReportKind(reportKind: ReportKind) {
+  return OUTPUT_PAGE_DEFINITIONS.filter((page) => !page.reportKinds || page.reportKinds.includes(reportKind));
+}
 
 export function createDefaultOutputConfig(reportKind: ReportKind): ReportOutputConfig {
   return {
@@ -38,8 +53,10 @@ export function createDefaultOutputConfig(reportKind: ReportKind): ReportOutputC
       lvInsulation: reportKind === "annual",
       arrayInsulation: true,
       pcs: true,
+      generatorInspection: false,
     },
     lvInsulationPageCount: reportKind === "annual" ? 1 : 0,
+    summaryVisibility: {},
   };
 }
 
@@ -49,8 +66,10 @@ export function deriveOutputConfigFromSummary(
 ): ReportOutputConfig {
   const defaults = createDefaultOutputConfig(reportKind);
   const pages = { ...defaults.pages };
+  const summaryVisibility: Record<string, boolean> = {};
 
   for (const item of summary) {
+    summaryVisibility[item.id] = item.result !== "";
     const key = PAGE_KEY_BY_SUMMARY_ID.get(item.id);
     if (key) pages[key] = item.result !== "";
   }
@@ -58,6 +77,7 @@ export function deriveOutputConfigFromSummary(
   return {
     pages,
     lvInsulationPageCount: pages.lvInsulation ? Math.max(defaults.lvInsulationPageCount, 1) : 0,
+    summaryVisibility,
   };
 }
 
@@ -67,7 +87,11 @@ export function applyOutputConfigToSummary(
 ): ReportData["summary"] {
   return summary.map((item) => {
     const key = PAGE_KEY_BY_SUMMARY_ID.get(item.id);
-    if (!key) return item;
+    if (!key) {
+      const visible = config.summaryVisibility[item.id] ?? item.result !== "";
+      if (!visible) return { ...item, result: "" };
+      return { ...item, result: item.result === "" ? ("良" as Judge) : item.result };
+    }
 
     const enabled = key === "lvInsulation" ? config.lvInsulationPageCount > 0 : config.pages[key];
     if (!enabled) return { ...item, result: "" };
@@ -77,12 +101,15 @@ export function applyOutputConfigToSummary(
 
 export function normalizeOutputConfig(config: ReportOutputConfig): ReportOutputConfig {
   const lvInsulationPageCount = clampLvPageCount(config.lvInsulationPageCount);
+  const pages = {
+    ...createDefaultOutputConfig("annual").pages,
+    ...config.pages,
+    lvInsulation: lvInsulationPageCount > 0,
+  };
   return {
-    pages: {
-      ...config.pages,
-      lvInsulation: lvInsulationPageCount > 0,
-    },
+    pages,
     lvInsulationPageCount,
+    summaryVisibility: config.summaryVisibility ?? {},
   };
 }
 
@@ -127,6 +154,7 @@ export function updateReportOutputConfig(
   report: ReportData,
   patch: Partial<Omit<ReportOutputConfig, "pages">> & {
     pages?: Partial<Record<OutputPageKey, boolean>>;
+    summaryVisibility?: Record<string, boolean>;
   },
 ): Pick<ReportData, "outputConfig" | "summary"> {
   const outputConfig = normalizeOutputConfig({
@@ -135,6 +163,10 @@ export function updateReportOutputConfig(
     pages: {
       ...report.outputConfig.pages,
       ...patch.pages,
+    },
+    summaryVisibility: {
+      ...report.outputConfig.summaryVisibility,
+      ...patch.summaryVisibility,
     },
   });
 

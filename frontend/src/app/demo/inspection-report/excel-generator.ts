@@ -45,6 +45,7 @@ async function generateAnnualExcelBlob(report: ReportData, client: Client): Prom
   const skipped = skippedSummaryIds(report);
   mutateSheet(zip, "xl/worksheets/sheet1.xml", annualCoverCells(report, client));
   mutateSheet(zip, "xl/worksheets/sheet15.xml", annualLowVoltageCells(report));
+  addAnnualConfiguredSheets(zip, report, client);
   hideAnnualSkippedSheets(zip, skipped);
 
   return zip.generate({
@@ -82,6 +83,19 @@ function annualLowVoltageCells(report: ReportData): Record<string, CellValue> {
     cells[`E${row}`] = item.judge || "良";
   });
   return cells;
+}
+
+function addAnnualConfiguredSheets(zip: PizZip, report: ReportData, client: Client) {
+  const lvPageCount = report.outputConfig.lvInsulationPageCount;
+  if (lvPageCount > 1) {
+    for (let page = 2; page <= lvPageCount; page++) {
+      duplicateWorksheet(zip, "xl/worksheets/sheet15.xml", `低圧絶縁 ${page}`);
+    }
+  }
+
+  if (report.outputConfig.pages.generatorInspection) {
+    addWorksheet(zip, "発電機点検記録", generatorInspectionSheetXml(report, client));
+  }
 }
 
 async function generateCompletionExcelBlob(report: ReportData, client: Client): Promise<Blob> {
@@ -231,6 +245,151 @@ function hideAnnualSkippedSheets(zip: PizZip, skipped: Set<string>) {
     xml = hideWorkbookSheet(xml, sheetName);
   }
   zip.file("xl/workbook.xml", xml);
+}
+
+function duplicateWorksheet(zip: PizZip, sourcePath: string, sheetName: string) {
+  const source = zip.file(sourcePath);
+  if (!source) return;
+
+  const sheetPath = nextWorksheetPath(zip);
+  addWorksheet(zip, sheetName, source.asText(), sheetPath);
+
+  const sourceRelsPath = sourcePath.replace("xl/worksheets/", "xl/worksheets/_rels/") + ".rels";
+  const sourceRels = zip.file(sourceRelsPath);
+  if (sourceRels) {
+    const targetRelsPath = sheetPath.replace("xl/worksheets/", "xl/worksheets/_rels/") + ".rels";
+    zip.file(targetRelsPath, sourceRels.asText());
+  }
+}
+
+function addWorksheet(zip: PizZip, sheetName: string, sheetXml: string, preferredPath?: string) {
+  const workbookFile = zip.file("xl/workbook.xml");
+  const relsFile = zip.file("xl/_rels/workbook.xml.rels");
+  const contentTypesFile = zip.file("[Content_Types].xml");
+  if (!workbookFile || !relsFile || !contentTypesFile) return;
+
+  const sheetPath = preferredPath ?? nextWorksheetPath(zip);
+  const sheetId = nextWorkbookSheetId(workbookFile.asText());
+  const relId = nextRelationshipId(relsFile.asText());
+  const sheetTarget = sheetPath.replace("xl/", "");
+
+  zip.file(sheetPath, sheetXml);
+  zip.file(
+    "xl/workbook.xml",
+    workbookFile
+      .asText()
+      .replace(
+        "</sheets>",
+        `<sheet name="${escapeXml(sheetName)}" sheetId="${sheetId}" r:id="${relId}"/></sheets>`,
+      ),
+  );
+  zip.file(
+    "xl/_rels/workbook.xml.rels",
+    relsFile
+      .asText()
+      .replace(
+        "</Relationships>",
+        `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="${sheetTarget}"/></Relationships>`,
+      ),
+  );
+  zip.file(
+    "[Content_Types].xml",
+    ensureWorksheetContentType(contentTypesFile.asText(), sheetPath),
+  );
+}
+
+function nextWorksheetPath(zip: PizZip): string {
+  const maxSheetNumber = Math.max(
+    0,
+    ...Object.keys(zip.files)
+      .map((path) => path.match(/^xl\/worksheets\/sheet(\d+)\.xml$/)?.[1])
+      .filter((value): value is string => Boolean(value))
+      .map(Number),
+  );
+  return `xl/worksheets/sheet${maxSheetNumber + 1}.xml`;
+}
+
+function nextWorkbookSheetId(workbookXml: string): number {
+  return (
+    Math.max(
+      0,
+      ...Array.from(workbookXml.matchAll(/\bsheetId="(\d+)"/g)).map((match) => Number(match[1])),
+    ) + 1
+  );
+}
+
+function nextRelationshipId(relsXml: string): string {
+  const maxId = Math.max(
+    0,
+    ...Array.from(relsXml.matchAll(/\bId="rId(\d+)"/g)).map((match) => Number(match[1])),
+  );
+  return `rId${maxId + 1}`;
+}
+
+function ensureWorksheetContentType(xml: string, sheetPath: string): string {
+  const partName = `/${sheetPath}`;
+  if (xml.includes(`PartName="${partName}"`)) return xml;
+  return xml.replace(
+    "</Types>",
+    `<Override PartName="${partName}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`,
+  );
+}
+
+function generatorInspectionSheetXml(report: ReportData, client: Client): string {
+  const date = `${2018 + report.year_wareki}年${report.month}月${report.day}日`;
+  const rows: Record<string, CellValue>[] = [
+    { A: "業場名", C: client.facility_name || client.name, H: "点検日", J: date },
+    { A: "非常用予備発電装置 点検記録" },
+    { A: "定格出力", B: "", D: "定格電圧", F: "", H: "定格周波数", I: "" },
+    { A: "蓄電池電圧", B: "", D: "タンク容量", F: "", H: "燃料", I: "", K: "回転数" },
+    { A: "製造者名", B: "型式", D: "製造番号", F: "製造年", H: "始動方式" },
+    { A: "" },
+    { A: "【蓄電池点検】" },
+    { A: "蓄電池番号", B: "電圧(V)", D: "比重", E: "液温", G: "蓄電池番号", H: "電圧(V)", J: "比重", L: "液温" },
+    { A: "1", B: "", D: "－", E: "－" },
+    {},
+    {},
+    {},
+    {},
+    { A: "判定基準：停電から電源切替まで　即時型：10秒以内　即時型以外：40秒以内" },
+    {},
+    {},
+    { A: "停電　起動　電圧確立　負荷切替" },
+    { A: "自動起動", J: "判定：良" },
+    { C: "", E: "", G: "" },
+    {},
+    { A: "判定基準：復電から停止用電磁弁ONまで3分±2秒" },
+    { A: "復電　負荷切替　電磁弁ON　停止　解放" },
+    { A: "自動停止", J: "判定：良" },
+    { C: "", E: "", G: "", I: "" },
+    {},
+    { A: "絶縁抵抗測定（MΩ以上）" },
+    { B: "印加電圧(V)", C: "測定値", D: "管理値", E: "判定", F: "備考" },
+    { A: "発電機", B: "250", C: "", D: "0.2", E: "良" },
+    { A: "制御盤", B: "125", C: "", D: "0.1", E: "良" },
+    {},
+    { A: "【外観点検・試運転記録】" },
+    { A: "別紙記載" },
+    {},
+    { A: "【特記事項】" },
+    { A: "特に異常を認めず" },
+  ];
+
+  return worksheetXml(rows);
+}
+
+function worksheetXml(rows: Record<string, CellValue>[]): string {
+  const rowXml = rows
+    .map((row, index) => {
+      const rowNumber = index + 1;
+      const cells = Object.entries(row)
+        .map(([column, value]) => buildCell(`${column}${rowNumber}`, "", value))
+        .join("");
+      return `<row r="${rowNumber}">${cells}</row>`;
+    })
+    .join("");
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><dimension ref="A1:L35"/><sheetViews><sheetView workbookViewId="0"/></sheetViews><sheetFormatPr defaultRowHeight="18"/><sheetData>${rowXml}</sheetData><pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/><pageSetup paperSize="9" orientation="portrait"/></worksheet>`;
 }
 
 function skippedSummaryIds(report: ReportData): Set<string> {

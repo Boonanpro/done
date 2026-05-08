@@ -12,16 +12,14 @@ import { Switch } from "@/components/ui/switch";
 import { useInspectionStore } from "../store";
 import { downloadDocx } from "../docx-generator";
 import { downloadExcel } from "../excel-generator";
-import { OUTPUT_PAGE_DEFINITIONS, updateReportOutputConfig } from "../output-config";
+import {
+  getOutputPageKeyForSummaryId,
+  getOutputPagesForReportKind,
+  updateReportOutputConfig,
+} from "../output-config";
 import type { Judge, ReportData } from "../types";
 
-const JUDGE_OPTIONS: Judge[] = ["良", "不良", "－", ""];
-const SUMMARY_JUDGE_LABELS: Record<Judge, string> = {
-  良: "出力する（良）",
-  不良: "出力する（不良）",
-  "－": "出力する（－）",
-  "": "出力しない",
-};
+const JUDGE_OPTIONS: Judge[] = ["良", "不良", "－"];
 
 function JudgeButton({
   value,
@@ -163,18 +161,18 @@ export function ConfirmView({
         </CardContent>
       </Card>
 
-      <Tabs defaultValue="numbers">
+      <Tabs defaultValue="output">
         <TabsList>
-          <TabsTrigger value="output">出力ページ</TabsTrigger>
+          <TabsTrigger value="output">出力構成</TabsTrigger>
           <TabsTrigger value="numbers">数値（{countNumbers(report)}箇所）</TabsTrigger>
           <TabsTrigger value="judges">判定（{countJudges(report)}箇所）</TabsTrigger>
           <TabsTrigger value="cover">表紙</TabsTrigger>
         </TabsList>
 
         <TabsContent value="output" className="space-y-4">
-          <SectionCard title="出力ページ設定">
+          <SectionCard title="詳細ページ">
             <div className="space-y-3">
-              {OUTPUT_PAGE_DEFINITIONS.map((page) => {
+              {getOutputPagesForReportKind(report.report_kind).map((page) => {
                 const checked =
                   page.key === "lvInsulation"
                     ? report.outputConfig.lvInsulationPageCount > 0
@@ -205,19 +203,56 @@ export function ConfirmView({
           </SectionCard>
 
           <SectionCard title="低圧絶縁の枚数">
-            <div className="max-w-xs">
+            <div>
               <Label className="text-xs text-muted-foreground">なし / 1〜5枚</Label>
-              <Input
-                type="number"
-                min={0}
-                max={5}
-                className="mt-1"
-                value={report.outputConfig.lvInsulationPageCount}
-                onChange={(e) => updateOutput({ lvInsulationPageCount: Number(e.target.value) })}
-              />
+              <div className="mt-2 inline-flex rounded-md border border-border overflow-hidden text-sm">
+                {[0, 1, 2, 3, 4, 5].map((count) => (
+                  <button
+                    key={count}
+                    type="button"
+                    className={`px-3 py-2 transition ${
+                      report.outputConfig.lvInsulationPageCount === count
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-background hover:bg-secondary"
+                    }`}
+                    onClick={() => updateOutput({ lvInsulationPageCount: count })}
+                  >
+                    {count === 0 ? "なし" : `${count}枚`}
+                  </button>
+                ))}
+              </div>
               <p className="mt-2 text-xs text-muted-foreground">
-                0にすると低圧絶縁ページを出力しません。複数枚の実出力はひな形確認後に対応します。
+                同じ低圧絶縁測定記録を、提出先に合わせて必要枚数分出力します。
               </p>
+            </div>
+          </SectionCard>
+
+          <SectionCard title="総括チェック表だけの項目">
+            <div className="space-y-2">
+              {report.summary
+                .filter((item) => !getOutputPageKeyForSummaryId(item.id))
+                .map((item) => {
+                  const checked = report.outputConfig.summaryVisibility[item.id] ?? item.result !== "";
+                  return (
+                    <div
+                      key={item.id}
+                      className="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-2"
+                    >
+                      <div>
+                        <Label className="text-sm font-medium">
+                          {item.no}. {item.label}
+                        </Label>
+                        <p className="text-xs text-muted-foreground">総括チェック表への表示</p>
+                      </div>
+                      <Switch
+                        checked={checked}
+                        onCheckedChange={(next) =>
+                          updateOutput({ summaryVisibility: { [item.id]: next } })
+                        }
+                      />
+                    </div>
+                  );
+                })}
             </div>
           </SectionCard>
         </TabsContent>
@@ -360,23 +395,21 @@ export function ConfirmView({
         <TabsContent value="judges" className="space-y-4">
           <SectionCard title="総括チェック表（23項目）">
             <p className="text-xs text-muted-foreground mb-3">
-              「出力しない」を選ぶと、総括表では空欄になり、対応する詳細ページやExcelシートも出力対象から外れます。
+              出す/出さないは「出力構成」タブで変更します。ここでは表示する項目の判定だけを編集します。
             </p>
             <div className="space-y-2 text-sm">
-              {report.summary.map((s, i) => (
+              {report.summary.filter((s) => s.result !== "").map((s) => {
+                const i = report.summary.findIndex((item) => item.id === s.id);
+                return (
                 <div
                   key={s.id}
-                  className={`flex items-center justify-between gap-3 ${
-                    s.result === "" ? "opacity-40" : ""
-                  }`}
+                  className="flex items-center justify-between gap-3"
                 >
                   <span className="text-muted-foreground">
                     {s.no}. {s.label}
-                    {s.result === "" && <span className="ml-2 text-xs">（出力されません）</span>}
                   </span>
                   <JudgeButton
                     value={s.result}
-                    labels={SUMMARY_JUDGE_LABELS}
                     onChange={(v) => {
                       const next = [...report.summary];
                       next[i] = { ...s, result: v };
@@ -384,7 +417,8 @@ export function ConfirmView({
                     }}
                   />
                 </div>
-              ))}
+                );
+              })}
             </div>
           </SectionCard>
 
@@ -601,5 +635,12 @@ function countNumbers(r: ReportData): number {
 }
 
 function countJudges(r: ReportData): number {
-  return r.summary.length + r.external.length + r.ground.length + r.array.length + r.lv.length + 3;
+  return (
+    r.summary.filter((item) => item.result !== "").length +
+    r.external.length +
+    r.ground.length +
+    r.array.length +
+    r.lv.length +
+    3
+  );
 }
