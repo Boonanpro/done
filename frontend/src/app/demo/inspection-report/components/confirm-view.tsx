@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowLeft, CheckCircle2, Eye, Sliders } from "lucide-react";
+import { ArrowLeft, CheckCircle2, ChevronDown, ChevronUp, Eye, Sliders } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -967,12 +967,55 @@ function NumField({
   value: string;
   onChange: (v: string) => void;
 }) {
+  const step = getNumberStep(label, value);
+  const adjust = (direction: 1 | -1) => {
+    const current = Number.parseFloat(value);
+    const base = Number.isFinite(current) ? current : 0;
+    const next = Math.max(0, base + step * direction);
+    onChange(formatNumberValue(next, step, value));
+  };
+
   return (
     <div>
       <span className="text-xs text-muted-foreground">{label}</span>
-      <Input className="mt-1 h-8" value={value} onChange={(e) => onChange(e.target.value)} />
+      <div className="mt-1 flex h-8 overflow-hidden rounded-md border border-input bg-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2">
+        <Input
+          className="h-full rounded-none border-0 focus-visible:ring-0 focus-visible:ring-offset-0"
+          inputMode="decimal"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <div className="flex w-8 shrink-0 flex-col border-l">
+          <button
+            type="button"
+            className="flex h-4 items-center justify-center hover:bg-secondary"
+            onClick={() => adjust(1)}
+            aria-label={`${label}を増やす`}
+          >
+            <ChevronUp className="h-3 w-3" />
+          </button>
+          <button
+            type="button"
+            className="flex h-4 items-center justify-center border-t hover:bg-secondary"
+            onClick={() => adjust(-1)}
+            aria-label={`${label}を減らす`}
+          >
+            <ChevronDown className="h-3 w-3" />
+          </button>
+        </div>
+      </div>
     </div>
   );
+}
+
+function getNumberStep(label: string, value: string) {
+  if (value.includes(".") || label.includes("秒") || label.includes("(S)") || label.includes("(s)")) return 0.1;
+  return 1;
+}
+
+function formatNumberValue(value: number, step: number, previous: string) {
+  const decimals = step < 1 || previous.includes(".") ? 1 : 0;
+  return value.toFixed(decimals).replace(/\.0$/, "");
 }
 
 function countDetails(r: ReportData): number {
