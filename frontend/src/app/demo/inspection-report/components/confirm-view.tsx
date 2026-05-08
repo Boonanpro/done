@@ -7,9 +7,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { useInspectionStore } from "../store";
 import { downloadDocx } from "../docx-generator";
 import { downloadExcel } from "../excel-generator";
+import { OUTPUT_PAGE_DEFINITIONS, updateReportOutputConfig } from "../output-config";
 import type { Judge, ReportData } from "../types";
 
 const JUDGE_OPTIONS: Judge[] = ["良", "不良", "－", ""];
@@ -82,6 +85,9 @@ export function ConfirmView({
   }
 
   const update = (patch: Partial<ReportData>) => updateReport(patch);
+  const updateOutput = (patch: Parameters<typeof updateReportOutputConfig>[1]) => {
+    update(updateReportOutputConfig(report, patch));
+  };
   const reportKindLabel =
     report.report_kind === "completion"
       ? "電力設備試験結果報告書（竣工報告書）"
@@ -159,10 +165,62 @@ export function ConfirmView({
 
       <Tabs defaultValue="numbers">
         <TabsList>
+          <TabsTrigger value="output">出力ページ</TabsTrigger>
           <TabsTrigger value="numbers">数値（{countNumbers(report)}箇所）</TabsTrigger>
           <TabsTrigger value="judges">判定（{countJudges(report)}箇所）</TabsTrigger>
           <TabsTrigger value="cover">表紙</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="output" className="space-y-4">
+          <SectionCard title="出力ページ設定">
+            <div className="space-y-3">
+              {OUTPUT_PAGE_DEFINITIONS.map((page) => {
+                const checked =
+                  page.key === "lvInsulation"
+                    ? report.outputConfig.lvInsulationPageCount > 0
+                    : report.outputConfig.pages[page.key];
+                return (
+                  <div
+                    key={page.key}
+                    className="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-2"
+                  >
+                    <div>
+                      <Label className="text-sm font-medium">{page.label}</Label>
+                      <p className="text-xs text-muted-foreground">{page.description}</p>
+                    </div>
+                    <Switch
+                      checked={checked}
+                      onCheckedChange={(next) => {
+                        if (page.key === "lvInsulation") {
+                          updateOutput({ lvInsulationPageCount: next ? 1 : 0 });
+                          return;
+                        }
+                        updateOutput({ pages: { [page.key]: next } });
+                      }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          </SectionCard>
+
+          <SectionCard title="低圧絶縁の枚数">
+            <div className="max-w-xs">
+              <Label className="text-xs text-muted-foreground">なし / 1〜5枚</Label>
+              <Input
+                type="number"
+                min={0}
+                max={5}
+                className="mt-1"
+                value={report.outputConfig.lvInsulationPageCount}
+                onChange={(e) => updateOutput({ lvInsulationPageCount: Number(e.target.value) })}
+              />
+              <p className="mt-2 text-xs text-muted-foreground">
+                0にすると低圧絶縁ページを出力しません。複数枚の実出力はひな形確認後に対応します。
+              </p>
+            </div>
+          </SectionCard>
+        </TabsContent>
 
         {/* 数値タブ */}
         <TabsContent value="numbers" className="space-y-4">

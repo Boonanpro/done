@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useInspectionStore } from "../store";
 import { generateReport } from "../random";
+import { applySavedConfig } from "../output-config";
 import type { ReportKind } from "../types";
 
 export function GenerateView({ onGenerated }: { onGenerated: () => void }) {
@@ -15,6 +16,7 @@ export function GenerateView({ onGenerated }: { onGenerated: () => void }) {
   const equipments = useInspectionStore((s) => s.equipments);
   const instruments = useInspectionStore((s) => s.instruments);
   const setCurrentReport = useInspectionStore((s) => s.setCurrentReport);
+  const getLastReportConfig = useInspectionStore((s) => s.getLastReportConfig);
 
   const [selectedId, setSelectedId] = useState<string>(clients[0]?.id ?? "");
   const [reportKind, setReportKind] = useState<ReportKind>("annual");
@@ -29,7 +31,10 @@ export function GenerateView({ onGenerated }: { onGenerated: () => void }) {
     if (!client) return;
     const eqMap = new Map(equipments.map((e) => [e.id, e]));
     const instMap = new Map(instruments.map((m) => [m.id, m]));
-    const r = generateReport(client, eqMap, instMap, year, month, day, reportKind);
+    const r = applySavedConfig(
+      generateReport(client, eqMap, instMap, year, month, day, reportKind),
+      getLastReportConfig(client.id, reportKind),
+    );
     setCurrentReport(r, client.id);
     onGenerated();
   };

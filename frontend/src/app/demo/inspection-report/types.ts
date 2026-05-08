@@ -1,6 +1,28 @@
 export type Judge = "良" | "不良" | "" | "－";
 export type ReportKind = "annual" | "completion";
 
+export type OutputPageKey =
+  | "ocr"
+  | "dgr"
+  | "ovgr"
+  | "hvInsulation"
+  | "groundResistance"
+  | "lvInsulation"
+  | "arrayInsulation"
+  | "pcs";
+
+export type ReportOutputConfig = {
+  pages: Record<OutputPageKey, boolean>;
+  lvInsulationPageCount: number;
+};
+
+export type ReportConfigSnapshot = {
+  outputConfig: ReportOutputConfig;
+  summaryResults: Record<string, Judge>;
+  inspector: string;
+  instruments: ReportData["inst"];
+};
+
 // 機器マスタ（PAS / 各種継電器 / 変圧器 など）
 export type Equipment = {
   id: string;
@@ -94,6 +116,8 @@ export type ReportData = {
 
   // Table 0 総括（最大23項目）。「空」選択時は no/label/result すべて空にする
   summary: { id: string; no: string; label: string; result: Judge }[];
+
+  outputConfig: ReportOutputConfig;
 
   // Table 1 外観点検
   external: { id: string; label: string; result: Judge }[];

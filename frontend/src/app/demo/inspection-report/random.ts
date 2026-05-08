@@ -1,4 +1,5 @@
 import type { Client, Equipment, Judge, MeasuringInstrument, ReportData, ReportKind } from "./types";
+import { createDefaultOutputConfig } from "./output-config";
 
 // 範囲内の値を小数1桁または整数で返す
 function rand(min: number, max: number, digits = 1): string {
@@ -144,7 +145,7 @@ export function generateReport(
   // 総括（23項目）。result が「空」の項目は出力時に no/label も空欄化される
   const summary = SUMMARY_LABELS.map((s) => {
     let result: ReportData["summary"][number]["result"] = "良";
-    if (SUMMARY_EMPTY_IDS.has(s.id)) result = "";
+    if (reportKind === "annual" && SUMMARY_EMPTY_IDS.has(s.id)) result = "";
     if (SUMMARY_DASH_IDS.has(s.id)) result = "－";
     return { id: s.id, no: s.no, label: s.label, result };
   });
@@ -245,6 +246,7 @@ export function generateReport(
     inspector: client.inspector || "本田修",
 
     summary,
+    outputConfig: createDefaultOutputConfig(reportKind),
     external,
     ground,
     hv,

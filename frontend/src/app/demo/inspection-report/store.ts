@@ -2,8 +2,9 @@
 
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import type { Client, Equipment, MeasuringInstrument, ReportData } from "./types";
+import type { Client, Equipment, MeasuringInstrument, ReportConfigSnapshot, ReportData, ReportKind } from "./types";
 import { initialClients, initialEquipments, initialInstruments } from "./mock-data";
+import { snapshotReportConfig } from "./output-config";
 
 type State = {
   clients: Client[];
@@ -16,6 +17,7 @@ type State = {
   // ドラフト中の生成データ
   currentReport: ReportData | null;
   currentClientId: string | null;
+  lastReportConfigs: Record<string, ReportConfigSnapshot>;
 
   upsertClient: (c: Client) => void;
   removeClient: (id: string) => void;
@@ -28,6 +30,7 @@ type State = {
 
   setCurrentReport: (r: ReportData | null, clientId: string | null) => void;
   updateReport: (patch: Partial<ReportData>) => void;
+  getLastReportConfig: (clientId: string, reportKind: ReportKind) => ReportConfigSnapshot | undefined;
 
   setSaveDir: (h: FileSystemDirectoryHandle | null, name: string) => void;
 
@@ -36,7 +39,7 @@ type State = {
 
 export const useInspectionStore = create<State>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       clients: initialClients,
       equipments: initialEquipments,
       instruments: initialInstruments,
@@ -44,6 +47,7 @@ export const useInspectionStore = create<State>()(
       saveDirName: "",
       currentReport: null,
       currentClientId: null,
+      lastReportConfigs: {},
 
       upsertClient: (c) =>
         set((s) => {
@@ -87,10 +91,36 @@ export const useInspectionStore = create<State>()(
       removeInstrument: (id) =>
         set((s) => ({ instruments: s.instruments.filter((m) => m.id !== id) })),
 
-      setCurrentReport: (r, clientId) => set({ currentReport: r, currentClientId: clientId }),
+      setCurrentReport: (r, clientId) =>
+        set((s) => {
+          if (!r || !clientId) return { currentReport: r, currentClientId: clientId };
+          return {
+            currentReport: r,
+            currentClientId: clientId,
+            lastReportConfigs: {
+              ...s.lastReportConfigs,
+              [reportConfigKey(clientId, r.report_kind)]: snapshotReportConfig(r),
+            },
+          };
+        }),
 
       updateReport: (patch) =>
-        set((s) => (s.currentReport ? { currentReport: { ...s.currentReport, ...patch } } : {})),
+        set((s) => {
+          if (!s.currentReport) return {};
+          const currentReport = { ...s.currentReport, ...patch };
+          const currentClientId = s.currentClientId;
+          if (!currentClientId) return { currentReport };
+          return {
+            currentReport,
+            lastReportConfigs: {
+              ...s.lastReportConfigs,
+              [reportConfigKey(currentClientId, currentReport.report_kind)]: snapshotReportConfig(currentReport),
+            },
+          };
+        }),
+
+      getLastReportConfig: (clientId, reportKind) =>
+        get().lastReportConfigs[reportConfigKey(clientId, reportKind)],
 
       setSaveDir: (h, name) => set({ saveDirHandle: h, saveDirName: name }),
 
@@ -101,6 +131,7 @@ export const useInspectionStore = create<State>()(
           instruments: initialInstruments,
           currentReport: null,
           currentClientId: null,
+          lastReportConfigs: {},
         }),
     }),
     {
@@ -111,7 +142,12 @@ export const useInspectionStore = create<State>()(
         equipments: s.equipments,
         instruments: s.instruments,
         saveDirName: s.saveDirName,
+        lastReportConfigs: s.lastReportConfigs,
       }),
     },
   ),
 );
+
+function reportConfigKey(clientId: string, reportKind: ReportKind): string {
+  return `${clientId}:${reportKind}:v3`;
+}
