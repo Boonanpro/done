@@ -646,7 +646,7 @@ function LiveReportPreview({
           <div className="space-y-1">
             <CardTitle className="flex items-center gap-2 text-sm">
               <Eye className="h-4 w-4 text-primary" />
-              ライブプレビュー
+              プレビュー
             </CardTitle>
             <p className="text-xs text-muted-foreground">
               内容確認用のイメージです。実際のExcel/Wordではセル幅・余白・改ページが異なる場合があります。
@@ -762,6 +762,70 @@ function renderPreviewPage(page: PreviewPage, report: ReportData, client: Client
     );
   }
 
+  if (page.kind === "dgr") {
+    return (
+      <PreviewSheet title="地絡継電器試験" subtitle={client.facility_name}>
+        <PreviewSectionTitle>機器情報</PreviewSectionTitle>
+        <PreviewTable
+          headers={["区分", "メーカー", "型式", "製造番号", "製造年月", "整定"]}
+          rows={[
+            ["PAS", report.dgr.pas_maker, report.dgr.pas_model, report.dgr.pas_serial, report.dgr.pas_mfg_date, ""],
+            [
+              "継電器",
+              report.dgr.relay_maker,
+              report.dgr.relay_model,
+              report.dgr.relay_serial,
+              report.dgr.relay_mfg_date,
+              [report.dgr.relay_setting, report.dgr.relay_setting2].filter(Boolean).join(" / "),
+            ],
+          ]}
+        />
+        <PreviewSectionTitle>試験結果</PreviewSectionTitle>
+        <PreviewTable
+          headers={["項目", "タップ", "測定値"]}
+          rows={[
+            ["動作電圧", report.dgr.v_tap, report.dgr.v_min],
+            ["動作電流", report.dgr.i_tap, report.dgr.i_min],
+            ["位相特性 進み", "", report.dgr.phase_lead],
+            ["位相特性 遅れ", "", report.dgr.phase_lag],
+            ["動作時間 a", report.dgr.t_i_a, report.dgr.t_a],
+            ["動作時間 b", report.dgr.t_i_b, report.dgr.t_b],
+            ["連動試験", report.dgr.t_tap, report.dgr.linked_time],
+          ]}
+        />
+        <PreviewLine label="判定" value={report.dgr.judge} />
+      </PreviewSheet>
+    );
+  }
+
+  if (page.kind === "ocr") {
+    return (
+      <PreviewSheet title="過電流継電器試験" subtitle={client.facility_name}>
+        <PreviewSectionTitle>機器情報</PreviewSectionTitle>
+        <PreviewTable
+          headers={["メーカー", "型式", "製造番号", "製造年月"]}
+          rows={[[report.ocr.maker, report.ocr.model, report.ocr.serial, report.ocr.mfg_date]]}
+        />
+        <PreviewSectionTitle>整定</PreviewSectionTitle>
+        <PreviewTable
+          headers={["限時", "瞬時", "タップ", "試験タップ", "瞬時タップ"]}
+          rows={[[report.ocr.setting_limit, report.ocr.setting_inst, report.ocr.tap_at, report.ocr.test_tap, report.ocr.inst_tap]]}
+        />
+        <PreviewSectionTitle>試験結果</PreviewSectionTitle>
+        <PreviewTable
+          headers={["項目", "R相", "T相"]}
+          rows={[
+            ["動作電流", report.ocr.r_current, report.ocr.t_current],
+            ["連動300%", report.ocr.r_300, report.ocr.t_300],
+            ["VCB連動動作時間", report.ocr.vcb_time, report.ocr.vcb_time],
+          ]}
+        />
+        <PreviewLine label="表示器" value={report.ocr.indicator} />
+        <PreviewLine label="判定" value={report.ocr.judge} />
+      </PreviewSheet>
+    );
+  }
+
   if (page.kind === "groundResistance") {
     return (
       <PreviewSheet title="接地抵抗測定" subtitle={client.facility_name}>
@@ -838,6 +902,10 @@ function PreviewSheet({ title, subtitle, children }: { title: string; subtitle: 
       {children}
     </div>
   );
+}
+
+function PreviewSectionTitle({ children }: { children: React.ReactNode }) {
+  return <h4 className="border-b border-slate-200 pb-1 text-[11px] font-semibold text-slate-700">{children}</h4>;
 }
 
 function PreviewLine({ label, value }: { label: string; value: string }) {
