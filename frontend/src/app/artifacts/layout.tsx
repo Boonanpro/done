@@ -18,7 +18,6 @@ import { InspectorRuntimeLoader } from '@/components/dan/inspector-runtime-loade
 
 const publicArtifactHostMap = JSON.stringify({
   'kittoku.vercel.app': 'kittoku',
-  'kittoku-tokuso.vercel.app': 'kittoku',
   'yoshikawa-tokuso.vercel.app': 'kittoku',
 });
 

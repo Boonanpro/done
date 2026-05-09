@@ -359,6 +359,15 @@ def _build_system_prompt(
         parts.append(active_plan)
 
     # Absolute rules — placed LAST for maximum attention.
+    parts.append(
+        "## Deliverable Placement Rules\n\n"
+        "- Production websites, dashboards, tools, and client-facing deliverables "
+        "must be created under `frontend/src/app/artifacts/<slug>/`.\n"
+        "- Do not create or edit production deliverables under `frontend/src/app/demo/`. "
+        "`/demo` is deprecated and reserved only for explicitly approved proposal-video prototypes.\n"
+        "- When creating a deliverable, make sure it has a `page.tsx` entry so it can be "
+        "registered as a chat artifact and opened from the chat header."
+    )
     parts.append(_ABSOLUTE_RULES)
 
     return "\n\n".join(parts)
@@ -548,6 +557,36 @@ def _build_cli_cmd(
             cmd.append("--fork-session")
 
     return cmd
+
+
+_CLI_ARG_SYSTEM_PROMPT_LIMIT = 8000
+
+
+def _prepare_cli_launch_payload(system_prompt: str, content: str) -> tuple[str, str]:
+    """Avoid Windows CreateProcess argument length failures.
+
+    Claude Code receives --append-system-prompt as a command-line argument.
+    Large accumulated runtime context can exceed the Windows command line limit
+    before the process starts. In that case, keep a short system prompt and move
+    the full runtime context into stdin.
+    """
+    if len(system_prompt or "") <= _CLI_ARG_SYSTEM_PROMPT_LIMIT:
+        return system_prompt, content
+
+    short_prompt = (
+        "Follow the runtime instructions included at the top of stdin. "
+        "Treat <runtime_system_context> as system-level guidance, then handle "
+        "the <user_request>."
+    )
+    expanded_content = (
+        "<runtime_system_context>\n"
+        f"{system_prompt}\n"
+        "</runtime_system_context>\n\n"
+        "<user_request>\n"
+        f"{content}\n"
+        "</user_request>"
+    )
+    return short_prompt, expanded_content
 
 
 def _run_cli_process(
@@ -926,12 +965,13 @@ def _run_cli_in_thread(
         need_fork = room_id in _interrupted_rooms
         if need_fork:
             _interrupted_rooms.discard(room_id)
-        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id, fork_session=need_fork)
+        launch_system_prompt, launch_content = _prepare_cli_launch_payload(system_prompt, content)
+        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, launch_system_prompt, resume_session_id, fork_session=need_fork)
         _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, fork={need_fork}, prompt len={len(content)})")
 
         result_data = _run_cli_process(
             cmd,
-            content,
+            launch_content,
             env,
             room_id,
             event_queue,
@@ -955,12 +995,12 @@ def _run_cli_in_thread(
                 _cli_debug(f"Failed to clear session from DB: {e}")
 
             # 2回目: 新規会話として実行
-            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, system_prompt, resume_session_id=None)
+            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, launch_system_prompt, resume_session_id=None)
             _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(content)})")
 
             result_data = _run_cli_process(
                 cmd,
-                content,
+                launch_content,
                 env,
                 room_id,
                 event_queue,

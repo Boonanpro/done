@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 
 const DEFAULT_PUBLIC_ARTIFACT_SLUGS = 'kittoku';
 
+function backendUrl(): string {
+  return process.env.BACKEND_URL || 'http://127.0.0.1:8000';
+}
+
 function publicSlugs(): Set<string> {
   return new Set(
     (process.env.PUBLIC_ARTIFACT_SLUGS || process.env.NEXT_PUBLIC_ARTIFACT_SLUGS || DEFAULT_PUBLIC_ARTIFACT_SLUGS)
@@ -26,9 +30,25 @@ export async function GET(request: NextRequest) {
   if (!slug) {
     return NextResponse.json({ detail: 'slug is required' }, { status: 400 });
   }
-  if (!publicSlugs().has(slug)) {
-    return NextResponse.json([]);
+
+  try {
+    const endpoint = new URL('/api/v1/inspector-overrides/public', backendUrl());
+    endpoint.searchParams.set('slug', slug);
+    const res = await fetch(endpoint, { cache: 'no-store' });
+    const body = await res.text();
+    return new NextResponse(body, {
+      status: res.status,
+      headers: {
+        'Content-Type': res.headers.get('Content-Type') || 'application/json',
+        'Cache-Control': 'no-store',
+      },
+    });
+  } catch {
+    // Fall through to the direct Supabase read for deployments that do not
+    // have a reachable backend proxy configured.
   }
+
+  if (!publicSlugs().has(slug)) return NextResponse.json([]);
 
   const { url, key } = supabaseConfig();
   if (!url || !key) {

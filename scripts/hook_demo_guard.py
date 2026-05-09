@@ -36,9 +36,6 @@ def _check(file_path):
 
     if os.path.exists(manifest):
         return None
-    if os.path.exists(demo_dir):
-        return None
-
     lines = [
         "/demo/{}/ への新規作成はブロックされました。".format(demo_id),
         "",

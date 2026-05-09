@@ -10,6 +10,7 @@ from app.services.chat_artifact_service import ChatArtifactService
 from app.models.chat_artifact_schemas import (
     ChatArtifactCreate,
     ChatArtifactUpdate,
+    ChatArtifactDomainRequest,
     ChatArtifactResponse,
 )
 
@@ -82,6 +83,34 @@ async def update_chat_artifact(
     )
     if not result:
         raise HTTPException(status_code=404, detail="見つかりません")
+    return result
+
+
+@router.post("/{artifact_id}/publish-preview", response_model=ChatArtifactResponse)
+async def publish_preview(
+    artifact_id: str,
+    user: TokenData = Depends(get_current_user),
+    service: ChatArtifactService = Depends(get_service),
+):
+    result = await service.mark_preview_live(artifact_id, user.user_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="隕九▽縺九ｊ縺ｾ縺帙ｓ")
+    return result
+
+
+@router.post("/{artifact_id}/connect-domain", response_model=ChatArtifactResponse)
+async def connect_domain(
+    artifact_id: str,
+    data: ChatArtifactDomainRequest,
+    user: TokenData = Depends(get_current_user),
+    service: ChatArtifactService = Depends(get_service),
+):
+    try:
+        result = await service.connect_domain(artifact_id, data.domain, user.user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not result:
+        raise HTTPException(status_code=404, detail="隕九▽縺九ｊ縺ｾ縺帙ｓ")
     return result
 
 

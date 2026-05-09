@@ -36,9 +36,18 @@ export interface ArtifactRecord {
   message_id: string | null;
   slug: string;
   kind: string;
+  artifact_type: 'website' | 'dashboard' | 'tool' | string;
   label: string | null;
   preview_url: string;
+  share_url?: string | null;
+  draft_url?: string | null;
+  production_url?: string | null;
+  custom_domain?: string | null;
+  publish_status?: string | null;
+  last_publish_error?: string | null;
   created_at: string;
+  updated_at?: string;
+  published_at?: string | null;
 }
 
 export type InspectorMode = 'comment' | 'edit';

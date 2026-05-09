@@ -5,7 +5,6 @@ import { InspectorRuntime } from './inspector-runtime';
 
 const PUBLIC_ARTIFACT_HOSTS: Record<string, string> = {
   'kittoku.vercel.app': 'kittoku',
-  'kittoku-tokuso.vercel.app': 'kittoku',
   'yoshikawa-tokuso.vercel.app': 'kittoku',
 };
 
@@ -26,7 +25,7 @@ export function InspectorRuntimeLoader() {
   const pathname = usePathname();
   if (!pathname) return null;
   // /artifacts/{slug} (通常) または /demo/{slug} (提案動画用プロトタイプ)
-  const m = pathname.match(/^\/(?:artifacts|demo|preview)\/([^/]+)/);
+  const m = pathname.match(/^\/(?:artifacts|preview)\/([^/]+)/);
   const slug = m?.[1] || slugFromHost();
   if (!slug) return null;
   return <InspectorRuntime slug={slug} />;

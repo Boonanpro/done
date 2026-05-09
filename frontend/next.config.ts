@@ -101,11 +101,6 @@ const nextConfig: NextConfig = {
       },
       {
         source: '/',
-        has: [{ type: 'host', value: 'kittoku-tokuso.vercel.app' }],
-        destination: '/artifacts/kittoku',
-      },
-      {
-        source: '/',
         has: [{ type: 'host', value: 'yoshikawa-tokuso.vercel.app' }],
         destination: '/artifacts/kittoku',
       },

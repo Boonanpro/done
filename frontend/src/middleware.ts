@@ -40,7 +40,6 @@ export function middleware(request: NextRequest) {
   // ----- 吉川特装HP 専用ドメイン: ルートを /artifacts/kittoku に rewrite -----
   if (
     host === 'kittoku.vercel.app' ||
-    host === 'kittoku-tokuso.vercel.app' ||
     host === 'yoshikawa-tokuso.vercel.app'
   ) {
     if (pathname === '/') {
@@ -48,7 +47,6 @@ export function middleware(request: NextRequest) {
       url.pathname = '/artifacts/kittoku';
       return NextResponse.rewrite(url);
     }
-    return NextResponse.next();
   }
 
   // ----- ダン本体ドメイン: root → /login -----

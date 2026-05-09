@@ -385,7 +385,24 @@ async def _enrich_content_with_video_analysis(
     from app.services.video_analyzer import analyze_video, analyze_video_url, extract_video_urls
 
     analyses = []
+    skipped = []
     video_analyses: dict[str, str] = {}  # {path: analysis_text}
+    max_analysis_chars = 5000
+    max_total_chars = 24000
+
+    def _append_analysis(label: str, analysis: str | None) -> None:
+        if not analysis:
+            return
+        used = sum(len(a) for a in analyses)
+        remaining = max_total_chars - used
+        if remaining <= 0:
+            return
+        text = analysis.strip()
+        if len(text) > max_analysis_chars:
+            text = text[:max_analysis_chars] + "\n...(analysis truncated; full video was processed)"
+        if len(text) > remaining:
+            text = text[:remaining] + "\n...(video analysis budget reached)"
+        analyses.append(f"[{label}:\n{text}\n]")
 
     # 1. アップロードされた動画ファイル
     if file_urls:
@@ -399,18 +416,53 @@ async def _enrich_content_with_video_analysis(
             if ext in VIDEO_EXTS:
                 filename = url.split("/")[-1]
                 local_path = os.path.join(upload_dir, filename)
-                analysis = await analyze_video(local_path)
+                if not os.path.exists(local_path):
+                    logger.warning("Uploaded video path missing: %s (%s)", local_path, name)
+                    skipped.append(f"{name}: local file not found")
+                    continue
+                try:
+                    analysis = await analyze_video(local_path)
+                except Exception as e:
+                    logger.warning("Video analysis failed for %s: %s", local_path, e, exc_info=True)
+                    skipped.append(f"{name}: analysis failed")
+                    continue
+                if analysis:
+                    used = sum(len(a) for a in analyses)
+                    remaining = max_total_chars - used
+                    if remaining <= 0:
+                        analysis = None
+                    elif len(analysis) > max_analysis_chars:
+                        analysis = analysis[:max_analysis_chars] + "\n...(analysis truncated; full video was processed)"
+                    if analysis and len(analysis) > remaining:
+                        analysis = analysis[:remaining] + "\n...(video analysis budget reached)"
                 if analysis:
                     analyses.append(f"[動画分析結果(Gemini):\n{analysis}\n]")
                     video_analyses[local_path] = analysis
+                else:
+                    skipped.append(f"{name}: analysis unavailable")
 
     # 2. メッセージ本文中の動画URL (YouTube, Loom)
     video_urls = extract_video_urls(content)
     logger.warning("Video URL detection: found %d URLs in message: %s", len(video_urls), video_urls)
     for v in video_urls:
-        analysis = await analyze_video_url(v["platform"], v["video_id"], v["url"])
+        try:
+            analysis = await analyze_video_url(v["platform"], v["video_id"], v["url"])
+        except Exception as e:
+            logger.warning("Video URL analysis failed for %s: %s", v["url"], e, exc_info=True)
+            skipped.append(f"{v['url']}: analysis failed")
+            continue
+        if analysis and len(analysis) > max_analysis_chars:
+            analysis = analysis[:max_analysis_chars] + "\n...(analysis truncated; full video was processed)"
         if analysis:
             analyses.append(f"[{v['platform']}動画分析結果(Gemini) {v['url']}:\n{analysis}\n]")
+
+    if skipped:
+        analyses.append(
+            "[video analysis notes:\n"
+            + "\n".join(f"- {item}" for item in skipped[:20])
+            + ("\n- additional videos omitted from notes" if len(skipped) > 20 else "")
+            + "\n]"
+        )
 
     if not analyses:
         return content, video_analyses
@@ -559,6 +611,60 @@ async def _save_written_artifacts(written_file_paths: list[str], room_id: str) -
         results = await asyncio.gather(*tasks, return_exceptions=True)
         saved = sum(1 for r in results if not isinstance(r, Exception) and r)
         logger.info("Post-CLI artifact extraction: %d/%d saved for room %s", saved, len(tasks), room_id)
+
+
+async def _register_written_chat_artifacts(
+    written_file_paths: list[str],
+    project_id: str | None,
+    user_id: str,
+) -> None:
+    """Register production artifacts even if the Claude Code hook missed them."""
+    if not written_file_paths or not project_id:
+        return
+    import re
+    from app.services.chat_artifact_service import ChatArtifactService
+
+    service = ChatArtifactService()
+    seen: set[str] = set()
+    pattern = re.compile(
+        r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)[/\\]page\.tsx$"
+    )
+    for raw_path in written_file_paths:
+        match = pattern.search((raw_path or "").replace("\\", "/"))
+        if not match:
+            continue
+        slug = match.group(1)
+        if slug in seen:
+            continue
+        seen.add(slug)
+
+        try:
+            existing = (
+                service.supabase.table("chat_artifact")
+                .select("id")
+                .eq("project_id", project_id)
+                .eq("slug", slug)
+                .limit(1)
+                .execute()
+            )
+            if existing.data:
+                continue
+            await service.create(
+                {
+                    "project_id": project_id,
+                    "slug": slug,
+                    "kind": "production",
+                    "artifact_type": service.infer_artifact_type(slug=slug, path=raw_path),
+                    "label": slug.replace("-", " ").replace("_", " "),
+                    "preview_url": f"/artifacts/{slug}",
+                    "share_url": f"/preview/{slug}",
+                    "draft_url": f"/preview/{slug}",
+                    "publish_status": "preview_live",
+                },
+                user_id,
+            )
+        except Exception as e:
+            logger.warning("Chat artifact auto-register failed for %s: %s", slug, e)
 
 
 def _fetch_latest_user_message_from_room(service: ChatService, room_id: str) -> str:
@@ -2144,6 +2250,11 @@ async def send_dan_message_stream(
                     # ダンが書き出したビジュアル成果物を検知 → Gemini抽出 → 永続保存
                     if written_file_paths:
                         try:
+                            await _register_written_chat_artifacts(
+                                written_file_paths,
+                                project_info.get("id"),
+                                current_user.user_id,
+                            )
                             await _save_written_artifacts(written_file_paths, room_id)
                         except Exception as e:
                             logger.warning("Post-CLI artifact extraction failed (non-blocking): %s", e)

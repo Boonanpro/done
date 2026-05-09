@@ -524,12 +524,17 @@ if __name__ == "__main__":
                     .execute()
                 )
                 if not exists.data:
+                    artifact_type = "dashboard" if "dashboard" in kebab else ("website" if any(t in kebab for t in ("website", "site", "homepage", "hp", "lp", "landing", "corporate", "company")) else "tool")
                     sb.table("chat_artifact").insert({
                         "project_id": project_id,
                         "slug": kebab,
-                        "kind": "demo" if demo else "production",
+                        "kind": "production",
+                        "artifact_type": artifact_type,
                         "label": feature_name,
-                        "preview_url": preview_url,
+                        "preview_url": f"/artifacts/{kebab}",
+                        "share_url": f"/preview/{kebab}",
+                        "draft_url": f"/preview/{kebab}",
+                        "publish_status": "preview_live",
                         "created_by": owner_id,
                     }).execute()
                     print(f"[chat_artifact] registered: {kebab} -> {preview_url} (project {project_id[:8]}...)")

@@ -407,10 +407,10 @@ function FlowSection() {
               <br />
               ぜひお問い合わせください
             </h2>
-            <p className="text-white/80 max-w-xl leading-relaxed">
-              LINEで車両の状態や写真を送るだけ。
+            <p data-edit-id="kittoku-top-flow-lead" className="text-white/80 max-w-xl leading-relaxed">
+              修理箇所の画像もまとめて送れるLINEか
               <br />
-              担当者が内容を確認し、折り返しご連絡します。
+              お電話でお問い合わせください。
             </p>
           </div>
         </div>
