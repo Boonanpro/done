@@ -29,12 +29,12 @@ import { VEHICLES, type VehicleKey } from "./components/vehicle-icons";
 // 動画/画像にバージョンクエリを付けて、ブラウザ強キャッシュを破棄する。
 // next.config.ts で git commit SHA から build-time に注入される。
 const ASSET_VERSION = process.env.NEXT_PUBLIC_ASSET_VERSION || "dev";
-const HERO_VIDEO = `/kikkawa/hero-v2.mp4?v=${ASSET_VERSION}`;
-const HERO_VIDEO_MOBILE = `/kikkawa/hero-mobile-v2.mp4?v=${ASSET_VERSION}`;
+const HERO_VIDEO = `/kikkawa/hero-pc-v3.mp4?v=${ASSET_VERSION}`;
+const HERO_VIDEO_MOBILE = `/kikkawa/hero-mobile-v3.mp4?v=${ASSET_VERSION}`;
 // poster は動画の1フレーム目を使う。元の hero.png（整備士のクローズアップ静止画）を出すと
 // 動画ロード前に「全く違う絵」がチラ見えする問題が起きるため。
-const HERO_POSTER = `/kikkawa/hero-poster-v2.jpg?v=${ASSET_VERSION}`;
-const HERO_POSTER_MOBILE = `/kikkawa/hero-mobile-poster-v2.jpg?v=${ASSET_VERSION}`;
+const HERO_POSTER = `/kikkawa/hero-pc-poster-v3.jpg?v=${ASSET_VERSION}`;
+const HERO_POSTER_MOBILE = `/kikkawa/hero-mobile-poster-v3.jpg?v=${ASSET_VERSION}`;
 
 function versionedAsset(src: string): string {
   if (!ASSET_VERSION || !src.startsWith("/kikkawa/")) return src;

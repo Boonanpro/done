@@ -6,7 +6,6 @@ import {
   Wrench,
   ChevronRight,
   Award,
-  Zap,
   Truck,
   Phone,
   MessageCircle,
@@ -28,27 +27,6 @@ function versionedAsset(src: string): string {
   const separator = src.includes("?") ? "&" : "?";
   return `${src}${separator}v=${ASSET_VERSION}`;
 }
-
-const STRENGTHS = [
-  {
-    slug: "shinmeiwa",
-    icon: Award,
-    title: "新明和工業 認定修理工場",
-    body: "特装車のリーディングメーカー、新明和工業の指定サービス工場としてメーカー純正部品と正規の整備ノウハウで対応します。",
-  },
-  {
-    slug: "all-models",
-    icon: Wrench,
-    title: "特装車 全機種に対応",
-    body: "塵芥車・ダンプ・クレーン・テールゲートリフタ・ローリ・高所作業車・ミキサ・飼料運搬車・脱着車まで、働く車のすべてを。",
-  },
-  {
-    slug: "fast-response",
-    icon: Zap,
-    title: "山陰から中国地方へ最短対応",
-    body: "米子を拠点に鳥取・島根・岡山・広島・山口へ出張整備も可能。止まっては困る業務車両を最短で現場復帰させます。",
-  },
-];
 
 type ServiceItem = {
   slug: string;
@@ -216,7 +194,6 @@ export default function ServicesPage() {
   return (
     <LpShell nav={<SiteNav />} footer={<SiteFooter />}>
       <PageHero />
-      <StrengthsSection />
       <ServicesGridSection />
       <VehicleListSection />
       <AchievementsSection />
@@ -266,53 +243,6 @@ function PageHero() {
         </p>
       </div>
     </section>
-  );
-}
-
-function StrengthsSection() {
-  return (
-    <Section padding="xl" width="xl" className="bg-background">
-      <div className="space-y-3 mb-12">
-        <div className="flex items-center gap-3">
-          <DiagonalDivider />
-          <span className="font-eyebrow text-xs text-[var(--yk-gold-dark)]">
-            Why kikkawa
-          </span>
-        </div>
-        <h2
-          data-edit-id="kittoku-services-strengths-h2"
-          className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black text-[var(--yk-navy)] tracking-tight"
-        >
-          選ばれる、3つの理由。
-        </h2>
-      </div>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {STRENGTHS.map((s, i) => {
-          const Icon = s.icon;
-          return (
-            <Card
-              key={s.slug}
-              className="border-border bg-white rounded-sm overflow-hidden"
-            >
-              <CardContent className="p-8 space-y-5">
-                <div className="flex items-center justify-between">
-                  <span className="font-eyebrow text-sm text-[var(--yk-gold-dark)] font-mono-data">
-                    0{i + 1}
-                  </span>
-                  <Icon className="h-6 w-6 text-[var(--yk-navy)]" />
-                </div>
-                <h3 className="font-headline text-xl font-bold text-[var(--yk-navy)] leading-snug">
-                  {s.title}
-                </h3>
-                <p className="text-sm text-[var(--yk-steel)] leading-relaxed">
-                  {s.body}
-                </p>
-              </CardContent>
-            </Card>
-          );
-        })}
-      </div>
-    </Section>
   );
 }
 
@@ -568,6 +498,22 @@ function InquiryFlowSection() {
             メーカー・型式・症状の3点が分かるとスムーズにご案内できます。
           </p>
         </div>
+
+        {/* 紹介動画 */}
+        <div className="mb-12 mx-auto max-w-4xl">
+          <div className="relative aspect-video rounded-sm overflow-hidden bg-black border border-white/10 shadow-2xl">
+            <video
+              src={versionedAsset("/kikkawa/inquiry-flow.mp4")}
+              poster={versionedAsset("/kikkawa/inquiry-flow-poster.jpg")}
+              controls
+              playsInline
+              preload="metadata"
+              className="absolute inset-0 w-full h-full object-cover"
+              aria-label="ご依頼の流れ 紹介動画"
+            />
+          </div>
+        </div>
+
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {INQUIRY_STEPS.map((s) => (
             <div
