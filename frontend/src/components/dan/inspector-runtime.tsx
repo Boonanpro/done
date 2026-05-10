@@ -281,7 +281,9 @@ export function InspectorRuntime({ slug }: { slug: string }) {
       findByKey: (key) => findElementByKey(doc, key),
       applyOverride: (key, styles, attrs) => {
         const el = findElementByKey(doc, key);
-        if (el) applyEntry(el, styles, attrs);
+        if (el && (!key || key.startsWith('@') || !hasEditIdAncestor(el))) {
+          applyEntry(el, styles, attrs);
+        }
         cache[key] = {
           styles: { ...(cache[key]?.styles || {}), ...(styles || {}) },
           attrs: { ...(cache[key]?.attrs || {}), ...(attrs || {}) },

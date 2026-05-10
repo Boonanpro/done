@@ -29,10 +29,18 @@ import { VEHICLES, type VehicleKey } from "./components/vehicle-icons";
 // 動画/画像にバージョンクエリを付けて、ブラウザ強キャッシュを破棄する。
 // next.config.ts で git commit SHA から build-time に注入される。
 const ASSET_VERSION = process.env.NEXT_PUBLIC_ASSET_VERSION || "dev";
-const HERO_VIDEO = `/kikkawa/hero.mp4?v=${ASSET_VERSION}`;
+const HERO_VIDEO = `/kikkawa/hero-v2.mp4?v=${ASSET_VERSION}`;
+const HERO_VIDEO_MOBILE = `/kikkawa/hero-mobile-v2.mp4?v=${ASSET_VERSION}`;
 // poster は動画の1フレーム目を使う。元の hero.png（整備士のクローズアップ静止画）を出すと
 // 動画ロード前に「全く違う絵」がチラ見えする問題が起きるため。
-const HERO_POSTER = `/kikkawa/hero-poster.jpg?v=${ASSET_VERSION}`;
+const HERO_POSTER = `/kikkawa/hero-poster-v2.jpg?v=${ASSET_VERSION}`;
+const HERO_POSTER_MOBILE = `/kikkawa/hero-mobile-poster-v2.jpg?v=${ASSET_VERSION}`;
+
+function versionedAsset(src: string): string {
+  if (!ASSET_VERSION || !src.startsWith("/kikkawa/")) return src;
+  const separator = src.includes("?") ? "&" : "?";
+  return `${src}${separator}v=${ASSET_VERSION}`;
+}
 
 const STATS = [
   { slug: "founded", label: "創業", value: "1988", unit: "年", hint: "37年以上の整備実績" },
@@ -215,6 +223,7 @@ export default function YoshikawaHomePage() {
       <HeroSection />
       <StatsSection />
       <ManufacturersSection />
+      <ServicesSummarySection />
       <VehiclesSection />
       <FlowSection />
       <CareersCtaSection />
@@ -227,7 +236,12 @@ export default function YoshikawaHomePage() {
 function HeroSection() {
   return (
     <section className="relative overflow-hidden">
-      <HeroVideo src={HERO_VIDEO} poster={HERO_POSTER} />
+      <HeroVideo
+        src={HERO_VIDEO}
+        poster={HERO_POSTER}
+        mobileSrc={HERO_VIDEO_MOBILE}
+        mobilePoster={HERO_POSTER_MOBILE}
+      />
       <div
         className="absolute inset-0"
         style={{
@@ -259,7 +273,7 @@ function HeroSection() {
             <Button
               asChild
               size="lg"
-              className="bg-[var(--yk-gold)] hover:bg-[var(--yk-gold-dark)] text-[var(--yk-navy-dark)] font-bold rounded-sm h-12 px-6"
+              className="bg-[var(--yk-gold)] hover:bg-[var(--yk-gold-dark)] text-[var(--yk-navy-dark)] font-bold rounded-sm h-12 px-6 animate-kk-cta"
             >
               <Link data-edit-id="kittoku-top-hero-cta-primary" href="/artifacts/kittoku/contact">
                 修理・整備の依頼
@@ -326,6 +340,125 @@ function StatsSection() {
   );
 }
 
+type ServiceItem = {
+  slug: string;
+  label: string;
+  en: string;
+  image: string;
+  comingSoon?: boolean;
+};
+
+const SERVICES_PRIMARY: ServiceItem[] = [
+  { slug: "repair", label: "整備・修理", en: "Maintenance & Repair", image: "/kikkawa/services-img/repair.jpg" },
+  { slug: "parts", label: "正規部品販売", en: "Parts Sales", image: "/kikkawa/services-img/parts.jpg" },
+];
+
+const SERVICES_SECONDARY: ServiceItem[] = [
+  { slug: "lease", label: "リース", en: "Lease", image: "/kikkawa/services-img/lease.jpg" },
+  { slug: "inspection", label: "点検", en: "Inspection", image: "/kikkawa/services-img/inspection.jpg" },
+  { slug: "bodywork", label: "板金", en: "Bodywork", image: "/kikkawa/services-img/bodywork.jpg" },
+  { slug: "retrofit", label: "架装・改造", en: "Retrofit & Custom", image: "/kikkawa/services-img/retrofit.jpg" },
+  { slug: "paint", label: "塗装", en: "Paint", image: "/kikkawa/services-img/paint.jpg", comingSoon: true },
+  { slug: "sales", label: "新車・中古車販売", en: "Vehicle Sales", image: "/kikkawa/services-img/sales.jpg", comingSoon: true },
+  { slug: "tow", label: "レッカー", en: "Tow", image: "/kikkawa/services-img/tow.jpg", comingSoon: true },
+];
+
+function ServicesSummarySection() {
+  return (
+    <Section padding="xl" width="xl" className="bg-[var(--yk-navy)]/[0.03]">
+      <div className="space-y-3 mb-10">
+        <div className="flex items-center gap-3">
+          <DiagonalDivider />
+          <span className="font-eyebrow text-xs text-[var(--yk-gold-dark)]">
+            Services
+          </span>
+        </div>
+        <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
+          <h2 data-edit-id="kittoku-top-services-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black text-[var(--yk-navy)] tracking-tight leading-tight">
+            事業内容
+          </h2>
+          <p data-edit-id="kittoku-top-services-lead" className="text-[var(--yk-steel)] max-w-md leading-relaxed text-sm">
+            特装車を中心に、整備・点検から架装・改造まで幅広く対応しています。
+          </p>
+        </div>
+      </div>
+
+      {/* メイン2: 整備・修理 + 正規部品販売 */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 mb-3 sm:mb-4">
+        {SERVICES_PRIMARY.map((s) => (
+          <ServiceCard key={s.slug} item={s} large />
+        ))}
+      </div>
+
+      {/* サブ7: 残りのサービス */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+        {SERVICES_SECONDARY.map((s) => (
+          <ServiceCard key={s.slug} item={s} large={false} />
+        ))}
+      </div>
+
+      <div className="mt-10 flex justify-center">
+        <Button
+          asChild
+          size="lg"
+          className="bg-[var(--yk-navy)] hover:bg-[var(--yk-navy-dark)] text-white rounded-sm h-12 px-6"
+        >
+          <Link data-edit-id="kittoku-top-services-cta" href="/artifacts/kittoku/services">
+            事業・サービスを詳しく見る
+            <ArrowRight className="h-4 w-4 ml-1.5" />
+          </Link>
+        </Button>
+      </div>
+    </Section>
+  );
+}
+
+function ServiceCard({ item, large }: { item: ServiceItem; large: boolean }) {
+  return (
+    <Link
+      href="/artifacts/kittoku/services"
+      className={`group relative block overflow-hidden rounded-sm border border-border bg-[var(--yk-navy-dark)] ${
+        large ? "aspect-[16/9] sm:aspect-[3/2]" : "aspect-[4/5] sm:aspect-square"
+      }`}
+    >
+      <Image
+        data-edit-id={`kittoku-top-services-${item.slug}-img`}
+        src={versionedAsset(item.image)}
+        alt={item.label}
+        fill
+        sizes={large ? "(max-width: 1024px) 100vw, 50vw" : "(max-width: 640px) 50vw, 25vw"}
+        className={`object-cover transition-transform duration-500 group-hover:scale-105 ${
+          item.comingSoon ? "opacity-60" : ""
+        }`}
+      />
+      <div className="absolute inset-0 bg-gradient-to-t from-[var(--yk-navy-dark)]/85 via-[var(--yk-navy-dark)]/30 to-transparent" />
+      <div className={`absolute inset-0 flex flex-col justify-end ${large ? "p-5 sm:p-7" : "p-3 sm:p-4"}`}>
+        <h3 className={`font-headline font-black text-white leading-tight ${
+          large ? "text-xl sm:text-2xl lg:text-3xl" : "text-sm sm:text-base"
+        }`} data-edit-id={`kittoku-top-services-${item.slug}-label`}>
+          {item.label}
+        </h3>
+        <div
+          data-edit-id={`kittoku-top-services-${item.slug}-en`}
+          className={`font-eyebrow text-white/70 ${large ? "text-[10px] sm:text-xs mt-1" : "text-[9px] mt-0.5"}`}
+        >
+          {item.en}
+        </div>
+        <div className={`absolute ${large ? "top-4 right-4" : "top-2 right-2"} flex items-center gap-1`}>
+          {item.comingSoon && (
+            <span className={`bg-[var(--yk-gold)] text-[var(--yk-navy-dark)] font-mono-data font-bold rounded-sm tracking-wider ${
+              large ? "text-[10px] px-2 py-0.5" : "text-[9px] px-1.5 py-0.5"
+            }`}>
+              COMING
+            </span>
+          )}
+          <ChevronRight className={`text-white/80 group-hover:translate-x-0.5 transition-transform ${large ? "h-5 w-5" : "h-3.5 w-3.5"}`} />
+        </div>
+      </div>
+    </Link>
+  );
+}
+
 function VehiclesSection() {
   const keys = Object.keys(VEHICLES) as VehicleKey[];
   return (
@@ -334,7 +467,7 @@ function VehiclesSection() {
         <div className="flex items-center gap-3">
           <DiagonalDivider />
           <span className="font-eyebrow text-xs text-[var(--yk-gold-dark)]">
-            Services
+            Vehicles
           </span>
         </div>
         <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
@@ -392,62 +525,48 @@ function FlowSection() {
     <section className="relative overflow-hidden bg-[var(--yk-navy)] text-white">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_78%_35%,rgba(255,196,0,0.16),transparent_30%),linear-gradient(135deg,rgba(255,255,255,0.08),transparent_45%)]" />
       <div className="relative mx-auto max-w-7xl px-4 sm:px-6 py-20 sm:py-24">
-        <div className="grid items-center gap-12 lg:grid-cols-[minmax(0,1fr)_400px] lg:gap-16">
-          <div className="max-w-2xl space-y-8">
-            <div className="space-y-3">
-          <div className="flex items-center gap-3">
-            <DiagonalDivider color="var(--yk-gold)" />
-            <span className="font-eyebrow text-xs text-[var(--yk-gold)]">
-              Inquiry flow
-            </span>
-          </div>
-          <div className="space-y-4">
-            <h2 data-edit-id="kittoku-top-flow-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black leading-tight">
-              修理・部品交換など
-              <br />
-              ぜひお問い合わせください
-            </h2>
-            <p data-edit-id="kittoku-top-flow-lead" className="text-white/80 max-w-xl leading-relaxed">
-              修理箇所の画像もまとめて送れるLINEか
-              <br />
-              お電話でお問い合わせください。
-            </p>
-          </div>
-        </div>
-            <div className="space-y-6">
-          <div className="max-w-2xl space-y-6">
-            <div className="grid gap-3 sm:grid-cols-3">
-              {[
-                "LINEで相談内容を送信",
-                "写真を添えて状態共有",
-                "担当者が折り返し連絡",
-              ].map((step, index) => (
-                <div
-                  key={step}
-                  className="rounded-xl border border-white/12 bg-white/[0.06] p-4 backdrop-blur"
-                >
-                  <div className="mb-3 font-mono-data text-xs font-bold text-[var(--yk-gold)]">
-                    0{index + 1}
-                  </div>
-                  <div className="text-sm font-bold leading-relaxed">{step}</div>
-                </div>
-              ))}
+        <div className="grid gap-6 sm:gap-8 lg:grid-cols-[minmax(0,1fr)_400px] lg:items-center lg:gap-16">
+          {/* テキスト: スマホ1番目 / PC左上 */}
+          <div className="order-1 lg:order-none lg:col-start-1 lg:row-start-1 space-y-3">
+            <div className="flex items-center gap-3">
+              <DiagonalDivider color="var(--yk-gold)" />
+              <span className="font-eyebrow text-xs text-[var(--yk-gold)]">
+                Inquiry flow
+              </span>
             </div>
+            <div className="space-y-4">
+              <h2 data-edit-id="kittoku-top-flow-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black leading-tight">
+                修理・部品交換など
+                <br />
+                ぜひお問い合わせください
+              </h2>
+              <p data-edit-id="kittoku-top-flow-lead" className="text-white/80 max-w-xl leading-relaxed">
+                修理箇所の画像もまとめて送れるLINEか
+                <br />
+                お電話でお問い合わせください。
+              </p>
+            </div>
+          </div>
+
+          {/* LINEモックアップ: スマホ2番目 / PC右側 (row全体span) */}
+          <div className="order-2 lg:order-none lg:col-start-2 lg:row-start-1 lg:row-span-2 flex justify-center lg:justify-end h-[400px] sm:h-auto overflow-visible">
+            <div className="scale-[0.72] sm:scale-100 origin-top">
+              <LineInquiryMockup />
+            </div>
+          </div>
+
+          {/* CTA: スマホ3番目 / PC左下 (スマホのみ中央寄せ) */}
+          <div className="order-3 lg:order-none lg:col-start-1 lg:row-start-2 flex justify-center lg:justify-start">
             <Button
-            asChild
-            size="lg"
-            className="bg-[var(--yk-gold)] hover:bg-[var(--yk-gold-dark)] text-[var(--yk-navy-dark)] font-bold rounded-sm h-12 px-6"
-          >
-            <Link data-edit-id="kittoku-top-flow-cta" href="/artifacts/kittoku/contact">
-              LINEで問い合わせ
-              <ArrowRight className="h-4 w-4 ml-1.5" />
-            </Link>
+              asChild
+              size="lg"
+              className="bg-[var(--yk-gold)] hover:bg-[var(--yk-gold-dark)] text-[var(--yk-navy-dark)] font-bold rounded-sm h-12 px-6 animate-kk-cta"
+            >
+              <Link data-edit-id="kittoku-top-flow-cta" href="/artifacts/kittoku/contact">
+                LINEで問い合わせ
+                <ArrowRight className="h-4 w-4 ml-1.5" />
+              </Link>
             </Button>
-          </div>
-            </div>
-          </div>
-          <div className="justify-self-center lg:justify-self-end">
-            <LineInquiryMockup />
           </div>
         </div>
       </div>
@@ -655,10 +774,10 @@ function CareersCtaSection() {
       <Link
         data-edit-id="kittoku-top-careers-card"
         href="/artifacts/kittoku/careers"
-        className="group relative block overflow-hidden rounded-sm border border-border bg-[var(--yk-navy-dark)] aspect-[16/7] sm:aspect-[16/5] transition-all hover:shadow-2xl"
+        className="group relative block overflow-hidden rounded-sm border border-border bg-[var(--yk-navy-dark)] aspect-[3/2] sm:aspect-[16/5] transition-all hover:shadow-2xl"
       >
         <Image
-          src="/kikkawa/careers-cta.jpg"
+          src="/kikkawa/careers-cta-v2.jpg"
           alt="吉川特装で働く社員"
           fill
           sizes="(max-width: 1024px) 100vw, 1280px"

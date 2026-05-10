@@ -122,6 +122,37 @@ export default function YoshikawaLayout({
           text-transform: uppercase;
           letter-spacing: 0.18em;
         }
+        @keyframes kk-cta-shine {
+          0% {
+            transform: translateX(-150%) skewX(-20deg);
+          }
+          20%, 100% {
+            transform: translateX(350%) skewX(-20deg);
+          }
+        }
+        .theme-yoshikawa .animate-kk-cta {
+          position: relative;
+          overflow: hidden;
+          isolation: isolate;
+        }
+        .theme-yoshikawa .animate-kk-cta::after {
+          content: "";
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 30%;
+          height: 100%;
+          background: linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, 0.55) 50%, transparent 70%);
+          animation: kk-cta-shine 5s ease-in-out infinite;
+          pointer-events: none;
+          z-index: 1;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .theme-yoshikawa .animate-kk-cta::after {
+            animation: none;
+            display: none;
+          }
+        }
       `}</style>
       <link
         rel="stylesheet"

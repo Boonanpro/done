@@ -14,6 +14,12 @@ const INLINE_EDIT_BLOCKED_TAGS = new Set([
   'html', 'body', 'head',
 ]);
 
+const INLINE_TEXT_TAGS = new Set([
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'p', 'span', 'a', 'li', 'label', 'button', 'strong', 'em',
+  'td', 'th', 'figcaption',
+]);
+
 type Handlers = {
   move: (e: Event) => void;
   click: (e: Event) => void;
@@ -239,6 +245,10 @@ export function attachInspector(iframe: HTMLIFrameElement) {
 
     const tagName = editTarget.tagName.toLowerCase();
     if (INLINE_EDIT_BLOCKED_TAGS.has(tagName)) return;
+    if (!INLINE_TEXT_TAGS.has(tagName)) {
+      console.warn('[inspector] inline-edit blocked: target is not a text element.', tagName);
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
 

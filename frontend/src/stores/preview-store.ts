@@ -226,7 +226,6 @@ export const usePreviewStore = create<PreviewStore>()(
         const { liveTarget, selectedElement, selectedRange, models, styleVersion } = get();
         if (!liveTarget || !selectedElement?.elementKey) return;
         const key = selectedElement.elementKey;
-
         const current = getOrInitModel(key, liveTarget, models);
         let next: EditModel;
 
@@ -339,10 +338,12 @@ export const usePreviewStore = create<PreviewStore>()(
 
       /** 選択中要素の編集をリセット（モデルを空に戻す）。 */
       resetElementEdits: () => {
-        const { liveTarget, selectedElement, models, styleVersion } = get();
+        const { liveTarget, selectedElement, models, styleVersion, artifact } = get();
         if (!liveTarget || !selectedElement?.elementKey) return;
         const key = selectedElement.elementKey;
-        const empty = emptyModel();
+        const doc = liveTarget.ownerDocument;
+        const win = doc?.defaultView as unknown as { __DAN_INSPECTOR__?: { slug?: string } } | undefined;
+        const slug = win?.__DAN_INSPECTOR__?.slug || artifact?.slug || '';
         try {
           // inline style をクリア
           const cur = models[key];
@@ -358,11 +359,26 @@ export const usePreviewStore = create<PreviewStore>()(
         const nextModels = { ...models };
         delete nextModels[key];
         set({ models: nextModels, styleVersion: styleVersion + 1 });
-        queueInspectorEdit({
-          target: liveTarget,
-          elementKey: key,
-          model: empty,
-        });
+        if (!slug) return;
+        removeLocalStorageOverride(slug, key);
+        void deleteInspectorOverride(slug, key)
+          .catch((err) => {
+            console.warn('[inspector-overrides] delete failed', err);
+            try {
+              toast.error('編集のリセットに失敗しました', {
+                description: String(err).slice(0, 200),
+              });
+            } catch {
+              /* ignore */
+            }
+          })
+          .finally(() => {
+            try {
+              doc?.defaultView?.location.reload();
+            } catch {
+              /* ignore */
+            }
+          });
       },
     }),
     {
@@ -516,6 +532,30 @@ export function flushInspectorEdits(): Promise<void> {
 }
 
 const LS_KEY = (slug: string) => `dan-inspector-overrides-${slug}`;
+
+function removeLocalStorageOverride(slug: string, elementKey: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = window.localStorage.getItem(LS_KEY(slug));
+    const rows = raw ? (JSON.parse(raw) as LocalOverride[]) : [];
+    const next = rows.filter((r) => r.elementKey !== elementKey);
+    if (next.length) window.localStorage.setItem(LS_KEY(slug), JSON.stringify(next));
+    else window.localStorage.removeItem(LS_KEY(slug));
+  } catch {
+    /* ignore */
+  }
+}
+
+async function deleteInspectorOverride(slug: string, elementKey: string): Promise<void> {
+  const params = new URLSearchParams({ slug, element_key: elementKey });
+  const res = await fetch(`/api/v1/inspector-overrides?${params.toString()}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(await res.text());
+  }
+}
 
 function upsertLocalStorage(slug: string, entry: LocalOverride): void {
   if (typeof window === 'undefined') return;

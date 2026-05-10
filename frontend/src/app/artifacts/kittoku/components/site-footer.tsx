@@ -39,7 +39,7 @@ export function SiteFooter() {
               className="inline-flex items-center gap-2 text-sm text-white transition-colors hover:text-[var(--yk-gold)]"
             >
               <Mail className="h-4 w-4" />
-              LINE・Webから問い合わせ
+              LINE / お電話で問い合わせ
             </Link>
           </div>
 

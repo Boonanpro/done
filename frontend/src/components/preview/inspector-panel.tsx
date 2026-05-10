@@ -180,6 +180,18 @@ function TypographySection() {
         label="font-family"
         value={cs.fontFamily}
         options={[
+          {
+            value: '"Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif',
+            label: '吉川 本文',
+          },
+          {
+            value: '"Zen Kaku Gothic New", "Noto Sans JP", sans-serif',
+            label: '吉川 見出し',
+          },
+          {
+            value: '"Space Grotesk", sans-serif',
+            label: '吉川 英字',
+          },
           { value: 'system-ui, sans-serif', label: 'System Sans' },
           { value: 'ui-serif, Georgia, serif', label: 'Serif' },
           { value: 'ui-monospace, Menlo, monospace', label: 'Mono' },
@@ -342,6 +354,7 @@ export function InspectorPanel() {
   const selectedElement = usePreviewStore((s) => s.selectedElement);
   const liveTarget = usePreviewStore((s) => s.liveTarget);
   const clearSelection = usePreviewStore((s) => s.clearSelection);
+  const resetElementEdits = usePreviewStore((s) => s.resetElementEdits);
 
   if (!selectedElement) {
     return (
@@ -397,6 +410,13 @@ export function InspectorPanel() {
       <div className="flex items-center gap-1 border-t border-border px-3 py-1.5 text-[10px] text-muted-foreground">
         <Check className="h-3 w-3 text-green-500" />
         <span>編集は自動保存されます</span>
+        <button
+          type="button"
+          onClick={resetElementEdits}
+          className="ml-auto rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground"
+        >
+          Reset
+        </button>
       </div>
     </div>
   );
