@@ -19,6 +19,11 @@ const nextConfig: NextConfig = {
   },
   images: {
     dangerouslyAllowSVG: true,
+    localPatterns: [
+      {
+        pathname: '/kikkawa/**',
+      },
+    ],
     contentSecurityPolicy:
       "default-src 'self'; script-src 'none'; sandbox;",
   },
