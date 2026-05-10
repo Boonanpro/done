@@ -272,7 +272,20 @@ export function InspectorRuntime({ slug }: { slug: string }) {
       }
     };
 
-    fetchAndApply();
+    // 公開閲覧モード（iframe 外、トップレベル訪問）では DB を見に行かない。
+    // JSX 自体が真実の状態なので fetch して上書きすると一瞬古い→新しいの flash が起きる。
+    // 編集モード（dan UI の iframe 内）では従来通り DB を取りに行って live edit を反映する。
+    const isInIframe = (() => {
+      try {
+        return window.top !== window.self;
+      } catch {
+        // cross-origin で window.top にアクセスできない場合は iframe とみなす
+        return true;
+      }
+    })();
+    if (isInIframe) {
+      fetchAndApply();
+    }
 
     const api: DanInspectorApi = {
       slug,

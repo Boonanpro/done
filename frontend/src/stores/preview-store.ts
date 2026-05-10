@@ -612,7 +612,10 @@ async function flushPendingOverrides(): Promise<void> {
   let lastError: { status?: number; text?: string } | null = null;
   for (const [, edit] of entries) {
     try {
-      const res = await fetch('/api/v1/inspector-overrides', {
+      // direct-write: DB をバイパスして JSX ファイルに直接書き込む。
+      // HMR が拾うのでローカルプレビューに即時反映される。
+      // 本番（Vercel）への反映は git commit & push 後の再ビルドを待つ。
+      const res = await fetch('/api/v1/inspector-overrides/direct-write', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -622,19 +625,18 @@ async function flushPendingOverrides(): Promise<void> {
           styles: Object.keys(edit.styles).length ? edit.styles : null,
           attrs: Object.keys(edit.attrs).length ? edit.attrs : null,
           project_id: projectId,
-          // v2 モデル送信時は attrs を全置換するよう、明示フラグを送る
           replace_attrs: 'model_v2' in (edit.attrs as Record<string, unknown>),
         }),
       });
       if (!res.ok) {
         failures++;
         lastError = { status: res.status, text: await res.text() };
-        console.warn('[inspector-overrides] upsert failed', res.status, lastError.text);
+        console.warn('[inspector-overrides] direct-write failed', res.status, lastError.text);
       }
     } catch (err) {
       failures++;
       lastError = { text: String(err) };
-      console.warn('[inspector-overrides] upsert exception', err);
+      console.warn('[inspector-overrides] direct-write exception', err);
     }
   }
 

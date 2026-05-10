@@ -229,11 +229,9 @@ function PageHero() {
         <h1
           data-edit-id="kittoku-services-hero-h1"
           className="font-headline text-4xl sm:text-5xl lg:text-6xl font-black leading-tight max-w-3xl"
-        >
-          働く車を、止めない。
-          <br />
-          すべてご対応します。
-        </h1>
+        >故障しても大丈夫
+すぐに現場復帰させます
+</h1>
         <p
           data-edit-id="kittoku-services-hero-lead"
           className="text-white/80 mt-6 text-base leading-relaxed max-w-2xl"

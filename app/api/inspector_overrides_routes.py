@@ -7,6 +7,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.services.auth_service import TokenData, decode_access_token
 from app.services.inspector_overrides_service import InspectorOverridesService
+from app.services.inspector_writeback_core import apply_override_for_slug
 from app.models.inspector_overrides_schemas import (
     OverrideUpsert,
     OverrideResponse,
@@ -51,6 +52,27 @@ async def upsert_override(
         project_id=str(data.project_id) if data.project_id else None,
         replace_attrs=data.replace_attrs,
     )
+    return result
+
+
+@router.post("/direct-write")
+async def direct_write_override(
+    data: OverrideUpsert,
+    user: TokenData = Depends(get_current_user),
+):
+    """Inspector の編集を DB ではなく直接 JSX ファイルに書き込む。
+
+    ローカル dev 環境専用。Vercel など read-only FS では使えない。
+    成功時は HMR で即時反映、ユーザーが git commit & push するまで本番には届かない。
+    """
+    result = apply_override_for_slug(
+        slug=data.artifact_slug,
+        element_key=data.element_key,
+        styles=data.styles or {},
+        attrs=data.attrs or {},
+    )
+    if not result["applied"] and result["reason"] and "not found" in result["reason"]:
+        raise HTTPException(status_code=404, detail=result["reason"])
     return result
 
 

@@ -263,22 +263,15 @@ function HeroSection() {
             <br />
             <span className="text-[var(--yk-gold)]">止めない。</span>
           </h1>
-          <p data-edit-id="kittoku-top-hero-tagline" className="text-white/85 text-base sm:text-lg leading-relaxed max-w-2xl">
-            鳥取・米子の特装車専門整備工場。
-            <br className="hidden sm:inline" />
-            ダンプ・塵芥車・テールゲートリフタ・クレーンまで、
-            主要架装メーカー各社の指定工場として正規の技術でお応えします。
-          </p>
+          <p data-edit-id="kittoku-top-hero-tagline" className="text-white/85 text-base sm:text-lg leading-relaxed max-w-2xl">鳥取県米子の特装車専門整備工場。
+ダンプ・塵芥車・テールゲートリフタ・クレーンまで、 主要架装メーカー各社の指定工場として正規の技術でお応えします。</p>
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 pt-2">
             <Button
               asChild
               size="lg"
               className="bg-[var(--yk-gold)] hover:bg-[var(--yk-gold-dark)] text-[var(--yk-navy-dark)] font-bold rounded-sm h-12 px-6 animate-kk-cta"
             >
-              <Link data-edit-id="kittoku-top-hero-cta-primary" href="/artifacts/kittoku/contact">
-                修理・整備の依頼
-                <ArrowRight className="h-4 w-4 ml-1.5" />
-              </Link>
+              <Link data-edit-id="kittoku-top-hero-cta-primary" href="/artifacts/kittoku/contact">お問い合わせ</Link>
             </Button>
             <div
               data-edit-id="kittoku-top-hero-hours"
@@ -310,11 +303,7 @@ function StatsSection() {
             <p data-edit-id="kittoku-top-stats-line1" className="text-sm sm:text-base leading-relaxed">
               1988年創業
             </p>
-            <p data-edit-id="kittoku-top-stats-line2" className="max-w-2xl text-sm sm:text-base leading-relaxed">
-              山陰地方を中心に、
-              <br className="sm:hidden" />
-              中国地方の働く車を支えています。
-            </p>
+            <p data-edit-id="kittoku-top-stats-line2" className="max-w-2xl text-sm sm:text-base leading-relaxed">山陰を中心に、中国地方の働く車を支えています。</p>
           </div>
           <div className="shrink-0">
             <div className="relative w-[220px] overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 p-3 shadow-sm sm:w-[260px]">
@@ -377,9 +366,7 @@ function ServicesSummarySection() {
           <h2 data-edit-id="kittoku-top-services-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black text-[var(--yk-navy)] tracking-tight leading-tight">
             事業内容
           </h2>
-          <p data-edit-id="kittoku-top-services-lead" className="text-[var(--yk-steel)] max-w-md leading-relaxed text-sm">
-            特装車を中心に、整備・点検から架装・改造まで幅広く対応しています。
-          </p>
+          <p data-edit-id="kittoku-top-services-lead" className="text-[var(--yk-steel)] max-w-md leading-relaxed text-sm">特装車の整備・点検から架装・改造、リースまで幅広く対応しています。</p>
         </div>
       </div>
 
@@ -471,15 +458,9 @@ function VehiclesSection() {
           </span>
         </div>
         <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
-          <h2 data-edit-id="kittoku-top-vehicles-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black text-[var(--yk-navy)] tracking-tight leading-tight">
-            特装車 全機種、
-            <br className="sm:hidden" />
-            お任せください。
-          </h2>
-          <p data-edit-id="kittoku-top-vehicles-lead" className="text-[var(--yk-steel)] max-w-md leading-relaxed">
-            取扱メーカー各社の指定工場として蓄積した専門知識で、
-            メーカー純正部品の手配から点検・整備・修理・架装までワンストップで対応します。
-          </p>
+          <h2 data-edit-id="kittoku-top-vehicles-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black text-[var(--yk-navy)] tracking-tight leading-tight">特装車なら、
+何でもお任せください。</h2>
+          <p data-edit-id="kittoku-top-vehicles-lead" className="text-[var(--yk-steel)] max-w-md leading-relaxed">特装車・特殊車両なら全車種ご対応可能です</p>
         </div>
       </div>
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-5">
@@ -540,11 +521,8 @@ function FlowSection() {
                 <br />
                 ぜひお問い合わせください
               </h2>
-              <p data-edit-id="kittoku-top-flow-lead" className="text-white/80 max-w-xl leading-relaxed">
-                修理箇所の画像もまとめて送れるLINEか
-                <br />
-                お電話でお問い合わせください。
-              </p>
+              <p data-edit-id="kittoku-top-flow-lead" className="text-white/80 max-w-xl leading-relaxed">修理箇所の画像もまとめて送れるLINEか
+お電話でお問い合わせください。</p>
             </div>
           </div>
 
@@ -632,9 +610,7 @@ function ManufacturersSection() {
           <h2 data-edit-id="kittoku-top-manufacturers-h2" className="font-headline text-2xl sm:text-3xl font-black text-[var(--yk-navy)] leading-tight">
             取扱メーカー
           </h2>
-          <p data-edit-id="kittoku-top-manufacturers-lead" className="text-sm text-[var(--yk-steel)] leading-relaxed">
-            取扱メーカー各社の指定工場として、主要架装メーカーの純正部品と整備ノウハウに対応しています。
-          </p>
+          <p data-edit-id="kittoku-top-manufacturers-lead" className="text-sm text-[var(--yk-steel)] leading-relaxed">指定工場として、主要架装メーカーの純正部品と整備ノウハウに対応しています。</p>
         </div>
         <div className="lg:col-span-2 grid grid-cols-2 sm:grid-cols-3 gap-3">
           {MANUFACTURERS.map((m) => (

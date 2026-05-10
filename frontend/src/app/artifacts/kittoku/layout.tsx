@@ -13,9 +13,11 @@ export default function YoshikawaLayout({
   children: React.ReactNode;
 }) {
   React.useEffect(() => {
-    // 手動編集で壊れた overrides を一度だけクリア。
+    // 直書き運用 (2026-05-10) に切り替えたタイミングで localStorage を 1 回クリアする。
+    // 旧 DB-fetch 時代のキャッシュが残ると、過去の上書きスタイルが pre-paint で
+    // 出てしまうため。RESET_FLAG を更新するたびに既存ユーザーが 1 回だけ消す。
     try {
-      const RESET_FLAG = "kikkawa-inspector-reset-2026-04-26-v2";
+      const RESET_FLAG = "kikkawa-inspector-reset-2026-05-10-direct-write";
       if (!localStorage.getItem(RESET_FLAG)) {
         localStorage.removeItem("dan-inspector-overrides-yoshikawa-tokuso");
         localStorage.removeItem("dan-inspector-overrides-kittoku");

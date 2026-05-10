@@ -28,6 +28,12 @@ const envArtifactHostMap = JSON.stringify(
 const prePaintScript = `
 (function(){
   try {
+    // 公開閲覧モード (iframe 外、トップレベル訪問) では何もしない。
+    // 直書き運用 (DB をバイパスして JSX を直接更新) になったので、
+    // localStorage の override は不要。残骸があれば触らずに無視する。
+    var inIframe = false;
+    try { inIframe = window.top !== window.self; } catch (e) { inIframe = true; }
+    if (!inIframe) return;
     var match = location.pathname.match(/\\/(?:artifacts|preview)\\/([^/]+)/);
     var slug = match && match[1];
     if (!slug) {
