@@ -660,13 +660,14 @@ def _run_cli_process(
     stderr_thread.start()
 
     # Watchdog: stdout に N 秒イベントが流れなければ hang とみなし強制終了する。
-    # Bash の長時間コマンド (例: npm install) を許容するためデフォルト 5 分。
-    # tool_result が来ない間 (= 実際に hang) に発火する。
+    # Bash の長時間コマンド (例: npm install / Whisper / ffmpeg encode) を許容するため
+    # デフォルト 10 分。tool_result が来ない間 (= 実際に hang) に発火する。
+    # 元は 5 分 (300s) だったが、Whisper CPU 推論などで 5 分超えが発生したため拡張 (2026-05-10)。
     #
     # 特例: Task (サブエージェント) 呼び出し中は別 Claude Code インスタンスが
     # 裏で 10〜20 分走りうる。その間 dan 本体は沈黙するので通常閾値だと誤発火する。
     # → Task in-flight 中は閾値を 30 分に延長。
-    WATCHDOG_TIMEOUT_NORMAL = 300         # seconds
+    WATCHDOG_TIMEOUT_NORMAL = 600         # seconds (10 min)
     WATCHDOG_TIMEOUT_TASK_ACTIVE = 1800   # 30 min: Task サブエージェント実行中の特例
     _last_activity = [time.time()]
     _watchdog_fired = [False]
