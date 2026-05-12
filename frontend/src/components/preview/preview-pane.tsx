@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Copy, Edit3, ExternalLink, Globe2, MessageSquare, RefreshCw, Redo2, Rocket, Sliders, Undo2, X } from 'lucide-react';
+import { ChevronDown, Copy, Edit3, ExternalLink, MessageSquare, RefreshCw, Redo2, Rocket, Sliders, Undo2, X } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -160,28 +160,6 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     },
   });
 
-  const connectDomainMutation = useMutation({
-    mutationFn: async (domain: string) => {
-      if (!artifact) throw new Error('No artifact selected');
-      await flushInspectorEdits();
-      const res = await fetch(`/api/v1/chat-artifact/${artifact.id}/connect-domain`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      return res.json() as Promise<ArtifactRecord>;
-    },
-    onSuccess: (updated) => {
-      refreshArtifacts();
-      if (projectId) openArtifact(projectId, updated);
-      toast.success('本公開URLを設定しました');
-    },
-    onError: (err) => {
-      toast.error('本公開の設定に失敗しました', { description: String(err).slice(0, 160) });
-    },
-  });
 
   const handleRefresh = async () => {
     const iframe = iframeRef.current;
@@ -253,48 +231,62 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   }, [isEditMode, loaded, iframeLoadSeq]);
 
   // Cmd+Z / Ctrl+Z で Undo、Cmd+Shift+Z / Ctrl+Y で Redo。
-  // iframe 内 keydown も拾うため、iframe の contentDocument にもバインドする。
+  //
+  // iframe 内にフォーカスがある時、parent window の keydown は発火しない。
+  // そこで iframe.contentWindow / iframe.contentDocument にも capture: true で
+  // 同じハンドラを bind する。capture phase なので、iframe 内の任意要素より先に走る。
+  // editMode が ON の間は常時バインドし、選択中/非選択中によらず効くようにする。
   useEffect(() => {
     if (!isEditMode) return;
+    const reloadIframe = () => {
+      try { iframeRef.current?.contentWindow?.location.reload(); } catch { /* ignore */ }
+    };
     const handler = async (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
-      // Inspector の text input/textarea 上では undo を OS に任せる
+      // input/textarea/contentEditable 上では OS の undo に任せる
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
         return;
       }
-      if (e.key === 'z' && !e.shiftKey) {
+      const key = e.key.toLowerCase();
+      if (key === 'z' && !e.shiftKey) {
         e.preventDefault();
+        e.stopPropagation();
         const store = useEditHistoryStore.getState();
         if (store.canUndo()) {
-          await store.undo();
-          // iframe を再読み込みして JSX の現状を反映
-          try { iframeRef.current?.contentWindow?.location.reload(); } catch { /* ignore */ }
+          const ok = await store.undo();
+          if (ok) reloadIframe();
         } else {
           toast.info('これ以上戻せません');
         }
         return;
       }
-      if ((e.key === 'Z' && e.shiftKey) || e.key === 'y') {
+      if ((key === 'z' && e.shiftKey) || key === 'y') {
         e.preventDefault();
+        e.stopPropagation();
         const store = useEditHistoryStore.getState();
         if (store.canRedo()) {
-          await store.redo();
-          try { iframeRef.current?.contentWindow?.location.reload(); } catch { /* ignore */ }
+          const ok = await store.redo();
+          if (ok) reloadIframe();
         } else {
           toast.info('これ以上やり直せません');
         }
       }
     };
-    window.addEventListener('keydown', handler);
+    const wrap = (e: Event) => void handler(e as KeyboardEvent);
+    // parent window（Inspector パネル側、編集モードトグル後など）
+    window.addEventListener('keydown', wrap, { capture: true });
+    // iframe 内のあらゆる場所からも拾う
     const iframe = iframeRef.current;
+    const innerWin = iframe?.contentWindow as Window | null;
     const innerDoc = iframe?.contentDocument;
-    const innerHandler = (e: Event) => void handler(e as KeyboardEvent);
-    innerDoc?.addEventListener('keydown', innerHandler);
+    innerWin?.addEventListener('keydown', wrap, { capture: true });
+    innerDoc?.addEventListener('keydown', wrap, { capture: true });
     return () => {
-      window.removeEventListener('keydown', handler);
-      innerDoc?.removeEventListener('keydown', innerHandler);
+      window.removeEventListener('keydown', wrap, { capture: true });
+      innerWin?.removeEventListener('keydown', wrap, { capture: true });
+      innerDoc?.removeEventListener('keydown', wrap, { capture: true });
     };
   }, [isEditMode, loaded, iframeLoadSeq]);
 
@@ -302,11 +294,6 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   if (!artifact) return null;
 
   const isWebsite = artifact.artifact_type === 'website';
-  const handleConnectDomain = () => {
-    const domain = window.prompt('本公開するドメインを入力してください（例: example.com）', artifact.custom_domain || '');
-    if (!domain?.trim()) return;
-    connectDomainMutation.mutate(domain.trim());
-  };
 
   return (
     <div className="flex h-full flex-col border-l border-border bg-muted/20">
@@ -366,16 +353,6 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
         >
           <ExternalLink className="h-3.5 w-3.5" />
         </a>
-        {isWebsite && (
-          <button
-            onClick={handleConnectDomain}
-            disabled={connectDomainMutation.isPending}
-            className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
-            title="既存ドメインを紐付け（手動）"
-          >
-            <Globe2 className="h-3.5 w-3.5" />
-          </button>
-        )}
         {isWebsite && (
           <button
             onClick={() => setShowPublishModal(true)}
