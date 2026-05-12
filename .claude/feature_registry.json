@@ -148,5 +148,19 @@
       "SKIPPED (exists): D:\\done\\frontend\\src\\app\\artifacts\\aix-dashboard\\page.tsx",
       "D:\\done\\scripts\\seed_aix_dashboard.py"
     ]
+  },
+  "publish": {
+    "name": "publish",
+    "description": "Phase 3 公開フロー (Cloudflare/Vercel/SEO orchestrator + API)",
+    "created_at": "2026-05-12T11:04:52.083217",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\050_publish.sql",
+      "D:\\done\\app\\models\\publish_schemas.py",
+      "D:\\done\\app\\services\\publish_service.py",
+      "D:\\done\\app\\api\\publish_routes.py",
+      "D:\\done\\frontend\\src\\app\\artifacts\\publish\\page.tsx",
+      "D:\\done\\scripts\\seed_publish.py"
+    ]
   }
 }
