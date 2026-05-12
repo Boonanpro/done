@@ -35,6 +35,11 @@ venv.bak/
 .env
 .env.local
 .env.*.local
+
+# Local credentials / secrets (never commit)
+.cf-token-tmp.txt
+.cloudflare-token.enc
+.playwright-cloudflare/
 *.env
 
 # IDE
