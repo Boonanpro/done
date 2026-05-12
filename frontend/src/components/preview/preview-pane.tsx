@@ -1,17 +1,60 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Copy, Edit3, ExternalLink, Globe2, MessageSquare, RefreshCw, Sliders, X } from 'lucide-react';
+import { ChevronDown, Copy, Edit3, ExternalLink, Globe2, MessageSquare, RefreshCw, Redo2, Rocket, Sliders, Undo2, X } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
 import { usePreviewStore, flushInspectorEdits, type ArtifactRecord } from '@/stores/preview-store';
+import { useEditHistoryStore } from '@/stores/edit-history-store';
 import { attachInspector, detachInspector } from './iframe-inspector';
 import { CommentPopover } from './comment-popover';
 import { InspectorPanel } from './inspector-panel';
+import { PublishModal } from './publish-modal';
 
 const FALLBACK_SHARE_ORIGIN = 'https://kittoku.vercel.app';
+
+/** Undo / Redo ボタン。編集中のみ表示。 */
+function UndoRedoButtons({ iframeRef }: { iframeRef: React.RefObject<HTMLIFrameElement | null> }) {
+  const undoStack = useEditHistoryStore((s) => s.undoStack);
+  const redoStack = useEditHistoryStore((s) => s.redoStack);
+  const undo = useEditHistoryStore((s) => s.undo);
+  const redo = useEditHistoryStore((s) => s.redo);
+  const canUndo = undoStack.length > 0;
+  const canRedo = redoStack.length > 0;
+  const reload = () => {
+    try { iframeRef.current?.contentWindow?.location.reload(); } catch { /* ignore */ }
+  };
+  return (
+    <>
+      <button
+        type="button"
+        onClick={async () => {
+          const ok = await undo();
+          if (ok) reload();
+        }}
+        disabled={!canUndo}
+        title={canUndo ? `Undo: ${undoStack[undoStack.length - 1]?.summary}` : '巻き戻すものがありません'}
+        className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+      >
+        <Undo2 className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={async () => {
+          const ok = await redo();
+          if (ok) reload();
+        }}
+        disabled={!canRedo}
+        title={canRedo ? `Redo: ${redoStack[redoStack.length - 1]?.summary}` : 'やり直すものがありません'}
+        className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+      >
+        <Redo2 className="h-3.5 w-3.5" />
+      </button>
+    </>
+  );
+}
 
 function publicShareOrigin(): string {
   const configured = process.env.NEXT_PUBLIC_SHARE_ORIGIN?.trim();
@@ -79,6 +122,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [loadedArtifactId, setLoadedArtifactId] = useState<string | null>(null);
   const [showSwitcher, setShowSwitcher] = useState(false);
+  const [showPublishModal, setShowPublishModal] = useState(false);
   const [refreshSpinning, setRefreshSpinning] = useState(false);
   // iframe が load するたびに increment する。attachInspector 再実行の deps に入れ、
   // リフレッシュや内部ナビゲーション後も新 contentDocument に再アタッチする
@@ -208,6 +252,52 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     return () => detachInspector(iframe);
   }, [isEditMode, loaded, iframeLoadSeq]);
 
+  // Cmd+Z / Ctrl+Z で Undo、Cmd+Shift+Z / Ctrl+Y で Redo。
+  // iframe 内 keydown も拾うため、iframe の contentDocument にもバインドする。
+  useEffect(() => {
+    if (!isEditMode) return;
+    const handler = async (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      // Inspector の text input/textarea 上では undo を OS に任せる
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
+        return;
+      }
+      if (e.key === 'z' && !e.shiftKey) {
+        e.preventDefault();
+        const store = useEditHistoryStore.getState();
+        if (store.canUndo()) {
+          await store.undo();
+          // iframe を再読み込みして JSX の現状を反映
+          try { iframeRef.current?.contentWindow?.location.reload(); } catch { /* ignore */ }
+        } else {
+          toast.info('これ以上戻せません');
+        }
+        return;
+      }
+      if ((e.key === 'Z' && e.shiftKey) || e.key === 'y') {
+        e.preventDefault();
+        const store = useEditHistoryStore.getState();
+        if (store.canRedo()) {
+          await store.redo();
+          try { iframeRef.current?.contentWindow?.location.reload(); } catch { /* ignore */ }
+        } else {
+          toast.info('これ以上やり直せません');
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    const iframe = iframeRef.current;
+    const innerDoc = iframe?.contentDocument;
+    const innerHandler = (e: Event) => void handler(e as KeyboardEvent);
+    innerDoc?.addEventListener('keydown', innerHandler);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      innerDoc?.removeEventListener('keydown', innerHandler);
+    };
+  }, [isEditMode, loaded, iframeLoadSeq]);
+
 
   if (!artifact) return null;
 
@@ -251,6 +341,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
             </div>
           )}
         </div>
+        {isEditMode && <UndoRedoButtons iframeRef={iframeRef} />}
         <button
           onClick={handleRefresh}
           className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -280,9 +371,19 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
             onClick={handleConnectDomain}
             disabled={connectDomainMutation.isPending}
             className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
-            title="ドメインを設定"
+            title="既存ドメインを紐付け（手動）"
           >
             <Globe2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+        {isWebsite && (
+          <button
+            onClick={() => setShowPublishModal(true)}
+            className="shrink-0 rounded bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+            title="カスタムドメインを購入して公開"
+          >
+            <Rocket className="mr-1 inline h-3 w-3" />
+            公開
           </button>
         )}
         {isEditMode && (
@@ -354,6 +455,14 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
         </div>
         {isEditMode && inspectorMode === 'edit' && <InspectorPanel />}
       </div>
+      {artifact && (
+        <PublishModal
+          open={showPublishModal}
+          onOpenChange={setShowPublishModal}
+          artifact={artifact}
+          onPublished={() => refreshArtifacts()}
+        />
+      )}
     </div>
   );
 }
