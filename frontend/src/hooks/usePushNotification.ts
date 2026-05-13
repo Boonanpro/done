@@ -63,6 +63,22 @@ export function usePushNotification(roomId: string, senderType: string) {
     }
   }, [roomId, senderType]);
 
+  const sendTest = useCallback(async () => {
+    const token = localStorage.getItem('done-token');
+    if (!token) return false;
+
+    try {
+      const res = await fetch(`${API_URL}/api/v1/push/test`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      return res.ok;
+    } catch (e) {
+      console.error('Push test error:', e);
+      return false;
+    }
+  }, []);
+
   // Auto-subscribe if permission already granted
   useEffect(() => {
     if (permission === 'granted' && roomId && senderType && !subscribed) {
@@ -70,7 +86,7 @@ export function usePushNotification(roomId: string, senderType: string) {
     }
   }, [permission, roomId, senderType, subscribed, subscribe]);
 
-  return { permission, subscribed, subscribe };
+  return { permission, subscribed, subscribe, sendTest };
 }
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {

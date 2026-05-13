@@ -1,11 +1,12 @@
 """
 Push Notification API Routes
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from typing import Optional
 
 from app.config import settings
+from app.api.chat_routes import get_current_user, TokenData
 from app.services.push_service import get_push_service
 
 router = APIRouter(prefix="/push", tags=["push"])
@@ -39,3 +40,17 @@ async def unsubscribe(req: SubscribeRequest):
         req.room_id, req.sender_type, req.subscription.get("endpoint", "")
     )
     return {"success": True}
+
+
+@router.post("/test")
+async def send_test_notification(current_user: TokenData = Depends(get_current_user)):
+    """Send a test push notification to the signed-in user's devices."""
+    svc = get_push_service()
+    sent = await svc.notify_room(
+        room_id=f"user:{current_user.user_id}",
+        exclude_type="ai",
+        title="Dan",
+        body="通知テストです。Dan の作業完了通知を受け取れます。",
+        url="/settings",
+    )
+    return {"success": True, "sent": sent}

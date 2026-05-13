@@ -202,13 +202,31 @@ export default function SettingsPage() {
                             </p>
                           </div>
                         </div>
-                        <Button
-                          type="button"
-                          onClick={() => void danPush.subscribe()}
-                          disabled={!user?.id || danPush.permission === 'granted'}
-                        >
-                          {danPush.permission === 'granted' ? '有効' : '有効にする'}
-                        </Button>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                          <Button
+                            type="button"
+                            onClick={() => void danPush.subscribe()}
+                            disabled={!user?.id || danPush.permission === 'granted'}
+                          >
+                            {danPush.permission === 'granted' ? '有効' : '有効にする'}
+                          </Button>
+                          {danPush.permission === 'granted' && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={async () => {
+                                const ok = await danPush.sendTest();
+                                if (ok) {
+                                  toast.success('テスト通知を送信しました');
+                                } else {
+                                  toast.error('テスト通知の送信に失敗しました');
+                                }
+                              }}
+                            >
+                              テスト送信
+                            </Button>
+                          )}
+                        </div>
                       </div>
                       {danPush.permission === 'denied' && (
                         <p className="text-sm text-destructive">
