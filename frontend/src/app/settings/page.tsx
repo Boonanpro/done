@@ -215,6 +215,9 @@ export default function SettingsPage() {
                               type="button"
                               variant="outline"
                               onClick={async () => {
+                                if (!danPush.subscribed) {
+                                  await danPush.subscribe();
+                                }
                                 const ok = await danPush.sendTest();
                                 if (ok) {
                                   toast.success('テスト通知を送信しました');

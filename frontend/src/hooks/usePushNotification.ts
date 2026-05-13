@@ -65,12 +65,14 @@ export function usePushNotification(roomId: string, senderType: string) {
 
   const sendTest = useCallback(async () => {
     const token = localStorage.getItem('done-token');
-    if (!token) return false;
 
     try {
+      const headers: HeadersInit = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
       const res = await fetch(`${API_URL}/api/v1/push/test`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token}` },
+        headers,
+        credentials: 'include',
       });
       return res.ok;
     } catch (e) {
