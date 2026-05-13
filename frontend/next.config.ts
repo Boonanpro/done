@@ -5,9 +5,9 @@ import withPWA from 'next-pwa';
 // Vercel では VERCEL_GIT_COMMIT_SHA が自動付与される。ローカル dev ではタイムスタンプ。
 // 各 page で `process.env.NEXT_PUBLIC_ASSET_VERSION` を参照して使う。
 const ASSET_VERSION =
-  process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 8) ||
-  process.env.NEXT_PUBLIC_ASSET_VERSION ||
-  `dev-${Date.now()}`;
+  (process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 8) ||
+    process.env.NEXT_PUBLIC_ASSET_VERSION ||
+    `dev`) + `-${Date.now()}`;
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
@@ -26,6 +26,31 @@ const nextConfig: NextConfig = {
     ],
     contentSecurityPolicy:
       "default-src 'self'; script-src 'none'; sandbox;",
+  },
+  async headers() {
+    // ダンが生成するサイトやツール、そのアセット（画像/動画等）すべてを
+    // 「常に最新」で返すための設定。
+    //
+    // 仕組み:
+    //   no-cache, must-revalidate
+    //     → ブラウザは保存はするが、毎リクエスト If-None-Match で origin に確認する。
+    //       変わってなければ 304 を返すので帯域コストは小さい。
+    //       ファイル差し替え後は次のリクエストで即座に新バイトに切り替わる。
+    //
+    // 除外:
+    //   /_next/static, /_next/image, /api/, /ws/ は別ルールで動いているので触らない。
+    //   (_next/* は Next.js がコンテンツハッシュ付きURLで配信し immutable キャッシュ前提)
+    //
+    // この設定を入れると、Inspector で画像を差し替え → リロード → 即時反映される。
+    // ASSET_VERSION の dev 起動時刻固定問題（dev サーバー再起動まで古い画像が残る）も解消する。
+    return [
+      {
+        source: '/:path((?!_next/static|_next/image|api/|ws/).*)',
+        headers: [
+          { key: 'Cache-Control', value: 'no-cache, must-revalidate' },
+        ],
+      },
+    ];
   },
   async rewrites() {
     // 本番 (Vercel 等) は自宅 PC を指せないので Cloudflare tunnel 等の
@@ -103,6 +128,11 @@ const nextConfig: NextConfig = {
         source: '/',
         has: [{ type: 'host', value: 'kittoku.vercel.app' }],
         destination: '/artifacts/kittoku',
+      },
+      {
+        source: '/v2',
+        has: [{ type: 'host', value: 'kittoku.vercel.app' }],
+        destination: '/artifacts/kittoku/v2',
       },
       {
         source: '/',

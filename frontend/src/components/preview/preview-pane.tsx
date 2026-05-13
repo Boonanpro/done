@@ -16,23 +16,21 @@ import { PublishModal } from './publish-modal';
 const FALLBACK_SHARE_ORIGIN = 'https://kittoku.vercel.app';
 
 /** Undo / Redo ボタン。編集中のみ表示。 */
-function UndoRedoButtons({ iframeRef }: { iframeRef: React.RefObject<HTMLIFrameElement | null> }) {
+function UndoRedoButtons() {
   const undoStack = useEditHistoryStore((s) => s.undoStack);
   const redoStack = useEditHistoryStore((s) => s.redoStack);
   const undo = useEditHistoryStore((s) => s.undo);
   const redo = useEditHistoryStore((s) => s.redo);
+  const bumpContentVersion = usePreviewStore((s) => s.bumpContentVersion);
   const canUndo = undoStack.length > 0;
   const canRedo = redoStack.length > 0;
-  const reload = () => {
-    try { iframeRef.current?.contentWindow?.location.reload(); } catch { /* ignore */ }
-  };
   return (
     <>
       <button
         type="button"
         onClick={async () => {
           const ok = await undo();
-          if (ok) reload();
+          if (ok) bumpContentVersion();
         }}
         disabled={!canUndo}
         title={canUndo ? `Undo: ${undoStack[undoStack.length - 1]?.summary}` : '巻き戻すものがありません'}
@@ -44,7 +42,7 @@ function UndoRedoButtons({ iframeRef }: { iframeRef: React.RefObject<HTMLIFrameE
         type="button"
         onClick={async () => {
           const ok = await redo();
-          if (ok) reload();
+          if (ok) bumpContentVersion();
         }}
         disabled={!canRedo}
         title={canRedo ? `Redo: ${redoStack[redoStack.length - 1]?.summary}` : 'やり直すものがありません'}
@@ -118,6 +116,8 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const closePreview = usePreviewStore((s) => s.closePreview);
   const toggleEditMode = usePreviewStore((s) => s.toggleEditMode);
   const openArtifact = usePreviewStore((s) => s.openArtifact);
+  const contentVersion = usePreviewStore((s) => s.contentVersion);
+  const bumpContentVersion = usePreviewStore((s) => s.bumpContentVersion);
 
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [loadedArtifactId, setLoadedArtifactId] = useState<string | null>(null);
@@ -162,31 +162,14 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
 
 
   const handleRefresh = async () => {
-    const iframe = iframeRef.current;
-    if (!iframe) return;
+    if (!iframeRef.current) return;
     setRefreshSpinning(true);
-    // 未送信のインスペクタ編集をまず flush（リロードで消さないため）
+    // 未送信のインスペクタ編集をまず flush（リロードで消さないため）。
+    // flush 成功時は内部で contentVersion が bump され iframe が新URLで再ロードされる。
     await flushInspectorEdits();
-    const prevScrollX = iframe.contentWindow?.scrollX ?? 0;
-    const prevScrollY = iframe.contentWindow?.scrollY ?? 0;
-    const restoreScroll = () => {
-      try {
-        iframe.contentWindow?.scrollTo(prevScrollX, prevScrollY);
-      } catch {
-        /* ignore */
-      }
-      iframe.removeEventListener('load', restoreScroll);
-    };
-    iframe.addEventListener('load', restoreScroll, { once: true });
-    try {
-      iframe.contentWindow?.location.reload();
-    } catch {
-      const current = iframe.src;
-      iframe.src = '';
-      setTimeout(() => {
-        iframe.src = current;
-      }, 30);
-    }
+    // flush で bump されなかった場合（未送信編集ゼロ）でも、Refresh ボタンは
+    // 「明示的に最新を取りに行く」操作なので必ず bump して CDN をバイパスする。
+    bumpContentVersion();
     setTimeout(() => setRefreshSpinning(false), 600);
   };
 
@@ -212,7 +195,12 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const draftUrl = artifact ? artifact.draft_url || publicPreviewUrl : '';
   const shareUrl = artifact ? artifact.share_url || draftUrl || publicPreviewUrl : '';
   const publicShareUrl = shareUrl ? absolutePublicUrl(shareUrl) : '';
-  const iframeSrc = draftUrl || publicPreviewUrl || shareUrl;
+  const baseIframeSrc = draftUrl || publicPreviewUrl || shareUrl;
+  // contentVersion を URL に乗せて Vercel CDN / ブラウザキャッシュをバイパスする。
+  // 初回は素のURLでCDNキャッシュを活かし、編集が走ったら ?t=N で新キャッシュキーへ。
+  const iframeSrc = baseIframeSrc && contentVersion > 0
+    ? `${baseIframeSrc}${baseIframeSrc.includes('?') ? '&' : '?'}t=${contentVersion}`
+    : baseIframeSrc;
 
   useEffect(() => {
     setLoadedArtifactId(null);
@@ -239,7 +227,8 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   useEffect(() => {
     if (!isEditMode) return;
     const reloadIframe = () => {
-      try { iframeRef.current?.contentWindow?.location.reload(); } catch { /* ignore */ }
+      // contentVersion を bump → iframeSrc が ?t=N で変わり、iframe が完全再ロード（CDNキャッシュもバイパス）。
+      bumpContentVersion();
     };
     const handler = async (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
@@ -288,7 +277,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
       innerWin?.removeEventListener('keydown', wrap, { capture: true });
       innerDoc?.removeEventListener('keydown', wrap, { capture: true });
     };
-  }, [isEditMode, loaded, iframeLoadSeq]);
+  }, [isEditMode, loaded, iframeLoadSeq, bumpContentVersion]);
 
 
   if (!artifact) return null;
@@ -328,7 +317,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
             </div>
           )}
         </div>
-        {isEditMode && <UndoRedoButtons iframeRef={iframeRef} />}
+        {isEditMode && <UndoRedoButtons />}
         <button
           onClick={handleRefresh}
           className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
