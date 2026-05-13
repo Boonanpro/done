@@ -6,10 +6,10 @@
 import { useAuthStore } from '@/stores/auth-store';
 
 // API Base URL - env 値に trailing whitespace / 改行が混入すると URL が壊れるので trim
-const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? '').trim().replace(/\/+$/, '');
+const API_BASE_URL = '';
 
 // SSE streaming - 同様に trim
-const SSE_BASE_URL = (process.env.NEXT_PUBLIC_API_URL ?? '').trim().replace(/\/+$/, '');
+const SSE_BASE_URL = '';
 
 // ==================== Types ====================
 
@@ -570,6 +570,7 @@ async function uploadFile(
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
+    credentials: 'include',
     body: formData,
   });
 
@@ -617,6 +618,7 @@ async function request<T>(
   const response = await fetch(url, {
     ...options,
     headers,
+    credentials: options.credentials ?? 'include',
   });
 
   if (!response.ok) {

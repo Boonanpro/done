@@ -293,6 +293,39 @@ def _trigger_observer(room_id: str, user_id: str):
     except RuntimeError:
         pass
 
+
+async def _notify_dan_completion(
+    room_id: str,
+    user_id: str,
+    project_id: str | None,
+    final_text: str = "",
+) -> None:
+    """Best-effort browser/PWA push when a Dan run finishes."""
+    try:
+        from app.services.push_service import get_push_service
+
+        body = _compact_text(final_text, 120) if final_text else ""
+        if not body:
+            body = "Dan の作業が完了しました"
+        url = f"/chat/{project_id}" if project_id else "/chat"
+        svc = get_push_service()
+        await svc.notify_room(
+            room_id=room_id,
+            exclude_type="ai",
+            title="Dan",
+            body=body,
+            url=url,
+        )
+        await svc.notify_room(
+            room_id=f"user:{user_id}",
+            exclude_type="ai",
+            title="Dan",
+            body=body,
+            url=url,
+        )
+    except Exception as e:
+        logger.debug("Dan completion push skipped (room=%s): %s", room_id, e)
+
 REPLAN_KEYWORDS = (
     "やっぱり",
     "方針変更",
@@ -2140,6 +2173,7 @@ async def send_dan_message_stream(
                         )
                         if run_id:
                             await run_service.update_run(run_id, state="paused")
+                        run_state = "paused"
                         yield f"data: {json.dumps({'type': 'cancelled', 'session_id': room_id})}\n\n"
                         done_sent = True
                         result_saved = True
@@ -2244,7 +2278,13 @@ async def send_dan_message_stream(
                         # DB保存はCLIスレッドが実行済み（DB-first）
 
                 # ダンの回答完了 → 観察者を即座にバックグラウンド起動
-                if result_saved:
+                if result_saved and run_state != "paused":
+                    await _notify_dan_completion(
+                        room_id,
+                        current_user.user_id,
+                        project_info.get("id"),
+                        final_text,
+                    )
                     _trigger_observer(room_id, current_user.user_id)
 
                     # ダンが書き出したビジュアル成果物を検知 → Gemini抽出 → 永続保存

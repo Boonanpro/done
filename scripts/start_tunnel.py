@@ -1,6 +1,7 @@
 """
 Cloudflare Tunnel auto-start script.
-Starts a quick tunnel, extracts the URL, and updates Vercel env + CORS config.
+Starts quick tunnels for Dan Core and Sandbox, extracts the URLs, and updates
+Vercel env + CORS config.
 
 Usage: python scripts/start_tunnel.py
 """
@@ -16,10 +17,13 @@ CLOUDFLARED = os.path.join(
     "Cloudflare.cloudflared_Microsoft.Winget.Source_8wekyb3d8bbwe",
     "cloudflared.exe"
 )
-BACKEND_PORT = 8000
-VERCEL_PROJECT_DIR = os.path.join(os.path.dirname(__file__), "..", "frontend")
-ENV_FILE = os.path.join(os.path.dirname(__file__), "..", ".env")
-TUNNEL_URL_FILE = os.path.join(os.path.dirname(__file__), "..", ".tunnel_url")
+CORE_PORT = 9000
+SANDBOX_PORT = 8000
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+VERCEL_PROJECT_DIR = REPO_ROOT
+ENV_FILE = os.path.join(REPO_ROOT, ".env")
+CORE_TUNNEL_URL_FILE = os.path.join(REPO_ROOT, ".tunnel_core_url")
+SANDBOX_TUNNEL_URL_FILE = os.path.join(REPO_ROOT, ".tunnel_sandbox_url")
 VERCEL_CMD = os.path.join(os.environ.get("APPDATA", ""), "npm", "vercel.cmd")
 
 
@@ -34,11 +38,11 @@ def kill_existing_tunnels():
         pass
 
 
-def start_tunnel() -> str:
+def start_tunnel(name: str, port: int) -> str:
     """Start cloudflared tunnel and return the public URL."""
-    print("[tunnel] Starting Cloudflare Tunnel...")
+    print(f"[tunnel] Starting Cloudflare Tunnel for {name} on port {port}...")
     proc = subprocess.Popen(
-        [CLOUDFLARED, "tunnel", "--url", f"http://127.0.0.1:{BACKEND_PORT}"],
+        [CLOUDFLARED, "tunnel", "--url", f"http://127.0.0.1:{port}"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -62,11 +66,7 @@ def start_tunnel() -> str:
         proc.kill()
         sys.exit(1)
 
-    print(f"[tunnel] Tunnel URL: {url}")
-
-    # Save URL to file for other scripts
-    with open(TUNNEL_URL_FILE, "w") as f:
-        f.write(url)
+    print(f"[tunnel] {name} Tunnel URL: {url}")
 
     return url
 
@@ -123,28 +123,36 @@ def get_vercel_url() -> str:
     return "https://frontend-liard-rho-29.vercel.app"
 
 
-def update_vercel_env(tunnel_url: str):
-    """Update Vercel env var and trigger redeploy."""
-    print(f"[tunnel] Updating Vercel NEXT_PUBLIC_API_URL to {tunnel_url}")
+def set_vercel_env(name: str, value: str):
+    """Replace one Vercel production env var."""
+    print(f"[tunnel] Updating Vercel {name} to {value}")
+    subprocess.run(
+        [VERCEL_CMD, "env", "rm", name, "production", "--yes"],
+        capture_output=True, timeout=15,
+        cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace"
+    )
 
-    # Remove old env var (ignore errors)
+    result = subprocess.run(
+        [VERCEL_CMD, "env", "add", name, "production"],
+        input=value,
+        capture_output=True, text=True, timeout=15,
+        cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace"
+    )
+    if result.returncode != 0:
+        print(f"[tunnel] Warning: Vercel env update failed for {name}: {result.stderr}")
+
+
+def update_vercel_env(core_url: str, sandbox_url: str):
+    """Update Vercel env vars and trigger redeploy."""
+    set_vercel_env("CORE_BACKEND_URL", core_url)
+    set_vercel_env("BACKEND_URL", sandbox_url)
+
+    # Public API URL was used by older builds and breaks when a quick tunnel expires.
     subprocess.run(
         [VERCEL_CMD, "env", "rm", "NEXT_PUBLIC_API_URL", "production", "--yes"],
         capture_output=True, timeout=15,
         cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace"
     )
-
-    # Add new one
-    result = subprocess.run(
-        [VERCEL_CMD, "env", "add", "NEXT_PUBLIC_API_URL", "production"],
-        input=tunnel_url,
-        capture_output=True, text=True, timeout=15,
-        cwd=VERCEL_PROJECT_DIR, encoding="utf-8", errors="replace"
-    )
-    if result.returncode == 0:
-        print("[tunnel] Vercel env updated")
-    else:
-        print(f"[tunnel] Warning: Vercel env update failed: {result.stderr}")
 
     # Trigger redeploy
     print("[tunnel] Triggering Vercel redeploy...")
@@ -169,26 +177,36 @@ def main():
         print(f"[tunnel] ERROR: cloudflared not found at {CLOUDFLARED}")
         sys.exit(1)
 
-    # Check if previous URL is the same (skip redeploy if unchanged)
-    old_url = ""
-    if os.path.exists(TUNNEL_URL_FILE):
-        with open(TUNNEL_URL_FILE) as f:
-            old_url = f.read().strip()
+    old_core_url = ""
+    old_sandbox_url = ""
+    if os.path.exists(CORE_TUNNEL_URL_FILE):
+        with open(CORE_TUNNEL_URL_FILE) as f:
+            old_core_url = f.read().strip()
+    if os.path.exists(SANDBOX_TUNNEL_URL_FILE):
+        with open(SANDBOX_TUNNEL_URL_FILE) as f:
+            old_sandbox_url = f.read().strip()
 
     kill_existing_tunnels()
     time.sleep(2)
 
-    tunnel_url = start_tunnel()
-    update_env_file(tunnel_url)
+    core_url = start_tunnel("Dan Core", CORE_PORT)
+    sandbox_url = start_tunnel("Sandbox", SANDBOX_PORT)
+    update_env_file(core_url)
 
-    if tunnel_url != old_url:
-        print(f"[tunnel] URL changed: {old_url} -> {tunnel_url}")
-        update_vercel_env(tunnel_url)
+    with open(CORE_TUNNEL_URL_FILE, "w") as f:
+        f.write(core_url)
+    with open(SANDBOX_TUNNEL_URL_FILE, "w") as f:
+        f.write(sandbox_url)
+
+    if core_url != old_core_url or sandbox_url != old_sandbox_url:
+        print("[tunnel] Tunnel URL changed; updating Vercel")
+        update_vercel_env(core_url, sandbox_url)
     else:
-        print("[tunnel] URL unchanged, skipping Vercel redeploy")
+        print("[tunnel] URLs unchanged, skipping Vercel redeploy")
 
     print("=" * 60)
-    print(f"[tunnel] Backend: {tunnel_url}")
+    print(f"[tunnel] Dan Core: {core_url}")
+    print(f"[tunnel] Sandbox: {sandbox_url}")
     print(f"[tunnel] Frontend: {get_vercel_url()}")
     print("[tunnel] Tunnel is running. Press Ctrl+C to stop.")
     print("=" * 60)

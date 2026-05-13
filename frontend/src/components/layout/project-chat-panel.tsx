@@ -41,6 +41,7 @@ import {
 } from '@/lib/api-client';
 import { useRouter } from 'next/navigation';
 import { useProjectRecovery } from '@/hooks/useProjectRecovery';
+import { useIsMobile } from '@/hooks/useIsMobile';
 import { useAuthStore } from '@/stores/auth-store';
 import { useProjectStore, useRecoveryActions, useRecoveryState } from '@/stores/project-store';
 import { usePreviewStore, type ArtifactRecord, type SelectedElement } from '@/stores/preview-store';
@@ -1214,6 +1215,7 @@ function composeCommentMessage(
 export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const queryClient = useQueryClient();
   const router = useRouter();
+  const isMobile = useIsMobile();
   // SSE接続中はポーリングを無効化
   const sseConnectedRef = useRef(false);
   const selectProject = useProjectStore((s) => s.selectProject);
@@ -1506,9 +1508,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     <div className="relative flex h-full w-full overflow-hidden">
     <div
       className={`flex h-full shrink-0 flex-col overflow-hidden bg-background ${
-        isPreviewOpenForProject ? '' : 'w-full'
+        isMobile && isPreviewOpenForProject ? 'hidden' : isPreviewOpenForProject ? '' : 'w-full'
       }`}
-      style={isPreviewOpenForProject ? { width: chatWidth } : undefined}
+      style={!isMobile && isPreviewOpenForProject ? { width: chatWidth } : undefined}
     >
       <div className="flex shrink-0 items-center gap-3 border-b border-border py-3 pl-12 pr-16 md:pl-4 md:pr-16">
         <FolderKanban className="h-5 w-5 shrink-0 text-primary" />
@@ -1681,7 +1683,12 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       )}
     </div>
-    {isPreviewOpenForProject && (
+    {isPreviewOpenForProject && isMobile && (
+      <div className="h-full w-full min-w-0">
+        <PreviewPane onSubmitComment={handleSubmitComment} />
+      </div>
+    )}
+    {isPreviewOpenForProject && !isMobile && (
       <>
         <div
           className="group relative h-full w-1 shrink-0 cursor-col-resize bg-border"

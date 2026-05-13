@@ -40,17 +40,8 @@ export function useCollabWebSocket({
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    // Use API URL for WebSocket (Vercel doesn't proxy WS, connect to backend directly)
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-    let wsUrl: string;
-    if (apiUrl) {
-      // External API: convert https://xxx to wss://xxx
-      wsUrl = apiUrl.replace(/^http/, 'ws') + `/api/v1/collab/ws/${roomId}`;
-    } else {
-      // Local dev: use same host
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      wsUrl = `${protocol}//${window.location.host}/api/v1/collab/ws/${roomId}`;
-    }
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/api/v1/collab/ws/${roomId}`;
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {

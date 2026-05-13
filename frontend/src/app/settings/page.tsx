@@ -5,7 +5,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { motion } from 'framer-motion';
-import { User, Lock, CreditCard, Globe, Loader2, Camera, Check, Link2, Calendar, Mail } from 'lucide-react';
+import { User, Lock, CreditCard, Globe, Loader2, Camera, Check, Link2, Calendar, Mail, Bell, BellOff } from 'lucide-react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -26,6 +26,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { api } from '@/lib/api-client';
+import { usePushNotification } from '@/hooks/usePushNotification';
 import { useAuthStore } from '@/stores/auth-store';
 import { useSettingsStore, type Language } from '@/stores/settings-store';
 
@@ -55,6 +56,7 @@ export default function SettingsPage() {
   const queryClient = useQueryClient();
   const { user, setUser } = useAuthStore();
   const { language, setLanguage } = useSettingsStore();
+  const danPush = usePushNotification(user?.id ? `user:${user.id}` : '', 'owner');
   const [showPasswordDialog, setShowPasswordDialog] = useState(false);
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -138,6 +140,7 @@ export default function SettingsPage() {
   };
 
   const settingsSections = [
+    { id: 'notifications', label: '通知', icon: Bell },
     { id: 'profile', label: 'プロフィール', icon: User },
     { id: 'integrations', label: '連携', icon: Link2 },
     { id: 'security', label: 'セキュリティ', icon: Lock },
@@ -171,6 +174,51 @@ export default function SettingsPage() {
                   );
                 })}
               </TabsList>
+
+              <TabsContent value="notifications">
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                >
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Dan の通知</CardTitle>
+                      <CardDescription>
+                        Dan の作業完了をこの端末で受け取ります。
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
+                        <div className="flex items-start gap-3">
+                          {danPush.permission === 'granted' ? (
+                            <Bell className="mt-0.5 h-5 w-5 text-primary" />
+                          ) : (
+                            <BellOff className="mt-0.5 h-5 w-5 text-muted-foreground" />
+                          )}
+                          <div>
+                            <p className="font-medium">作業完了通知</p>
+                            <p className="text-sm text-muted-foreground">
+                              スマホやPCでブラウザを閉じていても、Dan の完了に気づけるようにします。
+                            </p>
+                          </div>
+                        </div>
+                        <Button
+                          type="button"
+                          onClick={() => void danPush.subscribe()}
+                          disabled={!user?.id || danPush.permission === 'granted'}
+                        >
+                          {danPush.permission === 'granted' ? '有効' : '有効にする'}
+                        </Button>
+                      </div>
+                      {danPush.permission === 'denied' && (
+                        <p className="text-sm text-destructive">
+                          ブラウザ側で通知が拒否されています。ブラウザまたはホーム画面アプリのサイト設定から通知を許可してください。
+                        </p>
+                      )}
+                    </CardContent>
+                  </Card>
+                </motion.div>
+              </TabsContent>
 
               {/* Profile Tab */}
               <TabsContent value="profile">
@@ -466,7 +514,7 @@ function CalendarIntegration() {
   useEffect(() => {
     const token = localStorage.getItem('done-token');
     if (!token) return;
-    fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/calendar/status`, {
+    fetch('/api/v1/calendar/status', {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((r) => r.json())
@@ -479,7 +527,7 @@ function CalendarIntegration() {
     const token = localStorage.getItem('done-token');
     if (!token) return;
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/calendar/connect`, {
+      const res = await fetch('/api/v1/calendar/connect', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -495,7 +543,7 @@ function CalendarIntegration() {
   const handleDisconnect = async () => {
     const token = localStorage.getItem('done-token');
     if (!token) return;
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/calendar/disconnect`, {
+    await fetch('/api/v1/calendar/disconnect', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -536,7 +584,7 @@ function GmailIntegration() {
   useEffect(() => {
     const token = localStorage.getItem('done-token');
     if (!token) return;
-    fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/gmail/status`, {
+    fetch('/api/v1/gmail/status', {
       headers: { Authorization: `Bearer ${token}` },
     })
       .then((r) => r.json())
@@ -549,7 +597,7 @@ function GmailIntegration() {
     const token = localStorage.getItem('done-token');
     if (!token) return;
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/gmail/setup`, {
+      const res = await fetch('/api/v1/gmail/setup', {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       });
@@ -565,7 +613,7 @@ function GmailIntegration() {
   const handleDisconnect = async () => {
     const token = localStorage.getItem('done-token');
     if (!token) return;
-    await fetch(`${process.env.NEXT_PUBLIC_API_URL || ''}/api/v1/gmail/disconnect`, {
+    await fetch('/api/v1/gmail/disconnect', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
     });

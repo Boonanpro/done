@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
+const API_URL = '';
 
 export function usePushNotification(roomId: string, senderType: string) {
   const [permission, setPermission] = useState<NotificationPermission>('default');

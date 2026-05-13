@@ -19,9 +19,7 @@ export function useCollabNotifications() {
 
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const apiHost = process.env.NEXT_PUBLIC_API_URL
-        ? new URL(process.env.NEXT_PUBLIC_API_URL).host
-        : '127.0.0.1:8000';
+      const apiHost = window.location.host;
       const ws = new WebSocket(`${protocol}://${apiHost}/api/v1/collab/ws/notifications`);
       wsRef.current = ws;
 

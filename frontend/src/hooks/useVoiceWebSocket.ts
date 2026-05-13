@@ -34,11 +34,7 @@ interface UseVoiceWebSocketResult {
 }
 
 const buildWsUrl = () => {
-  if (process.env.NEXT_PUBLIC_API_URL) {
-    const base = process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, '');
-    return `${base.replace(/^http/, 'ws')}/ws/voice`;
-  }
-  if (typeof window === 'undefined') return 'ws://localhost:8000/ws/voice';
+  if (typeof window === 'undefined') return 'ws://localhost:3000/ws/voice';
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${window.location.host}/ws/voice`;
 };

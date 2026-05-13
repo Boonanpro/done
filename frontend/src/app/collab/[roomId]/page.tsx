@@ -187,8 +187,7 @@ export default function CollabRoomPage() {
     try {
       const formData = new FormData();
       formData.append('file', file);
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
-      const res = await fetch(`${apiUrl}/api/v1/collab/rooms/${roomId}/files`, {
+      const res = await fetch(`/api/v1/collab/rooms/${roomId}/files`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
@@ -196,9 +195,7 @@ export default function CollabRoomPage() {
       if (!res.ok) throw new Error('Upload failed');
       const fileData = await res.json();
       // Send message with file attachment
-      const fileUrl = apiUrl
-        ? `${apiUrl}${fileData.file_path}`
-        : fileData.file_path;
+      const fileUrl = fileData.file_path;
       wsSend(`${file.name}`, {
         file: { id: fileData.id, name: fileData.file_name, url: fileUrl, type: fileData.file_type, size: fileData.file_size },
       });

@@ -33,9 +33,9 @@ async def suggest_project_title(
         try:
             raw = await service.get_messages(room_id, current_user.user_id, limit=20)
             messages = [
-                m.get("content", "")
+                f"{m.get('sender_type', 'unknown')}: {m.get('content', '')}"
                 for m in reversed(raw)
-                if m.get("sender_type") == "human" and m.get("content")
+                if m.get("content")
             ]
         except Exception:
             pass
@@ -43,7 +43,7 @@ async def suggest_project_title(
     if not messages:
         return {"title": "新しいプロジェクト"}
 
-    context = "\n".join(messages[:5])
+    context = "\n".join(messages[-12:])
 
     try:
         import anthropic
@@ -53,6 +53,11 @@ async def suggest_project_title(
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=60,
+            system=(
+                "You generate concise Japanese project titles. Return only one concrete "
+                "noun phrase, with no quotes or explanation. Prefer deliverable, client, "
+                "site, app, investigation, or task names. Avoid generic titles."
+            ),
             messages=[{
                 "role": "user",
                 "content": (
