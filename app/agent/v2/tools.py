@@ -338,6 +338,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         WRITE_FILE_TOOL,
         EDIT_FILE_TOOL,
         BASH_TOOL,
+        ATTACH_IMAGE_TOOL,
         STUDIO_RECORD_TOOL,
         STUDIO_ENCODE_TOOL,
         STUDIO_PROBE_TOOL,
@@ -381,6 +382,33 @@ BROWSER_TOOL = {
 # ============================================
 # URL読み込みツール（Jina Reader）
 # ============================================
+
+ATTACH_IMAGE_TOOL = {
+    "name": "attach_image",
+    "description": """画像をチャットに添付するための正規マーカーを取得する。
+
+**画像をユーザーに見せたい時は、必ずこのツールを使うこと。** 自分で `[添付画像: ...]` を書いてはいけない（フォーマットを間違えると404になる）。
+
+使い方:
+1. このツールを呼ぶ → `marker` フィールド（例: `[添付画像: /api/v1/files/xxx.png]`）が返る
+2. 次のアシスタント返答の本文に、その marker 文字列をそのまま貼り付ける
+
+source の指定方法:
+- すでに /api/v1/files/ にあるファイル名: "e63623f3-3408-...png"
+- フルパス（uploads/ 外なら自動コピー）: "D:/done/foo.png", "C:\\\\Users\\\\Owner\\\\image.png"
+- 既存 URL: "/api/v1/files/foo.png", "http://localhost:8000/api/v1/files/foo.png"
+""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "source": {
+                "type": "string",
+                "description": "画像のファイル名・絶対パス・URL のいずれか"
+            }
+        },
+        "required": ["source"]
+    }
+}
 
 READ_URL_TOOL = {
     "name": "read_url",
@@ -743,6 +771,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "read_url":
         return ("_jina", "read")
+
+    if tool_name == "attach_image":
+        return ("_attach_image", "attach")
 
     if tool_name.startswith("studio_"):
         action = tool_name[len("studio_"):]
@@ -1384,6 +1415,10 @@ async def execute_tool(
             logger.info(f"[EXEC] {desc[:80]}")
         from app.tools.code_executor import execute_python
         return await execute_python(code)
+
+    # ★★★ 画像添付マーカー生成 ★★★
+    if skill_name == "_attach_image":
+        return await _execute_attach_image(params)
 
     # ★★★ ファイル読み込み ★★★
     if skill_name == "_read_file":
@@ -2641,6 +2676,86 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
 # ============================================
 # URL読み込み（Jina Reader）
 # ============================================
+
+async def _execute_attach_image(params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    画像をチャットに添付するための正規マーカーを生成する。
+
+    source は以下のいずれか:
+    - /api/v1/files/<filename> 形式の URL（絶対/相対）
+    - uploads/ 配下のファイル名（例: "abc.png"）
+    - 任意の絶対ローカルパス（uploads/ 外なら自動で UUID 名にコピー）
+    """
+    import re as _re
+    import shutil as _shutil
+    import uuid as _uuid
+
+    source = (params.get("source") or "").strip()
+    if not source:
+        return {"success": False, "error": "source が必要です"}
+
+    upload_dir = Path(__file__).resolve().parent.parent.parent.parent / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    image_exts = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+    filename: Optional[str] = None
+
+    api_match = _re.search(r"/api/v1/files/([^/?#\s)\"']+)", source)
+    if api_match:
+        candidate = api_match.group(1)
+        if (upload_dir / candidate).exists():
+            filename = candidate
+        else:
+            return {
+                "success": False,
+                "error": f"指定ファイルが uploads/ に存在しません: {candidate}",
+            }
+    else:
+        src_path = Path(source)
+        if src_path.is_absolute():
+            if not src_path.exists():
+                return {
+                    "success": False,
+                    "error": f"ファイルが存在しません: {source}",
+                }
+            if src_path.suffix.lower() not in image_exts:
+                return {
+                    "success": False,
+                    "error": f"画像ファイルではありません（拡張子: {src_path.suffix}）",
+                }
+            try:
+                same_dir = src_path.resolve().parent == upload_dir.resolve()
+            except Exception:
+                same_dir = False
+            if same_dir:
+                filename = src_path.name
+            else:
+                filename = f"{_uuid.uuid4()}{src_path.suffix.lower()}"
+                _shutil.copy2(src_path, upload_dir / filename)
+        else:
+            candidate_path = upload_dir / source
+            if candidate_path.exists():
+                filename = source
+            else:
+                return {
+                    "success": False,
+                    "error": f"uploads/ にファイルが見つかりません: {source}",
+                }
+
+    url = f"/api/v1/files/{filename}"
+    marker = f"[添付画像: {url}]"
+    logger.info(f"[ATTACH_IMAGE] marker={marker}")
+    return {
+        "success": True,
+        "filename": filename,
+        "url": url,
+        "marker": marker,
+        "instruction": (
+            "次のアシスタント返答の本文に、上記 marker 文字列をそのまま貼り付けてください。"
+            "改変・括弧追加・URL置換は一切しないこと。複数枚なら改行区切りで列挙。"
+        ),
+    }
+
 
 async def _execute_read_url(params: Dict[str, Any]) -> Dict[str, Any]:
     """

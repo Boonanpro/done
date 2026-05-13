@@ -14,7 +14,9 @@ import {
   applyModelToElement,
   selectionToTextRange,
 } from '@/lib/inspector-render';
+import { isEditableTextLeaf } from '@/lib/inspector-edit-target';
 import { normalizeToModel } from '@/lib/inspector-migrate';
+import { useEditHistoryStore, makeEditSummary } from '@/stores/edit-history-store';
 
 export interface SelectedElement {
   refId: string;
@@ -69,6 +71,11 @@ interface PreviewState {
   models: Record<string, EditModel>;
   /** 変更通知用バージョン。 */
   styleVersion: number;
+  /** JSXファイルへの書き戻し（direct-write / restore-file）が成功するたびに+1。
+   *  preview-pane が iframe src の `?t=` に反映し、Vercel CDN / ブラウザキャッシュをバイパスして
+   *  iframe を強制的に最新HTMLで再ロードする。styleVersion は keystroke 単位で bump するので
+   *  別フィールドにしている。 */
+  contentVersion: number;
 }
 
 interface PreviewActions {
@@ -85,6 +92,10 @@ interface PreviewActions {
   setLiveText: (text: string) => void;
   applyStyleTo: (target: Element | null, property: string, value: string, important?: boolean) => void;
   resetElementEdits: () => void;
+  /** 選択中要素を JSX から完全削除（ハード削除）。成功時は選択解除。 */
+  deleteSelectedElement: () => Promise<boolean>;
+  /** JSXファイル書き戻しが成功した時に呼ぶ。iframe が新URLで再ロードされる。 */
+  bumpContentVersion: () => void;
 }
 
 type PreviewStore = PreviewState & PreviewActions;
@@ -102,6 +113,7 @@ const INITIAL: PreviewState = {
   selectedRange: null,
   models: {},
   styleVersion: 0,
+  contentVersion: 0,
 };
 
 /**
@@ -159,7 +171,9 @@ export const usePreviewStore = create<PreviewStore>()(
     (set, get) => ({
       ...INITIAL,
 
-      openArtifact: (projectId, artifact) =>
+      openArtifact: (projectId, artifact) => {
+        // artifact 切り替え時は履歴をクリア（別ファイルの Undo は混ぜたくない）
+        useEditHistoryStore.getState().clear();
         set({
           isOpen: true,
           projectId,
@@ -171,9 +185,13 @@ export const usePreviewStore = create<PreviewStore>()(
           liveTarget: null,
           models: {},
           inspectorMode: 'comment',
-        }),
+        });
+      },
 
-      closePreview: () => set({ ...INITIAL }),
+      closePreview: () => {
+        useEditHistoryStore.getState().clear();
+        set({ ...INITIAL });
+      },
 
       toggleEditMode: () =>
         set((s) => ({
@@ -268,29 +286,33 @@ export const usePreviewStore = create<PreviewStore>()(
           model: next,
           // important hint は blockStyle の場合のみ意味がある
           important,
+          historyMeta: {
+            summary: makeEditSummary({
+              kind: 'style',
+              prop: property,
+              value,
+              elementHint: selectedElement.tagName,
+            }),
+          },
         });
       },
 
       /**
        * テキストを差し替える。spans の位置は自動補正される。
        *
-       * 致命防御: liveTarget が wrapper（自身に data-edit-id が無く、配下に
-       * data-edit-id 持ち子孫がある）の場合、テキスト保存しない。
-       * （wrapper の textContent は子要素テキストの連結なので、保存して再描画すると
-       *   子要素 h2/p ごと plaintext で上書きされ構造破壊に至る）
+       * 統一原則 (isEditableTextLeaf): text 編集は「data-edit-id 持ち & 子 Element 無し」の
+       * leaf のみ。子要素を持つ要素に保存すると、再描画時に innerHTML 上書きで
+       * 子要素 (h2/p や <strong>/<em>) が plaintext で潰れる。
        */
       setLiveText: (text) => {
         const { liveTarget, selectedElement, models, styleVersion } = get();
         if (!liveTarget || !selectedElement?.elementKey) return;
         const key = selectedElement.elementKey;
-        // wrapper チェック
         const el = liveTarget as HTMLElement;
-        const isWrapper =
-          !el.getAttribute?.('data-edit-id') &&
-          !!el.querySelector?.('[data-edit-id]');
-        if (isWrapper) {
+        if (!isEditableTextLeaf(el)) {
           console.warn(
-            '[preview-store] setLiveText blocked: liveTarget is a wrapper containing data-edit-id descendants.'
+            '[preview-store] setLiveText blocked: liveTarget is not an editable text leaf.',
+            { tag: el.tagName, children: el.children.length, editId: el.getAttribute?.('data-edit-id') }
           );
           return;
         }
@@ -313,6 +335,12 @@ export const usePreviewStore = create<PreviewStore>()(
           target: liveTarget,
           elementKey: key,
           model: next,
+          historyMeta: {
+            summary: makeEditSummary({
+              kind: 'text',
+              elementHint: selectedElement.tagName,
+            }),
+          },
         });
       },
 
@@ -333,7 +361,121 @@ export const usePreviewStore = create<PreviewStore>()(
         queueInspectorEdit({
           target,
           stylesOnly: { [property]: value },
+          historyMeta: {
+            summary: makeEditSummary({
+              kind: 'style',
+              prop: property,
+              value,
+              elementHint: target.tagName.toLowerCase(),
+            }),
+          },
         });
+      },
+
+      /**
+       * 選択中要素を JSX から完全削除（ハード削除）。
+       * - 即座に DOM から `liveTarget.remove()` で消す（プレビュー反映）
+       * - サーバに `/inspector-overrides/delete-element` を投げて JSX を物理削除
+       * - 失敗したら toast でエラー報告。DOM 削除は復元しない（後でリロードすればJSXが正）
+       * - 成功したら選択解除
+       *
+       * `@<edit-id>` キーが付いていない要素はサーバが拒否するので、UI 側でも事前ガードする。
+       */
+      deleteSelectedElement: async () => {
+        const { liveTarget, selectedElement, artifact, models, styleVersion } = get();
+        if (!liveTarget || !selectedElement?.elementKey) {
+          toast.error('削除対象が選択されていません');
+          return false;
+        }
+        const key = selectedElement.elementKey;
+        if (!key.startsWith('@')) {
+          toast.error('この要素には data-edit-id が無いので削除できません');
+          return false;
+        }
+        const doc = liveTarget.ownerDocument;
+        const win = doc?.defaultView as unknown as { __DAN_INSPECTOR__?: { slug?: string } } | undefined;
+        const slug = win?.__DAN_INSPECTOR__?.slug || artifact?.slug || '';
+        if (!slug) {
+          toast.error('artifact slug が取得できません');
+          return false;
+        }
+
+        // 楽観的に「視覚的に」消す（プレビューに即時反映）。
+        // ⚠️ .remove() で DOM ノードを物理削除すると、iframe 内の React (artifact ページ) の
+        //    fiber tree が stale 参照を保ったままになり、後続の HMR 再レンダリングで
+        //    parent.removeChild(staleNode) が走って NotFoundError を出す。
+        //    display:none なら DOM ノードはそのまま、視覚的にだけ消える。
+        //    JSX 書き戻し → HMR reload で正しく rebuild されるので最終的に消える。
+        try {
+          (liveTarget as HTMLElement).style.setProperty('display', 'none', 'important');
+        } catch {
+          /* ignore */
+        }
+
+        // store からも該当 model を削除（残骸を防ぐ）
+        const nextModels = { ...models };
+        delete nextModels[key];
+        set({
+          models: nextModels,
+          styleVersion: styleVersion + 1,
+          selectedElement: null,
+          liveTarget: null,
+        });
+
+        // localStorage の override もクリア
+        removeLocalStorageOverride(slug, key);
+
+        const tagHint = selectedElement.tagName;
+        try {
+          const res = await fetch('/api/v1/inspector-overrides/delete-element', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({
+              artifact_slug: slug,
+              element_key: key,
+            }),
+          });
+          if (!res.ok) {
+            const txt = await res.text();
+            toast.error('要素の削除に失敗しました', { description: txt.slice(0, 200) });
+            // DOM は楽観削除済みなので、リロードして整合させる
+            try { doc?.defaultView?.location.reload(); } catch { /* ignore */ }
+            return false;
+          }
+          // 削除成功: before/after を Undo に積む
+          try {
+            const body = (await res.json()) as {
+              removed?: boolean;
+              file?: string | null;
+              before_content?: string | null;
+              after_content?: string | null;
+            };
+            if (
+              body.removed &&
+              body.file &&
+              typeof body.before_content === 'string' &&
+              typeof body.after_content === 'string'
+            ) {
+              useEditHistoryStore.getState().push({
+                slug,
+                filePath: body.file,
+                before: body.before_content,
+                after: body.after_content,
+                elementKey: key,
+                summary: makeEditSummary({ kind: 'delete', elementHint: tagHint }),
+              });
+            }
+          } catch (e) {
+            console.warn('[deleteSelectedElement] history record failed', e);
+          }
+          toast.success('要素を削除しました（Cmd+Z で復元）');
+          return true;
+        } catch (err) {
+          toast.error('要素削除のリクエストに失敗', { description: String(err).slice(0, 200) });
+          try { doc?.defaultView?.location.reload(); } catch { /* ignore */ }
+          return false;
+        }
       },
 
       /** 選択中要素の編集をリセット（モデルを空に戻す）。 */
@@ -380,6 +522,9 @@ export const usePreviewStore = create<PreviewStore>()(
             }
           });
       },
+
+      bumpContentVersion: () =>
+        set((s) => ({ contentVersion: s.contentVersion + 1 })),
     }),
     {
       name: 'dan-preview-state',
@@ -453,6 +598,7 @@ type LocalOverride = {
 
 type PendingOverride = LocalOverride & {
   slug: string;
+  _historyMeta?: { summary: string };
 };
 
 const pendingOverrides: Record<string, PendingOverride> = {};
@@ -470,6 +616,8 @@ type QueueContext = {
   attrsOnly?: Record<string, string>;
   /** important フラグ（blockStyle 全体に適用したいケース用、現状未使用）。 */
   important?: boolean;
+  /** Undo 履歴の要約文（toast 表示用）。 */
+  historyMeta?: { summary: string };
 };
 
 export function queueInspectorEdit(ctx: QueueContext) {
@@ -518,6 +666,7 @@ export function queueInspectorEdit(ctx: QueueContext) {
     styles: ctx.model ? styles : { ...(existing?.styles || {}), ...styles },
     attrs: ctx.model ? attrs : { ...(existing?.attrs || {}), ...attrs },
     slug: urlSlug,
+    _historyMeta: ctx.historyMeta,
   };
   if (flushTimer) clearTimeout(flushTimer);
   flushTimer = setTimeout(flushPendingOverrides, FLUSH_DEBOUNCE_MS);
@@ -632,6 +781,34 @@ async function flushPendingOverrides(): Promise<void> {
         failures++;
         lastError = { status: res.status, text: await res.text() };
         console.warn('[inspector-overrides] direct-write failed', res.status, lastError.text);
+      } else {
+        // 成功時、before/after を Undo スタックに積む
+        try {
+          const body = (await res.json()) as {
+            applied?: boolean;
+            file?: string | null;
+            before_content?: string | null;
+            after_content?: string | null;
+          };
+          if (
+            body.applied &&
+            body.file &&
+            typeof body.before_content === 'string' &&
+            typeof body.after_content === 'string'
+          ) {
+            const meta = (edit as PendingOverride)._historyMeta;
+            useEditHistoryStore.getState().push({
+              slug: edit.slug,
+              filePath: body.file,
+              before: body.before_content,
+              after: body.after_content,
+              elementKey: edit.elementKey,
+              summary: meta?.summary || `${edit.elementKey} を編集`,
+            });
+          }
+        } catch (e) {
+          console.warn('[inspector-overrides] failed to record history', e);
+        }
       }
     } catch (err) {
       failures++;
@@ -647,6 +824,13 @@ async function flushPendingOverrides(): Promise<void> {
     try {
       toast.error(msg, { description: lastError?.text?.slice(0, 200) });
     } catch { /* ignore */ }
+  }
+
+  // 少なくとも1件成功したら iframe を最新HTMLで再ロードさせる。
+  // contentVersion を bump すると preview-pane の iframeSrc に `?t=N` が反映され、
+  // Vercel CDN/ブラウザのキャッシュをバイパスして新HTMLが取得される。
+  if (entries.length - failures > 0) {
+    usePreviewStore.getState().bumpContentVersion();
   }
 }
 

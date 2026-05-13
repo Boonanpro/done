@@ -216,13 +216,29 @@ function parseMediaContent(content: string): { images: string[]; videos: string[
   const text = content
     .replace(/<dan-context>[\s\S]*?<\/dan-context>/g, '')
     .replace(/\[動画分析結果\(Gemini\):\n[\s\S]*?\n\]/g, '')
-    .replace(/\[添付画像: ([^\]]+)\]/g, (_, path: string) => {
-      if (path.startsWith('/api/')) {
-        images.push(path);
-      } else {
-        const filename = path.replace(/\\/g, '/').split('/').pop();
-        if (filename) images.push(`/api/v1/files/${filename}`);
+    .replace(/\[添付画像: ([^\]]+)\]/g, (_, raw: string) => {
+      // ブラケット内の表記揺れを吸収:
+      //   "name (URL)" / "URL" / "/api/v1/files/x.png" / "C:\path\x.png" / "x.png"
+      // いずれも最終的に /api/v1/files/<filename> へ正規化する。
+      const urlMatch = raw.match(/https?:\/\/\S+|\/api\/\S+/);
+      let token = (urlMatch ? urlMatch[0] : raw.trim().split(/\s+/).pop() || '').trim();
+      // 末尾の記号（`)` `,` `.` `;` `"` `'`）を剥がす
+      token = token.replace(/[)\],.;"'`]+$/, '');
+      if (/^https?:\/\//.test(token)) {
+        const apiMatch = token.match(/\/api\/v1\/files\/[^?#\s)]+/);
+        if (apiMatch) {
+          images.push(apiMatch[0]);
+        } else {
+          images.push(token);
+        }
+        return '';
       }
+      if (token.startsWith('/api/')) {
+        images.push(token);
+        return '';
+      }
+      const filename = token.replace(/\\/g, '/').split('/').pop();
+      if (filename) images.push(`/api/v1/files/${filename}`);
       return '';
     })
     .replace(/\[添付動画: (.+?) \((.+?)\)\](?:\s*※分析に失敗しました)?/g, (_, _name, url) => {
