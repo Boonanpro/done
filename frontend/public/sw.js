@@ -13,23 +13,22 @@ self.addEventListener('push', (event) => {
 
   try {
     const data = event.data.json();
+    const url = data.url || '/';
     const options = {
       body: data.body || '',
       icon: data.icon || '/icon-192x192.png',
       badge: '/icon-192x192.png',
-      data: { url: data.url || '/' },
+      data: { url },
       vibrate: [200, 100, 200],
-      tag: 'collab-message',
+      tag: data.tag || url,
       renotify: true,
     };
 
     event.waitUntil(
       self.registration.showNotification(data.title || 'Done', options).then(() => {
-        // Update badge count
         if (navigator.setAppBadge) {
-          // Increment badge
           return self.registration.getNotifications().then((notifications) => {
-            navigator.setAppBadge(notifications.length + 1);
+            navigator.setAppBadge(notifications.length);
           });
         }
       })
@@ -39,25 +38,35 @@ self.addEventListener('push', (event) => {
   }
 });
 
-// Handle notification click - clear badge
+async function syncBadgeToVisibleNotifications() {
+  if (!navigator.setAppBadge || !navigator.clearAppBadge) return;
+  const notifications = await self.registration.getNotifications();
+  if (notifications.length > 0) {
+    await navigator.setAppBadge(notifications.length);
+  } else {
+    await navigator.clearAppBadge();
+  }
+}
+
+// Handle notification click: open the target chat/room and decrement only that notification.
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  if (navigator.clearAppBadge) {
-    navigator.clearAppBadge();
-  }
 
   const url = event.notification.data?.url || '/';
+  const targetUrl = new URL(url, self.registration.scope).href;
 
   event.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
-      // Focus existing window if open
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (clients) => {
+      await syncBadgeToVisibleNotifications();
       for (const client of clients) {
         if (client.url.includes(self.registration.scope) && 'focus' in client) {
+          if ('navigate' in client) {
+            await client.navigate(targetUrl);
+          }
           return client.focus();
         }
       }
-      // Open new window
-      return self.clients.openWindow(url);
+      return self.clients.openWindow(targetUrl);
     })
   );
 });
