@@ -613,7 +613,7 @@ function ChatInput({
       }
       setAttachedFiles(prev => [...prev, ...uploaded]);
     } catch (err: unknown) {
-      // PWA等で詳細不明エラーを切り分けるため、ファイル情報＋例外内容を可視化する
+      // PWA等で詳細不明エラーを切り分けるため、ファイル情報＋例外内容＋送信先URLを可視化する
       const errAny = err as { status?: number; statusText?: string; message?: string; name?: string };
       const errParts: string[] = [];
       if (errAny?.status !== undefined) errParts.push(`HTTP ${errAny.status}${errAny.statusText ? ' ' + errAny.statusText : ''}`);
@@ -623,8 +623,12 @@ function ChatInput({
       const fileSummary = currentFile
         ? `${currentFile.name || '(no name)'} [${currentFile.type || 'no-type'}, ${currentFile.size}B]`
         : '(no file)';
-      console.error('[uploadFiles] failed:', err, currentFile);
-      toast.error(`アップロード失敗: ${errSummary}\nfile: ${fileSummary}`, { duration: 20000 });
+      const origin = typeof window !== 'undefined' ? window.location.origin : '?';
+      console.error('[uploadFiles] failed:', err, currentFile, 'origin=', origin);
+      toast.error(
+        `アップロード失敗: ${errSummary}\norigin: ${origin}\nfile: ${fileSummary}`,
+        { duration: 30000 },
+      );
     } finally {
       setIsUploading(false);
     }
