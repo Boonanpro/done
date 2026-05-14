@@ -192,7 +192,10 @@ export default function CollabRoomPage() {
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
       });
-      if (!res.ok) throw new Error('Upload failed');
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} ${res.statusText}${bodyText ? ' | ' + bodyText.slice(0, 200) : ''}`);
+      }
       const fileData = await res.json();
       // Send message with file attachment
       const fileUrl = fileData.file_path;
@@ -200,8 +203,12 @@ export default function CollabRoomPage() {
         file: { id: fileData.id, name: fileData.file_name, url: fileUrl, type: fileData.file_type, size: fileData.file_size },
       });
       toast.success('ファイルを送信しました');
-    } catch {
-      toast.error('ファイルのアップロードに失敗しました');
+    } catch (err: unknown) {
+      const errAny = err as { name?: string; message?: string };
+      const errSummary = [errAny?.name, errAny?.message].filter(Boolean).join(' | ') || String(err);
+      const fileSummary = file ? `${file.name || '(no name)'} [${file.type || 'no-type'}, ${file.size}B]` : '(no file)';
+      console.error('[collab upload] failed:', err, file);
+      toast.error(`アップロード失敗(collab): ${errSummary}\nfile: ${fileSummary}`, { duration: 20000 });
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';

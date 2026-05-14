@@ -38,6 +38,11 @@ export function usePushNotification(roomId: string, senderType: string) {
       // Convert VAPID key
       const applicationServerKey = urlBase64ToUint8Array(publicKey) as any;
 
+      const existingSubscription = await reg.pushManager.getSubscription();
+      if (existingSubscription) {
+        await existingSubscription.unsubscribe();
+      }
+
       // Subscribe
       const subscription = await reg.pushManager.subscribe({
         userVisibleOnly: true,
@@ -63,7 +68,7 @@ export function usePushNotification(roomId: string, senderType: string) {
     }
   }, [roomId, senderType]);
 
-  const sendTest = useCallback(async () => {
+  const sendTest = useCallback(async (): Promise<{ ok: boolean; message?: string }> => {
     const token = localStorage.getItem('done-token');
 
     try {
@@ -74,10 +79,19 @@ export function usePushNotification(roomId: string, senderType: string) {
         headers,
         credentials: 'include',
       });
-      return res.ok;
+      if (res.ok) return { ok: true };
+      const data = await res.json().catch(() => null);
+      const detail = data?.detail;
+      if (detail?.attempted === 0) {
+        return { ok: false, message: 'この端末の通知購読がまだ保存されていません' };
+      }
+      if (detail?.failed) {
+        return { ok: false, message: '通知サービスへの送信に失敗しました' };
+      }
+      return { ok: false };
     } catch (e) {
       console.error('Push test error:', e);
-      return false;
+      return { ok: false };
     }
   }, []);
 

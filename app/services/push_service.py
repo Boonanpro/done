@@ -41,16 +41,17 @@ class PushService:
         }).execute()
 
     async def notify_room(self, room_id: str, exclude_type: str,
-                          title: str, body: str, url: Optional[str] = None) -> int:
+                          title: str, body: str, url: Optional[str] = None) -> dict:
         """Send push notification to all subscribers in a room except the sender's type."""
         if not settings.VAPID_PRIVATE_KEY or not settings.VAPID_PUBLIC_KEY:
-            return 0
+            return {"attempted": 0, "sent": 0, "failed": 0}
 
         result = self.supabase.table("push_subscriptions").select("*").eq(
             "room_id", room_id
         ).neq("sender_type", exclude_type).execute()
 
         sent = 0
+        failed = 0
         for sub in result.data:
             try:
                 subscription_info = {
@@ -74,6 +75,7 @@ class PushService:
                 )
                 sent += 1
             except WebPushException as e:
+                failed += 1
                 if e.response and e.response.status_code in (404, 410):
                     # Subscription expired, remove it
                     await self.remove_subscription(room_id, sub["sender_type"], sub["endpoint"])
@@ -81,8 +83,9 @@ class PushService:
                 else:
                     logger.error("Push failed: %s", e)
             except Exception as e:
+                failed += 1
                 logger.error("Push error: %s", e)
-        return sent
+        return {"attempted": len(result.data), "sent": sent, "failed": failed}
 
 
 def get_push_service() -> PushService:

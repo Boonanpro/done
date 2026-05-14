@@ -218,11 +218,11 @@ export default function SettingsPage() {
                                 if (!danPush.subscribed) {
                                   await danPush.subscribe();
                                 }
-                                const ok = await danPush.sendTest();
-                                if (ok) {
+                                const result = await danPush.sendTest();
+                                if (result.ok) {
                                   toast.success('テスト通知を送信しました');
                                 } else {
-                                  toast.error('テスト通知の送信に失敗しました');
+                                  toast.error(result.message || 'テスト通知の送信に失敗しました');
                                 }
                               }}
                             >

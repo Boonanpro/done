@@ -1,7 +1,7 @@
 """
 Push Notification API Routes
 """
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 
@@ -46,11 +46,19 @@ async def unsubscribe(req: SubscribeRequest):
 async def send_test_notification(current_user: TokenData = Depends(get_current_user)):
     """Send a test push notification to the signed-in user's devices."""
     svc = get_push_service()
-    sent = await svc.notify_room(
+    result = await svc.notify_room(
         room_id=f"user:{current_user.user_id}",
         exclude_type="ai",
         title="Dan",
         body="通知テストです。Dan の作業完了通知を受け取れます。",
         url="/settings",
     )
-    return {"success": True, "sent": sent}
+    if result["sent"] == 0:
+        raise HTTPException(
+            status_code=503 if result["attempted"] else 404,
+            detail={
+                "message": "No push notification was delivered",
+                **result,
+            },
+        )
+    return {"success": True, **result}
