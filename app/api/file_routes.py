@@ -3,16 +3,19 @@ File Upload API Routes
 Handles file uploads for chat attachments
 """
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.api.chat_routes import get_current_user
 from app.services.auth_service import TokenData
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["files"])
 
@@ -50,14 +53,44 @@ def is_allowed_file(filename: str) -> bool:
     return False
 
 
+async def _logging_current_user(request: Request) -> TokenData:
+    """
+    upload エンドポイント診断用: auth 前後の状態をログしてから get_current_user に委譲。
+    PWA経由アップロードが Authorization 等を欠いているか確認するため。
+    """
+    h = request.headers
+    has_auth = "authorization" in h
+    has_cookie_token = "access_token" in (request.cookies or {})
+    logger.info(
+        "[upload-auth] ct=%s cl=%s auth=%s cookie=%s cf=%s xff=%s ua=%s",
+        h.get("content-type", "")[:80],
+        h.get("content-length", "-"),
+        "Bearer***" if h.get("authorization", "").startswith("Bearer ") else f"raw='{h.get('authorization','')[:40]}'" if has_auth else "<absent>",
+        "yes" if has_cookie_token else "no",
+        h.get("cf-ray", "-"),
+        h.get("x-forwarded-for", "-"),
+        h.get("user-agent", "")[:80],
+    )
+    try:
+        from fastapi.security import HTTPBearer
+        bearer = HTTPBearer(auto_error=False)
+        creds = await bearer(request)
+        return await get_current_user(request, creds)
+    except HTTPException as e:
+        logger.warning("[upload-auth] FAIL status=%s detail=%s", e.status_code, e.detail)
+        raise
+
+
 @router.post("/upload", response_model=FileUploadResponse)
 async def upload_file(
+    request: Request,
     file: UploadFile = File(...),
-    current_user: TokenData = Depends(get_current_user)
+    current_user: TokenData = Depends(_logging_current_user),
 ):
     """
     Upload a file for chat attachment
     """
+    logger.info("[upload] OK user=%s", current_user.user_id)
     # Validate file size
     file.file.seek(0, 2)
     file_size = file.file.tell()
