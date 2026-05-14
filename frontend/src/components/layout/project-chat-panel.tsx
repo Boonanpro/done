@@ -600,9 +600,11 @@ function ChatInput({
   const uploadFiles = useCallback(async (fileList: File[]) => {
     if (fileList.length === 0) return;
     setIsUploading(true);
+    let currentFile: File | undefined;
     try {
       const uploaded: FileUploadResponse[] = [];
       for (const file of fileList) {
+        currentFile = file;
         if (file.size > 100 * 1024 * 1024) {
           toast.error(`${file.name} は100MB以上のファイルは添付できません`);
           continue;
@@ -610,8 +612,19 @@ function ChatInput({
         uploaded.push(await api.files.upload(file));
       }
       setAttachedFiles(prev => [...prev, ...uploaded]);
-    } catch {
-      toast.error('ファイルのアップロードに失敗しました');
+    } catch (err: unknown) {
+      // PWA等で詳細不明エラーを切り分けるため、ファイル情報＋例外内容を可視化する
+      const errAny = err as { status?: number; statusText?: string; message?: string; name?: string };
+      const errParts: string[] = [];
+      if (errAny?.status !== undefined) errParts.push(`HTTP ${errAny.status}${errAny.statusText ? ' ' + errAny.statusText : ''}`);
+      if (errAny?.name && errAny.name !== 'Error') errParts.push(errAny.name);
+      if (errAny?.message) errParts.push(errAny.message);
+      const errSummary = errParts.length > 0 ? errParts.join(' | ') : String(err);
+      const fileSummary = currentFile
+        ? `${currentFile.name || '(no name)'} [${currentFile.type || 'no-type'}, ${currentFile.size}B]`
+        : '(no file)';
+      console.error('[uploadFiles] failed:', err, currentFile);
+      toast.error(`アップロード失敗: ${errSummary}\nfile: ${fileSummary}`, { duration: 20000 });
     } finally {
       setIsUploading(false);
     }
