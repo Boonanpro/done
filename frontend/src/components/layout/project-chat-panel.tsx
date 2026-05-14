@@ -613,8 +613,14 @@ function ChatInput({
       }
       setAttachedFiles(prev => [...prev, ...uploaded]);
     } catch (err: unknown) {
-      // PWA等で詳細不明エラーを切り分けるため、ファイル情報＋例外内容＋送信先URLを可視化する
-      const errAny = err as { status?: number; statusText?: string; message?: string; name?: string };
+      // PWA等で詳細不明エラーを切り分けるため、原因情報を最大限可視化する
+      const errAny = err as {
+        status?: number;
+        statusText?: string;
+        message?: string;
+        name?: string;
+        data?: { body?: string; server?: string; via?: string; cfRay?: string };
+      };
       const errParts: string[] = [];
       if (errAny?.status !== undefined) errParts.push(`HTTP ${errAny.status}${errAny.statusText ? ' ' + errAny.statusText : ''}`);
       if (errAny?.name && errAny.name !== 'Error') errParts.push(errAny.name);
@@ -624,9 +630,16 @@ function ChatInput({
         ? `${currentFile.name || '(no name)'} [${currentFile.type || 'no-type'}, ${currentFile.size}B]`
         : '(no file)';
       const origin = typeof window !== 'undefined' ? window.location.origin : '?';
+      const d = errAny?.data;
+      const respParts: string[] = [];
+      if (d?.server) respParts.push(`server=${d.server}`);
+      if (d?.via) respParts.push(`via=${d.via}`);
+      if (d?.cfRay) respParts.push(`cf=${d.cfRay}`);
+      const respHeader = respParts.length > 0 ? `\nresp: ${respParts.join(' / ')}` : '';
+      const respBody = d?.body ? `\nbody: ${d.body.slice(0, 200)}` : '';
       console.error('[uploadFiles] failed:', err, currentFile, 'origin=', origin);
       toast.error(
-        `アップロード失敗: ${errSummary}\norigin: ${origin}\nfile: ${fileSummary}`,
+        `アップロード失敗: ${errSummary}\norigin: ${origin}\nfile: ${fileSummary}${respHeader}${respBody}`,
         { duration: 30000 },
       );
     } finally {

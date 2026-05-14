@@ -575,7 +575,16 @@ async function uploadFile(
   });
 
   if (!response.ok) {
-    throw new ApiError(response.status, response.statusText, null);
+    // 失敗時はレスポンス body と一部ヘッダも保持する（PWA等で原因切り分けが必要なため）
+    let bodyText = '';
+    try { bodyText = await response.text(); } catch { /* ignore */ }
+    const debugInfo = {
+      body: bodyText.slice(0, 500),
+      server: response.headers.get('server') || '',
+      via: response.headers.get('via') || '',
+      cfRay: response.headers.get('cf-ray') || '',
+    };
+    throw new ApiError(response.status, response.statusText, debugInfo);
   }
 
   return response.json();
