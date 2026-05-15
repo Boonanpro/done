@@ -25,8 +25,18 @@ class ChatArtifactService:
             payload.setdefault("preview_url", f"/artifacts/{slug}")
             payload.setdefault("share_url", f"/preview/{slug}")
             payload.setdefault("draft_url", f"/preview/{slug}")
+            payload["share_url"] = self._to_preview_url(payload.get("share_url"), slug)
+            payload["draft_url"] = self._to_preview_url(payload.get("draft_url"), slug)
         payload.setdefault("publish_status", "preview_live")
         return payload
+
+    @staticmethod
+    def _to_preview_url(value: str | None, slug: str) -> str:
+        if not value:
+            return f"/preview/{slug}"
+        if value == f"/artifacts/{slug}" or value.startswith(f"/artifacts/{slug}/"):
+            return value.replace(f"/artifacts/{slug}", f"/preview/{slug}", 1)
+        return value
 
     @staticmethod
     def infer_artifact_type(slug: str = "", label: str | None = None, path: str | None = None) -> str:

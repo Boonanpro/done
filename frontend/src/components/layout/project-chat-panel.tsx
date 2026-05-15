@@ -1205,7 +1205,10 @@ function ChatInput({
 
 function slugToFilePath(slug: string, previewUrl: string): string {
   // /demo/xxx → frontend/src/app/demo/xxx/page.tsx
-  const trimmed = previewUrl.replace(/^\//, '');
+  const normalized = previewUrl
+    .replace(new RegExp(`^/preview/${slug}(?:/.*)?$`), `/artifacts/${slug}`)
+    .replace(new RegExp(`^/artifacts/${slug}(?:/.*)?$`), `/artifacts/${slug}`);
+  const trimmed = normalized.replace(/^\//, '');
   return `frontend/src/app/${trimmed}/page.tsx`;
 }
 

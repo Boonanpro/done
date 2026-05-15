@@ -366,7 +366,12 @@ def _build_system_prompt(
         "- Do not create or edit production deliverables under `frontend/src/app/demo/`. "
         "`/demo` is deprecated and reserved only for explicitly approved proposal-video prototypes.\n"
         "- When creating a deliverable, make sure it has a `page.tsx` entry so it can be "
-        "registered as a chat artifact and opened from the chat header."
+        "registered as a chat artifact and opened from the chat header.\n"
+        "- For navigation inside an artifact, do not import `next/link` directly for "
+        "`/artifacts/<slug>` links. Import `ArtifactLink` from "
+        "`@/components/artifacts/artifact-link` and alias it as `Link`, or use helpers "
+        "from `@/lib/artifact-paths` when storing URLs. This preserves `/preview/<slug>` "
+        "and custom-domain clean paths while the source stays under `/artifacts/<slug>`."
     )
     parts.append(_ABSOLUTE_RULES)
 

@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { usePreviewStore, flushInspectorEdits, type ArtifactRecord } from '@/stores/preview-store';
 import { useEditHistoryStore } from '@/stores/edit-history-store';
+import { artifactProductionUrl, artifactSharePath } from '@/lib/artifact-paths';
 import { attachInspector, detachInspector } from './iframe-inspector';
 import { CommentPopover } from './comment-popover';
 import { InspectorPanel } from './inspector-panel';
@@ -78,6 +79,17 @@ function absolutePublicUrl(pathOrUrl: string): string {
   }
 }
 
+function cleanArtifactUrl(artifact: ArtifactRecord, pathOrUrl: string): string {
+  return (
+    artifactProductionUrl({
+      slug: artifact.slug,
+      pathOrUrl,
+      productionUrl: artifact.production_url,
+      customDomain: artifact.custom_domain,
+    }) || absolutePublicUrl(artifactSharePath(pathOrUrl || artifact.slug))
+  );
+}
+
 async function copyText(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText && window.isSecureContext) {
@@ -136,7 +148,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     mutationFn: async () => {
       if (!artifact) throw new Error('No artifact selected');
       await flushInspectorEdits();
-      const share_url = artifact.share_url || `/preview/${artifact.slug}`;
+      const share_url = artifactSharePath(artifact.share_url || artifact.preview_url || artifact.slug);
       return {
         ...artifact,
         share_url,
@@ -147,7 +159,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     onSuccess: async (updated) => {
       refreshArtifacts();
       if (projectId) openArtifact(projectId, updated);
-      const url = absolutePublicUrl(updated.share_url || `/preview/${updated.slug}`);
+      const url = cleanArtifactUrl(updated, updated.share_url || updated.preview_url || updated.slug);
       const copied = await copyText(url);
       if (copied) {
         toast.success('共有URLをコピーしました');
@@ -189,12 +201,10 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
 
   const loaded = artifact ? loadedArtifactId === artifact.id : false;
 
-  const publicPreviewUrl = artifact?.preview_url.startsWith('/artifacts/')
-    ? artifact.preview_url.replace(/^\/artifacts\//, '/preview/')
-    : artifact?.preview_url || '';
+  const publicPreviewUrl = artifact ? artifactSharePath(artifact.preview_url || artifact.slug) : '';
   const draftUrl = artifact ? artifact.draft_url || publicPreviewUrl : '';
   const shareUrl = artifact ? artifact.share_url || draftUrl || publicPreviewUrl : '';
-  const publicShareUrl = shareUrl ? absolutePublicUrl(shareUrl) : '';
+  const publicShareUrl = artifact && shareUrl ? cleanArtifactUrl(artifact, shareUrl) : '';
   const baseIframeSrc = draftUrl || publicPreviewUrl || shareUrl;
   // contentVersion を URL に乗せて Vercel CDN / ブラウザキャッシュをバイパスする。
   // 初回は素のURLでCDNキャッシュを活かし、編集が走ったら ?t=N で新キャッシュキーへ。

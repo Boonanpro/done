@@ -384,13 +384,13 @@ HP生成後、以下を全て確認する:
 #### プロジェクト構成 (新アーキテクチャ)
 
 HP は **`frontend/src/app/artifacts/{slug}/` 配下** に作る (クライアント案件も社内 LP も全て同じ場所)。
-※ `frontend/src/app/artifacts/{slug}/` は提案動画用プロトタイプ専用。通常の HP / ダッシュボード制作には使わない。
+※ `frontend/src/app/demo/{slug}/` は提案動画用プロトタイプ専用。通常の HP / ダッシュボード制作には使わない。
 独立した Next.js プロジェクトを切らない (旧 `D:/dan-workspace/hp-projects/` フローは廃止)。
 理由: チャット右ペインのライブプレビューでそのまま見せて会話で詰められる、
 `create_feature` の guard hook が機能する、Vercel デプロイは done 本体と同居できる。
 
 ```
-frontend/src/app/demo/yoshikawa-tokuso/
+frontend/src/app/artifacts/yoshikawa-tokuso/
   ├─ page.tsx            ← ホーム (LpShell + 各 Section)
   ├─ services/page.tsx   ← 子ページ
   ├─ contact/page.tsx
@@ -427,8 +427,9 @@ frontend/src/app/demo/yoshikawa-tokuso/
 
 #### デプロイ
 
-done 本体の Vercel デプロイに自動追従する (`/artifacts/{slug}` パスで公開)。
-クライアント独自ドメインを使う場合は Vercel のドメイン設定で `/artifacts/{slug}` を別ドメインにマッピングする。
+done 本体の Vercel デプロイに自動追従する。チャットの全画面プレビューや共有URLは `/preview/{slug}` を使い、内部的に `/artifacts/{slug}` へ rewrite される。
+artifact 内のナビゲーションで `/artifacts/{slug}` にリンクする場合は、`next/link` ではなく `@/components/artifacts/artifact-link` の `ArtifactLink` を `Link` として使う。これにより `/preview/{slug}`、内部 `/artifacts/{slug}`、独自ドメインの clean path が混ざらない。
+クライアント独自ドメインを使う場合は、middleware の `ARTIFACT_CUSTOM_DOMAINS` / `NEXT_PUBLIC_ARTIFACT_CUSTOM_DOMAINS` に `slug=domain.example` 形式で追加する。
 
 ---
 
@@ -459,4 +460,3 @@ done 本体の Vercel デプロイに自動追従する (`/artifacts/{slug}` パ
 
 > ※ 自動学習 (learned.md への自動追記) は廃止。改善パターンを記録する場合は
 > このファイル (SKILL.md) に明示的に追記する。隠れ状態を作らない方針。
-

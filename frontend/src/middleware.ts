@@ -1,23 +1,37 @@
-/**
- * Next.js Middleware - Route protection
- *
- * 認証チェックは基本的にクライアント側 (localStorage) だが、
- * 「公開すべきでない /artifacts/* 」への直接アクセスはここで遮断する。
- *
- * - 公開 slug 一覧 (PUBLIC_ARTIFACT_SLUGS): 認証不要
- * - それ以外の /artifacts/* : Cookie の done_access_token を要求
- *   無ければ /login にリダイレクト
- */
-
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 const ACCESS_TOKEN_COOKIE = 'done_access_token';
 
-// 公開してよい artifact slug の一覧（クライアント案件など）
-// 新しい公開案件を作ったらここに追加する。
+const DEFAULT_CUSTOM_DOMAIN_MAP: Record<string, string[]> = {
+  kittoku: ['kittoku.vercel.app', 'yoshikawa-tokuso.vercel.app'],
+};
+
+function parseCustomDomainMap(): Record<string, string[]> {
+  const configured = process.env.ARTIFACT_CUSTOM_DOMAINS || process.env.NEXT_PUBLIC_ARTIFACT_CUSTOM_DOMAINS;
+  if (!configured) return DEFAULT_CUSTOM_DOMAIN_MAP;
+
+  const map: Record<string, string[]> = { ...DEFAULT_CUSTOM_DOMAIN_MAP };
+  for (const entry of configured.split(',')) {
+    const [rawSlug, rawDomains] = entry.split('=');
+    const slug = rawSlug?.trim();
+    if (!slug || !rawDomains) continue;
+    const domains = rawDomains
+      .split('|')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    if (domains.length) map[slug] = domains;
+  }
+  return map;
+}
+
+const DOMAIN_TO_ARTIFACT = new Map<string, string>();
+for (const [slug, domains] of Object.entries(parseCustomDomainMap())) {
+  for (const domain of domains) DOMAIN_TO_ARTIFACT.set(domain, slug);
+}
+
 const PUBLIC_ARTIFACT_SLUGS = new Set<string>(
-  (process.env.NEXT_PUBLIC_ARTIFACT_SLUGS || 'kittoku')
+  (process.env.NEXT_PUBLIC_ARTIFACT_SLUGS || 'kittoku,test-edit')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
@@ -25,38 +39,33 @@ const PUBLIC_ARTIFACT_SLUGS = new Set<string>(
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  const host = request.headers.get('host') || '';
+  const host = (request.headers.get('host') || '').split(':')[0].toLowerCase();
+  const customDomainSlug = DOMAIN_TO_ARTIFACT.get(host);
 
-  // ----- Public preview: /preview/<slug> mirrors /artifacts/<slug> without auth -----
-  if (pathname.startsWith('/preview/')) {
-    const segments = pathname.split('/').filter(Boolean); // ['preview','slug', ...]
-    if (segments.length >= 2) {
+  if (customDomainSlug) {
+    const segments = pathname.split('/').filter(Boolean);
+    const first = segments[0];
+    const slug = segments[1];
+
+    if ((first === 'preview' || first === 'artifacts') && slug === customDomainSlug) {
       const url = request.nextUrl.clone();
-      url.pathname = `/artifacts/${segments.slice(1).join('/')}`;
-      return NextResponse.rewrite(url);
+      const rest = segments.slice(2).join('/');
+      url.pathname = rest ? `/${rest}` : '/';
+      return NextResponse.redirect(url);
     }
+
+    const url = request.nextUrl.clone();
+    url.pathname =
+      pathname === '/' ? `/artifacts/${customDomainSlug}` : `/artifacts/${customDomainSlug}${pathname}`;
+    return NextResponse.rewrite(url);
   }
 
-  // ----- 吉川特装HP 専用ドメイン: ルートを /artifacts/kittoku に rewrite -----
-  if (
-    host === 'kittoku.vercel.app' ||
-    host === 'yoshikawa-tokuso.vercel.app'
-  ) {
-    if (pathname === '/') {
-      const url = request.nextUrl.clone();
-      url.pathname = '/artifacts/kittoku';
-      return NextResponse.rewrite(url);
-    }
-  }
-
-  // ----- ダン本体ドメイン: root → /login -----
   if (pathname === '/') {
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
-  // ----- Public preview: /preview/<slug> mirrors /artifacts/<slug> without auth -----
   if (pathname.startsWith('/preview/')) {
-    const segments = pathname.split('/').filter(Boolean); // ['preview','slug', ...]
+    const segments = pathname.split('/').filter(Boolean);
     if (segments.length >= 2) {
       const url = request.nextUrl.clone();
       url.pathname = `/artifacts/${segments.slice(1).join('/')}`;
@@ -64,19 +73,15 @@ export function middleware(request: NextRequest) {
     }
   }
 
-  // ----- /artifacts/* の保護 -----
   if (pathname.startsWith('/artifacts/')) {
-    // /artifacts/<slug>/<rest...>
-    const segments = pathname.split('/').filter(Boolean); // ['artifacts','slug', ...]
+    const segments = pathname.split('/').filter(Boolean);
     const slug = segments[1];
     if (slug && PUBLIC_ARTIFACT_SLUGS.has(slug)) {
-      // 公開 slug は認証不要
       return NextResponse.next();
     }
-    // 公開 slug でなければ Cookie 確認
+
     const token = request.cookies.get(ACCESS_TOKEN_COOKIE)?.value;
     if (!token) {
-      // 未認証 → /login へ
       const loginUrl = new URL('/login', request.url);
       loginUrl.searchParams.set('redirect', pathname);
       return NextResponse.redirect(loginUrl);
@@ -88,12 +93,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: [
-    /*
-     * Match root and all /artifacts/* paths
-     */
-    '/',
-    '/artifacts/:path*',
-    '/preview/:path*',
-  ],
+  matcher: ['/', '/artifacts/:path*', '/preview/:path*'],
 };

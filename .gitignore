@@ -12,6 +12,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+!frontend/src/lib/
+!frontend/src/lib/artifact-paths.ts
 lib64/
 parts/
 sdist/
