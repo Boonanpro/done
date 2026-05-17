@@ -1568,7 +1568,14 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     isNearBottomRef.current = nearBottom;
     if (nearBottom) setHasNewMessages(false);
-  }, []);
+    if (el.scrollTop < 240) {
+      setVisibleItemCount((count) =>
+        count >= displayItems.length
+          ? count
+          : Math.min(displayItems.length, count + CHAT_RENDER_INCREMENT)
+      );
+    }
+  }, [displayItems.length]);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -1718,18 +1725,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
               });
             })()}
             {hiddenOlderCount > 0 ? (
-              <div>
-                <button
-                  onClick={() =>
-                    setVisibleItemCount((count) =>
-                      Math.min(displayItems.length, count + CHAT_RENDER_INCREMENT)
-                    )
-                  }
-                  className="mx-auto my-3 block rounded-full border border-border bg-background px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                >
-                  さらに古い履歴を表示 ({hiddenOlderCount})
-                </button>
-              </div>
+              <div className="h-1" aria-hidden="true" />
             ) : null}
             <div ref={messagesEndRef} />
           </div>
