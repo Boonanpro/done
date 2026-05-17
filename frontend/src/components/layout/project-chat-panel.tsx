@@ -51,6 +51,8 @@ interface ProjectChatPanelProps {
   projectId: string;
 }
 
+const INITIAL_CHAT_RENDER_COUNT = 80;
+const CHAT_RENDER_INCREMENT = 80;
 
 type StepInfo = {
   label: string;
@@ -1272,7 +1274,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sendMessageRef = useRef<((content: string) => void) | null>(null);
   const isNearBottomRef = useRef(true);
-  const initialScrollProjectRef = useRef<string | null>(null);
+  const [visibleItemCount, setVisibleItemCount] = useState(INITIAL_CHAT_RENDER_COUNT);
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<MessageResponse | null>(null);
@@ -1533,63 +1535,53 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const hasAnyContent = displayItems.length > 0;
 
-  const scrollDomToBottom = useCallback(() => {
-    const el = scrollContainerRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-    isNearBottomRef.current = true;
-  }, []);
-
   useEffect(() => {
-    initialScrollProjectRef.current = projectId;
     isNearBottomRef.current = true;
+    const frame = requestAnimationFrame(() => {
+      setVisibleItemCount(INITIAL_CHAT_RENDER_COUNT);
+      setHasNewMessages(false);
+    });
+    return () => cancelAnimationFrame(frame);
   }, [projectId]);
 
-  useEffect(() => {
-    if (isLoadingMessages || initialScrollProjectRef.current !== projectId) return;
-    scrollDomToBottom();
+  const visibleDisplayItems = useMemo(() => {
+    const start = Math.max(0, displayItems.length - visibleItemCount);
+    return displayItems.slice(start);
+  }, [displayItems, visibleItemCount]);
 
-    const frame = requestAnimationFrame(() => {
-      scrollDomToBottom();
-      setHasNewMessages(false);
-      requestAnimationFrame(scrollDomToBottom);
-    });
-    const timeout = window.setTimeout(() => {
-      scrollDomToBottom();
-      setHasNewMessages(false);
-      if (initialScrollProjectRef.current === projectId) {
-        initialScrollProjectRef.current = null;
-      }
-    }, 250);
+  const newestFirstDisplayItems = useMemo(
+    () => [...visibleDisplayItems].reverse(),
+    [visibleDisplayItems]
+  );
 
-    return () => {
-      cancelAnimationFrame(frame);
-      window.clearTimeout(timeout);
-    };
-  }, [displayItems.length, isLoadingMessages, scrollDomToBottom, projectId]);
+  const hiddenOlderCount = Math.max(0, displayItems.length - visibleDisplayItems.length);
 
   useEffect(() => {
-    if (initialScrollProjectRef.current === projectId) return;
     if (isNearBottomRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      requestAnimationFrame(() => {
+        const el = scrollContainerRef.current;
+        if (el) el.scrollTop = 0;
+      });
     } else {
       requestAnimationFrame(() => setHasNewMessages(true));
     }
-  }, [displayItems, projectId]);
+  }, [displayItems.length]);
 
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    const nearBottom = el.scrollTop < 100;
     isNearBottomRef.current = nearBottom;
     if (nearBottom) setHasNewMessages(false);
   }, []);
 
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    scrollDomToBottom();
+    const el = scrollContainerRef.current;
+    if (el) {
+      el.scrollTo({ top: 0, behavior: 'smooth' });
+    }
     setHasNewMessages(false);
-  }, [scrollDomToBottom]);
+  }, []);
 
   return (
     <div className="relative flex h-full w-full overflow-hidden">
@@ -1687,11 +1679,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       </div>
 
-      <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto">
+      <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto [transform:scaleY(-1)]">
         {hasNewMessages && (
           <button
             onClick={scrollToBottom}
-            className="sticky top-[calc(100%-3rem)] z-10 mx-auto flex items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-lg transition-opacity hover:opacity-90"
+            className="sticky top-3 z-10 mx-auto flex items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-lg transition-opacity hover:opacity-90 [transform:scaleY(-1)]"
             style={{ display: 'block', marginLeft: 'auto', marginRight: 'auto', width: 'fit-content' }}
           >
             <ChevronDown className="h-3.5 w-3.5" />
@@ -1699,38 +1691,55 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           </button>
         )}
         {isLoadingMessages ? (
-          <div className="flex items-center justify-center p-6">
+          <div className="flex items-center justify-center p-6 [transform:scaleY(-1)]">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
         ) : !hasAnyContent && !isActiveExecution ? (
-          <div className="flex h-full flex-col items-center justify-center p-6">
+          <div className="flex h-full flex-col items-center justify-center p-6 [transform:scaleY(-1)]">
             <MessageSquare className="mb-3 h-10 w-10 text-muted-foreground/20" />
             <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
           </div>
         ) : (
           <div className="flex flex-col gap-2 p-4">
             {(() => {
-              const lastExecutionIndex = displayItems.reduce(
+              const lastExecutionIndex = visibleDisplayItems.reduce(
                 (last, item, index) => (item.kind === 'execution-block' ? index : last),
                 -1
               );
+              const newestFirstLastExecutionIndex =
+                lastExecutionIndex === -1 ? -1 : visibleDisplayItems.length - 1 - lastExecutionIndex;
 
-              return displayItems.map((item, index) => {
+              return newestFirstDisplayItems.map((item, index) => {
                 if (item.kind === 'execution-block') {
                   return (
-                    <InlineProcessBlock
-                      key={item.id}
-                      steps={item.steps}
-                      isLive={item.isLive}
-                      defaultCollapsed={index !== lastExecutionIndex && !item.isLive}
-                    />
+                    <div key={item.id} className="[transform:scaleY(-1)]">
+                      <InlineProcessBlock
+                        steps={item.steps}
+                        isLive={item.isLive}
+                        defaultCollapsed={index !== newestFirstLastExecutionIndex && !item.isLive}
+                      />
+                    </div>
                   );
                 }
 
-                return <div key={item.msg.id} data-message-id={item.msg.id}><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>;
+                return <div key={item.msg.id} data-message-id={item.msg.id} className="[transform:scaleY(-1)]"><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>;
               });
             })()}
-            <div ref={messagesEndRef} />
+            {hiddenOlderCount > 0 ? (
+              <div className="[transform:scaleY(-1)]">
+                <button
+                  onClick={() =>
+                    setVisibleItemCount((count) =>
+                      Math.min(displayItems.length, count + CHAT_RENDER_INCREMENT)
+                    )
+                  }
+                  className="mx-auto my-3 block rounded-full border border-border bg-background px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  さらに古い履歴を表示 ({hiddenOlderCount})
+                </button>
+              </div>
+            ) : null}
+            <div ref={messagesEndRef} className="[transform:scaleY(-1)]" />
           </div>
         )}
       </div>
