@@ -37,6 +37,12 @@
         "projectId": "db295575-26c1-4088-99aa-4887eb27e2e2"
       }
     },
-    "owner": "done-is-better"
+    "owner": "done-is-better",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/db295575-26c1-4088-99aa-4887eb27e2e2"
+    }
   }
 }
