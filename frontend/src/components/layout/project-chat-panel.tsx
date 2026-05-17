@@ -1549,18 +1549,13 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     return displayItems.slice(start);
   }, [displayItems, visibleItemCount]);
 
-  const newestFirstDisplayItems = useMemo(
-    () => [...visibleDisplayItems].reverse(),
-    [visibleDisplayItems]
-  );
-
   const hiddenOlderCount = Math.max(0, displayItems.length - visibleDisplayItems.length);
 
   useEffect(() => {
     if (isNearBottomRef.current) {
       requestAnimationFrame(() => {
         const el = scrollContainerRef.current;
-        if (el) el.scrollTop = 0;
+        if (el) el.scrollTop = el.scrollHeight;
       });
     } else {
       requestAnimationFrame(() => setHasNewMessages(true));
@@ -1570,7 +1565,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
-    const nearBottom = el.scrollTop < 100;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
     isNearBottomRef.current = nearBottom;
     if (nearBottom) setHasNewMessages(false);
   }, []);
@@ -1578,7 +1573,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const scrollToBottom = useCallback(() => {
     const el = scrollContainerRef.current;
     if (el) {
-      el.scrollTo({ top: 0, behavior: 'smooth' });
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
     }
     setHasNewMessages(false);
   }, []);
@@ -1679,11 +1674,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       </div>
 
-      <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto [transform:scaleY(-1)]">
+      <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto">
         {hasNewMessages && (
           <button
             onClick={scrollToBottom}
-            className="sticky top-3 z-10 mx-auto flex items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-lg transition-opacity hover:opacity-90 [transform:scaleY(-1)]"
+            className="sticky top-[calc(100%-3rem)] z-10 mx-auto flex items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-lg transition-opacity hover:opacity-90"
             style={{ display: 'block', marginLeft: 'auto', marginRight: 'auto', width: 'fit-content' }}
           >
             <ChevronDown className="h-3.5 w-3.5" />
@@ -1691,11 +1686,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           </button>
         )}
         {isLoadingMessages ? (
-          <div className="flex items-center justify-center p-6 [transform:scaleY(-1)]">
+          <div className="flex items-center justify-center p-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
           </div>
         ) : !hasAnyContent && !isActiveExecution ? (
-          <div className="flex h-full flex-col items-center justify-center p-6 [transform:scaleY(-1)]">
+          <div className="flex h-full flex-col items-center justify-center p-6">
             <MessageSquare className="mb-3 h-10 w-10 text-muted-foreground/20" />
             <p className="text-base text-muted-foreground md:text-[17px]">メッセージを送信して開始してください。</p>
           </div>
@@ -1706,27 +1701,24 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                 (last, item, index) => (item.kind === 'execution-block' ? index : last),
                 -1
               );
-              const newestFirstLastExecutionIndex =
-                lastExecutionIndex === -1 ? -1 : visibleDisplayItems.length - 1 - lastExecutionIndex;
 
-              return newestFirstDisplayItems.map((item, index) => {
+              return visibleDisplayItems.map((item, index) => {
                 if (item.kind === 'execution-block') {
                   return (
-                    <div key={item.id} className="[transform:scaleY(-1)]">
-                      <InlineProcessBlock
-                        steps={item.steps}
-                        isLive={item.isLive}
-                        defaultCollapsed={index !== newestFirstLastExecutionIndex && !item.isLive}
-                      />
-                    </div>
+                    <InlineProcessBlock
+                      key={item.id}
+                      steps={item.steps}
+                      isLive={item.isLive}
+                      defaultCollapsed={index !== lastExecutionIndex && !item.isLive}
+                    />
                   );
                 }
 
-                return <div key={item.msg.id} data-message-id={item.msg.id} className="[transform:scaleY(-1)]"><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>;
+                return <div key={item.msg.id} data-message-id={item.msg.id}><MessageBubble msg={item.msg} onImageClick={setLightboxImage} onReply={setReplyTo} /></div>;
               });
             })()}
             {hiddenOlderCount > 0 ? (
-              <div className="[transform:scaleY(-1)]">
+              <div>
                 <button
                   onClick={() =>
                     setVisibleItemCount((count) =>
@@ -1739,7 +1731,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
                 </button>
               </div>
             ) : null}
-            <div ref={messagesEndRef} className="[transform:scaleY(-1)]" />
+            <div ref={messagesEndRef} />
           </div>
         )}
       </div>
