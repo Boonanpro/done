@@ -18,6 +18,10 @@ class SubscribeRequest(BaseModel):
     subscription: dict  # PushSubscription JSON
 
 
+class NativeSubscribeRequest(BaseModel):
+    token: str
+
+
 @router.get("/vapid-key")
 async def get_vapid_key():
     """Return the public VAPID key for push subscription."""
@@ -29,6 +33,26 @@ async def subscribe(req: SubscribeRequest):
     """Save a push subscription."""
     svc = get_push_service()
     await svc.save_subscription(req.room_id, req.sender_type, req.subscription)
+    return {"success": True}
+
+
+@router.post("/native/subscribe")
+async def subscribe_native(
+    req: NativeSubscribeRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Save an Expo native push token for the signed-in user."""
+    if not req.token.startswith("ExponentPushToken["):
+        raise HTTPException(status_code=400, detail="Invalid Expo push token")
+    svc = get_push_service()
+    await svc.save_subscription(
+        room_id=f"user:{current_user.user_id}",
+        sender_type="owner",
+        subscription={
+            "endpoint": req.token,
+            "keys": {"p256dh": "", "auth": ""},
+        },
+    )
     return {"success": True}
 
 

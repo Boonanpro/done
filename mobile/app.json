@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "DAN",
+    "slug": "dan-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#12110f"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.done.dan"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#12110f"
+      },
+      "package": "app.done.dan",
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-notifications"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "db295575-26c1-4088-99aa-4887eb27e2e2"
+      }
+    },
+    "owner": "done-is-better"
+  }
+}

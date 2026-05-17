@@ -1,0 +1,6 @@
+node_modules/
+.expo/
+.git/
+*.log
+expo-start.log
+expo-start.err.log

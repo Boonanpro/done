@@ -3,6 +3,7 @@ Web Push Notification Service
 """
 import json
 import logging
+import urllib.request
 from typing import Optional
 from pywebpush import webpush, WebPushException
 
@@ -43,9 +44,6 @@ class PushService:
     async def notify_room(self, room_id: str, exclude_type: str,
                           title: str, body: str, url: Optional[str] = None) -> dict:
         """Send push notification to all subscribers in a room except the sender's type."""
-        if not settings.VAPID_PRIVATE_KEY or not settings.VAPID_PUBLIC_KEY:
-            return {"attempted": 0, "sent": 0, "failed": 0}
-
         result = self.supabase.table("push_subscriptions").select("*").eq(
             "room_id", room_id
         ).neq("sender_type", exclude_type).execute()
@@ -53,6 +51,23 @@ class PushService:
         sent = 0
         failed = 0
         for sub in result.data:
+            if str(sub.get("endpoint", "")).startswith("ExponentPushToken["):
+                ok = await self._send_expo_push(
+                    token=sub["endpoint"],
+                    title=title,
+                    body=body,
+                    url=url or "/chat",
+                )
+                if ok:
+                    sent += 1
+                else:
+                    failed += 1
+                continue
+
+            if not settings.VAPID_PRIVATE_KEY or not settings.VAPID_PUBLIC_KEY:
+                failed += 1
+                continue
+
             try:
                 subscription_info = {
                     "endpoint": sub["endpoint"],
@@ -86,6 +101,40 @@ class PushService:
                 failed += 1
                 logger.error("Push error: %s", e)
         return {"attempted": len(result.data), "sent": sent, "failed": failed}
+
+    async def _send_expo_push(self, token: str, title: str, body: str, url: str) -> bool:
+        """Send a native Expo push notification."""
+        payload = json.dumps({
+            "to": token,
+            "title": title,
+            "body": body,
+            "sound": "default",
+            "data": {"url": url},
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            "https://exp.host/--/api/v2/push/send",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = resp.status
+                text = resp.read().decode("utf-8", errors="replace")
+            if 200 <= status < 300:
+                data = json.loads(text)
+                ticket = data.get("data", {})
+                if ticket.get("status") == "ok":
+                    return True
+                logger.warning("Expo push ticket failed: %s", ticket)
+            else:
+                logger.warning("Expo push HTTP %s: %s", status, text[:200])
+        except Exception as e:
+            logger.error("Expo push error: %s", e)
+        return False
 
 
 def get_push_service() -> PushService:

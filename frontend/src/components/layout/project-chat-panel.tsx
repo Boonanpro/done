@@ -1272,6 +1272,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sendMessageRef = useRef<((content: string) => void) | null>(null);
   const isNearBottomRef = useRef(true);
+  const initialScrollProjectRef = useRef<string | null>(null);
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<MessageResponse | null>(null);
@@ -1475,7 +1476,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       // 最新のhumanメッセージの時刻に紐づけて位置を固定する
       // (Date.now()を使うと再計算のたびにずれてメッセージとの前後が入れ替わる)
       const lastHumanMsg = chronologicalMessages.findLast((m) => m.sender_type === 'human');
-      const anchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : Date.now();
+      const anchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : 0;
       timedItems.push({
         item: {
           kind: 'execution-block',
@@ -1532,13 +1533,49 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const hasAnyContent = displayItems.length > 0;
 
+  const scrollDomToBottom = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    isNearBottomRef.current = true;
+  }, []);
+
   useEffect(() => {
+    initialScrollProjectRef.current = projectId;
+    isNearBottomRef.current = true;
+  }, [projectId]);
+
+  useEffect(() => {
+    if (isLoadingMessages || initialScrollProjectRef.current !== projectId) return;
+    scrollDomToBottom();
+
+    const frame = requestAnimationFrame(() => {
+      scrollDomToBottom();
+      setHasNewMessages(false);
+      requestAnimationFrame(scrollDomToBottom);
+    });
+    const timeout = window.setTimeout(() => {
+      scrollDomToBottom();
+      setHasNewMessages(false);
+      if (initialScrollProjectRef.current === projectId) {
+        initialScrollProjectRef.current = null;
+      }
+    }, 250);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timeout);
+    };
+  }, [displayItems.length, isLoadingMessages, scrollDomToBottom, projectId]);
+
+  useEffect(() => {
+    if (initialScrollProjectRef.current === projectId) return;
     if (isNearBottomRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     } else {
-      setHasNewMessages(true);
+      requestAnimationFrame(() => setHasNewMessages(true));
     }
-  }, [displayItems]);
+  }, [displayItems, projectId]);
 
   const handleScroll = useCallback(() => {
     const el = scrollContainerRef.current;
@@ -1550,8 +1587,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    scrollDomToBottom();
     setHasNewMessages(false);
-  }, []);
+  }, [scrollDomToBottom]);
 
   return (
     <div className="relative flex h-full w-full overflow-hidden">
