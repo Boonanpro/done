@@ -28,6 +28,12 @@ class ChatArtifactService:
             payload["share_url"] = self._to_preview_url(payload.get("share_url"), slug)
             payload["draft_url"] = self._to_preview_url(payload.get("draft_url"), slug)
         payload.setdefault("publish_status", "preview_live")
+        payload.setdefault("delivery_status", "preview")
+        payload.setdefault("delivery_mode", "preview")
+        payload.setdefault("target_audience", "internal")
+        payload.setdefault("requires_auth", False)
+        payload.setdefault("payment_responsibility", "owner_pays")
+        payload.setdefault("delivery_checklist", {})
         return payload
 
     @staticmethod

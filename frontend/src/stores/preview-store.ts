@@ -47,6 +47,13 @@ export interface ArtifactRecord {
   custom_domain?: string | null;
   publish_status?: string | null;
   last_publish_error?: string | null;
+  delivery_status?: string | null;
+  delivery_mode?: string | null;
+  target_audience?: string | null;
+  requires_auth?: boolean | null;
+  payment_responsibility?: string | null;
+  delivery_checklist?: Record<string, unknown> | null;
+  handoff_notes?: string | null;
   created_at: string;
   updated_at?: string;
   published_at?: string | null;

@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Copy, Edit3, ExternalLink, MessageSquare, RefreshCw, Redo2, Rocket, Sliders, Undo2, X } from 'lucide-react';
+import { ChevronDown, ClipboardList, Copy, Edit3, ExternalLink, MessageSquare, RefreshCw, Redo2, Rocket, Sliders, Undo2, X } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -13,6 +13,7 @@ import { attachInspector, detachInspector } from './iframe-inspector';
 import { CommentPopover } from './comment-popover';
 import { InspectorPanel } from './inspector-panel';
 import { PublishModal } from './publish-modal';
+import { DeliveryModal } from './delivery-modal';
 
 const FALLBACK_SHARE_ORIGIN = 'https://frontend-mikis-projects-86652663.vercel.app';
 
@@ -135,6 +136,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const [loadedArtifactId, setLoadedArtifactId] = useState<string | null>(null);
   const [showSwitcher, setShowSwitcher] = useState(false);
   const [showPublishModal, setShowPublishModal] = useState(false);
+  const [showDeliveryModal, setShowDeliveryModal] = useState(false);
   const [refreshSpinning, setRefreshSpinning] = useState(false);
   // iframe が load するたびに increment する。attachInspector 再実行の deps に入れ、
   // リフレッシュや内部ナビゲーション後も新 contentDocument に再アタッチする
@@ -352,6 +354,16 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
         >
           <ExternalLink className="h-3.5 w-3.5" />
         </a>
+        {!isWebsite && (
+          <button
+            onClick={() => setShowDeliveryModal(true)}
+            className="shrink-0 rounded bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+            title="納品準備"
+          >
+            <ClipboardList className="mr-1 inline h-3 w-3" />
+            納品準備
+          </button>
+        )}
         {isWebsite && (
           <button
             onClick={() => setShowPublishModal(true)}
@@ -437,6 +449,18 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
           onOpenChange={setShowPublishModal}
           artifact={artifact}
           onPublished={() => refreshArtifacts()}
+        />
+      )}
+      {artifact && (
+        <DeliveryModal
+          open={showDeliveryModal}
+          onOpenChange={setShowDeliveryModal}
+          artifact={artifact}
+          publicUrl={publicShareUrl}
+          onUpdated={(updated) => {
+            if (projectId) openArtifact(projectId, updated);
+            refreshArtifacts();
+          }}
         />
       )}
     </div>
