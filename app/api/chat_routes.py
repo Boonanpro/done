@@ -650,28 +650,45 @@ async def _register_written_chat_artifacts(
     written_file_paths: list[str],
     project_id: str | None,
     user_id: str,
+    result_text: str = "",
 ) -> None:
     """Register production artifacts even if the Claude Code hook missed them."""
-    if not written_file_paths or not project_id:
+    if not project_id:
         return
     import re
     from app.services.chat_artifact_service import ChatArtifactService
 
     service = ChatArtifactService()
     seen: set[str] = set()
-    pattern = re.compile(
-        r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)[/\\]page\.tsx$"
+    artifact_path_pattern = re.compile(
+        r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)(?:[/\\]|$)"
     )
+    artifact_link_pattern = re.compile(r"/artifacts/([\w-]+)(?:[/\s?#)]|$)")
+    project_root = Path(__file__).parent.parent.parent
+
+    candidates: list[tuple[str, str]] = []
     for raw_path in written_file_paths:
-        match = pattern.search((raw_path or "").replace("\\", "/"))
+        normalized_path = (raw_path or "").replace("\\", "/")
+        match = artifact_path_pattern.search(normalized_path)
         if not match:
             continue
+        candidates.append((match.group(1), normalized_path))
+
+    for match in artifact_link_pattern.finditer(result_text or ""):
         slug = match.group(1)
+        candidates.append((slug, f"frontend/src/app/artifacts/{slug}/page.tsx"))
+
+    for slug, source_path in candidates:
         if slug in seen:
             continue
         seen.add(slug)
 
         try:
+            page_path = project_root / "frontend" / "src" / "app" / "artifacts" / slug / "page.tsx"
+            if not page_path.exists():
+                logger.info("Skipping chat artifact registration for %s: page.tsx not found", slug)
+                continue
+
             existing = (
                 service.supabase.table("chat_artifact")
                 .select("id")
@@ -687,7 +704,7 @@ async def _register_written_chat_artifacts(
                     "project_id": project_id,
                     "slug": slug,
                     "kind": "production",
-                    "artifact_type": service.infer_artifact_type(slug=slug, path=raw_path),
+                    "artifact_type": service.infer_artifact_type(slug=slug, path=source_path),
                     "label": slug.replace("-", " ").replace("_", " "),
                     "preview_url": f"/artifacts/{slug}",
                     "share_url": f"/preview/{slug}",
@@ -2199,8 +2216,10 @@ async def send_dan_message_stream(
                         # ファイル書き出しを追跡（CLI完了後のartifact保存用）
                         tool_name = event.get("name", "")
                         tool_input = event.get("input", {})
-                        if tool_name == "write_file" and tool_input.get("path"):
-                            written_file_paths.append(tool_input["path"])
+                        if tool_name in ("write_file", "edit_file", "Write", "Edit", "mcp__dan-tools__write_file"):
+                            file_path = tool_input.get("path") or tool_input.get("file_path")
+                            if file_path and file_path not in written_file_paths:
+                                written_file_paths.append(file_path)
 
                     elif event["type"] == "text":
                         # textイベントは暫定的に記録（最終回答はresultイベントで確定する）
@@ -2288,16 +2307,17 @@ async def send_dan_message_stream(
                     _trigger_observer(room_id, current_user.user_id)
 
                     # ダンが書き出したビジュアル成果物を検知 → Gemini抽出 → 永続保存
-                    if written_file_paths:
-                        try:
-                            await _register_written_chat_artifacts(
-                                written_file_paths,
-                                project_info.get("id"),
-                                current_user.user_id,
-                            )
+                    try:
+                        await _register_written_chat_artifacts(
+                            written_file_paths,
+                            project_info.get("id"),
+                            current_user.user_id,
+                            final_text,
+                        )
+                        if written_file_paths:
                             await _save_written_artifacts(written_file_paths, room_id)
-                        except Exception as e:
-                            logger.warning("Post-CLI artifact extraction failed (non-blocking): %s", e)
+                    except Exception as e:
+                        logger.warning("Post-CLI artifact extraction failed (non-blocking): %s", e)
 
             # NOTE: 全チャットは統一済み。非プロジェクト分岐は削除済み (2026-03-06)
         except Exception as e:

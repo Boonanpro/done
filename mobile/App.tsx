@@ -177,6 +177,11 @@ function normalizeUrl(raw: string) {
     value = value.replace(/^https?:\/\/127\.0\.0\.1(?::3000)?/i, API_BASE_URL);
   }
 
+  value = value.replace(
+    new RegExp(`^${API_BASE_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/artifacts/`, 'i'),
+    `${API_BASE_URL}/preview/`,
+  );
+  if (value.startsWith('/artifacts/')) return `${API_BASE_URL}${value.replace('/artifacts/', '/preview/')}`;
   if (value.startsWith('/')) return `${API_BASE_URL}${value}`;
 
   if (/^[A-Za-z]:[\\/]/.test(value)) {

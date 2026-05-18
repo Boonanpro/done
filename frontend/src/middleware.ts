@@ -30,12 +30,15 @@ for (const [slug, domains] of Object.entries(parseCustomDomainMap())) {
   for (const domain of domains) DOMAIN_TO_ARTIFACT.set(domain, slug);
 }
 
-const PUBLIC_ARTIFACT_SLUGS = new Set<string>(
-  (process.env.NEXT_PUBLIC_ARTIFACT_SLUGS || 'kittoku,test-edit,salonboard-styleup')
+const DEFAULT_PUBLIC_ARTIFACT_SLUGS = ['kittoku', 'test-edit', 'salonboard-styleup'];
+
+const PUBLIC_ARTIFACT_SLUGS = new Set<string>([
+  ...DEFAULT_PUBLIC_ARTIFACT_SLUGS,
+  ...(process.env.NEXT_PUBLIC_ARTIFACT_SLUGS || '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
-);
+]);
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
