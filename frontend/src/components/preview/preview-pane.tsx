@@ -14,7 +14,7 @@ import { CommentPopover } from './comment-popover';
 import { InspectorPanel } from './inspector-panel';
 import { PublishModal } from './publish-modal';
 
-const FALLBACK_SHARE_ORIGIN = 'https://kittoku.vercel.app';
+const FALLBACK_SHARE_ORIGIN = 'https://frontend-mikis-projects-86652663.vercel.app';
 
 /** Undo / Redo ボタン。編集中のみ表示。 */
 function UndoRedoButtons() {

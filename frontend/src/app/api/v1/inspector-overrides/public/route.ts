@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-const DEFAULT_PUBLIC_ARTIFACT_SLUGS = 'kittoku';
+const DEFAULT_PUBLIC_ARTIFACT_SLUGS = 'kittoku,test-edit,salonboard-styleup';
 
 function backendUrl(): string {
   return process.env.BACKEND_URL || 'http://127.0.0.1:8000';
