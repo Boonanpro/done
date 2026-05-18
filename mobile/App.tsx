@@ -8,7 +8,9 @@ import {
   Alert,
   BackHandler,
   FlatList,
+  Image,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   SafeAreaView,
@@ -82,6 +84,24 @@ type StreamEvent =
   | { type: 'error'; session_id?: string; created_project_id?: string; message?: string }
   | { type: string; session_id?: string; created_project_id?: string; [key: string]: unknown };
 
+type ParsedLink = {
+  kind: 'link';
+  label: string;
+  url: string;
+};
+
+type ParsedText = {
+  kind: 'text';
+  value: string;
+};
+
+type ParsedMediaContent = {
+  images: string[];
+  videos: { name: string; url: string }[];
+  files: { name: string; url: string }[];
+  parts: Array<ParsedText | ParsedLink>;
+};
+
 function isMessageResponse(value: unknown): value is MessageResponse {
   if (!value || typeof value !== 'object') return false;
   const message = value as Partial<MessageResponse>;
@@ -143,6 +163,143 @@ function formatTime(value?: string | null) {
 
 function projectTime(project: ProjectResponse) {
   return project.updated_at || project.created_at;
+}
+
+function normalizeUrl(raw: string) {
+  let value = raw.trim().replace(/\s+(?=\/)/g, '');
+  value = value.replace(/[)\],.;"'`]+$/, '');
+
+  if (/^https?:\/\/localhost(?::3000)?/i.test(value)) {
+    value = value.replace(/^https?:\/\/localhost(?::3000)?/i, API_BASE_URL);
+  }
+
+  if (/^https?:\/\/127\.0\.0\.1(?::3000)?/i.test(value)) {
+    value = value.replace(/^https?:\/\/127\.0\.0\.1(?::3000)?/i, API_BASE_URL);
+  }
+
+  if (value.startsWith('/')) return `${API_BASE_URL}${value}`;
+
+  if (/^[A-Za-z]:[\\/]/.test(value)) {
+    const filename = value.replace(/\\/g, '/').split('/').pop();
+    return filename ? `${API_BASE_URL}/api/v1/files/${filename}` : value;
+  }
+
+  return value;
+}
+
+function parseRichContent(content: string): ParsedMediaContent {
+  const images: string[] = [];
+  const videos: { name: string; url: string }[] = [];
+  const files: { name: string; url: string }[] = [];
+
+  let text = content
+    .replace(/<dan-context>[\s\S]*?<\/dan-context>/g, '')
+    .replace(/\[添付画像: ([^\]]+)\]/g, (_, raw: string) => {
+      images.push(normalizeUrl(raw));
+      return '';
+    })
+    .replace(/\[添付動画: (.+?) \((.+?)\)\](?:\s*※分析に失敗しました)?/g, (_, name: string, url: string) => {
+      videos.push({ name, url: normalizeUrl(url) });
+      return '';
+    })
+    .replace(/\[添付ファイル: (.+?) \((.+?)\)\]/g, (_, name: string, url: string) => {
+      const normalized = normalizeUrl(url);
+      if (/\.(mp4|mov|m4v|webm|avi|mkv)$/i.test(name) || /\.(mp4|mov|m4v|webm|avi|mkv)(?:[?#].*)?$/i.test(normalized)) {
+        videos.push({ name, url: normalized });
+      } else {
+        files.push({ name, url: normalized });
+      }
+      return '';
+    })
+    .trim();
+
+  const parts: Array<ParsedText | ParsedLink> = [];
+  const markdownLinkPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = markdownLinkPattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ kind: 'text', value: text.slice(lastIndex, match.index) });
+    }
+    parts.push({ kind: 'link', label: match[1], url: normalizeUrl(match[2]) });
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push({ kind: 'text', value: text.slice(lastIndex) });
+  }
+
+  return { images, videos, files, parts };
+}
+
+function openUrl(url: string) {
+  void Linking.openURL(url).catch(() => {
+    Alert.alert('Open failed', url);
+  });
+}
+
+function RichMessageContent({ content, mine }: { content: string; mine: boolean }) {
+  const parsed = useMemo(() => parseRichContent(content), [content]);
+
+  return (
+    <View style={styles.messageContentWrap}>
+      {parsed.images.map((url, index) => (
+        <Pressable key={`${url}-${index}`} onPress={() => openUrl(url)}>
+          <Image resizeMode="contain" source={{ uri: url }} style={styles.messageImage} />
+        </Pressable>
+      ))}
+
+      {parsed.videos.map((video, index) => (
+        <Pressable
+          key={`${video.url}-${index}`}
+          onPress={() => openUrl(video.url)}
+          style={[styles.mediaCard, mine && styles.myMediaCard]}
+        >
+          <Text style={[styles.mediaCardTitle, mine && styles.myMessageText]} numberOfLines={1}>
+            動画を開く
+          </Text>
+          <Text style={[styles.mediaCardUrl, mine && styles.myMediaCardUrl]} numberOfLines={2}>
+            {video.name || video.url}
+          </Text>
+        </Pressable>
+      ))}
+
+      {parsed.files.map((file, index) => (
+        <Pressable
+          key={`${file.url}-${index}`}
+          onPress={() => openUrl(file.url)}
+          style={[styles.mediaCard, mine && styles.myMediaCard]}
+        >
+          <Text style={[styles.mediaCardTitle, mine && styles.myMessageText]} numberOfLines={1}>
+            ファイルを開く
+          </Text>
+          <Text style={[styles.mediaCardUrl, mine && styles.myMediaCardUrl]} numberOfLines={2}>
+            {file.name || file.url}
+          </Text>
+        </Pressable>
+      ))}
+
+      {parsed.parts.length > 0 ? (
+        <Text selectable style={[styles.messageText, mine && styles.myMessageText]}>
+          {parsed.parts.map((part, index) =>
+            part.kind === 'link' ? (
+              <Text
+                key={`${part.url}-${index}`}
+                onPress={() => openUrl(part.url)}
+                selectable
+                style={[styles.messageLink, mine && styles.myMessageLink]}
+              >
+                {part.label}
+              </Text>
+            ) : (
+              <Text key={`${part.value}-${index}`}>{part.value}</Text>
+            ),
+          )}
+        </Text>
+      ) : null}
+    </View>
+  );
 }
 
 async function streamDanMessage(
@@ -728,9 +885,7 @@ export default function App() {
                     <Text style={styles.messageSender}>{mine ? 'You' : item.sender_name || 'DAN'}</Text>
                     <Text style={styles.messageTime}>{formatTime(item.created_at)}</Text>
                   </View>
-                  <Text style={[styles.messageText, mine && styles.myMessageText]}>
-                    {item.content}
-                  </Text>
+                  <RichMessageContent content={item.content} mine={mine} />
                 </View>
               );
             }}
@@ -1085,8 +1240,52 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
   },
+  messageContentWrap: {
+    gap: 8,
+  },
+  messageLink: {
+    color: '#8db8ff',
+    fontWeight: '800',
+    textDecorationLine: 'underline',
+  },
   myMessageText: {
     color: '#12110f',
+  },
+  myMessageLink: {
+    color: '#0b4aa0',
+  },
+  messageImage: {
+    backgroundColor: '#12110f',
+    borderColor: '#34302a',
+    borderRadius: 12,
+    borderWidth: 1,
+    height: 220,
+    width: 260,
+  },
+  mediaCard: {
+    backgroundColor: '#15130f',
+    borderColor: '#34302a',
+    borderRadius: 12,
+    borderWidth: 1,
+    gap: 3,
+    padding: 10,
+  },
+  myMediaCard: {
+    backgroundColor: '#ebe4d8',
+    borderColor: '#d2c8b8',
+  },
+  mediaCardTitle: {
+    color: '#f4f0e8',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  mediaCardUrl: {
+    color: '#a7a19a',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  myMediaCardUrl: {
+    color: '#4d463e',
   },
   activityBar: {
     alignItems: 'center',

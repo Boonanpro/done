@@ -31,7 +31,7 @@ for (const [slug, domains] of Object.entries(parseCustomDomainMap())) {
 }
 
 const PUBLIC_ARTIFACT_SLUGS = new Set<string>(
-  (process.env.NEXT_PUBLIC_ARTIFACT_SLUGS || 'kittoku,test-edit')
+  (process.env.NEXT_PUBLIC_ARTIFACT_SLUGS || 'kittoku,test-edit,salonboard-styleup')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),
