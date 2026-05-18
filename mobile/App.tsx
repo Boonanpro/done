@@ -21,6 +21,7 @@ import {
   View,
 } from 'react-native';
 import EventSource from 'react-native-sse';
+import { WebView } from 'react-native-webview';
 
 const API_BASE_URL = 'https://frontend-mikis-projects-86652663.vercel.app';
 const TOKEN_KEY = 'done_mobile_access_token';
@@ -69,6 +70,16 @@ type ProjectListResponse = {
 
 type MessagesListResponse = {
   messages: MessageResponse[];
+};
+
+type ChatArtifactResponse = {
+  id: string;
+  slug: string;
+  label?: string | null;
+  preview_url?: string | null;
+  share_url?: string | null;
+  draft_url?: string | null;
+  artifact_type?: string | null;
 };
 
 type AuthState =
@@ -244,13 +255,30 @@ function openUrl(url: string) {
   });
 }
 
-function RichMessageContent({ content, mine }: { content: string; mine: boolean }) {
+function isArtifactUrl(url: string) {
+  return /\/(?:artifacts|preview)\/[\w-]+/i.test(url);
+}
+
+function artifactTitleFromUrl(url: string) {
+  const match = url.match(/\/(?:artifacts|preview)\/([\w-]+)/i);
+  return match ? match[1].replace(/[-_]/g, ' ') : 'Artifact';
+}
+
+function RichMessageContent({
+  content,
+  mine,
+  onOpenUrl,
+}: {
+  content: string;
+  mine: boolean;
+  onOpenUrl: (url: string) => void;
+}) {
   const parsed = useMemo(() => parseRichContent(content), [content]);
 
   return (
     <View style={styles.messageContentWrap}>
       {parsed.images.map((url, index) => (
-        <Pressable key={`${url}-${index}`} onPress={() => openUrl(url)}>
+        <Pressable key={`${url}-${index}`} onPress={() => onOpenUrl(url)}>
           <Image resizeMode="contain" source={{ uri: url }} style={styles.messageImage} />
         </Pressable>
       ))}
@@ -258,7 +286,7 @@ function RichMessageContent({ content, mine }: { content: string; mine: boolean 
       {parsed.videos.map((video, index) => (
         <Pressable
           key={`${video.url}-${index}`}
-          onPress={() => openUrl(video.url)}
+          onPress={() => onOpenUrl(video.url)}
           style={[styles.mediaCard, mine && styles.myMediaCard]}
         >
           <Text style={[styles.mediaCardTitle, mine && styles.myMessageText]} numberOfLines={1}>
@@ -273,7 +301,7 @@ function RichMessageContent({ content, mine }: { content: string; mine: boolean 
       {parsed.files.map((file, index) => (
         <Pressable
           key={`${file.url}-${index}`}
-          onPress={() => openUrl(file.url)}
+          onPress={() => onOpenUrl(file.url)}
           style={[styles.mediaCard, mine && styles.myMediaCard]}
         >
           <Text style={[styles.mediaCardTitle, mine && styles.myMessageText]} numberOfLines={1}>
@@ -291,7 +319,7 @@ function RichMessageContent({ content, mine }: { content: string; mine: boolean 
             part.kind === 'link' ? (
               <Text
                 key={`${part.url}-${index}`}
-                onPress={() => openUrl(part.url)}
+                onPress={() => onOpenUrl(part.url)}
                 selectable
                 style={[styles.messageLink, mine && styles.myMessageLink]}
               >
@@ -377,7 +405,10 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [activity, setActivity] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [screen, setScreen] = useState<'projects' | 'chat'>('projects');
+  const [screen, setScreen] = useState<'projects' | 'chat' | 'artifact'>('projects');
+  const [artifacts, setArtifacts] = useState<ChatArtifactResponse[]>([]);
+  const [loadingArtifacts, setLoadingArtifacts] = useState(false);
+  const [artifactView, setArtifactView] = useState<{ title: string; url: string } | null>(null);
   const [notificationStatus, setNotificationStatus] = useState('Off');
   const listRef = useRef<FlatList<MessageResponse>>(null);
 
@@ -406,6 +437,24 @@ export default function App() {
     }
   }, []);
 
+  const refreshArtifacts = useCallback(async (activeToken: string, projectId: string) => {
+    setLoadingArtifacts(true);
+    try {
+      const data = await apiRequest<ChatArtifactResponse[]>(
+        `/chat-artifact?project_id=${encodeURIComponent(projectId)}`,
+        {},
+        activeToken,
+      );
+      setArtifacts(data ?? []);
+      return data ?? [];
+    } catch {
+      setArtifacts([]);
+      return [];
+    } finally {
+      setLoadingArtifacts(false);
+    }
+  }, []);
+
   const loadProjectMessages = useCallback(
     async (activeToken: string, projectId: string) => {
       setLoadingMessages(true);
@@ -414,6 +463,7 @@ export default function App() {
         setCurrentProject(project);
         setCurrentProjectId(project.id);
         await SecureStore.setItemAsync(PROJECT_KEY, project.id);
+        void refreshArtifacts(activeToken, project.id);
 
         if (!project.room_id) {
           setMessages([]);
@@ -435,7 +485,7 @@ export default function App() {
         setLoadingMessages(false);
       }
     },
-    [],
+    [refreshArtifacts],
   );
 
   const loadInitialData = useCallback(
@@ -444,6 +494,8 @@ export default function App() {
       setCurrentProject(null);
       setCurrentProjectId(null);
       setMessages([]);
+      setArtifacts([]);
+      setArtifactView(null);
       setScreen('projects');
     },
     [refreshProjects],
@@ -477,13 +529,17 @@ export default function App() {
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (screen === 'artifact') {
+        setScreen(currentProject ? 'chat' : 'projects');
+        return true;
+      }
       if (screen !== 'chat') return false;
       setScreen('projects');
       setDrawerOpen(false);
       return true;
     });
     return () => subscription.remove();
-  }, [screen]);
+  }, [currentProject, screen]);
 
   async function handleLogin() {
     const cleanEmail = email.trim();
@@ -517,6 +573,8 @@ export default function App() {
     setProjects([]);
     setCurrentProject(null);
     setCurrentProjectId(null);
+    setArtifacts([]);
+    setArtifactView(null);
     setAuth({ status: 'signed_out' });
   }
 
@@ -527,6 +585,8 @@ export default function App() {
     setMessages([]);
     setCurrentProject(project);
     setCurrentProjectId(projectId);
+    setArtifacts([]);
+    setArtifactView(null);
     setScreen('chat');
     void loadProjectMessages(token, projectId);
   }
@@ -686,6 +746,36 @@ export default function App() {
     });
   }
 
+  function artifactUrl(artifact: ChatArtifactResponse) {
+    return normalizeUrl(
+      artifact.share_url ||
+        artifact.draft_url ||
+        artifact.preview_url ||
+        `/preview/${artifact.slug}`,
+    );
+  }
+
+  function handleOpenArtifact(artifact: ChatArtifactResponse) {
+    setArtifactView({
+      title: artifact.label || artifact.slug || 'Artifact',
+      url: artifactUrl(artifact),
+    });
+    setScreen('artifact');
+  }
+
+  const handleOpenMessageUrl = useCallback((url: string) => {
+    const normalized = normalizeUrl(url);
+    if (isArtifactUrl(normalized)) {
+      setArtifactView({
+        title: artifactTitleFromUrl(normalized),
+        url: normalized,
+      });
+      setScreen('artifact');
+      return;
+    }
+    openUrl(normalized);
+  }, []);
+
   function handleBackToProjects() {
     setScreen('projects');
     setDrawerOpen(false);
@@ -833,6 +923,40 @@ export default function App() {
     );
   }
 
+  if (screen === 'artifact' && artifactView) {
+    return (
+      <SafeAreaView style={styles.screen}>
+        <StatusBar style="light" />
+        <View style={styles.header}>
+          <Pressable onPress={() => setScreen(currentProject ? 'chat' : 'projects')} style={styles.iconButton}>
+            <Text style={styles.iconButtonText}>{'<'}</Text>
+          </Pressable>
+          <View style={styles.headerCenter}>
+            <Text style={styles.headerTitle} numberOfLines={1}>
+              {artifactView.title}
+            </Text>
+            <Text style={styles.headerMeta} numberOfLines={1}>
+              {artifactView.url}
+            </Text>
+          </View>
+          <Pressable onPress={() => openUrl(artifactView.url)} style={styles.iconButton}>
+            <Text style={styles.iconButtonText}>{'Open'}</Text>
+          </Pressable>
+        </View>
+        <WebView
+          source={{ uri: artifactView.url }}
+          startInLoadingState
+          style={styles.webView}
+          renderLoading={() => (
+            <View style={styles.webViewLoading}>
+              <ActivityIndicator color="#f4f0e8" />
+            </View>
+          )}
+        />
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.screen}>
       <StatusBar style="light" />
@@ -862,6 +986,29 @@ export default function App() {
           </Pressable>
         </View>
 
+        {artifacts.length > 0 || loadingArtifacts ? (
+          <View style={styles.artifactTabs}>
+            {loadingArtifacts ? (
+              <ActivityIndicator color="#d9d2c8" size="small" />
+            ) : (
+              artifacts.map((artifact) => (
+                <Pressable
+                  key={artifact.id}
+                  onPress={() => handleOpenArtifact(artifact)}
+                  style={({ pressed }) => [
+                    styles.artifactTab,
+                    pressed && styles.buttonPressed,
+                  ]}
+                >
+                  <Text style={styles.artifactTabText} numberOfLines={1}>
+                    {artifact.label || artifact.slug || 'Artifact'}
+                  </Text>
+                </Pressable>
+              ))
+            )}
+          </View>
+        ) : null}
+
         {loadingMessages && newestMessages.length === 0 ? (
           <View style={styles.centerPanel}>
             <ActivityIndicator color="#f4f0e8" />
@@ -890,7 +1037,7 @@ export default function App() {
                     <Text style={styles.messageSender}>{mine ? 'You' : item.sender_name || 'DAN'}</Text>
                     <Text style={styles.messageTime}>{formatTime(item.created_at)}</Text>
                   </View>
-                  <RichMessageContent content={item.content} mine={mine} />
+                  <RichMessageContent content={item.content} mine={mine} onOpenUrl={handleOpenMessageUrl} />
                 </View>
               );
             }}
@@ -1181,12 +1328,48 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     height: 42,
     justifyContent: 'center',
-    width: 42,
+    minWidth: 42,
+    paddingHorizontal: 8,
   },
   iconButtonText: {
     color: '#f4f0e8',
-    fontSize: 20,
+    fontSize: 14,
     fontWeight: '800',
+  },
+  artifactTabs: {
+    alignItems: 'center',
+    borderBottomColor: '#282520',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    minHeight: 48,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  artifactTab: {
+    backgroundColor: '#2c261b',
+    borderColor: '#5a4930',
+    borderRadius: 12,
+    borderWidth: 1,
+    maxWidth: 220,
+    minHeight: 34,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  artifactTabText: {
+    color: '#f4f0e8',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  webView: {
+    backgroundColor: '#12110f',
+    flex: 1,
+  },
+  webViewLoading: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    backgroundColor: '#12110f',
+    justifyContent: 'center',
   },
   centerPanel: {
     alignItems: 'center',
