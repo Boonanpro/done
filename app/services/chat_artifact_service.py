@@ -46,6 +46,15 @@ class ChatArtifactService:
 
     @staticmethod
     def infer_artifact_type(slug: str = "", label: str | None = None, path: str | None = None) -> str:
+        normalized_path = (path or "").replace("\\", "/").lower()
+        path_parts = [part for part in normalized_path.split("/") if part]
+        if "dashboards" in path_parts or "dashboard" in path_parts:
+            return "dashboard"
+        if any(part in path_parts for part in ("sites", "websites", "landing-pages")):
+            return "website"
+        if "tools" in path_parts:
+            return "tool"
+
         text = " ".join([slug or "", label or "", path or ""]).lower()
         if any(token in text for token in ("dashboard", "dash", "analytics", "kpi")):
             return "dashboard"
