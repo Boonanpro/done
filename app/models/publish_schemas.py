@@ -7,7 +7,7 @@ chat_artifact テーブル側に publish 状態 (custom_domain, publish_status�
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +42,7 @@ class PublishRequest(BaseModel):
     years: int = Field(1, ge=1, le=10)
     auto_renew: bool = True
     dry_run: bool = False
+    payment_responsibility: Literal["owner_pays", "client_pays"] = "owner_pays"
 
 
 class DeliveryUrlRequest(BaseModel):

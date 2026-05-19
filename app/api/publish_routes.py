@@ -76,6 +76,19 @@ async def run(
     user: TokenData = Depends(get_current_user),
 ):
     """公開フロー実行 (購入→Vercel紐付け→DNS→SEO→DB更新)"""
+    if data.payment_responsibility == "client_pays":
+        return PublishResponse(
+            success=False,
+            artifact_id=data.artifact_id,
+            domain=data.domain,
+            deploy_url=None,
+            steps=[],
+            error=(
+                "Client payment is not configured yet. "
+                "Set up Stripe Checkout and a payment webhook before enabling client-paid domain purchase."
+            ),
+        )
+
     result = await publish_with_custom_domain(
         artifact_id=data.artifact_id,
         domain=data.domain,
