@@ -25,9 +25,42 @@ function parseCustomDomainMap(): Record<string, string[]> {
   return map;
 }
 
-const DOMAIN_TO_ARTIFACT = new Map<string, string>();
-for (const [slug, domains] of Object.entries(parseCustomDomainMap())) {
-  for (const domain of domains) DOMAIN_TO_ARTIFACT.set(domain, slug);
+// 静的マップ (env + デフォルト) を host -> slug で1度だけ展開する。
+const STATIC_DOMAIN_TO_ARTIFACT: Map<string, string> = (() => {
+  const m = new Map<string, string>();
+  for (const [slug, domains] of Object.entries(parseCustomDomainMap())) {
+    for (const domain of domains) m.set(domain, slug);
+  }
+  return m;
+})();
+
+// DB 由来の接続済みカスタムドメインを TTL 付きでキャッシュする。
+// オーナー/クライアントが新しい独自ドメインを接続したら、フロントエンドの
+// 再デプロイ無しで数十秒以内に middleware が認識できる。
+const DYNAMIC_DOMAIN_TTL_MS = 60_000;
+let dynamicDomainCache: { map: Record<string, string>; at: number } = { map: {}, at: 0 };
+
+async function fetchDynamicDomainMap(origin: string): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (now - dynamicDomainCache.at <= DYNAMIC_DOMAIN_TTL_MS) {
+    return dynamicDomainCache.map;
+  }
+  try {
+    const res = await fetch(`${origin}/api/v1/publish/custom-domains`, {
+      signal: AbortSignal.timeout(2500),
+    });
+    if (res.ok) {
+      const json = (await res.json()) as { map?: Record<string, string> };
+      dynamicDomainCache = { map: json?.map ?? {}, at: now };
+    } else {
+      // 失敗時も at を更新して TTL 内の再試行ストームを防ぐ。
+      dynamicDomainCache = { ...dynamicDomainCache, at: now };
+    }
+  } catch {
+    // バックエンド不達時は前回のキャッシュ (または空) のまま続行する。
+    dynamicDomainCache = { ...dynamicDomainCache, at: now };
+  }
+  return dynamicDomainCache.map;
 }
 
 function deliverySlugFromHost(host: string): string | null {
@@ -46,10 +79,18 @@ const PUBLIC_ARTIFACT_SLUGS = new Set<string>([
     .filter(Boolean),
 ]);
 
-export function middleware(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const host = (request.headers.get('host') || '').split(':')[0].toLowerCase();
-  const customDomainSlug = DOMAIN_TO_ARTIFACT.get(host) || deliverySlugFromHost(host);
+  const deliverySlug = deliverySlugFromHost(host);
+
+  // ホスト解決: 静的マップ → 納品ホスト → DB 由来の動的マップ の順に確認する。
+  // 静的マップ / 納品ホストで決まる場合は外部 fetch を避ける。
+  let customDomainSlug: string | null = STATIC_DOMAIN_TO_ARTIFACT.get(host) ?? deliverySlug ?? null;
+  if (!customDomainSlug) {
+    const dynamicMap = await fetchDynamicDomainMap(request.nextUrl.origin);
+    customDomainSlug = dynamicMap[host] ?? null;
+  }
 
   if (customDomainSlug) {
     const segments = pathname.split('/').filter(Boolean);
@@ -66,7 +107,13 @@ export function middleware(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname =
       pathname === '/' ? `/artifacts/${customDomainSlug}` : `/artifacts/${customDomainSlug}${pathname}`;
-    return NextResponse.rewrite(url);
+    const response = NextResponse.rewrite(url);
+    // 納品URL (<slug>-done.vercel.app) は確認用なので検索インデックスから除外する。
+    // 本番の独自ドメインで公開した時のみ検索に載るようにする。
+    if (deliverySlug) {
+      response.headers.set('X-Robots-Tag', 'noindex, nofollow');
+    }
+    return response;
   }
 
   if (pathname === '/') {

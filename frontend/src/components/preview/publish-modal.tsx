@@ -1,15 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   AlertCircle,
   CheckCircle2,
   Circle,
-  CreditCard,
+  Copy,
   Globe,
   Loader2,
+  Send,
   Sparkles,
   UserRound,
   XCircle,
@@ -29,8 +30,8 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import type { ArtifactRecord } from '@/stores/preview-store';
 
-type Stage = 'input' | 'confirm' | 'publishing' | 'done';
-type Payer = 'owner_pays' | 'client_pays';
+type Stage = 'input' | 'confirm' | 'publishing' | 'done' | 'guide';
+type Payer = 'owner_pays' | 'client_owns';
 
 interface DomainCheckCandidate {
   name: string;
@@ -61,6 +62,15 @@ interface PublishResponse {
   pricing?: { currency: string; registration_cost: string; renewal_cost: string } | null;
 }
 
+interface DomainSetupResponse {
+  success: boolean;
+  token?: string | null;
+  setup_path?: string | null;
+  domain?: string | null;
+  status?: string | null;
+  error?: string | null;
+}
+
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -76,6 +86,7 @@ const STEP_LABEL: Record<string, string> = {
   configure_dns: 'URLの向き先設定',
   verify_dns_propagation: '反映確認',
   generate_seo_assets: '検索向けファイル作成',
+  submit_to_search_console: '検索エンジンに登録',
   update_artifact_db: 'DANに保存',
 };
 
@@ -84,9 +95,17 @@ function money(value?: string | number | null) {
   return Number.isFinite(n) ? n.toFixed(2) : '0.00';
 }
 
+function shareOrigin() {
+  const configured = process.env.NEXT_PUBLIC_SHARE_ORIGIN?.trim();
+  if (configured) return configured.replace(/\/$/, '');
+  if (typeof window !== 'undefined') return window.location.origin;
+  return '';
+}
+
 function StepIcon({ status }: { status: PublishStepDTO['status'] }) {
   if (status === 'completed') return <CheckCircle2 className="h-4 w-4 text-emerald-500" />;
   if (status === 'failed') return <XCircle className="h-4 w-4 text-red-500" />;
+  if (status === 'skipped') return <Circle className="h-4 w-4 text-muted-foreground/40" />;
   if (status === 'running') return <Loader2 className="h-4 w-4 animate-spin text-primary" />;
   return <Circle className="h-4 w-4 text-muted-foreground" />;
 }
@@ -99,11 +118,18 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
   const [payer, setPayer] = useState<Payer>('owner_pays');
   const [check, setCheck] = useState<DomainCheckResponse | null>(null);
   const [result, setResult] = useState<PublishResponse | null>(null);
+  const [guide, setGuide] = useState<DomainSetupResponse | null>(null);
+
+  const clientUrl = useMemo(
+    () => (guide?.setup_path ? `${shareOrigin()}${guide.setup_path}` : ''),
+    [guide],
+  );
 
   const reset = () => {
     setStage('input');
     setCheck(null);
     setResult(null);
+    setGuide(null);
   };
 
   const handleClose = (next: boolean) => {
@@ -146,7 +172,7 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
           years,
           auto_renew: true,
           dry_run: false,
-          payment_responsibility: payer,
+          payment_responsibility: 'owner_pays',
         }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -177,8 +203,44 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
     },
   });
 
+  const guideMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/v1/publish/domain-setup', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artifact_id: artifact.id,
+          domain,
+          vercel_project: vercelProject,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<DomainSetupResponse>;
+    },
+    onSuccess: (data) => {
+      if (!data.success) {
+        toast.error('案内URLの発行に失敗しました', { description: data.error?.slice(0, 160) });
+        return;
+      }
+      setGuide(data);
+      setStage('guide');
+      onPublished?.();
+    },
+    onError: (err) => {
+      toast.error('案内URLの発行に失敗しました', { description: String(err).slice(0, 160) });
+    },
+  });
+
   const total = Number(check?.exact?.pricing?.registration_cost ?? 0) * years;
-  const canPublish = payer === 'owner_pays';
+
+  const copyClientUrl = () => {
+    if (!clientUrl) return;
+    navigator.clipboard
+      .writeText(clientUrl)
+      .then(() => toast.success('案内URLをコピーしました'))
+      .catch(() => toast.error('コピーできませんでした'));
+  };
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
@@ -188,14 +250,63 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
             <Sparkles className="h-4 w-4 text-primary" /> 公開
           </DialogTitle>
           <DialogDescription>
-            専用ドメインを取り、検索に出せる形へ進めます。ツールの場合も、必要ならここから独自ドメインにできます。
+            専用ドメインを取り、検索に出せる形へ進めます。ドメイン代を誰が持つかで進め方が変わります。
           </DialogDescription>
         </DialogHeader>
 
         {stage === 'input' && (
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="domain">取りたいURL</Label>
+              <Label>誰がドメインを用意しますか？</Label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPayer('owner_pays');
+                    setCheck(null);
+                  }}
+                  className={`rounded-md border p-3 text-left text-sm transition ${
+                    payer === 'owner_pays' ? 'border-primary bg-primary/10' : 'hover:bg-muted'
+                  }`}
+                >
+                  <UserRound className="mb-2 h-4 w-4" />
+                  <div className="font-medium">自分で取得</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    その場で取得して公開まで進めます。
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPayer('client_owns');
+                    setCheck(null);
+                  }}
+                  className={`rounded-md border p-3 text-left text-sm transition ${
+                    payer === 'client_owns' ? 'border-primary bg-primary/10' : 'hover:bg-muted'
+                  }`}
+                >
+                  <Send className="mb-2 h-4 w-4" />
+                  <div className="font-medium">クライアントが用意</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    案内URLを発行して相手に送ります。
+                  </div>
+                </button>
+              </div>
+              {payer === 'client_owns' && (
+                <div className="flex gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 p-3 text-xs text-blue-800">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div>
+                    案内URLを発行すると、相手はそのページだけで取得・設定・公開まで進められます。
+                    ドメインは相手の名義・支払いになり、相手の資産として残ります。
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="domain">
+                {payer === 'client_owns' ? '相手に取得してもらうURL' : '取りたいURL'}
+              </Label>
               <Input
                 id="domain"
                 value={domain}
@@ -207,44 +318,11 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
                 autoComplete="off"
               />
               <p className="text-xs text-muted-foreground">
-                例: salon-styleup.com。空いていれば、このURLで公開できます。
+                例: salon-styleup.com。
+                {payer === 'client_owns'
+                  ? ' このドメイン名を相手に取得してもらいます。'
+                  : ' 空いていれば、このURLで公開できます。'}
               </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label>誰がドメイン代を払いますか？</Label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setPayer('owner_pays')}
-                  className={`rounded-md border p-3 text-left text-sm transition ${
-                    payer === 'owner_pays' ? 'border-primary bg-primary/10' : 'hover:bg-muted'
-                  }`}
-                >
-                  <UserRound className="mb-2 h-4 w-4" />
-                  <div className="font-medium">自分が払う</div>
-                  <div className="mt-1 text-xs text-muted-foreground">すぐ公開まで進めます。</div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setPayer('client_pays')}
-                  className={`rounded-md border p-3 text-left text-sm transition ${
-                    payer === 'client_pays' ? 'border-primary bg-primary/10' : 'hover:bg-muted'
-                  }`}
-                >
-                  <CreditCard className="mb-2 h-4 w-4" />
-                  <div className="font-medium">相手が払う</div>
-                  <div className="mt-1 text-xs text-muted-foreground">Stripe連携後に使えます。</div>
-                </button>
-              </div>
-              {payer === 'client_pays' && (
-                <div className="flex gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800">
-                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <div>
-                    相手に決済してもらうにはStripe設定が必要です。今はURL候補の確認まで進められます。
-                  </div>
-                </div>
-              )}
             </div>
 
             <div className="space-y-2">
@@ -326,15 +404,9 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
               <p className="text-xs text-muted-foreground">合計 ${money(total)}</p>
             </div>
 
-            {payer === 'owner_pays' ? (
-              <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800">
-                「公開する」を押すと、登録済みのCloudflare支払い方法で実際に購入します。
-              </div>
-            ) : (
-              <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800">
-                相手が払う流れはStripe連携後に有効化します。今は誤って購入されないよう停止しています。
-              </div>
-            )}
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800">
+              「公開する」を押すと、登録済みのCloudflare支払い方法で実際に購入します。
+            </div>
           </div>
         )}
 
@@ -405,19 +477,65 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
           </div>
         )}
 
+        {stage === 'guide' && (
+          <div className="space-y-4">
+            <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-4">
+              <div className="flex items-center gap-2 text-emerald-700">
+                <CheckCircle2 className="h-5 w-5" />
+                <span className="font-medium">クライアント用の案内URLを発行しました</span>
+              </div>
+              <p className="mt-2 text-xs text-emerald-900/80">
+                このURLを相手に送ってください。相手はこのページだけで、ドメインの取得・設定・公開まで
+                自分で進められます。設定が完了すると、サイトは自動で公開されます。
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label>案内URL</Label>
+              <div className="break-all rounded-md bg-muted px-3 py-2 font-mono text-xs">
+                {clientUrl}
+              </div>
+              <Button variant="secondary" size="sm" onClick={copyClientUrl}>
+                <Copy className="mr-1 h-3.5 w-3.5" /> 案内URLをコピー
+              </Button>
+            </div>
+
+            <div className="space-y-1.5 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
+              <div className="font-medium text-foreground">相手がこのページで行うこと</div>
+              <div>1. 案内されたサービスでドメイン（{domain}）を取得</div>
+              <div>2. 表示されたDNSレコードを設定</div>
+              <div>3.「接続を確認」を押す → 公開完了</div>
+            </div>
+          </div>
+        )}
+
         <DialogFooter>
           {stage === 'input' && (
             <>
               <Button variant="ghost" onClick={() => handleClose(false)}>
                 キャンセル
               </Button>
-              <Button
-                onClick={() => checkMutation.mutate(domain)}
-                disabled={checkMutation.isPending || !domain.includes('.')}
-              >
-                {checkMutation.isPending ? <Loader2 className="mr-2 h-3 w-3 animate-spin" /> : null}
-                URLを確認
-              </Button>
+              {payer === 'owner_pays' ? (
+                <Button
+                  onClick={() => checkMutation.mutate(domain)}
+                  disabled={checkMutation.isPending || !domain.includes('.')}
+                >
+                  {checkMutation.isPending ? (
+                    <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                  ) : null}
+                  URLを確認
+                </Button>
+              ) : (
+                <Button
+                  onClick={() => guideMutation.mutate()}
+                  disabled={guideMutation.isPending || !domain.includes('.')}
+                >
+                  {guideMutation.isPending ? (
+                    <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                  ) : null}
+                  案内URLを発行
+                </Button>
+              )}
             </>
           )}
           {stage === 'confirm' && (
@@ -427,7 +545,7 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
               </Button>
               <Button
                 onClick={() => publishMutation.mutate()}
-                disabled={publishMutation.isPending || !canPublish}
+                disabled={publishMutation.isPending}
               >
                 公開する（${money(total)}）
               </Button>
@@ -438,7 +556,9 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
               <Loader2 className="mr-2 h-3 w-3 animate-spin" /> 実行中...
             </Button>
           )}
-          {stage === 'done' && <Button onClick={() => handleClose(false)}>閉じる</Button>}
+          {(stage === 'done' || stage === 'guide') && (
+            <Button onClick={() => handleClose(false)}>閉じる</Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

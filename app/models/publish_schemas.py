@@ -74,3 +74,47 @@ class DeliveryUrlResponse(BaseModel):
     url: Optional[str] = None
     alias: Optional[str] = None
     error: Optional[str] = None
+
+
+# ============================================
+# クライアント所有ドメインの案内フロー
+# ============================================
+
+
+class DomainSetupCreateRequest(BaseModel):
+    """オーナーが「クライアントが用意する」を選んだ時の案内URL発行リクエスト"""
+
+    artifact_id: str
+    domain: str = Field(..., min_length=3, description="クライアントに取得を案内するドメイン")
+    vercel_project: str = "frontend"
+
+
+class DnsRecordDTO(BaseModel):
+    type: str  # A / CNAME / TXT
+    name: str  # @ / www など
+    value: str
+    purpose: str = ""  # 何のためのレコードかをクライアントに説明する
+
+
+class RegistrarLinkDTO(BaseModel):
+    label: str
+    url: str
+
+
+class DomainSetupResponse(BaseModel):
+    """案内フローの状態。create / get / verify で共通利用する。"""
+
+    success: bool
+    token: Optional[str] = None
+    setup_path: Optional[str] = None  # /domain-setup/<token>
+    artifact_id: Optional[str] = None
+    artifact_label: Optional[str] = None
+    domain: Optional[str] = None
+    status: Optional[str] = None  # pending / dns_pending / live / failed
+    availability: Optional[dict[str, Any]] = None
+    registrar_links: list[RegistrarLinkDTO] = []
+    dns_records: list[DnsRecordDTO] = []
+    production_url: Optional[str] = None
+    verified: bool = False
+    detail: Optional[str] = None
+    error: Optional[str] = None
