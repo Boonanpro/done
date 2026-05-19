@@ -176,6 +176,41 @@ class ChatArtifactService:
             user_id,
         )
 
+    async def list_custom_domain_map(self) -> dict:
+        """custom_domain が設定された全 artifact の host -> slug マップ。
+
+        middleware がカスタムドメインのリクエストを正しい artifact に
+        ルーティングするために使う (公開・認証なし)。
+        """
+        result = (
+            self.supabase.table(self.table)
+            .select("slug, custom_domain")
+            .execute()
+        )
+        mapping: dict = {}
+        for row in result.data or []:
+            domain = (row.get("custom_domain") or "").strip().lower()
+            slug = row.get("slug")
+            if not domain or not slug:
+                continue
+            mapping[domain] = slug
+            if not domain.startswith("www."):
+                mapping[f"www.{domain}"] = slug
+        return mapping
+
+    async def get_by_domain_setup_token(self, token: str) -> Optional[dict]:
+        """ドメイン案内フローのトークンで artifact を引く (公開ページ用・認証なし)。"""
+        if not token:
+            return None
+        result = (
+            self.supabase.table(self.table)
+            .select("*")
+            .eq("domain_setup_token", token)
+            .limit(1)
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
     async def delete(self, artifact_id: str, user_id: str) -> bool:
         result = (
             self.supabase.table(self.table)

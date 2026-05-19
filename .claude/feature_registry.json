@@ -1,4 +1,14 @@
 {
+  "test_edit": {
+    "name": "test_edit",
+    "description": "Inspector / 手動編集の実機動作確認用のテスト artifact。Playwright から実際の編集UIをドライブしてテストする。本番には公開しない。",
+    "created_at": "2026-05-12T00:00:00.000000",
+    "mode": "dev",
+    "files": [
+      "D:\\done\\frontend\\src\\app\\artifacts\\test-edit\\page.tsx",
+      "D:\\done\\frontend\\src\\app\\test-inspector\\page.tsx"
+    ]
+  },
   "imap_email": {
     "name": "imap_email",
     "description": "Gmail / iCloud などを IMAP 経由で fetch し、新着メッセージを dan-notion inbox に投入する。.env から ADDRESS / APP_PASSWORD を読む。",
@@ -161,6 +171,19 @@
       "D:\\done\\app\\api\\publish_routes.py",
       "D:\\done\\frontend\\src\\app\\artifacts\\publish\\page.tsx",
       "D:\\done\\scripts\\seed_publish.py"
+    ]
+  },
+  "chat_artifact_domain_setup": {
+    "name": "chat_artifact_domain_setup",
+    "description": "publish フローの拡張。クライアントが自分でドメインを所有・決済する案内フロー。オーナーが /domain-setup/<token> の公開URLを発行し、クライアントは購入→DNS設定→所有権検証→公開まで誘導される。Search Console 自動申請 (search_console.py) と納品URL (-done.vercel.app) の noindex 化も含む。Stripe 代理決済は不採用。",
+    "created_at": "2026-05-19T00:00:00.000000",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\054_chat_artifact_domain_setup.sql",
+      "D:\\done\\app\\tools\\publish_site\\search_console.py",
+      "D:\\done\\frontend\\src\\app\\domain-setup\\[token]\\page.tsx",
+      "D:\\done\\app\\api\\publish_routes.py",
+      "D:\\done\\app\\models\\publish_schemas.py"
     ]
   }
 }

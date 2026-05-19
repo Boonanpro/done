@@ -17,18 +17,26 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.models.publish_schemas import (
     DeliveryUrlRequest,
     DeliveryUrlResponse,
+    DnsRecordDTO,
     DomainCheckCandidate,
     DomainCheckRequest,
     DomainCheckResponse,
+    DomainSetupCreateRequest,
+    DomainSetupResponse,
     PublishRequest,
     PublishResponse,
     PublishStepDTO,
+    RegistrarLinkDTO,
 )
 from app.services.auth_service import TokenData, decode_access_token
+from app.services.chat_artifact_service import ChatArtifactService
 from app.tools.publish_site.orchestrator import (
     check_domain,
+    create_domain_setup,
+    get_domain_setup_state,
     issue_dedicated_delivery_url,
     publish_with_custom_domain,
+    verify_domain_setup,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,20 +83,10 @@ async def run(
     data: PublishRequest,
     user: TokenData = Depends(get_current_user),
 ):
-    """公開フロー実行 (購入→Vercel紐付け→DNS→SEO→DB更新)"""
-    if data.payment_responsibility == "client_pays":
-        return PublishResponse(
-            success=False,
-            artifact_id=data.artifact_id,
-            domain=data.domain,
-            deploy_url=None,
-            steps=[],
-            error=(
-                "Client payment is not configured yet. "
-                "Set up Stripe Checkout and a payment webhook before enabling client-paid domain purchase."
-            ),
-        )
+    """公開フロー実行 (オーナーが取得・支払い: 購入→Vercel紐付け→DNS→SEO→Search Console→DB更新)。
 
+    クライアントが自分でドメインを用意する場合は ``/publish/domain-setup`` を使う。
+    """
     result = await publish_with_custom_domain(
         artifact_id=data.artifact_id,
         domain=data.domain,
@@ -135,3 +133,125 @@ async def delivery_url(
     except Exception as e:
         logger.exception("issue_dedicated_delivery_url failed")
         return DeliveryUrlResponse(success=False, artifact_id=data.artifact_id, error=str(e))
+
+
+# ============================================
+# クライアント所有ドメインの案内フロー
+# ============================================
+#
+# /domain-setup        : オーナーが案内URLを発行 (要認証)
+# /domain-setup/{token}: クライアントが状態取得 (公開・認証なし)
+# .../{token}/verify   : クライアントが DNS 設定後に接続確認 (公開・認証なし)
+
+
+def _setup_to_response(
+    *,
+    success: bool,
+    token: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+    artifact_label: Optional[str] = None,
+    setup: Optional[dict] = None,
+    production_url: Optional[str] = None,
+    verified: bool = False,
+    detail: Optional[str] = None,
+    error: Optional[str] = None,
+) -> DomainSetupResponse:
+    """orchestrator の setup dict を API レスポンスに変換する。"""
+    setup = setup or {}
+    return DomainSetupResponse(
+        success=success,
+        token=token,
+        setup_path=f"/domain-setup/{token}" if token else None,
+        artifact_id=artifact_id,
+        artifact_label=artifact_label,
+        domain=setup.get("domain"),
+        status=setup.get("status"),
+        availability=setup.get("availability"),
+        registrar_links=[RegistrarLinkDTO(**r) for r in setup.get("registrar_links", [])],
+        dns_records=[DnsRecordDTO(**r) for r in setup.get("dns_records", [])],
+        production_url=production_url,
+        verified=verified,
+        detail=detail,
+        error=error,
+    )
+
+
+@router.post("/domain-setup", response_model=DomainSetupResponse)
+async def domain_setup_create(
+    data: DomainSetupCreateRequest,
+    user: TokenData = Depends(get_current_user),
+):
+    """クライアント向けドメイン設定の案内URLを発行する (オーナー操作)。"""
+    try:
+        result = await create_domain_setup(
+            artifact_id=data.artifact_id,
+            domain=data.domain,
+            vercel_project=data.vercel_project,
+            user_id=user.user_id,
+        )
+    except Exception as e:
+        logger.exception("create_domain_setup failed")
+        return DomainSetupResponse(success=False, error=str(e))
+    return _setup_to_response(
+        success=True,
+        token=result["token"],
+        artifact_id=data.artifact_id,
+        artifact_label=result["artifact_label"],
+        setup=result["setup"],
+    )
+
+
+@router.get("/domain-setup/{token}", response_model=DomainSetupResponse)
+async def domain_setup_get(token: str):
+    """クライアント案内ページの状態を取得する (公開・認証なし)。"""
+    state = await get_domain_setup_state(token)
+    if state is None:
+        return DomainSetupResponse(success=False, error="案内ページが見つかりません")
+    setup = state["setup"]
+    return _setup_to_response(
+        success=True,
+        token=token,
+        artifact_id=state["artifact_id"],
+        artifact_label=state["artifact_label"],
+        setup=setup,
+        production_url=state.get("production_url"),
+        verified=(setup.get("status") == "live"),
+        detail=setup.get("last_error"),
+    )
+
+
+@router.get("/custom-domains")
+async def custom_domains_map():
+    """カスタムドメイン → artifact slug のマップ (middleware 用・公開・認証なし)。
+
+    middleware がこれを TTL 付きで取得し、接続済みの独自ドメインを
+    正しい artifact にルーティングする。
+    """
+    try:
+        mapping = await ChatArtifactService().list_custom_domain_map()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("custom-domains map failed: %s", e)
+        mapping = {}
+    return {"map": mapping}
+
+
+@router.post("/domain-setup/{token}/verify", response_model=DomainSetupResponse)
+async def domain_setup_verify(token: str):
+    """クライアントが DNS 設定後に押す接続確認 (公開・認証なし)。"""
+    try:
+        result = await verify_domain_setup(token)
+    except Exception as e:
+        logger.exception("verify_domain_setup failed")
+        return DomainSetupResponse(success=False, token=token, error=str(e))
+    if not result.get("found"):
+        return DomainSetupResponse(
+            success=False, token=token, error=result.get("detail", "見つかりません")
+        )
+    return _setup_to_response(
+        success=True,
+        token=token,
+        setup=result.get("setup"),
+        production_url=result.get("production_url"),
+        verified=result.get("verified", False),
+        detail=result.get("detail"),
+    )

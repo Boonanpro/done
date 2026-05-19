@@ -11,7 +11,8 @@ publish_with_custom_domain の流れ:
     5. Vercel が要求するDNSレコードを Cloudflare に作成 (Cloudflare DNS)
     6. DNS verification 完了待ち   (Vercel)
     7. SEO アセット生成・書き出し  (SEO generator)
-    8. chat_artifact DB 更新
+    8. Search Console 所有権確認 + sitemap 申請 (Search Console)
+    9. chat_artifact DB 更新
 
 各ステップは PublishStep として記録され、UI 側でストリーミング表示可能。
 """
@@ -20,8 +21,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -300,6 +303,7 @@ async def publish_with_custom_domain(
                     raise
 
         # 5. DNS レコード設定 (Vercel が要求する形)
+        zone: Optional[dict[str, Any]] = None
         s = rec.start("configure_dns")
         if dry_run:
             rec.complete(s, "[DRY-RUN] skipped DNS")
@@ -356,7 +360,35 @@ async def publish_with_custom_domain(
         else:
             rec.skip("generate_seo_assets", "no pages found, skipped")
 
-        # 8. DB 更新
+        # 8. Search Console 申請 (公開 → 検索でヒットする状態まで自動化)
+        s = rec.start("submit_to_search_console")
+        if dry_run:
+            rec.complete(s, "[DRY-RUN] skipped")
+        elif zone is None:
+            s.status = "skipped"
+            s.detail = "Cloudflare zone が不明のためスキップ"
+        else:
+            try:
+                from app.tools.publish_site.search_console import auto_submit
+
+                sc_result = await auto_submit(
+                    domain,
+                    f"{base_url}/sitemap.xml",
+                    zone_id=zone["id"],
+                    cf_dns=cf_dns,
+                )
+                if not sc_result.get("configured"):
+                    s.status = "skipped"
+                    s.detail = sc_result.get("detail", "Search Console 未設定")
+                elif sc_result.get("sitemap_submitted"):
+                    rec.complete(s, sc_result.get("detail", ""))
+                else:
+                    # 所有権確認や申請が一部失敗しても公開自体は成立しているので致命的にしない
+                    rec.fail(s, sc_result.get("detail", "Search Console 申請に一部失敗"))
+            except Exception as e:
+                rec.fail(s, f"Search Console 申請でエラー: {e}")
+
+        # 9. DB 更新
         s = rec.start("update_artifact_db")
         if dry_run:
             rec.complete(s, "[DRY-RUN] skipped")
@@ -396,3 +428,257 @@ async def publish_with_custom_domain(
                 rec.fail(s, repr(e))
         result.error = repr(e)
         return result
+
+
+# ============================================
+# クライアント所有ドメインの案内フロー
+# ============================================
+#
+# オーナーが代理決済せず、クライアント自身がドメインを取得・所有する方式。
+# オーナーは案内URL (/domain-setup/<token>) を発行してクライアントに渡すだけ。
+# クライアントは公開ページから 購入 → DNS設定 → 検証 を自分で進められる。
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]  # D:\done
+VERCEL_APEX_IP = "76.76.21.21"  # Vercel のルートドメイン用 A レコード
+VERCEL_WWW_CNAME = "cname.vercel-dns.com"  # Vercel の www 用 CNAME
+
+# クライアントにドメイン購入先として案内するレジストラ (homepage の安定URL)
+REGISTRAR_LINKS: list[dict[str, str]] = [
+    {"label": "お名前.com（国内最大手・日本語サポート）", "url": "https://www.onamae.com/"},
+    {"label": "ムームードメイン（個人事業者向け・操作が簡単）", "url": "https://muumuu-domain.com/"},
+    {"label": "Cloudflare Registrar（原価販売・更新料が安い）", "url": "https://www.cloudflare.com/products/registrar/"},
+]
+
+
+def _normalize_domain(domain: str) -> str:
+    """入力ドメインを FQDN に正規化する。"""
+    d = (domain or "").strip().lower()
+    d = d.replace("https://", "").replace("http://", "")
+    d = d.split("/")[0].strip().strip(".")
+    return d
+
+
+def _write_seo_files_best_effort(slug: str, base_url: str) -> None:
+    """artifact ディレクトリに sitemap.ts / robots.ts を生成する (ベストエフォート)。
+
+    生成後は git commit/push でデプロイされて初めて公開URLに反映される。
+    """
+    if not slug:
+        return
+    try:
+        artifact_dir = PROJECT_ROOT / "frontend" / "src" / "app" / "artifacts" / slug
+        if not artifact_dir.is_dir():
+            logger.info("SEO: artifact dir not found, skipped (%s)", artifact_dir)
+            return
+        pages = scan_artifact_pages(str(artifact_dir))
+        if not pages:
+            return
+        (artifact_dir / "sitemap.ts").write_text(
+            generate_sitemap_ts(base_url, pages), encoding="utf-8"
+        )
+        (artifact_dir / "robots.ts").write_text(
+            generate_robots_ts(f"{base_url}/sitemap.xml"), encoding="utf-8"
+        )
+        logger.info("SEO: wrote sitemap.ts + robots.ts for %s (%d pages)", slug, len(pages))
+    except Exception as e:  # noqa: BLE001 - SEO 生成失敗で案内発行を止めない
+        logger.warning("SEO file generation skipped: %s", e)
+
+
+async def create_domain_setup(
+    *,
+    artifact_id: str,
+    domain: str,
+    vercel_project: str = DEFAULT_VERCEL_PROJECT,
+    user_id: str,
+) -> dict[str, Any]:
+    """クライアント向けドメイン設定の案内セッションを作成する (オーナー操作)。
+
+    Returns:
+        ``{"token": str, "setup": dict, "artifact_label": str}``
+    """
+    svc = ChatArtifactService()
+    artifact = await svc.get(artifact_id, user_id)
+    if artifact is None:
+        raise RuntimeError("artifact が見つかりません")
+
+    domain = _normalize_domain(domain)
+    if "." not in domain:
+        raise RuntimeError("ドメインは example.com のような形式で入力してください")
+    slug = artifact.get("slug") or ""
+
+    # 1. 空き確認 (取得済みでも案内自体は続行する)
+    availability: dict[str, Any] = {}
+    try:
+        availability = await check_domain(domain, include_suggestions=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("domain availability check failed (non-fatal): %s", e)
+
+    # 2. クライアントが設定する DNS レコード
+    dns_records: list[dict[str, str]] = [
+        {"type": "A", "name": "@", "value": VERCEL_APEX_IP,
+         "purpose": "サイトを表示する（ルートドメイン）"},
+        {"type": "CNAME", "name": "www", "value": VERCEL_WWW_CNAME,
+         "purpose": "サイトを表示する（www付き）"},
+    ]
+    # Google Search Console 所有権確認 TXT (サービスアカウント設定済みの時のみ)
+    try:
+        from app.tools.publish_site.search_console import get_dns_verification_record
+
+        sc_rec = await get_dns_verification_record(domain)
+        if sc_rec:
+            dns_records.append(
+                {**sc_rec, "purpose": "Google検索に登録する（所有権の確認）"}
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("search console verification record skipped: %s", e)
+
+    # 3. SEO ファイル生成 (オーナー操作なのでこのタイミングで作る)
+    _write_seo_files_best_effort(slug, f"https://{domain}")
+
+    # 4. セッション保存
+    token = secrets.token_urlsafe(24)
+    setup = {
+        "domain": domain,
+        "vercel_project": vercel_project,
+        "slug": slug,
+        "status": "pending",
+        "dns_records": dns_records,
+        "availability": availability,
+        "registrar_links": REGISTRAR_LINKS,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "verified_at": None,
+        "last_error": None,
+        "search_console": None,
+    }
+    await svc.update(
+        artifact_id,
+        {
+            "domain_setup_token": token,
+            "domain_setup": setup,
+            "payment_responsibility": "client_pays",
+            "delivery_mode": "client_domain",
+        },
+        user_id,
+    )
+    return {
+        "token": token,
+        "setup": setup,
+        "artifact_label": artifact.get("label") or slug,
+    }
+
+
+async def get_domain_setup_state(token: str) -> Optional[dict[str, Any]]:
+    """案内トークンからセッション状態を取得する (公開ページ用・認証なし)。"""
+    svc = ChatArtifactService()
+    artifact = await svc.get_by_domain_setup_token(token)
+    if artifact is None:
+        return None
+    setup = artifact.get("domain_setup") or {}
+    return {
+        "artifact_id": artifact["id"],
+        "artifact_label": artifact.get("label") or setup.get("slug") or "成果物",
+        "setup": setup,
+        "production_url": artifact.get("production_url"),
+    }
+
+
+async def verify_domain_setup(token: str) -> dict[str, Any]:
+    """クライアントが DNS 設定後に押す検証。DNS が通っていれば公開を確定する。
+
+    Returns:
+        ``{"found": bool, "status": str, "verified": bool, "detail": str,
+           "production_url": str|None, "setup": dict}``
+    """
+    svc = ChatArtifactService()
+    artifact = await svc.get_by_domain_setup_token(token)
+    if artifact is None:
+        return {"found": False, "verified": False, "detail": "案内ページが見つかりません"}
+
+    setup = dict(artifact.get("domain_setup") or {})
+    domain = setup.get("domain")
+    artifact_id = artifact["id"]
+    vercel_project = setup.get("vercel_project") or DEFAULT_VERCEL_PROJECT
+
+    if not domain:
+        return {
+            "found": True, "status": "failed", "verified": False,
+            "detail": "ドメイン情報が登録されていません", "setup": setup,
+        }
+
+    def _save() -> None:
+        svc.supabase.table(svc.table).update({"domain_setup": setup}).eq(
+            "id", artifact_id
+        ).execute()
+
+    # 1. Vercel に紐付け + DNS 構成チェック
+    #    ホスティングは運営者の Vercel アカウントが全テナント分を提供する。
+    try:
+        vercel = await get_vercel()
+        try:
+            await vercel.add_domain_to_project(vercel_project, domain)
+        except VercelError as e:
+            if e.status != 409:  # 409 = 既に紐付け済み
+                raise
+        config = await vercel.get_domain_config(domain)
+    except Exception as e:  # noqa: BLE001
+        setup["last_error"] = str(e)[:300]
+        _save()
+        return {
+            "found": True, "status": setup.get("status", "pending"), "verified": False,
+            "detail": f"接続確認でエラーが発生しました: {str(e)[:200]}", "setup": setup,
+        }
+
+    if config.get("misconfigured", True):
+        setup["status"] = "dns_pending"
+        setup["last_error"] = None
+        _save()
+        return {
+            "found": True, "status": "dns_pending", "verified": False,
+            "detail": (
+                "DNSの設定がまだ反映されていません。"
+                "レコードを設定済みの場合、反映に数分〜数十分かかることがあります。"
+                "少し待ってからもう一度「接続を確認」を押してください。"
+            ),
+            "setup": setup,
+        }
+
+    # 2. DNS OK → 公開を確定 + Search Console 申請
+    base_url = f"https://{domain}"
+    try:
+        from app.tools.publish_site.search_console import verify_and_submit
+
+        sc_result = await verify_and_submit(domain, f"{base_url}/sitemap.xml")
+    except Exception as e:  # noqa: BLE001
+        sc_result = {
+            "configured": True, "verified": False, "sitemap_submitted": False,
+            "detail": f"Search Console 申請でエラー: {str(e)[:200]}",
+        }
+
+    setup["status"] = "live"
+    setup["verified_at"] = datetime.now(timezone.utc).isoformat()
+    setup["last_error"] = None
+    setup["search_console"] = sc_result
+
+    svc.supabase.table(svc.table).update(
+        {
+            "custom_domain": domain,
+            "production_url": base_url,
+            "publish_status": "live",
+            "delivery_status": "delivered",
+            "delivery_mode": "client_domain",
+            "last_publish_error": None,
+            "domain_setup": setup,
+        }
+    ).eq("id", artifact_id).execute()
+
+    if sc_result.get("sitemap_submitted"):
+        detail = "ドメインを接続し、Google検索への登録（sitemap申請）まで完了しました。"
+    elif sc_result.get("configured"):
+        detail = "ドメインを接続しました。検索登録は申請を試みましたが一部未完了です。"
+    else:
+        detail = "ドメインを接続しました。サイトは公開済みです。"
+
+    return {
+        "found": True, "status": "live", "verified": True,
+        "production_url": base_url, "detail": detail, "setup": setup,
+    }
