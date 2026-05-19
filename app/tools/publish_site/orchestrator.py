@@ -633,6 +633,13 @@ async def run_paid_registration(token: str) -> None:
     slug = setup.get("slug")
     artifact_id = artifact["id"]
 
+    # Stripe テストモード (sk_test_) では実ドメイン取得を行わず空実行する。
+    # 本番キー (sk_live_) の時だけ Cloudflare で実際に取得する。
+    from app.tools.publish_site.stripe_payments import is_test_mode
+
+    dry_run = await is_test_mode()
+
+    deploy_url: Optional[str] = None
     try:
         result = await publish_with_custom_domain(
             artifact_id=artifact_id,
@@ -640,9 +647,10 @@ async def run_paid_registration(token: str) -> None:
             vercel_project=setup.get("vercel_project") or DEFAULT_VERCEL_PROJECT,
             artifact_dir=f"frontend/src/app/artifacts/{slug}" if slug else None,
             write_seo_files=True,
+            dry_run=dry_run,
             user_id=None,  # 運営者の Cloudflare / Vercel を使う
         )
-        ok, err = result.success, result.error
+        ok, err, deploy_url = result.success, result.error, result.deploy_url
     except Exception as e:  # noqa: BLE001
         ok, err = False, repr(e)
 
@@ -652,9 +660,17 @@ async def run_paid_registration(token: str) -> None:
         setup["status"] = "live"
         setup["verified_at"] = datetime.now(timezone.utc).isoformat()
         setup["last_error"] = None
+        setup["dry_run"] = dry_run
+        update: dict[str, Any] = {"domain_setup": setup}
+        # dry-run でも完了画面に表示できるよう production_url を入れる
+        if deploy_url:
+            update["production_url"] = deploy_url
+            update["custom_domain"] = domain
+            update["publish_status"] = "live"
+        svc.supabase.table(svc.table).update(update).eq("id", artifact_id).execute()
     else:
         setup["status"] = "failed"
         setup["last_error"] = err
-    svc.supabase.table(svc.table).update({"domain_setup": setup}).eq(
-        "id", artifact_id
-    ).execute()
+        svc.supabase.table(svc.table).update({"domain_setup": setup}).eq(
+            "id", artifact_id
+        ).execute()

@@ -17,6 +17,7 @@ interface DomainSetup {
   domain?: string | null;
   status?: string | null; // pending / registering / live / failed
   price?: string | null; // USD
+  test_mode?: boolean;
   production_url?: string | null;
   detail?: string | null;
   error?: string | null;
@@ -172,6 +173,11 @@ export default function DomainSetupPage() {
               {data.production_url.replace(/^https?:\/\//, '')}
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
+          )}
+          {data.test_mode && (
+            <p className="mt-4 text-xs text-amber-600">
+              ※ テスト環境での実行です。実際のドメイン取得は行われていません。
+            </p>
           )}
         </div>
       </Shell>

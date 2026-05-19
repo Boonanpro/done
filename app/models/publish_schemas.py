@@ -101,6 +101,7 @@ class DomainSetupResponse(BaseModel):
     status: Optional[str] = None  # pending / registering / live / failed
     price: Optional[str] = None  # ドメイン取得費用 (USD)
     currency: str = "usd"
+    test_mode: bool = False  # Stripe テストモードでの実行か
     production_url: Optional[str] = None
     detail: Optional[str] = None  # 補足・エラーメッセージ
     error: Optional[str] = None

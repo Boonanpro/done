@@ -173,6 +173,7 @@ def _setup_to_response(
         domain=setup.get("domain"),
         status=setup.get("status"),
         price=price,
+        test_mode=bool(setup.get("dry_run")),
         production_url=production_url,
         detail=detail or setup.get("last_error"),
         error=error,

@@ -57,6 +57,12 @@ async def is_configured() -> bool:
     return (await get_secret_key()) is not None
 
 
+async def is_test_mode() -> bool:
+    """登録キーがテスト用 (sk_test_) か。テスト時は実ドメイン取得を空実行にする。"""
+    key = await get_secret_key()
+    return bool(key and key.startswith("sk_test_"))
+
+
 def _stripe(secret_key: str):
     try:
         import stripe
@@ -100,7 +106,8 @@ async def create_checkout_session(
             cancel_url=cancel_url,
             metadata=metadata,
         )
-        url = session.get("url")
+        # StripeObject は .get() を持たないため、JSON 経由で素の dict にする
+        url = json.loads(str(session)).get("url")
         if not url:
             raise StripeError("Checkout Session に URL がありません")
         return url
@@ -121,11 +128,13 @@ async def retrieve_session(session_id: str) -> dict[str, Any]:
     def _work() -> dict[str, Any]:
         stripe = _stripe(secret_key)
         s = stripe.checkout.Session.retrieve(session_id)
+        # StripeObject は .get() を持たないため、JSON 経由で素の dict にする
+        data = json.loads(str(s))
         return {
-            "paid": s.get("payment_status") == "paid",
-            "metadata": dict(s.get("metadata") or {}),
-            "amount_total": s.get("amount_total"),
-            "currency": s.get("currency"),
+            "paid": data.get("payment_status") == "paid",
+            "metadata": dict(data.get("metadata") or {}),
+            "amount_total": data.get("amount_total"),
+            "currency": data.get("currency"),
         }
 
     return await asyncio.to_thread(_work)
