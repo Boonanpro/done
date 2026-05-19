@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from typing import Any, Optional
 
 from app.services.credentials_service import get_credentials_service
@@ -26,6 +27,18 @@ logger = logging.getLogger(__name__)
 
 OPERATOR_USER_ID = "2582a188-ff24-4a4f-b989-6063034d90b2"  # 0aw325171@gmail.com
 CREDENTIAL_SERVICE = "stripe"
+
+# Stripe 手数料(日本 3.6%) + USD決済の両替コスト + 端数 を確実にカバーする割増率。
+# 利益ではなく「手数料で赤字にならないため」の安全値。実取引の明細を見て調整可。
+STRIPE_FEE_RATE = 0.06
+
+
+def gross_up_for_fee(amount_cents: int) -> int:
+    """原価に手数料分を上乗せした請求額(セント)を返す。
+
+    運営者の受取が原価を下回らないようにするための割増。利益は乗せない。
+    """
+    return math.ceil(amount_cents / (1.0 - STRIPE_FEE_RATE))
 
 
 class StripeError(RuntimeError):
