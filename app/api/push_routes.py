@@ -56,6 +56,21 @@ async def subscribe_native(
     return {"success": True}
 
 
+@router.post("/native/unsubscribe")
+async def unsubscribe_native(
+    req: NativeSubscribeRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Remove an Expo native push token for the signed-in user."""
+    svc = get_push_service()
+    await svc.remove_subscription(
+        room_id=f"user:{current_user.user_id}",
+        sender_type="owner",
+        endpoint=req.token,
+    )
+    return {"success": True}
+
+
 @router.post("/unsubscribe")
 async def unsubscribe(req: SubscribeRequest):
     """Remove a push subscription."""

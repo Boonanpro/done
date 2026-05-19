@@ -7,6 +7,14 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(self.clients.claim());
 });
 
+// NOTE: No `fetch` handler is registered on purpose.
+// A pass-through `fetch` handler (event.respondWith(fetch(event.request)))
+// routes every navigation/asset request through the SW, and returning a
+// redirected response to a navigation request makes the browser throw,
+// bricking the whole origin until the SW is unregistered. A `fetch` handler
+// has not been required for PWA installability since Chrome 89, so this SW
+// only handles `push` / `notificationclick`.
+
 // Handle push notifications
 self.addEventListener('push', (event) => {
   if (!event.data) return;

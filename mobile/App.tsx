@@ -27,6 +27,7 @@ import { WebView } from 'react-native-webview';
 const API_BASE_URL = 'https://frontend-mikis-projects-86652663.vercel.app';
 const TOKEN_KEY = 'done_mobile_access_token';
 const PROJECT_KEY = 'done_mobile_project_id';
+const PUSH_KEY = 'done_mobile_push_enabled';
 const EAS_PROJECT_ID = 'db295575-26c1-4088-99aa-4887eb27e2e2';
 
 Notifications.setNotificationHandler({
@@ -156,7 +157,13 @@ async function apiRequest<T>(
     } catch {
       detail = await response.text().catch(() => '');
     }
-    throw new Error(detail || `Request failed: ${response.status}`);
+    // Attach the HTTP status so callers can tell a real auth failure (401)
+    // apart from a transient network/server error.
+    const error = new Error(detail || `Request failed: ${response.status}`) as Error & {
+      status?: number;
+    };
+    error.status = response.status;
+    throw error;
   }
 
   if (response.status === 204) return {} as T;
@@ -556,10 +563,16 @@ export default function App() {
     const subscription = AppState.addEventListener('change', (state) => {
       if (state === 'active') {
         refreshProjects(token).catch(() => null);
+        // Reload the open chat too: a reply that finished while the app was
+        // backgrounded never streams in (the SSE connection is suspended),
+        // so the project list alone is not enough to surface it.
+        if (currentProjectId) {
+          loadProjectMessages(token, currentProjectId).catch(() => null);
+        }
       }
     });
     return () => subscription.remove();
-  }, [refreshProjects, token]);
+  }, [refreshProjects, loadProjectMessages, currentProjectId, token]);
 
   useEffect(() => {
     if (!token) return;
@@ -585,6 +598,34 @@ export default function App() {
     };
   }, [openProjectFromNotificationUrl, refreshProjects, token]);
 
+  // Restore the notification toggle state on launch. `notificationStatus` is
+  // plain component state, so without this it always resets to 'Off'. The
+  // source of truth is "we saved a subscription" AND "the OS still grants
+  // permission" (the user may have revoked it from system settings).
+  useEffect(() => {
+    if (!token) return;
+    let alive = true;
+    (async () => {
+      try {
+        const enabled = await SecureStore.getItemAsync(PUSH_KEY);
+        if (enabled !== '1') return;
+        const perm = await Notifications.getPermissionsAsync();
+        if (!alive) return;
+        if (perm.status === 'granted') {
+          setNotificationStatus('On');
+        } else {
+          setNotificationStatus('Off');
+          await SecureStore.setItemAsync(PUSH_KEY, '0').catch(() => null);
+        }
+      } catch {
+        // best-effort: leave the default 'Off'
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [token]);
+
   useEffect(() => {
     let alive = true;
     async function restoreSession() {
@@ -594,16 +635,30 @@ export default function App() {
         return;
       }
 
-      try {
-        const restoredUser = await apiRequest<UserResponse>('/chat/me', {}, storedToken);
-        if (!alive) return;
-        setAuth({ status: 'signed_in', token: storedToken, user: restoredUser });
-        await loadInitialData(storedToken);
-      } catch {
-        await SecureStore.deleteItemAsync(TOKEN_KEY);
-        await SecureStore.deleteItemAsync(PROJECT_KEY);
-        if (alive) setAuth({ status: 'signed_out' });
+      // Cold-starting from a notification tap, the network is often not ready
+      // for a moment. Only a real 401 means the token is invalid — for any
+      // transient failure we retry and, crucially, never discard the saved
+      // token (discarding it was what logged the user out).
+      for (let attempt = 0; attempt < 4 && alive; attempt++) {
+        try {
+          const restoredUser = await apiRequest<UserResponse>('/chat/me', {}, storedToken);
+          if (!alive) return;
+          setAuth({ status: 'signed_in', token: storedToken, user: restoredUser });
+          await loadInitialData(storedToken);
+          return;
+        } catch (error) {
+          if ((error as { status?: number }).status === 401) {
+            await SecureStore.deleteItemAsync(TOKEN_KEY);
+            await SecureStore.deleteItemAsync(PROJECT_KEY);
+            if (alive) setAuth({ status: 'signed_out' });
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+        }
       }
+      // Retries exhausted but not a 401: keep the token so the next launch
+      // restores the session; just fall back to the signed-out screen.
+      if (alive) setAuth({ status: 'signed_out' });
     }
     restoreSession();
     return () => {
@@ -698,13 +753,42 @@ export default function App() {
     }
   }
 
-  async function handleEnableNotifications() {
+  async function handleToggleNotifications() {
     if (!token) return;
     if (!Device.isDevice) {
       setNotificationStatus('Physical device required');
       return;
     }
 
+    // Currently On -> turn Off by removing the server-side push subscription.
+    // (OS-level permission cannot be revoked from inside the app; "Off" here
+    // means Dan will no longer push to this device.)
+    if (notificationStatus === 'On') {
+      const previous = notificationStatus;
+      setNotificationStatus('Updating...');
+      try {
+        const expoToken = await Notifications.getExpoPushTokenAsync({
+          projectId: EAS_PROJECT_ID,
+        });
+        await apiRequest(
+          '/push/native/unsubscribe',
+          {
+            method: 'POST',
+            body: JSON.stringify({ token: expoToken.data }),
+          },
+          token,
+        );
+        await SecureStore.setItemAsync(PUSH_KEY, '0').catch(() => null);
+        setNotificationStatus('Off');
+      } catch (error) {
+        setNotificationStatus(previous);
+        Alert.alert('Could not turn off notifications', String((error as Error).message));
+      }
+      return;
+    }
+
+    // Off -> turn On.
+    setNotificationStatus('Updating...');
     try {
       if (Platform.OS === 'android') {
         await Notifications.setNotificationChannelAsync('default', {
@@ -737,6 +821,7 @@ export default function App() {
         },
         token,
       );
+      await SecureStore.setItemAsync(PUSH_KEY, '1').catch(() => null);
       setNotificationStatus('On');
     } catch (error) {
       setNotificationStatus('Failed');
@@ -1017,7 +1102,7 @@ export default function App() {
           <Pressable onPress={handleNewProject} style={styles.newProjectButton}>
             <Text style={styles.newProjectText}>New chat</Text>
           </Pressable>
-          <Pressable onPress={handleEnableNotifications} style={styles.secondaryFooterButton}>
+          <Pressable onPress={handleToggleNotifications} style={styles.secondaryFooterButton}>
             <Text style={styles.secondaryFooterButtonText}>Notifications: {notificationStatus}</Text>
           </Pressable>
           <Pressable onPress={handleLogout} style={styles.secondaryFooterButton}>
@@ -1234,7 +1319,7 @@ export default function App() {
               ))}
             </ScrollView>
             <View style={styles.drawerFooter}>
-              <Pressable onPress={handleEnableNotifications} style={styles.drawerAction}>
+              <Pressable onPress={handleToggleNotifications} style={styles.drawerAction}>
                 <Text style={styles.drawerActionText}>Notifications: {notificationStatus}</Text>
               </Pressable>
               <Pressable onPress={handleLogout} style={styles.drawerAction}>
