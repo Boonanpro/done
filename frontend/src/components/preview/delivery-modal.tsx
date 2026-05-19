@@ -23,6 +23,7 @@ interface Props {
   artifact: ArtifactRecord;
   publicUrl: string;
   onUpdated?: (artifact: ArtifactRecord) => void;
+  onRequestDomain?: () => void;
 }
 
 function artifactLabel(type: string) {
@@ -52,28 +53,49 @@ async function copyText(text: string) {
   await navigator.clipboard.writeText(text);
 }
 
-export function DeliveryModal({ open, onOpenChange, artifact, publicUrl, onUpdated }: Props) {
+export function DeliveryModal({ open, onOpenChange, artifact, publicUrl, onUpdated, onRequestDomain }: Props) {
   const [notes, setNotes] = useState(artifact.handoff_notes || '');
   const [saving, setSaving] = useState(false);
   const copy = useMemo(() => deliveryCopy(artifact.artifact_type), [artifact.artifact_type]);
   const sharePath = artifactSharePath(artifact.share_url || artifact.preview_url || artifact.slug);
+  const deliveryUrl = artifact.production_url || publicUrl;
+  const hasDedicatedUrl = Boolean(artifact.production_url);
 
   const save = async () => {
     setSaving(true);
     try {
+      const deliveryRes = hasDedicatedUrl
+        ? null
+        : await fetch('/api/v1/publish/delivery-url', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              artifact_id: artifact.id,
+              slug: artifact.slug,
+              vercel_project: 'frontend',
+            }),
+          });
+
+      if (deliveryRes && !deliveryRes.ok) throw new Error(await deliveryRes.text());
+      const delivery = deliveryRes ? await deliveryRes.json() : null;
+      if (delivery && !delivery.success) throw new Error(delivery.error || 'Delivery URL failed');
+      const finalUrl = delivery?.url || deliveryUrl;
+
       const res = await fetch(`/api/v1/chat-artifact/${artifact.id}`, {
         method: 'PATCH',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           delivery_status: 'ready',
-          delivery_mode: copy.mode,
+          delivery_mode: 'dedicated_url',
           target_audience: artifact.artifact_type === 'dashboard' ? 'internal' : 'client',
           requires_auth: copy.requiresAuth,
           payment_responsibility: 'client_pays',
           handoff_notes: notes,
+          production_url: finalUrl,
           delivery_checklist: {
-            delivery_url: publicUrl,
+            delivery_url: finalUrl,
             share_path: sharePath,
             next_step:
               artifact.artifact_type === 'dashboard'
@@ -84,7 +106,7 @@ export function DeliveryModal({ open, onOpenChange, artifact, publicUrl, onUpdat
       });
       if (!res.ok) throw new Error(await res.text());
       const updated = (await res.json()) as ArtifactRecord;
-      await copyText(publicUrl);
+      await copyText(finalUrl);
       onUpdated?.(updated);
       toast.success('納品URLをコピーしました');
       onOpenChange(false);
@@ -118,13 +140,13 @@ export function DeliveryModal({ open, onOpenChange, artifact, publicUrl, onUpdat
               <ExternalLink className="h-4 w-4" /> 納品URL
             </div>
             <div className="break-all rounded-md bg-muted px-3 py-2 font-mono text-xs">
-              {publicUrl}
+              {deliveryUrl}
             </div>
             <Button
               variant="secondary"
               size="sm"
               className="mt-3"
-              onClick={() => copyText(publicUrl).then(() => toast.success('URLをコピーしました'))}
+              onClick={() => copyText(deliveryUrl).then(() => toast.success('URLをコピーしました'))}
             >
               <Copy className="mr-1 h-3.5 w-3.5" /> URLをコピー
             </Button>
@@ -152,8 +174,19 @@ export function DeliveryModal({ open, onOpenChange, artifact, publicUrl, onUpdat
           <Button variant="secondary" onClick={() => onOpenChange(false)}>
             閉じる
           </Button>
+          {onRequestDomain ? (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                onOpenChange(false);
+                onRequestDomain();
+              }}
+            >
+              独自ドメインも取る
+            </Button>
+          ) : null}
           <Button onClick={save} disabled={saving}>
-            {saving ? '準備中...' : '納品URLをコピーして完了'}
+            {saving ? '発行中...' : hasDedicatedUrl ? '納品URLをコピーして完了' : '専用URLを発行して納品'}
           </Button>
         </DialogFooter>
       </DialogContent>

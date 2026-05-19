@@ -44,6 +44,12 @@ class PublishRequest(BaseModel):
     dry_run: bool = False
 
 
+class DeliveryUrlRequest(BaseModel):
+    artifact_id: str
+    slug: str = Field(..., min_length=1)
+    vercel_project: str = "frontend"
+
+
 class PublishStepDTO(BaseModel):
     name: str
     status: str
@@ -59,3 +65,11 @@ class PublishResponse(BaseModel):
     steps: list[PublishStepDTO] = []
     error: Optional[str] = None
     pricing: Optional[dict[str, Any]] = None
+
+
+class DeliveryUrlResponse(BaseModel):
+    success: bool
+    artifact_id: str
+    url: Optional[str] = None
+    alias: Optional[str] = None
+    error: Optional[str] = None

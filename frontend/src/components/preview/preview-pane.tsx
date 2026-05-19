@@ -457,6 +457,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
           onOpenChange={setShowDeliveryModal}
           artifact={artifact}
           publicUrl={publicShareUrl}
+          onRequestDomain={() => setShowPublishModal(true)}
           onUpdated={(updated) => {
             if (projectId) openArtifact(projectId, updated);
             refreshArtifacts();

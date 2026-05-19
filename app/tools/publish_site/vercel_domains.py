@@ -95,6 +95,34 @@ class VercelDomains:
     async def get_project(self, project_id_or_name: str) -> dict[str, Any]:
         return await self._request("GET", f"/v9/projects/{project_id_or_name}")
 
+    async def list_deployments(
+        self,
+        project_id_or_name: str,
+        *,
+        target: str = "production",
+        limit: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Return recent deployments for a project."""
+        result = await self._request(
+            "GET",
+            "/v6/deployments",
+            params={
+                "projectId": project_id_or_name,
+                "target": target,
+                "state": "READY",
+                "limit": limit,
+            },
+        )
+        return result.get("deployments", [])
+
+    async def assign_alias(self, deployment_id: str, alias: str) -> dict[str, Any]:
+        """Assign a vercel.app alias to a deployment."""
+        return await self._request(
+            "POST",
+            f"/v2/deployments/{deployment_id}/aliases",
+            json={"alias": alias, "redirect": None},
+        )
+
     # ---- Project Domains ----
 
     async def list_project_domains(self, project_id_or_name: str) -> list[dict[str, Any]]:

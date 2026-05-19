@@ -15,6 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.models.publish_schemas import (
+    DeliveryUrlRequest,
+    DeliveryUrlResponse,
     DomainCheckCandidate,
     DomainCheckRequest,
     DomainCheckResponse,
@@ -25,6 +27,7 @@ from app.models.publish_schemas import (
 from app.services.auth_service import TokenData, decode_access_token
 from app.tools.publish_site.orchestrator import (
     check_domain,
+    issue_dedicated_delivery_url,
     publish_with_custom_domain,
 )
 
@@ -95,3 +98,27 @@ async def run(
         error=result.error,
         pricing=result.pricing,
     )
+
+
+@router.post("/delivery-url", response_model=DeliveryUrlResponse)
+async def delivery_url(
+    data: DeliveryUrlRequest,
+    user: TokenData = Depends(get_current_user),
+):
+    """Issue a dedicated vercel.app delivery URL for a tool/dashboard artifact."""
+    try:
+        result = await issue_dedicated_delivery_url(
+            artifact_id=data.artifact_id,
+            slug=data.slug,
+            vercel_project=data.vercel_project,
+            user_id=user.user_id,
+        )
+        return DeliveryUrlResponse(
+            success=True,
+            artifact_id=data.artifact_id,
+            url=result["url"],
+            alias=result["alias"],
+        )
+    except Exception as e:
+        logger.exception("issue_dedicated_delivery_url failed")
+        return DeliveryUrlResponse(success=False, artifact_id=data.artifact_id, error=str(e))
