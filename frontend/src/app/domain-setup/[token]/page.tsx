@@ -17,6 +17,7 @@ import {
   Loader2,
   AlertTriangle,
 } from 'lucide-react';
+import { copyToClipboard } from '@/lib/clipboard';
 
 interface DnsRecord {
   type: string;
@@ -53,12 +54,10 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
     <button
       type="button"
       onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text);
+        const ok = await copyToClipboard(text);
+        if (ok) {
           setCopied(true);
           setTimeout(() => setCopied(false), 1500);
-        } catch {
-          /* clipboard 不可環境は無視 */
         }
       }}
       className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50"
