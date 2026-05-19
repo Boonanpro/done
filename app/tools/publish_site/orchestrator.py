@@ -431,23 +431,13 @@ async def publish_with_custom_domain(
 
 
 # ============================================
-# クライアント所有ドメインの案内フロー
+# クライアント向けドメイン取得の案内フロー（Stripe 決済）
 # ============================================
 #
-# オーナーが代理決済せず、クライアント自身がドメインを取得・所有する方式。
-# オーナーは案内URL (/domain-setup/<token>) を発行してクライアントに渡すだけ。
-# クライアントは公開ページから 購入 → DNS設定 → 検証 を自分で進められる。
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]  # D:\done
-VERCEL_APEX_IP = "76.76.21.21"  # Vercel のルートドメイン用 A レコード
-VERCEL_WWW_CNAME = "cname.vercel-dns.com"  # Vercel の www 用 CNAME
-
-# クライアントにドメイン購入先として案内するレジストラ (homepage の安定URL)
-REGISTRAR_LINKS: list[dict[str, str]] = [
-    {"label": "お名前.com（国内最大手・日本語サポート）", "url": "https://www.onamae.com/"},
-    {"label": "ムームードメイン（個人事業者向け・操作が簡単）", "url": "https://muumuu-domain.com/"},
-    {"label": "Cloudflare Registrar（原価販売・更新料が安い）", "url": "https://www.cloudflare.com/products/registrar/"},
-]
+# オーナーが案内URL (/domain-setup/<token>) を発行してクライアントに渡す。
+# クライアントは案内ページで金額を見てカード決済するだけ。決済完了後、
+# 運営者のインフラ (Cloudflare/Vercel) が自動でドメイン取得〜公開〜検索登録まで
+# 行う。クライアントはレジストラ移動も DNS 設定も一切不要。
 
 
 def _normalize_domain(domain: str) -> str:
@@ -458,30 +448,11 @@ def _normalize_domain(domain: str) -> str:
     return d
 
 
-def _write_seo_files_best_effort(slug: str, base_url: str) -> None:
-    """artifact ディレクトリに sitemap.ts / robots.ts を生成する (ベストエフォート)。
-
-    生成後は git commit/push でデプロイされて初めて公開URLに反映される。
-    """
-    if not slug:
-        return
-    try:
-        artifact_dir = PROJECT_ROOT / "frontend" / "src" / "app" / "artifacts" / slug
-        if not artifact_dir.is_dir():
-            logger.info("SEO: artifact dir not found, skipped (%s)", artifact_dir)
-            return
-        pages = scan_artifact_pages(str(artifact_dir))
-        if not pages:
-            return
-        (artifact_dir / "sitemap.ts").write_text(
-            generate_sitemap_ts(base_url, pages), encoding="utf-8"
-        )
-        (artifact_dir / "robots.ts").write_text(
-            generate_robots_ts(f"{base_url}/sitemap.xml"), encoding="utf-8"
-        )
-        logger.info("SEO: wrote sitemap.ts + robots.ts for %s (%d pages)", slug, len(pages))
-    except Exception as e:  # noqa: BLE001 - SEO 生成失敗で案内発行を止めない
-        logger.warning("SEO file generation skipped: %s", e)
+def _setup_price(setup: dict[str, Any]) -> Optional[str]:
+    """setup から取得費用 (USD 文字列) を取り出す。"""
+    pricing = (((setup.get("availability") or {}).get("exact")) or {}).get("pricing") or {}
+    cost = pricing.get("registration_cost")
+    return str(cost) if cost is not None else None
 
 
 async def create_domain_setup(
@@ -506,49 +477,25 @@ async def create_domain_setup(
         raise RuntimeError("ドメインは example.com のような形式で入力してください")
     slug = artifact.get("slug") or ""
 
-    # 1. 空き確認 (取得済みでも案内自体は続行する)
+    # 空き確認 + 価格取得
     availability: dict[str, Any] = {}
     try:
         availability = await check_domain(domain, include_suggestions=True)
     except Exception as e:  # noqa: BLE001
         logger.warning("domain availability check failed (non-fatal): %s", e)
 
-    # 2. クライアントが設定する DNS レコード
-    dns_records: list[dict[str, str]] = [
-        {"type": "A", "name": "@", "value": VERCEL_APEX_IP,
-         "purpose": "サイトを表示する（ルートドメイン）"},
-        {"type": "CNAME", "name": "www", "value": VERCEL_WWW_CNAME,
-         "purpose": "サイトを表示する（www付き）"},
-    ]
-    # Google Search Console 所有権確認 TXT (サービスアカウント設定済みの時のみ)
-    try:
-        from app.tools.publish_site.search_console import get_dns_verification_record
-
-        sc_rec = await get_dns_verification_record(domain)
-        if sc_rec:
-            dns_records.append(
-                {**sc_rec, "purpose": "Google検索に登録する（所有権の確認）"}
-            )
-    except Exception as e:  # noqa: BLE001
-        logger.warning("search console verification record skipped: %s", e)
-
-    # 3. SEO ファイル生成 (オーナー操作なのでこのタイミングで作る)
-    _write_seo_files_best_effort(slug, f"https://{domain}")
-
-    # 4. セッション保存
     token = secrets.token_urlsafe(24)
     setup = {
         "domain": domain,
         "vercel_project": vercel_project,
         "slug": slug,
-        "status": "pending",
-        "dns_records": dns_records,
+        "status": "pending",  # pending → registering → live / failed
         "availability": availability,
-        "registrar_links": REGISTRAR_LINKS,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "paid_at": None,
         "verified_at": None,
+        "stripe_session_id": None,
         "last_error": None,
-        "search_console": None,
     }
     await svc.update(
         artifact_id,
@@ -563,6 +510,7 @@ async def create_domain_setup(
     return {
         "token": token,
         "setup": setup,
+        "price": _setup_price(setup),
         "artifact_label": artifact.get("label") or slug,
     }
 
@@ -578,107 +526,135 @@ async def get_domain_setup_state(token: str) -> Optional[dict[str, Any]]:
         "artifact_id": artifact["id"],
         "artifact_label": artifact.get("label") or setup.get("slug") or "成果物",
         "setup": setup,
+        "price": _setup_price(setup),
         "production_url": artifact.get("production_url"),
     }
 
 
-async def verify_domain_setup(token: str) -> dict[str, Any]:
-    """クライアントが DNS 設定後に押す検証。DNS が通っていれば公開を確定する。
+async def create_domain_checkout(token: str, *, return_origin: str) -> dict[str, Any]:
+    """Stripe Checkout セッションを作成し、決済ページURLを返す (公開・クライアント操作)。
 
     Returns:
-        ``{"found": bool, "status": str, "verified": bool, "detail": str,
-           "production_url": str|None, "setup": dict}``
+        ``{"success": bool, "checkout_url": str}`` または ``{"success": False, "error": str}``
     """
     svc = ChatArtifactService()
     artifact = await svc.get_by_domain_setup_token(token)
     if artifact is None:
-        return {"found": False, "verified": False, "detail": "案内ページが見つかりません"}
+        return {"success": False, "error": "案内ページが見つかりません"}
+    setup = artifact.get("domain_setup") or {}
+    domain = setup.get("domain")
+    if not domain:
+        return {"success": False, "error": "ドメイン情報がありません"}
+    if setup.get("status") in ("registering", "live"):
+        return {"success": False, "error": "すでに手続きが完了しています"}
 
+    price = _setup_price(setup)
+    try:
+        amount_cents = round(float(price) * 100)
+    except (TypeError, ValueError):
+        return {"success": False, "error": "ドメイン価格を取得できませんでした"}
+    if amount_cents <= 0:
+        return {"success": False, "error": "ドメイン価格が不正です"}
+
+    origin = (return_origin or "").rstrip("/")
+    if not origin:
+        return {"success": False, "error": "戻り先URLが不明です"}
+
+    try:
+        from app.tools.publish_site.stripe_payments import create_checkout_session
+
+        url = await create_checkout_session(
+            amount_cents=amount_cents,
+            currency="usd",
+            product_name=f"独自ドメイン取得・公開: {domain}（1年）",
+            success_url=f"{origin}/domain-setup/{token}?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{origin}/domain-setup/{token}",
+            metadata={"token": token, "domain": domain},
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("create_domain_checkout failed")
+        return {"success": False, "error": str(e)}
+    return {"success": True, "checkout_url": url}
+
+
+async def confirm_domain_payment(token: str, session_id: str) -> dict[str, Any]:
+    """決済完了を検証する。支払い済みなら status=registering にして登録開始可否を返す。
+
+    Returns:
+        ``{"success": bool, "status": str|None, "start": bool, "error": str|None}``
+        ``start=True`` のとき呼び出し側が ``run_paid_registration`` を実行する。
+    """
+    svc = ChatArtifactService()
+    artifact = await svc.get_by_domain_setup_token(token)
+    if artifact is None:
+        return {"success": False, "status": None, "start": False, "error": "案内ページが見つかりません"}
+    setup = dict(artifact.get("domain_setup") or {})
+    status = setup.get("status")
+    if status in ("registering", "live"):
+        # すでに処理中 / 完了
+        return {"success": True, "status": status, "start": False, "error": None}
+
+    try:
+        from app.tools.publish_site.stripe_payments import retrieve_session
+
+        sess = await retrieve_session(session_id)
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "status": status, "start": False,
+                "error": f"決済の確認に失敗しました: {str(e)[:200]}"}
+    if not sess.get("paid"):
+        return {"success": False, "status": status, "start": False,
+                "error": "決済がまだ完了していません"}
+    if (sess.get("metadata") or {}).get("token") != token:
+        return {"success": False, "status": status, "start": False,
+                "error": "決済情報が一致しません"}
+
+    setup["status"] = "registering"
+    setup["paid_at"] = datetime.now(timezone.utc).isoformat()
+    setup["stripe_session_id"] = session_id
+    setup["last_error"] = None
+    svc.supabase.table(svc.table).update({"domain_setup": setup}).eq(
+        "id", artifact["id"]
+    ).execute()
+    return {"success": True, "status": "registering", "start": True, "error": None}
+
+
+async def run_paid_registration(token: str) -> None:
+    """決済済みドメインの取得〜公開を実行する (バックグラウンドタスク)。
+
+    運営者の Cloudflare でドメインを取得し、Vercel 紐付け・DNS・SEO・Search Console
+    申請まで自動実行する。クライアント側の操作は不要。
+    """
+    svc = ChatArtifactService()
+    artifact = await svc.get_by_domain_setup_token(token)
+    if artifact is None:
+        return
     setup = dict(artifact.get("domain_setup") or {})
     domain = setup.get("domain")
+    slug = setup.get("slug")
     artifact_id = artifact["id"]
-    vercel_project = setup.get("vercel_project") or DEFAULT_VERCEL_PROJECT
 
-    if not domain:
-        return {
-            "found": True, "status": "failed", "verified": False,
-            "detail": "ドメイン情報が登録されていません", "setup": setup,
-        }
-
-    def _save() -> None:
-        svc.supabase.table(svc.table).update({"domain_setup": setup}).eq(
-            "id", artifact_id
-        ).execute()
-
-    # 1. Vercel に紐付け + DNS 構成チェック
-    #    ホスティングは運営者の Vercel アカウントが全テナント分を提供する。
     try:
-        vercel = await get_vercel()
-        try:
-            await vercel.add_domain_to_project(vercel_project, domain)
-        except VercelError as e:
-            if e.status != 409:  # 409 = 既に紐付け済み
-                raise
-        config = await vercel.get_domain_config(domain)
+        result = await publish_with_custom_domain(
+            artifact_id=artifact_id,
+            domain=domain,
+            vercel_project=setup.get("vercel_project") or DEFAULT_VERCEL_PROJECT,
+            artifact_dir=f"frontend/src/app/artifacts/{slug}" if slug else None,
+            write_seo_files=True,
+            user_id=None,  # 運営者の Cloudflare / Vercel を使う
+        )
+        ok, err = result.success, result.error
     except Exception as e:  # noqa: BLE001
-        setup["last_error"] = str(e)[:300]
-        _save()
-        return {
-            "found": True, "status": setup.get("status", "pending"), "verified": False,
-            "detail": f"接続確認でエラーが発生しました: {str(e)[:200]}", "setup": setup,
-        }
+        ok, err = False, repr(e)
 
-    if config.get("misconfigured", True):
-        setup["status"] = "dns_pending"
+    latest = await svc.get_by_domain_setup_token(token)
+    setup = dict((latest or {}).get("domain_setup") or setup)
+    if ok:
+        setup["status"] = "live"
+        setup["verified_at"] = datetime.now(timezone.utc).isoformat()
         setup["last_error"] = None
-        _save()
-        return {
-            "found": True, "status": "dns_pending", "verified": False,
-            "detail": (
-                "DNSの設定がまだ反映されていません。"
-                "レコードを設定済みの場合、反映に数分〜数十分かかることがあります。"
-                "少し待ってからもう一度「接続を確認」を押してください。"
-            ),
-            "setup": setup,
-        }
-
-    # 2. DNS OK → 公開を確定 + Search Console 申請
-    base_url = f"https://{domain}"
-    try:
-        from app.tools.publish_site.search_console import verify_and_submit
-
-        sc_result = await verify_and_submit(domain, f"{base_url}/sitemap.xml")
-    except Exception as e:  # noqa: BLE001
-        sc_result = {
-            "configured": True, "verified": False, "sitemap_submitted": False,
-            "detail": f"Search Console 申請でエラー: {str(e)[:200]}",
-        }
-
-    setup["status"] = "live"
-    setup["verified_at"] = datetime.now(timezone.utc).isoformat()
-    setup["last_error"] = None
-    setup["search_console"] = sc_result
-
-    svc.supabase.table(svc.table).update(
-        {
-            "custom_domain": domain,
-            "production_url": base_url,
-            "publish_status": "live",
-            "delivery_status": "delivered",
-            "delivery_mode": "client_domain",
-            "last_publish_error": None,
-            "domain_setup": setup,
-        }
-    ).eq("id", artifact_id).execute()
-
-    if sc_result.get("sitemap_submitted"):
-        detail = "ドメインを接続し、Google検索への登録（sitemap申請）まで完了しました。"
-    elif sc_result.get("configured"):
-        detail = "ドメインを接続しました。検索登録は申請を試みましたが一部未完了です。"
     else:
-        detail = "ドメインを接続しました。サイトは公開済みです。"
-
-    return {
-        "found": True, "status": "live", "verified": True,
-        "production_url": base_url, "detail": detail, "setup": setup,
-    }
+        setup["status"] = "failed"
+        setup["last_error"] = err
+    svc.supabase.table(svc.table).update({"domain_setup": setup}).eq(
+        "id", artifact_id
+    ).execute()

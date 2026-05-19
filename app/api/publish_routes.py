@@ -8,6 +8,7 @@ create_feature の自動生成 CRUD は本機能の構造と合わないため�
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -17,26 +18,29 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.models.publish_schemas import (
     DeliveryUrlRequest,
     DeliveryUrlResponse,
-    DnsRecordDTO,
     DomainCheckCandidate,
     DomainCheckRequest,
     DomainCheckResponse,
+    DomainCheckoutRequest,
+    DomainCheckoutResponse,
     DomainSetupCreateRequest,
     DomainSetupResponse,
+    PaymentConfirmRequest,
     PublishRequest,
     PublishResponse,
     PublishStepDTO,
-    RegistrarLinkDTO,
 )
 from app.services.auth_service import TokenData, decode_access_token
 from app.services.chat_artifact_service import ChatArtifactService
 from app.tools.publish_site.orchestrator import (
     check_domain,
+    confirm_domain_payment,
+    create_domain_checkout,
     create_domain_setup,
     get_domain_setup_state,
     issue_dedicated_delivery_url,
     publish_with_custom_domain,
-    verify_domain_setup,
+    run_paid_registration,
 )
 
 logger = logging.getLogger(__name__)
@@ -136,12 +140,14 @@ async def delivery_url(
 
 
 # ============================================
-# クライアント所有ドメインの案内フロー
+# クライアント向けドメイン取得の案内フロー（Stripe 決済）
 # ============================================
 #
-# /domain-setup        : オーナーが案内URLを発行 (要認証)
-# /domain-setup/{token}: クライアントが状態取得 (公開・認証なし)
-# .../{token}/verify   : クライアントが DNS 設定後に接続確認 (公開・認証なし)
+# /domain-setup            : オーナーが案内URLを発行 (要認証)
+# /domain-setup/{token}    : クライアントが状態取得 (公開・認証なし)
+# .../{token}/checkout     : クライアントが決済ページへ進む (公開・認証なし)
+# .../{token}/confirm      : 決済完了 → ドメイン取得・公開を開始 (公開・認証なし)
+# /custom-domains          : middleware 用のドメイン→artifact マップ (公開・認証なし)
 
 
 def _setup_to_response(
@@ -151,8 +157,8 @@ def _setup_to_response(
     artifact_id: Optional[str] = None,
     artifact_label: Optional[str] = None,
     setup: Optional[dict] = None,
+    price: Optional[str] = None,
     production_url: Optional[str] = None,
-    verified: bool = False,
     detail: Optional[str] = None,
     error: Optional[str] = None,
 ) -> DomainSetupResponse:
@@ -166,12 +172,9 @@ def _setup_to_response(
         artifact_label=artifact_label,
         domain=setup.get("domain"),
         status=setup.get("status"),
-        availability=setup.get("availability"),
-        registrar_links=[RegistrarLinkDTO(**r) for r in setup.get("registrar_links", [])],
-        dns_records=[DnsRecordDTO(**r) for r in setup.get("dns_records", [])],
+        price=price,
         production_url=production_url,
-        verified=verified,
-        detail=detail,
+        detail=detail or setup.get("last_error"),
         error=error,
     )
 
@@ -181,7 +184,7 @@ async def domain_setup_create(
     data: DomainSetupCreateRequest,
     user: TokenData = Depends(get_current_user),
 ):
-    """クライアント向けドメイン設定の案内URLを発行する (オーナー操作)。"""
+    """クライアント向けドメイン取得の案内URLを発行する (オーナー操作)。"""
     try:
         result = await create_domain_setup(
             artifact_id=data.artifact_id,
@@ -198,6 +201,7 @@ async def domain_setup_create(
         artifact_id=data.artifact_id,
         artifact_label=result["artifact_label"],
         setup=result["setup"],
+        price=result.get("price"),
     )
 
 
@@ -207,16 +211,60 @@ async def domain_setup_get(token: str):
     state = await get_domain_setup_state(token)
     if state is None:
         return DomainSetupResponse(success=False, error="案内ページが見つかりません")
-    setup = state["setup"]
     return _setup_to_response(
         success=True,
         token=token,
         artifact_id=state["artifact_id"],
         artifact_label=state["artifact_label"],
-        setup=setup,
+        setup=state["setup"],
+        price=state.get("price"),
         production_url=state.get("production_url"),
-        verified=(setup.get("status") == "live"),
-        detail=setup.get("last_error"),
+    )
+
+
+@router.post("/domain-setup/{token}/checkout", response_model=DomainCheckoutResponse)
+async def domain_setup_checkout(token: str, data: DomainCheckoutRequest):
+    """クライアントが決済ページ (Stripe Checkout) へ進む (公開・認証なし)。"""
+    try:
+        result = await create_domain_checkout(token, return_origin=data.return_origin)
+    except Exception as e:
+        logger.exception("create_domain_checkout failed")
+        return DomainCheckoutResponse(success=False, error=str(e))
+    return DomainCheckoutResponse(
+        success=result.get("success", False),
+        checkout_url=result.get("checkout_url"),
+        error=result.get("error"),
+    )
+
+
+@router.post("/domain-setup/{token}/confirm", response_model=DomainSetupResponse)
+async def domain_setup_confirm(token: str, data: PaymentConfirmRequest):
+    """決済完了の確認 → ドメイン取得・公開を開始する (公開・認証なし)。"""
+    try:
+        res = await confirm_domain_payment(token, data.session_id)
+    except Exception as e:
+        logger.exception("confirm_domain_payment failed")
+        return DomainSetupResponse(success=False, token=token, error=str(e))
+
+    if res.get("start"):
+        # 取得〜公開は数分かかるためバックグラウンド実行。ページはポーリングで追う。
+        asyncio.create_task(run_paid_registration(token))
+
+    state = await get_domain_setup_state(token)
+    if state is None:
+        return DomainSetupResponse(
+            success=res.get("success", False), token=token, error=res.get("error")
+        )
+    return _setup_to_response(
+        success=res.get("success", False),
+        token=token,
+        artifact_id=state["artifact_id"],
+        artifact_label=state["artifact_label"],
+        setup=state["setup"],
+        price=state.get("price"),
+        production_url=state.get("production_url"),
+        detail=res.get("error"),
+        error=None if res.get("success") else res.get("error"),
     )
 
 
@@ -233,25 +281,3 @@ async def custom_domains_map():
         logger.warning("custom-domains map failed: %s", e)
         mapping = {}
     return {"map": mapping}
-
-
-@router.post("/domain-setup/{token}/verify", response_model=DomainSetupResponse)
-async def domain_setup_verify(token: str):
-    """クライアントが DNS 設定後に押す接続確認 (公開・認証なし)。"""
-    try:
-        result = await verify_domain_setup(token)
-    except Exception as e:
-        logger.exception("verify_domain_setup failed")
-        return DomainSetupResponse(success=False, token=token, error=str(e))
-    if not result.get("found"):
-        return DomainSetupResponse(
-            success=False, token=token, error=result.get("detail", "見つかりません")
-        )
-    return _setup_to_response(
-        success=True,
-        token=token,
-        setup=result.get("setup"),
-        production_url=result.get("production_url"),
-        verified=result.get("verified", False),
-        detail=result.get("detail"),
-    )
