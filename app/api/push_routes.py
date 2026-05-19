@@ -74,7 +74,7 @@ async def send_test_notification(current_user: TokenData = Depends(get_current_u
         room_id=f"user:{current_user.user_id}",
         exclude_type="ai",
         title="Dan",
-        body="通知テストです。Dan の作業完了通知を受け取れます。",
+        body="通知テストです。Danの作業完了通知を受け取れます。",
         url="/settings",
     )
     if result["sent"] == 0:

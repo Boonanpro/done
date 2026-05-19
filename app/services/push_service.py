@@ -109,6 +109,8 @@ class PushService:
             "title": title,
             "body": body,
             "sound": "default",
+            "priority": "high",
+            "channelId": "default",
             "data": {"url": url},
         }).encode("utf-8")
         req = urllib.request.Request(

@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   BackHandler,
   FlatList,
   Image,
@@ -60,6 +61,8 @@ type ProjectResponse = {
   room_id?: string | null;
   summary?: string | null;
   icon?: string | null;
+  unread_count?: number;
+  last_message_at?: string | null;
   updated_at?: string | null;
   created_at: string;
 };
@@ -173,7 +176,7 @@ function formatTime(value?: string | null) {
 }
 
 function projectTime(project: ProjectResponse) {
-  return project.updated_at || project.created_at;
+  return project.last_message_at || project.updated_at || project.created_at;
 }
 
 function normalizeUrl(raw: string) {
@@ -424,7 +427,27 @@ export default function App() {
     [messages],
   );
 
+  const unreadTotal = useMemo(
+    () => projects.reduce((total, project) => total + (project.unread_count || 0), 0),
+    [projects],
+  );
+
   const headerTitle = currentProject?.title || 'DAN';
+
+  const markProjectReadLocally = useCallback((projectId: string) => {
+    setProjects((current) =>
+      current.map((project) =>
+        project.id === projectId ? { ...project, unread_count: 0 } : project,
+      ),
+    );
+  }, []);
+
+  const syncNotificationBadge = useCallback(async (count: number) => {
+    await Notifications.setBadgeCountAsync(count).catch(() => null);
+    if (count === 0) {
+      await Notifications.dismissAllNotificationsAsync().catch(() => null);
+    }
+  }, []);
 
   const refreshProjects = useCallback(async (activeToken: string) => {
     setLoadingProjects(true);
@@ -477,6 +500,10 @@ export default function App() {
         );
         setMessages(data.messages ?? []);
         await apiRequest(`/chat/rooms/${project.room_id}/read`, { method: 'POST' }, activeToken).catch(() => null);
+        setCurrentProject((current) =>
+          current?.id === project.id ? { ...current, unread_count: 0 } : current,
+        );
+        markProjectReadLocally(project.id);
         return project;
       } catch (error) {
         Alert.alert('Load failed', String((error as Error).message));
@@ -485,7 +512,7 @@ export default function App() {
         setLoadingMessages(false);
       }
     },
-    [refreshArtifacts],
+    [markProjectReadLocally, refreshArtifacts],
   );
 
   const loadInitialData = useCallback(
@@ -500,6 +527,63 @@ export default function App() {
     },
     [refreshProjects],
   );
+
+  const openProjectFromNotificationUrl = useCallback(
+    async (url?: unknown) => {
+      if (!token || typeof url !== 'string') return;
+      await syncNotificationBadge(0);
+      const match = url.match(/\/chat\/([^/?#]+)/);
+      const projectId = match?.[1];
+      if (!projectId) {
+        await refreshProjects(token).catch(() => null);
+        setScreen('projects');
+        return;
+      }
+      setScreen('chat');
+      setDrawerOpen(false);
+      await loadProjectMessages(token, projectId);
+      await refreshProjects(token).catch(() => null);
+    },
+    [loadProjectMessages, refreshProjects, syncNotificationBadge, token],
+  );
+
+  useEffect(() => {
+    void syncNotificationBadge(unreadTotal);
+  }, [syncNotificationBadge, unreadTotal]);
+
+  useEffect(() => {
+    if (!token) return;
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        refreshProjects(token).catch(() => null);
+      }
+    });
+    return () => subscription.remove();
+  }, [refreshProjects, token]);
+
+  useEffect(() => {
+    if (!token) return;
+
+    const received = Notifications.addNotificationReceivedListener(() => {
+      refreshProjects(token).catch(() => null);
+    });
+    const response = Notifications.addNotificationResponseReceivedListener((event) => {
+      void openProjectFromNotificationUrl(event.notification.request.content.data?.url);
+    });
+
+    Notifications.getLastNotificationResponseAsync()
+      .then((event) => {
+        if (event) {
+          void openProjectFromNotificationUrl(event.notification.request.content.data?.url);
+        }
+      })
+      .catch(() => null);
+
+    return () => {
+      received.remove();
+      response.remove();
+    };
+  }, [openProjectFromNotificationUrl, refreshProjects, token]);
 
   useEffect(() => {
     let alive = true;
@@ -622,6 +706,15 @@ export default function App() {
     }
 
     try {
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('default', {
+          name: 'DAN',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#f4f0e8',
+        });
+      }
+
       const current = await Notifications.getPermissionsAsync();
       let finalStatus = current.status;
       if (finalStatus !== 'granted') {
@@ -857,6 +950,11 @@ export default function App() {
               {user?.email}
             </Text>
           </View>
+          {unreadTotal > 0 ? (
+            <View style={styles.headerUnreadBadge}>
+              <Text style={styles.headerUnreadText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
+            </View>
+          ) : null}
           <Pressable
             disabled={loadingProjects}
             onPress={handleRefreshProjectList}
@@ -904,6 +1002,13 @@ export default function App() {
                   {item.summary || item.description || 'No summary yet'}
                 </Text>
               </View>
+              {(item.unread_count || 0) > 0 ? (
+                <View style={styles.unreadBadge}>
+                  <Text style={styles.unreadBadgeText}>
+                    {(item.unread_count || 0) > 99 ? '99+' : item.unread_count}
+                  </Text>
+                </View>
+              ) : null}
             </Pressable>
           )}
         />
@@ -977,6 +1082,11 @@ export default function App() {
               {user?.email}
             </Text>
           </View>
+          {unreadTotal > 0 ? (
+            <Pressable onPress={() => setScreen('projects')} style={styles.headerUnreadBadge}>
+              <Text style={styles.headerUnreadText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
+            </Pressable>
+          ) : null}
           <Pressable
             disabled={loadingMessages || !token || !currentProjectId}
             onPress={() => token && currentProjectId && loadProjectMessages(token, currentProjectId)}
@@ -1113,6 +1223,13 @@ export default function App() {
                     {project.summary || project.description || 'No summary yet'}
                   </Text>
                   <Text style={styles.projectTime}>{formatTime(projectTime(project))}</Text>
+                  {(project.unread_count || 0) > 0 ? (
+                    <View style={styles.drawerUnreadBadge}>
+                      <Text style={styles.unreadBadgeText}>
+                        {(project.unread_count || 0) > 99 ? '99+' : project.unread_count}
+                      </Text>
+                    </View>
+                  ) : null}
                 </Pressable>
               ))}
             </ScrollView>
@@ -1335,6 +1452,34 @@ const styles = StyleSheet.create({
     color: '#f4f0e8',
     fontSize: 14,
     fontWeight: '800',
+  },
+  headerUnreadBadge: {
+    alignItems: 'center',
+    backgroundColor: '#ff5a3d',
+    borderRadius: 14,
+    minWidth: 28,
+    height: 28,
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  headerUnreadText: {
+    color: '#fffaf5',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  unreadBadge: {
+    alignItems: 'center',
+    backgroundColor: '#ff5a3d',
+    borderRadius: 13,
+    minWidth: 26,
+    height: 26,
+    justifyContent: 'center',
+    paddingHorizontal: 7,
+  },
+  unreadBadgeText: {
+    color: '#fffaf5',
+    fontSize: 11,
+    fontWeight: '900',
   },
   artifactTabs: {
     alignItems: 'center',
@@ -1586,6 +1731,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     marginBottom: 8,
     padding: 12,
+    position: 'relative',
   },
   projectItemActive: {
     borderColor: '#f4f0e8',
@@ -1605,6 +1751,18 @@ const styles = StyleSheet.create({
     color: '#7c766f',
     fontSize: 11,
     marginTop: 7,
+  },
+  drawerUnreadBadge: {
+    alignItems: 'center',
+    backgroundColor: '#ff5a3d',
+    borderRadius: 12,
+    minWidth: 24,
+    height: 24,
+    justifyContent: 'center',
+    paddingHorizontal: 7,
+    position: 'absolute',
+    right: 10,
+    top: 10,
   },
   drawerFooter: {
     borderTopColor: '#282520',

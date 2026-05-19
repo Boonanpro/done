@@ -89,6 +89,91 @@ class ProjectService:
     def __init__(self):
         self.supabase = get_supabase_client().client
 
+    @staticmethod
+    def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def _enrich_project_read_state(self, project: dict, user_id: str) -> dict:
+        """Attach unread metadata for a project-backed chat room."""
+        enriched = dict(project)
+        room_id = enriched.get("room_id")
+        enriched["unread_count"] = 0
+        enriched["last_message_at"] = None
+        if not room_id:
+            return enriched
+
+        try:
+            member = (
+                self.supabase.table("chat_room_members")
+                .select("unread_count")
+                .eq("room_id", room_id)
+                .eq("user_id", user_id)
+                .limit(1)
+                .execute()
+            )
+            if member.data:
+                enriched["unread_count"] = member.data[0].get("unread_count") or 0
+
+            room = (
+                self.supabase.table("chat_rooms")
+                .select("last_message_at,updated_at")
+                .eq("id", room_id)
+                .limit(1)
+                .execute()
+            )
+            if room.data:
+                enriched["last_message_at"] = room.data[0].get("last_message_at") or room.data[0].get("updated_at")
+        except Exception as exc:
+            logger.debug("Project unread enrichment skipped (project=%s): %s", enriched.get("id"), exc)
+        return enriched
+
+    def _enrich_projects_read_state(self, projects: list[dict], user_id: str) -> list[dict]:
+        """Attach unread metadata for many projects without reading chat_messages."""
+        enriched = []
+        room_ids = [project.get("room_id") for project in projects if project.get("room_id")]
+        if not room_ids:
+            return [self._enrich_project_read_state(project, user_id) for project in projects]
+
+        member_by_room: dict[str, dict] = {}
+        latest_by_room: dict[str, str] = {}
+
+        try:
+            members = (
+                self.supabase.table("chat_room_members")
+                .select("room_id,unread_count")
+                .eq("user_id", user_id)
+                .in_("room_id", room_ids)
+                .execute()
+            )
+            member_by_room = {row["room_id"]: row for row in (members.data or [])}
+
+            rooms = (
+                self.supabase.table("chat_rooms")
+                .select("id,last_message_at,updated_at")
+                .in_("id", room_ids)
+                .execute()
+            )
+            latest_by_room = {
+                row["id"]: row.get("last_message_at") or row.get("updated_at")
+                for row in (rooms.data or [])
+            }
+        except Exception as exc:
+            logger.debug("Batch project unread enrichment skipped: %s", exc)
+            return [self._enrich_project_read_state(project, user_id) for project in projects]
+
+        for project in projects:
+            item = dict(project)
+            room_id = item.get("room_id")
+            item["unread_count"] = (member_by_room.get(room_id) or {}).get("unread_count") or 0
+            item["last_message_at"] = latest_by_room.get(room_id)
+            enriched.append(item)
+        return enriched
+
     # ==================== Projects ====================
 
     async def create_project(
@@ -140,7 +225,7 @@ class ProjectService:
         if not result.data:
             raise ValueError("Failed to create project")
 
-        return result.data[0]
+        return self._enrich_project_read_state(result.data[0], user_id)
 
     async def get_project(self, project_id: str, user_id: str) -> Optional[dict]:
         """プロジェクトを取得（所有者チェック付き）"""
@@ -151,7 +236,9 @@ class ProjectService:
             .eq("user_id", user_id)
             .execute()
         )
-        return result.data[0] if result.data else None
+        if not result.data:
+            return None
+        return self._enrich_project_read_state(result.data[0], user_id)
 
     async def list_projects(
         self,
@@ -168,7 +255,7 @@ class ProjectService:
             query = query.eq("status", status)
 
         result = query.order("updated_at", desc=True).execute()
-        return result.data or []
+        return self._enrich_projects_read_state(result.data or [], user_id)
 
     async def update_project(
         self,
@@ -193,7 +280,9 @@ class ProjectService:
             .eq("user_id", user_id)
             .execute()
         )
-        return result.data[0] if result.data else None
+        if not result.data:
+            return None
+        return self._enrich_project_read_state(result.data[0], user_id)
 
     async def delete_project(self, project_id: str, user_id: str) -> bool:
         """プロジェクトを削除"""

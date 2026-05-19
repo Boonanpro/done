@@ -177,7 +177,6 @@ export function Sidebar({
   const filteredProjects = projectsData?.projects?.filter((p) =>
     p.title.toLowerCase().includes(searchQuery.toLowerCase())
   ) ?? [];
-
   const handleProjectClick = (project: ProjectResponse) => {
     if (project.id === selectedProjectId) {
       selectProject(null);
@@ -400,9 +399,14 @@ export function Sidebar({
                                 <div className="flex-1 min-w-0">
                                   <p className="truncate">{project.title}</p>
                                   <p className="text-xs text-muted-foreground truncate">
-                                    {formatRelativeTime(project.updated_at || project.created_at)}
+                                    {formatRelativeTime(project.last_message_at || project.updated_at || project.created_at)}
                                   </p>
                                 </div>
+                                {(project.unread_count || 0) > 0 && (
+                                  <span className="shrink-0 min-w-5 h-5 px-1.5 rounded-full bg-red-500 text-[10px] font-bold leading-5 text-white text-center">
+                                    {project.unread_count > 99 ? '99+' : project.unread_count}
+                                  </span>
+                                )}
                                 <button
                                   className="shrink-0 p-0.5 rounded transition-opacity opacity-0 group-hover:opacity-100"
                                   onClick={(e) => handleStartEdit(e, project)}
@@ -462,8 +466,14 @@ export function Sidebar({
                           isCollapsed && 'justify-center px-0'
                         )}
                       >
-                        <Icon className="h-4 w-4 shrink-0" />
-                        {!isCollapsed && <span>{item.title}</span>}
+                        <div className="relative shrink-0">
+                          <Icon className="h-4 w-4" />
+                        </div>
+                        {!isCollapsed && (
+                          <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
+                            <span className="truncate">{item.title}</span>
+                          </span>
+                        )}
                       </motion.div>
                     </Link>
                   </TooltipTrigger>

@@ -1388,6 +1388,17 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: (query) => (query.state.error ? 15000 : 3000),
   });
 
+  const latestMessageId = messagesData?.messages?.[0]?.id;
+
+  useEffect(() => {
+    if (!project?.room_id) return;
+    api.rooms.markAsRead(project.room_id)
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ['projects'] });
+      })
+      .catch(() => null);
+  }, [latestMessageId, project?.room_id, queryClient]);
+
   const { data: activeStatus } = useQuery({
     queryKey: ['session-active', project?.room_id],
     queryFn: () => api.sm.getActiveStatus(project!.room_id!),

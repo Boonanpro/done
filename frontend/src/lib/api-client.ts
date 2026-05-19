@@ -337,6 +337,8 @@ export interface ProjectResponse {
   summary: string | null;
   icon: string | null;
   metadata: Record<string, unknown> | null;
+  unread_count: number;
+  last_message_at: string | null;
   created_at: string;
   updated_at: string | null;
 }

@@ -306,7 +306,7 @@ async def _notify_dan_completion(
 
         body = _compact_text(final_text, 120) if final_text else ""
         if not body:
-            body = "Dan の作業が完了しました"
+            body = "Danの作業が完了しました"
         url = f"/chat/{project_id}" if project_id else "/chat"
         svc = get_push_service()
         await svc.notify_room(

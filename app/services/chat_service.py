@@ -442,6 +442,34 @@ class ChatService:
         raise ValueError("Failed to add member")
     
     # ==================== Message Management ====================
+
+    async def _record_message_delivery(self, room_id: str, message_id: str, sender_id: Optional[str] = None) -> None:
+        """Update room/member read state after a message is inserted."""
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            self.supabase.table("chat_rooms").update({
+                "last_message_at": now,
+            }).eq("id", room_id).execute()
+
+            members = self.supabase.table("chat_room_members").select(
+                "id,user_id,unread_count"
+            ).eq("room_id", room_id).execute()
+
+            for member in members.data or []:
+                if sender_id and member.get("user_id") == sender_id:
+                    self.supabase.table("chat_room_members").update({
+                        "last_read_at": now,
+                        "last_read_message_id": message_id,
+                        "unread_count": 0,
+                    }).eq("id", member["id"]).execute()
+                    continue
+
+                current = member.get("unread_count") or 0
+                self.supabase.table("chat_room_members").update({
+                    "unread_count": current + 1,
+                }).eq("id", member["id"]).execute()
+        except Exception as exc:
+            self.logger.warning("Unread counter update failed: %s", exc)
     
     async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human", reply_to_id: str = None) -> dict:
         """Send a message to a room"""
@@ -478,6 +506,7 @@ class ChatService:
         if result.data:
             msg = result.data[0]
             msg["sender_name"] = sender_name
+            await self._record_message_delivery(room_id, msg["id"], sender_id=sender_id)
             
             # Phase 5A: メッセージ検知フック（AI有効ルームのみ）
             if sender_type == "human":
@@ -608,9 +637,17 @@ class ChatService:
     
     async def mark_as_read(self, room_id: str, user_id: str) -> bool:
         """Mark messages as read"""
-        result = self.supabase.table("chat_room_members").update({
+        latest = self.supabase.table("chat_messages").select("id").eq(
+            "room_id", room_id
+        ).order("created_at", desc=True).limit(1).execute()
+        update_data = {
             "last_read_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("room_id", room_id).eq("user_id", user_id).execute()
+            "unread_count": 0,
+        }
+        if latest.data:
+            update_data["last_read_message_id"] = latest.data[0]["id"]
+
+        result = self.supabase.table("chat_room_members").update(update_data).eq("room_id", room_id).eq("user_id", user_id).execute()
         
         return bool(result.data)
     
@@ -829,24 +866,18 @@ class ChatService:
         room_id = room["id"]
         
         # 未読メッセージ数を取得
-        member = self.supabase.table("chat_room_members").select("last_read_at").eq("room_id", room_id).eq("user_id", user_id).execute()
-        last_read_at = member.data[0]["last_read_at"] if member.data else None
-        
-        unread_count = 0
-        if last_read_at:
-            unread = self.supabase.table("chat_messages").select("id", count="exact").eq("room_id", room_id).gt("created_at", last_read_at).execute()
-            unread_count = unread.count or 0
-        else:
-            unread = self.supabase.table("chat_messages").select("id", count="exact").eq("room_id", room_id).execute()
-            unread_count = unread.count or 0
+        member = self.supabase.table("chat_room_members").select("unread_count").eq("room_id", room_id).eq("user_id", user_id).execute()
+        unread_count = member.data[0].get("unread_count", 0) if member.data else 0
         
         # 保留中の提案数を取得
         pending = self.supabase.table("dan_proposals").select("id", count="exact").eq("user_id", user_id).eq("status", "pending").execute()
         pending_count = pending.count or 0
         
         # 最後のメッセージ日時
-        last_msg = self.supabase.table("chat_messages").select("created_at").eq("room_id", room_id).order("created_at", desc=True).limit(1).execute()
-        last_message_at = last_msg.data[0]["created_at"] if last_msg.data else None
+        room_state = self.supabase.table("chat_rooms").select("last_message_at,updated_at").eq("id", room_id).limit(1).execute()
+        last_message_at = None
+        if room_state.data:
+            last_message_at = room_state.data[0].get("last_message_at") or room_state.data[0].get("updated_at")
         
         return {
             "id": room_id,
@@ -924,6 +955,7 @@ class ChatService:
         if result.data:
             msg = result.data[0]
             msg["sender_name"] = "ダン"
+            await self._record_message_delivery(target_room_id, msg["id"])
             return msg
         raise ValueError("Failed to send AI message")
     

@@ -56,6 +56,8 @@ class ProjectResponse(BaseModel):
     summary: Optional[str] = None
     icon: Optional[str] = None
     metadata: Optional[dict] = None
+    unread_count: int = 0
+    last_message_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
