@@ -89,20 +89,8 @@ class DomainSetupCreateRequest(BaseModel):
     vercel_project: str = "frontend"
 
 
-class DnsRecordDTO(BaseModel):
-    type: str  # A / CNAME / TXT
-    name: str  # @ / www など
-    value: str
-    purpose: str = ""  # 何のためのレコードかをクライアントに説明する
-
-
-class RegistrarLinkDTO(BaseModel):
-    label: str
-    url: str
-
-
 class DomainSetupResponse(BaseModel):
-    """案内フローの状態。create / get / verify で共通利用する。"""
+    """案内フローの状態 (create / get / confirm で共通)。"""
 
     success: bool
     token: Optional[str] = None
@@ -110,11 +98,23 @@ class DomainSetupResponse(BaseModel):
     artifact_id: Optional[str] = None
     artifact_label: Optional[str] = None
     domain: Optional[str] = None
-    status: Optional[str] = None  # pending / dns_pending / live / failed
-    availability: Optional[dict[str, Any]] = None
-    registrar_links: list[RegistrarLinkDTO] = []
-    dns_records: list[DnsRecordDTO] = []
+    status: Optional[str] = None  # pending / registering / live / failed
+    price: Optional[str] = None  # ドメイン取得費用 (USD)
+    currency: str = "usd"
     production_url: Optional[str] = None
-    verified: bool = False
-    detail: Optional[str] = None
+    detail: Optional[str] = None  # 補足・エラーメッセージ
     error: Optional[str] = None
+
+
+class DomainCheckoutRequest(BaseModel):
+    return_origin: str = Field(..., description="決済後に戻るフロントエンドのオリジン")
+
+
+class DomainCheckoutResponse(BaseModel):
+    success: bool
+    checkout_url: Optional[str] = None
+    error: Optional[str] = None
+
+
+class PaymentConfirmRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, description="Stripe Checkout セッションID")
