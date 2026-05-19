@@ -13,7 +13,6 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
 import { copyToClipboard } from '@/lib/clipboard';
 import type { ArtifactRecord } from '@/stores/preview-store';
 import { artifactSharePath } from '@/lib/artifact-paths';
@@ -41,7 +40,6 @@ export function DeliveryModal({
   onUpdated,
   onRequestDomain,
 }: Props) {
-  const [notes, setNotes] = useState(artifact.handoff_notes || '');
   const [saving, setSaving] = useState(false);
   const sharePath = artifactSharePath(
     artifact.share_url || artifact.preview_url || artifact.slug,
@@ -80,7 +78,6 @@ export function DeliveryModal({
           delivery_mode: 'dedicated_url',
           target_audience: artifact.artifact_type === 'dashboard' ? 'internal' : 'client',
           requires_auth: artifact.artifact_type === 'dashboard',
-          handoff_notes: notes,
           production_url: finalUrl,
           delivery_checklist: { delivery_url: finalUrl, share_path: sharePath },
         }),
@@ -126,11 +123,6 @@ export function DeliveryModal({
           <Button variant="secondary" size="sm" onClick={copyUrl}>
             <Copy className="mr-1 h-3.5 w-3.5" /> URLをコピー
           </Button>
-          <Textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="メモ（任意）"
-          />
         </div>
 
         <DialogFooter>
