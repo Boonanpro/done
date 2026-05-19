@@ -647,6 +647,7 @@ async def run_paid_registration(token: str) -> None:
             vercel_project=setup.get("vercel_project") or DEFAULT_VERCEL_PROJECT,
             artifact_dir=f"frontend/src/app/artifacts/{slug}" if slug else None,
             write_seo_files=True,
+            auto_renew=False,  # 自動更新OFF: 入金なしに更新料が課金されるのを防ぐ
             dry_run=dry_run,
             user_id=None,  # 運営者の Cloudflare / Vercel を使う
         )
