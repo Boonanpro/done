@@ -449,10 +449,22 @@ def _normalize_domain(domain: str) -> str:
 
 
 def _setup_price(setup: dict[str, Any]) -> Optional[str]:
-    """setup から取得費用 (USD 文字列) を取り出す。"""
+    """客に提示・請求する価格 (USD 文字列) を返す。
+
+    Cloudflare 原価に Stripe 手数料分を上乗せした額。運営者の受取が原価を
+    下回らないようにするためで、利益は乗せていない。
+    """
     pricing = (((setup.get("availability") or {}).get("exact")) or {}).get("pricing") or {}
     cost = pricing.get("registration_cost")
-    return str(cost) if cost is not None else None
+    if cost is None:
+        return None
+    try:
+        from app.tools.publish_site.stripe_payments import gross_up_for_fee
+
+        cents = gross_up_for_fee(round(float(cost) * 100))
+    except (TypeError, ValueError):
+        return None
+    return f"{cents / 100:.2f}"
 
 
 async def create_domain_setup(
