@@ -203,8 +203,8 @@ export default function DomainSetupPage() {
   const dnsPending = data.status === 'dns_pending';
 
   return (
-    <main className="min-h-screen bg-slate-50 py-10 px-4">
-      <div className="mx-auto max-w-2xl space-y-5">
+    <main className="fixed inset-0 overflow-y-auto bg-slate-50">
+      <div className="mx-auto max-w-2xl space-y-5 px-4 py-10">
         {/* ヘッダー */}
         <header className="rounded-2xl bg-slate-900 p-6 text-white">
           <div className="flex items-center gap-2 text-sm text-slate-300">
