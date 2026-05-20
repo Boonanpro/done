@@ -416,6 +416,7 @@ class GeminiLiveRunner:
     ) -> None:
         """Insert turn messages into chat_messages table."""
         from app.services.supabase_client import get_supabase_client
+        from app.services.chat_service import record_message_delivery_sync
         supabase = get_supabase_client().client
 
         source = "text" if self.text_mode else "voice"
@@ -443,7 +444,14 @@ class GeminiLiveRunner:
             })
 
         for row in rows:
-            supabase.table("chat_messages").insert(row).execute()
+            result = supabase.table("chat_messages").insert(row).execute()
+            # Bump room members' unread for AI replies (mirrors what
+            # ChatService.send_ai_message does via _record_message_delivery).
+            # Without this, voice-mode AI turns don't mark rooms as unread.
+            if row.get("sender_type") == "ai" and result.data:
+                record_message_delivery_sync(
+                    supabase, room_id, result.data[0].get("id")
+                )
 
     async def _inject_into_agent_session(self, room_id: str, user_text: str, assistant_text: str) -> None:
         """Inject voice conversation into the Claude agent session for context continuity."""

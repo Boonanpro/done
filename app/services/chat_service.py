@@ -36,6 +36,48 @@ def generate_invite_code(length: int = 8) -> str:
     return secrets.token_urlsafe(length)[:length]
 
 
+def record_message_delivery_sync(
+    sb,
+    room_id: str,
+    message_id: Optional[str] = None,
+    sender_id: Optional[str] = None,
+) -> None:
+    """Sync analog of ``ChatService._record_message_delivery`` for callers that
+    insert into ``chat_messages`` directly (cli_runner, live_runner) and so
+    bypass the ChatService send paths.
+
+    Bumps ``chat_rooms.last_message_at`` and updates ``chat_room_members``
+    unread state. With ``sender_id=None`` (an AI reply) every member's
+    ``unread_count`` is incremented. Best-effort; failures are logged but
+    do not raise.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        sb.table("chat_rooms").update({"last_message_at": now}).eq("id", room_id).execute()
+
+        members = sb.table("chat_room_members").select(
+            "id,user_id,unread_count"
+        ).eq("room_id", room_id).execute()
+
+        for member in members.data or []:
+            if sender_id and member.get("user_id") == sender_id:
+                update_data: dict = {
+                    "last_read_at": now,
+                    "unread_count": 0,
+                }
+                if message_id:
+                    update_data["last_read_message_id"] = message_id
+                sb.table("chat_room_members").update(update_data).eq("id", member["id"]).execute()
+                continue
+
+            current = member.get("unread_count") or 0
+            sb.table("chat_room_members").update({
+                "unread_count": current + 1,
+            }).eq("id", member["id"]).execute()
+    except Exception as exc:
+        logging.getLogger(__name__).warning("record_message_delivery_sync failed: %s", exc)
+
+
 class ChatService:
     """Done Chat business logic"""
     
