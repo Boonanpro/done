@@ -14,7 +14,7 @@ const NAV_ITEMS = [
   { label: "採用情報", href: "/artifacts/kittoku/careers" },
 ];
 
-export function SiteNav() {
+export function SiteNav(_props: { homeHref?: string } = {}) {
   const [scrolled, setScrolled] = React.useState(false);
   const [open, setOpen] = React.useState(false);
 
