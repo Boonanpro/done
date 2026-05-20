@@ -65,10 +65,26 @@ const OPT = {
 };
 
 const SAMPLES = [
-  { key: 'bob_beige', label: 'ベージュのボブ', url: '/api/v1/files/sb_sample_bob_beige.png' },
-  { key: 'long_dark', label: '暗髪のロング', url: '/api/v1/files/sb_sample_long_dark.png' },
-  { key: 'mens_short', label: 'メンズショート', url: '/api/v1/files/sb_sample_mens_short.png' },
-  { key: 'hightone_short', label: 'ハイトーンボブ', url: '/api/v1/files/sb_sample_hightone_short.png' },
+  {
+    key: 'bob_beige',
+    label: 'ベージュのボブ',
+    url: 'https://omcnusihkpfyvzglttop.supabase.co/storage/v1/object/public/generated-images/generate/81a2f0f6-e504-4bfc-96bf-3f456527ee15.png',
+  },
+  {
+    key: 'long_dark',
+    label: '暗髪のロング',
+    url: 'https://omcnusihkpfyvzglttop.supabase.co/storage/v1/object/public/generated-images/generate/3e86dd7c-af0e-47ad-8f87-8b9139223833.png',
+  },
+  {
+    key: 'mens_short',
+    label: 'メンズショート',
+    url: 'https://omcnusihkpfyvzglttop.supabase.co/storage/v1/object/public/generated-images/generate/40b48d40-8132-4da4-9ae9-58748717058e.png',
+  },
+  {
+    key: 'hightone_short',
+    label: 'ハイトーンボブ',
+    url: 'https://omcnusihkpfyvzglttop.supabase.co/storage/v1/object/public/generated-images/generate/f720f85b-f03a-4695-9eeb-bcc73df8a459.png',
+  },
 ];
 
 const ANALYZE_MSGS = [
@@ -124,10 +140,31 @@ export default function SalonboardStyleupPage() {
         const j = (await res.json().catch(() => ({}))) as { detail?: string };
         throw new Error(j.detail || '写真の解析に失敗しました');
       }
-      const data = (await res.json()) as { fields: Fields };
+      const data = (await res.json()) as {
+        fields: Fields;
+        images?: Array<{ angle: string; confidence: number; reason: string }>;
+      };
       const wait = 3000 - (Date.now() - t0);
       if (wait > 0) await sleep(wait);
       setElapsed(Math.max(6, Math.round((Date.now() - t0) / 1000)));
+      const imgs = data.images ?? [];
+      if (imgs.length > 0) {
+        const used = new Set<number>();
+        const ordered: Photo[] = [];
+        for (const angle of ['front', 'side', 'back'] as const) {
+          const idx = imgs.findIndex(
+            (im, i) => im.angle === angle && !used.has(i),
+          );
+          if (idx >= 0 && items[idx]) {
+            ordered.push(items[idx]);
+            used.add(idx);
+          }
+        }
+        items.forEach((p, i) => {
+          if (!used.has(i)) ordered.push(p);
+        });
+        if (ordered.length > 0) setPhotos(ordered);
+      }
       setForm(data.fields);
       setStep('form');
     } catch (e) {
