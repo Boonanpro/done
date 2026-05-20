@@ -185,5 +185,19 @@
       "D:\\done\\app\\api\\publish_routes.py",
       "D:\\done\\app\\models\\publish_schemas.py"
     ]
+  },
+  "client_messaging": {
+    "name": "client_messaging",
+    "description": "Persistent client accounts + magic-link auth + friend-style direct chat for client communication",
+    "created_at": "2026-05-20T16:11:38.544735",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\055_client_messaging.sql",
+      "D:\\done\\app\\models\\client_messaging_schemas.py",
+      "D:\\done\\app\\services\\client_messaging_service.py",
+      "D:\\done\\app\\api\\client_messaging_routes.py",
+      "D:\\done\\frontend\\src\\app\\artifacts\\client-messaging\\page.tsx",
+      "D:\\done\\scripts\\seed_client_messaging.py"
+    ]
   }
 }
