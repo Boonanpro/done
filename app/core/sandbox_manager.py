@@ -194,8 +194,15 @@ class SandboxManager:
             "127.0.0.1",
             "--port",
             str(self.port),
-            "--reload",
         ]
+        # --reload is opt-in. On Windows the uvicorn reloader hits an asyncio
+        # AssertionError in ProactorEventLoop._attach during teardown and the
+        # whole process tree dies without auto-recovery (2026-05-19/20
+        # outages). For ordinary running we want a stable worker; code changes
+        # are picked up via the explicit POST /api/v1/sandbox/restart endpoint.
+        # For dev work where you want hot-reload, set DAN_SANDBOX_RELOAD=1.
+        if os.environ.get("DAN_SANDBOX_RELOAD", "").lower() in ("1", "true", "yes", "on"):
+            cmd.append("--reload")
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         env["DAN_SANDBOX_PORT"] = str(self.port)
 
