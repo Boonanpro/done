@@ -61,7 +61,8 @@ ANALYSIS_PROMPT = """あなたは美容室のヘアカタログ制作に精通�
   "face": {"value": "「設定しない」「丸型」「卵型」「四角」「逆三角」「ベース」「面長」のいずれか", "confidence": 0.0, "reason": ""},
   "style_name": {"value": "スタイル名(30字以内)", "confidence": 0.0, "reason": ""},
   "comment": {"value": "スタイル紹介コメント(120字以内)", "confidence": 0.0, "reason": ""},
-  "hashtags": {"value": ["ハッシュタグの配列。#は付けない。各20字以内。最大10個"], "confidence": 0.0, "reason": ""}
+  "hashtags": {"value": ["ハッシュタグの配列。#は付けない。各20字以内。最大10個"], "confidence": 0.0, "reason": ""},
+  "images": [{"angle": "「front」「side」「back」のいずれか", "confidence": 0.0, "reason": ""}]
 }
 
 # 判定ルール
@@ -81,6 +82,13 @@ ANALYSIS_PROMPT = """あなたは美容室のヘアカタログ制作に精通�
 - hashtags: ["ショートボブ", "ミルクティーベージュ", "小顔ショート", "透明感カラー", "大人可愛い"]
 
 写真が複数枚ある場合は、すべてを総合して判断してください。
+
+# 撮影角度の判定（images 配列）
+提供された各写真について、撮影角度を1枚ずつ判定し、images 配列に「写真の順番通り」に入れてください。
+- front: 顔が正面から見える写真
+- side: 横顔（顔のラインが横向き）が見える写真
+- back: 後ろ姿・後頭部が中心の写真
+写真が1枚なら images は1要素、3枚なら3要素にしてください。reason は判定理由を30字以内で書いてください。
 """
 
 
@@ -117,7 +125,14 @@ def _analyze_sync(images: list[tuple[bytes, str]]) -> str:
         genai_types.Part.from_bytes(data=data, mime_type=mime)
         for data, mime in images
     ]
-    parts.append(genai_types.Part(text=ANALYSIS_PROMPT))
+    n = len(images)
+    header = (
+        f"# 重要な前提\n"
+        f"このリクエストには合計 {n} 枚の写真が添付されています。\n"
+        f"後述の images 配列は必ず{n}要素返してください。i番目の要素は添付の i番目の写真に対する判定です。\n"
+        f"images 以外の項目（fields）は{n}枚の写真を総合的に判断して1セットだけ返してください。\n\n"
+    )
+    parts.append(genai_types.Part(text=header + ANALYSIS_PROMPT))
 
     logger.info("salonboard-styleup: analyzing %d image(s) with %s", len(images), MODEL)
     response = client.models.generate_content(
@@ -254,6 +269,10 @@ async def analyze_style_photos(files: list[UploadFile] = File(...)) -> dict:
         )
         raise HTTPException(status_code=502, detail="解析結果の読み取りに失敗しました")
 
+    # Gemini が複数写真の時に配列で返すことがあるため、最初のオブジェクトに正規化
+    if isinstance(data, list):
+        data = data[0] if data and isinstance(data[0], dict) else {}
+
     fields = {
         "category": _coerce_single(data.get("category"), CATEGORY_OPTIONS, "レディース"),
         "length": _coerce_single(data.get("length"), LENGTH_OPTIONS, "ミディアム"),
@@ -269,4 +288,25 @@ async def analyze_style_photos(files: list[UploadFile] = File(...)) -> dict:
         "hashtags": _coerce_tags(data.get("hashtags")),
     }
 
-    return {"success": True, "image_count": len(images), "fields": fields}
+    images_raw = data.get("images", [])
+    if not isinstance(images_raw, list):
+        images_raw = []
+    result_images: list[dict] = []
+    for img in images_raw[:MAX_IMAGES]:
+        if not isinstance(img, dict):
+            continue
+        angle = img.get("angle", "front")
+        if angle not in {"front", "side", "back"}:
+            angle = "front"
+        result_images.append({
+            "angle": angle,
+            "confidence": _clamp_confidence(img.get("confidence")),
+            "reason": str(img.get("reason", ""))[:60],
+        })
+
+    return {
+        "success": True,
+        "image_count": len(images),
+        "fields": fields,
+        "images": result_images,
+    }
