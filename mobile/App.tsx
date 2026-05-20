@@ -421,6 +421,12 @@ export default function App() {
   const [artifactView, setArtifactView] = useState<{ title: string; url: string } | null>(null);
   const [notificationStatus, setNotificationStatus] = useState('Off');
   const listRef = useRef<FlatList<MessageResponse>>(null);
+  // Live-tracking ref for the notification listener (which we don't want to
+  // re-subscribe on every project switch).
+  const currentProjectIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    currentProjectIdRef.current = currentProjectId;
+  }, [currentProjectId]);
 
   const token = auth.status === 'signed_in' ? auth.token : undefined;
   const user = auth.status === 'signed_in' ? auth.user : undefined;
@@ -447,6 +453,24 @@ export default function App() {
         project.id === projectId ? { ...project, unread_count: 0 } : project,
       ),
     );
+  }, []);
+
+  // Clear any OS-tray push notifications that belong to this project so the
+  // app-icon badge (which on Android reflects tray entries) drops as soon as
+  // the user reads the room — without having to tap the push in the
+  // notification center.
+  const dismissNotificationsForProject = useCallback(async (projectId: string) => {
+    try {
+      const presented = await Notifications.getPresentedNotificationsAsync();
+      for (const n of presented) {
+        const url = n.request.content.data?.url;
+        if (typeof url === 'string' && url.includes(`/chat/${projectId}`)) {
+          await Notifications.dismissNotificationAsync(n.request.identifier);
+        }
+      }
+    } catch {
+      // best-effort; ignore
+    }
   }, []);
 
   const syncNotificationBadge = useCallback(async (count: number) => {
@@ -511,6 +535,7 @@ export default function App() {
           current?.id === project.id ? { ...current, unread_count: 0 } : current,
         );
         markProjectReadLocally(project.id);
+        void dismissNotificationsForProject(project.id);
         return project;
       } catch (error) {
         Alert.alert('Load failed', String((error as Error).message));
@@ -519,7 +544,7 @@ export default function App() {
         setLoadingMessages(false);
       }
     },
-    [markProjectReadLocally, refreshArtifacts],
+    [dismissNotificationsForProject, markProjectReadLocally, refreshArtifacts],
   );
 
   const loadInitialData = useCallback(
@@ -577,8 +602,20 @@ export default function App() {
   useEffect(() => {
     if (!token) return;
 
-    const received = Notifications.addNotificationReceivedListener(() => {
+    const received = Notifications.addNotificationReceivedListener((event) => {
       refreshProjects(token).catch(() => null);
+      // If the push is for the room the user is currently viewing, reload its
+      // messages so the new reply appears without a manual refresh. The ref
+      // gives us the latest project id without making this effect re-subscribe
+      // on every project switch.
+      const url = event.request.content.data?.url;
+      if (typeof url === 'string') {
+        const match = url.match(/\/chat\/([^/?#]+)/);
+        const pid = match?.[1];
+        if (pid && pid === currentProjectIdRef.current) {
+          loadProjectMessages(token, pid).catch(() => null);
+        }
+      }
     });
     const response = Notifications.addNotificationResponseReceivedListener((event) => {
       void openProjectFromNotificationUrl(event.notification.request.content.data?.url);
@@ -596,7 +633,7 @@ export default function App() {
       received.remove();
       response.remove();
     };
-  }, [openProjectFromNotificationUrl, refreshProjects, token]);
+  }, [loadProjectMessages, openProjectFromNotificationUrl, refreshProjects, token]);
 
   // Restore the notification toggle state on launch. `notificationStatus` is
   // plain component state, so without this it always resets to 'Off'. The

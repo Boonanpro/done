@@ -400,15 +400,24 @@ class GeminiLiveRunner:
     async def _save_user_message_to_db(self, text: str) -> None:
         """Save a user message to chat_messages immediately (text mode)."""
         from app.services.supabase_client import get_supabase_client
+        from app.services.chat_service import record_message_delivery_sync
         supabase = get_supabase_client().client
 
-        supabase.table("chat_messages").insert({
+        result = supabase.table("chat_messages").insert({
             "room_id": self.session_id,
             "sender_id": self.user_id,
             "sender_type": "human",
             "content": text,
             "ai_context": {"source": "text", "provider": "gemini"},
         }).execute()
+        # Mirror ChatService.send_message: bump chat_rooms.last_message_at and
+        # reset the sender's own read state. Without this the projects list
+        # would keep showing the old last_message_at after a voice-text send.
+        if result.data:
+            record_message_delivery_sync(
+                supabase, self.session_id, result.data[0].get("id"),
+                sender_id=self.user_id,
+            )
 
     async def _save_to_chat_messages(
         self, room_id: str, user_text: str, assistant_text: str,
@@ -445,13 +454,16 @@ class GeminiLiveRunner:
 
         for row in rows:
             result = supabase.table("chat_messages").insert(row).execute()
-            # Bump room members' unread for AI replies (mirrors what
-            # ChatService.send_ai_message does via _record_message_delivery).
-            # Without this, voice-mode AI turns don't mark rooms as unread.
-            if row.get("sender_type") == "ai" and result.data:
-                record_message_delivery_sync(
-                    supabase, room_id, result.data[0].get("id")
-                )
+            if not result.data:
+                continue
+            # Mirror what ChatService.send_message / send_ai_message do via
+            # _record_message_delivery: AI turns (sender_id=None) bump every
+            # member's unread; human turns reset the sender's own state and
+            # bump everyone else. Either way last_message_at moves.
+            sender_id = row.get("sender_id") if row.get("sender_type") == "human" else None
+            record_message_delivery_sync(
+                supabase, room_id, result.data[0].get("id"), sender_id=sender_id,
+            )
 
     async def _inject_into_agent_session(self, room_id: str, user_text: str, assistant_text: str) -> None:
         """Inject voice conversation into the Claude agent session for context continuity."""
