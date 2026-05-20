@@ -212,6 +212,7 @@ def _save_ai_message_sync(
 ) -> bool:
     """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。成功=True。disconnect時は1度だけリトライ。"""
     from app.services.supabase_client import get_supabase_client
+    from app.services.chat_service import record_message_delivery_sync
 
     ai_context = None
     if reasoning_steps:
@@ -232,8 +233,14 @@ def _save_ai_message_sync(
             sb = get_supabase_client().client if attempt == 1 else _fresh_supabase_client()
             result = sb.table("chat_messages").insert(insert_data).execute()
             if result.data:
+                msg_id = result.data[0].get("id")
+                # Bump unread for room members so the sidebar/mobile show an
+                # indicator. This is the same bookkeeping ChatService.send_*
+                # does via _record_message_delivery; without it, AI replies
+                # stay invisible as "unread" because we bypass the service.
+                record_message_delivery_sync(sb, room_id, msg_id)
                 _cli_debug(
-                    f"_save_ai_message_sync OK (attempt {attempt}): msg_id={result.data[0].get('id', '?')}"
+                    f"_save_ai_message_sync OK (attempt {attempt}): msg_id={msg_id or '?'}"
                 )
                 return True
             _cli_debug(f"_save_ai_message_sync: insert returned no data (attempt {attempt})")
