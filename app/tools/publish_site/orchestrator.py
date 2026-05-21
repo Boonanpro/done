@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -55,7 +54,6 @@ REGISTRATION_POLL_TIMEOUT_SEC = 180
 DNS_VERIFY_POLL_INTERVAL_SEC = 5
 DNS_VERIFY_TIMEOUT_SEC = 180
 DEFAULT_VERCEL_PROJECT = "frontend"
-DEDICATED_ALIAS_SUFFIX = "-done.vercel.app"
 
 
 @dataclass
@@ -77,63 +75,10 @@ class PublishResult:
     pricing: Optional[dict[str, Any]] = None
 
 
-def _alias_slug(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9-]+", "-", value.lower()).strip("-")
-    slug = re.sub(r"-{2,}", "-", slug)
-    return slug[:45].strip("-") or "artifact"
-
-
-async def issue_dedicated_delivery_url(
-    *,
-    artifact_id: str,
-    slug: str,
-    user_id: Optional[str] = None,
-    vercel_project: str = DEFAULT_VERCEL_PROJECT,
-) -> dict[str, Any]:
-    """Issue a dedicated vercel.app URL for a non-website artifact.
-
-    The alias points to the latest production deployment. Middleware maps
-    ``<slug>-done.vercel.app`` to the artifact root.
-    """
-    vercel = await get_vercel(user_id)
-    deployments = await vercel.list_deployments(vercel_project, target="production", limit=1)
-    if not deployments:
-        raise RuntimeError("No production deployment is available for delivery URL")
-
-    deployment = deployments[0]
-    deployment_id = deployment.get("uid") or deployment.get("id")
-    if not deployment_id:
-        raise RuntimeError("Latest production deployment has no id")
-
-    base_slug = _alias_slug(slug)
-    candidates = [
-        f"{base_slug}{DEDICATED_ALIAS_SUFFIX}",
-        f"{base_slug}-{artifact_id[:8]}{DEDICATED_ALIAS_SUFFIX}",
-    ]
-    last_error: Exception | None = None
-    for alias in candidates:
-        try:
-            result = await vercel.assign_alias(deployment_id, alias)
-            url = f"https://{alias}"
-            svc = ChatArtifactService()
-            update_data = {
-                "production_url": url,
-                "publish_status": "delivery_live",
-                "delivery_status": "ready",
-                "delivery_mode": "dedicated_url",
-                "last_publish_error": None,
-            }
-            if user_id:
-                await svc.update(artifact_id, update_data, user_id)
-            else:
-                svc.supabase.table(svc.table).update(update_data).eq("id", artifact_id).execute()
-            return {"url": url, "alias": alias, "deployment_id": deployment_id, "vercel": result}
-        except VercelError as e:
-            last_error = e
-            if e.status == 409:
-                continue
-            raise
-    raise RuntimeError(f"Could not assign delivery alias: {last_error}")
+# 旧 issue_dedicated_delivery_url（<slug>-done.vercel.app 専用 alias 発行）は廃止。
+# 納品 URL は常に <host>/preview/<slug>。production_url は custom_domain を取って
+# 公開した時のみセットする。複数 URL が存在することで「修正したのに本番が直らない」
+# 系の事故が起きていたため、URL 一本化のために削除した。
 
 
 # ============================================
