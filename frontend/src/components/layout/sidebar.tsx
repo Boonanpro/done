@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap } from 'lucide-react';
+import { MessageSquare, Users, Settings, LogOut, Search, ChevronLeft, ChevronRight, ChevronDown, Loader2, FolderKanban, FileEdit, Plus, Pencil, Clapperboard, LayoutDashboard, Notebook, Zap, Pin, PinOff, Trash2, MoreVertical } from 'lucide-react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 
@@ -20,6 +20,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { useAuth } from '@/hooks/use-auth';
 import { api, OWNER_USER_ID, type ProjectResponse } from '@/lib/api-client';
 import { useUnreadStore } from '@/stores/unread-store';
@@ -124,6 +131,33 @@ export function Sidebar({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       setEmojiPickerProjectId(null);
+    },
+  });
+
+  const pinMutation = useMutation({
+    mutationFn: ({ id, pinned }: { id: string; pinned: boolean }) =>
+      api.projects.update(id, { pinned }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+    },
+    onError: () => {
+      toast.error('ピン留めの更新に失敗しました');
+    },
+  });
+
+  const deleteProjectMutation = useMutation({
+    mutationFn: (id: string) => api.projects.delete(id),
+    onSuccess: (_, deletedId) => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      // 削除したチャットを開いていたら閉じる
+      if (selectedProjectId === deletedId) {
+        selectProject(null);
+        router.push('/chat');
+      }
+      toast.success('チャットを削除しました');
+    },
+    onError: () => {
+      toast.error('チャットの削除に失敗しました');
     },
   });
 
@@ -397,7 +431,12 @@ export function Sidebar({
                             ) : (
                               <>
                                 <div className="flex-1 min-w-0">
-                                  <p className="truncate">{project.title}</p>
+                                  <div className="flex items-center gap-1.5">
+                                    {project.pinned_at && (
+                                      <Pin className="h-3 w-3 shrink-0 text-muted-foreground/70 fill-current" />
+                                    )}
+                                    <p className="truncate">{project.title}</p>
+                                  </div>
                                   <p className="text-xs text-muted-foreground truncate">
                                     {formatRelativeTime(project.last_message_at || project.updated_at || project.created_at)}
                                   </p>
@@ -407,13 +446,55 @@ export function Sidebar({
                                     {project.unread_count > 99 ? '99+' : project.unread_count}
                                   </span>
                                 )}
-                                <button
-                                  className="shrink-0 p-0.5 rounded transition-opacity opacity-0 group-hover:opacity-100"
-                                  onClick={(e) => handleStartEdit(e, project)}
-                                  title="タイトルを編集"
-                                >
-                                  <Pencil className="h-3 w-3 text-muted-foreground" />
-                                </button>
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger asChild>
+                                    <button
+                                      className="shrink-0 p-1 rounded transition-opacity opacity-0 group-hover:opacity-100 hover:bg-accent/50"
+                                      onClick={(e) => e.stopPropagation()}
+                                      title="メニュー"
+                                    >
+                                      <MoreVertical className="h-3.5 w-3.5 text-muted-foreground" />
+                                    </button>
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent
+                                    align="end"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <DropdownMenuItem
+                                      onClick={() =>
+                                        pinMutation.mutate({ id: project.id, pinned: !project.pinned_at })
+                                      }
+                                    >
+                                      {project.pinned_at ? (
+                                        <>
+                                          <PinOff className="h-4 w-4 mr-2" />
+                                          ピン留めを外す
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Pin className="h-4 w-4 mr-2" />
+                                          ピン留めして上部に固定
+                                        </>
+                                      )}
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem onClick={(e) => handleStartEdit(e as unknown as React.MouseEvent, project)}>
+                                      <Pencil className="h-4 w-4 mr-2" />
+                                      名前を変更
+                                    </DropdownMenuItem>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem
+                                      className="text-red-500 focus:text-red-500"
+                                      onClick={() => {
+                                        if (window.confirm(`「${project.title}」を削除しますか？この操作は取り消せません。`)) {
+                                          deleteProjectMutation.mutate(project.id);
+                                        }
+                                      }}
+                                    >
+                                      <Trash2 className="h-4 w-4 mr-2" />
+                                      削除
+                                    </DropdownMenuItem>
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
                               </>
                             )}
                           </div>
