@@ -5,11 +5,12 @@ import { Section } from "@/components/templates/section";
 import { SiteNav } from "../components/site-nav";
 import { SiteFooter } from "../components/site-footer";
 import { DiagonalDivider } from "../components/diagonal-divider";
+import { MultiStepInquiry } from "../components/multi-step-inquiry";
 
 export const metadata = {
   title: "お問い合わせ | 吉川特装",
   description:
-    "特装車の修理・整備のお問い合わせは、LINEまたはお電話でお気軽にどうぞ。",
+    "特装車の修理・整備のお問い合わせフォーム。LINE・お電話に加えて、車検証写真や故障画像を添付できる詳細フォームもご利用いただけます。",
 };
 
 export default function ContactPage() {
@@ -98,6 +99,25 @@ export default function ContactPage() {
               </div>
             </div>
           </div>
+        </div>
+      </Section>
+
+      <Section padding="xl" width="lg" className="bg-muted/30 border-t border-border">
+        <div className="space-y-6">
+          <div className="text-center space-y-2">
+            <div className="flex items-center justify-center gap-3">
+              <DiagonalDivider color="var(--yk-gold)" />
+              <span className="font-eyebrow text-xs text-[var(--yk-gold-dark)]">Inquiry Form</span>
+              <DiagonalDivider color="var(--yk-gold)" />
+            </div>
+            <h2 className="font-headline text-2xl sm:text-3xl font-black text-[var(--yk-navy)]">
+              詳細フォームでお問い合わせ
+            </h2>
+            <p className="text-sm text-[var(--yk-steel)] leading-relaxed max-w-2xl mx-auto">
+              車検証や故障画像を添付したい方、メールでのやりとりを希望される方はこちらからどうぞ。
+            </p>
+          </div>
+          <MultiStepInquiry />
         </div>
       </Section>
     </LpShell>
