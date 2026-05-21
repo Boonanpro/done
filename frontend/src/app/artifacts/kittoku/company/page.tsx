@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { ArtifactLink as Link } from "@/components/artifacts/artifact-link";
 import Image from "next/image";
 import { ChevronRight, MapPin, Phone, Users, Building2, Calendar, Clock, FileText } from "lucide-react";
 import { LpShell } from "@/components/templates/lp-shell";
@@ -27,7 +27,7 @@ const COMPANY_INFO = [
     icon: MapPin,
   },
   { slug: "tel", label: "電話", value: "0859-27-4885", icon: Phone, mono: true },
-  { slug: "hours", label: "営業時間", value: "月〜土 9:00〜17:00（日祝休）", icon: Clock },
+  { slug: "hours", label: "営業時間", value: "月〜土 9:00〜17:00（定休日：日祝・毎月第2土曜）", icon: Clock },
   {
     slug: "business",
     label: "事業内容",
@@ -122,8 +122,19 @@ function GroupPhotoSection() {
 function PageHero() {
   return (
     <section className="relative bg-[var(--yk-navy)] text-white overflow-hidden">
+      {/* 背景画像 (集合写真) */}
+      <Image
+        src="/kikkawa/company-hero.png"
+        alt="吉川特装 集合写真"
+        fill
+        priority
+        sizes="100vw"
+        className="object-cover object-center"
+      />
+      {/* 暗化グラデ (左を濃く、右を薄く) */}
+      <div className="absolute inset-0 bg-gradient-to-r from-[var(--yk-navy)]/90 via-[var(--yk-navy)]/65 to-[var(--yk-navy)]/35" />
       <div
-        className="absolute inset-0 opacity-[0.08]"
+        className="absolute inset-0 opacity-[0.08] pointer-events-none"
         style={{
           backgroundImage:
             "repeating-linear-gradient(-45deg, var(--yk-gold) 0 1px, transparent 1px 14px)",
@@ -143,8 +154,11 @@ function PageHero() {
             Company
           </span>
         </div>
-        <h1 data-edit-id="kittoku-company-hero-h1" className="font-headline text-3xl sm:text-5xl lg:text-6xl font-black leading-tight max-w-3xl">
-          米子で、働く車を、30年。
+        <h1
+          data-edit-id="kittoku-company-hero-h1"
+          className="font-headline text-3xl sm:text-5xl lg:text-6xl font-black leading-tight max-w-3xl drop-shadow-[0_2px_12px_rgba(0,0,0,0.6)]"
+        >
+          米子で特装車を30年
         </h1>
       </div>
     </section>
@@ -362,7 +376,7 @@ function AccessSection() {
               <Clock className="h-5 w-5 text-[var(--yk-navy)] shrink-0 mt-0.5" />
               <div>
                 <div>月〜土 9:00〜17:00</div>
-                <div className="text-sm text-[var(--yk-steel)]">日祝休</div>
+                <div className="text-sm text-[var(--yk-steel)]">定休日：日祝・毎月第2土曜</div>
               </div>
             </div>
           </div>

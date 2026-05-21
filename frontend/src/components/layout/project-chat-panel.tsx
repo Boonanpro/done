@@ -13,6 +13,7 @@ import {
   FolderKanban,
   Loader2,
   MessageSquare,
+  Mic,
   Paperclip,
   Reply,
   Send,
@@ -46,6 +47,7 @@ import { useAuthStore } from '@/stores/auth-store';
 import { useProjectStore, useRecoveryActions, useRecoveryState } from '@/stores/project-store';
 import { usePreviewStore, type ArtifactRecord, type SelectedElement } from '@/stores/preview-store';
 import { PreviewPane } from '@/components/preview/preview-pane';
+import { VoiceConsole } from '@/components/voice/voice-console';
 
 interface ProjectChatPanelProps {
   projectId: string;
@@ -1278,6 +1280,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<MessageResponse | null>(null);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const { warmupMode } = useRecoveryState(projectId);
 
   // Preview pane state
@@ -1600,6 +1603,15 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   return (
     <div className="relative flex h-full w-full overflow-hidden">
+    {voiceOpen && project?.room_id && (
+      <div className="fixed bottom-4 right-4 z-50 w-[360px] max-w-[calc(100vw-2rem)] max-h-[80vh] overflow-y-auto rounded-2xl border border-neutral-800 bg-neutral-950 shadow-2xl">
+        <VoiceConsole
+          roomId={project.room_id}
+          chatTitle={project.title || undefined}
+          onClose={() => setVoiceOpen(false)}
+        />
+      </div>
+    )}
     <div
       className={`flex h-full shrink-0 flex-col overflow-hidden bg-background ${
         isMobile && isPreviewOpenForProject ? 'hidden' : isPreviewOpenForProject ? '' : 'w-full'
@@ -1658,6 +1670,20 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
               </>
             )}
           </div>
+        )}
+        {project?.room_id && (
+          <button
+            onClick={() => setVoiceOpen((v) => !v)}
+            className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              voiceOpen
+                ? 'border-emerald-700 bg-emerald-900/30 text-emerald-200 hover:bg-emerald-900/50'
+                : 'border-border bg-background text-foreground hover:bg-muted'
+            }`}
+            title="このチャットの文脈で音声開発（パネルを開閉。delegate はこのチャットに書き戻されます）"
+          >
+            <Mic className="h-3.5 w-3.5" />
+            <span>音声</span>
+          </button>
         )}
         <div className="min-w-0 flex-1">
           {isLoading ? (

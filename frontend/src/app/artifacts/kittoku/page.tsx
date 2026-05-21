@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { ArtifactLink as Link } from "@/components/artifacts/artifact-link";
 import Image from "next/image";
 import {
   Phone,
@@ -23,14 +23,13 @@ import { Logo } from "./components/logo";
 import { CertifiedBadge } from "./components/certified-badge";
 import { DiagonalDivider } from "./components/diagonal-divider";
 import { HeroVideo } from "./components/hero-video";
-import { LineInquiryMockup } from "./components/line-inquiry-mockup";
 import { VEHICLES, type VehicleKey } from "./components/vehicle-icons";
 
 // 動画/画像にバージョンクエリを付けて、ブラウザ強キャッシュを破棄する。
 // next.config.ts で git commit SHA から build-time に注入される。
 const ASSET_VERSION = process.env.NEXT_PUBLIC_ASSET_VERSION || "dev";
-const HERO_VIDEO = `/kikkawa/hero-pc-v3.mp4?v=${ASSET_VERSION}`;
-const HERO_VIDEO_MOBILE = `/kikkawa/hero-mobile-v3.mp4?v=${ASSET_VERSION}`;
+const HERO_VIDEO = `/kikkawa/hero-pc-v4.mp4?v=${ASSET_VERSION}`;
+const HERO_VIDEO_MOBILE = `/kikkawa/hero-mobile-v4.mp4?v=${ASSET_VERSION}`;
 // poster は動画の1フレーム目を使う。元の hero.png（整備士のクローズアップ静止画）を出すと
 // 動画ロード前に「全く違う絵」がチラ見えする問題が起きるため。
 const HERO_POSTER = `/kikkawa/hero-pc-poster-v3.jpg?v=${ASSET_VERSION}`;
@@ -225,7 +224,6 @@ export default function YoshikawaHomePage() {
       <ManufacturersSection />
       <ServicesSummarySection />
       <VehiclesSection />
-      <FlowSection />
       <CareersCtaSection />
     </LpShell>
   );
@@ -283,6 +281,7 @@ function HeroSection() {
                 <span data-edit-id="kittoku-top-hero-hours-value" className="font-mono-data text-lg font-bold">
                   月〜土 9:00〜17:00
                 </span>
+                <span className="text-[10px] text-white/55 mt-0.5">※毎月第2土曜は定休日</span>
               </div>
             </div>
           </div>
@@ -363,10 +362,7 @@ export function ServicesSummarySection() {
           </span>
         </div>
         <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-4">
-          <h2 data-edit-id="kittoku-top-services-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black text-[var(--yk-navy)] tracking-tight leading-tight">
-            事業内容
-          </h2>
-          <p data-edit-id="kittoku-top-services-lead" className="text-[var(--yk-steel)] max-w-md leading-relaxed text-sm">特装車の整備・点検から架装・改造、リースまで幅広く対応しています。</p>
+          <h2 data-edit-id="kittoku-top-services-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black text-[var(--yk-navy)] tracking-tight leading-tight">ぜひお問い合わせください</h2>
         </div>
       </div>
 
@@ -388,10 +384,10 @@ export function ServicesSummarySection() {
         <Button
           asChild
           size="lg"
-          className="bg-[var(--yk-navy)] hover:bg-[var(--yk-navy-dark)] text-white rounded-sm h-12 px-6"
+          className="bg-[var(--yk-gold)] hover:bg-[var(--yk-gold-dark)] text-[var(--yk-navy-dark)] font-bold rounded-sm h-12 px-7 animate-kk-cta"
         >
-          <Link data-edit-id="kittoku-top-services-cta" href="/artifacts/kittoku/services">
-            事業・サービスを詳しく見る
+          <Link data-edit-id="kittoku-top-services-cta" href="/artifacts/kittoku/contact">
+            お問い合わせはこちら
             <ArrowRight className="h-4 w-4 ml-1.5" />
           </Link>
         </Button>
@@ -402,8 +398,7 @@ export function ServicesSummarySection() {
 
 function ServiceCard({ item, large }: { item: ServiceItem; large: boolean }) {
   return (
-    <Link
-      href="/artifacts/kittoku/services"
+    <div
       className={`group relative block overflow-hidden rounded-sm border border-border bg-[var(--yk-navy-dark)] ${
         large ? "aspect-[16/9] sm:aspect-[3/2]" : "aspect-[4/5] sm:aspect-square"
       }`}
@@ -418,11 +413,23 @@ function ServiceCard({ item, large }: { item: ServiceItem; large: boolean }) {
           item.comingSoon ? "opacity-60" : ""
         }`}
       />
-      <div className="absolute inset-0 bg-gradient-to-t from-[var(--yk-navy-dark)]/85 via-[var(--yk-navy-dark)]/30 to-transparent" />
-      <div className={`absolute inset-0 flex flex-col justify-end ${large ? "p-5 sm:p-7" : "p-3 sm:p-4"}`}>
-        <h3 className={`font-headline font-black text-white leading-tight ${
-          large ? "text-xl sm:text-2xl lg:text-3xl" : "text-sm sm:text-base"
-        }`} data-edit-id={`kittoku-top-services-${item.slug}-label`}>
+      <div className="absolute inset-0 bg-gradient-to-t from-[var(--yk-navy-dark)]/85 via-[var(--yk-navy-dark)]/30 to-transparent pointer-events-none" />
+
+      {/* カード本体クリック = お問い合わせ */}
+      <Link
+        href={`/artifacts/kittoku/contact?service=${item.slug}`}
+        aria-label={`${item.label}についてお問い合わせ`}
+        className="absolute inset-0 z-10"
+      />
+
+      {/* タイトル等のテキスト (背面、 親クリックを邪魔しない) */}
+      <div className={`absolute inset-0 flex flex-col justify-end pointer-events-none ${large ? "p-5 sm:p-7" : "p-3 sm:p-4"}`}>
+        <h3
+          className={`font-headline font-black text-white leading-tight ${
+            large ? "text-xl sm:text-2xl lg:text-3xl" : "text-sm sm:text-base"
+          }`}
+          data-edit-id={`kittoku-top-services-${item.slug}-label`}
+        >
           {item.label}
         </h3>
         <div
@@ -431,22 +438,43 @@ function ServiceCard({ item, large }: { item: ServiceItem; large: boolean }) {
         >
           {item.en}
         </div>
-        <div className={`absolute ${large ? "top-4 right-4" : "top-2 right-2"} flex items-center gap-1`}>
-          {item.comingSoon && (
-            <span className={`bg-[var(--yk-gold)] text-[var(--yk-navy-dark)] font-mono-data font-bold rounded-sm tracking-wider ${
-              large ? "text-[10px] px-2 py-0.5" : "text-[9px] px-1.5 py-0.5"
-            }`}>
-              COMING
-            </span>
-          )}
-          <ChevronRight className={`text-white/80 group-hover:translate-x-0.5 transition-transform ${large ? "h-5 w-5" : "h-3.5 w-3.5"}`} />
+        {/* デフォルト CTA: お問い合わせ */}
+        <div className={`flex items-center gap-1 text-white font-bold ${large ? "mt-3 text-sm" : "mt-2 text-[11px]"}`}>
+          お問い合わせ
+          <ChevronRight className={`text-[var(--yk-gold)] ${large ? "h-4 w-4" : "h-3 w-3"}`} />
         </div>
       </div>
-    </Link>
+
+      {/* COMING ラベル (右上) */}
+      {item.comingSoon && (
+        <div className={`absolute z-20 pointer-events-none ${large ? "top-4 right-4" : "top-2 right-2"}`}>
+          <span
+            className={`bg-[var(--yk-gold)] text-[var(--yk-navy-dark)] font-mono-data font-bold rounded-sm tracking-wider ${
+              large ? "text-[10px] px-2 py-0.5" : "text-[9px] px-1.5 py-0.5"
+            }`}
+          >
+            準備中
+          </span>
+        </div>
+      )}
+
+      {/* hover オーバーレイ: 「詳しく見る」 (PCのみ hover、 スマホでは触れたら出る) */}
+      <Link
+        href="/artifacts/kittoku/services"
+        className={`absolute z-30 inline-flex items-center gap-1 rounded-sm bg-white/95 backdrop-blur-sm text-[var(--yk-navy)] font-bold opacity-0 group-hover:opacity-100 transition-opacity shadow-md ${
+          large
+            ? "top-4 left-4 sm:top-5 sm:left-5 px-3 py-1.5 text-xs"
+            : "top-2 left-2 px-2 py-1 text-[10px]"
+        } ${item.comingSoon ? "top-12 sm:top-14" : ""}`}
+      >
+        詳しく見る
+        <ChevronRight className={large ? "h-3.5 w-3.5" : "h-3 w-3"} />
+      </Link>
+    </div>
   );
 }
 
-function VehiclesSection() {
+export function VehiclesSection() {
   const keys = Object.keys(VEHICLES) as VehicleKey[];
   return (
     <Section padding="xl" width="xl" className="bg-background">
@@ -501,56 +529,6 @@ function VehiclesSection() {
   );
 }
 
-function FlowSection() {
-  return (
-    <section className="relative overflow-hidden bg-[var(--yk-navy)] text-white">
-      <div className="absolute inset-0 bg-[radial-gradient(circle_at_78%_35%,rgba(255,196,0,0.16),transparent_30%),linear-gradient(135deg,rgba(255,255,255,0.08),transparent_45%)]" />
-      <div className="relative mx-auto max-w-7xl px-4 sm:px-6 py-20 sm:py-24">
-        <div className="grid gap-6 sm:gap-8 lg:grid-cols-[minmax(0,1fr)_400px] lg:items-center lg:gap-16">
-          {/* テキスト: スマホ1番目 / PC左上 */}
-          <div className="order-1 lg:order-none lg:col-start-1 lg:row-start-1 space-y-3">
-            <div className="flex items-center gap-3">
-              <DiagonalDivider color="var(--yk-gold)" />
-              <span className="font-eyebrow text-xs text-[var(--yk-gold)]">
-                Inquiry flow
-              </span>
-            </div>
-            <div className="space-y-4">
-              <h2 data-edit-id="kittoku-top-flow-h2" className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black leading-tight">
-                修理・部品交換など
-                <br />
-                ぜひお問い合わせください
-              </h2>
-              <p data-edit-id="kittoku-top-flow-lead" className="text-white/80 max-w-xl leading-relaxed">修理箇所の画像もまとめて送れるLINEか
-お電話でお問い合わせください。</p>
-            </div>
-          </div>
-
-          {/* LINEモックアップ: スマホ2番目 / PC右側 (row全体span) */}
-          <div className="order-2 lg:order-none lg:col-start-2 lg:row-start-1 lg:row-span-2 flex justify-center lg:justify-end h-[400px] sm:h-auto overflow-visible">
-            <div className="scale-[0.72] sm:scale-100 origin-top">
-              <LineInquiryMockup />
-            </div>
-          </div>
-
-          {/* CTA: スマホ3番目 / PC左下 (スマホのみ中央寄せ) */}
-          <div className="order-3 lg:order-none lg:col-start-1 lg:row-start-2 flex justify-center lg:justify-start">
-            <Button
-              asChild
-              size="lg"
-              className="bg-[var(--yk-gold)] hover:bg-[var(--yk-gold-dark)] text-[var(--yk-navy-dark)] font-bold rounded-sm h-12 px-6 animate-kk-cta"
-            >
-              <Link data-edit-id="kittoku-top-flow-cta" href="/artifacts/kittoku/contact">
-                LINEで問い合わせ
-                <ArrowRight className="h-4 w-4 ml-1.5" />
-              </Link>
-            </Button>
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
 
 function StrengthsSection() {
   return (
@@ -682,7 +660,7 @@ function CompanyBriefSection() {
               <Clock className="h-4 w-4 text-[var(--yk-navy)] shrink-0 mt-0.5" />
               <div className="space-y-0.5">
                 <div className="text-sm">月〜土 9:00〜17:00</div>
-                <div className="text-xs text-[var(--yk-steel)]">日祝休</div>
+                <div className="text-xs text-[var(--yk-steel)]">定休日：日祝・毎月第2土曜</div>
               </div>
             </InfoRow>
             <InfoRow label="代表電話">

@@ -1,5 +1,5 @@
 import Image from "next/image";
-import Link from "next/link";
+import { ArtifactLink as Link } from "@/components/artifacts/artifact-link";
 import { cn } from "@/lib/utils";
 
 type LogoProps = {

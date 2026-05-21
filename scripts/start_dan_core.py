@@ -57,6 +57,12 @@ def main() -> None:
         "127.0.0.1",
         "--port",
         str(DAN_CORE_PORT),
+        # --reload は使わない。ダンコアは「不変・再起動しない」プロセス。
+        # --reload はリポジトリ全体を監視するため、auto_deploy の git pull
+        # (サンドボックス系ファイル含む) で reload 連鎖が発生し、Windows の
+        # コンソールグループのシグナル伝播レースでワーカーが wedge する。
+        # (2026-05-19 障害: ワーカーが KeyboardInterrupt を拾い port 9000 で停止)
+        # コア自体のコード変更時はこのスクリプトで手動再起動する。
     ]
     clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 

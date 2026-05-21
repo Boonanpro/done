@@ -8,7 +8,22 @@
       "WebSearch",
       "PowerShell(Get-ScheduledTask *)",
       "PowerShell(Get-Process *)",
-      "PowerShell(Get-NetTCPConnection *)"
+      "PowerShell(Get-NetTCPConnection *)",
+      "PowerShell(Get-WinEvent *)",
+      "PowerShell(Get-WinEvent -LogName 'System' -MaxEvents 200 -ErrorAction SilentlyContinue | Where-Object {$_.Id -eq 1074 -or $_.Id -eq 6005 -or $_.Id -eq 6006 -or $_.Id -eq 6008 -or $_.Id -eq 41 -or $_.Id -eq 1076} | Select-Object -First 15 TimeCreated, Id, ProviderName, Message | Format-List)",
+      "PowerShell($sh = New-Object -ComObject WScript.Shell; $lnk = $sh.CreateShortcut\\(\"$env:APPDATA\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\Startup\\\\DanCore.lnk\"\\); Write-Output \\(\"TargetPath: \" + $lnk.TargetPath\\); Write-Output \\(\"Arguments: \" + $lnk.Arguments\\); Write-Output \\(\"WorkingDir: \" + $lnk.WorkingDirectory\\))",
+      "PowerShell(Get-WmiObject *)",
+      "PowerShell($ports = @{9000='dan-core'; 8000='sandbox'; 3000='frontend'}; $deadline=\\(Get-Date\\).AddSeconds\\(90\\); $remaining=$ports.Keys.Clone\\(\\); while \\(\\(Get-Date\\) -lt $deadline -and $remaining.Count -gt 0\\) { foreach \\($p in @\\($remaining\\)\\) { try { $r=Invoke-WebRequest -Uri \"http://127.0.0.1:$p\" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; Write-Output \\(\"[{0:HH:mm:ss}] {1} \\({2}\\) -> HTTP {3}\" -f \\(Get-Date\\), $p, $ports[$p], $r.StatusCode\\); $remaining=$remaining|Where-Object {$_ -ne $p} } catch { $sc=$null; try{$sc=$_.Exception.Response.StatusCode.value__}catch{}; if\\($sc\\){Write-Output \\(\"[{0:HH:mm:ss}] {1} \\({2}\\) -> HTTP {3} \\(responding\\)\" -f \\(Get-Date\\), $p, $ports[$p], $sc\\); $remaining=$remaining|Where-Object {$_ -ne $p}} } }; if\\($remaining.Count -gt 0\\){Start-Sleep 3} }; if \\($remaining.Count -gt 0\\) { Write-Output \\(\"TIMEOUT: still down -> \" + \\($remaining -join ','\\)\\) } else { Write-Output \"ALL UP\" })",
+      "PowerShell($ports=@\\(9000,8000,3000\\); $remaining=[System.Collections.ArrayList]@\\($ports\\); $deadline=\\(Get-Date\\).AddSeconds\\(90\\); while \\(\\(Get-Date\\) -lt $deadline -and $remaining.Count -gt 0\\) { foreach \\($p in @\\($remaining\\)\\) { try { $r=Invoke-WebRequest -Uri \"http://127.0.0.1:$p\" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; Write-Output \\(\"[{0:HH:mm:ss}] port {1} -> HTTP {2}\" -f \\(Get-Date\\), $p, $r.StatusCode\\); [void]$remaining.Remove\\($p\\) } catch { $sc=$null; try{$sc=$_.Exception.Response.StatusCode.value__}catch{}; if\\($sc\\){Write-Output \\(\"[{0:HH:mm:ss}] port {1} -> HTTP {2} \\(responding\\)\" -f \\(Get-Date\\), $p, $sc\\); [void]$remaining.Remove\\($p\\)} } }; if\\($remaining.Count -gt 0\\){Start-Sleep 3} }; if \\($remaining.Count -gt 0\\) { Write-Output \\(\"TIMEOUT still down: \" + \\($remaining -join ','\\)\\) } else { Write-Output 'ALL READY' })",
+      "PowerShell(try { $r=Invoke-WebRequest -Uri \"http://100.76.90.51:3000\" -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop; Write-Output \\(\"100.76.90.51:3000 -> HTTP \" + $r.StatusCode + \" \\(\" + $r.Content.Length + \" bytes\\)\"\\) } catch { Write-Output \\(\"ERROR: \" + $_.Exception.Message\\) })",
+      "PowerShell(New-ScheduledTaskAction *)",
+      "PowerShell(cmd /c \"D:\\\\done\\\\scripts\\\\start_frontend.bat\"; Write-Output \"start_frontend.bat invoked \\(detached minimized window\\)\")",
+      "PowerShell(Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','\"D:\\\\done\\\\scripts\\\\dan_core_autostart.bat\"' -WindowStyle Hidden)",
+      "PowerShell(python scripts/check_realtime.py)",
+      "PowerShell(Write-Output \"--- GET /health ---\"; curl.exe -s -m 10 http://127.0.0.1:9000/health; Write-Output \"`n`n--- POST /api/v1/realtime/session ---\"; curl.exe -s -m 30 -X POST http://127.0.0.1:9000/api/v1/realtime/session)",
+      "PowerShell(Get-CimInstance *)",
+      "PowerShell(taskkill *)",
+      "PowerShell(Select-String *)"
     ]
   },
   "hooks": {
@@ -42,6 +57,10 @@
           {
             "type": "command",
             "command": "python $CLAUDE_PROJECT_DIR/scripts/hook_register_artifact.py"
+          },
+          {
+            "type": "command",
+            "command": "python $CLAUDE_PROJECT_DIR/scripts/hook_artifact_link_guard.py"
           },
           {
             "type": "command",

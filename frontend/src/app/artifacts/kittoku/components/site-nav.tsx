@@ -1,22 +1,34 @@
 "use client";
 
 import * as React from "react";
-import Link from "next/link";
+import { ArtifactLink as Link } from "@/components/artifacts/artifact-link";
 import { Phone, Menu, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Logo } from "./logo";
 
-const NAV_ITEMS = [
-  { label: "ホーム", href: "/artifacts/kittoku" },
-  { label: "事業・サービス", href: "/artifacts/kittoku/services" },
-  { label: "会社情報", href: "/artifacts/kittoku/company" },
-  { label: "採用情報", href: "/artifacts/kittoku/careers" },
-];
-
-export function SiteNav(_props: { homeHref?: string } = {}) {
+export function SiteNav({ homeHref = "/artifacts/kittoku" }: { homeHref?: string } = {}) {
   const [scrolled, setScrolled] = React.useState(false);
   const [open, setOpen] = React.useState(false);
+  // sessionStorage が "v2" なら、 ナビの「ホーム」を v2 に上書きする
+  // (v2 を一度訪問してから他ページに遷移しても、 同じタブ中は v2 に戻れる)
+  const [effectiveHome, setEffectiveHome] = React.useState(homeHref);
+  React.useEffect(() => {
+    try {
+      const mode = sessionStorage.getItem("kittoku-mode");
+      if (mode === "v2") setEffectiveHome("/artifacts/kittoku/v2");
+      else setEffectiveHome(homeHref);
+    } catch {
+      /* ignore */
+    }
+  }, [homeHref]);
+
+  const NAV_ITEMS = [
+    { label: "ホーム", href: effectiveHome },
+    { label: "事業・サービス", href: "/artifacts/kittoku/services" },
+    { label: "会社情報", href: "/artifacts/kittoku/company" },
+    { label: "採用情報", href: "/artifacts/kittoku/careers" },
+  ];
 
   React.useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 10);
@@ -34,7 +46,7 @@ export function SiteNav(_props: { homeHref?: string } = {}) {
     >
       <div className="mx-auto max-w-7xl px-4 sm:px-6">
         <div className="flex h-16 sm:h-20 items-center justify-between gap-4">
-          <Logo size="md" />
+          <Logo size="md" href={effectiveHome} />
           <nav className="hidden lg:flex items-center gap-7">
             {NAV_ITEMS.map((item) => (
               <Link

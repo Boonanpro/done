@@ -10,6 +10,7 @@
  */
 
 import type { EditModel, CSSStyle, InlineSpan } from './inspector-model';
+import { isEditableTextLeaf } from './inspector-edit-target';
 
 const HTML_ESCAPE: Record<string, string> = {
   '&': '&amp;',
@@ -45,6 +46,11 @@ function escapeAttr(v: string): string {
 /**
  * 各文字位置における「重なっている全 span のスタイルマージ結果」を計算し、
  * 連続して同じスタイルになる範囲を 1 セグメントとして出力する。
+ *
+ * テキスト分離問題対策:
+ * - 空 style のセグメントは <span> でラップしない（プレーンテキストとして連結）
+ * - 隣接セグメントは start/end 連続性関係なく、最終的にプレーン同士を bridge できるよう
+ *   出力時に「連続する装飾なし」を 1 つの文字列に統合する
  */
 export function renderToHtml(model: EditModel): string {
   const text = model.text ?? '';
@@ -78,13 +84,16 @@ export function renderToHtml(model: EditModel): string {
     const mergedStyle: CSSStyle = {};
     for (const sp of spans) {
       if (sp.start <= segStart && sp.end >= segEnd) {
-        Object.assign(mergedStyle, sp.style);
+        // 空文字 / null/undefined のキーは無視（"消去" 表現）
+        for (const [k, v] of Object.entries(sp.style)) {
+          if (typeof v === 'string' && v.length > 0) mergedStyle[k] = v;
+        }
       }
     }
     segments.push({ start: segStart, end: segEnd, style: mergedStyle });
   }
 
-  // 連続する同一スタイルセグメントを連結
+  // 連続する同一スタイル（または両方空）を連結
   const merged: { start: number; end: number; style: CSSStyle }[] = [];
   for (const seg of segments) {
     const last = merged[merged.length - 1];
@@ -95,14 +104,17 @@ export function renderToHtml(model: EditModel): string {
     }
   }
 
-  return merged
-    .map((seg) => {
-      const segText = escapeHtmlWithBr(text.slice(seg.start, seg.end));
-      const styleKeys = Object.keys(seg.style);
-      if (styleKeys.length === 0) return segText;
-      return `<span data-dan-edit="1" style="${styleToString(seg.style)}">${segText}</span>`;
-    })
-    .join('');
+  // 出力: 空 style は <span> 化せずプレーン化。連続するプレーンは結合される。
+  const parts: string[] = [];
+  for (const seg of merged) {
+    const segText = escapeHtmlWithBr(text.slice(seg.start, seg.end));
+    if (Object.keys(seg.style).length === 0) {
+      parts.push(segText);
+    } else {
+      parts.push(`<span data-dan-edit="1" style="${styleToString(seg.style)}">${segText}</span>`);
+    }
+  }
+  return parts.join('');
 }
 
 function stylesEqual(a: CSSStyle, b: CSSStyle): boolean {
@@ -119,18 +131,13 @@ function stylesEqual(a: CSSStyle, b: CSSStyle): boolean {
  * - blockStyle は要素の inline style に !important で適用
  * - extraAttrs は href/src 等の属性に適用
  *
- * 致命防御: 要素自身が data-edit-id を持たず、配下に data-edit-id 持ちの子孫が
- * 存在する場合（h2 と p を包む wrapper div など）、innerHTML 書き戻しは
- * 構造破壊（h2 や p ごと plaintext で上書き）になるため **skip** する。
- * blockStyle / attrs は非破壊なので適用 OK。
+ * 統一原則 (isEditableTextLeaf): text/spans の innerHTML 反映は
+ * 「data-edit-id 持ち & 子 Element 無し」の leaf のみ。
+ * 子 Element を持つ要素（wrapper や <strong> を含む段落）は構造破壊を防ぐため skip。
+ * blockStyle / attrs は非破壊なので、子持ち要素にも常に適用 OK。
  */
 export function applyModelToElement(el: HTMLElement, model: EditModel): void {
-  const hasOwnEditId = !!el.getAttribute('data-edit-id');
-  const hasEditIdDescendant = !!el.querySelector?.('[data-edit-id]');
-  const isWrapper = !hasOwnEditId && hasEditIdDescendant;
-
-  // テキスト関連の上書き（wrapper では実行しない）
-  if (model.text !== null && !isWrapper) {
+  if (model.text !== null && isEditableTextLeaf(el)) {
     const html = renderToHtml(model);
     if (el.innerHTML !== html) {
       el.innerHTML = html;

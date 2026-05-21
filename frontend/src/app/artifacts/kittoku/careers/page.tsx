@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { ArtifactLink as Link } from "@/components/artifacts/artifact-link";
 import Image from "next/image";
 import {
   ChevronRight,
@@ -377,6 +377,20 @@ function ApplyFormSection() {
           />
         </CardContent>
       </Card>
+
+      {/* フォーム下の職場風景ループ動画 (装飾なし、無音 loop) */}
+      <div className="mt-10 sm:mt-14 rounded-sm overflow-hidden bg-black">
+        <video
+          src="/kikkawa/careers-loop.mp4"
+          autoPlay
+          loop
+          muted
+          playsInline
+          preload="metadata"
+          className="block w-full h-auto"
+          aria-label="吉川特装の職場風景"
+        />
+      </div>
       <div className="text-center mt-8">
         <Button
           asChild

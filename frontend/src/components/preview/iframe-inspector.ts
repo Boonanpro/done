@@ -1,7 +1,9 @@
 'use client';
 
+import { toast } from 'sonner';
 import { usePreviewStore } from '@/stores/preview-store';
 import { computeElementKey, resolveEditUnit } from '@/components/dan/inspector-runtime';
+import { isEditableTextLeaf } from '@/lib/inspector-edit-target';
 
 const HOVER_OVERLAY_ID = 'dan-inspector-hover';
 const ACTIVE_OVERLAY_ID = 'dan-inspector-active';
@@ -18,6 +20,9 @@ const INLINE_TEXT_TAGS = new Set([
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
   'p', 'span', 'a', 'li', 'label', 'button', 'strong', 'em',
   'td', 'th', 'figcaption',
+  // div: data-edit-id 付きの短い text leaf として使われるケース (例: kittoku の manufacturer name)
+  // isEditableTextLeaf(children=0) で structural div は弾かれるので安全。
+  'div',
 ]);
 
 type Handlers = {
@@ -223,30 +228,53 @@ export function attachInspector(iframe: HTMLIFrameElement) {
     } catch {
       /* fallback: initialTarget */
     }
-    // data-edit-id を持つ祖先があればそれを編集単位とする
-    // （部分テキストの span や子要素ではなく、論理的なまとまり全体を編集対象に）
-    editTarget = resolveEditUnit(editTarget) as HTMLElement;
 
-    // 致命防御: editTarget 自身に data-edit-id が無く、配下に data-edit-id 持ちの
-    // 子孫が存在する wrapper（h2 と p 両方を包む div など）に inline edit を許すと、
-    // contentEditable 化で plaintext 化されて子要素の構造が破壊される。
-    // → ブロックして、ユーザーに具体的な子（h2 か p か）を選び直させる。
-    if (
-      !editTarget.getAttribute('data-edit-id') &&
-      editTarget.querySelector?.('[data-edit-id]')
-    ) {
-      // 警告だけ出してリターン。アクティブオーバーレイは出す（クリック自体は通常通り選択扱い）
-      console.warn(
-        '[inspector] inline-edit blocked: clicked a wrapper that contains data-edit-id descendants. ' +
-        'Click directly on the heading or paragraph instead.'
-      );
-      return;
+    // 編集対象解決の優先順位 (regression fix 2026-05-13):
+    //   1) クリック地点の text-node parent が「data-edit-id 持ち & 子 Element 無し」の leaf
+    //      → そのまま使う (祖先まで climb しない)
+    //   2) それ以外 → resolveEditUnit で data-edit-id 祖先まで climb
+    //
+    // 例: <h1 data-edit-id="x">work<br/><span data-edit-id="y">text</span></h1>
+    //     旧: span を click しても resolveEditUnit が h1 に climb し、h1 は br/span を持つので
+    //         isEditableTextLeaf=false で BLOCKED → 編集できない
+    //     新: span が data-edit-id 付きの leaf なので、climb せず span を直接編集
+    //
+    // 子 Element を含む wrapper (例: <p>...<strong>...</strong></p>) は依然として後段の
+    // isEditableTextLeaf gate で block されるので、構造破壊の安全性は維持される。
+    const localIsLeafWithEditId =
+      editTarget.children.length === 0 && !!editTarget.getAttribute('data-edit-id');
+    if (!localIsLeafWithEditId) {
+      editTarget = resolveEditUnit(editTarget) as HTMLElement;
     }
 
     const tagName = editTarget.tagName.toLowerCase();
     if (INLINE_EDIT_BLOCKED_TAGS.has(tagName)) return;
     if (!INLINE_TEXT_TAGS.has(tagName)) {
-      console.warn('[inspector] inline-edit blocked: target is not a text element.', tagName);
+      toast.warning('テキスト編集不可', {
+        description: `<${tagName}> はテキスト編集対象外です`,
+      });
+      return;
+    }
+
+    // 統一原則: text 編集は「data-edit-id 持ち & 子 Element 無し」の leaf のみ。
+    // 子 Element（<strong> / <em> / <a> 等）を含む要素は plaintext 化で構造破壊するため拒否。
+    // data-edit-id 無し要素は識別子が無いので保存できない（writeback がキー解決できない）。
+    if (!isEditableTextLeaf(editTarget)) {
+      const editId = editTarget.getAttribute('data-edit-id');
+      const childCount = editTarget.children.length;
+      console.warn(
+        '[inspector] inline-edit blocked: not an editable text leaf.',
+        { tag: tagName, children: childCount, editId }
+      );
+      if (!editId) {
+        toast.warning('テキスト編集不可', {
+          description: `<${tagName}> に data-edit-id が無いため保存できません。artifact 側で data-edit-id を追加してください`,
+        });
+      } else if (childCount > 0) {
+        toast.warning('テキスト編集不可', {
+          description: `<${tagName}> は子要素 (${childCount}個) を含むため text 編集すると構造が壊れます。子要素を直接ダブルクリックしてください`,
+        });
+      }
       return;
     }
     e.preventDefault();
@@ -275,6 +303,9 @@ export function attachInspector(iframe: HTMLIFrameElement) {
     enableInlineEdit(editTarget, doc, hover, active, overlays);
   };
 
+  // Ctrl+Z / Cmd+Z は preview-pane.tsx の useEffect で iframe.contentWindow に
+  // capture: true で bind する（HMR で更新されやすく、こちらに集約）。
+  // iframe-inspector はあくまで Escape による選択解除のみ担当する。
   const keydown = (ev: Event) => {
     const e = ev as KeyboardEvent;
     if (e.key === 'Escape') {

@@ -6,7 +6,10 @@
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from app.core.sandbox_manager import SandboxManager, SandboxStatus
 
@@ -59,11 +62,17 @@ async def stop_sandbox() -> dict:
     return _serialize(_require_manager().stop())
 
 
+class RestartRequest(BaseModel):
+    """テスト用に env を一時注入できる。例: {"extra_env": {"DAN_DEV_NO_AUTH": "1"}}"""
+    extra_env: Optional[dict[str, str]] = None
+
+
 @router.post("/restart")
-async def restart_sandbox() -> dict:
+async def restart_sandbox(payload: Optional[RestartRequest] = None) -> dict:
     mgr = _require_manager()
+    extra = payload.extra_env if payload else None
     try:
-        mgr.restart()
+        mgr.restart(extra_env=extra)
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
     mgr.wait_until_healthy(timeout=15.0)
