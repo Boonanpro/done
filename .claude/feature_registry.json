@@ -1,4 +1,13 @@
 {
+  "projects_pinned_at": {
+    "name": "projects_pinned_at",
+    "description": "LINE-style pin support for the chat list (projects). Adds a `pinned_at` timestamp column to `projects`; non-null means pinned, and the timestamp also orders pinned items so newer pins sit above older ones. Backend `update_project` translates a `pinned: bool` flag from PATCH into setting/clearing this column. Frontend (PC sidebar + mobile chat list) shows a pin icon and a context menu (Pin/Unpin/Delete) on long-press / kebab.",
+    "created_at": "2026-05-21T00:00:00.000000",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\058_projects_pinned_at.sql"
+    ]
+  },
   "test_edit": {
     "name": "test_edit",
     "description": "Inspector / 手動編集の実機動作確認用のテスト artifact。Playwright から実際の編集UIをドライブしてテストする。本番には公開しない。",
@@ -198,6 +207,15 @@
       "D:\\done\\app\\api\\client_messaging_routes.py",
       "D:\\done\\frontend\\src\\app\\artifacts\\client-messaging\\page.tsx",
       "D:\\done\\scripts\\seed_client_messaging.py"
+    ]
+  },
+  "chat_artifact_room_scope": {
+    "name": "chat_artifact_room_scope",
+    "description": "chat_artifact のスコープを project_id から room_id (= chat_rooms.id) に切替。同一プロジェクトの別チャットに artifact が混入する問題の構造的修正。room_id NOT NULL + UNIQUE(room_id, slug) で物理的に強制。",
+    "created_at": "2026-05-20T00:00:00.000000",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\057_chat_artifact_room_scope.sql"
     ]
   }
 }

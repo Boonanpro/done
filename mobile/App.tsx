@@ -66,6 +66,7 @@ type ProjectResponse = {
   icon?: string | null;
   unread_count?: number;
   last_message_at?: string | null;
+  pinned_at?: string | null;
   updated_at?: string | null;
   created_at: string;
 };
@@ -801,6 +802,60 @@ function AppMain() {
     }
   }
 
+  async function handleTogglePin(project: ProjectResponse) {
+    if (!token) return;
+    try {
+      await apiRequest(
+        `/projects/${project.id}`,
+        { method: 'PATCH', body: JSON.stringify({ pinned: !project.pinned_at }) },
+        token,
+      );
+      await refreshProjects(token).catch(() => null);
+    } catch (error) {
+      Alert.alert('Pin failed', String((error as Error).message));
+    }
+  }
+
+  async function handleDeleteProject(project: ProjectResponse) {
+    if (!token) return;
+    try {
+      await apiRequest(`/projects/${project.id}`, { method: 'DELETE' }, token);
+      if (project.id === currentProjectId) {
+        setCurrentProject(null);
+        setCurrentProjectId(null);
+        setMessages([]);
+        setArtifacts([]);
+        await SecureStore.deleteItemAsync(PROJECT_KEY).catch(() => null);
+        setScreen('projects');
+      }
+      await refreshProjects(token).catch(() => null);
+    } catch (error) {
+      Alert.alert('Delete failed', String((error as Error).message));
+    }
+  }
+
+  function handleProjectLongPress(project: ProjectResponse) {
+    const pinLabel = project.pinned_at ? 'ピン留めを外す' : 'ピン留めして上部に固定';
+    Alert.alert(project.title || 'Untitled', undefined, [
+      { text: pinLabel, onPress: () => void handleTogglePin(project) },
+      {
+        text: '削除',
+        style: 'destructive',
+        onPress: () => {
+          Alert.alert(
+            '削除の確認',
+            `「${project.title || 'このチャット'}」を削除しますか？この操作は取り消せません。`,
+            [
+              { text: 'キャンセル', style: 'cancel' },
+              { text: '削除', style: 'destructive', onPress: () => void handleDeleteProject(project) },
+            ],
+          );
+        },
+      },
+      { text: 'キャンセル', style: 'cancel' },
+    ]);
+  }
+
   async function handleToggleNotifications() {
     if (!token) return;
     if (!Device.isDevice) {
@@ -1118,6 +1173,8 @@ function AppMain() {
           renderItem={({ item }) => (
             <Pressable
               onPress={() => handleSelectProject(item.id)}
+              onLongPress={() => handleProjectLongPress(item)}
+              delayLongPress={350}
               style={({ pressed }) => [
                 styles.chatListItem,
                 pressed && styles.chatListItemPressed,
@@ -1128,9 +1185,14 @@ function AppMain() {
               </View>
               <View style={styles.chatListBody}>
                 <View style={styles.chatListTopRow}>
-                  <Text style={styles.chatListTitle} numberOfLines={1}>
-                    {item.title || 'Untitled'}
-                  </Text>
+                  <View style={styles.chatListTitleRow}>
+                    {item.pinned_at ? (
+                      <Ionicons name="pin" size={13} color="#a7a19a" style={styles.chatListPinIcon} />
+                    ) : null}
+                    <Text style={styles.chatListTitle} numberOfLines={1}>
+                      {item.title || 'Untitled'}
+                    </Text>
+                  </View>
                   <Text style={styles.chatListTime}>{formatTime(projectTime(item))}</Text>
                 </View>
                 <Text style={styles.chatListPreview} numberOfLines={2}>
@@ -1703,6 +1765,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     gap: 8,
+  },
+  chatListTitleRow: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    gap: 4,
+  },
+  chatListPinIcon: {
+    transform: [{ rotate: '45deg' }],
   },
   chatListTitle: {
     color: '#f4f0e8',
