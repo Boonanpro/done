@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# pre-commit: run the mixed-scope guard.
+#
+# Activate this hooks directory once per clone:
+#     python scripts/install_git_hooks.py
+# (start_dan_core.py runs the install automatically.)
+set -e
+python scripts/hook_mixed_scope_guard.py

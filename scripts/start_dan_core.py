@@ -38,10 +38,26 @@ def check_health(port: int, timeout: int = 3) -> bool:
         return False
 
 
+def _ensure_git_hooks_installed() -> None:
+    """Activate .githooks/ for this clone (mixed-scope guard etc.). Idempotent."""
+    try:
+        subprocess.run(
+            [sys.executable, "scripts/install_git_hooks.py"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"[dan-core] WARN: install_git_hooks failed (non-fatal): {e}")
+
+
 def main() -> None:
     print("=" * 60)
     print(f"Dan Core Startup (port {DAN_CORE_PORT})")
     print("=" * 60)
+
+    _ensure_git_hooks_installed()
 
     if not is_port_free(DAN_CORE_PORT):
         print(f"[dan-core] ERROR: port {DAN_CORE_PORT} is already in use.")
