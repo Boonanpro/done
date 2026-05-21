@@ -44,49 +44,29 @@ export function DeliveryModal({
   const sharePath = artifactSharePath(
     artifact.share_url || artifact.preview_url || artifact.slug,
   );
-  const deliveryUrl = artifact.production_url || publicUrl;
-  const hasDedicatedUrl = Boolean(artifact.production_url);
+  // 正規 URL は常に publicUrl（= <host>/preview/<slug>）。専用 alias は廃止。
+  // 独自ドメインを取った成果物だけ production_url が別途使われる。
+  const deliveryUrl = publicUrl;
 
   const save = async () => {
     setSaving(true);
     try {
-      // 専用URL未発行なら発行する
-      let finalUrl = deliveryUrl;
-      if (!hasDedicatedUrl) {
-        const res = await fetch('/api/v1/publish/delivery-url', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            artifact_id: artifact.id,
-            slug: artifact.slug,
-            vercel_project: 'frontend',
-          }),
-        });
-        if (!res.ok) throw new Error(await res.text());
-        const data = await res.json();
-        if (!data.success) throw new Error(data.error || 'URL発行に失敗しました');
-        finalUrl = data.url || deliveryUrl;
-      }
-
       const patch = await fetch(`/api/v1/chat-artifact/${artifact.id}`, {
         method: 'PATCH',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           delivery_status: 'ready',
-          delivery_mode: 'dedicated_url',
+          delivery_mode: 'preview_share',
           target_audience: artifact.artifact_type === 'dashboard' ? 'internal' : 'client',
           requires_auth: artifact.artifact_type === 'dashboard',
-          production_url: finalUrl,
-          delivery_checklist: { delivery_url: finalUrl, share_path: sharePath },
+          delivery_checklist: { delivery_url: deliveryUrl, share_path: sharePath },
         }),
       });
       if (!patch.ok) throw new Error(await patch.text());
       onUpdated?.((await patch.json()) as ArtifactRecord);
 
-      // コピー失敗（HTTP環境等）でも納品準備自体は成功扱いにする
-      const copied = await copyToClipboard(finalUrl);
+      const copied = await copyToClipboard(deliveryUrl);
       toast.success(copied ? '納品URLをコピーしました' : '納品URLを準備しました');
       onOpenChange(false);
     } catch (error) {
@@ -141,7 +121,7 @@ export function DeliveryModal({
             </Button>
           )}
           <Button onClick={save} disabled={saving}>
-            {saving ? '発行中...' : hasDedicatedUrl ? 'コピーして完了' : '専用URLを発行'}
+            {saving ? '準備中...' : 'コピーして完了'}
           </Button>
         </DialogFooter>
       </DialogContent>

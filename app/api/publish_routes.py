@@ -16,8 +16,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.models.publish_schemas import (
-    DeliveryUrlRequest,
-    DeliveryUrlResponse,
     DomainCheckCandidate,
     DomainCheckRequest,
     DomainCheckResponse,
@@ -38,7 +36,6 @@ from app.tools.publish_site.orchestrator import (
     create_domain_checkout,
     create_domain_setup,
     get_domain_setup_state,
-    issue_dedicated_delivery_url,
     publish_with_custom_domain,
     run_paid_registration,
 )
@@ -115,28 +112,10 @@ async def run(
     )
 
 
-@router.post("/delivery-url", response_model=DeliveryUrlResponse)
-async def delivery_url(
-    data: DeliveryUrlRequest,
-    user: TokenData = Depends(get_current_user),
-):
-    """Issue a dedicated vercel.app delivery URL for a tool/dashboard artifact."""
-    try:
-        result = await issue_dedicated_delivery_url(
-            artifact_id=data.artifact_id,
-            slug=data.slug,
-            vercel_project=data.vercel_project,
-            user_id=user.user_id,
-        )
-        return DeliveryUrlResponse(
-            success=True,
-            artifact_id=data.artifact_id,
-            url=result["url"],
-            alias=result["alias"],
-        )
-    except Exception as e:
-        logger.exception("issue_dedicated_delivery_url failed")
-        return DeliveryUrlResponse(success=False, artifact_id=data.artifact_id, error=str(e))
+# 旧 /delivery-url エンドポイント（<slug>-done.vercel.app の専用 alias 発行）は
+# 廃止。納品 URL は常に <host>/preview/<slug> に統一。独自ドメインを取って公開
+# した時のみ custom_domain ベースの production_url が増える。
+# 詳細: docs/architecture/artifact_urls.md を参照。
 
 
 # ============================================

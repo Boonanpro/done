@@ -16,6 +16,8 @@ lib/
 !frontend/src/lib/artifact-paths.ts
 lib64/
 parts/
+!frontend/public/**/parts/
+!frontend/public/**/parts/**
 sdist/
 var/
 wheels/
