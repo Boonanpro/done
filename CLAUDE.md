@@ -208,17 +208,64 @@ Playwright等でブラウザ操作するスキルを新規作成・修正する�
 2. 自由に実装（コード変更・新規ファイル作成）
 3. サンドボックスを再起動して動作確認: `curl -X POST http://127.0.0.1:9000/api/v1/sandbox/restart`
 4. `git diff` で変更内容を確認
-5. ユーザーに「テスト済みです。変更内容:（日本語の要約）」と報告
-6. 承認されたら以下を自動実行:
+5. **`python scripts/scope_diff.py --working` で scope を確認**（次節「Scope 規律」参照）
+6. ユーザーに「テスト済みです。変更内容:（日本語の要約）」と報告
+7. 承認されたら以下を自動実行:
    - ブランチ作成: `git checkout -b dan/<簡潔な変更名>`
    - コミット & プッシュ: `git add → git commit → git push origin dan/<ブランチ名>`
    - PR作成: `gh pr create --title "..." --body "..."`
    - マージ: `gh pr merge --merge --delete-branch`
    - mainに戻る: `git checkout main && git pull`
-7. 却下されたら `git restore .` で破棄
+8. 却下されたら `git restore .` で破棄
 
 ### 禁止事項
 
 - ❌ テスト環境で動作確認せずに「完了」と報告する
 - ❌ ログやDBを確認せずに推測で原因を断定する
 - ❌ ユーザーの承認なしにmainに直接コミットする
+
+## ⚠️ Scope 規律: 1 commit = 1 scope ⚠️
+
+**ダン infra と成果物の変更を同じ commit に混在させてはいけない。**
+
+これは **pre-commit hook と CI workflow で物理的に強制**されている（2026-05-21 以降）。
+規則を守らない commit は技術的に作成不可能。
+
+### Scope の分類
+
+| Scope | 例 | コミット時の扱い |
+|---|---|---|
+| `infra` | `app/**`, `scripts/**`, `frontend/src/{components,lib,hooks,stores,middleware,types}/**`, ダンダッシュボード (`/chat`, `/notes` 等), `.claude/**`, `.github/**`, `supabase/migrations/**`, `mobile/**` | infra 同士なら何個でも同じ commit に入れて OK |
+| `artifact:<slug>` | `frontend/src/app/artifacts/<slug>/**`, `frontend/src/app/api/<slug>/**`, 該当する `frontend/public/<dir>/**` | 同じ slug の中なら何個でも OK。**違う slug が混ざったら拒否** |
+| `demo:<name>` | `frontend/src/app/{demo,scratch}/<name>/**` | 中立。他の scope と混ざってもOK（プレイグラウンド） |
+| `ignored` | `.tunnel_*`, lock files, `node_modules`, `.next/`, `sandbox.log`, `.env*` | 全て自動的に scope 判定から除外 |
+| `ambiguous` | どのルールにもマッチしないパス | **拒否**。`scripts/scope_classifier.py` にルール追加してから commit |
+
+### 守らないと何が起きるか
+
+1. **ローカル**: `git commit` の pre-commit hook (`.githooks/pre-commit` → `scripts/hook_mixed_scope_guard.py`) が混在を検出して拒否
+2. **リモート**: PR 作成時に `.github/workflows/scope-check.yml` がチェック失敗にして merge をブロック
+
+### 確認コマンド
+
+- `python scripts/scope_diff.py` — staged ファイルの scope を表示
+- `python scripts/scope_diff.py --working` — staged + unstaged + untracked
+- `python scripts/scope_diff.py --branch main` — main からの差分
+
+### 例外的に混在が必要な場合（極稀）
+
+- ローカル: `OVERRIDE_MIXED_SCOPE=1 git commit ...`
+- リモート: PR タイトルに `[scope-override]` を含める
+
+どちらも痕跡が残るので、レビュー時に「本当に必要だったか」を必ず確認する。
+
+### なぜこの規律があるか
+
+2026-05-10 の `d9e49be sync(kittoku): commit local-only production state` で
+ダン infra の Inspector writeback 副作用と kittoku 成果物の編集が同じ
+commit に混ざり、`<MultiStepInquiry />` がそのまま削除されて本番反映。
+
+2026-05-20 の `stash@{0} "WIP: unrelated changes"` で kittoku contact + Inspector v2
++ voice 機能 + mobile + salonboard が全部一緒に退避されて消失。
+
+これらの事故の構造的原因は「**commit / stash が複数の論理スコープを巻き込めること**」だった。Scope 規律はその根本対策。
