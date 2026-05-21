@@ -128,7 +128,7 @@ export function MainLayout({
           <div className="h-full">{children}</div>
         ) : selectedProjectId ? (
           <div className="h-full">
-            <ProjectChatPanel projectId={selectedProjectId} />
+            <ProjectChatPanel key={selectedProjectId} projectId={selectedProjectId} />
           </div>
         ) : (
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-3 px-6">
@@ -190,7 +190,7 @@ export function MainLayout({
         {children ? (
           children
         ) : selectedProjectId ? (
-          <ProjectChatPanel projectId={selectedProjectId} />
+          <ProjectChatPanel key={selectedProjectId} projectId={selectedProjectId} />
         ) : (
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-3">
             <FolderOpen className="h-16 w-16 opacity-30" />
