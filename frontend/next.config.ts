@@ -95,6 +95,11 @@ const nextConfig: NextConfig = {
         source: '/api/v1/sandbox/:path*',
         destination: `${coreBackendUrl}/api/v1/sandbox/:path*`,
       },
+      // Realtime 音声レイヤー (gpt-realtime-2 ephemeral トークン発行)
+      {
+        source: '/api/v1/realtime/:path*',
+        destination: `${coreBackendUrl}/api/v1/realtime/:path*`,
+      },
       // 上記以外の /api/* は業務系サンドボックスへ
       {
         source: '/api/:path*',
@@ -117,6 +122,11 @@ const nextConfig: NextConfig = {
         source: '/ws/gemini-voice/:path*',
         destination: `${coreBackendUrl}/ws/gemini-voice/:path*`,
       },
+      // Realtime delegate ブリッジ WebSocket (gpt-realtime-2 → 実行エンジン)
+      {
+        source: '/ws/realtime-delegate',
+        destination: `${coreBackendUrl}/ws/realtime-delegate`,
+      },
       // 上記以外の WebSocket は業務系サンドボックスへ
       {
         source: '/ws/:path*',
@@ -135,9 +145,19 @@ const nextConfig: NextConfig = {
         destination: '/artifacts/kittoku/v2',
       },
       {
+        source: '/:path(services|company|careers|contact)',
+        has: [{ type: 'host', value: 'kittoku.vercel.app' }],
+        destination: '/artifacts/kittoku/:path',
+      },
+      {
         source: '/',
         has: [{ type: 'host', value: 'yoshikawa-tokuso.vercel.app' }],
         destination: '/artifacts/kittoku',
+      },
+      {
+        source: '/:path(v2|services|company|careers|contact)',
+        has: [{ type: 'host', value: 'yoshikawa-tokuso.vercel.app' }],
+        destination: '/artifacts/kittoku/:path',
       },
       // 吉川特装HP: /kikkawa-tokuso 短縮パスは /artifacts/kittoku にエイリアス
       {

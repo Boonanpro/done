@@ -28,6 +28,7 @@ from app.api.chat_routes import router as chat_router
 from app.api.credentials_routes import router as credentials_router
 from app.api.voice_routes import router as voice_router, ws_router as voice_ws_router
 from app.api.gemini_voice_routes import router as gemini_voice_router
+from app.api.realtime_routes import router as realtime_router, ws_router as realtime_ws_router
 from app.api.public_chat_routes import router as public_chat_router
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,8 @@ app.include_router(credentials_router, prefix="/api/v1")
 app.include_router(voice_router)  # /api/v1/voice prefix が router 側に
 app.include_router(voice_ws_router)
 app.include_router(gemini_voice_router)
+app.include_router(realtime_router)  # /api/v1/realtime prefix は router 側に定義
+app.include_router(realtime_ws_router)  # /ws/realtime-delegate
 app.include_router(public_chat_router, prefix="/api/v1")
 
 

@@ -61,6 +61,16 @@ export function InquiryForm({
       setError("お名前とご用件は必須です。");
       return;
     }
+    if (fields.includes("email")) {
+      if (!state.email.trim()) {
+        setError("メールアドレスは必須です。");
+        return;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(state.email.trim())) {
+        setError("メールアドレスの形式が正しくありません。");
+        return;
+      }
+    }
     setError(null);
     setLoading(true);
     try {
@@ -115,7 +125,7 @@ export function InquiryForm({
     >
       {fields.map((f) => {
         const isMessage = f === "message";
-        const required = f === "name" || f === "message";
+        const required = f === "name" || f === "message" || f === "email";
         return (
           <div key={f} className="space-y-1.5">
             <Label htmlFor={`inquiry-${f}`}>

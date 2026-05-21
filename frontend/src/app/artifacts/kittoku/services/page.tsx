@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { ArtifactLink as Link } from "@/components/artifacts/artifact-link";
 import Image from "next/image";
 import {
   ArrowRight,
@@ -8,7 +8,6 @@ import {
   Award,
   Truck,
   Phone,
-  MessageCircle,
 } from "lucide-react";
 import { LpShell } from "@/components/templates/lp-shell";
 import { Section } from "@/components/templates/section";
@@ -161,29 +160,6 @@ const ACHIEVEMENTS = [
   },
 ];
 
-const INQUIRY_STEPS = [
-  {
-    num: "01",
-    title: "LINE / 電話で連絡",
-    body: "「修理したい」「点検時期」「部品がほしい」など、まずはお気軽にご連絡ください。",
-  },
-  {
-    num: "02",
-    title: "状況を共有",
-    body: "車検証・架装メーカー・型式・破損箇所の写真や動画をお送りいただけるとスムーズです。",
-  },
-  {
-    num: "03",
-    title: "見積・日程ご提案",
-    body: "状況を確認のうえ、概算見積と入庫候補日をご提案します。",
-  },
-  {
-    num: "04",
-    title: "入庫・整備・引き渡し",
-    body: "ご都合の合う日程で入庫いただき、整備完了後にお引き渡しします。",
-  },
-];
-
 export const metadata = {
   title: "事業・サービス | 吉川特装",
   description:
@@ -197,7 +173,7 @@ export default function ServicesPage() {
       <ServicesGridSection />
       <VehicleListSection />
       <AchievementsSection />
-      <InquiryFlowSection />
+      <ContactCtaSection />
     </LpShell>
   );
 }
@@ -230,8 +206,7 @@ function PageHero() {
           data-edit-id="kittoku-services-hero-h1"
           className="font-headline text-4xl sm:text-5xl lg:text-6xl font-black leading-tight max-w-3xl"
         >故障しても大丈夫
-すぐに現場復帰させます
-</h1>
+すぐに現場復帰させます</h1>
         <p
           data-edit-id="kittoku-services-hero-lead"
           className="text-white/80 mt-6 text-base leading-relaxed max-w-2xl"
@@ -296,7 +271,7 @@ function ServiceDetailCard({ item, large }: { item: ServiceItem; large: boolean 
         />
         {item.comingSoon && (
           <span className="absolute top-3 right-3 bg-[var(--yk-gold)] text-[var(--yk-navy-dark)] text-[10px] font-mono-data font-bold px-2 py-0.5 rounded-sm tracking-wider">
-            COMING SOON
+            準備中
           </span>
         )}
       </div>
@@ -364,12 +339,12 @@ function VehicleListSection() {
               key={key}
               className="bg-white border border-border rounded-sm overflow-hidden"
             >
-              <div className="aspect-[4/3] relative bg-[var(--yk-navy)]/[0.03]">
+              <div className="aspect-[4/3] relative bg-[var(--yk-navy)]/[0.03] overflow-hidden">
                 <Image
                   src={v.image}
                   alt={v.label}
                   fill
-                  className="object-contain p-3"
+                  className="object-cover"
                   sizes="(max-width: 640px) 50vw, 33vw"
                 />
               </div>
@@ -473,80 +448,40 @@ function AchievementsSection() {
   );
 }
 
-function InquiryFlowSection() {
+function ContactCtaSection() {
   return (
     <section className="relative overflow-hidden bg-[var(--yk-navy)] text-white">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_78%_35%,rgba(255,196,0,0.16),transparent_30%)]" />
-      <div className="relative mx-auto max-w-7xl px-4 sm:px-6 py-20 sm:py-24">
-        <div className="space-y-3 mb-12">
-          <div className="flex items-center gap-3">
-            <DiagonalDivider color="var(--yk-gold)" />
-            <span className="font-eyebrow text-xs text-[var(--yk-gold)]">
-              Inquiry Flow
-            </span>
-          </div>
-          <h2
-            data-edit-id="kittoku-services-flow-h2"
-            className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black leading-tight"
-          >
-            ご依頼の流れ
-          </h2>
-          <p className="text-white/80 max-w-2xl leading-relaxed">
-            まずはLINEまたはお電話でお問い合わせください。
-            メーカー・型式・症状の3点が分かるとスムーズにご案内できます。
-          </p>
+      <div className="relative mx-auto max-w-5xl px-4 sm:px-6 py-16 sm:py-24 text-center">
+        <div className="flex items-center justify-center gap-3 mb-4">
+          <DiagonalDivider color="var(--yk-gold)" />
+          <span className="font-eyebrow text-xs text-[var(--yk-gold)]">Contact</span>
         </div>
-
-        {/* 紹介動画 */}
-        <div className="mb-12 mx-auto max-w-4xl">
-          <div className="relative aspect-video rounded-sm overflow-hidden bg-black border border-white/10 shadow-2xl">
-            <video
-              src={versionedAsset("/kikkawa/inquiry-flow.mp4")}
-              poster={versionedAsset("/kikkawa/inquiry-flow-poster.jpg")}
-              controls
-              playsInline
-              preload="metadata"
-              className="absolute inset-0 w-full h-full object-cover"
-              aria-label="ご依頼の流れ 紹介動画"
-            />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {INQUIRY_STEPS.map((s) => (
-            <div
-              key={s.num}
-              className="rounded-sm border border-white/15 bg-white/[0.03] p-6 space-y-3"
-            >
-              <div className="font-mono-data text-2xl font-black text-[var(--yk-gold)]">
-                {s.num}
-              </div>
-              <div className="font-headline font-bold text-lg leading-snug">
-                {s.title}
-              </div>
-              <p className="text-sm text-white/70 leading-relaxed">{s.body}</p>
-            </div>
-          ))}
-        </div>
-        <div className="mt-10 flex flex-col sm:flex-row gap-3 justify-center">
-          <Button
-            asChild
-            size="lg"
-            className="bg-[#06c755] hover:bg-[#05a648] text-white font-bold rounded-sm h-12 px-6"
-          >
-            <a
-              href="https://line.me/R/ti/p/@kittoku"
-              target="_blank"
-              rel="noreferrer noopener"
-            >
-              <MessageCircle className="h-5 w-5 mr-2" />
-              LINEで問い合わせ
-            </a>
-          </Button>
+        <h2
+          data-edit-id="kittoku-services-contact-h2"
+          className="font-headline text-3xl sm:text-4xl lg:text-5xl font-black leading-tight"
+        >
+          お問い合わせ
+        </h2>
+        <p className="text-white/80 mt-5 max-w-2xl mx-auto text-sm sm:text-base leading-relaxed">
+          修理・整備で急ぎの方はお電話、 部品注文は LINE か WEB フォームが便利です。
+        </p>
+        <div className="mt-8 flex flex-col sm:flex-row gap-3 justify-center">
           <Button
             asChild
             size="lg"
             className="bg-[var(--yk-gold)] hover:bg-[var(--yk-gold-dark)] text-[var(--yk-navy-dark)] font-bold rounded-sm h-12 px-6"
+          >
+            <Link href="/artifacts/kittoku/contact">
+              お問い合わせはこちら
+              <ArrowRight className="h-5 w-5 ml-2" />
+            </Link>
+          </Button>
+          <Button
+            asChild
+            size="lg"
+            variant="outline"
+            className="border-white/40 hover:border-white text-white hover:bg-white/10 hover:text-white font-bold rounded-sm h-12 px-6 bg-transparent"
           >
             <a href="tel:0859-27-4885">
               <Phone className="h-5 w-5 mr-2" />

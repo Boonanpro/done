@@ -60,6 +60,9 @@ class SandboxManager:
         self._proc: Optional[subprocess.Popen] = None
         self._started_at: Optional[float] = None
         self._lock = threading.Lock()
+        # restart() で追加注入された env vars。次回 spawn 時に os.environ にマージされる。
+        # テスト用に DAN_DEV_NO_AUTH=1 を一時的に注入したい時に使う。
+        self._extra_env: dict[str, str] = {}
 
     # --- 公開API -----------------------------------------------------
 
@@ -165,8 +168,16 @@ class SandboxManager:
         except Exception as e:
             logger.warning("failed to scan for spawn children of %s: %s", pid, e)
 
-    def restart(self) -> SandboxStatus:
+    def restart(self, extra_env: Optional[dict[str, str]] = None) -> SandboxStatus:
+        """サンドボックスを再起動。
+
+        extra_env: 次回 spawn 時に追加注入する環境変数。テスト用に
+                   DAN_DEV_NO_AUTH=1 を一時的に立てたい時に使う。None なら前回の値を維持。
+                   空 dict を渡せばクリア（通常起動に戻す）。
+        """
         self.stop()
+        if extra_env is not None:
+            self._extra_env = dict(extra_env)
         # Wait briefly for port release
         for _ in range(10):
             if self._is_port_free(self.port):
@@ -205,6 +216,9 @@ class SandboxManager:
             cmd.append("--reload")
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
         env["DAN_SANDBOX_PORT"] = str(self.port)
+        # restart で注入された extra env をマージ（テスト用認証バイパス等）
+        for k, v in self._extra_env.items():
+            env[k] = v
 
         log_file = open(self.log_path, "w", encoding="utf-8")
         return subprocess.Popen(

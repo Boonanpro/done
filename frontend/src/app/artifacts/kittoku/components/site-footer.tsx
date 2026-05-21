@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { ArtifactLink as Link } from "@/components/artifacts/artifact-link";
 import { Clock, Mail, MapPin, Phone } from "lucide-react";
 import { Logo } from "./logo";
 
@@ -31,7 +31,7 @@ export function SiteFooter() {
               <Clock className="mt-0.5 h-4 w-4 shrink-0" />
               <div>
                 <div>月〜土 9:00〜17:00</div>
-                <div className="text-xs text-white/60">日祝休</div>
+                <div className="text-xs text-white/60">定休日：日祝・毎月第2土曜</div>
               </div>
             </div>
             <Link

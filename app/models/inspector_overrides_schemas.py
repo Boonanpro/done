@@ -23,6 +23,20 @@ class OverrideUpsert(BaseModel):
     replace_attrs: bool = False
 
 
+class DeleteElementRequest(BaseModel):
+    """Inspector からの「要素まるごと削除」リクエスト。"""
+    artifact_slug: str = Field(..., min_length=1)
+    element_key: str = Field(..., min_length=1)
+    project_id: Optional[UUID] = None
+
+
+class RestoreFileRequest(BaseModel):
+    """Undo: artifact 配下のファイルを指定内容で完全置換するリクエスト。"""
+    artifact_slug: str = Field(..., min_length=1)
+    file_path: str = Field(..., min_length=1, description="PROJECT_ROOT からの相対パス")
+    content: str = Field(..., description="書き戻すファイル内容")
+
+
 class OverrideResponse(BaseModel):
     id: UUID
     project_id: Optional[UUID] = None

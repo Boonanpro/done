@@ -152,16 +152,17 @@ def _set_attr(tag_html: str, attr_name: str, value: str) -> str:
     return tag_html[:cut] + " " + new_assign + tag_html[cut:]
 
 
-def apply_override_to_file(file_path: Path, edit_id: str, model: dict) -> tuple[bool, bool]:
+def apply_override_to_file(file_path: Path, edit_id: str, model: dict) -> tuple[bool, bool, str | None, str | None]:
     """指定ファイルの data-edit-id 要素に override を適用。
 
-    Returns (found, changed).
+    Returns (found, changed, before_content, after_content).
+    before/after は Undo 用。変更なしなら after_content=None。
     """
     src = file_path.read_text(encoding="utf-8")
     original = src
     found = _find_open_tag(src, edit_id)
     if not found:
-        return False, False
+        return False, False, None, None
     open_start, open_end, tag_html = found
     new_tag = tag_html
     if model.get("blockStyle"):
@@ -179,33 +180,260 @@ def apply_override_to_file(file_path: Path, edit_id: str, model: dict) -> tuple[
     changed = src != original
     if changed:
         file_path.write_text(src, encoding="utf-8")
-    return True, changed
+        return True, True, original, src
+    return True, False, original, None
 
 
 def apply_override_for_slug(slug: str, element_key: str, styles: dict | None, attrs: dict | None) -> dict[str, Any]:
     """slug の artifact 配下から element_key に対応する JSX を見つけて override を適用。
 
-    Returns: {"applied": bool, "file": str | None, "reason": str | None}
+    Returns: {"applied": bool, "file": str | None, "reason": str | None,
+              "before_content": str | None, "after_content": str | None}
     """
     if not element_key.startswith("@"):
-        return {"applied": False, "file": None, "reason": "legacy element_key (DOM path) not supported"}
+        return {
+            "applied": False, "file": None,
+            "reason": "legacy element_key (DOM path) not supported",
+            "before_content": None, "after_content": None,
+        }
     edit_id = element_key[1:]
 
     model = normalize_to_v2(styles, attrs)
     if not model:
-        return {"applied": False, "file": None, "reason": "empty override (no text/style/attrs)"}
+        return {
+            "applied": False, "file": None,
+            "reason": "empty override (no text/style/attrs)",
+            "before_content": None, "after_content": None,
+        }
 
     files = find_artifact_tsx_files(slug)
     if not files:
-        return {"applied": False, "file": None, "reason": "no artifact files for slug={}".format(slug)}
+        return {
+            "applied": False, "file": None,
+            "reason": "no artifact files for slug={}".format(slug),
+            "before_content": None, "after_content": None,
+        }
 
     for f in files:
-        found, changed = apply_override_to_file(f, edit_id, model)
+        found, changed, before, after = apply_override_to_file(f, edit_id, model)
         if found:
             return {
                 "applied": changed,
                 "file": str(f.relative_to(PROJECT_ROOT)),
                 "reason": None if changed else "no diff (already up-to-date)",
+                "before_content": before,
+                "after_content": after,
             }
 
-    return {"applied": False, "file": None, "reason": "data-edit-id={} not found in any artifact file".format(edit_id)}
+    return {
+        "applied": False, "file": None,
+        "reason": "data-edit-id={} not found in any artifact file".format(edit_id),
+        "before_content": None, "after_content": None,
+    }
+
+
+# ============================================================================
+# 要素削除（ハード削除）
+# ============================================================================
+
+# 削除を拒否するタグ（ページ全体を壊す）
+_DELETE_REFUSED_TAGS = {"html", "body", "head", "main"}
+
+
+def _find_matching_close(src: str, tag_name: str, scan_from: int) -> int | None:
+    """`<tag_name ...>` の開きタグに対応する `</tag_name>` を探し、その末尾位置を返す。
+
+    scan_from は開きタグの直後（`>` の次）を指している前提。
+    JSX 式 `{...}` 内のブレース深さを尊重しつつ、同名タグのネストを正しく数える。
+    自己閉じタグ `<tag_name ... />` は depth に影響しない。
+    見つからなければ None。
+    """
+    n = len(src)
+    pos = scan_from
+    depth = 1  # 開きタグ 1 個分は既に入っている
+    brace = 0
+
+    # 単語境界を担保: `<TagNameFoo` を `<TagName` と誤マッチしない
+    open_re = re.compile(r"<" + re.escape(tag_name) + r"(?=[\s/>])")
+    close_re = re.compile(r"</" + re.escape(tag_name) + r"\s*>")
+
+    while pos < n:
+        c = src[pos]
+        if c == "{":
+            brace += 1
+            pos += 1
+            continue
+        if c == "}":
+            brace -= 1
+            pos += 1
+            continue
+        if brace > 0:
+            pos += 1
+            continue
+        if c != "<":
+            pos += 1
+            continue
+        # 閉じタグ優先で試す
+        cm = close_re.match(src, pos)
+        if cm:
+            depth -= 1
+            if depth == 0:
+                return cm.end()
+            pos = cm.end()
+            continue
+        # 同名の開きタグ
+        om = open_re.match(src, pos)
+        if om:
+            # 開きタグの末尾を探す（自己閉じか否かを判定するため）
+            t_brace = 0
+            t_pos = pos + 1
+            t_end: int | None = None
+            while t_pos < n:
+                ch = src[t_pos]
+                if ch == "{":
+                    t_brace += 1
+                elif ch == "}":
+                    t_brace -= 1
+                elif ch == ">" and t_brace == 0:
+                    t_end = t_pos + 1
+                    break
+                t_pos += 1
+            if t_end is None:
+                return None  # 不正
+            tag_html = src[pos:t_end]
+            if not tag_html.rstrip().endswith("/>"):
+                depth += 1
+            pos = t_end
+            continue
+        pos += 1
+    return None
+
+
+def remove_element_from_file(file_path: Path, edit_id: str) -> tuple[bool, bool, str | None, str | None, str | None]:
+    """指定ファイルから data-edit-id=<edit_id> の JSX 要素を完全削除する。
+
+    Returns: (found, removed, reason_if_not_removed, before_content, after_content)
+    """
+    src = file_path.read_text(encoding="utf-8")
+    found = _find_open_tag(src, edit_id)
+    if not found:
+        return False, False, None, None, None
+    open_start, open_end, tag_html = found
+    tag_name = _tag_name(tag_html)
+    if not tag_name:
+        return True, False, "tag name not parsable", None, None
+    if tag_name.lower() in _DELETE_REFUSED_TAGS:
+        return True, False, "refuse to delete root tag <{}>".format(tag_name), None, None
+
+    if _is_self_closing(tag_html):
+        delete_end = open_end
+    else:
+        close_end = _find_matching_close(src, tag_name, open_end)
+        if close_end is None:
+            return True, False, "matching </{}> not found".format(tag_name), None, None
+        delete_end = close_end
+
+    # その行の前方の whitespace と末尾の改行も一緒に除去（見た目を綺麗に保つ）
+    delete_start = open_start
+    line_start = src.rfind("\n", 0, delete_start) + 1
+    leading = src[line_start:delete_start]
+    if leading.strip() == "":
+        delete_start = line_start
+        if delete_end < len(src) and src[delete_end] == "\n":
+            delete_end += 1
+
+    new_src = src[:delete_start] + src[delete_end:]
+    if new_src == src:
+        return True, False, "no diff", src, None
+    file_path.write_text(new_src, encoding="utf-8")
+    return True, True, None, src, new_src
+
+
+def remove_element_for_slug(slug: str, element_key: str) -> dict[str, Any]:
+    """slug の artifact 配下から element_key に対応する JSX 要素を完全削除。
+
+    Returns: {"removed": bool, "file": str | None, "reason": str | None, "tag": str | None,
+              "before_content": str | None, "after_content": str | None}
+    """
+    if not element_key.startswith("@"):
+        return {
+            "removed": False, "file": None,
+            "reason": "legacy element_key (DOM path) not supported",
+            "tag": None, "before_content": None, "after_content": None,
+        }
+    edit_id = element_key[1:]
+
+    files = find_artifact_tsx_files(slug)
+    if not files:
+        return {
+            "removed": False, "file": None,
+            "reason": "no artifact files for slug={}".format(slug),
+            "tag": None, "before_content": None, "after_content": None,
+        }
+
+    for f in files:
+        found, removed, reason, before, after = remove_element_from_file(f, edit_id)
+        if found:
+            return {
+                "removed": removed,
+                "file": str(f.relative_to(PROJECT_ROOT)),
+                "reason": reason, "tag": None,
+                "before_content": before, "after_content": after,
+            }
+
+    return {
+        "removed": False, "file": None,
+        "reason": "data-edit-id={} not found in any artifact file".format(edit_id),
+        "tag": None, "before_content": None, "after_content": None,
+    }
+
+
+# ============================================================================
+# Undo 用: ファイル完全書き戻し
+# ============================================================================
+
+
+def restore_file_content(slug: str, file_path_rel: str, content: str) -> dict[str, Any]:
+    """artifact 配下のファイルを指定内容で完全置換する（Undo用）。
+
+    安全策:
+    - file_path_rel は `frontend/src/app/artifacts/<slug>/` 配下のファイルに限定
+    - .tsx / .ts / .css のみ許可（誤って .py を書き換える事故防止）
+
+    Returns: {"restored": bool, "file": str | None, "reason": str | None,
+              "before_content": str | None}
+    """
+    target = (PROJECT_ROOT / file_path_rel).resolve()
+    expected_base = (PROJECT_ROOT / "frontend" / "src" / "app" / "artifacts" / slug).resolve()
+    try:
+        target.relative_to(expected_base)
+    except ValueError:
+        return {
+            "restored": False, "file": None,
+            "reason": "file path outside artifact dir for slug={}".format(slug),
+            "before_content": None,
+        }
+    if target.suffix not in {".tsx", ".ts", ".css", ".js", ".jsx"}:
+        return {
+            "restored": False, "file": None,
+            "reason": "unsupported file extension: {}".format(target.suffix),
+            "before_content": None,
+        }
+    before: str | None = None
+    if target.exists():
+        before = target.read_text(encoding="utf-8")
+        if before == content:
+            return {
+                "restored": False, "file": file_path_rel,
+                "reason": "no diff (content unchanged)",
+                "before_content": before,
+            }
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return {
+        "restored": True,
+        "file": file_path_rel,
+        "reason": None,
+        "before_content": before,
+    }

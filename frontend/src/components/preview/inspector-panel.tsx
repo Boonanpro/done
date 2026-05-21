@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo } from 'react';
-import { Check } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Check, Trash2 } from 'lucide-react';
 
 import { usePreviewStore, findMediaInScope, type SelectedElement } from '@/stores/preview-store';
 
@@ -355,6 +355,110 @@ export function InspectorPanel() {
   const liveTarget = usePreviewStore((s) => s.liveTarget);
   const clearSelection = usePreviewStore((s) => s.clearSelection);
   const resetElementEdits = usePreviewStore((s) => s.resetElementEdits);
+  const deleteSelectedElement = usePreviewStore((s) => s.deleteSelectedElement);
+
+  // 2クリック確認方式: 1回目で「もう一度クリックで削除」状態、4秒で revert
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  useEffect(() => {
+    if (!confirmDelete) return;
+    const t = window.setTimeout(() => setConfirmDelete(false), 4000);
+    return () => window.clearTimeout(t);
+  }, [confirmDelete]);
+  // 選択要素が変わったら確認状態リセット
+  useEffect(() => {
+    setConfirmDelete(false);
+  }, [selectedElement?.refId]);
+
+  // 削除可否を「祖先 → 自分 → 子孫」の順で広く探索:
+  //   1) 選択要素自身に data-edit-id がある → そのまま削除候補
+  //   2) 祖先に data-edit-id がある → その祖先（最近接）
+  //   3) 子孫に data-edit-id がある → その子孫（最初の1個）
+  //
+  // wrapper（自身は data-edit-id 無し、子に持つ）を選んでも削除候補が見つかるようにする。
+  const deleteCandidate = useMemo<{ key: string; tagName: string; element: Element; mode: 'self' | 'ancestor' | 'descendant' } | null>(() => {
+    // 1) selectedElement.elementKey が @ で始まっていれば、それを最優先で使う
+    if (selectedElement?.elementKey?.startsWith('@') && liveTarget) {
+      return {
+        key: selectedElement.elementKey,
+        tagName: selectedElement.tagName,
+        element: liveTarget,
+        mode: 'self',
+      };
+    }
+    if (!liveTarget) return null;
+    // 2) 祖先方向に遡って探す
+    let cur: Element | null = liveTarget;
+    while (cur) {
+      const id = cur.getAttribute?.('data-edit-id');
+      if (id) {
+        return {
+          key: `@${id}`,
+          tagName: cur.tagName.toLowerCase(),
+          element: cur,
+          mode: cur === liveTarget ? 'self' : 'ancestor',
+        };
+      }
+      cur = cur.parentElement;
+    }
+    // 3) 子孫方向に探す（最初に見つかったもの）
+    const descendant = (liveTarget as Element).querySelector?.('[data-edit-id]');
+    if (descendant) {
+      const id = descendant.getAttribute('data-edit-id');
+      if (id) {
+        return {
+          key: `@${id}`,
+          tagName: descendant.tagName.toLowerCase(),
+          element: descendant,
+          mode: 'descendant',
+        };
+      }
+    }
+    return null;
+  }, [liveTarget, selectedElement?.refId, selectedElement?.elementKey, selectedElement?.tagName]);
+
+  // 「自分以外」を削除する場合は救済モード。tooltipで明示。
+  const deletingDifferent = !!deleteCandidate && deleteCandidate.mode !== 'self';
+  const canDelete = !!deleteCandidate;
+
+  const handleDelete = async () => {
+    if (!canDelete || !deleteCandidate) return;
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    setConfirmDelete(false);
+    // 自分以外（祖先/子孫）を削除する場合は、選択を一度ターゲットに切り替えてから delete
+    if (deleteCandidate.mode !== 'self') {
+      const el = deleteCandidate.element as HTMLElement;
+      const rect = el.getBoundingClientRect();
+      usePreviewStore.getState().selectElement(
+        {
+          tagName: deleteCandidate.tagName,
+          text: (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120),
+          outerHtmlSnippet: (el.outerHTML || '').slice(0, 2000),
+          rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+          className: el.getAttribute('class') || '',
+          ancestors: [],
+          bgColor: '',
+          elementKey: deleteCandidate.key,
+        },
+        el
+      );
+      // selectElement は非同期に state を反映するので、次の tick で削除を呼ぶ
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    await deleteSelectedElement();
+  };
+
+  const deleteTooltip = !canDelete
+    ? 'この要素にも祖先にも子孫にも data-edit-id を持つ要素がないため削除できません'
+    : deleteCandidate?.mode === 'ancestor'
+      ? `祖先 <${deleteCandidate.tagName}> を削除します`
+      : deleteCandidate?.mode === 'descendant'
+        ? `この wrapper は data-edit-id を持たないので、子の <${deleteCandidate.tagName}> を削除します`
+        : confirmDelete
+          ? 'もう一度クリックで完全削除（Cmd+Z で復元可能）'
+          : '要素を削除（Cmd+Z で復元可能）';
 
   if (!selectedElement) {
     return (
@@ -373,31 +477,58 @@ export function InspectorPanel() {
 
   return (
     <div className="flex h-full w-[280px] shrink-0 flex-col border-l border-border bg-background">
-      <div className="flex items-center gap-1 border-b border-border px-3 py-2">
-        <span className="rounded bg-primary/15 px-1.5 py-0.5 font-mono text-xs font-medium text-primary">
-          @{selectedElement.refId}
-        </span>
-        <span className="truncate text-xs text-muted-foreground">
-          &lt;{selectedElement.tagName}&gt;
-          {selectedElement.text ? ` "${selectedElement.text.slice(0, 18)}"` : ''}
-        </span>
-        {selectedElement.stackHint && selectedElement.stackHint.total > 1 && (
-          <span
-            className="ml-auto shrink-0 rounded bg-blue-500/15 px-1 font-mono text-[10px] text-blue-600 dark:text-blue-400"
-            title="同じ場所をもう一度クリック (or Alt+クリック) で次の要素にドリル"
-          >
-            {selectedElement.stackHint.index + 1}/{selectedElement.stackHint.total} ↓
+      <div className="flex flex-col gap-1.5 border-b border-border px-3 py-2">
+        <div className="flex items-center gap-1">
+          <span className="rounded bg-primary/15 px-1.5 py-0.5 font-mono text-xs font-medium text-primary">
+            @{selectedElement.refId}
           </span>
-        )}
-        <span className="ml-auto shrink-0 rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground">
-          {Math.round(selectedElement.rect.width)}×{Math.round(selectedElement.rect.height)}
-        </span>
+          <span className="truncate text-xs text-muted-foreground">
+            &lt;{selectedElement.tagName}&gt;
+            {selectedElement.text ? ` "${selectedElement.text.slice(0, 18)}"` : ''}
+          </span>
+          {selectedElement.stackHint && selectedElement.stackHint.total > 1 && (
+            <span
+              className="ml-auto shrink-0 rounded bg-blue-500/15 px-1 font-mono text-[10px] text-blue-600 dark:text-blue-400"
+              title="同じ場所をもう一度クリック (or Alt+クリック) で次の要素にドリル"
+            >
+              {selectedElement.stackHint.index + 1}/{selectedElement.stackHint.total} ↓
+            </span>
+          )}
+          <span className="ml-auto shrink-0 rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground">
+            {Math.round(selectedElement.rect.width)}×{Math.round(selectedElement.rect.height)}
+          </span>
+          <button
+            onClick={clearSelection}
+            className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+            title="選択解除"
+          >
+            ×
+          </button>
+        </div>
+        {/* 削除アクション: 目立つ位置 + 大きめサイズ */}
         <button
-          onClick={clearSelection}
-          className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="選択解除"
+          type="button"
+          onClick={handleDelete}
+          disabled={!canDelete}
+          title={deleteTooltip}
+          className={`flex w-full items-center justify-center gap-1.5 rounded-md border px-2 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+            confirmDelete
+              ? 'border-red-600 bg-red-600 text-white hover:bg-red-700'
+              : !canDelete
+                ? 'border-border text-muted-foreground'
+                : 'border-red-500/30 text-red-600 hover:border-red-500 hover:bg-red-500/10'
+          }`}
         >
-          ×
+          <Trash2 className="h-3.5 w-3.5" />
+          {confirmDelete
+            ? '本当に削除？ もう一度クリック'
+            : !canDelete
+              ? '削除不可（編集IDが無い）'
+              : deleteCandidate?.mode === 'ancestor'
+                ? `親 <${deleteCandidate.tagName}> を削除`
+                : deleteCandidate?.mode === 'descendant'
+                  ? `子 <${deleteCandidate.tagName}> を削除`
+                  : 'この要素を削除（Cmd+Zで復元）'}
         </button>
       </div>
       <div className="flex-1 space-y-4 overflow-y-auto p-3">
@@ -409,11 +540,12 @@ export function InspectorPanel() {
       </div>
       <div className="flex items-center gap-1 border-t border-border px-3 py-1.5 text-[10px] text-muted-foreground">
         <Check className="h-3 w-3 text-green-500" />
-        <span>編集は自動保存されます</span>
+        <span>編集は自動保存されます（Cmd+Z で巻き戻し）</span>
         <button
           type="button"
           onClick={resetElementEdits}
           className="ml-auto rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted hover:text-foreground"
+          title="この要素の編集を全てリセット"
         >
           Reset
         </button>
