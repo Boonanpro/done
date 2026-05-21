@@ -217,5 +217,19 @@
     "files": [
       "D:\\done\\supabase\\migrations\\057_chat_artifact_room_scope.sql"
     ]
+  },
+  "salonboard_credentials": {
+    "name": "salonboard_credentials",
+    "description": "サロンボードのログイン情報を暗号化して保存。初期設定画面で本人が入力し、自動投稿時にサーバー内部で復号して使う。みきさんは平文を閲覧不可。",
+    "created_at": "2026-05-21T17:25:48.481134",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\060_salonboard_credentials.sql",
+      "D:\\done\\app\\models\\salonboard_credentials_schemas.py",
+      "D:\\done\\app\\services\\salonboard_credentials_service.py",
+      "D:\\done\\app\\api\\salonboard_credentials_routes.py",
+      "D:\\done\\frontend\\src\\app\\artifacts\\salonboard-credentials\\page.tsx",
+      "D:\\done\\scripts\\seed_salonboard_credentials.py"
+    ]
   }
 }

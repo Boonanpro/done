@@ -49,7 +49,7 @@ type Fields = {
   hashtags: MField;
 };
 type Photo = { url: string; file: File };
-type Step = 'intro' | 'analyzing' | 'form' | 'posting' | 'done';
+type Step = 'init' | 'intro' | 'analyzing' | 'form' | 'posting' | 'done';
 
 /* ============ 定数 ============ */
 const OPT = {
@@ -115,13 +115,54 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /* ============ メイン ============ */
 export default function SalonboardStyleupPage() {
-  const [step, setStep] = useState<Step>('intro');
+  const [step, setStep] = useState<Step>('init');
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [form, setForm] = useState<Fields | null>(null);
   const [error, setError] = useState('');
   const [elapsed, setElapsed] = useState(0);
   const [stylist, setStylist] = useState('');
+  const [deviceId, setDeviceId] = useState('');
+  const [setupReady, setSetupReady] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // 起動時: device_id を確保し、サロンボード認証情報の設定状態を確認する
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    let id = window.localStorage.getItem('sb_device_id') ?? '';
+    if (!id) {
+      id =
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : 'd-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      window.localStorage.setItem('sb_device_id', id);
+    }
+    setDeviceId(id);
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/v1/salonboard-credentials/status?device_id=${encodeURIComponent(id)}`,
+        );
+        if (res.ok) {
+          const data = (await res.json()) as {
+            has_credentials: boolean;
+            stylist_name?: string | null;
+          };
+          if (data.has_credentials) {
+            if (data.stylist_name) setStylist(data.stylist_name);
+            setStep('intro');
+          } else {
+            setStep('init');
+          }
+        } else {
+          setStep('init');
+        }
+      } catch {
+        setStep('init');
+      } finally {
+        setSetupReady(true);
+      }
+    })();
+  }, []);
 
   const runAnalyze = useCallback(async (items: Photo[]) => {
     setError('');
@@ -230,11 +271,27 @@ export default function SalonboardStyleupPage() {
   return (
     <div className="h-screen overflow-y-auto bg-[#f4f5f7] text-gray-900">
       <div className="mx-auto min-h-screen max-w-md bg-white shadow-sm">
-        {step === 'intro' && (
+        {!setupReady && (
+          <div className="flex min-h-screen items-center justify-center">
+            <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+          </div>
+        )}
+        {setupReady && step === 'init' && (
+          <InitScreen
+            deviceId={deviceId}
+            initialStylistName={stylist}
+            onDone={(name) => {
+              setStylist(name);
+              setStep('intro');
+            }}
+          />
+        )}
+        {setupReady && step === 'intro' && (
           <Intro
             onPick={() => fileRef.current?.click()}
             onSample={onPickSample}
             error={error}
+            onOpenSetup={() => setStep('init')}
           />
         )}
         {step === 'analyzing' && <Analyzing photos={photos} />}
@@ -269,10 +326,12 @@ function Intro({
   onPick,
   onSample,
   error,
+  onOpenSetup,
 }: {
   onPick: () => void;
   onSample: (s: (typeof SAMPLES)[number]) => void;
   error: string;
+  onOpenSetup?: () => void;
 }) {
   return (
     <div className="flex flex-col">
@@ -280,6 +339,14 @@ function Intro({
         <div className="flex items-center gap-1.5 text-sm font-semibold text-white/90">
           <Sparkles className="h-4 w-4" />
           StyleSnap
+          {onOpenSetup && (
+            <button
+              onClick={onOpenSetup}
+              className="ml-auto rounded-full bg-white/15 px-3 py-1 text-[11px] font-medium text-white hover:bg-white/25"
+            >
+              設定
+            </button>
+          )}
         </div>
         <h1 className="mt-4 text-[26px] font-bold leading-snug">
           写真を撮るだけで、
@@ -937,5 +1004,164 @@ function Counter({
       </div>
       {reason && <Reason text={reason} />}
     </>
+  );
+}
+
+/* ============ 画面: 初期設定 ============ */
+function InitScreen({
+  deviceId,
+  initialStylistName,
+  onDone,
+}: {
+  deviceId: string;
+  initialStylistName: string;
+  onDone: (stylistName: string) => void;
+}) {
+  const [stylistName, setStylistName] = useState(initialStylistName);
+  const [loginId, setLoginId] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPw, setShowPw] = useState(false);
+  const [agree, setAgree] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const canSubmit =
+    stylistName.trim().length > 0 &&
+    loginId.trim().length > 0 &&
+    password.length > 0 &&
+    agree &&
+    !submitting;
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setError('');
+    setSubmitting(true);
+    try {
+      const res = await fetch('/api/v1/salonboard-credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          device_id: deviceId,
+          stylist_name: stylistName.trim(),
+          login_id: loginId.trim(),
+          password,
+          consent: true,
+        }),
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(j.detail || '保存に失敗しました');
+      }
+      onDone(stylistName.trim());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '保存に失敗しました');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col">
+      <div className="bg-gradient-to-b from-[#e8607f] to-[#c8587a] px-6 pb-9 pt-14 text-white">
+        <div className="flex items-center gap-1.5 text-sm font-semibold text-white/90">
+          <Sparkles className="h-4 w-4" />
+          StyleSnap
+        </div>
+        <h1 className="mt-4 text-[24px] font-bold leading-snug">最初の設定</h1>
+        <p className="mt-3 text-sm leading-relaxed text-white/90">
+          初回だけ、お名前とサロンボードのログイン情報をお預かりします。暗号化して保管するので、開発者を含め誰も中身を見ることはできません。
+        </p>
+      </div>
+
+      <div className="space-y-5 px-6 pb-32 pt-6">
+        <div>
+          <Label text="スタイリスト名" required />
+          <input
+            value={stylistName}
+            onChange={(e) => setStylistName(e.target.value.slice(0, 50))}
+            placeholder="お名前(例: 田中 美咲)"
+            className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#0a3d62]"
+          />
+        </div>
+
+        <div>
+          <Label text="サロンボードのログインID" required />
+          <input
+            value={loginId}
+            onChange={(e) => setLoginId(e.target.value)}
+            placeholder="ログインID または メール"
+            autoComplete="off"
+            className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#0a3d62]"
+          />
+        </div>
+
+        <div>
+          <Label text="サロンボードのパスワード" required />
+          <div className="relative">
+            <input
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              type={showPw ? 'text' : 'password'}
+              placeholder="パスワード"
+              autoComplete="off"
+              className="w-full rounded-lg border border-gray-200 px-3 py-2.5 pr-16 text-sm text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#0a3d62]"
+            />
+            <button
+              type="button"
+              onClick={() => setShowPw((v) => !v)}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium text-[#0a3d62]"
+            >
+              {showPw ? '隠す' : '表示'}
+            </button>
+          </div>
+        </div>
+
+        <div className="space-y-1.5 rounded-xl bg-[#f6f8fb] p-4 text-[12px] leading-relaxed text-gray-600">
+          <div className="font-semibold text-gray-800">取扱いについて</div>
+          <ul className="list-disc space-y-1 pl-4">
+            <li>ログイン情報は暗号化して保管します</li>
+            <li>サロンボードへの自動投稿の目的でのみ使用します</li>
+            <li>開発者を含め、誰もパスワードの中身を見られません</li>
+            <li>削除を希望されたらすぐに消去します</li>
+          </ul>
+        </div>
+
+        <label className="flex items-start gap-3 text-sm text-gray-700">
+          <input
+            type="checkbox"
+            checked={agree}
+            onChange={(e) => setAgree(e.target.checked)}
+            className="mt-0.5 h-4 w-4 shrink-0 accent-[#0a3d62]"
+          />
+          <span>上記の取扱いに同意します</span>
+        </label>
+
+        {error && (
+          <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            {error}
+          </div>
+        )}
+      </div>
+
+      <div className="fixed inset-x-0 bottom-0">
+        <div className="mx-auto max-w-md border-t border-gray-100 bg-white px-4 py-3">
+          <button
+            onClick={submit}
+            disabled={!canSubmit}
+            className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#0a3d62] py-3.5 font-bold text-white transition active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {submitting ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                保存中…
+              </>
+            ) : (
+              '保存して始める'
+            )}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

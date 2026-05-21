@@ -41,6 +41,9 @@ class Settings(BaseSettings):
 
     # Google Gemini (learning inference)
     GOOGLE_GEMINI_API_KEY: str = ""
+
+    # Salonboard credentials encryption (Fernet base64, 32 bytes urlsafe)
+    SALONBOARD_ENCRYPTION_KEY: str = ""
     
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
