@@ -17,17 +17,55 @@ from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+ARTIFACTS_ROOT = PROJECT_ROOT / "frontend" / "src" / "app" / "artifacts"
 
 _TAG_NAME_RE = re.compile(r"^<([A-Za-z][A-Za-z0-9_.-]*)")
 
 ALLOWED_ATTRS = {"href", "src", "alt", "title", "aria-label", "data-edit-id"}
 
 
+class WritebackScopeError(RuntimeError):
+    """Inspector writeback がアーティファクトのスコープ外に書き出そうとした時に上がる。"""
+
+
+def _artifact_root(slug: str) -> Path:
+    if not slug or "/" in slug or "\\" in slug or ".." in slug:
+        raise WritebackScopeError(f"invalid slug: {slug!r}")
+    return ARTIFACTS_ROOT / slug
+
+
+def _ensure_under_artifact(file_path: Path, slug: str) -> Path:
+    """resolve したパスが frontend/src/app/artifacts/<slug>/ 配下であることを保証する。
+
+    Inspector writeback の唯一の意図は「指定アーティファクトの JSX を書き換える」こと。
+    ここを越えた書き込みは構造的なバグかパストラバーサルなので例外で止める。
+    """
+    root = _artifact_root(slug).resolve()
+    target = Path(file_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as e:
+        raise WritebackScopeError(
+            f"writeback target {target} is outside artifact scope {root}"
+        ) from e
+    return target
+
+
 def find_artifact_tsx_files(slug: str) -> list[Path]:
-    base = PROJECT_ROOT / "frontend" / "src" / "app" / "artifacts" / slug
+    base = _artifact_root(slug)
     if not base.exists():
         return []
-    return list(base.rglob("*.tsx"))
+    # rglob は base に閉じているので追加の path-traversal チェックは不要。
+    # ただし symlink がアーティファクト外に貼られているとすり抜けるので、
+    # _ensure_under_artifact を通してフィルタする。
+    out: list[Path] = []
+    for f in base.rglob("*.tsx"):
+        try:
+            _ensure_under_artifact(f, slug)
+        except WritebackScopeError:
+            continue
+        out.append(f)
+    return out
 
 
 def normalize_to_v2(styles: dict | None, attrs: dict | None) -> dict | None:
@@ -152,12 +190,20 @@ def _set_attr(tag_html: str, attr_name: str, value: str) -> str:
     return tag_html[:cut] + " " + new_assign + tag_html[cut:]
 
 
-def apply_override_to_file(file_path: Path, edit_id: str, model: dict) -> tuple[bool, bool, str | None, str | None]:
+def apply_override_to_file(
+    file_path: Path,
+    edit_id: str,
+    model: dict,
+    *,
+    slug: str,
+) -> tuple[bool, bool, str | None, str | None]:
     """指定ファイルの data-edit-id 要素に override を適用。
 
     Returns (found, changed, before_content, after_content).
     before/after は Undo 用。変更なしなら after_content=None。
+    file_path はかならず frontend/src/app/artifacts/<slug>/ 配下でなければならない。
     """
+    file_path = _ensure_under_artifact(file_path, slug)
     src = file_path.read_text(encoding="utf-8")
     original = src
     found = _find_open_tag(src, edit_id)
@@ -215,7 +261,7 @@ def apply_override_for_slug(slug: str, element_key: str, styles: dict | None, at
         }
 
     for f in files:
-        found, changed, before, after = apply_override_to_file(f, edit_id, model)
+        found, changed, before, after = apply_override_to_file(f, edit_id, model, slug=slug)
         if found:
             return {
                 "applied": changed,
@@ -309,11 +355,18 @@ def _find_matching_close(src: str, tag_name: str, scan_from: int) -> int | None:
     return None
 
 
-def remove_element_from_file(file_path: Path, edit_id: str) -> tuple[bool, bool, str | None, str | None, str | None]:
+def remove_element_from_file(
+    file_path: Path,
+    edit_id: str,
+    *,
+    slug: str,
+) -> tuple[bool, bool, str | None, str | None, str | None]:
     """指定ファイルから data-edit-id=<edit_id> の JSX 要素を完全削除する。
 
     Returns: (found, removed, reason_if_not_removed, before_content, after_content)
+    file_path はかならず frontend/src/app/artifacts/<slug>/ 配下でなければならない。
     """
+    file_path = _ensure_under_artifact(file_path, slug)
     src = file_path.read_text(encoding="utf-8")
     found = _find_open_tag(src, edit_id)
     if not found:
@@ -372,7 +425,7 @@ def remove_element_for_slug(slug: str, element_key: str) -> dict[str, Any]:
         }
 
     for f in files:
-        found, removed, reason, before, after = remove_element_from_file(f, edit_id)
+        found, removed, reason, before, after = remove_element_from_file(f, edit_id, slug=slug)
         if found:
             return {
                 "removed": removed,
