@@ -28,6 +28,7 @@ from typing import Any, Optional
 from app.services.supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
 # 自律エージェント用のシステムプロンプト
@@ -315,6 +316,7 @@ class AutopilotRunner:
                 text=True,
                 encoding="utf-8",
                 bufsize=1,
+                creationflags=_NO_WINDOW,
             )
         except Exception as e:
             self._trace("error", {"message": f"failed to spawn CLI: {e}"})

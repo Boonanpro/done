@@ -648,43 +648,48 @@ async def _save_written_artifacts(written_file_paths: list[str], room_id: str) -
 
 async def _register_written_chat_artifacts(
     written_file_paths: list[str],
+    room_id: str | None,
     project_id: str | None,
     user_id: str,
     result_text: str = "",
 ) -> None:
     """Register production artifacts even if the Claude Code hook missed them."""
-    if not project_id:
+    if not room_id:
         return
     import re
     from app.services.chat_artifact_service import ChatArtifactService
 
     service = ChatArtifactService()
     seen: set[str] = set()
-    artifact_path_pattern = re.compile(
-        r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)(?:[/\\]|$)"
+    artifact_page_pattern = re.compile(
+        r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)(?:[/\\]([^:]*?))?[/\\]page\.tsx$"
     )
-    artifact_link_pattern = re.compile(r"/artifacts/([\w-]+)(?:[/\s?#)]|$)")
     project_root = Path(__file__).parent.parent.parent
 
-    candidates: list[tuple[str, str]] = []
+    candidates: list[tuple[str, str, str]] = []
     for raw_path in written_file_paths:
         normalized_path = (raw_path or "").replace("\\", "/")
-        match = artifact_path_pattern.search(normalized_path)
+        match = artifact_page_pattern.search(normalized_path)
         if not match:
+            logger.info(
+                "Skipping chat artifact auto-registration for non-entry artifact file: %s",
+                normalized_path,
+            )
             continue
-        candidates.append((match.group(1), normalized_path))
+        root_slug = match.group(1)
+        rest = (match.group(2) or "").strip("/")
+        preview_url = f"/artifacts/{root_slug}" + (f"/{rest}" if rest else "")
+        card_slug = root_slug if not rest else f"{root_slug}-{'-'.join(part for part in rest.split('/') if part)}"
+        candidates.append((card_slug, preview_url, normalized_path))
 
-    for match in artifact_link_pattern.finditer(result_text or ""):
-        slug = match.group(1)
-        candidates.append((slug, f"frontend/src/app/artifacts/{slug}/page.tsx"))
-
-    for slug, source_path in candidates:
+    for slug, preview_url, source_path in candidates:
         if slug in seen:
             continue
         seen.add(slug)
 
         try:
-            page_path = project_root / "frontend" / "src" / "app" / "artifacts" / slug / "page.tsx"
+            route_parts = preview_url.removeprefix("/artifacts/").split("/")
+            page_path = project_root / "frontend" / "src" / "app" / "artifacts" / Path(*route_parts) / "page.tsx"
             if not page_path.exists():
                 logger.info("Skipping chat artifact registration for %s: page.tsx not found", slug)
                 continue
@@ -692,8 +697,8 @@ async def _register_written_chat_artifacts(
             existing = (
                 service.supabase.table("chat_artifact")
                 .select("id")
-                .eq("project_id", project_id)
-                .eq("slug", slug)
+                .eq("room_id", room_id)
+                .eq("preview_url", preview_url)
                 .limit(1)
                 .execute()
             )
@@ -701,14 +706,13 @@ async def _register_written_chat_artifacts(
                 continue
             await service.create(
                 {
+                    "room_id": room_id,
                     "project_id": project_id,
                     "slug": slug,
                     "kind": "production",
                     "artifact_type": service.infer_artifact_type(slug=slug, path=source_path),
                     "label": slug.replace("-", " ").replace("_", " "),
-                    "preview_url": f"/artifacts/{slug}",
-                    "share_url": f"/preview/{slug}",
-                    "draft_url": f"/preview/{slug}",
+                    "preview_url": preview_url,
                     "publish_status": "preview_live",
                 },
                 user_id,
@@ -2310,6 +2314,7 @@ async def send_dan_message_stream(
                     try:
                         await _register_written_chat_artifacts(
                             written_file_paths,
+                            room_id,
                             project_info.get("id"),
                             current_user.user_id,
                             final_text,

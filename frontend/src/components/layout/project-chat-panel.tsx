@@ -596,7 +596,7 @@ function ChatInput({
     queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
     queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
     queryClient.invalidateQueries({ queryKey: ['project', projectId] });
-    queryClient.invalidateQueries({ queryKey: ['chat-artifacts', projectId] });
+    queryClient.invalidateQueries({ queryKey: ['chat-artifacts', roomId] });
   }, [projectId, queryClient, roomId]);
 
   const uploadFiles = useCallback(async (fileList: File[]) => {
@@ -1298,38 +1298,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     }
   }, [projectId, previewProjectId, closePreview]);
 
-  // Artifacts for the header opener button
-  const { data: artifacts = [] } = useQuery<ArtifactRecord[]>({
-    queryKey: ['chat-artifacts', projectId],
-    queryFn: async () => {
-      const res = await fetch(`/api/v1/chat-artifact?project_id=${projectId}`, {
-        credentials: 'include',
-      });
-      if (!res.ok) return [];
-      return res.json();
-    },
-    enabled: !!projectId,
-    staleTime: 10_000,
-  });
   const [artifactMenuOpen, setArtifactMenuOpen] = useState(false);
 
-  // Auto-open newly created artifacts
   const seenArtifactIdsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    if (!artifacts.length) return;
-    const seen = seenArtifactIdsRef.current;
-    if (seen.size === 0) {
-      // First load: just record current state, don't auto-open
-      artifacts.forEach((a) => seen.add(a.id));
-      return;
-    }
-    const newOnes = artifacts.filter((a) => !seen.has(a.id));
-    if (newOnes.length > 0) {
-      // Most recent first (already sorted desc by created_at)
-      openArtifact(projectId, newOnes[0]);
-      newOnes.forEach((a) => seen.add(a.id));
-    }
-  }, [artifacts, projectId, openArtifact]);
 
   // Chat/Preview pane resize
   const [chatWidth, setChatWidth] = useState(520);
@@ -1378,6 +1349,37 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     retry: 1,
     refetchInterval: (query) => (query.state.error ? 15000 : 3000),
   });
+
+  // Artifacts for the header opener button
+  const { data: artifacts = [] } = useQuery<ArtifactRecord[]>({
+    queryKey: ['chat-artifacts', project?.room_id],
+    queryFn: async () => {
+      const res = await fetch(`/api/v1/chat-artifact?room_id=${project!.room_id}`, {
+        credentials: 'include',
+      });
+      if (!res.ok) return [];
+      return res.json();
+    },
+    enabled: !!project?.room_id,
+    staleTime: 10_000,
+  });
+
+  // Auto-open newly created artifacts
+  useEffect(() => {
+    if (!artifacts.length) return;
+    const seen = seenArtifactIdsRef.current;
+    if (seen.size === 0) {
+      // First load: just record current state, don't auto-open
+      artifacts.forEach((a) => seen.add(a.id));
+      return;
+    }
+    const newOnes = artifacts.filter((a) => !seen.has(a.id));
+    if (newOnes.length > 0) {
+      // Most recent first (already sorted desc by created_at)
+      openArtifact(projectId, newOnes[0]);
+      newOnes.forEach((a) => seen.add(a.id));
+    }
+  }, [artifacts, projectId, openArtifact]);
 
   const { data: messagesData, isLoading: isLoadingMessages } = useQuery({
     queryKey: ['project-messages', project?.room_id],

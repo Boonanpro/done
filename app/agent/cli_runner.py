@@ -39,6 +39,7 @@ _SENTINEL = object()  # キュー終了シグナル
 # アクティブなCLIプロセスを追跡（room_id → Popen）
 _active_processes: Dict[str, subprocess.Popen] = {}
 _process_lock = threading.Lock()
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 # 停止されたroom_idを記録（次回起動時に--fork-sessionを付けるため）
 _interrupted_rooms: set = set()
@@ -639,6 +640,7 @@ def _run_cli_process(
         env=env,
         encoding="utf-8",
         errors="replace",
+        creationflags=_NO_WINDOW,
     )
 
     # プロセスを追跡dictに登録（旧プロセスがあればkill）
@@ -945,6 +947,7 @@ def _run_cli_in_thread(
     # ANTHROPIC_API_KEY: CLIがMax planサブスク（定額）ではなくAPI従量課金を使うのを防止
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
     env["DAN_SESSION_ID"] = room_id
+    env["DAN_ROOM_ID"] = room_id
     env["CLAUDE_CODE_ENABLE_TASKS"] = "true"
     if project_id:
         env["DAN_PROJECT_ID"] = project_id

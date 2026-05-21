@@ -504,8 +504,9 @@ if __name__ == "__main__":
     # ==========================================
     # 9. chat_artifact への自動登録（DAN_PROJECT_ID があれば）
     # ==========================================
+    room_id = os.environ.get("DAN_ROOM_ID") or os.environ.get("DAN_SESSION_ID")
     project_id = os.environ.get("DAN_PROJECT_ID")
-    if project_id:
+    if room_id and project_id:
         try:
             from app.services.supabase_client import get_supabase_client
             sb = get_supabase_client().client
@@ -519,13 +520,14 @@ if __name__ == "__main__":
                 exists = (
                     sb.table("chat_artifact")
                     .select("id")
-                    .eq("project_id", project_id)
+                    .eq("room_id", room_id)
                     .eq("slug", kebab)
                     .execute()
                 )
                 if not exists.data:
                     artifact_type = "dashboard" if "dashboard" in kebab else ("website" if any(t in kebab for t in ("website", "site", "homepage", "hp", "lp", "landing", "corporate", "company")) else "tool")
                     sb.table("chat_artifact").insert({
+                        "room_id": room_id,
                         "project_id": project_id,
                         "slug": kebab,
                         "kind": "production",

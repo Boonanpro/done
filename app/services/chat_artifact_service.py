@@ -3,6 +3,7 @@ chat_artifact のビジネスロジック
 """
 from datetime import datetime, timezone
 from typing import Optional, List
+import re
 from app.services.supabase_client import get_supabase_client
 
 
@@ -14,17 +15,21 @@ class ChatArtifactService:
     def _normalize_payload(self, payload: dict) -> dict:
         slug = (payload.get("slug") or "").strip()
         kind = payload.get("kind") or "production"
+        preview_url = payload.get("preview_url")
+        if slug:
+            payload.setdefault("preview_url", f"/artifacts/{slug}")
+            preview_url = payload.get("preview_url")
         artifact_type = payload.get("artifact_type") or self.infer_artifact_type(
             slug=slug,
             label=payload.get("label"),
-            path=payload.get("preview_url"),
+            path=preview_url,
         )
         payload["kind"] = kind
         payload["artifact_type"] = artifact_type
         if slug:
-            payload.setdefault("preview_url", f"/artifacts/{slug}")
-            payload.setdefault("share_url", f"/preview/{slug}")
-            payload.setdefault("draft_url", f"/preview/{slug}")
+            default_share_url = self._share_url_for(preview_url, slug)
+            payload.setdefault("share_url", default_share_url)
+            payload.setdefault("draft_url", default_share_url)
             payload["share_url"] = self._to_preview_url(payload.get("share_url"), slug)
             payload["draft_url"] = self._to_preview_url(payload.get("draft_url"), slug)
         payload.setdefault("publish_status", "preview_live")
@@ -43,6 +48,14 @@ class ChatArtifactService:
         if value == f"/artifacts/{slug}" or value.startswith(f"/artifacts/{slug}/"):
             return value.replace(f"/artifacts/{slug}", f"/preview/{slug}", 1)
         return value
+
+    @staticmethod
+    def _share_url_for(preview_url: str | None, slug: str) -> str:
+        value = preview_url or f"/artifacts/{slug}"
+        match = re.match(r"^/artifacts/([^/?#]+)([^?#]*)?([?#].*)?$", value)
+        if match:
+            return f"/preview/{match.group(1)}{match.group(2) or ''}{match.group(3) or ''}"
+        return f"/preview/{slug}"
 
     @staticmethod
     def infer_artifact_type(slug: str = "", label: str | None = None, path: str | None = None) -> str:
@@ -66,6 +79,7 @@ class ChatArtifactService:
         self,
         user_id: str,
         project_id: Optional[str] = None,
+        room_id: Optional[str] = None,
         limit: int = 100,
     ) -> List[dict]:
         query = (
@@ -73,7 +87,9 @@ class ChatArtifactService:
             .select("*")
             .eq("created_by", user_id)
         )
-        if project_id:
+        if room_id:
+            query = query.eq("room_id", room_id)
+        elif project_id:
             query = query.eq("project_id", project_id)
         result = query.order("created_at", desc=True).limit(limit).execute()
         return result.data or []
@@ -92,6 +108,8 @@ class ChatArtifactService:
         payload = self._normalize_payload({**data, "created_by": user_id})
         if payload.get("project_id"):
             payload["project_id"] = str(payload["project_id"])
+        if payload.get("room_id"):
+            payload["room_id"] = str(payload["room_id"])
         if payload.get("message_id"):
             payload["message_id"] = str(payload["message_id"])
         result = self.supabase.table(self.table).insert(payload).execute()

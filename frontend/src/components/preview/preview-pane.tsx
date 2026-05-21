@@ -123,6 +123,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const queryClient = useQueryClient();
   const artifact = usePreviewStore((s) => s.artifact);
   const projectId = usePreviewStore((s) => s.projectId);
+  const artifactRoomId = artifact?.room_id || null;
   const isEditMode = usePreviewStore((s) => s.isEditMode);
   const inspectorMode = usePreviewStore((s) => s.inspectorMode);
   const setInspectorMode = usePreviewStore((s) => s.setInspectorMode);
@@ -143,7 +144,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const [iframeLoadSeq, setIframeLoadSeq] = useState(0);
 
   const refreshArtifacts = () => {
-    queryClient.invalidateQueries({ queryKey: ['chat-artifacts', projectId] });
+    queryClient.invalidateQueries({ queryKey: ['chat-artifacts'] });
   };
 
   const publishPreviewMutation = useMutation({
@@ -188,16 +189,21 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   };
 
   const { data: artifacts = [] } = useQuery<ArtifactRecord[]>({
-    queryKey: ['chat-artifacts', projectId],
+    queryKey: ['chat-artifacts', artifactRoomId || projectId],
     queryFn: async () => {
+      const query = artifactRoomId
+        ? `?room_id=${artifactRoomId}`
+        : projectId
+          ? `?project_id=${projectId}`
+          : '';
       const res = await fetch(
-        `/api/v1/chat-artifact${projectId ? `?project_id=${projectId}` : ''}`,
+        `/api/v1/chat-artifact${query}`,
         { credentials: 'include' }
       );
       if (!res.ok) return [];
       return res.json();
     },
-    enabled: !!projectId,
+    enabled: !!artifactRoomId || !!projectId,
     staleTime: 10_000,
   });
 

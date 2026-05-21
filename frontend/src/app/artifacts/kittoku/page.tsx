@@ -294,7 +294,7 @@ function HeroSection() {
   );
 }
 
-function StatsSection() {
+export function StatsSection() {
   return (
     <div className="bg-white border-b border-border">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 py-10 sm:py-12">
@@ -352,7 +352,7 @@ const SERVICES_SECONDARY: ServiceItem[] = [
   { slug: "tow", label: "レッカー", en: "Tow", image: "/kikkawa/services-img/tow.jpg", comingSoon: true },
 ];
 
-function ServicesSummarySection() {
+export function ServicesSummarySection() {
   return (
     <Section padding="xl" width="xl" className="bg-[var(--yk-navy)]/[0.03]">
       <div className="space-y-3 mb-10">
@@ -596,7 +596,7 @@ function StrengthsSection() {
   );
 }
 
-function ManufacturersSection() {
+export function ManufacturersSection() {
   return (
     <Section padding="lg" width="xl" className="bg-[var(--yk-navy)]/5">
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-10 items-start">
@@ -744,7 +744,7 @@ function InfoRow({
   );
 }
 
-function CareersCtaSection() {
+export function CareersCtaSection() {
   return (
     <Section padding="xl" width="xl" className="bg-background">
       <Link

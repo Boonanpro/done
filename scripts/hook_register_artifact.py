@@ -24,7 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 # artifacts/{slug}/page.tsx と demo/{slug}/page.tsx の両方を拾う
 PATH_PATTERN = re.compile(
-    r"frontend[/\\]src[/\\]app[/\\](artifacts)[/\\]([\w-]+)[/\\]page\.tsx$"
+    r"frontend[/\\]src[/\\]app[/\\](artifacts)[/\\]([\w-]+)(?:[/\\]([^:]*?))?[/\\]page\.tsx$"
 )
 
 
@@ -44,10 +44,14 @@ def main() -> int:
         return 0
 
     folder = m.group(1)  # 'artifacts' or 'demo'
-    slug = m.group(2)
+    root_slug = m.group(2)
+    rest = (m.group(3) or "").strip("/\\").replace("\\", "/")
+    slug = root_slug if not rest else f"{root_slug}-{'-'.join(part for part in rest.split('/') if part)}"
+    preview_path = f"/{folder}/{root_slug}" + (f"/{rest}" if rest else "")
 
+    room_id = os.environ.get("DAN_ROOM_ID") or os.environ.get("DAN_SESSION_ID")
     project_id = os.environ.get("DAN_PROJECT_ID")
-    if not project_id:
+    if not room_id:
         # project 紐づけなしで登録する意味は薄い。何もしない
         return 0
 
@@ -62,8 +66,8 @@ def main() -> int:
         exists = (
             sb.table("chat_artifact")
             .select("id")
-            .eq("project_id", project_id)
-            .eq("slug", slug)
+            .eq("room_id", room_id)
+            .eq("preview_url", preview_path)
             .execute()
         )
         if exists.data:
@@ -77,7 +81,7 @@ def main() -> int:
 
         # 登録
         kind = "production"
-        preview_url = f"/{folder}/{slug}"
+        preview_url = preview_path
         lower = slug.lower()
         if any(token in lower for token in ("dashboard", "dash", "analytics", "kpi")):
             artifact_type = "dashboard"
@@ -87,13 +91,14 @@ def main() -> int:
             artifact_type = "tool"
         sb.table("chat_artifact").insert({
             "project_id": project_id,
+            "room_id": room_id,
             "slug": slug,
             "kind": kind,
             "artifact_type": artifact_type,
             "label": slug.replace("-", " ").replace("_", " "),
             "preview_url": preview_url,
-            "share_url": f"/preview/{slug}",
-            "draft_url": f"/preview/{slug}",
+            "share_url": preview_url.replace(f"/{folder}/", "/preview/", 1),
+            "draft_url": preview_url.replace(f"/{folder}/", "/preview/", 1),
             "publish_status": "preview_live",
             "created_by": owner_id,
         }).execute()

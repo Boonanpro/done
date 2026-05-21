@@ -41,10 +41,11 @@ def get_service() -> ChatArtifactService:
 @router.get("", response_model=List[ChatArtifactResponse])
 async def list_chat_artifact(
     project_id: Optional[str] = Query(None),
+    room_id: Optional[str] = Query(None),
     user: TokenData = Depends(get_current_user),
     service: ChatArtifactService = Depends(get_service),
 ):
-    return await service.list(user.user_id, project_id=project_id)
+    return await service.list(user.user_id, project_id=project_id, room_id=room_id)
 
 
 @router.post("", response_model=ChatArtifactResponse)

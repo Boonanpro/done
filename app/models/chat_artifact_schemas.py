@@ -8,6 +8,7 @@ from uuid import UUID
 
 
 class ChatArtifactCreate(BaseModel):
+    room_id: Optional[UUID] = None
     project_id: Optional[UUID] = None
     message_id: Optional[UUID] = None
     slug: str = Field(..., min_length=1)
@@ -56,6 +57,7 @@ class ChatArtifactDomainRequest(BaseModel):
 
 class ChatArtifactResponse(BaseModel):
     id: UUID
+    room_id: UUID
     project_id: Optional[UUID] = None
     message_id: Optional[UUID] = None
     slug: str
