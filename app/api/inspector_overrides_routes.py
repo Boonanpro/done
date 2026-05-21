@@ -10,7 +10,6 @@ from app.services.auth_service import TokenData, decode_access_token
 from app.services.inspector_overrides_service import InspectorOverridesService
 from app.services.inspector_writeback_core import (
     apply_override_for_slug,
-    remove_element_for_slug,
     restore_file_content,
 )
 from app.models.inspector_overrides_schemas import (
@@ -123,33 +122,47 @@ async def delete_element(
     user: TokenData = Depends(get_current_user),
     service: InspectorOverridesService = Depends(get_service),
 ):
-    """`data-edit-id` を持つ JSX 要素をブロックごと完全削除する（ハード削除）。
+    """`data-edit-id` を持つ JSX 要素を **非破壊的に隠す**（display:none を注入）。
 
-    動作:
-    - JSX ファイルから開きタグ〜閉じタグまでを物理削除（self-closing は単体削除）
-    - 削除後、その element_key に紐づく inspector_overrides 行も DB から消す
-    - HMR でローカルに即時反映、本番は git commit & push 後の再ビルドで反映
+    旧仕様 (2026-05-21 以前) は JSX から要素ごと物理削除していた。これが
+    Inspector 経由で `<MultiStepInquiry />` 等のコンポーネント呼び出しを
+    JSX から消し、後の「sync」commit でその削除がそのまま git に流れる
+    事故を起こした（2026-05-10 commit d9e49be / 2026-05-20 stash@{0}）。
 
-    制約:
-    - html/body/head/main など page 全体を壊すタグは拒否
-    - レガシー DOM パスキー (`@` なし) は非対応
+    新仕様:
+    - 物理削除ではなく `style.display = "none"` の override を DB に upsert
+    - 直書き (apply_override_for_slug) も走らせて JSX に `style={{...}}` を注入
+    - JSX の構造（import / コンポーネント呼び出し）は保たれる
+    - 後から「やっぱり戻したい」時は override を消すかインスペクタで unhide
+    - 本当に物理削除したい場合は、開発者がエディタで JSX を編集する
+
+    制約: レガシー DOM パスキー (`@` なし) は非対応。
     """
-    result = remove_element_for_slug(
+    hide_styles = {"display": "none"}
+    saved = await service.upsert(
+        artifact_slug=data.artifact_slug,
+        element_key=data.element_key,
+        styles=hide_styles,
+        attrs=None,
+        user_id=user.user_id,
+        replace_attrs=False,
+    )
+    write_result = apply_override_for_slug(
         slug=data.artifact_slug,
         element_key=data.element_key,
+        styles=hide_styles,
+        attrs=None,
     )
-    if not result["removed"]:
-        if result["reason"] and "not found" in result["reason"]:
-            raise HTTPException(status_code=404, detail=result["reason"])
-        if result["reason"]:
-            raise HTTPException(status_code=400, detail=result["reason"])
-    # JSX 削除に成功したら、対応する override 行もクリーンアップ
-    try:
-        await service.delete_one(data.artifact_slug, data.element_key, user.user_id)
-    except Exception:
-        # 残骸 override は害がないので失敗しても OK
-        pass
-    return result
+    if not write_result["applied"] and write_result.get("reason") and "not found" in write_result["reason"]:
+        raise HTTPException(status_code=404, detail=write_result["reason"])
+    return {
+        "hidden": True,
+        "removed": True,  # 既存クライアント互換: UI 上は「削除」表示
+        "file": write_result.get("file"),
+        "override_id": saved.get("id"),
+        "reason": write_result.get("reason"),
+        "mode": "hide_via_display_none",
+    }
 
 
 @router.get("", response_model=List[OverrideResponse])
