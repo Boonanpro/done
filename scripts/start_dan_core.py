@@ -57,7 +57,6 @@ def main() -> None:
         "127.0.0.1",
         "--port",
         str(DAN_CORE_PORT),
-        "--reload",
     ]
     clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
