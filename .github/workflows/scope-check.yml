@@ -1,0 +1,120 @@
+name: scope-check
+
+# Run the same mixed-scope policy that scripts/hook_mixed_scope_guard.py
+# enforces locally, but on every PR diff. Belt-and-suspenders against:
+#   1. A contributor whose clone has not run scripts/install_git_hooks.py
+#      (i.e. core.hooksPath is still pointing at .git/hooks/).
+#   2. Commits arriving via the GitHub web UI / squash merge / push -f
+#      that bypass the local pre-commit hook.
+#
+# The policy is encoded in scripts/scope_classifier.py and is identical
+# to the local hook - this workflow only changes WHERE the check runs.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check-scope-mix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Need history so we can diff against the base branch on PRs.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compute changed files
+        id: changed
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            # push to main: compare with the previous commit so we can
+            # report on direct pushes too.
+            BASE_SHA="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+          fi
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "no base sha available (initial push?), skipping check"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Comparing $BASE_SHA...$HEAD_SHA"
+          git diff --name-only --diff-filter=ACMRT "$BASE_SHA" "$HEAD_SHA" > changed.txt
+          echo "Changed files:"
+          cat changed.txt
+          echo "skip=0" >> "$GITHUB_OUTPUT"
+
+      - name: Run scope mix detector
+        if: steps.changed.outputs.skip != '1'
+        shell: bash
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python <<'PY'
+          import os
+          import sys
+          sys.path.insert(0, "scripts")
+          from scope_classifier import classify, detect_mix
+
+          with open("changed.txt", "r", encoding="utf-8") as f:
+              paths = [line.strip() for line in f if line.strip()]
+
+          if not paths:
+              print("no changed files - skipping scope check")
+              sys.exit(0)
+
+          print("File classification:")
+          for p in paths:
+              print(f"  {classify(p)!s:<40} {p}")
+
+          v = detect_mix(paths)
+          if v.ok:
+              print("\nOK: scope is pure")
+              sys.exit(0)
+
+          # PR title escape hatch: [scope-override] tag explicitly
+          # acknowledges the mix. Mirrors the OVERRIDE_MIXED_SCOPE=1
+          # local bypass but is visible in the GitHub UI.
+          title = os.environ.get("PR_TITLE", "")
+          if "[scope-override]" in title:
+              print("\nscope mix detected, but PR title contains [scope-override] -> allowing")
+              print(f"reason: {v.reason}")
+              sys.exit(0)
+
+          print()
+          print("=" * 70)
+          print("scope mix detected - blocking")
+          print("=" * 70)
+          print(f"\nreason: {v.reason}\n")
+          if v.infra_files:
+              print("[infra]")
+              for p in sorted(v.infra_files):
+                  print(f"  {p}")
+          for slug, files in sorted(v.artifact_groups.items()):
+              print(f"[artifact:{slug}]")
+              for p in sorted(files):
+                  print(f"  {p}")
+          if v.ambiguous_files:
+              print("[ambiguous - scope_classifier rule must be added]")
+              for p in sorted(v.ambiguous_files):
+                  print(f"  {p}")
+          print()
+          print("Fix: split this into separate commits / PRs by scope.")
+          print("Override (rare special-case): add [scope-override] to the PR title.")
+          sys.exit(1)
+          PY
