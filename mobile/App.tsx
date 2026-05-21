@@ -2,7 +2,8 @@ import { StatusBar } from 'expo-status-bar';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Ionicons } from '@expo/vector-icons';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -12,15 +13,17 @@ import {
   Image,
   KeyboardAvoidingView,
   Linking,
+  Modal,
   Platform,
   Pressable,
-  SafeAreaView,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import EventSource from 'react-native-sse';
 import { WebView } from 'react-native-webview';
 
@@ -64,6 +67,7 @@ type ProjectResponse = {
   icon?: string | null;
   unread_count?: number;
   last_message_at?: string | null;
+  pinned_at?: string | null;
   updated_at?: string | null;
   created_at: string;
 };
@@ -274,6 +278,44 @@ function artifactTitleFromUrl(url: string) {
   return match ? match[1].replace(/[-_]/g, ' ') : 'Artifact';
 }
 
+// Inline markdown for chat text: **bold**, *italic* / _italic_, `code`.
+// Kept intentionally minimal — we render as nested <Text> spans so the
+// parent's selection + line-wrap behavior survives. Returns React nodes
+// so callers can drop them straight into a <Text>.
+const INLINE_MD_TOKEN = /(\*\*[^*\n]+?\*\*|__[^_\n]+?__|`[^`\n]+?`|(?<![*\w])\*[^*\n]+?\*(?!\*)|(?<![_\w])_[^_\n]+?_(?!_))/g;
+
+function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const parts = text.split(INLINE_MD_TOKEN);
+  return parts.filter(Boolean).map((part, idx) => {
+    const key = `${keyPrefix}-${idx}`;
+    if ((part.startsWith('**') && part.endsWith('**')) || (part.startsWith('__') && part.endsWith('__'))) {
+      return (
+        <Text key={key} style={styles.mdBold}>
+          {part.slice(2, -2)}
+        </Text>
+      );
+    }
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      return (
+        <Text key={key} style={styles.mdCode}>
+          {part.slice(1, -1)}
+        </Text>
+      );
+    }
+    if (
+      (part.startsWith('*') && part.endsWith('*') && !part.startsWith('**') && part.length > 2) ||
+      (part.startsWith('_') && part.endsWith('_') && !part.startsWith('__') && part.length > 2)
+    ) {
+      return (
+        <Text key={key} style={styles.mdItalic}>
+          {part.slice(1, -1)}
+        </Text>
+      );
+    }
+    return <Fragment key={key}>{part}</Fragment>;
+  });
+}
+
 function RichMessageContent({
   content,
   mine,
@@ -336,7 +378,7 @@ function RichMessageContent({
                 {part.label}
               </Text>
             ) : (
-              <Text key={`${part.value}-${index}`}>{part.value}</Text>
+              <Text key={`text-${index}`}>{renderInlineMarkdown(part.value, `md-${index}`)}</Text>
             ),
           )}
         </Text>
@@ -400,7 +442,104 @@ async function streamDanMessage(
   });
 }
 
+type ActionSheetState = {
+  project: ProjectResponse;
+  mode: 'menu' | 'confirm-delete';
+};
+
+function ProjectActionSheet({
+  sheet,
+  insetsBottom,
+  onClose,
+  onPin,
+  onRequestDelete,
+  onConfirmDelete,
+}: {
+  sheet: ActionSheetState | null;
+  insetsBottom: number;
+  onClose: () => void;
+  onPin: (project: ProjectResponse) => void;
+  onRequestDelete: (project: ProjectResponse) => void;
+  onConfirmDelete: (project: ProjectResponse) => void;
+}) {
+  const visible = sheet !== null;
+  // Keep rendering the previous project's content during the slide-out so
+  // the labels don't pop to empty as the user dismisses the sheet.
+  const lastSheetRef = useRef<ActionSheetState | null>(sheet);
+  if (sheet) lastSheetRef.current = sheet;
+  const active = sheet ?? lastSheetRef.current;
+  if (!active) return null;
+
+  const { project, mode } = active;
+  const pinned = !!project.pinned_at;
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+      <View style={styles.sheetRoot}>
+        <Pressable style={styles.sheetBackdrop} onPress={onClose} />
+        <View style={[styles.sheet, { paddingBottom: Math.max(insetsBottom, 12) + 12 }]}>
+          <View style={styles.sheetGrabber} />
+          <Text style={styles.sheetHeading} numberOfLines={1}>
+            {project.title || 'Untitled'}
+          </Text>
+
+          {mode === 'menu' ? (
+            <>
+              <Pressable
+                onPress={() => onPin(project)}
+                style={({ pressed }) => [styles.sheetAction, pressed && styles.sheetActionPressed]}
+              >
+                <Ionicons name={pinned ? 'pin-outline' : 'pin'} size={22} color="#f4f0e8" />
+                <Text style={styles.sheetActionText}>
+                  {pinned ? 'ピン留めを外す' : 'ピン留めして上部に固定'}
+                </Text>
+              </Pressable>
+              <View style={styles.sheetDivider} />
+              <Pressable
+                onPress={() => onRequestDelete(project)}
+                style={({ pressed }) => [styles.sheetAction, pressed && styles.sheetActionPressed]}
+              >
+                <Ionicons name="trash-outline" size={22} color="#ff5a3d" />
+                <Text style={[styles.sheetActionText, styles.sheetActionTextDanger]}>削除</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <Text style={styles.sheetConfirmBody}>
+                このチャットを削除します。{'\n'}この操作は取り消せません。
+              </Text>
+              <Pressable
+                onPress={() => onConfirmDelete(project)}
+                style={({ pressed }) => [styles.sheetPrimaryDanger, pressed && styles.buttonPressed]}
+              >
+                <Ionicons name="trash" size={18} color="#fff" />
+                <Text style={styles.sheetPrimaryDangerText}>削除する</Text>
+              </Pressable>
+            </>
+          )}
+
+          <Pressable
+            onPress={onClose}
+            style={({ pressed }) => [styles.sheetCancel, pressed && styles.sheetActionPressed]}
+          >
+            <Text style={styles.sheetCancelText}>キャンセル</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 export default function App() {
+  return (
+    <SafeAreaProvider>
+      <AppMain />
+    </SafeAreaProvider>
+  );
+}
+
+function AppMain() {
+  const insets = useSafeAreaInsets();
   const [auth, setAuth] = useState<AuthState>({ status: 'checking' });
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -415,12 +554,25 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [activity, setActivity] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [screen, setScreen] = useState<'projects' | 'chat' | 'artifact'>('projects');
+  const [screen, setScreen] = useState<'projects' | 'chat' | 'artifact' | 'settings'>('projects');
   const [artifacts, setArtifacts] = useState<ChatArtifactResponse[]>([]);
   const [loadingArtifacts, setLoadingArtifacts] = useState(false);
   const [artifactView, setArtifactView] = useState<{ title: string; url: string } | null>(null);
   const [notificationStatus, setNotificationStatus] = useState('Off');
+  // Long-press action sheet for a chat list item. `mode` lets the same
+  // sheet host both the primary menu and the secondary "really delete?"
+  // confirm without spawning a second modal.
+  const [actionSheet, setActionSheet] = useState<{
+    project: ProjectResponse;
+    mode: 'menu' | 'confirm-delete';
+  } | null>(null);
   const listRef = useRef<FlatList<MessageResponse>>(null);
+  // Live-tracking ref for the notification listener (which we don't want to
+  // re-subscribe on every project switch).
+  const currentProjectIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    currentProjectIdRef.current = currentProjectId;
+  }, [currentProjectId]);
 
   const token = auth.status === 'signed_in' ? auth.token : undefined;
   const user = auth.status === 'signed_in' ? auth.user : undefined;
@@ -447,6 +599,24 @@ export default function App() {
         project.id === projectId ? { ...project, unread_count: 0 } : project,
       ),
     );
+  }, []);
+
+  // Clear any OS-tray push notifications that belong to this project so the
+  // app-icon badge (which on Android reflects tray entries) drops as soon as
+  // the user reads the room — without having to tap the push in the
+  // notification center.
+  const dismissNotificationsForProject = useCallback(async (projectId: string) => {
+    try {
+      const presented = await Notifications.getPresentedNotificationsAsync();
+      for (const n of presented) {
+        const url = n.request.content.data?.url;
+        if (typeof url === 'string' && url.includes(`/chat/${projectId}`)) {
+          await Notifications.dismissNotificationAsync(n.request.identifier);
+        }
+      }
+    } catch {
+      // best-effort; ignore
+    }
   }, []);
 
   const syncNotificationBadge = useCallback(async (count: number) => {
@@ -511,6 +681,7 @@ export default function App() {
           current?.id === project.id ? { ...current, unread_count: 0 } : current,
         );
         markProjectReadLocally(project.id);
+        void dismissNotificationsForProject(project.id);
         return project;
       } catch (error) {
         Alert.alert('Load failed', String((error as Error).message));
@@ -519,7 +690,7 @@ export default function App() {
         setLoadingMessages(false);
       }
     },
-    [markProjectReadLocally, refreshArtifacts],
+    [dismissNotificationsForProject, markProjectReadLocally, refreshArtifacts],
   );
 
   const loadInitialData = useCallback(
@@ -577,8 +748,20 @@ export default function App() {
   useEffect(() => {
     if (!token) return;
 
-    const received = Notifications.addNotificationReceivedListener(() => {
+    const received = Notifications.addNotificationReceivedListener((event) => {
       refreshProjects(token).catch(() => null);
+      // If the push is for the room the user is currently viewing, reload its
+      // messages so the new reply appears without a manual refresh. The ref
+      // gives us the latest project id without making this effect re-subscribe
+      // on every project switch.
+      const url = event.request.content.data?.url;
+      if (typeof url === 'string') {
+        const match = url.match(/\/chat\/([^/?#]+)/);
+        const pid = match?.[1];
+        if (pid && pid === currentProjectIdRef.current) {
+          loadProjectMessages(token, pid).catch(() => null);
+        }
+      }
     });
     const response = Notifications.addNotificationResponseReceivedListener((event) => {
       void openProjectFromNotificationUrl(event.notification.request.content.data?.url);
@@ -596,7 +779,7 @@ export default function App() {
       received.remove();
       response.remove();
     };
-  }, [openProjectFromNotificationUrl, refreshProjects, token]);
+  }, [loadProjectMessages, openProjectFromNotificationUrl, refreshProjects, token]);
 
   // Restore the notification toggle state on launch. `notificationStatus` is
   // plain component state, so without this it always resets to 'Off'. The
@@ -751,6 +934,42 @@ export default function App() {
     } catch (error) {
       Alert.alert('Could not create project', String((error as Error).message));
     }
+  }
+
+  async function handleTogglePin(project: ProjectResponse) {
+    if (!token) return;
+    try {
+      await apiRequest(
+        `/projects/${project.id}`,
+        { method: 'PATCH', body: JSON.stringify({ pinned: !project.pinned_at }) },
+        token,
+      );
+      await refreshProjects(token).catch(() => null);
+    } catch (error) {
+      Alert.alert('Pin failed', String((error as Error).message));
+    }
+  }
+
+  async function handleDeleteProject(project: ProjectResponse) {
+    if (!token) return;
+    try {
+      await apiRequest(`/projects/${project.id}`, { method: 'DELETE' }, token);
+      if (project.id === currentProjectId) {
+        setCurrentProject(null);
+        setCurrentProjectId(null);
+        setMessages([]);
+        setArtifacts([]);
+        await SecureStore.deleteItemAsync(PROJECT_KEY).catch(() => null);
+        setScreen('projects');
+      }
+      await refreshProjects(token).catch(() => null);
+    } catch (error) {
+      Alert.alert('Delete failed', String((error as Error).message));
+    }
+  }
+
+  function handleProjectLongPress(project: ProjectResponse) {
+    setActionSheet({ project, mode: 'menu' });
   }
 
   async function handleToggleNotifications() {
@@ -1026,51 +1245,55 @@ export default function App() {
 
   if (screen === 'projects') {
     return (
-      <SafeAreaView style={styles.screen}>
+      <View style={styles.screen}>
         <StatusBar style="light" />
-        <View style={styles.listHeader}>
-          <View style={styles.headerCenter}>
-            <Text style={styles.listTitle}>DAN</Text>
-            <Text style={styles.headerMeta} numberOfLines={1}>
-              {user?.email}
-            </Text>
+        <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
+          <View style={styles.appBarTitleBlock}>
+            <Text style={styles.appBarTitle}>Chats</Text>
+            {unreadTotal > 0 ? (
+              <View style={styles.appBarBadge}>
+                <Text style={styles.appBarBadgeText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
+              </View>
+            ) : null}
           </View>
-          {unreadTotal > 0 ? (
-            <View style={styles.headerUnreadBadge}>
-              <Text style={styles.headerUnreadText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
-            </View>
-          ) : null}
           <Pressable
-            disabled={loadingProjects}
-            onPress={handleRefreshProjectList}
-            style={styles.iconButton}
+            onPress={() => setScreen('settings')}
+            hitSlop={10}
+            style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
           >
-            <Text style={styles.iconButtonText}>↻</Text>
+            <Ionicons name="settings-outline" size={22} color="#f4f0e8" />
           </Pressable>
         </View>
 
         <FlatList
-          contentContainerStyle={styles.projectListContent}
+          contentContainerStyle={[styles.projectListContent, { paddingBottom: insets.bottom + 96 }]}
           data={projects}
           keyExtractor={(item) => item.id}
+          refreshControl={
+            <RefreshControl
+              refreshing={loadingProjects}
+              onRefresh={handleRefreshProjectList}
+              tintColor="#d9d2c8"
+              colors={['#d9d2c8']}
+            />
+          }
           ListEmptyComponent={
-            <View style={styles.centerPanel}>
-              {loadingProjects ? (
-                <ActivityIndicator color="#f4f0e8" />
-              ) : (
-                <>
-                  <Text style={styles.emptyTitle}>DAN</Text>
-                  <Text style={styles.mutedText}>No chats yet</Text>
-                </>
-              )}
-            </View>
+            !loadingProjects ? (
+              <View style={styles.emptyState}>
+                <Ionicons name="chatbubbles-outline" size={48} color="#5a5550" />
+                <Text style={styles.emptyTitle}>No chats yet</Text>
+                <Text style={styles.emptyHint}>Tap + to start a new conversation with DAN.</Text>
+              </View>
+            ) : null
           }
           renderItem={({ item }) => (
             <Pressable
               onPress={() => handleSelectProject(item.id)}
+              onLongPress={() => handleProjectLongPress(item)}
+              delayLongPress={350}
               style={({ pressed }) => [
                 styles.chatListItem,
-                pressed && styles.buttonPressed,
+                pressed && styles.chatListItemPressed,
               ]}
             >
               <View style={styles.chatAvatar}>
@@ -1078,9 +1301,14 @@ export default function App() {
               </View>
               <View style={styles.chatListBody}>
                 <View style={styles.chatListTopRow}>
-                  <Text style={styles.chatListTitle} numberOfLines={1}>
-                    {item.title || 'Untitled'}
-                  </Text>
+                  <View style={styles.chatListTitleRow}>
+                    {item.pinned_at ? (
+                      <Ionicons name="pin" size={13} color="#a7a19a" style={styles.chatListPinIcon} />
+                    ) : null}
+                    <Text style={styles.chatListTitle} numberOfLines={1}>
+                      {item.title || 'Untitled'}
+                    </Text>
+                  </View>
                   <Text style={styles.chatListTime}>{formatTime(projectTime(item))}</Text>
                 </View>
                 <Text style={styles.chatListPreview} numberOfLines={2}>
@@ -1098,39 +1326,142 @@ export default function App() {
           )}
         />
 
-        <View style={styles.listFooter}>
-          <Pressable onPress={handleNewProject} style={styles.newProjectButton}>
-            <Text style={styles.newProjectText}>New chat</Text>
+        <Pressable
+          onPress={handleNewProject}
+          style={({ pressed }) => [
+            styles.fab,
+            { bottom: insets.bottom + 20 },
+            pressed && styles.fabPressed,
+          ]}
+        >
+          <Ionicons name="add" size={28} color="#111" />
+        </Pressable>
+
+        <ProjectActionSheet
+          sheet={actionSheet}
+          insetsBottom={insets.bottom}
+          onClose={() => setActionSheet(null)}
+          onPin={(project) => {
+            setActionSheet(null);
+            void handleTogglePin(project);
+          }}
+          onRequestDelete={(project) => setActionSheet({ project, mode: 'confirm-delete' })}
+          onConfirmDelete={(project) => {
+            setActionSheet(null);
+            void handleDeleteProject(project);
+          }}
+        />
+      </View>
+    );
+  }
+
+  if (screen === 'settings') {
+    return (
+      <View style={styles.screen}>
+        <StatusBar style="light" />
+        <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
+          <Pressable
+            onPress={() => setScreen('projects')}
+            hitSlop={10}
+            style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+          >
+            <Ionicons name="chevron-back" size={26} color="#f4f0e8" />
           </Pressable>
-          <Pressable onPress={handleToggleNotifications} style={styles.secondaryFooterButton}>
-            <Text style={styles.secondaryFooterButtonText}>Notifications: {notificationStatus}</Text>
-          </Pressable>
-          <Pressable onPress={handleLogout} style={styles.secondaryFooterButton}>
-            <Text style={styles.secondaryFooterButtonText}>Log out</Text>
-          </Pressable>
+          <View style={styles.appBarTitleBlockCenter}>
+            <Text style={styles.appBarTitleSingle}>Settings</Text>
+          </View>
+          <View style={styles.appBarIconButton} />
         </View>
-      </SafeAreaView>
+
+        <ScrollView contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}>
+          <Text style={styles.settingsSectionLabel}>ACCOUNT</Text>
+          <View style={styles.settingsCard}>
+            <View style={styles.settingsRow}>
+              <View style={styles.settingsRowMain}>
+                <Text style={styles.settingsRowLabel}>Name</Text>
+                <Text style={styles.settingsRowValue} numberOfLines={1}>
+                  {user?.display_name || '—'}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.settingsRowDivider} />
+            <View style={styles.settingsRow}>
+              <View style={styles.settingsRowMain}>
+                <Text style={styles.settingsRowLabel}>Email</Text>
+                <Text style={styles.settingsRowValue} numberOfLines={1}>
+                  {user?.email || '—'}
+                </Text>
+              </View>
+            </View>
+          </View>
+
+          <Text style={styles.settingsSectionLabel}>NOTIFICATIONS</Text>
+          <View style={styles.settingsCard}>
+            <Pressable
+              onPress={handleToggleNotifications}
+              style={({ pressed }) => [styles.settingsRow, pressed && styles.buttonPressed]}
+            >
+              <View style={styles.settingsRowMain}>
+                <Text style={styles.settingsRowLabel}>Push notifications</Text>
+                <Text style={styles.settingsRowValue}>{notificationStatus}</Text>
+              </View>
+              <Ionicons
+                name={notificationStatus === 'On' ? 'notifications' : 'notifications-off-outline'}
+                size={20}
+                color={notificationStatus === 'On' ? '#7fd1c7' : '#77736b'}
+              />
+            </Pressable>
+            <View style={styles.settingsRowDivider} />
+            <View style={styles.settingsRowHint}>
+              <Text style={styles.settingsHintText}>
+                Tap to toggle. iOS/Android system permission is requested on first enable.
+              </Text>
+            </View>
+          </View>
+
+          <Text style={styles.settingsSectionLabel}>SESSION</Text>
+          <View style={styles.settingsCard}>
+            <Pressable
+              onPress={handleLogout}
+              style={({ pressed }) => [styles.settingsRow, pressed && styles.buttonPressed]}
+            >
+              <Text style={styles.settingsDangerLabel}>Log out</Text>
+              <Ionicons name="log-out-outline" size={20} color="#ff5a3d" />
+            </Pressable>
+          </View>
+
+          <Text style={styles.settingsFootnote}>DAN mobile · v1.0.0</Text>
+        </ScrollView>
+      </View>
     );
   }
 
   if (screen === 'artifact' && artifactView) {
     return (
-      <SafeAreaView style={styles.screen}>
+      <View style={styles.screen}>
         <StatusBar style="light" />
-        <View style={styles.header}>
-          <Pressable onPress={() => setScreen(currentProject ? 'chat' : 'projects')} style={styles.iconButton}>
-            <Text style={styles.iconButtonText}>{'<'}</Text>
+        <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
+          <Pressable
+            onPress={() => setScreen(currentProject ? 'chat' : 'projects')}
+            hitSlop={10}
+            style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+          >
+            <Ionicons name="chevron-back" size={26} color="#f4f0e8" />
           </Pressable>
-          <View style={styles.headerCenter}>
-            <Text style={styles.headerTitle} numberOfLines={1}>
+          <View style={styles.appBarTitleBlockCenter}>
+            <Text style={styles.appBarTitleSingle} numberOfLines={1}>
               {artifactView.title}
             </Text>
-            <Text style={styles.headerMeta} numberOfLines={1}>
+            <Text style={styles.appBarSubtitle} numberOfLines={1}>
               {artifactView.url}
             </Text>
           </View>
-          <Pressable onPress={() => openUrl(artifactView.url)} style={styles.iconButton}>
-            <Text style={styles.iconButtonText}>{'Open'}</Text>
+          <Pressable
+            onPress={() => openUrl(artifactView.url)}
+            hitSlop={10}
+            style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+          >
+            <Ionicons name="open-outline" size={22} color="#f4f0e8" />
           </Pressable>
         </View>
         <WebView
@@ -1143,52 +1474,44 @@ export default function App() {
             </View>
           )}
         />
-      </SafeAreaView>
+      </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.screen}>
+    <View style={styles.screen}>
       <StatusBar style="light" />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 8 : 0}
         style={styles.chatWrap}
       >
-        <View style={styles.header}>
-          <Pressable onPress={handleBackToProjects} style={styles.iconButton}>
-            <Text style={styles.iconButtonText}>‹</Text>
+        <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
+          <Pressable
+            onPress={handleBackToProjects}
+            hitSlop={10}
+            style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+          >
+            <Ionicons name="chevron-back" size={26} color="#f4f0e8" />
           </Pressable>
-          <View style={styles.headerCenter}>
-            <Text style={styles.headerTitle} numberOfLines={1}>
+          <View style={styles.appBarTitleBlockCenter}>
+            <Text style={styles.appBarTitleSingle} numberOfLines={1}>
               {headerTitle}
-            </Text>
-            <Text style={styles.headerMeta} numberOfLines={1}>
-              {user?.email}
             </Text>
           </View>
           {unreadTotal > 0 ? (
-            <Pressable onPress={() => setScreen('projects')} style={styles.headerUnreadBadge}>
-              <Text style={styles.headerUnreadText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
-            </Pressable>
-          ) : null}
-          <Pressable
-            disabled={loadingMessages || !token || !currentProjectId}
-            onPress={() => token && currentProjectId && loadProjectMessages(token, currentProjectId)}
-            style={styles.iconButton}
-          >
-            <Text style={styles.iconButtonText}>↻</Text>
-          </Pressable>
-          {currentProject?.room_id ? (
             <Pressable
-              onPress={() =>
-                openUrl(`${API_BASE_URL}/voice?room=${encodeURIComponent(currentProject.room_id!)}`)
-              }
-              style={styles.iconButton}
+              onPress={() => setScreen('projects')}
+              hitSlop={10}
+              style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
             >
-              <Text style={styles.iconButtonText}>🎙</Text>
+              <View style={styles.appBarBadge}>
+                <Text style={styles.appBarBadgeText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
+              </View>
             </Pressable>
-          ) : null}
+          ) : (
+            <View style={styles.appBarIconButton} />
+          )}
         </View>
 
         {artifacts.length > 0 || loadingArtifacts ? (
@@ -1260,7 +1583,7 @@ export default function App() {
           </View>
         ) : null}
 
-        <View style={styles.composer}>
+        <View style={[styles.composer, { paddingBottom: 10 + insets.bottom }]}>
           <TextInput
             multiline
             onChangeText={setDraft}
@@ -1285,61 +1608,7 @@ export default function App() {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
-
-      {drawerOpen ? (
-        <View style={styles.drawerBackdrop}>
-          <Pressable style={styles.drawerShade} onPress={() => setDrawerOpen(false)} />
-          <View style={styles.drawer}>
-            <View style={styles.drawerHeader}>
-              <Text style={styles.drawerTitle}>Projects</Text>
-              <Pressable onPress={() => setDrawerOpen(false)} style={styles.closeButton}>
-                <Text style={styles.closeButtonText}>×</Text>
-              </Pressable>
-            </View>
-            <Pressable onPress={handleNewProject} style={styles.newProjectButton}>
-              <Text style={styles.newProjectText}>New chat</Text>
-            </Pressable>
-            <ScrollView style={styles.projectList}>
-              {loadingProjects ? <ActivityIndicator color="#f4f0e8" /> : null}
-              {projects.map((project) => (
-                <Pressable
-                  key={project.id}
-                  onPress={() => handleSelectProject(project.id)}
-                  style={[
-                    styles.projectItem,
-                    project.id === currentProjectId && styles.projectItemActive,
-                  ]}
-                >
-                  <Text style={styles.projectTitle} numberOfLines={1}>
-                    {project.icon ? `${project.icon} ` : ''}
-                    {project.title || 'Untitled'}
-                  </Text>
-                  <Text style={styles.projectMeta} numberOfLines={2}>
-                    {project.summary || project.description || 'No summary yet'}
-                  </Text>
-                  <Text style={styles.projectTime}>{formatTime(projectTime(project))}</Text>
-                  {(project.unread_count || 0) > 0 ? (
-                    <View style={styles.drawerUnreadBadge}>
-                      <Text style={styles.unreadBadgeText}>
-                        {(project.unread_count || 0) > 99 ? '99+' : project.unread_count}
-                      </Text>
-                    </View>
-                  ) : null}
-                </Pressable>
-              ))}
-            </ScrollView>
-            <View style={styles.drawerFooter}>
-              <Pressable onPress={handleToggleNotifications} style={styles.drawerAction}>
-                <Text style={styles.drawerActionText}>Notifications: {notificationStatus}</Text>
-              </Pressable>
-              <Pressable onPress={handleLogout} style={styles.drawerAction}>
-                <Text style={styles.drawerActionText}>Log out</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      ) : null}
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -1347,6 +1616,274 @@ const styles = StyleSheet.create({
   screen: {
     flex: 1,
     backgroundColor: '#12110f',
+  },
+  mdBold: {
+    fontWeight: '800',
+  },
+  mdItalic: {
+    fontStyle: 'italic',
+  },
+  mdCode: {
+    backgroundColor: 'rgba(244, 240, 232, 0.08)',
+    borderRadius: 4,
+    color: '#f4f0e8',
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 13,
+    paddingHorizontal: 4,
+  },
+  sheetRoot: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  sheetBackdrop: {
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+    bottom: 0,
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+  },
+  sheet: {
+    backgroundColor: '#1d1b18',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+  },
+  sheetGrabber: {
+    alignSelf: 'center',
+    backgroundColor: '#3a3631',
+    borderRadius: 2,
+    height: 4,
+    marginBottom: 12,
+    width: 40,
+  },
+  sheetHeading: {
+    color: '#a7a19a',
+    fontSize: 13,
+    fontWeight: '600',
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    textAlign: 'center',
+  },
+  sheetAction: {
+    alignItems: 'center',
+    borderRadius: 12,
+    flexDirection: 'row',
+    gap: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  sheetActionPressed: {
+    backgroundColor: 'rgba(244, 240, 232, 0.06)',
+  },
+  sheetActionText: {
+    color: '#f4f0e8',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  sheetActionTextDanger: {
+    color: '#ff5a3d',
+  },
+  sheetDivider: {
+    backgroundColor: '#28251f',
+    height: 1,
+    marginHorizontal: 14,
+  },
+  sheetConfirmBody: {
+    color: '#a7a19a',
+    fontSize: 14,
+    lineHeight: 22,
+    paddingHorizontal: 18,
+    paddingVertical: 16,
+    textAlign: 'center',
+  },
+  sheetPrimaryDanger: {
+    alignItems: 'center',
+    backgroundColor: '#ff5a3d',
+    borderRadius: 12,
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'center',
+    marginHorizontal: 4,
+    marginTop: 4,
+    paddingVertical: 14,
+  },
+  sheetPrimaryDangerText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  sheetCancel: {
+    alignItems: 'center',
+    borderRadius: 12,
+    marginTop: 8,
+    paddingVertical: 14,
+  },
+  sheetCancelText: {
+    color: '#7c766f',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  appBar: {
+    alignItems: 'center',
+    backgroundColor: '#12110f',
+    borderBottomColor: '#1f1d1a',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 4,
+    paddingBottom: 12,
+    paddingHorizontal: 12,
+  },
+  appBarIconButton: {
+    alignItems: 'center',
+    height: 40,
+    justifyContent: 'center',
+    width: 40,
+  },
+  appBarTitleBlock: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    gap: 10,
+    paddingLeft: 8,
+  },
+  appBarTitleBlockCenter: {
+    alignItems: 'center',
+    flex: 1,
+    justifyContent: 'center',
+  },
+  appBarTitle: {
+    color: '#f4f0e8',
+    fontSize: 28,
+    fontWeight: '800',
+    letterSpacing: -0.5,
+  },
+  appBarTitleSingle: {
+    color: '#f4f0e8',
+    fontSize: 17,
+    fontWeight: '700',
+    letterSpacing: -0.2,
+    maxWidth: '85%',
+  },
+  appBarSubtitle: {
+    color: '#77736b',
+    fontSize: 11,
+    marginTop: 2,
+    maxWidth: '85%',
+  },
+  appBarBadge: {
+    alignItems: 'center',
+    backgroundColor: '#ff5a3d',
+    borderRadius: 11,
+    height: 22,
+    justifyContent: 'center',
+    minWidth: 22,
+    paddingHorizontal: 7,
+  },
+  appBarBadgeText: {
+    color: '#fffaf5',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  emptyState: {
+    alignItems: 'center',
+    flex: 1,
+    gap: 14,
+    justifyContent: 'center',
+    paddingHorizontal: 36,
+    paddingTop: 80,
+  },
+  emptyHint: {
+    color: '#77736b',
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  chatListItemPressed: {
+    backgroundColor: '#1a1815',
+  },
+  fab: {
+    alignItems: 'center',
+    backgroundColor: '#f4f0e8',
+    borderRadius: 30,
+    elevation: 6,
+    height: 60,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    width: 60,
+  },
+  fabPressed: {
+    opacity: 0.8,
+    transform: [{ scale: 0.96 }],
+  },
+  settingsSectionLabel: {
+    color: '#77736b',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1,
+    marginBottom: 8,
+    marginLeft: 20,
+    marginTop: 24,
+  },
+  settingsCard: {
+    backgroundColor: '#1d1b18',
+    borderColor: '#282520',
+    borderRadius: 14,
+    borderWidth: 1,
+    marginHorizontal: 12,
+    overflow: 'hidden',
+  },
+  settingsRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 12,
+    minHeight: 56,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  settingsRowDivider: {
+    backgroundColor: '#282520',
+    height: 1,
+    marginLeft: 16,
+  },
+  settingsRowMain: {
+    flex: 1,
+  },
+  settingsRowLabel: {
+    color: '#f4f0e8',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  settingsRowValue: {
+    color: '#a7a19a',
+    fontSize: 13,
+    marginTop: 2,
+  },
+  settingsRowHint: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  settingsHintText: {
+    color: '#77736b',
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  settingsDangerLabel: {
+    color: '#ff5a3d',
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  settingsFootnote: {
+    color: '#4a4640',
+    fontSize: 11,
+    marginTop: 32,
+    textAlign: 'center',
   },
   centerScreen: {
     alignItems: 'center',
@@ -1467,6 +2004,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     gap: 8,
+  },
+  chatListTitleRow: {
+    alignItems: 'center',
+    flex: 1,
+    flexDirection: 'row',
+    gap: 4,
+  },
+  chatListPinIcon: {
+    transform: [{ rotate: '45deg' }],
   },
   chatListTitle: {
     color: '#f4f0e8',
