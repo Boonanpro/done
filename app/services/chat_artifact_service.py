@@ -4,7 +4,10 @@ chat_artifact のビジネスロジック
 from datetime import datetime, timezone
 from typing import Optional, List
 import re
+from pathlib import Path
 from app.services.supabase_client import get_supabase_client
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class ChatArtifactService:
@@ -55,7 +58,23 @@ class ChatArtifactService:
         match = re.match(r"^/artifacts/([^/?#]+)([^?#]*)?([?#].*)?$", value)
         if match:
             return f"/preview/{match.group(1)}{match.group(2) or ''}{match.group(3) or ''}"
+        if value.startswith("/demo/"):
+            return value
         return f"/preview/{slug}"
+
+    @staticmethod
+    def _local_route_exists(url: str | None) -> bool:
+        if not url:
+            return False
+        path = url.split("?", 1)[0].split("#", 1)[0].strip("/")
+        parts = path.split("/")
+        if not parts or parts[0] not in {"artifacts", "demo", "preview"}:
+            return True
+        if len(parts) < 2:
+            return False
+        if parts[0] == "preview":
+            parts[0] = "artifacts"
+        return (PROJECT_ROOT / "frontend" / "src" / "app" / Path(*parts) / "page.tsx").exists()
 
     @staticmethod
     def infer_artifact_type(slug: str = "", label: str | None = None, path: str | None = None) -> str:
@@ -92,7 +111,10 @@ class ChatArtifactService:
         elif project_id:
             query = query.eq("project_id", project_id)
         result = query.order("created_at", desc=True).limit(limit).execute()
-        return result.data or []
+        return [
+            row for row in (result.data or [])
+            if self._local_route_exists(row.get("preview_url"))
+        ]
 
     async def get(self, artifact_id: str, user_id: str) -> Optional[dict]:
         result = (

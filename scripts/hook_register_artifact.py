@@ -24,7 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 # artifacts/{slug}/page.tsx と demo/{slug}/page.tsx の両方を拾う
 PATH_PATTERN = re.compile(
-    r"frontend[/\\]src[/\\]app[/\\](artifacts)[/\\]([\w-]+)(?:[/\\]([^:]*?))?[/\\]page\.tsx$"
+    r"frontend[/\\]src[/\\]app[/\\](artifacts|demo)[/\\]([\w-]+)(?:[/\\]([^:]*?))?[/\\]page\.tsx$"
 )
 
 
@@ -51,7 +51,7 @@ def main() -> int:
 
     room_id = os.environ.get("DAN_ROOM_ID") or os.environ.get("DAN_SESSION_ID")
     project_id = os.environ.get("DAN_PROJECT_ID")
-    if not room_id:
+    if not room_id or not project_id:
         # project 紐づけなしで登録する意味は薄い。何もしない
         return 0
 
@@ -80,7 +80,7 @@ def main() -> int:
         owner_id = proj.data[0]["user_id"]
 
         # 登録
-        kind = "production"
+        kind = "demo" if folder == "demo" else "production"
         preview_url = preview_path
         lower = slug.lower()
         if any(token in lower for token in ("dashboard", "dash", "analytics", "kpi")):
@@ -97,8 +97,8 @@ def main() -> int:
             "artifact_type": artifact_type,
             "label": slug.replace("-", " ").replace("_", " "),
             "preview_url": preview_url,
-            "share_url": preview_url.replace(f"/{folder}/", "/preview/", 1),
-            "draft_url": preview_url.replace(f"/{folder}/", "/preview/", 1),
+            "share_url": preview_url if folder == "demo" else preview_url.replace(f"/{folder}/", "/preview/", 1),
+            "draft_url": preview_url if folder == "demo" else preview_url.replace(f"/{folder}/", "/preview/", 1),
             "publish_status": "preview_live",
             "created_by": owner_id,
         }).execute()

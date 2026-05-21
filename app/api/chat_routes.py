@@ -662,7 +662,7 @@ async def _register_written_chat_artifacts(
     service = ChatArtifactService()
     seen: set[str] = set()
     artifact_page_pattern = re.compile(
-        r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)(?:[/\\]([^:]*?))?[/\\]page\.tsx$"
+        r"frontend[/\\]src[/\\]app[/\\](artifacts|demo)[/\\]([\w-]+)(?:[/\\]([^:]*?))?[/\\]page\.tsx$"
     )
     project_root = Path(__file__).parent.parent.parent
 
@@ -676,9 +676,10 @@ async def _register_written_chat_artifacts(
                 normalized_path,
             )
             continue
-        root_slug = match.group(1)
-        rest = (match.group(2) or "").strip("/")
-        preview_url = f"/artifacts/{root_slug}" + (f"/{rest}" if rest else "")
+        folder = match.group(1)
+        root_slug = match.group(2)
+        rest = (match.group(3) or "").strip("/")
+        preview_url = f"/{folder}/{root_slug}" + (f"/{rest}" if rest else "")
         card_slug = root_slug if not rest else f"{root_slug}-{'-'.join(part for part in rest.split('/') if part)}"
         candidates.append((card_slug, preview_url, normalized_path))
 
@@ -688,8 +689,8 @@ async def _register_written_chat_artifacts(
         seen.add(slug)
 
         try:
-            route_parts = preview_url.removeprefix("/artifacts/").split("/")
-            page_path = project_root / "frontend" / "src" / "app" / "artifacts" / Path(*route_parts) / "page.tsx"
+            route_parts = preview_url.strip("/").split("/")
+            page_path = project_root / "frontend" / "src" / "app" / Path(*route_parts) / "page.tsx"
             if not page_path.exists():
                 logger.info("Skipping chat artifact registration for %s: page.tsx not found", slug)
                 continue
@@ -709,7 +710,7 @@ async def _register_written_chat_artifacts(
                     "room_id": room_id,
                     "project_id": project_id,
                     "slug": slug,
-                    "kind": "production",
+                    "kind": "demo" if preview_url.startswith("/demo/") else "production",
                     "artifact_type": service.infer_artifact_type(slug=slug, path=source_path),
                     "label": slug.replace("-", " ").replace("_", " "),
                     "preview_url": preview_url,

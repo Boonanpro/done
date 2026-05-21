@@ -92,18 +92,17 @@ export function artifactProductionUrl({
   productionUrl?: string | null;
   customDomain?: string | null;
 }): string | null {
-  // 正規 URL の唯一の根拠は「カスタムドメインを取って公開した」かどうか。
-  // production_url は custom_domain と一緒にセットされた時だけ正規 URL として扱う。
-  // <slug>-done.vercel.app のような専用 alias は production_url に紛れ込んでいても
-  // ここでは null を返し、呼び出し側が /preview/<slug> にフォールバックする。
-  const knownDomain = KNOWN_CUSTOM_DOMAINS[slug]?.[0];
+  // Prefer explicit published URLs, then known route domains. Card slugs can
+  // differ from route slugs, so pathOrUrl is the source of truth for routing.
+  const parsed = parseArtifactPath(pathOrUrl);
+  const routeSlug = parsed?.slug || slug;
+  const knownDomain = KNOWN_CUSTOM_DOMAINS[routeSlug]?.[0];
   const domain = customDomain || knownDomain;
-  if (!domain) return null;
-  const base = productionUrl && customDomain ? productionUrl : `https://${domain}`;
+  const base = productionUrl || (domain ? `https://${domain}` : null);
+  if (!base) return null;
 
   let rest = '';
-  const parsed = parseArtifactPath(pathOrUrl);
-  if (parsed?.slug === slug) {
+  if (parsed?.slug === routeSlug) {
     rest = parsed.rest;
   } else if (pathOrUrl.startsWith('/') && !pathOrUrl.startsWith('/artifacts/') && !pathOrUrl.startsWith('/preview/')) {
     rest = pathOrUrl;

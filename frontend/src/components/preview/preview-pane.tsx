@@ -15,7 +15,7 @@ import { InspectorPanel } from './inspector-panel';
 import { PublishModal } from './publish-modal';
 import { DeliveryModal } from './delivery-modal';
 
-const FALLBACK_SHARE_ORIGIN = 'https://frontend-mikis-projects-86652663.vercel.app';
+const LEGACY_SHARE_ORIGIN = 'https://frontend-mikis-projects-86652663.vercel.app';
 
 /** Undo / Redo ボタン。編集中のみ表示。 */
 function UndoRedoButtons() {
@@ -58,25 +58,20 @@ function UndoRedoButtons() {
 
 function publicShareOrigin(): string {
   const configured = process.env.NEXT_PUBLIC_SHARE_ORIGIN?.trim();
-  if (configured) return configured.replace(/\/+$/, '');
-  if (typeof window === 'undefined') return FALLBACK_SHARE_ORIGIN;
-
-  const { origin, hostname } = window.location;
-  const isLocalPreview =
-    hostname === 'localhost' ||
-    hostname === '127.0.0.1' ||
-    hostname.startsWith('100.') ||
-    hostname.startsWith('192.168.') ||
-    hostname.startsWith('10.');
-
-  return isLocalPreview ? FALLBACK_SHARE_ORIGIN : origin;
+  if (configured && configured.replace(/\/+$/, '') !== LEGACY_SHARE_ORIGIN) {
+    return configured.replace(/\/+$/, '');
+  }
+  if (typeof window === 'undefined') return '';
+  return window.location.origin;
 }
 
 function absolutePublicUrl(pathOrUrl: string): string {
+  const origin = publicShareOrigin();
+  if (!origin) return pathOrUrl;
   try {
-    return new URL(pathOrUrl, publicShareOrigin()).toString();
+    return new URL(pathOrUrl, origin).toString();
   } catch {
-    return `${publicShareOrigin()}/${pathOrUrl.replace(/^\/+/, '')}`;
+    return `${origin}/${pathOrUrl.replace(/^\/+/, '')}`;
   }
 }
 

@@ -506,7 +506,10 @@ if __name__ == "__main__":
     # ==========================================
     room_id = os.environ.get("DAN_ROOM_ID") or os.environ.get("DAN_SESSION_ID")
     project_id = os.environ.get("DAN_PROJECT_ID")
-    if room_id and project_id:
+    # Do not register chat_artifact from feature scaffolding. This function can
+    # create backend/internal helper features; only page.tsx write hooks should
+    # create user-openable artifact cards.
+    if os.environ.get("DAN_CREATE_FEATURE_REGISTER_ARTIFACT") == "1" and room_id and project_id:
         try:
             from app.services.supabase_client import get_supabase_client
             sb = get_supabase_client().client
@@ -521,7 +524,7 @@ if __name__ == "__main__":
                     sb.table("chat_artifact")
                     .select("id")
                     .eq("room_id", room_id)
-                    .eq("slug", kebab)
+                    .eq("preview_url", preview_url)
                     .execute()
                 )
                 if not exists.data:
@@ -530,12 +533,12 @@ if __name__ == "__main__":
                         "room_id": room_id,
                         "project_id": project_id,
                         "slug": kebab,
-                        "kind": "production",
+                        "kind": "demo" if demo else "production",
                         "artifact_type": artifact_type,
                         "label": feature_name,
-                        "preview_url": f"/artifacts/{kebab}",
-                        "share_url": f"/preview/{kebab}",
-                        "draft_url": f"/preview/{kebab}",
+                        "preview_url": preview_url,
+                        "share_url": preview_url if demo else f"/preview/{kebab}",
+                        "draft_url": preview_url if demo else f"/preview/{kebab}",
                         "publish_status": "preview_live",
                         "created_by": owner_id,
                     }).execute()
