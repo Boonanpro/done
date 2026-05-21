@@ -34,6 +34,7 @@
       "expo-notifications"
     ],
     "extra": {
+      "apiBaseUrl": "https://frontend-liard-rho-29.vercel.app",
       "eas": {
         "projectId": "db295575-26c1-4088-99aa-4887eb27e2e2"
       }

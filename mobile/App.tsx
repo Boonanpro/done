@@ -1,4 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
+import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
@@ -27,7 +28,18 @@ import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-
 import EventSource from 'react-native-sse';
 import { WebView } from 'react-native-webview';
 
-const API_BASE_URL = 'https://frontend-mikis-projects-86652663.vercel.app';
+const DEFAULT_API_BASE_URL = 'https://frontend-liard-rho-29.vercel.app';
+const API_BASE_URL =
+  typeof Constants.expoConfig?.extra?.apiBaseUrl === 'string' &&
+  Constants.expoConfig.extra.apiBaseUrl.trim()
+    ? Constants.expoConfig.extra.apiBaseUrl.trim().replace(/\/+$/, '')
+    : DEFAULT_API_BASE_URL;
+const LEGACY_BASE_URL = 'https://frontend-mikis-projects-86652663.vercel.app';
+const LEGACY_VERCEL_HOST_PATTERN = /^https?:\/\/frontend-[^.]*mikis-projects-86652663\.vercel\.app/i;
+const KNOWN_ARTIFACT_URLS: Record<string, string> = {
+  'salonboard-styleup': 'https://salonboard-styleup-done.vercel.app',
+  kittoku: 'https://kittoku.vercel.app',
+};
 const TOKEN_KEY = 'done_mobile_access_token';
 const PROJECT_KEY = 'done_mobile_project_id';
 const PUSH_KEY = 'done_mobile_push_enabled';
@@ -87,6 +99,8 @@ type ChatArtifactResponse = {
   preview_url?: string | null;
   share_url?: string | null;
   draft_url?: string | null;
+  production_url?: string | null;
+  custom_domain?: string | null;
   artifact_type?: string | null;
 };
 
@@ -202,6 +216,13 @@ function normalizeUrl(raw: string) {
     value = value.replace(/^https?:\/\/127\.0\.0\.1(?::3000)?/i, API_BASE_URL);
   }
 
+  if (value.toLowerCase().startsWith(LEGACY_BASE_URL.toLowerCase())) {
+    value = API_BASE_URL + value.slice(LEGACY_BASE_URL.length);
+  }
+  if (LEGACY_VERCEL_HOST_PATTERN.test(value)) {
+    value = value.replace(LEGACY_VERCEL_HOST_PATTERN, API_BASE_URL);
+  }
+
   value = value.replace(
     new RegExp(`^${API_BASE_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/artifacts/`, 'i'),
     `${API_BASE_URL}/preview/`,
@@ -215,6 +236,41 @@ function normalizeUrl(raw: string) {
   }
 
   return value;
+}
+
+function artifactRouteParts(raw?: string | null) {
+  if (!raw) return null;
+  try {
+    const url = raw.startsWith('http') ? new URL(raw) : new URL(raw, API_BASE_URL);
+    const match = url.pathname.match(/^\/(?:artifacts|preview)\/([^/?#]+)(.*)$/);
+    if (!match) return null;
+    return {
+      slug: decodeURIComponent(match[1]),
+      rest: `${match[2] || ''}${url.search || ''}${url.hash || ''}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function cleanArtifactUrl(artifact: ChatArtifactResponse) {
+  const path = artifact.share_url || artifact.draft_url || artifact.preview_url || `/preview/${artifact.slug}`;
+  const route = artifactRouteParts(path);
+  const routeSlug = route?.slug || artifact.slug;
+  const base =
+    artifact.production_url ||
+    (artifact.custom_domain ? `https://${artifact.custom_domain}` : null) ||
+    KNOWN_ARTIFACT_URLS[routeSlug];
+
+  if (base) {
+    try {
+      return new URL(route?.rest || '/', base).toString();
+    } catch {
+      return base;
+    }
+  }
+
+  return normalizeUrl(path);
 }
 
 function parseRichContent(content: string): ParsedMediaContent {
@@ -1144,12 +1200,7 @@ function AppMain() {
   }
 
   function artifactUrl(artifact: ChatArtifactResponse) {
-    return normalizeUrl(
-      artifact.share_url ||
-        artifact.draft_url ||
-        artifact.preview_url ||
-        `/preview/${artifact.slug}`,
-    );
+    return cleanArtifactUrl(artifact);
   }
 
   function handleOpenArtifact(artifact: ChatArtifactResponse) {
