@@ -339,6 +339,7 @@ export interface ProjectResponse {
   metadata: Record<string, unknown> | null;
   unread_count: number;
   last_message_at: string | null;
+  pinned_at: string | null;
   created_at: string;
   updated_at: string | null;
 }
@@ -1282,7 +1283,7 @@ export const api = {
         body: JSON.stringify(data),
       }),
 
-    update: (projectId: string, data: { title?: string; status?: ProjectStatusType; summary?: string; icon?: string }) =>
+    update: (projectId: string, data: { title?: string; status?: ProjectStatusType; summary?: string; icon?: string; pinned?: boolean }) =>
       request<ProjectResponse>(`/projects/${projectId}`, {
         method: 'PATCH',
         body: JSON.stringify(data),

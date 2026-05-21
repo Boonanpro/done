@@ -255,7 +255,23 @@ class ProjectService:
             query = query.eq("status", status)
 
         result = query.order("updated_at", desc=True).execute()
-        return self._enrich_projects_read_state(result.data or [], user_id)
+        enriched = self._enrich_projects_read_state(result.data or [], user_id)
+        # LINE-style ordering: pinned items first (newer pins on top), then
+        # the rest by activity. We do this in Python rather than SQL because
+        # _enrich_projects_read_state already loads everything anyway.
+        pinned = [p for p in enriched if p.get("pinned_at")]
+        pinned.sort(key=lambda p: p["pinned_at"], reverse=True)
+        unpinned = [p for p in enriched if not p.get("pinned_at")]
+        unpinned.sort(
+            key=lambda p: (
+                p.get("last_message_at")
+                or p.get("updated_at")
+                or p.get("created_at")
+                or ""
+            ),
+            reverse=True,
+        )
+        return pinned + unpinned
 
     async def update_project(
         self,
@@ -264,10 +280,18 @@ class ProjectService:
         **updates,
     ) -> Optional[dict]:
         """プロジェクトを更新"""
-        # iconのみの更新ではupdated_atを変更しない（ソート順を維持）
-        # DBトリガーが常にupdated_atを更新するため、元の値で上書きする
-        icon_only = set(updates.keys()) == {"icon"}
-        if icon_only:
+        # LINE-style pin: the convenience `pinned: bool` from PATCH becomes
+        # a write to the `pinned_at` timestamp column.
+        if "pinned" in updates:
+            pinned = updates.pop("pinned")
+            updates["pinned_at"] = (
+                datetime.now(timezone.utc).isoformat() if pinned else None
+            )
+
+        # icon/pin だけの更新では updated_at を据え置く（ソート順をいじらない）。
+        # DBトリガーが常に updated_at を更新するため、元の値で上書きする。
+        sort_neutral = bool(updates) and set(updates.keys()) <= {"icon", "pinned_at"}
+        if sort_neutral:
             current = self.supabase.table("projects").select("updated_at").eq("id", project_id).execute()
             if current.data:
                 updates["updated_at"] = current.data[0]["updated_at"]

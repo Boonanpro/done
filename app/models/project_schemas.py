@@ -42,6 +42,11 @@ class ProjectUpdateRequest(BaseModel):
     status: Optional[ProjectStatus] = None
     summary: Optional[str] = None
     icon: Optional[str] = Field(None, max_length=10)
+    # LINE-style pin: True sets pinned_at = now, False clears it.
+    # The actual `pinned_at` column is exposed via ProjectResponse; this
+    # boolean is the write-side convenience so callers don't deal with
+    # timestamps.
+    pinned: Optional[bool] = None
 
 
 class ProjectResponse(BaseModel):
@@ -58,6 +63,7 @@ class ProjectResponse(BaseModel):
     metadata: Optional[dict] = None
     unread_count: int = 0
     last_message_at: Optional[datetime] = None
+    pinned_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
