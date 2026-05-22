@@ -79,6 +79,7 @@ type ProjectResponse = {
   icon?: string | null;
   unread_count?: number;
   last_message_at?: string | null;
+  last_message_preview?: string | null;
   pinned_at?: string | null;
   updated_at?: string | null;
   created_at: string;
@@ -801,6 +802,21 @@ function AppMain() {
     return () => subscription.remove();
   }, [refreshProjects, loadProjectMessages, currentProjectId, token]);
 
+  // Keep the unread badge honest even when the room is read on another device
+  // (e.g. the PC). Without this poll the local projects cache — and therefore
+  // the header badge and OS app-icon badge — could stay > 0 until the next
+  // foreground/notification refresh. 20s is frequent enough to feel live but
+  // light on the backend.
+  useEffect(() => {
+    if (!token) return;
+    const id = setInterval(() => {
+      if (AppState.currentState === 'active') {
+        refreshProjects(token).catch(() => null);
+      }
+    }, 20000);
+    return () => clearInterval(id);
+  }, [refreshProjects, token]);
+
   useEffect(() => {
     if (!token) return;
 
@@ -1362,8 +1378,8 @@ function AppMain() {
                   </View>
                   <Text style={styles.chatListTime}>{formatTime(projectTime(item))}</Text>
                 </View>
-                <Text style={styles.chatListPreview} numberOfLines={2}>
-                  {item.summary || item.description || 'No summary yet'}
+                <Text style={styles.chatListPreview} numberOfLines={1}>
+                  {item.last_message_preview || 'メッセージはまだありません'}
                 </Text>
               </View>
               {(item.unread_count || 0) > 0 ? (

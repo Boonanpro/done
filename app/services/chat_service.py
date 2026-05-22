@@ -36,24 +36,50 @@ def generate_invite_code(length: int = 8) -> str:
     return secrets.token_urlsafe(length)[:length]
 
 
+def build_message_preview(content: Optional[str], limit: int = 80) -> str:
+    """Turn raw message content into a short, single-line chat-list preview.
+
+    Strips internal markup, collapses attachment tags into a short label,
+    drops markdown emphasis markers, and truncates.
+    """
+    if not content:
+        return ""
+    text = re.sub(r"<dan-context>.*?</dan-context>", "", content, flags=re.DOTALL)
+    text = re.sub(r"\[添付画像:[^\]]*\]", "📷 画像", text)
+    text = re.sub(r"\[添付動画:[^\]]*\]", "🎬 動画", text)
+    text = re.sub(r"\[添付ファイル:[^\]]*\]", "📎 ファイル", text)
+    # Markdown link [label](url) -> label
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    # Emphasis / code markers
+    text = re.sub(r"[*_`#>]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "…"
+    return text
+
+
 def record_message_delivery_sync(
     sb,
     room_id: str,
     message_id: Optional[str] = None,
     sender_id: Optional[str] = None,
+    content: Optional[str] = None,
 ) -> None:
     """Sync analog of ``ChatService._record_message_delivery`` for callers that
     insert into ``chat_messages`` directly (cli_runner, live_runner) and so
     bypass the ChatService send paths.
 
-    Bumps ``chat_rooms.last_message_at`` and updates ``chat_room_members``
-    unread state. With ``sender_id=None`` (an AI reply) every member's
-    ``unread_count`` is incremented. Best-effort; failures are logged but
-    do not raise.
+    Bumps ``chat_rooms.last_message_at`` (and ``last_message_preview`` when
+    ``content`` is given) and updates ``chat_room_members`` unread state. With
+    ``sender_id=None`` (an AI reply) every member's ``unread_count`` is
+    incremented. Best-effort; failures are logged but do not raise.
     """
     now = datetime.now(timezone.utc).isoformat()
     try:
-        sb.table("chat_rooms").update({"last_message_at": now}).eq("id", room_id).execute()
+        room_update: dict = {"last_message_at": now}
+        if content is not None:
+            room_update["last_message_preview"] = build_message_preview(content)
+        sb.table("chat_rooms").update(room_update).eq("id", room_id).execute()
 
         members = sb.table("chat_room_members").select(
             "id,user_id,unread_count"
@@ -485,13 +511,14 @@ class ChatService:
     
     # ==================== Message Management ====================
 
-    async def _record_message_delivery(self, room_id: str, message_id: str, sender_id: Optional[str] = None) -> None:
+    async def _record_message_delivery(self, room_id: str, message_id: str, sender_id: Optional[str] = None, content: Optional[str] = None) -> None:
         """Update room/member read state after a message is inserted."""
         now = datetime.now(timezone.utc).isoformat()
         try:
-            self.supabase.table("chat_rooms").update({
-                "last_message_at": now,
-            }).eq("id", room_id).execute()
+            room_update: dict = {"last_message_at": now}
+            if content is not None:
+                room_update["last_message_preview"] = build_message_preview(content)
+            self.supabase.table("chat_rooms").update(room_update).eq("id", room_id).execute()
 
             members = self.supabase.table("chat_room_members").select(
                 "id,user_id,unread_count"
@@ -548,7 +575,7 @@ class ChatService:
         if result.data:
             msg = result.data[0]
             msg["sender_name"] = sender_name
-            await self._record_message_delivery(room_id, msg["id"], sender_id=sender_id)
+            await self._record_message_delivery(room_id, msg["id"], sender_id=sender_id, content=content)
             
             # Phase 5A: メッセージ検知フック（AI有効ルームのみ）
             if sender_type == "human":
@@ -997,7 +1024,7 @@ class ChatService:
         if result.data:
             msg = result.data[0]
             msg["sender_name"] = "ダン"
-            await self._record_message_delivery(target_room_id, msg["id"])
+            await self._record_message_delivery(target_room_id, msg["id"], content=content)
             return msg
         raise ValueError("Failed to send AI message")
     

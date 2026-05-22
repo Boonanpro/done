@@ -104,6 +104,7 @@ class ProjectService:
         room_id = enriched.get("room_id")
         enriched["unread_count"] = 0
         enriched["last_message_at"] = None
+        enriched["last_message_preview"] = None
         if not room_id:
             return enriched
 
@@ -121,13 +122,14 @@ class ProjectService:
 
             room = (
                 self.supabase.table("chat_rooms")
-                .select("last_message_at,updated_at")
+                .select("last_message_at,updated_at,last_message_preview")
                 .eq("id", room_id)
                 .limit(1)
                 .execute()
             )
             if room.data:
                 enriched["last_message_at"] = room.data[0].get("last_message_at") or room.data[0].get("updated_at")
+                enriched["last_message_preview"] = room.data[0].get("last_message_preview")
         except Exception as exc:
             logger.debug("Project unread enrichment skipped (project=%s): %s", enriched.get("id"), exc)
         return enriched
@@ -141,6 +143,7 @@ class ProjectService:
 
         member_by_room: dict[str, dict] = {}
         latest_by_room: dict[str, str] = {}
+        preview_by_room: dict[str, str] = {}
 
         try:
             members = (
@@ -154,12 +157,16 @@ class ProjectService:
 
             rooms = (
                 self.supabase.table("chat_rooms")
-                .select("id,last_message_at,updated_at")
+                .select("id,last_message_at,updated_at,last_message_preview")
                 .in_("id", room_ids)
                 .execute()
             )
             latest_by_room = {
                 row["id"]: row.get("last_message_at") or row.get("updated_at")
+                for row in (rooms.data or [])
+            }
+            preview_by_room = {
+                row["id"]: row.get("last_message_preview")
                 for row in (rooms.data or [])
             }
         except Exception as exc:
@@ -171,6 +178,7 @@ class ProjectService:
             room_id = item.get("room_id")
             item["unread_count"] = (member_by_room.get(room_id) or {}).get("unread_count") or 0
             item["last_message_at"] = latest_by_room.get(room_id)
+            item["last_message_preview"] = preview_by_room.get(room_id)
             enriched.append(item)
         return enriched
 
