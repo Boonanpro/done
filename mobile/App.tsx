@@ -1307,6 +1307,11 @@ function AppMain() {
     setMessages((current) => [...current, optimistic]);
 
     let selectedProjectId = project.id;
+    // Becomes true once the server has accepted the message (echoes it back as
+    // user_message, or starts replying / finishes). After that point a stream
+    // error is just a dropped connection — the message is already saved, so we
+    // must NOT restore the draft or remove the optimistic bubble.
+    let sent = false;
 
     try {
       await streamDanMessage(token, finalContent, project.room_id, (event) => {
@@ -1320,6 +1325,7 @@ function AppMain() {
           const step = event.step as { label?: string } | undefined;
           setActivity(step?.label || 'DAN is working...');
         } else if (event.type === 'user_message' && isMessageResponse(event.message)) {
+          sent = true;
           const incoming = event.message;
           setMessages((current) =>
             upsertMessage(
@@ -1328,13 +1334,31 @@ function AppMain() {
             ),
           );
         } else if (event.type === 'ai_message' && isMessageResponse(event.message)) {
+          sent = true;
           const incoming = event.message;
           setMessages((current) => upsertMessage(current, incoming));
         } else if (event.type === 'done') {
+          sent = true;
           setActivity('Done');
         }
       });
+    } catch (error) {
+      if (!sent) {
+        // Genuine failure before the message was accepted: put the text back
+        // and drop the optimistic bubble.
+        setDraft(content);
+        setMessages((current) => current.filter((message) => message.id !== optimistic.id));
+        Alert.alert('Send failed', String((error as Error).message));
+        setSending(false);
+        setActivity('');
+        return;
+      }
+      // Sent, but the stream dropped before a clean "done" — fall through and
+      // reconcile from the server instead of treating it as a failure.
+    }
 
+    // Reconcile final state (clean done OR sent-but-stream-dropped).
+    try {
       const list = await refreshProjects(token).catch(() => projects);
       const nextProject =
         list.find((item) => item.id === selectedProjectId) ||
@@ -1343,10 +1367,8 @@ function AppMain() {
       if (nextProject?.id) {
         await loadProjectMessages(token, nextProject.id);
       }
-    } catch (error) {
-      setDraft(content);
-      setMessages((current) => current.filter((message) => message.id !== optimistic.id));
-      Alert.alert('Send failed', String((error as Error).message));
+    } catch {
+      // best-effort reconcile
     } finally {
       setSending(false);
       setActivity('');
