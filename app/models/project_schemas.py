@@ -63,6 +63,7 @@ class ProjectResponse(BaseModel):
     metadata: Optional[dict] = None
     unread_count: int = 0
     last_message_at: Optional[datetime] = None
+    last_message_preview: Optional[str] = None
     pinned_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None

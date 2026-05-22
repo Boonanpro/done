@@ -239,7 +239,7 @@ def _save_ai_message_sync(
                 # indicator. This is the same bookkeeping ChatService.send_*
                 # does via _record_message_delivery; without it, AI replies
                 # stay invisible as "unread" because we bypass the service.
-                record_message_delivery_sync(sb, room_id, msg_id)
+                record_message_delivery_sync(sb, room_id, msg_id, content=content)
                 _cli_debug(
                     f"_save_ai_message_sync OK (attempt {attempt}): msg_id={msg_id or '?'}"
                 )

@@ -416,7 +416,7 @@ class GeminiLiveRunner:
         if result.data:
             record_message_delivery_sync(
                 supabase, self.session_id, result.data[0].get("id"),
-                sender_id=self.user_id,
+                sender_id=self.user_id, content=text,
             )
 
     async def _save_to_chat_messages(
@@ -463,6 +463,7 @@ class GeminiLiveRunner:
             sender_id = row.get("sender_id") if row.get("sender_type") == "human" else None
             record_message_delivery_sync(
                 supabase, room_id, result.data[0].get("id"), sender_id=sender_id,
+                content=row.get("content"),
             )
 
     async def _inject_into_agent_session(self, room_id: str, user_text: str, assistant_text: str) -> None:
