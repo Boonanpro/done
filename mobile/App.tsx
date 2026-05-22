@@ -4,6 +4,8 @@ import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
@@ -152,6 +154,48 @@ function upsertMessage(list: MessageResponse[], incoming: MessageResponse) {
   const next = [...list];
   next[index] = incoming;
   return next;
+}
+
+type PendingAttachment = {
+  key: string;
+  uri: string;
+  name: string;
+  mime: string;
+  kind: 'image' | 'video' | 'file';
+};
+
+// Upload one local file to the chat upload endpoint and return its hosted URL.
+// React Native FormData takes {uri,name,type}; we must NOT set Content-Type
+// ourselves so fetch can add the multipart boundary.
+async function uploadAttachment(
+  att: PendingAttachment,
+  token: string,
+): Promise<{ kind: PendingAttachment['kind']; name: string; url: string }> {
+  const form = new FormData();
+  form.append('file', { uri: att.uri, name: att.name, type: att.mime } as unknown as Blob);
+  const res = await fetch(`${API_BASE_URL}/api/v1/files/upload`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body = await res.json();
+      detail = body?.detail?.message || body?.detail || JSON.stringify(body);
+    } catch {
+      detail = await res.text().catch(() => '');
+    }
+    throw new Error(detail || `Upload failed: ${res.status}`);
+  }
+  const data = (await res.json()) as { url: string };
+  return { kind: att.kind, name: att.name, url: data.url };
+}
+
+function mediaTag(kind: PendingAttachment['kind'], name: string, url: string): string {
+  if (kind === 'image') return `[添付画像: ${url}]`;
+  if (kind === 'video') return `[添付動画: ${name} (${url})]`;
+  return `[添付ファイル: ${name} (${url})]`;
 }
 
 async function apiRequest<T>(
@@ -606,6 +650,8 @@ function AppMain() {
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [currentProject, setCurrentProject] = useState<ProjectResponse | null>(null);
   const [draft, setDraft] = useState('');
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [attachSheetOpen, setAttachSheetOpen] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [sending, setSending] = useState(false);
@@ -1129,10 +1175,76 @@ function AppMain() {
     }
   }
 
+  async function pickMedia() {
+    setAttachSheetOpen(false);
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('権限が必要です', '設定アプリから写真へのアクセスを許可してください。');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images', 'videos'],
+        allowsMultipleSelection: true,
+        quality: 0.9,
+      });
+      if (result.canceled) return;
+      const picked: PendingAttachment[] = result.assets.map((a, i) => {
+        const isVideo = a.type === 'video';
+        const name =
+          a.fileName || `${isVideo ? 'video' : 'image'}-${Date.now()}-${i}.${isVideo ? 'mp4' : 'jpg'}`;
+        return {
+          key: `${a.assetId || a.uri}-${i}-${Date.now()}`,
+          uri: a.uri,
+          name,
+          mime: a.mimeType || (isVideo ? 'video/mp4' : 'image/jpeg'),
+          kind: isVideo ? 'video' : 'image',
+        };
+      });
+      setAttachments((cur) => [...cur, ...picked]);
+    } catch (error) {
+      Alert.alert('選択に失敗しました', String((error as Error).message));
+    }
+  }
+
+  async function pickDocument() {
+    setAttachSheetOpen(false);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        multiple: true,
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      const picked: PendingAttachment[] = result.assets.map((a, i) => {
+        const name = a.name || `file-${Date.now()}-${i}`;
+        const kind: PendingAttachment['kind'] = /\.(mp4|mov|m4v|webm|avi|mkv)$/i.test(name)
+          ? 'video'
+          : /\.(png|jpe?g|gif|webp|heic|heif)$/i.test(name)
+            ? 'image'
+            : 'file';
+        return {
+          key: `${a.uri}-${i}-${Date.now()}`,
+          uri: a.uri,
+          name,
+          mime: a.mimeType || 'application/octet-stream',
+          kind,
+        };
+      });
+      setAttachments((cur) => [...cur, ...picked]);
+    } catch (error) {
+      Alert.alert('選択に失敗しました', String((error as Error).message));
+    }
+  }
+
+  function removeAttachment(key: string) {
+    setAttachments((cur) => cur.filter((a) => a.key !== key));
+  }
+
   async function handleSend() {
     if (!token || sending) return;
     const content = draft.trim();
-    if (!content) return;
+    const pending = attachments;
+    if (!content && pending.length === 0) return;
 
     let project = currentProject;
     if (!project) {
@@ -1157,7 +1269,33 @@ function AppMain() {
     }
 
     setDraft('');
+    setAttachments([]);
     setSending(true);
+
+    // Upload attachments first, then prepend the [添付...] tags Dan + the
+    // renderers understand. If upload fails, restore the draft + attachments
+    // so nothing is lost.
+    let finalContent = content;
+    if (pending.length > 0) {
+      setActivity(`アップロード中... (0/${pending.length})`);
+      try {
+        const uploaded: { kind: PendingAttachment['kind']; name: string; url: string }[] = [];
+        for (let i = 0; i < pending.length; i++) {
+          uploaded.push(await uploadAttachment(pending[i], token));
+          setActivity(`アップロード中... (${i + 1}/${pending.length})`);
+        }
+        const tags = uploaded.map((u) => mediaTag(u.kind, u.name, u.url)).join('\n');
+        finalContent = content ? `${tags}\n\n${content}` : tags;
+      } catch (error) {
+        setSending(false);
+        setActivity('');
+        setDraft(content);
+        setAttachments(pending);
+        Alert.alert('アップロード失敗', String((error as Error).message));
+        return;
+      }
+    }
+
     setActivity('DAN is working...');
 
     const optimistic: MessageResponse = {
@@ -1165,7 +1303,7 @@ function AppMain() {
       room_id: project.room_id,
       sender_name: 'You',
       sender_type: 'human',
-      content,
+      content: finalContent,
       created_at: new Date().toISOString(),
     };
     setMessages((current) => [...current, optimistic]);
@@ -1173,7 +1311,7 @@ function AppMain() {
     let selectedProjectId = project.id;
 
     try {
-      await streamDanMessage(token, content, project.room_id, (event) => {
+      await streamDanMessage(token, finalContent, project.room_id, (event) => {
         if (event.created_project_id && event.created_project_id !== selectedProjectId) {
           selectedProjectId = event.created_project_id;
           setCurrentProjectId(event.created_project_id);
@@ -1659,7 +1797,50 @@ function AppMain() {
           </View>
         ) : null}
 
+        {attachments.length > 0 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.attachmentBar}
+            contentContainerStyle={styles.attachmentBarContent}
+          >
+            {attachments.map((att) => (
+              <View key={att.key} style={styles.attachmentChip}>
+                {att.kind === 'image' ? (
+                  <Image source={{ uri: att.uri }} style={styles.attachmentThumb} />
+                ) : (
+                  <View style={[styles.attachmentThumb, styles.attachmentThumbIcon]}>
+                    <Ionicons
+                      name={att.kind === 'video' ? 'videocam' : 'document'}
+                      size={20}
+                      color="#d9d2c8"
+                    />
+                  </View>
+                )}
+                <Text style={styles.attachmentName} numberOfLines={1}>
+                  {att.name}
+                </Text>
+                <Pressable
+                  onPress={() => removeAttachment(att.key)}
+                  hitSlop={8}
+                  style={styles.attachmentRemove}
+                >
+                  <Ionicons name="close-circle" size={18} color="#111" />
+                </Pressable>
+              </View>
+            ))}
+          </ScrollView>
+        ) : null}
+
         <View style={[styles.composer, { paddingBottom: 10 + insets.bottom }]}>
+          <Pressable
+            onPress={() => setAttachSheetOpen(true)}
+            disabled={sending}
+            hitSlop={6}
+            style={({ pressed }) => [styles.attachButton, pressed && styles.buttonPressed]}
+          >
+            <Ionicons name="add-circle-outline" size={28} color="#a7a19a" />
+          </Pressable>
           <TextInput
             multiline
             onChangeText={setDraft}
@@ -1669,11 +1850,11 @@ function AppMain() {
             value={draft}
           />
           <Pressable
-            disabled={sending || !draft.trim()}
+            disabled={sending || (!draft.trim() && attachments.length === 0)}
             onPress={handleSend}
             style={({ pressed }) => [
               styles.sendButton,
-              (pressed || sending || !draft.trim()) && styles.buttonPressed,
+              (pressed || sending || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
             ]}
           >
             {sending ? (
@@ -1684,6 +1865,43 @@ function AppMain() {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
+
+      <Modal
+        visible={attachSheetOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setAttachSheetOpen(false)}
+        statusBarTranslucent
+      >
+        <View style={styles.sheetRoot}>
+          <Pressable style={styles.sheetBackdrop} onPress={() => setAttachSheetOpen(false)} />
+          <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 12) + 12 }]}>
+            <View style={styles.sheetGrabber} />
+            <Text style={styles.sheetHeading}>添付する</Text>
+            <Pressable
+              onPress={() => void pickMedia()}
+              style={({ pressed }) => [styles.sheetAction, pressed && styles.sheetActionPressed]}
+            >
+              <Ionicons name="image" size={22} color="#f4f0e8" />
+              <Text style={styles.sheetActionText}>写真・動画</Text>
+            </Pressable>
+            <View style={styles.sheetDivider} />
+            <Pressable
+              onPress={() => void pickDocument()}
+              style={({ pressed }) => [styles.sheetAction, pressed && styles.sheetActionPressed]}
+            >
+              <Ionicons name="document" size={22} color="#f4f0e8" />
+              <Text style={styles.sheetActionText}>ファイル</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setAttachSheetOpen(false)}
+              style={({ pressed }) => [styles.sheetCancel, pressed && styles.sheetActionPressed]}
+            >
+              <Text style={styles.sheetCancelText}>キャンセル</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -2360,6 +2578,60 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingBottom: Platform.OS === 'android' ? 8 : 12,
     paddingTop: 10,
+  },
+  attachButton: {
+    alignItems: 'center',
+    height: 44,
+    justifyContent: 'center',
+    width: 32,
+  },
+  attachmentBar: {
+    borderTopColor: '#282520',
+    borderTopWidth: 1,
+    maxHeight: 84,
+  },
+  attachmentBarContent: {
+    gap: 8,
+    padding: 10,
+  },
+  attachmentChip: {
+    alignItems: 'center',
+    backgroundColor: '#1d1b18',
+    borderColor: '#34302a',
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    maxWidth: 200,
+    paddingLeft: 6,
+    paddingRight: 26,
+    paddingVertical: 6,
+  },
+  attachmentThumb: {
+    backgroundColor: '#2a2620',
+    borderRadius: 8,
+    height: 40,
+    width: 40,
+  },
+  attachmentThumbIcon: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  attachmentName: {
+    color: '#d9d2c8',
+    flexShrink: 1,
+    fontSize: 12,
+  },
+  attachmentRemove: {
+    alignItems: 'center',
+    backgroundColor: '#d9d2c8',
+    borderRadius: 9,
+    height: 18,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 4,
+    top: 4,
+    width: 18,
   },
   composerInput: {
     backgroundColor: '#1d1b18',
