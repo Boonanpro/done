@@ -630,6 +630,12 @@ function AppMain() {
   useEffect(() => {
     currentProjectIdRef.current = currentProjectId;
   }, [currentProjectId]);
+  // Tracks which screen is showing, so background→foreground logic can tell
+  // "user is actually viewing this chat" from "user is on the chat list".
+  const screenRef = useRef<'projects' | 'chat' | 'artifact' | 'settings'>('projects');
+  useEffect(() => {
+    screenRef.current = screen;
+  }, [screen]);
 
   const token = auth.status === 'signed_in' ? auth.token : undefined;
   const user = auth.status === 'signed_in' ? auth.user : undefined;
@@ -792,15 +798,18 @@ function AppMain() {
       if (state === 'active') {
         refreshProjects(token).catch(() => null);
         // Reload the open chat too: a reply that finished while the app was
-        // backgrounded never streams in (the SSE connection is suspended),
-        // so the project list alone is not enough to surface it.
-        if (currentProjectId) {
-          loadProjectMessages(token, currentProjectId).catch(() => null);
+        // backgrounded never streams in (the SSE connection is suspended).
+        // Only do this when the user is *actually viewing* that chat — doing
+        // it whenever a currentProjectId exists would silently mark the
+        // last-opened room as read just by foregrounding the app (the chat
+        // list would never keep an unread badge long enough to see).
+        if (screenRef.current === 'chat' && currentProjectIdRef.current) {
+          loadProjectMessages(token, currentProjectIdRef.current).catch(() => null);
         }
       }
     });
     return () => subscription.remove();
-  }, [refreshProjects, loadProjectMessages, currentProjectId, token]);
+  }, [refreshProjects, loadProjectMessages, token]);
 
   // Keep the unread badge honest even when the room is read on another device
   // (e.g. the PC). Without this poll the local projects cache — and therefore
@@ -1316,7 +1325,7 @@ function AppMain() {
         <StatusBar style="light" />
         <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
           <View style={styles.appBarTitleBlock}>
-            <Text style={styles.appBarTitle}>Chats</Text>
+            <Text style={styles.appBarTitle}>Done</Text>
             {unreadTotal > 0 ? (
               <View style={styles.appBarBadge}>
                 <Text style={styles.appBarBadgeText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
