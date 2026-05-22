@@ -440,13 +440,11 @@ function RichMessageContent({
         <Pressable
           key={`${video.url}-${index}`}
           onPress={() => onOpenUrl(video.url)}
-          style={[styles.mediaCard, mine && styles.myMediaCard]}
+          style={[styles.mediaCard, styles.mediaCardRow, mine && styles.myMediaCard]}
         >
+          <Ionicons name="play-circle" size={22} color={mine ? '#1d1b18' : '#f4f0e8'} />
           <Text style={[styles.mediaCardTitle, mine && styles.myMessageText]} numberOfLines={1}>
             動画を開く
-          </Text>
-          <Text style={[styles.mediaCardUrl, mine && styles.myMediaCardUrl]} numberOfLines={2}>
-            {video.name || video.url}
           </Text>
         </Pressable>
       ))}
@@ -1464,11 +1462,6 @@ function AppMain() {
         <View style={[styles.appBar, { paddingTop: insets.top + 8 }]}>
           <View style={styles.appBarTitleBlock}>
             <Text style={styles.appBarTitle}>Done</Text>
-            {unreadTotal > 0 ? (
-              <View style={styles.appBarBadge}>
-                <Text style={styles.appBarBadgeText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
-              </View>
-            ) : null}
           </View>
           <Pressable
             onPress={() => setScreen('settings')}
@@ -1817,9 +1810,11 @@ function AppMain() {
                     />
                   </View>
                 )}
-                <Text style={styles.attachmentName} numberOfLines={1}>
-                  {att.name}
-                </Text>
+                {att.kind === 'file' ? (
+                  <Text style={styles.attachmentName} numberOfLines={1}>
+                    {att.name}
+                  </Text>
+                ) : null}
                 <Pressable
                   onPress={() => removeAttachment(att.key)}
                   hitSlop={8}
@@ -2537,6 +2532,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     gap: 3,
     padding: 10,
+  },
+  mediaCardRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
   },
   myMediaCard: {
     backgroundColor: '#ebe4d8',
