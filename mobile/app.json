@@ -31,7 +31,14 @@
     },
     "plugins": [
       "expo-secure-store",
-      "expo-notifications"
+      "expo-notifications",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "DANで画像や動画を送るために写真ライブラリへのアクセスを許可してください。",
+          "cameraPermission": "DANで写真を撮って送るためにカメラへのアクセスを許可してください。"
+        }
+      ]
     ],
     "extra": {
       "apiBaseUrl": "https://frontend-liard-rho-29.vercel.app",
