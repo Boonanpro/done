@@ -30,6 +30,7 @@ import {
   Sparkles,
   Wand2,
 } from 'lucide-react';
+import { isDanPreview } from '@/lib/dan-preview';
 
 /* ============ 型 ============ */
 type SField = { value: string; confidence: number; reason: string };
@@ -113,6 +114,60 @@ const FIELD_SEQ: (keyof Fields)[] = [
 const LOW = 0.6;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/* ============ プレビュー専用（ライブプレビューでの全画面閲覧/編集） ============ */
+const PREVIEW_STEPS: { key: Step; label: string }[] = [
+  { key: 'init', label: '初期設定' },
+  { key: 'intro', label: 'イントロ' },
+  { key: 'analyzing', label: '解析中' },
+  { key: 'form', label: '投稿フォーム' },
+  { key: 'posting', label: '投稿中' },
+  { key: 'done', label: '完了' },
+];
+
+// 解析中/フォーム画面を描画するためのモック写真（実ファイルは不要、url だけ使われる）
+function makePreviewPhotos(): Photo[] {
+  return SAMPLES.slice(0, 3).map((s) => ({
+    url: s.url,
+    file:
+      typeof File !== 'undefined'
+        ? new File([], `${s.key}.png`, { type: 'image/png' })
+        : ({ name: `${s.key}.png` } as unknown as File),
+  }));
+}
+
+// 投稿フォーム画面を描画するためのモック AI 推定結果
+function makePreviewForm(): Fields {
+  const s = (value: string, confidence = 0.9, reason = 'プレビュー用のサンプルデータです'): SField => ({
+    value,
+    confidence,
+    reason,
+  });
+  const m = (value: string[], confidence = 0.9, reason = 'プレビュー用のサンプルデータです'): MField => ({
+    value,
+    confidence,
+    reason,
+  });
+  return {
+    category: s('レディース'),
+    length: s('ボブ'),
+    menu: m(['パーマ']),
+    hair_amount: s('普通'),
+    hair_quality: s('普通'),
+    hair_thickness: s('普通'),
+    hair_curl: s('少し'),
+    age: s('20代'),
+    face: s('卵型'),
+    style_name: s('くびれ感ナチュラルボブ'),
+    // 「要確認」バッジの見た目も確認できるよう、あえて低信頼度にしている
+    comment: s(
+      '小顔に見えるくびれボブ。柔らかい質感とナチュラルなカラーで、大人かわいい仕上がりです。',
+      0.5,
+      '低信頼度表示の確認用にあえて confidence を下げています',
+    ),
+    hashtags: m(['ボブ', 'ナチュラル', '小顔', '透明感カラー']),
+  };
+}
+
 /* ============ メイン ============ */
 export default function SalonboardStyleupPage() {
   const [step, setStep] = useState<Step>('init');
@@ -122,12 +177,24 @@ export default function SalonboardStyleupPage() {
   const [elapsed, setElapsed] = useState(0);
   const [stylist, setStylist] = useState('');
   const [deviceId, setDeviceId] = useState('');
+  const [postMsg, setPostMsg] = useState('');
   const [setupReady, setSetupReady] = useState(false);
+  const [previewMode, setPreviewMode] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   // 起動時: device_id を確保し、サロンボード認証情報の設定状態を確認する
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    // ライブプレビュー（チャット右ペイン）では認証/初期設定ゲートをスキップし、
+    // 管理者として全画面を閲覧・編集できるようにする。
+    if (isDanPreview()) {
+      setPreviewMode(true);
+      setDeviceId('preview-device');
+      setStylist((s) => s || 'プレビュー');
+      setStep('intro');
+      setSetupReady(true);
+      return;
+    }
     let id = window.localStorage.getItem('sb_device_id') ?? '';
     if (!id) {
       id =
@@ -252,9 +319,68 @@ export default function SalonboardStyleupPage() {
     });
 
   const post = async () => {
+    if (!form) return;
+    // チャット右ペインのプレビューは投稿の流れだけ再現する
+    if (previewMode) {
+      setStep('posting');
+      await sleep(2100);
+      setStep('done');
+      return;
+    }
+    const files = photos.map((p) => p.file).filter((f): f is File => !!f);
+    if (!files.length) {
+      setError('写真が見つかりません。選び直してください');
+      return;
+    }
+    setError('');
+    setPostMsg('投稿を受け付けました');
     setStep('posting');
-    await sleep(2100);
-    setStep('done');
+    try {
+      const fd = new FormData();
+      fd.append('device_id', deviceId);
+      fd.append('fields', JSON.stringify(form));
+      const angles = ['front', 'side', 'back'] as const;
+      const imagesMeta = files.map((_, i) => ({ angle: angles[i] ?? 'front' }));
+      fd.append('images', JSON.stringify(imagesMeta));
+      fd.append('stylist_name', stylist || '');
+      files.forEach((f) => fd.append('files', f));
+
+      const res = await fetch('/api/v1/salonboard-styleup/post', {
+        method: 'POST',
+        body: fd,
+      });
+      if (!res.ok) {
+        const j = (await res.json().catch(() => ({}))) as { detail?: string };
+        throw new Error(j.detail || '投稿の受付に失敗しました');
+      }
+      const { job_id } = (await res.json()) as { job_id: string };
+
+      const deadline = Date.now() + 10 * 60 * 1000; // 最大10分待つ
+      while (Date.now() < deadline) {
+        await sleep(3000);
+        const sres = await fetch(
+          `/api/v1/salonboard-styleup/post-status/${job_id}`,
+        );
+        if (!sres.ok) continue;
+        const st = (await sres.json()) as { status: string; message: string };
+        if (st.message) setPostMsg(st.message);
+        if (st.status === 'done') {
+          setStep('done');
+          return;
+        }
+        if (st.status === 'error') {
+          setError(st.message || '投稿に失敗しました');
+          setStep('form');
+          return;
+        }
+        // 'running' / 'needs_human' は待機継続
+      }
+      setError('投稿に時間がかかっています。少し待って一覧をご確認ください');
+      setStep('form');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '投稿に失敗しました');
+      setStep('form');
+    }
   };
 
   const reset = () => {
@@ -268,8 +394,24 @@ export default function SalonboardStyleupPage() {
     setStep('intro');
   };
 
+  // プレビュー専用: 任意の画面へ直接ジャンプする（必要なモックデータを補う）
+  const goPreviewStep = (target: Step) => {
+    setError('');
+    if (target === 'analyzing' || target === 'form') {
+      setPhotos((p) => (p.length ? p : makePreviewPhotos()));
+    }
+    if (target === 'form') {
+      setForm((f) => f ?? makePreviewForm());
+    }
+    if (target === 'done') {
+      setElapsed((e) => e || 8);
+    }
+    setStep(target);
+  };
+
   return (
-    <div className="h-screen overflow-y-auto bg-[#f4f5f7] text-gray-900">
+    <div className="min-h-[100dvh] bg-[#f4f5f7] text-gray-900">
+      {previewMode && <PreviewStepBar current={step} onGo={goPreviewStep} />}
       <div className="mx-auto min-h-screen max-w-md bg-white shadow-sm">
         {!setupReady && (
           <div className="flex min-h-screen items-center justify-center">
@@ -306,7 +448,7 @@ export default function SalonboardStyleupPage() {
             onPost={post}
           />
         )}
-        {step === 'posting' && <Posting />}
+        {step === 'posting' && <Posting message={postMsg} />}
         {step === 'done' && <Done elapsed={elapsed} onReset={reset} />}
         <input
           ref={fileRef}
@@ -317,6 +459,42 @@ export default function SalonboardStyleupPage() {
           onChange={onPickFiles}
         />
       </div>
+    </div>
+  );
+}
+
+/* ============ プレビュー専用: 画面切替バー ============ */
+// data-dan-preview-ui を付けることで、編集モード中でもインスペクタにクリックを
+// 横取りされず、各画面へジャンプできる（iframe-inspector の isPreviewUi で除外）。
+function PreviewStepBar({
+  current,
+  onGo,
+}: {
+  current: Step;
+  onGo: (s: Step) => void;
+}) {
+  return (
+    <div
+      data-dan-preview-ui
+      className="fixed left-1/2 top-2 z-[2147483647] flex max-w-[calc(100vw-16px)] -translate-x-1/2 flex-wrap items-center justify-center gap-1 rounded-full border border-gray-200 bg-white/95 px-2 py-1.5 shadow-lg backdrop-blur"
+    >
+      <span className="px-1.5 text-[10px] font-bold tracking-wide text-[#d4577a]">
+        プレビュー
+      </span>
+      {PREVIEW_STEPS.map((s) => (
+        <button
+          key={s.key}
+          type="button"
+          onClick={() => onGo(s.key)}
+          className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition ${
+            current === s.key
+              ? 'bg-[#0a3d62] text-white'
+              : 'text-gray-600 hover:bg-gray-100'
+          }`}
+        >
+          {s.label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -759,7 +937,7 @@ function FormView({
 }
 
 /* ============ 画面: 投稿中 ============ */
-function Posting() {
+function Posting({ message }: { message?: string }) {
   return (
     <div
       className="flex flex-col items-center justify-center px-6"
@@ -770,7 +948,10 @@ function Posting() {
         サロンボードに投稿しています…
       </div>
       <div className="mt-1 text-sm text-gray-400">
-        スタイル写真と入力内容を送信中
+        {message || 'スタイル写真と入力内容を送信中'}
+      </div>
+      <div className="mt-4 max-w-xs text-center text-[11px] leading-relaxed text-gray-400">
+        投稿には数分かかります。この画面のまま少しお待ちください。
       </div>
     </div>
   );
@@ -805,8 +986,8 @@ function Done({ elapsed, onReset }: { elapsed: number; onReset: () => void }) {
       </div>
 
       <p className="mt-5 text-[11px] leading-relaxed text-gray-400">
-        ※ このデモでは投稿の流れを再現しています。実際の運用では、ここで
-        本物のサロンボードにそのまま自動投稿されます。
+        ※ サロンボードに登録されました。お客様向けページに公開するには、
+        サロンボードの掲載管理で「反映申請」を押してください（反映まで30分ほど）。
       </p>
 
       <button
