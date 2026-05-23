@@ -3,7 +3,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
-  Brain,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -67,121 +66,31 @@ type DisplayItem =
   | { kind: 'message'; msg: MessageResponse }
   | { kind: 'execution-block'; id: string; steps: StepInfo[]; isLive: boolean };
 
-function MemberBadge({ role }: { role: 'researcher' | 'critic' }) {
-  const config = {
-    researcher: { label: 'リサーチ', color: 'text-blue-500' },
-    critic: { label: 'クリティック', color: 'text-orange-500' },
-  } as const;
-  const current = config[role];
-
-  return (
-    <span className={`inline-flex items-center text-[9px] font-medium ${current.color} shrink-0`}>
-      {current.label}
-    </span>
-  );
-}
-
-function ProcessStepItem({
-  step,
-  isLastLive,
-}: {
-  step: StepInfo;
-  isLastLive: boolean;
-}) {
-  return (
-    <div className="flex items-start gap-1.5 text-sm md:text-[15px] leading-relaxed">
-      {step.type === 'error' ? (
-        <AlertCircle className="mt-0.5 h-2.5 w-2.5 shrink-0 text-red-500" />
-      ) : step.type === 'reasoning' ? (
-        isLastLive ? (
-          <Loader2 className="mt-0.5 h-2.5 w-2.5 shrink-0 animate-spin text-primary" />
-        ) : (
-          <Brain className="mt-0.5 h-2.5 w-2.5 shrink-0 text-yellow-500/70" />
-        )
-      ) : isLastLive ? (
-        <Loader2 className="mt-0.5 h-2.5 w-2.5 shrink-0 animate-spin text-primary" />
-      ) : (
-        <Check className="mt-0.5 h-2.5 w-2.5 shrink-0 text-green-500" />
-      )}
-      {step.role && step.role !== 'leader' ? <MemberBadge role={step.role} /> : null}
-      <span
-        className={`whitespace-pre-wrap ${
-          step.type === 'error'
-            ? 'text-red-500'
-            : step.type === 'reasoning'
-              ? 'italic text-muted-foreground/70'
-              : 'text-muted-foreground'
-        }`}
-      >
-        {step.label}
-      </span>
-    </div>
-  );
-}
-
+// Phase 2: the live in-progress turn renders with the SAME inline timeline as
+// a finished turn (text segments + a collapsible tool group), so there's no
+// separate "process monitor" box anymore. While live, the tool group is open
+// (watch it work) and a spinner trails the steps; once the run finishes this
+// block is dropped and the saved message's blocks take over (tools collapsed).
 function InlineProcessBlock({
   steps,
   isLive = false,
-  defaultCollapsed = true,
 }: {
   steps: StepInfo[];
   isLive?: boolean;
-  defaultCollapsed?: boolean;
+  defaultCollapsed?: boolean; // kept for call-site compatibility (unused)
 }) {
-  const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  // 自動展開なし（ユーザーが閉じたらそのまま維持）
-
-  // 自動スクロールなし（ユーザーが自由にスクロール位置を維持できるようにする）
-
   if (steps.length === 0 && !isLive) return null;
+  const blocks = stepsToBlocks(steps);
 
   return (
     <div className="my-1">
-      <div className="max-w-[90%] overflow-hidden rounded-lg border border-border/40 bg-muted/20">
-        <button
-          onClick={() => setIsCollapsed((value) => !value)}
-          className="flex w-full items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-muted/30 md:text-[15px]"
-        >
-          {isCollapsed ? (
-            <ChevronRight className="h-3 w-3 shrink-0" />
-          ) : (
-            <ChevronDown className="h-3 w-3 shrink-0" />
-          )}
-          <Terminal className="h-3 w-3 shrink-0 text-primary/60" />
-          <span className="font-medium">
-            {isLive && steps.length === 0 ? '処理中...' : `処理 (${steps.length})`}
-          </span>
-          {isLive ? <Loader2 className="ml-auto h-3 w-3 shrink-0 animate-spin text-primary" /> : null}
-          {!isLive && steps.some((step) => step.type === 'error') ? (
-            <AlertCircle className="ml-auto h-3 w-3 shrink-0 text-red-500" />
-          ) : null}
-          {!isLive && !steps.some((step) => step.type === 'error') && steps.length > 0 ? (
-            <Check className="ml-auto h-3 w-3 shrink-0 text-green-500" />
-          ) : null}
-        </button>
-
-        {!isCollapsed ? (
-          <div ref={scrollRef} className="max-h-[400px] overflow-y-auto px-3 pb-2">
-            <div className="space-y-0.5 border-l-2 border-primary/20 pl-2.5">
-              {steps.map((step, index) => (
-                <ProcessStepItem
-                  key={`${step.type}-${index}`}
-                  step={step}
-                  isLastLive={isLive && index === steps.length - 1}
-                />
-              ))}
-              {isLive && steps.length === 0 ? (
-                <div className="flex items-center gap-1.5 text-sm text-muted-foreground md:text-[15px]">
-                  <Loader2 className="h-2.5 w-2.5 animate-spin text-primary" />
-                  <span>更新を待機中...</span>
-                </div>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-      </div>
+      {blocks.length > 0 ? <AiTurnBlocks blocks={blocks} toolsOpen={isLive} /> : null}
+      {isLive ? (
+        <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+          <Loader2 className="h-3 w-3 shrink-0 animate-spin text-primary" />
+          <span>{steps.length === 0 ? '考えています…' : '実行中…'}</span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -369,8 +278,8 @@ function TurnToolRow({ block }: { block: TurnBlock }) {
   );
 }
 
-function TurnToolGroup({ items }: { items: TurnBlock[] }) {
-  const [open, setOpen] = useState(false);
+function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="my-2">
       <button type="button" onClick={() => setOpen((o) => !o)} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
@@ -387,7 +296,7 @@ function TurnToolGroup({ items }: { items: TurnBlock[] }) {
   );
 }
 
-function AiTurnBlocks({ blocks, onImageClick }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void }) {
+function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
     if (b.type === 'text') {
@@ -403,9 +312,20 @@ function AiTurnBlocks({ blocks, onImageClick }: { blocks: TurnBlock[]; onImageCl
     <div className="flex flex-col">
       {grouped.map((g, i) => (g.kind === 'text'
         ? <TurnTextSegment key={i} text={g.text} onImageClick={onImageClick} />
-        : <TurnToolGroup key={i} items={g.items} />))}
+        : <TurnToolGroup key={i} items={g.items} defaultOpen={toolsOpen} />))}
     </div>
   );
+}
+
+// Live in-progress steps (execution events) → the same block shape so the
+// live turn renders with the identical inline-timeline UI as the finished one.
+function stepsToBlocks(steps: StepInfo[]): TurnBlock[] {
+  return steps.map((s) => {
+    if (s.type === 'tool') return { type: 'tool', label: s.label };
+    if (s.type === 'error') return { type: 'error', text: s.label };
+    // reasoning step = Dan's intermediate Japanese text → show as answer text
+    return { type: 'text', text: s.label };
+  });
 }
 
 const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }: { msg: MessageResponse; onImageClick?: (url: string) => void; onReply?: (msg: MessageResponse) => void }) {
