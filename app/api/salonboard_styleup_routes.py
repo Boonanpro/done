@@ -53,6 +53,7 @@ ANALYSIS_PROMPT = """あなたは美容室のヘアカタログ制作に精通�
   "category": {"value": "「レディース」か「メンズ」", "confidence": 0.0, "reason": ""},
   "length": {"value": "「ベリーショート」「ショート」「ボブ」「ミディアム」「セミロング」「ロング」のいずれか", "confidence": 0.0, "reason": ""},
   "menu": {"value": ["「パーマ」「ストレートパーマ・縮毛矯正」「エクステ」「ブリーチ」から該当するものの配列。なければ空配列"], "confidence": 0.0, "reason": ""},
+  "menu_text": {"value": "施術メニュー内容を簡潔に(例:「カット＋カラー」「カット＋ブリーチ＋カラー」「パーマ＋カット」。40字以内)", "confidence": 0.0, "reason": ""},
   "hair_amount": {"value": "「設定しない」「少ない」「普通」「多い」のいずれか", "confidence": 0.0, "reason": ""},
   "hair_quality": {"value": "「設定しない」「柔らかい」「普通」「硬い」のいずれか", "confidence": 0.0, "reason": ""},
   "hair_thickness": {"value": "「設定しない」「細い」「普通」「太い」のいずれか", "confidence": 0.0, "reason": ""},
@@ -283,6 +284,7 @@ async def analyze_style_photos(files: list[UploadFile] = File(...)) -> dict:
         "hair_curl": _coerce_single(data.get("hair_curl"), HAIR_CURL_OPTIONS, "設定しない"),
         "age": _coerce_single(data.get("age"), AGE_OPTIONS, "設定しない"),
         "face": _coerce_single(data.get("face"), FACE_OPTIONS, "設定しない"),
+        "menu_text": _coerce_text(data.get("menu_text"), 100),
         "style_name": _coerce_text(data.get("style_name"), 30),
         "comment": _coerce_text(data.get("comment"), 120),
         "hashtags": _coerce_tags(data.get("hashtags")),
@@ -310,3 +312,115 @@ async def analyze_style_photos(files: list[UploadFile] = File(...)) -> dict:
         "fields": fields,
         "images": result_images,
     }
+
+
+# ============================================================
+# 実投稿（本物Chromeでサロンボードへ登録）
+# 投稿は数分かかるため、受付でジョブを作りバックグラウンドで実行。
+# フロントは job_id で状況をポーリングする。状態はサーバー内(メモリ)で保持。
+# ============================================================
+import asyncio  # noqa: E402
+import tempfile  # noqa: E402
+import uuid  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from fastapi import Form  # noqa: E402
+
+# job_id -> {status, message, style_name}
+_POST_JOBS: dict[str, dict] = {}
+_POST_JOBS_MAX = 200
+
+
+def _ext_for(upload: UploadFile) -> str:
+    name = (upload.filename or "").lower()
+    for e in (".png", ".jpg", ".jpeg", ".webp"):
+        if name.endswith(e):
+            return e
+    return ".jpg"
+
+
+@router.post("/post")
+async def post_style(
+    device_id: str = Form(...),
+    fields: str = Form(...),
+    images: str = Form("[]"),
+    stylist_name: str = Form(""),
+    files: list[UploadFile] = File(...),
+) -> dict:
+    """写真と項目を受け取り、実投稿ジョブを起動して job_id を返す。"""
+    if not device_id:
+        raise HTTPException(status_code=400, detail="device_id がありません")
+    try:
+        fields_dict = json.loads(fields)
+        images_meta = json.loads(images) if images else []
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="項目データが不正です")
+    if not files:
+        raise HTTPException(status_code=400, detail="写真がありません")
+
+    job_id = str(uuid.uuid4())
+    job_dir = Path(tempfile.gettempdir()) / "salonboard_post" / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    photo_paths: list[str] = []
+    for i, f in enumerate(files[:MAX_IMAGES]):
+        data = await f.read()
+        if not data:
+            continue
+        if len(data) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=400, detail="画像のサイズが大きすぎます")
+        dest = job_dir / f"{i}{_ext_for(f)}"
+        dest.write_bytes(data)
+        photo_paths.append(str(dest))
+    if not photo_paths:
+        raise HTTPException(status_code=400, detail="有効な写真がありません")
+
+    # 古いジョブの掃除
+    if len(_POST_JOBS) > _POST_JOBS_MAX:
+        for k in list(_POST_JOBS)[:-_POST_JOBS_MAX]:
+            _POST_JOBS.pop(k, None)
+
+    _POST_JOBS[job_id] = {"status": "pending", "message": "投稿を受け付けました", "style_name": None}
+
+    def _cb(status: str, message: str) -> None:
+        if job_id in _POST_JOBS:
+            _POST_JOBS[job_id]["status"] = status
+            _POST_JOBS[job_id]["message"] = message
+
+    async def _runner() -> None:
+        from app.services.salonboard_browser_session import run_style_post
+        try:
+            res = await run_style_post(
+                device_id=device_id,
+                photo_paths=photo_paths,
+                fields=fields_dict,
+                images_meta=images_meta,
+                stylist_name=stylist_name or None,
+                status_cb=_cb,
+            )
+            if res.get("ok"):
+                _POST_JOBS[job_id] = {
+                    "status": "done",
+                    "message": res.get("message", "登録しました"),
+                    "style_name": res.get("style_name"),
+                }
+            else:
+                _POST_JOBS[job_id] = {
+                    "status": "error",
+                    "message": res.get("message", "投稿に失敗しました"),
+                    "style_name": None,
+                }
+        except Exception as e:  # noqa: BLE001
+            logger.error("salonboard post job failed: %s", e, exc_info=True)
+            _POST_JOBS[job_id] = {"status": "error", "message": f"投稿中にエラー: {e}", "style_name": None}
+
+    asyncio.create_task(_runner())
+    return {"job_id": job_id, "status": "pending"}
+
+
+@router.get("/post-status/{job_id}")
+async def post_status(job_id: str) -> dict:
+    """投稿ジョブの状況を返す。"""
+    job = _POST_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="ジョブが見つかりません")
+    return {"job_id": job_id, **job}
