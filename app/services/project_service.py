@@ -44,25 +44,22 @@ def _guess_icon(title: str) -> str:
 
 
 def generate_icon_for_title(title: str) -> str:
-    """タイトルから絵文字アイコンを生成（Haiku使用、失敗時はキーワードフォールバック）"""
-    try:
-        import anthropic
-        from app.config import settings
+    """タイトルから絵文字アイコンを生成（Max定額CLI使用、失敗時はキーワードフォールバック）。
 
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=10,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "以下のプロジェクトタイトルに最も合う絵文字を1つだけ返してください。"
-                    "絵文字のみを返し、他のテキストは一切含めないでください。\n\n"
-                    f"タイトル: {title}"
-                ),
-            }],
-        )
-        icon = resp.content[0].text.strip()
+    同期関数（ブロッキング）。async から呼ぶ場合は
+    `await asyncio.to_thread(generate_icon_for_title, title)` で。
+    """
+    try:
+        # 従量APIは残高ゼロで死んでいるため、Max定額のCLIワンショットを使う
+        from app.agent.cli_runner import run_oneshot_cli
+
+        icon = (run_oneshot_cli(
+            "次のプロジェクトタイトルに最も合う絵文字を1つだけ返してください。"
+            "絵文字1文字のみを返し、説明や他のテキストは一切含めないでください。\n\n"
+            f"タイトル: {title}",
+            "haiku",
+            30,
+        ) or "").strip()
         import re
         emoji_match = re.search(
             r'[\U0001F300-\U0001FAD6\U0001FA70-\U0001FAFF\U00002702-\U000027B0'
@@ -75,7 +72,7 @@ def generate_icon_for_title(title: str) -> str:
         )
         if emoji_match:
             return emoji_match.group(0)
-        if len(icon) <= 4:
+        if icon and len(icon) <= 4:
             return icon
         return _guess_icon(title)
     except Exception as e:
@@ -211,8 +208,10 @@ class ProjectService:
                 "role": "owner",
             }).execute()
 
-        # アイコン自動生成
-        icon = generate_icon_for_title(title)
+        # アイコン: 作成時は即時のキーワード推定（LLMでブロックしない）。
+        # 作成直後はタイトルが「新しいプロジェクト」等で確定していないことが多く、
+        # 本番のアイコンはタイトル自動生成→update_project 時に LLM で付け直す。
+        icon = _guess_icon(title)
 
         # プロジェクトを作成
         insert_data = {
@@ -295,6 +294,18 @@ class ProjectService:
             updates["pinned_at"] = (
                 datetime.now(timezone.utc).isoformat() if pinned else None
             )
+
+        # タイトル変更時はアイコンも LLM で付け直す（icon を明示指定していない場合のみ）。
+        # フロントの「タイトル自動生成→update」フローに相乗りし、タイトルとアイコンが
+        # 一緒に更新される。CLI 呼び出しはスレッドに逃がしてイベントループを塞がない。
+        new_title = updates.get("title")
+        if new_title and "icon" not in updates:
+            try:
+                updates["icon"] = await asyncio.to_thread(
+                    generate_icon_for_title, new_title
+                )
+            except Exception:
+                pass
 
         # icon/pin だけの更新では updated_at を据え置く（ソート順をいじらない）。
         # DBトリガーが常に updated_at を更新するため、元の値で上書きする。

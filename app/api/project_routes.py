@@ -1,6 +1,7 @@
 """
 Project API Routes - プロジェクト管理
 """
+import asyncio
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import Optional
 
@@ -18,6 +19,80 @@ from app.models.project_schemas import (
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
+# タイトル生成の指示（ChatGPT/Geminiの会話一覧レベルの品質を狙う）
+_TITLE_SYSTEM = (
+    "あなたはチャット履歴の一覧に表示する会話タイトルを付ける専門家です。"
+    "ChatGPTやGeminiの会話一覧のように、その会話が何の話だったか一目で分かる"
+    "自然で具体的な日本語タイトルを1つだけ作ります。\n"
+    "ルール:\n"
+    "- 12〜20文字程度。長くても25文字以内。\n"
+    "- 会話の核心（依頼内容・対象・成果物・調べ物）を表す。\n"
+    "- 体言止めでも自然な句でもよいが、内容が伝わることを最優先する。\n"
+    "- 「新しいプロジェクト」「会話」「質問」「相談」「お願い」のような中身のない語だけのタイトルは禁止。\n"
+    "- 固有名詞（クライアント名・サイト名・サービス名・技術名）があれば優先的に入れる。\n"
+    "- あいさつ・雑談・内容の薄い会話は「あいさつ」「雑談」など短い語1つでよい（この場合だけ一般語を許可）。\n"
+    "- どんな入力でも必ず短いタイトルを返す。「タイトルを作成できません」のような説明文・断り文は絶対に返さない。\n"
+    "- 引用符・カギカッコ・絵文字・末尾の句点は付けない。\n"
+    "- タイトルだけを返す。説明や前置き・「タイトル:」などのラベルは一切付けない。"
+)
+
+_TITLE_EXAMPLES = (
+    "例:\n"
+    "会話: 吉川特装のホームページのトップ画像を新しいものに差し替えたい\n"
+    "タイトル: 吉川特装HPのトップ画像差し替え\n"
+    "---\n"
+    "会話: iTunesの課金って経費だとどの勘定科目で仕訳するのが正しい？\n"
+    "タイトル: iTunes課金の経費仕訳\n"
+    "---\n"
+    "会話: ReactのuseEffectがマウント時に2回走るんだけど原因と直し方を教えて\n"
+    "タイトル: useEffectが2回走る原因の調査\n"
+    "---\n"
+    "会話: 小学生向けの野球の練習メニューを1時間分組んでほしい\n"
+    "タイトル: 小学生向け野球練習メニュー作成\n"
+    "---\n"
+    "会話: おはよう\n"
+    "タイトル: あいさつ\n"
+)
+
+# LLM がタイトルではなく断り文・説明文を返したときに弾くための語
+_REFUSAL_MARKERS = (
+    "できません", "ありません", "申し訳", "わかりません", "不明",
+    "具体的な", "判断できません", "情報が不足",
+)
+
+
+def _is_valid_title(title: str) -> bool:
+    """タイトルとして妥当か（断り文・説明文・長すぎる文を排除）。"""
+    if not title:
+        return False
+    # タイトルは短い。文章・断り文は長くなりがち
+    if len(title) > 26:
+        return False
+    # 句点を含む＝文章として返ってきている
+    if "。" in title:
+        return False
+    if any(marker in title for marker in _REFUSAL_MARKERS):
+        return False
+    return True
+
+
+def _clean_title(text: str) -> str:
+    """LLM出力からタイトルとして使える文字列を整形する。"""
+    title = (text or "").strip()
+    # モデルが付けがちなラベルを除去
+    for prefix in ("タイトル:", "タイトル：", "Title:", "件名:", "件名："):
+        if title.startswith(prefix):
+            title = title[len(prefix):].strip()
+    # 複数行で返ってきたら1行目だけ
+    title = title.split("\n")[0].strip()
+    # 引用符・カギカッコ・末尾句点を除去
+    title = title.strip("「」『』｢｣“”\"'").strip()
+    title = title.rstrip("。.").strip()
+    if len(title) > 30:
+        title = title[:30]
+    return title
+
+
 @router.get("/suggest-title")
 async def suggest_project_title(
     room_id: Optional[str] = Query(default=None),
@@ -27,55 +102,65 @@ async def suggest_project_title(
     from app.services.chat_service import ChatService
 
     service = ChatService()
-    messages = []
+    raw_messages: list[dict] = []
 
     if room_id:
         try:
             raw = await service.get_messages(room_id, current_user.user_id, limit=20)
-            messages = [
-                f"{m.get('sender_type', 'unknown')}: {m.get('content', '')}"
-                for m in reversed(raw)
-                if m.get("content")
-            ]
+            # 古い→新しい順に並べ替え、空メッセージは除外
+            raw_messages = [m for m in reversed(raw) if (m.get("content") or "").strip()]
         except Exception:
             pass
 
-    if not messages:
+    if not raw_messages:
         return {"title": "新しいプロジェクト"}
 
-    context = "\n".join(messages[-12:])
+    # 最初のユーザー発言はタイトルの最重要シグナルなので確実に拾う
+    first_user = next(
+        (m for m in raw_messages if m.get("sender_type") == "human"),
+        raw_messages[0],
+    )
+    first_user_text = (first_user.get("content") or "").strip()
+
+    # 直近のやり取りを文脈として連結（合計約2500文字まで）
+    lines: list[str] = []
+    budget = 2500
+    for m in raw_messages[-12:]:
+        role = "ユーザー" if m.get("sender_type") == "human" else "ダン"
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        entry = f"{role}: {content[:600]}"
+        lines.append(entry)
+        budget -= len(entry)
+        if budget <= 0:
+            break
+    context = "\n".join(lines)
+
+    # 従量課金API（残高切れで死んでいた）ではなく Max 定額の Claude CLI ワンショットで生成。
+    # システム指示 + few-shot + 会話を1プロンプトにまとめて渡す。
+    full_prompt = (
+        f"{_TITLE_SYSTEM}\n\n"
+        f"{_TITLE_EXAMPLES}\n"
+        "では次の会話のタイトルを作ってください。タイトルの文字列だけを返してください。\n\n"
+        f"会話:\n{context}\n\n"
+        "タイトル:"
+    )
 
     try:
-        import anthropic
-        from app.config import settings
+        from app.agent.cli_runner import run_oneshot_cli
 
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=60,
-            system=(
-                "You generate concise Japanese project titles. Return only one concrete "
-                "noun phrase, with no quotes or explanation. Prefer deliverable, client, "
-                "site, app, investigation, or task names. Avoid generic titles."
-            ),
-            messages=[{
-                "role": "user",
-                "content": (
-                    "以下の会話内容から、プロジェクトのタイトルを日本語で1つ生成してください。\n"
-                    "タイトルは20文字以内の簡潔な名詞句にしてください。タイトルだけを返してください。\n\n"
-                    f"会話内容:\n{context[:800]}"
-                ),
-            }],
-        )
-        title = resp.content[0].text.strip().strip("「」『』")
-        if len(title) > 50:
-            title = title[:50]
-        return {"title": title}
+        raw_title = await asyncio.to_thread(run_oneshot_cli, full_prompt, "haiku", 60)
+        title = _clean_title(raw_title or "")
+        if _is_valid_title(title):
+            return {"title": title}
     except Exception:
-        # フォールバック: 最初のメッセージを短く切る
-        first = messages[0]
-        title = first.split("。")[0].split("、")[0].split("\n")[0][:30].strip()
-        return {"title": title or "新しいプロジェクト"}
+        pass
+
+    # フォールバック: 最初のユーザー発言を短く整形
+    fallback = first_user_text.split("\n")[0].split("。")[0].split("、")[0]
+    fallback = _clean_title(fallback)[:24]
+    return {"title": fallback or "新しいプロジェクト"}
 
 
 @router.post("/generate-icon")
@@ -87,7 +172,8 @@ async def generate_icon(
     title = request.get("title", "")
     if not title:
         return {"icon": "📁"}
-    icon = generate_icon_for_title(title)
+    # 定額CLIワンショット（ブロッキング）はスレッドに逃がす
+    icon = await asyncio.to_thread(generate_icon_for_title, title)
     return {"icon": icon}
 
 
