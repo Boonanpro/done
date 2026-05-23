@@ -15,6 +15,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import queue as thread_queue
@@ -33,6 +34,11 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent  # app/agent/ → app/ → D:
 # 事業部の作業ディレクトリ（D:\done の外に置くことで開発者向け CLAUDE.md の混入を防ぐ）
 CLI_WORKSPACE = Path("D:/dan-workspace")
 CLI_WORKSPACE.mkdir(parents=True, exist_ok=True)
+
+# ワンショット生成（タイトル等）専用の中立な空ディレクトリ。
+# CLAUDE.md / MCP / プロジェクト設定を一切読み込ませず、起動を軽く・出力を素にする。
+_ONESHOT_CWD = Path(tempfile.gettempdir()) / "dan_oneshot"
+_ONESHOT_CWD.mkdir(parents=True, exist_ok=True)
 
 _SENTINEL = object()  # キュー終了シグナル
 
@@ -533,6 +539,73 @@ def _resolve_claude_cli() -> tuple[Optional[str], Optional[str]]:
 
     # .exe やその他: そのまま使う
     return claude_path, None
+
+
+def run_oneshot_cli(
+    prompt: str,
+    model: str = "haiku",
+    timeout: int = 60,
+    cwd: Optional[str] = None,
+) -> Optional[str]:
+    """Claude CLI を1回だけ起動して短いテキストを生成する軽量ワンショット。
+
+    タイトル/アイコン等の用途。Max 定額プランで動かすため ANTHROPIC_API_KEY を
+    env から外して呼ぶ（従量課金を発生させない）。セッション・MCP・カスタム
+    システムプロンプトは使わない純粋なテキスト生成。
+
+    同期関数。async から呼ぶ場合は `await asyncio.to_thread(run_oneshot_cli, ...)`。
+
+    Returns:
+        生成テキスト（strip 済み）。CLI未検出・タイムアウト・異常終了時は None。
+    """
+    claude_cmd, cli_js = _resolve_claude_cli()
+    if not claude_cmd:
+        logger.warning("run_oneshot_cli: claude CLI が見つかりません")
+        return None
+
+    cmd = [claude_cmd, cli_js] if cli_js else [claude_cmd]
+    cmd.extend([
+        "-p", prompt,
+        "--output-format", "text",
+        "--model", model,
+        "--dangerously-skip-permissions",
+    ])
+
+    # ANTHROPIC_API_KEY を外して Max 定額を強制 / CLAUDECODE で再帰起動防止
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["NO_COLOR"] = "1"
+
+    # CLAUDE.md / プロジェクトフック / MCP を巻き込まないよう空の中立 cwd で実行
+    run_cwd = cwd or str(_ONESHOT_CWD)
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            input="",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
+            cwd=run_cwd,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("run_oneshot_cli: %ss でタイムアウト", timeout)
+        return None
+    except Exception as e:
+        logger.warning("run_oneshot_cli: 起動失敗: %s", e)
+        return None
+
+    if proc.returncode != 0:
+        logger.warning(
+            "run_oneshot_cli: exit=%s stderr=%s",
+            proc.returncode, (proc.stderr or "")[:300],
+        )
+        return None
+
+    return (proc.stdout or "").strip() or None
 
 
 def _build_cli_cmd(
