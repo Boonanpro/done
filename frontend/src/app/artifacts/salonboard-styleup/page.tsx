@@ -410,7 +410,7 @@ export default function SalonboardStyleupPage() {
   };
 
   return (
-    <div className="min-h-[100dvh] bg-[#f4f5f7] text-gray-900">
+    <div className="h-screen h-[100dvh] overflow-y-auto bg-[#f4f5f7] text-gray-900">
       {previewMode && <PreviewStepBar current={step} onGo={goPreviewStep} />}
       <div className="mx-auto min-h-screen max-w-md bg-white shadow-sm">
         {!setupReady && (
