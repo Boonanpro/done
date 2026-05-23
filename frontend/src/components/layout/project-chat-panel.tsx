@@ -293,9 +293,29 @@ const ReplyQuote = memo(function ReplyQuote({ replyTo }: { replyTo: ReplyToMessa
 // Renders an AI turn from its ordered blocks: text segments show as the
 // answer; runs of tool/reasoning blocks collapse into one expandable group
 // so the flow stays readable.
+
+// Strip raw tool-call markup that sometimes leaks into a text block
+// (`<invoke …>`, `<parameter …>`, `<function_calls>` …). It's internal
+// plumbing, never meant to be shown as the answer. Handles unclosed tags
+// (truncated/streamed) by deleting from the opening tag to the end.
+function stripToolMarkup(s: string): string {
+  return s
+    .replace(/<function_calls\b[\s\S]*?(<\/function_calls>|$)/gi, '')
+    .replace(/<invoke\b[\s\S]*?(<\/invoke>|$)/gi, '')
+    .replace(/<\/?(invoke|parameter|function_calls|antml:[a-z_]+)\b[^>]*>/gi, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Tailwind arbitrary variants: keep big code blocks from flooding the chat —
+// cap their height and let them scroll.
+const PROSE_CLASS =
+  'prose prose-base prose-dan max-w-none text-base leading-relaxed text-foreground md:prose-base md:text-[17px] ' +
+  '[&_pre]:max-h-72 [&_pre]:overflow-auto [&_pre]:text-sm';
+
 function AiMarkdown({ text, onImageClick }: { text: string; onImageClick?: (url: string) => void }) {
   return (
-    <div className="prose prose-base prose-dan max-w-none text-base leading-relaxed text-foreground md:prose-base md:text-[17px]">
+    <div className={PROSE_CLASS}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -308,7 +328,7 @@ function AiMarkdown({ text, onImageClick }: { text: string; onImageClick?: (url:
 }
 
 function TurnTextSegment({ text, onImageClick }: { text: string; onImageClick?: (url: string) => void }) {
-  const { images, videos, files, text: clean } = parseMediaContent(text);
+  const { images, videos, files, text: clean } = parseMediaContent(stripToolMarkup(text));
   return (
     <>
       {(images.length > 0 || videos.length > 0 || files.length > 0) && (
@@ -443,7 +463,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
   // Remove proposal blocks from text before passing to parseMediaContent
   const contentWithoutProposals = rawContent.replace(proposalRegex, '').trim();
 
-  const { images: aiImages, videos: aiVideos, files: aiFiles, text: aiText } = parseMediaContent(contentWithoutProposals);
+  const { images: aiImages, videos: aiVideos, files: aiFiles, text: aiText } = parseMediaContent(stripToolMarkup(contentWithoutProposals));
   const hasMedia = aiImages.length > 0 || aiVideos.length > 0 || aiFiles.length > 0;
 
   // Inline timeline when the turn carries ordered blocks with tools or with
@@ -501,11 +521,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
           ))}
         </div>
       )}
-      {!useTimeline && aiText && (
-        <div className="prose prose-base prose-dan max-w-none text-base leading-relaxed text-foreground md:prose-base md:text-[17px]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; }, img({ src, alt }) { const imgSrc = typeof src === 'string' && src ? src : null; if (!imgSrc) return null; return <img src={imgSrc} alt={alt || ''} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(imgSrc)} />; } }}>{aiText}</ReactMarkdown>
-        </div>
-      )}
+      {!useTimeline && aiText && <AiMarkdown text={aiText} onImageClick={onImageClick} />}
       {proposals.length > 0 && (
         <div className="flex flex-wrap gap-3 mt-2">
           {proposals.map((p, i) => (
