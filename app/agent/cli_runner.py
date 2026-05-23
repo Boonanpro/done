@@ -216,16 +216,21 @@ def _save_ai_message_sync(
     content: str,
     reasoning_steps: Optional[list] = None,
     reasoning_full: Optional[list] = None,
+    blocks: Optional[list] = None,
 ) -> bool:
     """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。成功=True。disconnect時は1度だけリトライ。"""
     from app.services.supabase_client import get_supabase_client
     from app.services.chat_service import record_message_delivery_sync
 
-    ai_context = None
+    ai_context: Optional[dict] = None
     if reasoning_steps:
         ai_context = {"reasoning_steps": reasoning_steps}
         if reasoning_full:
             ai_context["reasoning_full"] = reasoning_full
+    # 時系列ブロック（text/tool を順序保持）。フロントのインライン時系列描画用。
+    if blocks:
+        ai_context = ai_context or {}
+        ai_context["blocks"] = blocks
     insert_data = {
         "room_id": room_id,
         "sender_id": None,
@@ -696,6 +701,10 @@ def _run_cli_process(
     result_data = None
     reasoning_steps_acc = []  # DB-first: reasoning短縮ラベル蓄積
     reasoning_full_acc = []   # DB-first: reasoning全文蓄積
+    # 時系列ブロック: text / tool を「起きた順」に保持し、AIメッセージの
+    # ai_context.blocks として保存する。フロントはこれをインライン時系列で描画
+    # （最後のテキストだけでなく途中のテキストも回答として表示する）。
+    turn_blocks: list = []
 
     # --include-partial-messages による重複を防ぐ
     # メッセージIDごとに「処理済みブロックのスナップショット」を記録
@@ -873,18 +882,26 @@ def _run_cli_process(
                 _cli_debug(f"  Event: type={ev['type']}, name={ev.get('name', '')}, text_len={len(ev.get('text', ''))}")
                 if ev["type"] == "text":
                     final_text_parts.append(ev["text"])
+                    if ev.get("text", "").strip():
+                        turn_blocks.append({"type": "text", "text": ev["text"]})
                 event_queue.put(ev)
 
                 # DB-first: CLIスレッドから直接DB保存（SSE断線対策）
                 if project_id:
                     if ev["type"] == "tool_use":
                         from app.api.project_routes import _format_tool_label
+                        tool_label = _format_tool_label(ev.get("name", ""), ev.get("input", {}))
                         _save_execution_event_sync(
                             room_id, "tool_use", project_id=project_id, run_id=run_id,
                             tool_name=ev.get("name", ""),
-                            tool_label=_format_tool_label(ev.get("name", ""), ev.get("input", {})),
+                            tool_label=tool_label,
                         )
-                        reasoning_steps_acc.append(f"🔧 {_format_tool_label(ev.get('name', ''), ev.get('input', {}))}")
+                        reasoning_steps_acc.append(f"🔧 {tool_label}")
+                        turn_blocks.append({
+                            "type": "tool",
+                            "name": ev.get("name", ""),
+                            "label": tool_label,
+                        })
                     elif ev["type"] == "reasoning" and ev.get("text", "").strip():
                         # thinkingはプロセスモニターに送らない（英語で読みにくい）
                         # reasoning_full にだけ蓄積（デバッグ用に保持）
@@ -920,6 +937,7 @@ def _run_cli_process(
                 "duration_ms": duration_ms,
                 "reasoning_steps": reasoning_steps_acc,
                 "reasoning_full": reasoning_full_acc,
+                "turn_blocks": turn_blocks,
             }
 
             _cli_debug(
@@ -1129,8 +1147,9 @@ def _run_cli_in_thread(
             if not skip_save:
                 reasoning = result_data.get("reasoning_steps", [])
                 reasoning_full_list = result_data.get("reasoning_full", [])
+                blocks = result_data.get("turn_blocks", [])
                 cli_saved = _save_ai_message_sync(
-                    room_id, text, reasoning, reasoning_full_list
+                    room_id, text, reasoning, reasoning_full_list, blocks=blocks
                 )
                 _cli_debug(f"AI message DB save: cli_saved={cli_saved}, text_len={len(text)}")
 

@@ -39,6 +39,7 @@ import {
   type ProcessStep,
   type ProjectStatusType,
   type ReplyToMessage,
+  type TurnBlock,
 } from '@/lib/api-client';
 import { useRouter } from 'next/navigation';
 import { useProjectRecovery } from '@/hooks/useProjectRecovery';
@@ -288,6 +289,89 @@ const ReplyQuote = memo(function ReplyQuote({ replyTo }: { replyTo: ReplyToMessa
   );
 });
 
+// --- Inline turn timeline (Claude Code / Codex style) -------------------
+// Renders an AI turn from its ordered blocks: text segments show as the
+// answer; runs of tool/reasoning blocks collapse into one expandable group
+// so the flow stays readable.
+function AiMarkdown({ text, onImageClick }: { text: string; onImageClick?: (url: string) => void }) {
+  return (
+    <div className="prose prose-base prose-dan max-w-none text-base leading-relaxed text-foreground md:prose-base md:text-[17px]">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; },
+          img({ src, alt }) { const imgSrc = typeof src === 'string' && src ? src : null; if (!imgSrc) return null; return <img src={imgSrc} alt={alt || ''} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(imgSrc)} />; },
+        }}
+      >{text}</ReactMarkdown>
+    </div>
+  );
+}
+
+function TurnTextSegment({ text, onImageClick }: { text: string; onImageClick?: (url: string) => void }) {
+  const { images, videos, files, text: clean } = parseMediaContent(text);
+  return (
+    <>
+      {(images.length > 0 || videos.length > 0 || files.length > 0) && (
+        <div className="flex flex-col gap-1.5 my-2">
+          {images.map((url, i) => (<img key={i} src={url} alt="添付画像" className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(url)} />))}
+          {videos.map((url, i) => (<video key={`v${i}`} src={url} controls className="rounded-xl max-w-full border border-border" style={{ maxHeight: '300px' }} />))}
+          {files.map((f, i) => (<a key={`f${i}`} href={f.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"><FileText className="h-4 w-4 shrink-0 text-primary" /><span className="truncate max-w-[250px]">{f.name}</span></a>))}
+        </div>
+      )}
+      {clean.trim() && <AiMarkdown text={clean} onImageClick={onImageClick} />}
+    </>
+  );
+}
+
+function TurnToolGroup({ items }: { items: TurnBlock[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="my-2">
+      <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
+        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        <Terminal className="h-3 w-3 text-primary" />
+        <span>{items.length}件の作業{open ? '' : ' を表示'}</span>
+      </button>
+      {open && (
+        <div className="mt-1 ml-4 border-l-2 border-primary/20 pl-3 space-y-1">
+          {items.map((it, i) => {
+            const label = ('label' in it && it.label) || ('name' in it && it.name)
+              || (it.type === 'reasoning' ? (it.text || '思考') : it.type === 'error' ? (it.text || 'エラー') : 'ツール実行');
+            const isErr = it.type === 'error';
+            return (
+              <div key={i} className="flex items-start gap-1.5 text-xs">
+                {isErr ? <AlertCircle className="h-3 w-3 text-red-500 shrink-0 mt-0.5" /> : <Check className="h-3 w-3 text-green-500 shrink-0 mt-0.5" />}
+                <span className={isErr ? 'text-red-600' : 'text-muted-foreground'}>{label}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AiTurnBlocks({ blocks, onImageClick }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void }) {
+  const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
+  for (const b of blocks) {
+    if (b.type === 'text') {
+      if (!b.text?.trim()) continue;
+      grouped.push({ kind: 'text', text: b.text });
+    } else {
+      const last = grouped[grouped.length - 1];
+      if (last && last.kind === 'tools') last.items.push(b);
+      else grouped.push({ kind: 'tools', items: [b] });
+    }
+  }
+  return (
+    <div className="flex flex-col">
+      {grouped.map((g, i) => (g.kind === 'text'
+        ? <TurnTextSegment key={i} text={g.text} onImageClick={onImageClick} />
+        : <TurnToolGroup key={i} items={g.items} />))}
+    </div>
+  );
+}
+
 const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }: { msg: MessageResponse; onImageClick?: (url: string) => void; onReply?: (msg: MessageResponse) => void }) {
 
   if (msg.sender_type === 'human') {
@@ -362,6 +446,14 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
   const { images: aiImages, videos: aiVideos, files: aiFiles, text: aiText } = parseMediaContent(contentWithoutProposals);
   const hasMedia = aiImages.length > 0 || aiVideos.length > 0 || aiFiles.length > 0;
 
+  // Inline timeline when the turn carries ordered blocks with tools or with
+  // more than one text segment (so intermediate text isn't lost). A single
+  // text block with no tools renders fine via the plain path below.
+  const turnBlocks = msg.ai_context?.blocks;
+  const useTimeline = !!turnBlocks && turnBlocks.length > 0
+    && (turnBlocks.some((b) => b.type === 'tool' || b.type === 'error')
+      || turnBlocks.filter((b) => b.type === 'text').length > 1);
+
   return (
     <div className="group relative">
       {onReply && !msg.id.startsWith('temp-') && (
@@ -374,7 +466,8 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
         </button>
       )}
       {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
-      {hasMedia && (
+      {useTimeline && <AiTurnBlocks blocks={turnBlocks!} onImageClick={onImageClick} />}
+      {!useTimeline && hasMedia && (
         <div className="flex flex-col gap-1.5 mb-2">
           {aiImages.map((url, i) => (
             <img
@@ -408,7 +501,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
           ))}
         </div>
       )}
-      {aiText && (
+      {!useTimeline && aiText && (
         <div className="prose prose-base prose-dan max-w-none text-base leading-relaxed text-foreground md:prose-base md:text-[17px]">
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a({ href, children }) { return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>; }, img({ src, alt }) { const imgSrc = typeof src === 'string' && src ? src : null; if (!imgSrc) return null; return <img src={imgSrc} alt={alt || ''} className="rounded-xl max-w-full max-h-80 object-contain border border-border cursor-zoom-in" onClick={() => onImageClick?.(imgSrc)} />; } }}>{aiText}</ReactMarkdown>
         </div>
@@ -1525,13 +1618,17 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         .filter((event) => event.event_type !== 'done' && event.event_type !== 'phase')
         .map(eventToStep);
 
-      if (steps.length > 0) {
-        const isLiveRun =
-          !!currentRun &&
-          runId === currentRun.id &&
-          isActiveExecution &&
-          currentRun.state === 'running';
+      const isLiveRun =
+        !!currentRun &&
+        runId === currentRun.id &&
+        isActiveExecution &&
+        currentRun.state === 'running';
 
+      // Only show the separate process block while a run is LIVE. Once the run
+      // finishes, the completed AI message carries the same tools/text inline
+      // via ai_context.blocks (AiTurnBlocks), so keeping the standalone block
+      // would just duplicate it.
+      if (steps.length > 0 && isLiveRun) {
         timedItems.push({
           item: {
             kind: 'execution-block',
