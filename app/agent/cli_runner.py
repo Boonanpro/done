@@ -211,6 +211,26 @@ def _update_run_sync(
         _cli_debug(f"_update_run_sync failed: {e}")
 
 
+def _tool_detail(inp, limit: int = 4000) -> str:
+    """Readable detail of a tool call's input for the expandable tool row.
+    Picks the most useful field (command / file content / edit text / query),
+    falling back to compact JSON, and caps the size so ai_context stays small.
+    """
+    if not inp:
+        return ""
+    if not isinstance(inp, dict):
+        return str(inp)[:limit]
+    for key in ("command", "content", "new_string", "code", "query", "prompt", "pattern"):
+        v = inp.get(key)
+        if isinstance(v, str) and v.strip():
+            return v[:limit]
+    try:
+        s = json.dumps(inp, ensure_ascii=False)
+    except Exception:
+        s = str(inp)
+    return s[:limit]
+
+
 def _save_ai_message_sync(
     room_id: str,
     content: str,
@@ -901,6 +921,7 @@ def _run_cli_process(
                             "type": "tool",
                             "name": ev.get("name", ""),
                             "label": tool_label,
+                            "detail": _tool_detail(ev.get("input", {})),
                         })
                     elif ev["type"] == "reasoning" and ev.get("text", "").strip():
                         # thinkingはプロセスモニターに送らない（英語で読みにくい）
