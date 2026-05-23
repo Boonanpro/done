@@ -48,6 +48,12 @@ export interface ReplyToMessage {
   created_at: string;
 }
 
+export type TurnBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool'; name?: string; label?: string }
+  | { type: 'reasoning'; text?: string }
+  | { type: 'error'; text?: string };
+
 export interface MessageResponse {
   id: string;
   room_id: string;
@@ -59,6 +65,7 @@ export interface MessageResponse {
   ai_context?: {
     reasoning_steps?: string[];
     reasoning_full?: string[];
+    blocks?: TurnBlock[];
   };
   reply_to_id?: string;
   reply_to_message?: ReplyToMessage;
