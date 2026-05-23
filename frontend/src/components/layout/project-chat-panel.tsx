@@ -343,28 +343,44 @@ function TurnTextSegment({ text, onImageClick }: { text: string; onImageClick?: 
   );
 }
 
+function TurnToolRow({ block }: { block: TurnBlock }) {
+  const [show, setShow] = useState(false);
+  const label = ('label' in block && block.label) || ('name' in block && block.name)
+    || (block.type === 'reasoning' ? (block.text || '思考') : block.type === 'error' ? (block.text || 'エラー') : 'ツール実行');
+  const detail = (block.type === 'tool' && block.detail) ? block.detail
+    : (block.type === 'reasoning' || block.type === 'error') ? (block.text || '') : '';
+  const isErr = block.type === 'error';
+  const hasDetail = !!detail && detail !== label;
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => hasDetail && setShow((s) => !s)}
+        className={`flex w-full items-start gap-1.5 text-left text-xs ${hasDetail ? 'cursor-pointer hover:text-foreground' : 'cursor-default'} ${isErr ? 'text-red-600' : 'text-muted-foreground'}`}
+      >
+        {isErr ? <AlertCircle className="h-3 w-3 text-red-500 shrink-0 mt-0.5" /> : <Check className="h-3 w-3 text-green-500 shrink-0 mt-0.5" />}
+        <span className="flex-1">{label}</span>
+        {hasDetail && (show ? <ChevronDown className="h-3 w-3 shrink-0 mt-0.5" /> : <ChevronRight className="h-3 w-3 shrink-0 mt-0.5" />)}
+      </button>
+      {show && hasDetail && (
+        <pre className="mt-1 ml-4 max-h-72 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-2 text-[11px] leading-relaxed text-muted-foreground">{detail}</pre>
+      )}
+    </div>
+  );
+}
+
 function TurnToolGroup({ items }: { items: TurnBlock[] }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="my-2">
-      <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
+      <button type="button" onClick={() => setOpen((o) => !o)} className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
         {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         <Terminal className="h-3 w-3 text-primary" />
         <span>{items.length}件の作業{open ? '' : ' を表示'}</span>
       </button>
       {open && (
-        <div className="mt-1 ml-4 border-l-2 border-primary/20 pl-3 space-y-1">
-          {items.map((it, i) => {
-            const label = ('label' in it && it.label) || ('name' in it && it.name)
-              || (it.type === 'reasoning' ? (it.text || '思考') : it.type === 'error' ? (it.text || 'エラー') : 'ツール実行');
-            const isErr = it.type === 'error';
-            return (
-              <div key={i} className="flex items-start gap-1.5 text-xs">
-                {isErr ? <AlertCircle className="h-3 w-3 text-red-500 shrink-0 mt-0.5" /> : <Check className="h-3 w-3 text-green-500 shrink-0 mt-0.5" />}
-                <span className={isErr ? 'text-red-600' : 'text-muted-foreground'}>{label}</span>
-              </div>
-            );
-          })}
+        <div className="mt-1 ml-4 border-l-2 border-primary/20 pl-3 space-y-1.5">
+          {items.map((it, i) => <TurnToolRow key={i} block={it} />)}
         </div>
       )}
     </div>

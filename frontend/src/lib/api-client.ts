@@ -50,7 +50,7 @@ export interface ReplyToMessage {
 
 export type TurnBlock =
   | { type: 'text'; text: string }
-  | { type: 'tool'; name?: string; label?: string }
+  | { type: 'tool'; name?: string; label?: string; detail?: string }
   | { type: 'reasoning'; text?: string }
   | { type: 'error'; text?: string };
 
