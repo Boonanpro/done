@@ -57,12 +57,12 @@ const OPT = {
   category: ['レディース', 'メンズ'],
   length: ['ベリーショート', 'ショート', 'ボブ', 'ミディアム', 'セミロング', 'ロング'],
   menu: ['パーマ', 'ストレートパーマ・縮毛矯正', 'エクステ', 'ブリーチ'],
-  hair_amount: ['設定しない', '少ない', '普通', '多い'],
-  hair_quality: ['設定しない', '柔らかい', '普通', '硬い'],
-  hair_thickness: ['設定しない', '細い', '普通', '太い'],
-  hair_curl: ['設定しない', 'なし', '少し', '強い'],
-  age: ['設定しない', 'キッズ', '10代', '20代', '30代', '40代', '50代', '60代以上'],
-  face: ['設定しない', '丸型', '卵型', '四角', '逆三角', 'ベース', '面長'],
+  hair_amount: ['少ない', '普通', '多い'],
+  hair_quality: ['柔らかい', '普通', '硬い'],
+  hair_thickness: ['細い', '普通', '太い'],
+  hair_curl: ['なし', '少し', '強い'],
+  age: ['キッズ', '10代', '20代', '30代', '40代', '50代', '60代以上'],
+  face: ['丸型', '卵型', '四角', '逆三角', 'ベース', '面長'],
 };
 
 const SAMPLES = [
@@ -113,6 +113,56 @@ const FIELD_SEQ: (keyof Fields)[] = [
 
 const LOW = 0.6;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const FIELD_DEFAULTS: Partial<Record<keyof Fields, string>> = {
+  hair_amount: '普通',
+  hair_quality: '普通',
+  hair_thickness: '普通',
+  hair_curl: 'なし',
+  age: '20代',
+  face: '卵型',
+};
+const SINGLE_DEFAULT_KEYS = [
+  'hair_amount',
+  'hair_quality',
+  'hair_thickness',
+  'hair_curl',
+  'age',
+  'face',
+] as const;
+
+function normalizeFields(input: Fields): Fields {
+  const next = { ...input };
+  for (const key of SINGLE_DEFAULT_KEYS) {
+    const options = OPT[key as keyof typeof OPT] as string[] | undefined;
+    const fallback = FIELD_DEFAULTS[key];
+    const current = next[key];
+    if (options && fallback && !options.includes(current.value)) {
+      next[key] = {
+        ...current,
+        value: fallback,
+        confidence: Math.min(current.confidence || 0.4, 0.4),
+        reason: current.reason || '未判定のため初期値',
+      };
+    }
+  }
+  return next;
+}
+
+function imageSize(file: File): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('画像サイズを確認できませんでした'));
+    };
+    img.src = url;
+  });
+}
 
 /* ============ プレビュー専用（ライブプレビューでの全画面閲覧/編集） ============ */
 const PREVIEW_STEPS: { key: Step; label: string }[] = [
@@ -238,6 +288,14 @@ export default function SalonboardStyleupPage() {
     setStep('analyzing');
     const t0 = Date.now();
     try {
+      for (const [idx, item] of items.entries()) {
+        const size = await imageSize(item.file);
+        if (size.width > size.height) {
+          throw new Error(
+            `${idx + 1}枚目が横長です。サロンボードは横長画像をアップロードできないため、縦長の画像に差し替えてください。`,
+          );
+        }
+      }
       const fd = new FormData();
       items.forEach((it) => fd.append('files', it.file));
       const res = await fetch('/api/v1/salonboard-styleup/analyze', {
@@ -273,7 +331,7 @@ export default function SalonboardStyleupPage() {
         });
         if (ordered.length > 0) setPhotos(ordered);
       }
-      setForm(data.fields);
+      setForm(normalizeFields(data.fields));
       setStep('form');
     } catch (e) {
       setError(e instanceof Error ? e.message : '写真の解析に失敗しました');
@@ -333,7 +391,7 @@ export default function SalonboardStyleupPage() {
       return;
     }
     setError('');
-    setPostMsg('投稿を受け付けました');
+    setPostMsg('投稿ジョブを受け付けました');
     setStep('posting');
     try {
       const fd = new FormData();
@@ -680,7 +738,6 @@ function FormView({
   onPost: () => void;
 }) {
   const [reveal, setReveal] = useState(0);
-  const [applyPhoto, setApplyPhoto] = useState(false);
   useEffect(() => {
     if (reveal >= FIELD_SEQ.length) return;
     const t = setTimeout(() => setReveal((r) => r + 1), 240);
@@ -739,15 +796,6 @@ function FormView({
             </div>
           ))}
         </div>
-        <label className="mt-3 flex items-center gap-2 text-xs text-gray-500">
-          <input
-            type="checkbox"
-            checked={applyPhoto}
-            onChange={(e) => setApplyPhoto(e.target.checked)}
-            className="h-4 w-4 shrink-0 accent-[#0a3d62]"
-          />
-          画像応募する
-        </label>
       </Section>
 
       <Section title="スタイリストコメント">
@@ -943,15 +991,19 @@ function Posting({ message }: { message?: string }) {
       className="flex flex-col items-center justify-center px-6"
       style={{ minHeight: '72vh' }}
     >
-      <Loader2 className="h-10 w-10 animate-spin text-[#0a3d62]" />
-      <div className="mt-5 font-bold text-gray-700">
-        サロンボードに投稿しています…
+      <CheckCircle2 className="h-12 w-12 text-[#2e7d32]" />
+      <div className="mt-5 text-xl font-bold text-gray-800">
+        投稿を開始しました
       </div>
-      <div className="mt-1 text-sm text-gray-400">
-        {message || 'スタイル写真と入力内容を送信中'}
+      <div className="mt-5 flex items-center gap-2 text-sm font-medium text-[#0a3d62]">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        登録から公開反映まで処理中です
+      </div>
+      <div className="mt-2 text-sm text-gray-500">
+        {message || 'PC側のブラウザでサロンボード操作を進めています'}
       </div>
       <div className="mt-4 max-w-xs text-center text-[11px] leading-relaxed text-gray-400">
-        投稿には数分かかります。この画面のまま少しお待ちください。
+        この画面を閉じたり、スマホをスリープしても処理はPC側で続きます。結果を見る場合はこの画面を開いたままお待ちください。
       </div>
     </div>
   );
@@ -969,7 +1021,7 @@ function Done({ elapsed, onReset }: { elapsed: number; onReset: () => void }) {
         投稿が完了しました
       </h2>
       <p className="mt-2 text-sm text-gray-500">
-        サロンボードにスタイルが登録されました。
+        サロンボードへの登録と公開反映が完了しました。
       </p>
 
       <div className="mt-7 w-full rounded-2xl bg-[#f7f8fa] px-5 py-5">
