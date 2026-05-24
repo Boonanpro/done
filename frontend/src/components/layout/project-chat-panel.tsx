@@ -877,9 +877,7 @@ function ChatInput({
                 ],
               })
             );
-            syncActiveStatus(false);
-            setInterrupted(projectId, false);
-            setWarmupMode(projectId, null);
+            queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
             queryClient.invalidateQueries({ queryKey: ['projects'] });
