@@ -871,7 +871,6 @@ function ChatInput({
             aiRespondedRef.current = true;
             pendingMessageRef.current = null;
             replaceMessageIdRef.current = null;
-            setWarmupMode(projectId, null);
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
@@ -1497,10 +1496,14 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   // ポーリング結果に依存するため、バックエンドの登録処理が完了するまでの
   // 0〜2秒間に false が返ってきて「Thinking...」が一瞬消える問題がある。
   // warmupMode がセットされている間はフロントエンド側の状態を信頼する。
-  const showWarmupBlock =
-    (isActiveExecution || !!warmupMode) &&
-    (!!warmupMode || (!!currentRun && currentRun.state === 'running')) &&
-    currentRunEvents.length === 0;
+  // Keep the send-time Thinking block visible until the final AI message,
+  // interruption, or error. Process/tool events should not make it flicker.
+  const showWarmupBlock = !!warmupMode || (
+    isActiveExecution &&
+    !!currentRun &&
+    currentRun.state === 'running' &&
+    currentRunEvents.length === 0
+  );
 
   const deleteProjectMutation = useMutation({
     mutationFn: () => api.projects.delete(projectId),
