@@ -1994,8 +1994,21 @@ async def send_dan_message_stream(
                 except Exception:
                     pass
 
-            # 方針変更要求時は、既存の同一ルーム実行を先に止める
-            if replan_requested or should_supersede_existing_run:
+            # 追い連絡（DAN_STREAMING_INPUT）: すでに常駐セッションでターン実行中なら、
+            # この新規メッセージは「割り込んで止める」のではなく、次のステップ境界で
+            # 反映する追い連絡として扱う。→ supersede(kill) はスキップする。
+            _followup_session = None
+            try:
+                from app.agent.streaming_session import streaming_enabled, get_session
+                if streaming_enabled():
+                    _sess = get_session(room_id)
+                    if _sess is not None and _sess.is_turn_active():
+                        _followup_session = _sess
+            except Exception:
+                _followup_session = None
+
+            # 方針変更要求時は、既存の同一ルーム実行を先に止める（追い連絡経路では止めない）
+            if (replan_requested or should_supersede_existing_run) and _followup_session is None:
                 try:
                     CancellationRegistry.cancel(room_id)
                     from app.agent.cli_runner import kill_cli_process
@@ -2030,6 +2043,24 @@ async def send_dan_message_stream(
             # ユーザーメッセージを送信（session_id付き）
             yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
             mark_latency("user_sse_sent")
+
+            # 追い連絡を常駐セッションへ注入し、即ackして本リクエストは終了する。
+            # 本ターンの回答（次の境界以降）は、継続中の最初のSSEストリームが描画する。
+            if _followup_session is not None:
+                try:
+                    followup_content = _build_content_with_media(
+                        effective_content, request.image_urls or [], request.file_urls or []
+                    )
+                    _followup_session.submit_followup(followup_content)
+                    logger.info("[STREAMING] follow-up queued for room=%s msg=%s", room_id, message["id"])
+                    yield f"data: {json.dumps({'type': 'followup_queued', 'session_id': room_id, 'message_id': message['id']})}\n\n"
+                except Exception as e:
+                    logger.warning("submit_followup failed (room=%s): %s", room_id, e)
+                    yield f"data: {json.dumps({'type': 'error', 'session_id': room_id, 'message': '追い連絡の注入に失敗しました'})}\n\n"
+                result_saved = True
+                done_sent = True
+                yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
+                return
 
             # Update project's updated_at on user message
             try:
