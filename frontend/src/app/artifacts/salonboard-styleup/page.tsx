@@ -24,12 +24,13 @@ import {
   CheckCircle2,
   ChevronRight,
   Clock,
-  ImagePlus,
+  GripHorizontal,
   Loader2,
   RotateCcw,
   Sparkles,
   Wand2,
 } from 'lucide-react';
+import { Reorder } from 'framer-motion';
 import { isDanPreview } from '@/lib/dan-preview';
 
 /* ============ 型 ============ */
@@ -498,6 +499,7 @@ export default function SalonboardStyleupPage() {
         {step === 'form' && form && (
           <FormView
             photos={photos}
+            onReorder={setPhotos}
             form={form}
             stylist={stylist}
             setStylist={setStylist}
@@ -719,9 +721,69 @@ function Analyzing({ photos }: { photos: Photo[] }) {
   );
 }
 
+/* ============ 部品: 写真の並べ替え（ドラッグで FRONT/SIDE/BACK を入替） ============ */
+const SLOT_LABELS = ['FRONT', 'SIDE', 'BACK'] as const;
+
+function PhotoReorder({
+  photos,
+  onReorder,
+}: {
+  photos: Photo[];
+  onReorder: (next: Photo[]) => void;
+}) {
+  const canReorder = photos.length > 1;
+  return (
+    <>
+      <Reorder.Group
+        axis="x"
+        values={photos}
+        onReorder={onReorder}
+        className="flex gap-2"
+      >
+        {photos.map((p, i) => (
+          <Reorder.Item
+            key={p.url}
+            value={p}
+            drag={canReorder}
+            whileDrag={{ scale: 1.05, zIndex: 10 }}
+            className={`flex-1 touch-none ${canReorder ? 'cursor-grab active:cursor-grabbing' : ''}`}
+          >
+            <div className="relative grid aspect-[3/4] place-items-center overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={p.url}
+                alt={SLOT_LABELS[i] ?? ''}
+                draggable={false}
+                className="h-full w-full select-none object-cover"
+              />
+              {canReorder && (
+                <span className="absolute right-1 top-1 grid h-5 w-5 place-items-center rounded-full bg-black/40 text-white">
+                  <GripHorizontal className="h-3 w-3" />
+                </span>
+              )}
+            </div>
+            <div className="mt-1 text-center text-[10px] font-semibold text-gray-500">
+              {SLOT_LABELS[i] ?? `${i + 1}枚目`}
+            </div>
+          </Reorder.Item>
+        ))}
+      </Reorder.Group>
+      {canReorder && (
+        <p className="mt-2 flex items-start gap-1 text-[11px] leading-relaxed text-gray-400">
+          <GripHorizontal className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>
+            写真をドラッグして並べ替えると、前(FRONT)・横(SIDE)・後ろ(BACK)の順番が変わります。この順番のままサロンボードに登録されます。
+          </span>
+        </p>
+      )}
+    </>
+  );
+}
+
 /* ============ 画面: 投稿フォーム ============ */
 function FormView({
   photos,
+  onReorder,
   form,
   stylist,
   setStylist,
@@ -730,6 +792,7 @@ function FormView({
   onPost,
 }: {
   photos: Photo[];
+  onReorder: (next: Photo[]) => void;
   form: Fields;
   stylist: string;
   setStylist: (v: string) => void;
@@ -775,27 +838,7 @@ function FormView({
       </div>
 
       <Section title="スタイル登録">
-        <div className="grid grid-cols-3 gap-2">
-          {['FRONT', 'SIDE', 'BACK'].map((label, i) => (
-            <div key={label}>
-              <div className="grid aspect-[3/4] place-items-center overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
-                {photos[i] ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={photos[i].url}
-                    alt={label}
-                    className="h-full w-full object-cover"
-                  />
-                ) : (
-                  <ImagePlus className="h-5 w-5 text-gray-300" />
-                )}
-              </div>
-              <div className="mt-1 text-center text-[10px] text-gray-400">
-                {label}
-              </div>
-            </div>
-          ))}
-        </div>
+        <PhotoReorder photos={photos} onReorder={onReorder} />
       </Section>
 
       <Section title="スタイリストコメント">
