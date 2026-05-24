@@ -857,8 +857,19 @@ function ChatInput({
               );
             }
           },
-          onAIMessage: () => {
+          onAIMessage: (msg) => {
             if (streamRequestRef.current !== requestId) return;
+            queryClient.setQueryData(
+              queryKey,
+              (old: { messages: MessageResponse[] } | undefined) => ({
+                messages: [
+                  msg,
+                  ...(old?.messages || []).filter(
+                    (current: MessageResponse) => current.id !== msg.id
+                  ),
+                ],
+              })
+            );
             queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
