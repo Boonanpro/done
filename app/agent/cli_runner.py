@@ -54,6 +54,22 @@ _interrupted_rooms: set = set()
 _thread_local = threading.local()
 
 
+def _env_flag(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() not in {"0", "false", "no", "off"}
+
+
+def _latency_debug(message: str) -> None:
+    try:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with (PROJECT_ROOT / "dan_latency.log").open("a", encoding="utf-8") as f:
+            f.write(f"{timestamp} {message}\n")
+    except Exception:
+        logger.debug("Failed to write DAN latency log", exc_info=True)
+
+
 def is_cli_active(room_id: str) -> bool:
     """CLIサブプロセスがまだ実行中かどうかを返す"""
     with _process_lock:
@@ -298,8 +314,13 @@ def _build_runtime_contract_section() -> str:
     cli_builtin_tools = ["read_file", "write_file", "edit_file", "bash", "glob", "grep"]
     mcp_tools = get_all_skill_tools()
     mcp_tool_names = [tool.get("name", "") for tool in mcp_tools if tool.get("name")]
+    hidden_skills = {"self-dev"}
     skill_entries = sorted(
-        [f"{skill.name}: {skill.description}" for skill in SkillRegistry.list_all()],
+        [
+            f"{skill.name}: {skill.description}"
+            for skill in SkillRegistry.list_all()
+            if skill.name not in hidden_skills
+        ],
     )
 
     return render_runtime_contract(
@@ -392,14 +413,25 @@ def _build_system_prompt(
     if artifact_desc:
         parts.append(artifact_desc)
 
-    # Approved plan — injected near the end for recency bias.
-    active_plan = load_active_plan(room_id=room_id)
-    if active_plan:
-        parts.append(active_plan)
+    # Approved plan injection is experimental. Keep it switchable so we can
+    # compare observer-backed memory against a lean Codex-like runtime.
+    if _env_flag("DAN_PLAN_INJECTION_ENABLED", False):
+        active_plan = load_active_plan(room_id=room_id)
+        if active_plan:
+            parts.append(active_plan)
 
     # Absolute rules — placed LAST for maximum attention.
     parts.append(
         "## Deliverable Placement Rules\n\n"
+        "- Treat DAN itself and user deliverables as separate codebases, even when "
+        "both live under this repository.\n"
+        "- `frontend/src/app/artifacts/<slug>/` and `~/.dan/workspace/artifacts/<room>/` "
+        "are user deliverables created by DAN; they are not DAN core.\n"
+        "- Editing a user deliverable is not self-development. Do not use the `self-dev` "
+        "skill for artifact websites, tools, landing pages, dashboards, or client work.\n"
+        "- Use `self-dev` only when the user explicitly asks to change DAN itself: "
+        "agent runtime, backend routes/services, DAN UI shell, hooks, deployment, "
+        "skills, or infrastructure.\n"
         "- Production websites, dashboards, tools, and client-facing deliverables "
         "must be created under `frontend/src/app/artifacts/<slug>/`.\n"
         "- Do not create or edit production deliverables under `frontend/src/app/demo/`. "
@@ -733,6 +765,7 @@ def _run_cli_process(
     # tool_use は ID 単位で一度だけ送信（partial でハッシュが揺れても重複しない）
     emitted_tool_use_ids: set = set()
 
+    popen_start = time.perf_counter()
     process = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -744,6 +777,20 @@ def _run_cli_process(
         errors="replace",
         creationflags=_NO_WINDOW,
     )
+    latency_message = (
+        "[DAN_LATENCY] room=%s popen_started=%.3fs cmd_args=%s cwd=%s"
+        % (
+            room_id,
+            time.perf_counter() - popen_start,
+            len(cmd),
+            cwd or CLI_WORKSPACE,
+        )
+    )
+    logger.info(
+        "%s",
+        latency_message,
+    )
+    _latency_debug(latency_message)
 
     # プロセスを追跡dictに登録（旧プロセスがあればkill）
     with _process_lock:
@@ -1301,6 +1348,7 @@ async def process_message_cli(
         system_prompt: カスタムシステムプロンプト。指定時は _build_system_prompt() をスキップ。
         user_messages: ユーザーの依頼文原文（planning プロンプト用）。
     """
+    setup_start = time.perf_counter()
     if system_prompt is None:
         system_prompt = _build_system_prompt(
             project_title, project_description, project_status,
@@ -1312,6 +1360,18 @@ async def process_message_cli(
         system_prompt += f"\n\n{skill_injection}"
     mcp_config_path = _build_mcp_config(room_id, user_id, credentials)
     resume_session_id = None if skip_resume else _load_session(room_id)
+    latency_message = (
+        "[DAN_LATENCY] room=%s cli_setup=%.3fs system_prompt_chars=%s content_chars=%s resume=%s"
+        % (
+            room_id,
+            time.perf_counter() - setup_start,
+            len(system_prompt),
+            len(content),
+            bool(resume_session_id),
+        )
+    )
+    logger.info("%s", latency_message)
+    _latency_debug(latency_message)
 
     # cancel_eventの参照を取得（旧スレッドが新スレッドのEventを消さないようにする）
     from app.services.cancellation import CancellationRegistry

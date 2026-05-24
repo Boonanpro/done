@@ -9,7 +9,9 @@ from typing import Optional
 from datetime import datetime, timezone
 import json
 import logging
+import os
 import re
+import time
 from pathlib import Path
 
 from app.config import settings
@@ -58,6 +60,16 @@ WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
 WORKSPACE_MEMORY_DIR = WORKSPACE_DIR / "memory"
 COMPACTION_SNAPSHOT_INTERVAL_MESSAGES = 40
 logger = logging.getLogger(__name__)
+DAN_LATENCY_LOG = Path(__file__).resolve().parents[2] / "dan_latency.log"
+
+
+def _write_latency_log(message: str) -> None:
+    try:
+        timestamp = datetime.now(timezone.utc).isoformat()
+        with DAN_LATENCY_LOG.open("a", encoding="utf-8") as f:
+            f.write(f"{timestamp} {message}\n")
+    except Exception:
+        logger.debug("Failed to write DAN latency log", exc_info=True)
 
 # ==================== Observer ====================
 import asyncio as _asyncio_observer
@@ -279,6 +291,9 @@ async def _create_observer_notification(room_id: str, user_id: str, summaries: l
 
 def _trigger_observer(room_id: str, user_id: str):
     """ダンの回答完了後に観察者を即座に起動する。前の観察者が実行中ならスキップ。"""
+    if os.getenv("DAN_OBSERVER_ENABLED", "false").lower() in {"0", "false", "no", "off"}:
+        logger.info("[Observer] Skipped because DAN_OBSERVER_ENABLED is disabled for room %s", room_id)
+        return
     # 前の観察者がまだ実行中ならスキップ
     existing = _observer_running.get(room_id)
     if existing and not existing.done():
@@ -1851,6 +1866,21 @@ async def send_dan_message_stream(
     # 挨拶のハードコード返答は廃止。必ずAgent v2に渡す。
     
     async def generate_stream():
+        latency_start = time.perf_counter()
+        latency_marks: list[tuple[str, float]] = []
+
+        def mark_latency(label: str) -> None:
+            latency_marks.append((label, time.perf_counter() - latency_start))
+
+        def log_latency(room_id: str = "") -> None:
+            if not latency_marks:
+                return
+            timeline = " ".join(f"{label}={elapsed:.3f}s" for label, elapsed in latency_marks)
+            message = f"[DAN_LATENCY] room={room_id or '-'} {timeline}"
+            logger.info(message)
+            _write_latency_log(message)
+
+        mark_latency("request_start")
         # リクエストIDを生成（プログレスコールバック用）
         request_id = str(uuid.uuid4())
         progress_queue = ProgressCallbackRegistry.create_queue(request_id)
@@ -1924,6 +1954,7 @@ async def send_dan_message_stream(
             # 観察者はダンの回答完了後に起動する（1807行目付近）
 
             # Step 1: ユーザーメッセージを保存（or 既存メッセージを上書き）
+            mark_latency("project_preload")
             media_content = _build_content_with_media(request.content, request.image_urls or [], request.file_urls or [])
             if request.replace_message_id:
                 # キャンセル後の再送信: 既存メッセージの内容を上書き（INSERTしない）
@@ -1945,6 +1976,7 @@ async def send_dan_message_stream(
                 message = await service.send_dan_message(current_user.user_id, media_content)
                 room_id = message["room_id"]
             user = await service.get_user_by_id(current_user.user_id)
+            mark_latency("message_saved")
 
             # 返信先メッセージの内容を取得（ダンのコンテキスト注入 + SSEレスポンス用）
             reply_context_prefix = ""
@@ -1997,6 +2029,7 @@ async def send_dan_message_stream(
 
             # ユーザーメッセージを送信（session_id付き）
             yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
+            mark_latency("user_sse_sent")
 
             # Update project's updated_at on user message
             try:
@@ -2027,6 +2060,7 @@ async def send_dan_message_stream(
             except Exception as e:
                 import logging
                 logging.warning(f"Failed to get conversation history: {e}")
+            mark_latency("history_loaded")
             
             # ========================================
             # CLI Runner でメッセージ処理
@@ -2094,6 +2128,7 @@ async def send_dan_message_stream(
                         room_id,
                         run_error,
                     )
+                mark_latency("run_created")
 
                 # 方針変更要求が来たら、現在ステータスに関係なく planning へ戻して再計画
                 if replan_requested and project_info.get("status") != "planning":
@@ -2154,6 +2189,7 @@ async def send_dan_message_stream(
                 cli_content, video_analyses = await _enrich_content_with_video_analysis(cli_content, request.file_urls or [])
                 if reply_context_prefix:
                     cli_content = reply_context_prefix + cli_content
+                mark_latency("content_enriched")
 
                 # ── メディア永続化: CLI起動前に画像/動画をGeminiで抽出・保存 ──
                 # system promptに注入されるため、ダンは最初のターンから参照可能
@@ -2168,7 +2204,9 @@ async def send_dan_message_stream(
                     )
                 except Exception as media_err:
                     logger.warning("Media artifact extraction failed (non-blocking): %s", media_err)
+                mark_latency("media_artifacts_saved")
 
+                first_cli_event_logged = False
                 async for event in process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
@@ -2181,6 +2219,10 @@ async def send_dan_message_stream(
                     run_id=run_id,
                     skill_injection=skill_injection,
                 ):
+                    if not first_cli_event_logged:
+                        mark_latency(f"first_cli_event:{event.get('type', 'unknown')}")
+                        log_latency(room_id)
+                        first_cli_event_logged = True
                     if event["type"] == "keepalive":
                         # SSEコメント: クライアントのEventSourceパーサーは無視するが接続は維持される
                         yield ": keepalive\n\n"
