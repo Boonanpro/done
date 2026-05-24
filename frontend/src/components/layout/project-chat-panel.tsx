@@ -859,8 +859,6 @@ function ChatInput({
           },
           onAIMessage: () => {
             if (streamRequestRef.current !== requestId) return;
-            syncActiveStatus(false);
-            setWarmupMode(projectId, null);
             queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
@@ -1530,12 +1528,23 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     type TimedItem = { item: DisplayItem; sortKey: number; subKey: number };
     const timedItems: TimedItem[] = [];
     const chronologicalMessages = [...messages].reverse();
+    const lastHumanMsg = chronologicalMessages.findLast((m) => m.sender_type === 'human');
+    const liveAnchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : 0;
+    const liveAnchorMessageTime = liveAnchorTime;
 
     for (const msg of chronologicalMessages) {
       const content = msg.content || '';
       if (
         msg.sender_type !== 'human' &&
         (content.startsWith('[PROCESS]') || content.startsWith('[THINKING]'))
+      ) {
+        continue;
+      }
+      if (
+        !!warmupMode &&
+        msg.sender_type === 'ai' &&
+        liveAnchorMessageTime > 0 &&
+        new Date(msg.created_at).getTime() >= liveAnchorMessageTime
       ) {
         continue;
       }
@@ -1549,8 +1558,6 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
     // Keep the live execution block anchored to the user message so the UI
     // transitions from Thinking to tools/text without jumping through history.
-    const lastHumanMsg = chronologicalMessages.findLast((m) => m.sender_type === 'human');
-    const liveAnchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : 0;
     let liveBlockRendered = false;
 
     // Group all execution events by run_id and create a block per run
