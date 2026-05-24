@@ -85,6 +85,11 @@ class StreamingSession:
     def is_alive(self) -> bool:
         return self._alive and self._proc is not None and self._proc.poll() is None
 
+    def is_turn_active(self) -> bool:
+        """True while a turn is in flight (so a new message should be treated as
+        a follow-up to inject at the next step boundary, not a fresh run)."""
+        return self.is_alive() and self._turn is not None
+
     def start(self) -> None:
         with self._lock:
             if self.is_alive():

@@ -1314,6 +1314,142 @@ def _run_cli_in_thread(
             pass
 
 
+async def _process_via_streaming_session(
+    room_id: str,
+    user_id: str,
+    content: str,
+    system_prompt: str,
+    mcp_config_path: str,
+    project_id: Optional[str],
+    run_id: Optional[str],
+    skip_save: bool,
+    cwd: Optional[str],
+) -> AsyncIterator[Dict[str, Any]]:
+    """DAN_STREAMING_INPUT path (flag-gated). Runs the turn through a
+    persistent stream-json session so follow-ups can later be injected at the
+    next step boundary. Reuses the SAME classify/save helpers as the one-shot
+    path; the one-shot path itself is untouched.
+
+    Increment 2a: a normal turn only. (Follow-up injection is a later step.)
+    """
+    from app.agent.streaming_session import get_or_create_session
+
+    claude_cmd, cli_js = _resolve_claude_cli()
+    if not claude_cmd:
+        yield {"type": "error", "message": "claude CLI が見つかりません"}
+        return
+
+    def build_cmd() -> list:
+        c = [claude_cmd, cli_js] if cli_js else [claude_cmd]
+        c += [
+            "-p",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+            "--model", "opus",
+            "--max-turns", "200",
+            "--mcp-config", mcp_config_path,
+            "--append-system-prompt", system_prompt,
+            "--disallowedTools", "ExitPlanMode,AskUserQuestion",
+        ]
+        return c
+
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
+    env["NO_COLOR"] = "1"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    run_cwd = cwd or str(CLI_WORKSPACE)
+
+    session = get_or_create_session(room_id, build_cmd, env, run_cwd)
+
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue = asyncio.Queue()
+    _SENTINEL: Dict[str, Any] = {"__turn_done__": True}
+
+    def sink(raw_ev: Dict[str, Any]) -> None:
+        loop.call_soon_threadsafe(q.put_nowait, raw_ev)
+
+    def run() -> None:
+        try:
+            session.run_turn(content, sink, timeout=600)
+        except Exception as e:  # noqa: BLE001
+            loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "message": str(e)})
+        finally:
+            loop.call_soon_threadsafe(q.put_nowait, _SENTINEL)
+
+    threading.Thread(target=run, daemon=True).start()
+
+    turn_blocks: list = []
+    final_text_parts: list = []
+    reasoning_steps_acc: list = []
+    reasoning_full_acc: list = []
+    session_id_captured: Optional[str] = None
+
+    while True:
+        raw = await q.get()
+        if raw is _SENTINEL:
+            break
+        rtype = raw.get("type")
+
+        if rtype == "assistant":
+            blocks = (raw.get("message") or {}).get("content") or []
+            for ev in _classify_content_blocks(blocks):
+                if ev["type"] == "text":
+                    txt = ev.get("text", "")
+                    if txt.strip():
+                        final_text_parts.append(txt)
+                        turn_blocks.append({"type": "text", "text": txt})
+                    yield ev
+                    if project_id and txt.strip() and len(txt.strip()) > 10:
+                        _save_execution_event_sync(room_id, "reasoning", project_id=project_id, run_id=run_id, content=txt.strip())
+                        reasoning_steps_acc.append(txt.strip())
+                        reasoning_full_acc.append(txt.strip())
+                elif ev["type"] == "tool_use":
+                    from app.api.project_routes import _format_tool_label
+                    tool_label = _format_tool_label(ev.get("name", ""), ev.get("input", {}))
+                    yield ev
+                    if project_id:
+                        _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=run_id, tool_name=ev.get("name", ""), tool_label=tool_label)
+                        reasoning_steps_acc.append(f"🔧 {tool_label}")
+                        turn_blocks.append({"type": "tool", "name": ev.get("name", ""), "label": tool_label, "detail": _tool_detail(ev.get("input", {}))})
+                elif ev["type"] == "reasoning":
+                    yield ev
+                    if ev.get("text", "").strip():
+                        reasoning_full_acc.append(ev["text"])
+
+        elif rtype == "system":
+            sid = raw.get("session_id")
+            if sid:
+                session_id_captured = sid
+                _save_session(room_id, sid)
+                _update_run_sync(run_id, claude_session_id=sid)
+
+        elif rtype == "result":
+            result_text = raw.get("result", "") or ""
+            is_error = bool(raw.get("is_error"))
+            text = result_text or "\n".join(final_text_parts)
+            if not text.strip():
+                text = "（応答テキストが空でした。もう一度お試しください。）"
+            cli_saved = False
+            if not skip_save:
+                cli_saved = _save_ai_message_sync(room_id, text, reasoning_steps_acc, reasoning_full_acc, blocks=turn_blocks)
+            if project_id:
+                _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, content="completed")
+                _update_run_sync(run_id, state="failed" if is_error else "completed")
+            yield {"type": "result", "text": text, "session_id": session_id_captured, "is_error": is_error, "cli_saved": cli_saved}
+            # Reset per-turn accumulators: a follow-up injected at the next step
+            # boundary produces a *subsequent* turn (run_turn loops over pending
+            # follow-ups through the same sink), and that turn must save its own
+            # ai_message/blocks without inheriting this turn's content.
+            turn_blocks = []
+            final_text_parts = []
+            reasoning_steps_acc = []
+            reasoning_full_acc = []
+
+        elif rtype == "error":
+            yield {"type": "error", "message": raw.get("message") or "error"}
+
+
 async def process_message_cli(
     room_id: str,
     user_id: str,
@@ -1360,6 +1496,25 @@ async def process_message_cli(
         system_prompt += f"\n\n{skill_injection}"
     mcp_config_path = _build_mcp_config(room_id, user_id, credentials)
     resume_session_id = None if skip_resume else _load_session(room_id)
+
+    # --- DAN_STREAMING_INPUT: 常駐ストリーミングセッション経路（フラグ制御） ---
+    # 有効時のみ、ターンを常駐 stream-json セッションに流す（後段で「次の境界」
+    # への追い連絡注入を可能にするため）。フラグOFF時は下の1ターン1プロセス経路を
+    # そのまま使用する（=従来挙動と完全一致、無改変）。
+    try:
+        from app.agent.streaming_session import streaming_enabled
+        _use_streaming = streaming_enabled()
+    except Exception:
+        _use_streaming = False
+    if _use_streaming:
+        _cli_debug(f"[STREAMING] routing room={room_id} via persistent session")
+        async for ev in _process_via_streaming_session(
+            room_id, user_id, content, system_prompt, mcp_config_path,
+            project_id, run_id, skip_save, cwd,
+        ):
+            yield ev
+        return
+
     latency_message = (
         "[DAN_LATENCY] room=%s cli_setup=%.3fs system_prompt_chars=%s content_chars=%s resume=%s"
         % (
