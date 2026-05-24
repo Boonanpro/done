@@ -656,6 +656,13 @@ function ChatInput({
     queryClient.invalidateQueries({ queryKey: ['chat-artifacts', roomId] });
   }, [projectId, queryClient, roomId]);
 
+  const invalidateProjectChrome = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
+    queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
+    queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+    queryClient.invalidateQueries({ queryKey: ['chat-artifacts', roomId] });
+  }, [projectId, queryClient, roomId]);
+
   const uploadFiles = useCallback(async (fileList: File[]) => {
     if (fileList.length === 0) return;
     setIsUploading(true);
@@ -900,7 +907,7 @@ function ChatInput({
             setInterrupted(projectId, false);
             setWarmupMode(projectId, null);
             onSseStateChange?.(false);
-            invalidateProjectQueries();
+            invalidateProjectChrome();
 
             if (!titleGeneratedRef.current) {
               const cached = queryClient.getQueryData<{ title?: string }>(['project', projectId]);
@@ -962,7 +969,7 @@ function ChatInput({
       }
     }
   }, [
-    invalidateProjectQueries,
+    invalidateProjectChrome,
     isBusy,
     projectId,
     queryClient,
