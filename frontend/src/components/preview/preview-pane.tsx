@@ -209,11 +209,17 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const shareUrl = artifact ? artifact.share_url || draftUrl || publicPreviewUrl : '';
   const publicShareUrl = artifact && shareUrl ? cleanArtifactUrl(artifact, shareUrl) : '';
   const baseIframeSrc = draftUrl || publicPreviewUrl || shareUrl;
-  // contentVersion を URL に乗せて Vercel CDN / ブラウザキャッシュをバイパスする。
-  // 初回は素のURLでCDNキャッシュを活かし、編集が走ったら ?t=N で新キャッシュキーへ。
-  const iframeSrc = baseIframeSrc && contentVersion > 0
-    ? `${baseIframeSrc}${baseIframeSrc.includes('?') ? '&' : '?'}t=${contentVersion}`
-    : baseIframeSrc;
+  // ライブプレビューでは成果物に「プレビュー中」を伝える dan_preview=1 を必ず付与する。
+  // 成果物側 (isDanPreview()) はこれを見てログイン/初期設定ゲートをスキップし、
+  // 管理者として全画面を閲覧・編集できる。公開URL/共有URLには付かない（iframe src 限定）。
+  // contentVersion は Vercel CDN / ブラウザキャッシュのバイパス用（編集が走ったら ?t=N）。
+  const iframeSrc = (() => {
+    if (!baseIframeSrc) return baseIframeSrc;
+    const params = ['dan_preview=1'];
+    if (contentVersion > 0) params.push(`t=${contentVersion}`);
+    const sep = baseIframeSrc.includes('?') ? '&' : '?';
+    return `${baseIframeSrc}${sep}${params.join('&')}`;
+  })();
 
   useEffect(() => {
     setLoadedArtifactId(null);

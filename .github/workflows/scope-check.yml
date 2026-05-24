@@ -118,3 +118,7 @@ jobs:
           print("Override (rare special-case): add [scope-override] to the PR title.")
           sys.exit(1)
           PY
+
+      - name: Enforce Salonboard browser session policy
+        shell: bash
+        run: python scripts/check_salonboard_browser_policy.py

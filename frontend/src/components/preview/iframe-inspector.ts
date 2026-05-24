@@ -128,10 +128,21 @@ export function attachInspector(iframe: HTMLIFrameElement) {
   const isEditing = (el: Element | null): boolean =>
     !!el && el.getAttribute('data-dan-editing') === '1';
 
+  // プレビュー専用 UI (画面切替バー等、data-dan-preview-ui を持つ要素の配下) は
+  // インスペクタの対象外にする。編集モード中でもクリックを成果物にそのまま通し、
+  // プレビュー内ナビゲーションを動かせるようにする。
+  const isPreviewUi = (el: Element | null): boolean =>
+    !!el && typeof el.closest === 'function' && !!el.closest('[data-dan-preview-ui]');
+
   const move = (ev: Event) => {
     const e = ev as MouseEvent;
     const target = e.target as Element | null;
     if (!target || isOverlay(target)) return;
+    // プレビュー専用 UI にはホバー overlay を出さない
+    if (isPreviewUi(target)) {
+      hideOverlay(hover);
+      return;
+    }
     // インライン編集中の要素にはホバー overlay を出さない (邪魔)
     if (isEditing(target)) {
       hideOverlay(hover);
@@ -144,6 +155,8 @@ export function attachInspector(iframe: HTMLIFrameElement) {
     const e = ev as MouseEvent;
     const initialTarget = e.target as Element | null;
     if (!initialTarget || isOverlay(initialTarget)) return;
+    // プレビュー専用 UI ならネイティブ click を通す (画面切替を動かすため)
+    if (isPreviewUi(initialTarget)) return;
     // 編集中の要素ならネイティブ click を通す (キャレット位置調整・テキスト選択のため)
     if (isEditing(initialTarget)) return;
     e.preventDefault();
@@ -210,6 +223,7 @@ export function attachInspector(iframe: HTMLIFrameElement) {
     const e = ev as MouseEvent;
     const initialTarget = e.target as Element | null;
     if (!initialTarget || isOverlay(initialTarget)) return;
+    if (isPreviewUi(initialTarget)) return;
     if (isEditing(initialTarget)) return;
 
     // クリック位置のテキストノードから、本当に編集すべき leaf 要素を見つける。

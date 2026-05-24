@@ -20,6 +20,8 @@ CASES: list[tuple[str, str]] = [
     ("app/core/main.py", "infra"),
     ("scripts/auto_deploy.py", "infra"),
     ("scripts/hook_destructive_guard.py", "infra"),
+    ("tests/test_salonboard_browser_policy.py", "infra"),
+    ("tests_e2e/test_project_chat_recovery.py", "infra"),
     ("supabase/migrations/057_chat_artifact_room_scope.sql", "infra"),
     (".github/workflows/scope-check.yml", "infra"),
     (".githooks/pre-commit", "infra"),

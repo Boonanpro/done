@@ -30,12 +30,12 @@ MODEL = "gemini-2.5-pro"
 CATEGORY_OPTIONS = ["レディース", "メンズ"]
 LENGTH_OPTIONS = ["ベリーショート", "ショート", "ボブ", "ミディアム", "セミロング", "ロング"]
 MENU_OPTIONS = ["パーマ", "ストレートパーマ・縮毛矯正", "エクステ", "ブリーチ"]
-HAIR_AMOUNT_OPTIONS = ["設定しない", "少ない", "普通", "多い"]
-HAIR_QUALITY_OPTIONS = ["設定しない", "柔らかい", "普通", "硬い"]
-HAIR_THICKNESS_OPTIONS = ["設定しない", "細い", "普通", "太い"]
-HAIR_CURL_OPTIONS = ["設定しない", "なし", "少し", "強い"]
-AGE_OPTIONS = ["設定しない", "キッズ", "10代", "20代", "30代", "40代", "50代", "60代以上"]
-FACE_OPTIONS = ["設定しない", "丸型", "卵型", "四角", "逆三角", "ベース", "面長"]
+HAIR_AMOUNT_OPTIONS = ["少ない", "普通", "多い"]
+HAIR_QUALITY_OPTIONS = ["柔らかい", "普通", "硬い"]
+HAIR_THICKNESS_OPTIONS = ["細い", "普通", "太い"]
+HAIR_CURL_OPTIONS = ["なし", "少し", "強い"]
+AGE_OPTIONS = ["キッズ", "10代", "20代", "30代", "40代", "50代", "60代以上"]
+FACE_OPTIONS = ["丸型", "卵型", "四角", "逆三角", "ベース", "面長"]
 
 MAX_IMAGES = 3
 MAX_IMAGE_BYTES = 12 * 1024 * 1024  # 12MB
@@ -54,12 +54,12 @@ ANALYSIS_PROMPT = """あなたは美容室のヘアカタログ制作に精通�
   "length": {"value": "「ベリーショート」「ショート」「ボブ」「ミディアム」「セミロング」「ロング」のいずれか", "confidence": 0.0, "reason": ""},
   "menu": {"value": ["「パーマ」「ストレートパーマ・縮毛矯正」「エクステ」「ブリーチ」から該当するものの配列。なければ空配列"], "confidence": 0.0, "reason": ""},
   "menu_text": {"value": "施術メニュー内容を簡潔に(例:「カット＋カラー」「カット＋ブリーチ＋カラー」「パーマ＋カット」。40字以内)", "confidence": 0.0, "reason": ""},
-  "hair_amount": {"value": "「設定しない」「少ない」「普通」「多い」のいずれか", "confidence": 0.0, "reason": ""},
-  "hair_quality": {"value": "「設定しない」「柔らかい」「普通」「硬い」のいずれか", "confidence": 0.0, "reason": ""},
-  "hair_thickness": {"value": "「設定しない」「細い」「普通」「太い」のいずれか", "confidence": 0.0, "reason": ""},
-  "hair_curl": {"value": "「設定しない」「なし」「少し」「強い」のいずれか", "confidence": 0.0, "reason": ""},
-  "age": {"value": "「設定しない」「キッズ」「10代」「20代」「30代」「40代」「50代」「60代以上」のいずれか", "confidence": 0.0, "reason": ""},
-  "face": {"value": "「設定しない」「丸型」「卵型」「四角」「逆三角」「ベース」「面長」のいずれか", "confidence": 0.0, "reason": ""},
+  "hair_amount": {"value": "「少ない」「普通」「多い」のいずれか。迷ったら「普通」", "confidence": 0.0, "reason": ""},
+  "hair_quality": {"value": "「柔らかい」「普通」「硬い」のいずれか。迷ったら「普通」", "confidence": 0.0, "reason": ""},
+  "hair_thickness": {"value": "「細い」「普通」「太い」のいずれか。迷ったら「普通」", "confidence": 0.0, "reason": ""},
+  "hair_curl": {"value": "「なし」「少し」「強い」のいずれか。迷ったら「なし」", "confidence": 0.0, "reason": ""},
+  "age": {"value": "「キッズ」「10代」「20代」「30代」「40代」「50代」「60代以上」のいずれか。迷ったら最も近い年代", "confidence": 0.0, "reason": ""},
+  "face": {"value": "「丸型」「卵型」「四角」「逆三角」「ベース」「面長」のいずれか。迷ったら「卵型」", "confidence": 0.0, "reason": ""},
   "style_name": {"value": "スタイル名(30字以内)", "confidence": 0.0, "reason": ""},
   "comment": {"value": "スタイル紹介コメント(120字以内)", "confidence": 0.0, "reason": ""},
   "hashtags": {"value": ["ハッシュタグの配列。#は付けない。各20字以内。最大10個"], "confidence": 0.0, "reason": ""},
@@ -70,7 +70,7 @@ ANALYSIS_PROMPT = """あなたは美容室のヘアカタログ制作に精通�
 - 髪の長さは肩の位置を基準に正確に判定する。耳上=ベリーショート、あご周り=ショート/ボブ、肩=ミディアム、肩下=セミロング、胸あたり=ロング。
 - 明るい髪色や複雑なカラー(ハイトーン、グラデーション等)が見えたら menu に「ブリーチ」を含めることを検討する。
 - はっきりしたウェーブ・カールがあれば menu に「パーマ」を含めることを検討する。直毛で不自然なほど真っ直ぐなら「ストレートパーマ・縮毛矯正」を検討する。
-- 写真だけでは断定しにくい項目(髪量・髪質・太さ・クセ)は、最も可能性が高い値を選びつつ confidence を低め(0.3〜0.5)にする。判断が全くつかなければ value を「設定しない」にする。
+- 写真だけでは断定しにくい項目(髪量・髪質・太さ・クセ)も必ず選択肢から1つ選ぶ。迷う場合は髪量/髪質/太さは「普通」、クセは「なし」にして confidence を低め(0.3〜0.5)にする。
 - 年代・顔型はモデルの見た目から推定する。断定が難しければ confidence を下げる。
 - reason は必ず40字以内の日本語で、なぜその値にしたかを簡潔に書く。
 
@@ -278,12 +278,12 @@ async def analyze_style_photos(files: list[UploadFile] = File(...)) -> dict:
         "category": _coerce_single(data.get("category"), CATEGORY_OPTIONS, "レディース"),
         "length": _coerce_single(data.get("length"), LENGTH_OPTIONS, "ミディアム"),
         "menu": _coerce_multi(data.get("menu"), MENU_OPTIONS),
-        "hair_amount": _coerce_single(data.get("hair_amount"), HAIR_AMOUNT_OPTIONS, "設定しない"),
-        "hair_quality": _coerce_single(data.get("hair_quality"), HAIR_QUALITY_OPTIONS, "設定しない"),
-        "hair_thickness": _coerce_single(data.get("hair_thickness"), HAIR_THICKNESS_OPTIONS, "設定しない"),
-        "hair_curl": _coerce_single(data.get("hair_curl"), HAIR_CURL_OPTIONS, "設定しない"),
-        "age": _coerce_single(data.get("age"), AGE_OPTIONS, "設定しない"),
-        "face": _coerce_single(data.get("face"), FACE_OPTIONS, "設定しない"),
+        "hair_amount": _coerce_single(data.get("hair_amount"), HAIR_AMOUNT_OPTIONS, "普通"),
+        "hair_quality": _coerce_single(data.get("hair_quality"), HAIR_QUALITY_OPTIONS, "普通"),
+        "hair_thickness": _coerce_single(data.get("hair_thickness"), HAIR_THICKNESS_OPTIONS, "普通"),
+        "hair_curl": _coerce_single(data.get("hair_curl"), HAIR_CURL_OPTIONS, "なし"),
+        "age": _coerce_single(data.get("age"), AGE_OPTIONS, "20代"),
+        "face": _coerce_single(data.get("face"), FACE_OPTIONS, "卵型"),
         "menu_text": _coerce_text(data.get("menu_text"), 100),
         "style_name": _coerce_text(data.get("style_name"), 30),
         "comment": _coerce_text(data.get("comment"), 120),

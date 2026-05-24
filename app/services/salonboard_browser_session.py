@@ -10,6 +10,7 @@ import json
 import os
 import asyncio
 import random
+import re
 import socket
 import subprocess
 import time
@@ -23,6 +24,7 @@ from playwright.async_api import (
     BrowserContext,
     Page,
     Playwright,
+    TimeoutError as PlaywrightTimeoutError,
     async_playwright,
 )
 
@@ -64,6 +66,10 @@ class SalonboardProfileLocked(SalonboardSessionError):
 
 class SalonboardChromeLaunchError(SalonboardSessionError):
     """Raised when regular Chrome cannot be launched or attached over CDP."""
+
+
+class SalonboardImageUploadError(SalonboardSessionError):
+    """Raised when Salonboard rejects or repeatedly fails an image upload."""
 
 
 @dataclass
@@ -493,6 +499,170 @@ async def open_style_edit_form(page: Page) -> bool:
     return "styleEdit" in page.url
 
 
+async def open_reflect_top(page: Page) -> bool:
+    """Open CNB reflect top through the CLP KMAGIC handoff."""
+    if await page.locator("#cmsForwardForm").count() == 0:
+        await page.goto(CLP_TOP_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(1500)
+        if await is_captcha_visible(page):
+            raise SalonboardCaptchaDetected("CAPTCHA detected on CLP top.")
+
+    if await page.locator("#cmsForwardForm").count() > 0:
+        await page.evaluate(
+            """() => {
+                const f = document.getElementById('cmsForwardForm');
+                f.setAttribute('action', 'https://salonboard.com/CNB/reflect/reflectTop/');
+                f.submit();
+            }"""
+        )
+        await page.wait_for_load_state("domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(2000)
+
+    if "reflectTop" not in page.url:
+        await page.goto(REFLECT_TOP_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(2000)
+
+    return "reflectTop" in page.url or "reflect" in page.url.lower()
+
+
+async def _style_reflect_rows(page: Page) -> list[str]:
+    return await page.eval_on_selector_all(
+        "table tr",
+        """trs => trs
+            .map(t => (t.innerText || '').replace(/\\s+/g, ' ').trim())
+            .filter(Boolean)""",
+    )
+
+
+async def _extract_style_id(page: Page) -> str | None:
+    try:
+        html = await page.content()
+    except Exception:
+        return None
+    match = re.search(r"\bL\d{9,}\b", html)
+    return match.group(0) if match else None
+
+
+async def _find_registered_style(page: Page, style_name: str) -> dict | None:
+    """Find a registered style by title in the draft style list."""
+    title = (style_name or "").strip()
+    if not title:
+        return None
+    await open_reflect_top(page)
+    await page.goto(STYLE_LIST_URL, wait_until="domcontentloaded", timeout=60000)
+    await page.wait_for_timeout(1500)
+    for page_no in range(1, 90):
+        rows = await page.evaluate(
+            """
+            (pageNo) => {
+              const trs = [...document.querySelectorAll('tr')];
+              const out = [];
+              for (let i = 0; i < trs.length; i++) {
+                const tr = trs[i];
+                const html = tr.innerHTML || '';
+                const ids = [...html.matchAll(/L\\d{9}/g)].map(m => m[0]);
+                if (!ids.length) continue;
+                const styleId = [...new Set(ids)][0];
+                const update = ([...html.matchAll(/20\\d{15}/g)].map(m => m[0])[0]) || '';
+                const rowTitle = (tr.innerText || '').replace(/\\s+/g, ' ').replace(/^No\\.\\s*/, '').trim();
+                const next = trs[i + 1];
+                const cells = next ? [...next.querySelectorAll('td,th')].map(td => (td.innerText || '').replace(/\\s+/g, ' ').trim()) : [];
+                out.push({ page: pageNo, styleId, update, title: rowTitle, check: cells[2] || '' });
+              }
+              return out;
+            }
+            """,
+            page_no,
+        )
+        matches = [r for r in rows if r.get("title") == title or title in r.get("title", "")]
+        if matches:
+            matches.sort(key=lambda r: r.get("update", ""), reverse=True)
+            return matches[0]
+        next_link = page.locator("a", has_text="次へ")
+        if await next_link.count() == 0:
+            return None
+        await next_link.first.click()
+        await page.wait_for_load_state("domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(300)
+    return None
+
+
+async def _apply_reflect_request(page: Page) -> dict:
+    """Submit the style reflect request so the registered style becomes public."""
+    if not await open_reflect_top(page):
+        return {"ok": False, "message": "反映申請画面を開けませんでした"}
+
+    rows = await _style_reflect_rows(page)
+    ng_rows = [row for row in rows if "NG" in row]
+    if ng_rows:
+        return {
+            "ok": False,
+            "message": "掲載チェックNGのスタイルがあるため、反映申請できません",
+            "ng_rows": ng_rows[:5],
+        }
+
+    btn = page.locator("#reflectedButton")
+    if await btn.count() == 0:
+        return {"ok": False, "message": "反映申請ボタンが見つかりませんでした"}
+    try:
+        cls = await btn.first.get_attribute("class") or ""
+        if "disabled" in cls or not await btn.first.is_enabled():
+            return {"ok": False, "message": "反映申請ボタンが押せない状態です"}
+    except Exception:
+        pass
+
+    page.on("dialog", lambda d: asyncio.create_task(d.accept()))
+    try:
+        await btn.first.click(force=True, timeout=8000, no_wait_after=True)
+    except PlaywrightTimeoutError as exc:
+        # Salonboard's reflect button can submit through legacy JS without a
+        # clean navigation signal. Treat the click as best-effort and verify
+        # the resulting page state below instead of failing immediately.
+        if "click action done" not in str(exc):
+            raise
+    await page.wait_for_timeout(5000)
+
+    confirm = page.locator(
+        'button:has-text("反映する"), a:has-text("反映する"), input[value*="反映する"], '
+        'button:has-text("申請する"), a:has-text("申請する"), input[value*="申請"], '
+        'button:has-text("実行"), input[value*="実行"], button:has-text("OK"), a:has-text("はい")'
+    )
+    for i in range(await confirm.count()):
+        try:
+            if await confirm.nth(i).is_visible():
+                await confirm.nth(i).click(force=True, timeout=6000)
+                break
+        except Exception:
+            continue
+
+    await page.wait_for_timeout(6000)
+    try:
+        body = await page.locator("body").inner_text()
+    except Exception:
+        body = ""
+    success_tokens = (
+        "反映済",
+        "反映済み",
+        "反映されました",
+        "反映申請予約",
+        "反映申請を予約",
+        "申請予約",
+        "申請しました",
+        "予約しました",
+        "受け付けました",
+        "完了しました",
+    )
+    if any(token in body for token in success_tokens):
+        return {"ok": True, "message": "サロンボードに登録し、反映申請まで完了しました"}
+
+    rows_after = await _style_reflect_rows(page)
+    style_rows = [row for row in rows_after if "スタイル掲載情報" in row]
+    if any(any(token in row for token in success_tokens) for row in style_rows):
+        return {"ok": True, "message": "サロンボードに登録し、反映申請まで完了しました"}
+
+    return {"ok": False, "message": "反映申請後の完了状態を確認できませんでした"}
+
+
 # =====================================================================
 # スタイル投稿（項目入力 → 写真アップロード → 登録）
 # AI解析結果(fields)をサロンボードのフォーム値に変換して入力する。
@@ -506,13 +676,13 @@ _MENS_LEN = {"ベリーショート": "HL10", "ショート": "HL11", "ボブ": 
              "ミディアム": "HL12", "セミロング": "HL12", "ロング": "HL13"}
 _MENU_MAP = {"パーマ": "MC01", "ストレートパーマ・縮毛矯正": "MC02",
              "エクステ": "MC03", "ブリーチ": "MC04"}
-_VOLUME = {"設定しない": "99", "少ない": "1", "普通": "2", "多い": "3"}
-_QUALITY = {"設定しない": "99", "柔らかい": "1", "柔かい": "1", "普通": "2", "硬い": "3"}
-_THICK = {"設定しない": "99", "細い": "1", "普通": "2", "太い": "3"}
-_CURLY = {"設定しない": "99", "なし": "1", "少し": "2", "強い": "3"}
-_FACE = {"設定しない": "99", "丸型": "1", "卵型": "2", "四角": "3",
+_VOLUME = {"設定しない": "2", "少ない": "1", "普通": "2", "多い": "3"}
+_QUALITY = {"設定しない": "2", "柔らかい": "1", "柔かい": "1", "普通": "2", "硬い": "3"}
+_THICK = {"設定しない": "2", "細い": "1", "普通": "2", "太い": "3"}
+_CURLY = {"設定しない": "1", "なし": "1", "少し": "2", "強い": "3"}
+_FACE = {"設定しない": "2", "丸型": "1", "卵型": "2", "四角": "3",
          "逆三角": "4", "ベース": "5", "面長": "6"}
-_AGE = {"設定しない": "99", "キッズ": "0", "10代": "1", "20代": "2",
+_AGE = {"設定しない": "2", "キッズ": "0", "10代": "1", "20代": "2",
         "30代": "3", "40代": "4", "50代": "5", "60代以上": "6"}
 _ANGLE_SLOT = {"front": "FRONT", "side": "SIDE", "back": "BACK"}
 _SLOT_CLASS = {"FRONT": "SV01", "SIDE": "SV02", "BACK": "SV03"}
@@ -551,12 +721,12 @@ def build_form_values(fields: dict) -> dict:
         "comment": (_field_value(fields, "comment") or "").strip(),
         "menu_text": menu_text[:1000],
         "menu_codes": [_MENU_MAP[m] for m in menu_labels if m in _MENU_MAP],
-        "volume": _VOLUME.get(_field_value(fields, "hair_amount"), "99"),
-        "quality": _QUALITY.get(_field_value(fields, "hair_quality"), "99"),
-        "thickness": _THICK.get(_field_value(fields, "hair_thickness"), "99"),
-        "curly": _CURLY.get(_field_value(fields, "hair_curl"), "99"),
-        "face": _FACE.get(_field_value(fields, "face"), "99"),
-        "age": _AGE.get(_field_value(fields, "age"), "99"),
+        "volume": _VOLUME.get(_field_value(fields, "hair_amount"), "2"),
+        "quality": _QUALITY.get(_field_value(fields, "hair_quality"), "2"),
+        "thickness": _THICK.get(_field_value(fields, "hair_thickness"), "2"),
+        "curly": _CURLY.get(_field_value(fields, "hair_curl"), "1"),
+        "face": _FACE.get(_field_value(fields, "face"), "2"),
+        "age": _AGE.get(_field_value(fields, "age"), "2"),
         "hashtags": [str(t).lstrip("#").strip()[:40] for t in tags if str(t).strip()][:8],
     }
 
@@ -618,23 +788,43 @@ async def _upload_one_photo(page: Page, slot: str, img_path: str) -> bool:
     await page.wait_for_timeout(2500)
     # 確定: グローバル file_upload() → doUpload。*_IMG_ID が入るまで待つ。
     val = ""
-    for _attempt in range(2):
+    transient_error = ""
+    for attempt in range(4):
         try:
             await page.evaluate(
                 "() => { try { wnsLoading.show(); } catch (e) {} ; file_upload(); }"
             )
         except Exception:
             pass
-        for _ in range(40):
+        for _ in range(50):
             await page.wait_for_timeout(1000)
             val = await page.evaluate(
                 f"() => {{ const e = document.getElementById('{field}'); return e ? e.value : ''; }}"
             )
             if val:
                 break
+            try:
+                text = await page.locator("body").inner_text(timeout=1500)
+            except Exception:
+                text = ""
+            if "横長" in text:
+                raise SalonboardImageUploadError(
+                    "横長の画像はサロンボードにアップロードできません。縦長の画像に差し替えてください。"
+                )
+            if (
+                "アクセスが集中" in text
+                or "通信に失敗" in text
+                or "しばらくしてから" in text
+            ):
+                transient_error = "画像アップロード機能が一時的に制限されています"
+                break
         if val:
             break
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(8000 * (attempt + 1))
+    if not val and transient_error:
+        raise SalonboardImageUploadError(
+            f"{transient_error}。少し時間を置いてから再投稿してください。"
+        )
     try:
         await page.select_option(
             f'select[name="frmStyleEditStyleInfoDto.{_SLOT_SELECT[slot]}"]',
@@ -743,13 +933,19 @@ async def run_style_post(
     async with async_playwright() as p:
         async with launch_salonboard_context(p) as ctx:
             page = await get_or_create_page(ctx)
-            report("running", "サロンボードにログイン中")
-            await ensure_logged_in(
+            report("running", "ログイン済みセッションを確認しています")
+            login_status = await ensure_logged_in(
                 page,
                 creds,
                 policy=SalonboardLoginPolicy(max_login_attempts=1),
                 handoff_timeout_seconds=handoff_timeout_seconds,
             )
+            if login_status == "already_logged_in":
+                report("running", "ログイン済みセッションを再利用しています")
+            elif login_status == "logged_in":
+                report("running", "ログインしました")
+            else:
+                report("running", "認証状態を確認しました")
             report("running", "投稿フォームを開いています")
             try:
                 ok = await open_style_edit_form(page)
@@ -764,17 +960,18 @@ async def run_style_post(
             await _fill_style_form(page, stylist, fv)
 
             report("running", "写真をアップロードしています")
-            front_ok = False
+            uploaded_slots: list[str] = []
             for slot in ("FRONT", "SIDE", "BACK"):
                 if slot in slots:
                     okimg = await _upload_one_photo(page, slot, slots[slot])
-                    if slot == "FRONT":
-                        front_ok = okimg
+                    if okimg:
+                        uploaded_slots.append(slot)
             try:
                 await page.check("#agrFlgStyleImgId")
             except Exception:
                 pass
-            if not front_ok:
+            missing_slots = [slot for slot in slots if slot not in uploaded_slots]
+            if missing_slots:
                 return {"ok": False, "message": "写真のアップロードに失敗しました"}
 
             report("running", "登録しています")
@@ -791,9 +988,37 @@ async def run_style_post(
             except Exception:
                 pass
             done = ("登録が完了" in body) or ("登録しました" in body) or ("完了しました" in body)
+            style_id = await _extract_style_id(page)
+            if not done:
+                registered = await _find_registered_style(page, fv["style_name"])
+                if registered:
+                    done = True
+                    style_id = registered.get("styleId") or style_id
+                else:
+                    return {
+                        "ok": False,
+                        "registered": False,
+                        "style_name": fv["style_name"],
+                        "style_id": style_id,
+                        "message": "サロンボード登録の完了を確認できませんでした",
+                    }
+
+            report("running", "公開反映を申請しています")
+            reflect = await _apply_reflect_request(page)
+            if not reflect.get("ok"):
+                return {
+                    "ok": False,
+                    "registered": True,
+                    "published": False,
+                    "style_name": fv["style_name"],
+                    "style_id": style_id,
+                    "message": reflect.get("message", "反映申請に失敗しました"),
+                }
             return {
                 "ok": True,
                 "registered": done,
+                "published": True,
                 "style_name": fv["style_name"],
-                "message": "サロンボードに登録しました（公開には反映申請が必要です）",
+                "style_id": style_id,
+                "message": reflect.get("message", "サロンボードに登録し、反映申請まで完了しました"),
             }

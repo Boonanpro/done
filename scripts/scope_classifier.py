@@ -108,6 +108,8 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "app/**",
     # ops / tooling
     "scripts/**",
+    "tests/**",
+    "tests_e2e/**",
     "mobile/**",
     "supabase/**",
     ".github/**",

@@ -28,11 +28,16 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
+from pathlib import Path
 
 # Windows のデフォルト cp932 だと日本語メッセージが文字化けするので UTF-8 に固定。
 if hasattr(sys.stderr, "buffer"):
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 # Each rule: (regex, human explanation, suggested replacement)
@@ -90,6 +95,11 @@ RM_RF_ALLOW_TARGETS = (
     ".ruff_cache",
 )
 
+STASH_APPLY_RE = re.compile(
+    r"(^|[\s;&|`])git\s+stash\s+(apply|pop)(?P<args>(?:\s+(?![;&|`])\S+)*)",
+)
+STASH_REF_RE = re.compile(r"^stash@\{\d+\}$")
+
 
 def _check_rm_rf(cmd: str) -> tuple[str, str] | None:
     """Return (message, suggestion) if rm -rf target is not allow-listed."""
@@ -109,6 +119,71 @@ def _check_rm_rf(cmd: str) -> tuple[str, str] | None:
             "ビルドキャッシュ削除なら node_modules / .next / dist / build / .cache "
             "/ coverage / __pycache__ などの allowlist パスを使ってください。\n"
             "本当に削除する必要があるなら ``OVERRIDE_DESTRUCTIVE=1`` を付けてください",
+        )
+    return None
+
+
+def _stash_ref_from_args(args_text: str) -> str:
+    for token in args_text.split():
+        token = token.strip("\"'")
+        if STASH_REF_RE.match(token):
+            return token
+    return "stash@{0}"
+
+
+def _stash_paths(stash_ref: str) -> list[str] | None:
+    try:
+        out = subprocess.check_output(
+            ["git", "stash", "show", "--name-only", stash_ref],
+            cwd=ROOT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stderr=subprocess.STDOUT,
+        )
+    except Exception as e:
+        sys.stderr.write(
+            f"Could not inspect {stash_ref} before applying it: {e}\n"
+            "Run `git stash show --name-only <stash>` manually, or use "
+            "`OVERRIDE_DESTRUCTIVE=1` only after confirming the stash scope.\n"
+        )
+        return None
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _check_stash_apply_pop(cmd: str) -> tuple[str, str] | None:
+    """Block applying a stash that would reintroduce mixed Dan/artifact scope."""
+    for match in STASH_APPLY_RE.finditer(cmd):
+        stash_ref = _stash_ref_from_args(match.group("args") or "")
+        paths = _stash_paths(stash_ref)
+        if paths is None:
+            return (
+                f"git stash {match.group(2)} {stash_ref} could not be scope-checked",
+                "Inspect the stash first, then apply only a single-scope patch or use a wip branch.",
+            )
+        if not paths:
+            continue
+
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from scope_classifier import classify, detect_mix  # noqa: E402
+
+        verdict = detect_mix(paths)
+        if verdict.ok:
+            continue
+
+        lines = [
+            f"git stash {match.group(2)} {stash_ref} would reintroduce mixed or ambiguous scope.",
+            f"reason: {verdict.reason}",
+            "",
+            "stash files:",
+        ]
+        for path in sorted(paths):
+            lines.append(f"  [{classify(path)}] {path}")
+        return (
+            "\n".join(lines),
+            "Use `git stash branch wip/<name> <stash>` to inspect it on a branch, "
+            "then cherry-pick or copy only one logical scope at a time. "
+            "If this is genuinely intended, rerun with `OVERRIDE_DESTRUCTIVE=1`.",
         )
     return None
 
@@ -176,6 +251,17 @@ def main() -> int:
                 f"{suggestion}\n"
             )
             return 2
+
+    stash_check = _check_stash_apply_pop(executable)
+    if stash_check:
+        reason, suggestion = stash_check
+        sys.stderr.write(
+            "Blocked stash apply/pop before it could rewrite the working tree:\n"
+            f"  command: {cmd}\n"
+            f"  reason: {reason}\n\n"
+            f"{suggestion}\n"
+        )
+        return 2
 
     rm_check = _check_rm_rf(executable)
     if rm_check:
