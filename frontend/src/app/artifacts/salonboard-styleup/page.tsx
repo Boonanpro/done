@@ -468,9 +468,9 @@ export default function SalonboardStyleupPage() {
   };
 
   return (
-    <div className="h-screen h-[100dvh] overflow-y-auto bg-[#f4f5f7] text-gray-900">
+    <div className="h-[100svh] overflow-y-auto bg-[#f4f5f7] text-gray-900">
       {previewMode && <PreviewStepBar current={step} onGo={goPreviewStep} />}
-      <div className="mx-auto min-h-screen max-w-md bg-white shadow-sm">
+      <div className="mx-auto min-h-full max-w-md bg-white shadow-sm">
         {!setupReady && (
           <div className="flex min-h-screen items-center justify-center">
             <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
@@ -748,7 +748,7 @@ function FormView({
   const done = reveal >= FIELD_SEQ.length;
 
   return (
-    <div className="pb-28">
+    <div>
       <div className="sticky top-0 z-10 flex items-center gap-2 bg-[#0a3d62] px-4 py-3 text-white">
         <span className="text-sm font-bold">スタイル登録</span>
         <span className="ml-auto rounded bg-white/15 px-2 py-0.5 text-[11px]">
@@ -962,7 +962,7 @@ function FormView({
         />
       </Section>
 
-      <div className="fixed inset-x-0 bottom-0">
+      <div className="sticky bottom-0">
         <div className="mx-auto max-w-md border-t border-gray-100 bg-white px-4 py-3">
           <button
             onClick={onPost}
@@ -1306,7 +1306,7 @@ function InitScreen({
         </p>
       </div>
 
-      <div className="space-y-5 px-6 pb-32 pt-6">
+      <div className="space-y-5 px-6 pb-6 pt-6">
         <div>
           <Label text="スタイリスト名" required />
           <input
@@ -1377,7 +1377,7 @@ function InitScreen({
         )}
       </div>
 
-      <div className="fixed inset-x-0 bottom-0">
+      <div className="sticky bottom-0">
         <div className="mx-auto max-w-md border-t border-gray-100 bg-white px-4 py-3">
           <button
             onClick={submit}
