@@ -1547,28 +1547,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       });
     }
 
-    // Warmup block for current live run that has no events yet
-    if (showWarmupBlock) {
-      // 最新のhumanメッセージの時刻に紐づけて位置を固定する
-      // (Date.now()を使うと再計算のたびにずれてメッセージとの前後が入れ替わる)
-      const lastHumanMsg = chronologicalMessages.findLast((m) => m.sender_type === 'human');
-      const anchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : 0;
-      timedItems.push({
-        item: {
-          kind: 'execution-block',
-          id: `warmup-${projectId}`,
-          steps: [
-            {
-              label: transitionLabel,
-              type: 'reasoning',
-            },
-          ],
-          isLive: true,
-        },
-        sortKey: anchorTime,
-        subKey: 2,
-      });
-    }
+    // Keep the live execution block anchored to the user message so the UI
+    // transitions from Thinking to tools/text without jumping through history.
+    const lastHumanMsg = chronologicalMessages.findLast((m) => m.sender_type === 'human');
+    const liveAnchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : 0;
+    let liveBlockRendered = false;
 
     // Group all execution events by run_id and create a block per run
     const eventsByRun = new Map<string, ExecutionEvent[]>();
@@ -1593,23 +1576,43 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       // finishes, the completed AI message carries the same tools/text inline
       // via ai_context.blocks (AiTurnBlocks), so keeping the standalone block
       // would just duplicate it.
-      if (steps.length > 0 && isLiveRun) {
+      if (isLiveRun && (steps.length > 0 || !!warmupMode)) {
+        liveBlockRendered = true;
         timedItems.push({
           item: {
             kind: 'execution-block',
-            id: `exec-${runId}`,
-            steps,
+            id: `live-${projectId}`,
+            steps: steps.length > 0 ? steps : [{
+              label: transitionLabel,
+              type: 'reasoning',
+            }],
             isLive: isLiveRun,
           },
-          sortKey: new Date(events[0].created_at).getTime(),
+          sortKey: liveAnchorTime,
           subKey: 2,
         });
       }
     }
 
+    if (showWarmupBlock && !liveBlockRendered) {
+      timedItems.push({
+        item: {
+          kind: 'execution-block',
+          id: `live-${projectId}`,
+          steps: [{
+            label: transitionLabel,
+            type: 'reasoning',
+          }],
+          isLive: true,
+        },
+        sortKey: liveAnchorTime,
+        subKey: 2,
+      });
+    }
+
     timedItems.sort((left, right) => left.sortKey - right.sortKey || left.subKey - right.subKey);
     return timedItems.map((item) => item.item);
-  }, [allExecutionEvents, currentRun, isActiveExecution, messages, projectId, showWarmupBlock, transitionLabel]);
+  }, [allExecutionEvents, currentRun, isActiveExecution, messages, projectId, showWarmupBlock, transitionLabel, warmupMode]);
 
   const hasAnyContent = displayItems.length > 0;
 
