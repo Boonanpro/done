@@ -222,9 +222,15 @@ const PROSE_CLASS =
   'prose prose-base prose-dan max-w-none text-base leading-relaxed text-foreground md:prose-base md:text-[17px] ' +
   '[&_pre]:max-h-72 [&_pre]:overflow-auto [&_pre]:text-sm';
 
-function AiMarkdown({ text, onImageClick }: { text: string; onImageClick?: (url: string) => void }) {
+// Muted style for "narration" text ("○○を調べます" between tools): smaller,
+// dimmer — clearly secondary so the real answer stands out.
+const MUTED_PROSE_CLASS =
+  'prose prose-sm prose-dan max-w-none text-sm leading-relaxed text-muted-foreground/80 ' +
+  '[&_p]:my-1 [&_pre]:max-h-60 [&_pre]:overflow-auto [&_pre]:text-xs';
+
+function AiMarkdown({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
   return (
-    <div className={PROSE_CLASS}>
+    <div className={muted ? MUTED_PROSE_CLASS : PROSE_CLASS}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -236,7 +242,7 @@ function AiMarkdown({ text, onImageClick }: { text: string; onImageClick?: (url:
   );
 }
 
-function TurnTextSegment({ text, onImageClick }: { text: string; onImageClick?: (url: string) => void }) {
+function TurnTextSegment({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
   const { images, videos, files, text: clean } = parseMediaContent(stripToolMarkup(text));
   return (
     <>
@@ -247,7 +253,7 @@ function TurnTextSegment({ text, onImageClick }: { text: string; onImageClick?: 
           {files.map((f, i) => (<a key={`f${i}`} href={f.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground shadow-sm transition-colors hover:bg-muted md:text-[15px]"><FileText className="h-4 w-4 shrink-0 text-primary" /><span className="truncate max-w-[250px]">{f.name}</span></a>))}
         </div>
       )}
-      {clean.trim() && <AiMarkdown text={clean} onImageClick={onImageClick} />}
+      {clean.trim() && <AiMarkdown text={clean} onImageClick={onImageClick} muted={muted} />}
     </>
   );
 }
@@ -308,10 +314,14 @@ function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false }: { blocks: Tur
       else grouped.push({ kind: 'tools', items: [b] });
     }
   }
+  // The substantive answer is the LAST text segment (after the tools). Earlier
+  // text segments are mid-work narration ("○○を調べます") → render them muted
+  // so the real answer stands out.
+  const lastTextIndex = grouped.reduce((acc, g, i) => (g.kind === 'text' ? i : acc), -1);
   return (
     <div className="flex flex-col">
       {grouped.map((g, i) => (g.kind === 'text'
-        ? <TurnTextSegment key={i} text={g.text} onImageClick={onImageClick} />
+        ? <TurnTextSegment key={i} text={g.text} onImageClick={onImageClick} muted={i !== lastTextIndex} />
         : <TurnToolGroup key={i} items={g.items} defaultOpen={toolsOpen} />))}
     </div>
   );
