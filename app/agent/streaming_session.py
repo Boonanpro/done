@@ -80,6 +80,12 @@ class StreamingSession:
         self._turn: Optional[_Turn] = None
         self._pending: "queue.Queue[str]" = queue.Queue()
         self._interrupt_sent = False
+        # True while a run_turn loop is active. Guards against a second,
+        # concurrent run_turn on the same session (e.g. a follow-up request that
+        # raced is_turn_active and fell through to a fresh process_message_cli):
+        # such a call must NOT start a parallel loop (that double-processes the
+        # CLI output and double-saves) — it is routed as a follow-up instead.
+        self._running = False
 
     # --- lifecycle ------------------------------------------------------
     def is_alive(self) -> bool:
@@ -162,31 +168,48 @@ class StreamingSession:
         turns (each re-invokes run_turn-like streaming through the same sink)."""
         if not self.is_alive():
             self.start()
-        turn = _Turn(sink=sink)
-        self._turn = turn
-        self._interrupt_sent = False
-        self._last_activity = time.time()
-        self._send_user(content)
 
-        # Keep running follow-up turns until nothing is pending.
-        last_result: Optional[TurnEvent] = None
-        deadline = time.time() + timeout
-        while True:
-            if not turn.done.wait(timeout=max(0.5, deadline - time.time())):
-                break  # timeout
-            last_result = turn.result
-            # If a follow-up was queued, start the next turn for it.
-            follow = self._drain_pending()
-            if follow is None:
-                break
+        # Serialize: only ONE run_turn loop may be active per session. A second,
+        # concurrent call (e.g. a follow-up request that raced is_turn_active and
+        # fell through to a fresh process_message_cli) must NOT spin a parallel
+        # loop driving the same CLI process — that double-processes the output
+        # and double-saves the answer. Route its content as a follow-up to the
+        # active loop and return immediately.
+        with self._lock:
+            if self._running:
+                self._pending.put(content)
+                self._last_activity = time.time()
+                return None
+            self._running = True
+
+        try:
             turn = _Turn(sink=sink)
             self._turn = turn
             self._interrupt_sent = False
             self._last_activity = time.time()
-            self._send_user(follow)
+            self._send_user(content)
+
+            # Keep running follow-up turns until nothing is pending.
+            last_result: Optional[TurnEvent] = None
             deadline = time.time() + timeout
-        self._turn = None
-        return last_result
+            while True:
+                if not turn.done.wait(timeout=max(0.5, deadline - time.time())):
+                    break  # timeout
+                last_result = turn.result
+                # If a follow-up was queued, start the next turn for it.
+                follow = self._drain_pending()
+                if follow is None:
+                    break
+                turn = _Turn(sink=sink)
+                self._turn = turn
+                self._interrupt_sent = False
+                self._last_activity = time.time()
+                self._send_user(follow)
+                deadline = time.time() + timeout
+            return last_result
+        finally:
+            self._turn = None
+            self._running = False
 
     def submit_followup(self, content: str) -> None:
         """Queue a follow-up. If a turn is in flight it will be applied at the
