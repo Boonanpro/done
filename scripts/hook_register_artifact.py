@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import asyncio
 from pathlib import Path
 
 
@@ -56,15 +57,15 @@ def main() -> int:
         return 0
 
     try:
-        from app.services.supabase_client import get_supabase_client
-        sb = get_supabase_client().client
+        from app.services.chat_artifact_service import ChatArtifactService
     except Exception:
         return 0
 
     try:
+        service = ChatArtifactService()
         # 既存チェック
         exists = (
-            sb.table("chat_artifact")
+            service.supabase.table("chat_artifact")
             .select("id")
             .eq("room_id", room_id)
             .eq("preview_url", preview_path)
@@ -74,7 +75,7 @@ def main() -> int:
             return 0
 
         # project の owner を取得
-        proj = sb.table("projects").select("user_id").eq("id", project_id).execute()
+        proj = service.supabase.table("projects").select("user_id").eq("id", project_id).execute()
         if not proj.data:
             return 0
         owner_id = proj.data[0]["user_id"]
@@ -89,7 +90,8 @@ def main() -> int:
             artifact_type = "website"
         else:
             artifact_type = "tool"
-        sb.table("chat_artifact").insert({
+        share_url = preview_url if folder == "demo" else preview_url.replace(f"/{folder}/", "/preview/", 1)
+        asyncio.run(service.create({
             "project_id": project_id,
             "room_id": room_id,
             "slug": slug,
@@ -97,11 +99,10 @@ def main() -> int:
             "artifact_type": artifact_type,
             "label": slug.replace("-", " ").replace("_", " "),
             "preview_url": preview_url,
-            "share_url": preview_url if folder == "demo" else preview_url.replace(f"/{folder}/", "/preview/", 1),
-            "draft_url": preview_url if folder == "demo" else preview_url.replace(f"/{folder}/", "/preview/", 1),
+            "share_url": share_url,
+            "draft_url": share_url,
             "publish_status": "preview_live",
-            "created_by": owner_id,
-        }).execute()
+        }, owner_id))
         sys.stderr.write(
             f"[artifact auto-register] {slug} -> {preview_url} (kind:{kind})\n"
         )

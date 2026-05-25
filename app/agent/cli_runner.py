@@ -253,10 +253,26 @@ def _save_ai_message_sync(
     reasoning_steps: Optional[list] = None,
     reasoning_full: Optional[list] = None,
     blocks: Optional[list] = None,
+    created_at: Optional[str] = None,
 ) -> bool:
-    """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。成功=True。disconnect時は1度だけリトライ。"""
+    """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。成功=True。disconnect時は1度だけリトライ。
+
+    created_at: 明示指定時はその時刻で保存（既定はDBの now()）。ストリーミング経路が
+    「ターン開始時刻」を渡すために使う。保存=ターン終了時刻だと、追い連絡で割り込まれた
+    ターンの回答が追い連絡より後ろにずれて時系列が崩れるのを防ぐ。
+    """
     from app.services.supabase_client import get_supabase_client
     from app.services.chat_service import record_message_delivery_sync
+    from app.services.artifact_url_guard import sanitize_artifact_public_urls
+
+    content = sanitize_artifact_public_urls(content)
+    if blocks:
+        blocks = [
+            {**b, "text": sanitize_artifact_public_urls(b.get("text", ""))}
+            if isinstance(b, dict) and b.get("type") == "text"
+            else b
+            for b in blocks
+        ]
 
     ai_context: Optional[dict] = None
     if reasoning_steps:
@@ -273,6 +289,8 @@ def _save_ai_message_sync(
         "sender_type": "ai",
         "content": content,
     }
+    if created_at:
+        insert_data["created_at"] = created_at
     if ai_context:
         insert_data["ai_context"] = ai_context
 
@@ -1387,6 +1405,10 @@ async def _process_via_streaming_session(
         "reasoning_steps_acc": [],
         "reasoning_full_acc": [],
         "session_id": None,
+        # ターン開始時刻（最初の assistant イベント時）。保存する ai_message の
+        # created_at に使い、追い連絡で割り込まれたターンの回答が時系列で正しく並ぶ
+        # ようにする（保存=ターン終了時刻だと追い連絡より後ろにずれる）。
+        "turn_start": None,
     }
 
     def _emit(display_ev: Dict[str, Any]) -> None:
@@ -1406,6 +1428,10 @@ async def _process_via_streaming_session(
         try:
             rtype = raw_ev.get("type")
             if rtype == "assistant":
+                if state["turn_start"] is None:
+                    # 最初の assistant イベント = このターンの開始（ユーザー/追い連絡
+                    # メッセージより確実に後の時刻になる）。
+                    state["turn_start"] = datetime.now(timezone.utc).isoformat()
                 blocks = (raw_ev.get("message") or {}).get("content") or []
                 for ev in _classify_content_blocks(blocks):
                     if ev["type"] == "text":
@@ -1441,21 +1467,27 @@ async def _process_via_streaming_session(
             elif rtype == "result":
                 result_text = raw_ev.get("result", "") or ""
                 is_error = bool(raw_ev.get("is_error"))
+                # このターンが追い連絡の割り込み（interrupt）で終了したか = 後続ターンあり。
+                # _interrupt_sent はこの sink と同じリーダースレッドで同期的にセットされる
+                # ので result 到達時点で信頼できる。継続中は done を出さずライブ表示を維持。
+                continuation = bool(getattr(session, "_interrupt_sent", False))
                 text = result_text or "\n".join(state["final_text_parts"])
                 if not text.strip():
                     text = "（応答テキストが空でした。もう一度お試しください。）"
+                turn_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
                 cli_saved = False
                 if not skip_save:
-                    cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"])
-                if project_id:
+                    cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"], created_at=turn_start)
+                if project_id and not continuation:
                     _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, content="completed")
                     _update_run_sync(run_id, state="failed" if is_error else "completed")
-                _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": cli_saved})
+                _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": cli_saved, "created_at": turn_start, "continuation": continuation})
                 # Reset per-turn accumulators for any follow-up turn.
                 state["turn_blocks"] = []
                 state["final_text_parts"] = []
                 state["reasoning_steps_acc"] = []
                 state["reasoning_full_acc"] = []
+                state["turn_start"] = None
 
             elif rtype == "error":
                 _emit({"type": "error", "message": raw_ev.get("message") or "error"})
@@ -1540,10 +1572,15 @@ async def process_message_cli(
         _use_streaming = False
     if _use_streaming:
         _cli_debug(f"[STREAMING] routing room={room_id} via persistent session")
+        from app.services.artifact_url_guard import sanitize_artifact_public_urls
         async for ev in _process_via_streaming_session(
             room_id, user_id, content, system_prompt, mcp_config_path,
             project_id, run_id, skip_save, cwd,
         ):
+            if isinstance(ev, dict) and ev.get("type") in {"text", "result"}:
+                key = "text" if "text" in ev else "content"
+                if isinstance(ev.get(key), str):
+                    ev = {**ev, key: sanitize_artifact_public_urls(ev[key])}
             yield ev
         return
 
@@ -1619,4 +1656,10 @@ async def process_message_cli(
         idle_seconds = 0
         if event is _SENTINEL:
             break
+        if isinstance(event, dict):
+            from app.services.artifact_url_guard import sanitize_artifact_public_urls
+            if event.get("type") in {"text", "result"}:
+                key = "text" if "text" in event else "content"
+                if isinstance(event.get(key), str):
+                    event = {**event, key: sanitize_artifact_public_urls(event[key])}
         yield event

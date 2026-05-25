@@ -1,4 +1,5 @@
 import { InspectorRuntimeLoader } from '@/components/dan/inspector-runtime-loader';
+import type { Metadata } from 'next';
 
 /**
  * artifacts ページ共通レイアウト。
@@ -24,6 +25,17 @@ const publicArtifactHostMap = JSON.stringify({
 const envArtifactHostMap = JSON.stringify(
   process.env.NEXT_PUBLIC_ARTIFACT_HOST_MAP || '',
 );
+
+export const metadata: Metadata = {
+  title: '成果物プレビュー',
+  description: 'DANで作成した成果物の公開プレビューです。',
+  manifest: '/manifest.webmanifest',
+  appleWebApp: {
+    capable: true,
+    title: '成果物',
+    statusBarStyle: 'default',
+  },
+};
 
 const prePaintScript = `
 (function(){

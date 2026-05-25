@@ -44,8 +44,8 @@ export function DeliveryModal({
   const sharePath = artifactSharePath(
     artifact.share_url || artifact.preview_url || artifact.slug,
   );
-  // 正規 URL は常に publicUrl（= <host>/preview/<slug>）。専用 alias は廃止。
-  // 独自ドメインを取った成果物だけ production_url が別途使われる。
+  // 正規 URL は常に publicUrl。
+  // 独自ドメイン取得前は <slug>-done.vercel.app、取得後は独自ドメインになる。
   const deliveryUrl = publicUrl;
 
   const save = async () => {
@@ -60,7 +60,20 @@ export function DeliveryModal({
           delivery_mode: 'preview_share',
           target_audience: artifact.artifact_type === 'dashboard' ? 'internal' : 'client',
           requires_auth: artifact.artifact_type === 'dashboard',
-          delivery_checklist: { delivery_url: deliveryUrl, share_path: sharePath },
+          delivery_checklist: {
+            ...(artifact.delivery_checklist || {}),
+            delivery_url: deliveryUrl,
+            share_path: sharePath,
+            public_profile: {
+              ...((artifact.delivery_checklist?.public_profile as Record<string, unknown> | undefined) || {}),
+              artifact_slug: artifact.slug,
+              public_url: deliveryUrl,
+              alias_domain: new URL(deliveryUrl).hostname,
+              start_url: `/preview/${artifact.slug}`,
+              scope: `/preview/${artifact.slug}`,
+              auth_policy: artifact.artifact_type === 'dashboard' ? 'auth_required' : 'public',
+            },
+          },
         }),
       });
       if (!patch.ok) throw new Error(await patch.text());

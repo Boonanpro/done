@@ -737,6 +737,52 @@ async def _register_written_chat_artifacts(
             logger.warning("Chat artifact auto-register failed for %s: %s", slug, e)
 
 
+def _artifact_slugs_from_written_paths(written_file_paths: list[str]) -> list[str]:
+    """Extract root artifact slugs from written frontend artifact paths."""
+    import re
+
+    pattern = re.compile(r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)[/\\]")
+    slugs: list[str] = []
+    seen: set[str] = set()
+    for raw_path in written_file_paths:
+        match = pattern.search((raw_path or "").replace("\\", "/"))
+        if not match:
+            continue
+        slug = match.group(1)
+        if slug not in seen:
+            seen.add(slug)
+            slugs.append(slug)
+    return slugs
+
+
+def _schedule_artifact_alias_deploy(written_file_paths: list[str]) -> None:
+    """Run the stable artifact deployment flow in the background.
+
+    This makes the alias update a harness behavior instead of relying on the LLM
+    to remember a deployment command after editing an artifact.
+    """
+    slugs = _artifact_slugs_from_written_paths(written_file_paths)
+    if not slugs:
+        return
+    try:
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        subprocess.Popen(
+            [sys.executable, "scripts/deploy_frontend_artifacts.py", *slugs],
+            cwd=str(root),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+        logger.info("Scheduled artifact alias deploy for slugs=%s", ",".join(slugs))
+    except Exception as e:
+        logger.warning("Failed to schedule artifact alias deploy: %s", e)
+
+
 def _fetch_latest_user_message_from_room(service: ChatService, room_id: str) -> str:
     """指定ルームの最新ユーザーメッセージを取得する（旧データ互換を含む）。"""
     if not room_id:
@@ -2314,6 +2360,11 @@ async def send_dan_message_stream(
                     elif event["type"] == "result":
                         result_text = event.get("text", "")
                         cli_saved_ai_message = event.get("cli_saved", False)
+                        # 追い連絡で中断されたターン（後続ターンが続く=継続中）。この場合は
+                        # done を送らず run も完了扱いにしない → フロントのライブ表示が
+                        # ターン境界で一瞬畳まれて再表示される「チラつき」(#1)を防ぐ。
+                        # 最後のターンの result（continuation=False）でだけ done を送る。
+                        is_continuation = bool(event.get("continuation", False))
                         if run_id and event.get("session_id"):
                             await run_service.attach_claude_session(run_id, event["session_id"])
                         run_state = "failed" if event.get("is_error") else "completed"
@@ -2333,7 +2384,9 @@ async def send_dan_message_stream(
                                 "sender_name": "ダン",
                                 "sender_type": "ai",
                                 "content": ai_response_content,
-                                "created_at": datetime.now(timezone.utc).isoformat(),
+                                # ストリーミング経路はターン開始時刻を返す（DB行と一致させ、
+                                # 追い連絡で割り込まれたターンが時系列で正しく並ぶように）。
+                                "created_at": event.get("created_at") or datetime.now(timezone.utc).isoformat(),
                             }
                             yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
                         else:
@@ -2352,11 +2405,15 @@ async def send_dan_message_stream(
                                     "created_at": ai_message_data["created_at"].isoformat() if hasattr(ai_message_data["created_at"], 'isoformat') else str(ai_message_data["created_at"]),
                                 }
                                 yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
-                        if run_id and run_state:
-                            await run_service.update_run(run_id, state=run_state)
-                        result_saved = True
-                        yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
-                        done_sent = True
+                        if is_continuation:
+                            # 後続ターンあり。done を送らずライブ表示を維持。run も running のまま。
+                            result_saved = True  # この中間ターンの回答は保存済み（DB-first）
+                        else:
+                            if run_id and run_state:
+                                await run_service.update_run(run_id, state=run_state)
+                            result_saved = True
+                            yield f"data: {json.dumps({'type': 'done', 'session_id': room_id})}\n\n"
+                            done_sent = True
 
                         # Update project's updated_at to bubble it up in sidebar
                         try:
@@ -2395,6 +2452,7 @@ async def send_dan_message_stream(
                         )
                         if written_file_paths:
                             await _save_written_artifacts(written_file_paths, room_id)
+                            _schedule_artifact_alias_deploy(written_file_paths)
                     except Exception as e:
                         logger.warning("Post-CLI artifact extraction failed (non-blocking): %s", e)
 

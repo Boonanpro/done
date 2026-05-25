@@ -529,6 +529,8 @@ if __name__ == "__main__":
                 )
                 if not exists.data:
                     artifact_type = "dashboard" if "dashboard" in kebab else ("website" if any(t in kebab for t in ("website", "site", "homepage", "hp", "lp", "landing", "corporate", "company")) else "tool")
+                    delivery_url = f"https://{kebab}-done.vercel.app/"
+                    share_url = preview_url if demo else f"/preview/{kebab}"
                     sb.table("chat_artifact").insert({
                         "room_id": room_id,
                         "project_id": project_id,
@@ -537,10 +539,31 @@ if __name__ == "__main__":
                         "artifact_type": artifact_type,
                         "label": feature_name,
                         "preview_url": preview_url,
-                        "share_url": preview_url if demo else f"/preview/{kebab}",
-                        "draft_url": preview_url if demo else f"/preview/{kebab}",
+                        "share_url": share_url,
+                        "draft_url": share_url,
                         "publish_status": "preview_live",
                         "created_by": owner_id,
+                        "delivery_status": "preview",
+                        "delivery_mode": "preview",
+                        "target_audience": "internal",
+                        "requires_auth": False,
+                        "payment_responsibility": "owner_pays",
+                        "delivery_checklist": {
+                            "delivery_url": delivery_url,
+                            "share_path": share_url,
+                            "preview_url": preview_url,
+                            "public_profile": {
+                                "artifact_slug": kebab,
+                                "public_url": delivery_url,
+                                "alias_domain": f"{kebab}-done.vercel.app",
+                                "title": feature_name,
+                                "manifest_path": f"/artifacts/{kebab}/manifest.webmanifest",
+                                "start_url": f"/preview/{kebab}",
+                                "scope": f"/preview/{kebab}",
+                                "auth_policy": "public",
+                                "artifact_type": artifact_type,
+                            },
+                        },
                     }).execute()
                     print(f"[chat_artifact] registered: {kebab} -> {preview_url} (project {project_id[:8]}...)")
                     created_files.append(f"REGISTERED: chat_artifact/{kebab}")

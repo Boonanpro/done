@@ -5,9 +5,11 @@ from datetime import datetime, timezone
 from typing import Optional, List
 import re
 from pathlib import Path
+from app.services.artifact_public_assets import ensure_artifact_icons
 from app.services.supabase_client import get_supabase_client
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DELIVERY_DOMAIN_SUFFIX = "-done.vercel.app"
 
 
 class ChatArtifactService:
@@ -41,8 +43,63 @@ class ChatArtifactService:
         payload.setdefault("target_audience", "internal")
         payload.setdefault("requires_auth", False)
         payload.setdefault("payment_responsibility", "owner_pays")
-        payload.setdefault("delivery_checklist", {})
+        payload["delivery_checklist"] = self._merge_public_profile(
+            payload.get("delivery_checklist"),
+            slug=slug,
+            preview_url=payload.get("preview_url"),
+            share_url=payload.get("share_url"),
+            label=payload.get("label"),
+            artifact_type=artifact_type,
+            requires_auth=payload.get("requires_auth", False),
+        )
+        if slug and kind != "demo":
+            ensure_artifact_icons(slug, payload.get("label") or slug)
         return payload
+
+    @staticmethod
+    def _delivery_domain_for(slug: str) -> str:
+        return f"{slug}{DELIVERY_DOMAIN_SUFFIX}"
+
+    @classmethod
+    def _delivery_url_for(cls, slug: str) -> str:
+        return f"https://{cls._delivery_domain_for(slug)}/"
+
+    @classmethod
+    def _merge_public_profile(
+        cls,
+        value: dict | None,
+        *,
+        slug: str,
+        preview_url: str | None,
+        share_url: str | None,
+        label: str | None,
+        artifact_type: str,
+        requires_auth: bool,
+    ) -> dict:
+        checklist = value if isinstance(value, dict) else {}
+        if not slug:
+            return checklist
+
+        public_url = cls._delivery_url_for(slug)
+        profile = {
+            **(checklist.get("public_profile") if isinstance(checklist.get("public_profile"), dict) else {}),
+            "artifact_slug": slug,
+            "public_url": public_url,
+            "alias_domain": cls._delivery_domain_for(slug),
+            "title": label or slug.replace("-", " ").replace("_", " "),
+            "manifest_path": f"/artifacts/{slug}/manifest.webmanifest",
+            "start_url": f"/preview/{slug}",
+            "scope": f"/preview/{slug}",
+            "auth_policy": "auth_required" if requires_auth else "public",
+            "artifact_type": artifact_type,
+        }
+        return {
+            **checklist,
+            "public_profile": profile,
+            "delivery_url": checklist.get("delivery_url") or public_url,
+            "share_path": checklist.get("share_path") or share_url or f"/preview/{slug}",
+            "preview_url": checklist.get("preview_url") or preview_url or f"/artifacts/{slug}",
+        }
 
     @staticmethod
     def _to_preview_url(value: str | None, slug: str) -> str:

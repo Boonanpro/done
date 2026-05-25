@@ -97,9 +97,27 @@ export async function middleware(request: NextRequest) {
     const first = segments[0];
     const slug = segments[1];
 
-    if ((first === 'preview' || first === 'artifacts') && slug === customDomainSlug) {
+    if (pathname === '/manifest.webmanifest') {
+      const url = request.nextUrl.clone();
+      url.pathname = `/artifacts/${customDomainSlug}/manifest.webmanifest`;
+      return NextResponse.rewrite(url);
+    }
+
+    if (first === 'preview' && slug === customDomainSlug) {
       const url = request.nextUrl.clone();
       const rest = segments.slice(2).join('/');
+      url.pathname = rest
+        ? `/artifacts/${customDomainSlug}/${rest}`
+        : `/artifacts/${customDomainSlug}`;
+      return NextResponse.rewrite(url);
+    }
+
+    if (first === 'artifacts' && slug === customDomainSlug) {
+      const rest = segments.slice(2).join('/');
+      if (rest === 'manifest.webmanifest' || /^icon-\d+\.png$/.test(rest)) {
+        return NextResponse.next();
+      }
+      const url = request.nextUrl.clone();
       url.pathname = rest ? `/${rest}` : '/';
       return NextResponse.redirect(url);
     }
@@ -149,5 +167,5 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/', '/artifacts/:path*', '/preview/:path*'],
+  matcher: ['/', '/artifacts/:path*', '/preview/:path*', '/manifest.webmanifest'],
 };

@@ -2,6 +2,9 @@ const DEFAULT_CUSTOM_DOMAINS: Record<string, string[]> = {
   kittoku: ['kittoku.vercel.app', 'yoshikawa-tokuso.vercel.app'],
 };
 
+const DELIVERY_DOMAIN_SUFFIX =
+  process.env.NEXT_PUBLIC_ARTIFACT_DELIVERY_SUFFIX || '-done.vercel.app';
+
 function parseCustomDomains(): Record<string, string[]> {
   const configured = process.env.NEXT_PUBLIC_ARTIFACT_CUSTOM_DOMAINS;
   if (!configured) return DEFAULT_CUSTOM_DOMAINS;
@@ -21,6 +24,16 @@ function parseCustomDomains(): Record<string, string[]> {
 }
 
 export const KNOWN_CUSTOM_DOMAINS: Record<string, string[]> = parseCustomDomains();
+
+function isInternalVercelUrl(value?: string | null): boolean {
+  if (!value) return false;
+  try {
+    const host = new URL(value).hostname;
+    return /^frontend(?:-[a-z0-9-]+)?-mikis-projects-86652663\.vercel\.app$/.test(host);
+  } catch {
+    return false;
+  }
+}
 
 function normalizeRest(rest = ''): string {
   if (!rest || rest === '/') return '';
@@ -44,6 +57,14 @@ export function artifactPublicPath(slug: string, rest = ''): string {
   return artifactPreviewPath(slug, rest);
 }
 
+export function artifactDeliveryDomain(slug: string): string {
+  return `${slug}${DELIVERY_DOMAIN_SUFFIX}`;
+}
+
+export function artifactDeliveryUrl(slug: string, rest = ''): string {
+  return `https://${artifactDeliveryDomain(slug)}${cleanPath(rest)}`;
+}
+
 export function artifactVisiblePath({
   slug,
   rest = '',
@@ -56,7 +77,7 @@ export function artifactVisiblePath({
   hostname?: string;
 }): string {
   const customDomains = KNOWN_CUSTOM_DOMAINS[slug] || [];
-  if (hostname && customDomains.includes(hostname)) {
+  if (hostname && (customDomains.includes(hostname) || hostname === artifactDeliveryDomain(slug))) {
     return cleanPath(rest);
   }
 
@@ -98,7 +119,8 @@ export function artifactProductionUrl({
   const routeSlug = parsed?.slug || slug;
   const knownDomain = KNOWN_CUSTOM_DOMAINS[routeSlug]?.[0];
   const domain = customDomain || knownDomain;
-  const base = productionUrl || (domain ? `https://${domain}` : null);
+  const safeProductionUrl = isInternalVercelUrl(productionUrl) ? null : productionUrl;
+  const base = safeProductionUrl || (domain ? `https://${domain}` : `https://${artifactDeliveryDomain(routeSlug)}`);
   if (!base) return null;
 
   let rest = '';

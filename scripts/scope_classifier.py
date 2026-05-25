@@ -70,6 +70,7 @@ _IGNORED_PATTERNS: tuple[str, ...] = (
     "package-lock.json",
     "frontend/package-lock.json",
     "frontend/.next/**",
+    "frontend/public/artifacts/*/icon-*.png",
     "node_modules/**",
     "frontend/node_modules/**",
     "**/__pycache__/**",
@@ -227,6 +228,8 @@ def classify(path: str) -> Scope:
         # by the infra rule list as well, but handle explicitly to make
         # ordering robust).
         if rest in {"layout.tsx"} or rest.startswith("publish/"):
+            return Scope("infra")
+        if rest.startswith("[slug]/"):
             return Scope("infra")
         head = rest.split("/", 1)[0]
         if head:
