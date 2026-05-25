@@ -442,7 +442,20 @@ def _build_system_prompt(
         "`/artifacts/<slug>` links. Import `ArtifactLink` from "
         "`@/components/artifacts/artifact-link` and alias it as `Link`, or use helpers "
         "from `@/lib/artifact-paths` when storing URLs. This preserves `/preview/<slug>` "
-        "and custom-domain clean paths while the source stays under `/artifacts/<slug>`."
+        "and custom-domain clean paths while the source stays under `/artifacts/<slug>`.\n"
+        "- Client-facing artifact URLs are stable delivery aliases: "
+        "`https://<slug>-done.vercel.app/`. Vercel deployment URLs such as "
+        "`frontend-xxxxx.vercel.app` are internal build outputs and must not be given to "
+        "the user as the share/delivery URL.\n"
+        "- When fixing an existing artifact, update the existing artifact source and make "
+        "sure its stable `*-done.vercel.app` alias points at the new deployment; do not "
+        "solve delivery by handing out a new deployment URL. Prefer "
+        "`python scripts/deploy_frontend_artifacts.py <slug>` after frontend artifact "
+        "changes so the production deployment and alias update happen together.\n"
+        "- Public artifacts must not inherit DAN's app identity. Add or preserve "
+        "artifact-specific metadata and PWA manifest settings; the public manifest must "
+        "not be `/manifest.json`, must not use `Done - AI Secretary`, and must not set "
+        "`start_url` to `/chat`."
     )
     parts.append(_ABSOLUTE_RULES)
 
@@ -1366,88 +1379,107 @@ async def _process_via_streaming_session(
     q: asyncio.Queue = asyncio.Queue()
     _SENTINEL: Dict[str, Any] = {"__turn_done__": True}
 
+    # Per-turn accumulators live in the SINK's thread context. They reset on each
+    # `result` so a follow-up turn saves its own ai_message/blocks independently.
+    state: Dict[str, Any] = {
+        "turn_blocks": [],
+        "final_text_parts": [],
+        "reasoning_steps_acc": [],
+        "reasoning_full_acc": [],
+        "session_id": None,
+    }
+
+    def _emit(display_ev: Dict[str, Any]) -> None:
+        # Best-effort forward to the SSE generator. Safe even if the consumer
+        # (the SSE request) is already gone — saving does NOT depend on this.
+        try:
+            loop.call_soon_threadsafe(q.put_nowait, display_ev)
+        except Exception:
+            pass
+
     def sink(raw_ev: Dict[str, Any]) -> None:
-        loop.call_soon_threadsafe(q.put_nowait, raw_ev)
+        # Runs in the session reader thread. Does classification + DB-first
+        # persistence (execution_events / ai_message / done) here, INDEPENDENT of
+        # SSE liveness — matching the one-shot path's _run_cli_in_thread. If the
+        # phone backgrounds and the SSE drops mid-turn, Dan keeps working and the
+        # result is still saved. Display events are forwarded best-effort.
+        try:
+            rtype = raw_ev.get("type")
+            if rtype == "assistant":
+                blocks = (raw_ev.get("message") or {}).get("content") or []
+                for ev in _classify_content_blocks(blocks):
+                    if ev["type"] == "text":
+                        txt = ev.get("text", "")
+                        if txt.strip():
+                            state["final_text_parts"].append(txt)
+                            state["turn_blocks"].append({"type": "text", "text": txt})
+                        _emit(ev)
+                        if project_id and txt.strip() and len(txt.strip()) > 10:
+                            _save_execution_event_sync(room_id, "reasoning", project_id=project_id, run_id=run_id, content=txt.strip())
+                            state["reasoning_steps_acc"].append(txt.strip())
+                            state["reasoning_full_acc"].append(txt.strip())
+                    elif ev["type"] == "tool_use":
+                        from app.api.project_routes import _format_tool_label
+                        tool_label = _format_tool_label(ev.get("name", ""), ev.get("input", {}))
+                        _emit(ev)
+                        if project_id:
+                            _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=run_id, tool_name=ev.get("name", ""), tool_label=tool_label)
+                            state["reasoning_steps_acc"].append(f"🔧 {tool_label}")
+                            state["turn_blocks"].append({"type": "tool", "name": ev.get("name", ""), "label": tool_label, "detail": _tool_detail(ev.get("input", {}))})
+                    elif ev["type"] == "reasoning":
+                        _emit(ev)
+                        if ev.get("text", "").strip():
+                            state["reasoning_full_acc"].append(ev["text"])
+
+            elif rtype == "system":
+                sid = raw_ev.get("session_id")
+                if sid:
+                    state["session_id"] = sid
+                    _save_session(room_id, sid)
+                    _update_run_sync(run_id, claude_session_id=sid)
+
+            elif rtype == "result":
+                result_text = raw_ev.get("result", "") or ""
+                is_error = bool(raw_ev.get("is_error"))
+                text = result_text or "\n".join(state["final_text_parts"])
+                if not text.strip():
+                    text = "（応答テキストが空でした。もう一度お試しください。）"
+                cli_saved = False
+                if not skip_save:
+                    cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"])
+                if project_id:
+                    _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, content="completed")
+                    _update_run_sync(run_id, state="failed" if is_error else "completed")
+                _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": cli_saved})
+                # Reset per-turn accumulators for any follow-up turn.
+                state["turn_blocks"] = []
+                state["final_text_parts"] = []
+                state["reasoning_steps_acc"] = []
+                state["reasoning_full_acc"] = []
+
+            elif rtype == "error":
+                _emit({"type": "error", "message": raw_ev.get("message") or "error"})
+        except Exception as e:  # noqa: BLE001
+            _cli_debug(f"[STREAMING] sink error: {e}")
 
     def run() -> None:
         try:
             session.run_turn(content, sink, timeout=600)
         except Exception as e:  # noqa: BLE001
-            loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "message": str(e)})
+            _emit({"type": "error", "message": str(e)})
         finally:
-            loop.call_soon_threadsafe(q.put_nowait, _SENTINEL)
+            _emit(_SENTINEL)
 
     threading.Thread(target=run, daemon=True).start()
 
-    turn_blocks: list = []
-    final_text_parts: list = []
-    reasoning_steps_acc: list = []
-    reasoning_full_acc: list = []
-    session_id_captured: Optional[str] = None
-
+    # The generator is now a thin display forwarder. If the SSE consumer goes
+    # away, the sink (in the reader thread) keeps classifying + saving, so DB
+    # persistence is decoupled from SSE liveness.
     while True:
         raw = await q.get()
         if raw is _SENTINEL:
             break
-        rtype = raw.get("type")
-
-        if rtype == "assistant":
-            blocks = (raw.get("message") or {}).get("content") or []
-            for ev in _classify_content_blocks(blocks):
-                if ev["type"] == "text":
-                    txt = ev.get("text", "")
-                    if txt.strip():
-                        final_text_parts.append(txt)
-                        turn_blocks.append({"type": "text", "text": txt})
-                    yield ev
-                    if project_id and txt.strip() and len(txt.strip()) > 10:
-                        _save_execution_event_sync(room_id, "reasoning", project_id=project_id, run_id=run_id, content=txt.strip())
-                        reasoning_steps_acc.append(txt.strip())
-                        reasoning_full_acc.append(txt.strip())
-                elif ev["type"] == "tool_use":
-                    from app.api.project_routes import _format_tool_label
-                    tool_label = _format_tool_label(ev.get("name", ""), ev.get("input", {}))
-                    yield ev
-                    if project_id:
-                        _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=run_id, tool_name=ev.get("name", ""), tool_label=tool_label)
-                        reasoning_steps_acc.append(f"🔧 {tool_label}")
-                        turn_blocks.append({"type": "tool", "name": ev.get("name", ""), "label": tool_label, "detail": _tool_detail(ev.get("input", {}))})
-                elif ev["type"] == "reasoning":
-                    yield ev
-                    if ev.get("text", "").strip():
-                        reasoning_full_acc.append(ev["text"])
-
-        elif rtype == "system":
-            sid = raw.get("session_id")
-            if sid:
-                session_id_captured = sid
-                _save_session(room_id, sid)
-                _update_run_sync(run_id, claude_session_id=sid)
-
-        elif rtype == "result":
-            result_text = raw.get("result", "") or ""
-            is_error = bool(raw.get("is_error"))
-            text = result_text or "\n".join(final_text_parts)
-            if not text.strip():
-                text = "（応答テキストが空でした。もう一度お試しください。）"
-            cli_saved = False
-            if not skip_save:
-                cli_saved = _save_ai_message_sync(room_id, text, reasoning_steps_acc, reasoning_full_acc, blocks=turn_blocks)
-            if project_id:
-                _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, content="completed")
-                _update_run_sync(run_id, state="failed" if is_error else "completed")
-            yield {"type": "result", "text": text, "session_id": session_id_captured, "is_error": is_error, "cli_saved": cli_saved}
-            # Reset per-turn accumulators: a follow-up injected at the next step
-            # boundary produces a *subsequent* turn (run_turn loops over pending
-            # follow-ups through the same sink), and that turn must save its own
-            # ai_message/blocks without inheriting this turn's content.
-            turn_blocks = []
-            final_text_parts = []
-            reasoning_steps_acc = []
-            reasoning_full_acc = []
-
-        elif rtype == "error":
-            yield {"type": "error", "message": raw.get("message") or "error"}
+        yield raw
 
 
 async def process_message_cli(

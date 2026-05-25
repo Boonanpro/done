@@ -69,6 +69,9 @@ export interface MessageResponse {
   };
   reply_to_id?: string;
   reply_to_message?: ReplyToMessage;
+  // ダン作業中の追い連絡で、まだ「読まれて反映」されていない仮送信状態（半透明表示）。
+  // クライアント側のみで付与し、ダンの応答到着でクリアする（DB列ではない）。
+  pendingFollowup?: boolean;
 }
 
 export interface MessagesListResponse {
@@ -1077,6 +1080,7 @@ export const api = {
         onUserMessage?: (message: MessageResponse, sessionId?: string) => void;
         onAIMessage?: (message: MessageResponse, sessionId?: string) => void;
         onVoiceAnnouncement?: (text: string, sessionId?: string) => void;
+        onFollowupQueued?: (messageId: string, sessionId?: string) => void;
         onComplete?: (sessionId?: string) => void;
         onError?: (error: string, sessionId?: string) => void;
         onInterrupted?: (reason: StreamInterruptionReason, sessionId?: string) => void;
@@ -1162,6 +1166,8 @@ export const api = {
                   callbacks.onUserMessage(parsed.message, eventSessionId);
                 } else if (parsed.type === 'ai_message' && callbacks.onAIMessage) {
                   callbacks.onAIMessage(parsed.message, eventSessionId);
+                } else if (parsed.type === 'followup_queued' && callbacks.onFollowupQueued) {
+                  callbacks.onFollowupQueued(parsed.message_id, eventSessionId);
                 } else if (parsed.type === 'done') {
                   // スキル化可能な場合、コールバックを呼び出す
                   if (parsed.can_create_skill && parsed.browser_session_id && callbacks.onSkillAvailable) {

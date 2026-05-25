@@ -338,12 +338,19 @@ function stepsToBlocks(steps: StepInfo[]): TurnBlock[] {
   });
 }
 
+// 追い連絡（ダン作業中の途中送信）機能のフロント側ゲート。
+// バックエンドの DAN_STREAMING_INPUT と揃えて有効化する（OFF時は従来挙動）。
+const STREAMING_INPUT = process.env.NEXT_PUBLIC_DAN_STREAMING_INPUT === '1';
+
 const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }: { msg: MessageResponse; onImageClick?: (url: string) => void; onReply?: (msg: MessageResponse) => void }) {
+
+  // 追い連絡の仮送信状態（クライアント側フラグ）。半透明＋バッジで表示。
+  const pending = !!msg.pendingFollowup;
 
   if (msg.sender_type === 'human') {
     const { images, videos, files, text } = parseMediaContent(msg.content || '');
     return (
-      <div className="flex flex-col items-end max-w-[85%] ml-auto">
+      <div className={`flex flex-col items-end max-w-[85%] ml-auto${pending ? ' opacity-50' : ''}`}>
         {msg.reply_to_message && <ReplyQuote replyTo={msg.reply_to_message} />}
         <div className="group flex items-start gap-1">
           {onReply && !msg.id.startsWith('temp-') && (
@@ -393,6 +400,9 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
           )}
           </div>
         </div>
+        {pending && (
+          <span className="mt-0.5 mr-1 text-[11px] text-muted-foreground">仮送信・次の区切りで反映</span>
+        )}
       </div>
     );
   }
@@ -813,6 +823,7 @@ function ChatInput({
     };
 
     const queryKey = ['project-messages', roomId];
+    await queryClient.cancelQueries({ queryKey });
     const currentReplaceId = replaceMessageIdRef.current;
     if (currentReplaceId) {
       // 再送信: 既存メッセージの内容を楽観的に上書き
@@ -881,6 +892,12 @@ function ChatInput({
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
             queryClient.invalidateQueries({ queryKey: ['projects'] });
+            // ダンが応答した = 仮送信中の追い連絡は読まれて反映された → 不透明化
+            queryClient.setQueryData(
+              ['project-messages', roomId],
+              (old: { messages: MessageResponse[] } | undefined) =>
+                old ? { messages: old.messages.map((m) => (m.pendingFollowup ? { ...m, pendingFollowup: false } : m)) } : old
+            );
           },
           onProcessStep: (_step: ProcessStep) => {
             if (streamRequestRef.current !== requestId) return;
@@ -990,6 +1007,78 @@ function ChatInput({
     }
   }, [sendMessageRef, sendMessageCore]);
 
+  // 追い連絡（DAN_STREAMING_INPUT）: ダンの作業中に送る途中メッセージ。
+  // 進行中のSSEストリームを中断せず、別リクエストで送信する。即 followup_queued で
+  // ackされ、回答（次の境界以降のターン）は継続中の最初のストリームが onAIMessage で届ける。
+  const sendFollowup = useCallback(async (
+    content: string,
+    imageUrls: string[] = [],
+    fileUrls: { name: string; url: string }[] = [],
+    replyToMsg?: MessageResponse | null,
+  ) => {
+    if (!content.trim() && imageUrls.length === 0 && fileUrls.length === 0) return;
+    const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
+    const filePrefix = fileUrls.map(f => `[添付ファイル: ${f.name} (${f.url})]`).join('\n');
+    const mediaParts = [imagePrefix, filePrefix].filter(Boolean).join('\n');
+    const optimisticContent = mediaParts ? (content ? `${mediaParts}\n\n${content}` : mediaParts) : content;
+
+    const tempId = `temp-followup-${Date.now()}`;
+    const queryKey = ['project-messages', roomId];
+    const optimistic: MessageResponse = {
+      id: tempId,
+      room_id: roomId,
+      sender_id: user?.id || '',
+      sender_name: user?.display_name || 'You',
+      sender_type: 'human',
+      content: optimisticContent,
+      created_at: new Date().toISOString(),
+      pendingFollowup: true,
+      ...(replyToMsg ? {
+        reply_to_id: replyToMsg.id,
+        reply_to_message: {
+          id: replyToMsg.id,
+          sender_name: replyToMsg.sender_name,
+          sender_type: replyToMsg.sender_type,
+          content: replyToMsg.content,
+          created_at: replyToMsg.created_at,
+        },
+      } : {}),
+    };
+    queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
+      messages: [optimistic, ...(old?.messages || [])],
+    }));
+
+    const controller = new AbortController();
+    try {
+      await api.sm.sendMessageStream(
+        { message: content, session_id: roomId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}) },
+        {
+          onUserMessage: (msg) => {
+            // temp をサーバ版で置換しつつ、読まれるまでは仮送信フラグを保持する。
+            queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
+              messages: (old?.messages || []).map((m: MessageResponse) => (m.id === tempId ? { ...msg, pendingFollowup: true } : m)),
+            }));
+          },
+          // 受領確認。ダンの応答が届くまで「仮送信」（半透明）のまま。
+          onFollowupQueued: () => {},
+          // 本リクエストは即終了する。メインストリームのスピナー等には触れない。
+          onComplete: () => {},
+          onError: (error) => {
+            queryClient.setQueryData(queryKey, (old: { messages: MessageResponse[] } | undefined) => ({
+              messages: (old?.messages || []).filter((m: MessageResponse) => m.id !== tempId),
+            }));
+            toast.error(error || '追い連絡の送信に失敗しました');
+          },
+        },
+        controller.signal,
+      );
+    } catch (error) {
+      if (error instanceof Error && error.name !== 'AbortError') {
+        toast.error('追い連絡の送信中に問題が発生しました');
+      }
+    }
+  }, [queryClient, roomId, user?.id, user?.display_name]);
+
   const handleSendMessage = useCallback(async () => {
     if (!message.trim() && attachedFiles.length === 0) return;
 
@@ -999,6 +1088,17 @@ function ChatInput({
 
     const content = message.trim();
     const currentReplyTo = replyTo;
+
+    // 追い連絡: ダン作業中（進行中ストリームあり）の途中送信は、ストリームを
+    // 中断せず別経路で送る。メインストリームの ref 群には触れない。
+    if (STREAMING_INPUT && abortControllerRef.current !== null) {
+      setMessage('');
+      setAttachedFiles([]);
+      onClearReply?.();
+      await sendFollowup(content, imageUrls, fileUrls, currentReplyTo);
+      return;
+    }
+
     pendingMessageRef.current = { text: message, files: [...attachedFiles], replyTo };
     aiRespondedRef.current = false;
     serverMessageIdRef.current = null;
@@ -1008,7 +1108,7 @@ function ChatInput({
     // Immediately bump this project to top of sidebar
     queryClient.invalidateQueries({ queryKey: ['projects'] });
     await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo);
-  }, [attachedFiles, message, sendMessageCore, queryClient, replyTo, onClearReply]);
+  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, replyTo, onClearReply]);
 
   const handleCancel = useCallback(async () => {
     const pending = pendingMessageRef.current;
@@ -1460,7 +1560,9 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     enabled: !!project?.room_id,
     staleTime: 5 * 1000,
     retry: 1,
-    refetchInterval: (query) => (query.state.error ? 15000 : 3000),
+    refetchInterval: (query) => (
+      sseConnectedRef.current || warmupMode ? false : (query.state.error ? 15000 : 3000)
+    ),
   });
 
   const latestMessageId = messagesData?.messages?.[0]?.id;
@@ -1549,6 +1651,13 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     const lastHumanMsg = chronologicalMessages.findLast((m) => m.sender_type === 'human');
     const liveAnchorTime = lastHumanMsg ? new Date(lastHumanMsg.created_at).getTime() : 0;
     const liveAnchorMessageTime = liveAnchorTime;
+    // Anchor the live execution block to the current RUN's start, not the last
+    // human message. Without this, a follow-up sent mid-run (a newer human msg)
+    // drags the live block below it, so Dan's in-progress output appears to jump
+    // ABOVE the follow-up. Anchoring to the run start keeps chronological order:
+    // [starting message] → [Dan's live output] → [follow-up].
+    const runStart = (currentRun as { created_at?: string } | null)?.created_at;
+    const liveBlockSortKey = runStart ? new Date(runStart).getTime() : liveAnchorTime;
 
     for (const msg of chronologicalMessages) {
       const content = msg.content || '';
@@ -1613,7 +1722,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
             }],
             isLive: isLiveRun,
           },
-          sortKey: liveAnchorTime,
+          sortKey: liveBlockSortKey,
           subKey: 2,
         });
       }
