@@ -721,8 +721,8 @@ function Analyzing({ photos }: { photos: Photo[] }) {
   );
 }
 
-/* ============ 部品: 写真の並べ替え（ドラッグで FRONT/SIDE/BACK を入替） ============ */
-const SLOT_LABELS = ['FRONT', 'SIDE', 'BACK'] as const;
+/* ============ 部品: 写真の並べ替え（ドラッグで投稿順を入替） ============ */
+const SLOT_LABELS = ['1枚目', '2枚目', '3枚目'] as const;
 
 function PhotoReorder({
   photos,
@@ -772,7 +772,7 @@ function PhotoReorder({
         <p className="mt-2 flex items-start gap-1 text-[11px] leading-relaxed text-gray-400">
           <GripHorizontal className="mt-0.5 h-3 w-3 shrink-0" />
           <span>
-            写真をドラッグして並べ替えると、前(FRONT)・横(SIDE)・後ろ(BACK)の順番が変わります。この順番のままサロンボードに登録されます。
+            写真をドラッグして並べ替えると、この順番のままサロンボードに登録されます。
           </span>
         </p>
       )}
