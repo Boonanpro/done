@@ -146,6 +146,18 @@ def _save_session(room_id: str, session_id: str):
         logger.warning(f"Failed to save CLI session for {room_id}: {e}")
 
 
+def _clear_cli_session(room_id: str) -> None:
+    """Forget a room's saved Claude CLI session (in-memory cache + DB) so the
+    next turn starts a fresh conversation instead of resuming a stale or
+    poisoned transcript."""
+    _cli_sessions.pop(room_id, None)
+    try:
+        from app.services.supabase_client import get_supabase_client
+        get_supabase_client().client.table("cli_sessions").delete().eq("room_id", room_id).execute()
+    except Exception as e:
+        _cli_debug(f"_clear_cli_session failed: {e}")
+
+
 def _is_disconnect_error(err: Exception) -> bool:
     """Detect transient Supabase/httpx disconnect errors worth retrying once."""
     msg = str(err).lower()
@@ -1387,13 +1399,18 @@ async def _process_via_streaming_session(
     run_id: Optional[str],
     skip_save: bool,
     cwd: Optional[str],
+    resume_session_id: Optional[str] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """DAN_STREAMING_INPUT path (flag-gated). Runs the turn through a
-    persistent stream-json session so follow-ups can later be injected at the
-    next step boundary. Reuses the SAME classify/save helpers as the one-shot
-    path; the one-shot path itself is untouched.
+    persistent stream-json session so follow-ups can be injected at the next
+    step boundary. Reuses the SAME classify/save helpers as the one-shot path;
+    the one-shot path itself is untouched.
 
-    Increment 2a: a normal turn only. (Follow-up injection is a later step.)
+    When `resume_session_id` is set, a freshly (re)started session resumes that
+    saved Claude conversation with `--resume`, so dan-core restarts (and the
+    idle-hang teardown) no longer wipe the room's context. The streaming path
+    keeps no other history, so this is what makes it survive a restart the way
+    the one-shot path always has.
     """
     from app.agent.streaming_session import get_or_create_session
 
@@ -1416,6 +1433,10 @@ async def _process_via_streaming_session(
             "--append-system-prompt", system_prompt,
             "--disallowedTools", "ExitPlanMode,AskUserQuestion",
         ]
+        # Resume the saved conversation so context survives a process restart.
+        # Only applied at session creation (a live session is reused as-is).
+        if resume_session_id:
+            c += ["--resume", resume_session_id]
         return c
 
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "ANTHROPIC_API_KEY")}
@@ -1442,6 +1463,9 @@ async def _process_via_streaming_session(
         # created_at に使い、追い連絡で割り込まれたターンの回答が時系列で正しく並ぶ
         # ようにする（保存=ターン終了時刻だと追い連絡より後ろにずれる）。
         "turn_start": None,
+        # True once any `result` was seen this call. Used to tell a normal turn
+        # apart from a session that died on start (e.g. a stale --resume id).
+        "any_result": False,
     }
 
     def _emit(display_ev: Dict[str, Any]) -> None:
@@ -1504,6 +1528,7 @@ async def _process_via_streaming_session(
                     _update_run_sync(run_id, claude_session_id=sid)
 
             elif rtype == "result":
+                state["any_result"] = True
                 result_text = raw_ev.get("result", "") or ""
                 is_error = bool(raw_ev.get("is_error"))
                 # このターンが追い連絡の割り込み（interrupt）で終了したか = 後続ターンあり。
@@ -1536,15 +1561,19 @@ async def _process_via_streaming_session(
             _cli_debug(f"[STREAMING] sink error: {e}")
 
     def run() -> None:
+        t0 = time.time()
         try:
             session.run_turn(content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
+            elapsed = time.time() - t0
             # Idle hang: the turn produced no `result`, so the sink never saved
             # or emitted one. Instead of silently closing the SSE on silence
             # (which is what made long tasks "lose" their reply), persist what
             # streamed so far and tell the user it was cut at a quiet point. The
-            # session was already torn down inside run_turn, so the next message
-            # starts on a clean process.
+            # session was already torn down inside run_turn; also forget the
+            # saved session id so the next turn starts a FRESH conversation
+            # rather than --resume-ing a half-finished (desynced) transcript.
             if getattr(session, "last_turn_hung", False):
+                _clear_cli_session(room_id)
                 partial = "\n".join(state["final_text_parts"]).strip()
                 note = (
                     "（長時間の処理が一定時間まったく応答しなくなったため、ここで一旦区切りました。"
@@ -1569,6 +1598,27 @@ async def _process_via_streaming_session(
                     "type": "result", "text": text, "session_id": state["session_id"],
                     "is_error": True, "cli_saved": not skip_save, "created_at": t_start,
                     "continuation": False, "turn_id": t_id,
+                })
+            elif resume_session_id and not state["any_result"] and elapsed < 15:
+                # We asked the process to --resume <id> and it produced nothing
+                # and exited almost immediately → the saved transcript was
+                # probably stale/gone ("No conversation found"). Forget it and
+                # ask the user to resend; the next turn starts fresh and works,
+                # instead of failing on every retry.
+                _clear_cli_session(room_id)
+                try:
+                    session.stop()
+                except Exception:
+                    pass
+                text = (
+                    "前回の会話の復元に失敗したため、セッションを作り直しました。"
+                    "お手数ですが、もう一度同じ内容を送ってください。"
+                )
+                if not skip_save:
+                    _save_ai_message_sync(room_id, text, turn_id=str(uuid.uuid4()))
+                _emit({
+                    "type": "result", "text": text, "session_id": None,
+                    "is_error": True, "cli_saved": not skip_save, "continuation": False,
                 })
         except Exception as e:  # noqa: BLE001
             _emit({"type": "error", "message": str(e)})
@@ -1655,6 +1705,7 @@ async def process_message_cli(
         async for ev in _process_via_streaming_session(
             room_id, user_id, content, system_prompt, mcp_config_path,
             project_id, run_id, skip_save, cwd,
+            resume_session_id=resume_session_id,
         ):
             if isinstance(ev, dict) and ev.get("type") in {"text", "result"}:
                 key = "text" if "text" in ev else "content"
