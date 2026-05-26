@@ -158,6 +158,59 @@ def _clear_cli_session(room_id: str) -> None:
         _cli_debug(f"_clear_cli_session failed: {e}")
 
 
+def _is_parse_error_text(text: Optional[str]) -> bool:
+    """True when a turn result is the CLI's unparseable-tool-call error — the
+    signature of the `<invoke>`-as-text leak that poisons a session."""
+    return "could not be parsed" in (text or "").lower()
+
+
+# Lines from history that would re-poison a fresh session if fed back verbatim.
+_RESEED_SKIP_MARKERS = ("<invoke", "could not be parsed", "function_calls")
+
+
+def _build_reseed_context(room_id: str, max_chars: int = 8000, max_msgs: int = 40) -> str:
+    """Rebuild a room's recent conversation from the DB as a context preamble
+    for a FRESH session. Used after a poisoned/desynced session is dropped so
+    Dan keeps the context (no re-explaining) without resuming the contaminated
+    transcript. Contaminated lines are filtered out so they can't re-poison.
+    Returns "" when there is no usable history."""
+    try:
+        from app.services.supabase_client import get_supabase_client
+        rows = (
+            get_supabase_client().client.table("chat_messages")
+            .select("sender_type,content,created_at")
+            .eq("room_id", room_id).order("created_at", desc=True).limit(max_msgs).execute()
+        ).data or []
+    except Exception as e:
+        _cli_debug(f"_build_reseed_context fetch failed: {e}")
+        return ""
+
+    lines = []
+    for m in reversed(rows):  # oldest -> newest
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        low = content.lower()
+        if any(mark in low for mark in _RESEED_SKIP_MARKERS):
+            continue  # never re-feed contaminated tool-call text
+        who = "ユーザー" if m.get("sender_type") == "human" else "ダン"
+        lines.append(f"{who}: {content[:1500]}")
+    if not lines:
+        return ""
+
+    body = "\n".join(lines)
+    if len(body) > max_chars:
+        body = body[-max_chars:]  # keep the most recent
+    return (
+        "<conversation_so_far>\n"
+        "（内部メモ: セッションがリセットされたため、この部屋のこれまでの会話を再共有します。"
+        "この見出し自体やログはユーザーに表示しないこと。文脈として読み、続きから自然に対応してください。"
+        "過去のやり取りを最初から繰り返し報告しないこと。）\n\n"
+        f"{body}\n"
+        "</conversation_so_far>"
+    )
+
+
 def _is_disconnect_error(err: Exception) -> bool:
     """Detect transient Supabase/httpx disconnect errors worth retrying once."""
     msg = str(err).lower()
@@ -1445,7 +1498,23 @@ async def _process_via_streaming_session(
     env["GIT_TERMINAL_PROMPT"] = "0"
     run_cwd = cwd or str(CLI_WORKSPACE)
 
+    from app.agent.streaming_session import get_session
+    existing = get_session(room_id)
+    session_is_fresh = existing is None or not existing.is_alive()
     session = get_or_create_session(room_id, build_cmd, env, run_cwd)
+
+    # Context-preserving reseed: when we start a BRAND-NEW session with no
+    # transcript to --resume (e.g. right after a poisoned session was cleared),
+    # rebuild the room's context from the DB instead of resuming a possibly
+    # contaminated transcript. The conversation lives in chat_messages, so a
+    # reset drops only the CLI session — not the context — and the user never
+    # has to re-explain. Contaminated lines (leaked <invoke> text / parse-error
+    # results) are filtered out so the reseed can't re-poison the new session.
+    send_content = content
+    if session_is_fresh and not resume_session_id:
+        reseed = _build_reseed_context(room_id)
+        if reseed:
+            send_content = f"{reseed}\n\n{content}"
 
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
@@ -1539,6 +1608,14 @@ async def _process_via_streaming_session(
                 text = result_text or "\n".join(state["final_text_parts"])
                 if not text.strip():
                     text = "（応答テキストが空でした。もう一度お試しください。）"
+                # Replace the CLI's cryptic parse-error result with a friendly
+                # note. The session is dropped + reseeded afterwards (see run()),
+                # so the user can just resend and continue with full context.
+                if is_error and _is_parse_error_text(result_text):
+                    text = (
+                        "うまく処理できませんでした（内部のツール呼び出しが壊れました）。"
+                        "文脈は保持したままセッションを立て直したので、もう一度同じ内容を送ってください。"
+                    )
                 turn_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
@@ -1564,7 +1641,7 @@ async def _process_via_streaming_session(
     def run() -> None:
         t0 = time.time()
         try:
-            session.run_turn(content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
+            res = session.run_turn(send_content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
             elapsed = time.time() - t0
             # Idle hang: the turn produced no `result`, so the sink never saved
             # or emitted one. Instead of silently closing the SSE on silence
@@ -1600,6 +1677,19 @@ async def _process_via_streaming_session(
                     "is_error": True, "cli_saved": not skip_save, "created_at": t_start,
                     "continuation": False, "turn_id": t_id,
                 })
+            elif res and res.get("is_error") and _is_parse_error_text(res.get("result") or ""):
+                # Poisoned turn: the model emitted an unparseable tool call (the
+                # `<invoke>`-as-text leak). The sink already saved a result, so
+                # we don't save again — we just drop the session + saved id so
+                # the NEXT turn starts FRESH and gets re-seeded from the DB
+                # (context preserved) instead of resuming the contaminated
+                # transcript and looping on the same parse error every turn.
+                _clear_cli_session(room_id)
+                try:
+                    session.stop()
+                except Exception:
+                    pass
+                _cli_debug(f"[STREAMING] parse-error poisoned session cleared for room {room_id[:8]}")
             elif resume_session_id and not state["any_result"] and elapsed < 15:
                 # We asked the process to --resume <id> and it produced nothing
                 # and exited almost immediately → the saved transcript was
