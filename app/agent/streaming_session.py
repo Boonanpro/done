@@ -40,6 +40,12 @@ def streaming_enabled() -> bool:
     return os.environ.get("DAN_STREAMING_INPUT", "").lower() in ("1", "true", "yes", "on")
 
 
+# How often run_turn wakes to re-check idle/liveness while waiting on a turn.
+# An actively streaming turn sets done quickly; this only bounds how fast we
+# notice a real hang or a freshly arrived result.
+_RUN_TURN_POLL_SECONDS = 2.0
+
+
 TurnEvent = dict  # parsed JSON object from the CLI stream
 EventSink = Callable[[TurnEvent], None]
 
@@ -80,6 +86,9 @@ class StreamingSession:
         self._turn: Optional[_Turn] = None
         self._pending: "queue.Queue[str]" = queue.Queue()
         self._interrupt_sent = False
+        # Set True when the last run_turn ended because the CLI went silent for
+        # longer than the idle timeout (a real hang), as opposed to finishing.
+        self._last_turn_hung = False
         # True while a run_turn loop is active. Guards against a second,
         # concurrent run_turn on the same session (e.g. a follow-up request that
         # raced is_turn_active and fell through to a fresh process_message_cli):
@@ -160,12 +169,35 @@ class StreamingSession:
         })
 
     # --- public turn API -----------------------------------------------
+    @property
+    def last_turn_hung(self) -> bool:
+        """True if the most recent run_turn ended on an idle hang (not a clean
+        result). The caller uses this to persist partial output and warn the
+        user instead of closing the stream on silence."""
+        return self._last_turn_hung
+
     def run_turn(self, content: str, sink: EventSink, timeout: float = 600.0) -> Optional[TurnEvent]:
         """Submit a user message and stream this turn's events to `sink`.
-        Blocks until the turn's `result` arrives (or timeout). Returns the
-        result event. Follow-ups submitted via submit_followup() during the
-        turn are applied at the next step boundary and produce subsequent
-        turns (each re-invokes run_turn-like streaming through the same sink)."""
+
+        `timeout` is the maximum *idle* gap — seconds with NO output at all from
+        the CLI — not a cap on total turn duration. A turn that keeps streaming
+        (tool calls, text, thinking) is never abandoned, no matter how long it
+        runs; only a turn that goes completely silent for `timeout` seconds is
+        treated as a hang. This is the whole point of the streaming path: long
+        tasks ("時間をかけて品質優先で") must run to completion and still deliver
+        their answer rather than being cut off at a fixed wall-clock limit.
+
+        On a genuine idle hang the session is torn down (the CLI process is
+        stopped) so the NEXT turn starts on a clean process. A half-finished
+        turn left inside the persistent process desynchronises the stream and
+        makes the model emit its tool calls as plain text (the `<invoke …>`
+        leak), which then repeats on every later turn — resetting the process
+        is what prevents that loop.
+
+        Returns the final `result` event, or None on an idle hang (in which case
+        `last_turn_hung` is True). Follow-ups submitted via submit_followup()
+        during the turn are applied at the next step boundary and produce
+        subsequent turns through the same sink."""
         if not self.is_alive():
             self.start()
 
@@ -182,6 +214,11 @@ class StreamingSession:
                 return None
             self._running = True
 
+        self._last_turn_hung = False
+        hung = False
+        # Re-check often enough to notice a hang promptly even for small idle
+        # thresholds, but no more than the normal poll cadence.
+        poll = max(0.2, min(_RUN_TURN_POLL_SECONDS, timeout / 2.0))
         try:
             turn = _Turn(sink=sink)
             self._turn = turn
@@ -191,25 +228,37 @@ class StreamingSession:
 
             # Keep running follow-up turns until nothing is pending.
             last_result: Optional[TurnEvent] = None
-            deadline = time.time() + timeout
             while True:
-                if not turn.done.wait(timeout=max(0.5, deadline - time.time())):
-                    break  # timeout
-                last_result = turn.result
-                # If a follow-up was queued, start the next turn for it.
-                follow = self._drain_pending()
-                if follow is None:
+                if turn.done.wait(timeout=poll):
+                    last_result = turn.result
+                    # If a follow-up was queued, start the next turn for it.
+                    follow = self._drain_pending()
+                    if follow is None:
+                        break
+                    turn = _Turn(sink=sink)
+                    self._turn = turn
+                    self._interrupt_sent = False
+                    self._last_activity = time.time()
+                    self._send_user(follow)
+                    continue
+                # Not done yet — give up only if the CLI died or has gone silent
+                # for longer than the idle timeout. An active turn keeps
+                # _last_activity fresh (updated per CLI line in _read_loop), so
+                # this never fires while output is still flowing.
+                if not self.is_alive():
                     break
-                turn = _Turn(sink=sink)
-                self._turn = turn
-                self._interrupt_sent = False
-                self._last_activity = time.time()
-                self._send_user(follow)
-                deadline = time.time() + timeout
+                if time.time() - self._last_activity > timeout:
+                    hung = True
+                    break
             return last_result
         finally:
             self._turn = None
             self._running = False
+            self._last_turn_hung = hung
+            if hung:
+                # Drop the poisoned/half-finished process; the next turn will
+                # start a fresh CLI via start() in run_turn/get_or_create_session.
+                self.stop()
 
     def submit_followup(self, content: str) -> None:
         """Queue a follow-up. If a turn is in flight it will be applied at the

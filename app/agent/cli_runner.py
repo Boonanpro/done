@@ -20,6 +20,7 @@ import threading
 import time
 import queue as thread_queue
 import unicodedata
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator, Optional, Dict, Any
@@ -41,6 +42,16 @@ _ONESHOT_CWD = Path(tempfile.gettempdir()) / "dan_oneshot"
 _ONESHOT_CWD.mkdir(parents=True, exist_ok=True)
 
 _SENTINEL = object()  # キュー終了シグナル
+
+# Streaming path tuning.
+# Idle (no-output) seconds before a turn is treated as hung. This is NOT a cap
+# on total turn duration — an actively streaming turn runs as long as it needs.
+# Generous so a long bash/build or a Task subagent that stays quiet for a while
+# is not mistaken for a hang.
+_STREAMING_IDLE_TIMEOUT = int(os.getenv("DAN_STREAMING_IDLE_TIMEOUT", "1800"))
+# Cadence for SSE keepalive frames during silent-but-active stretches so proxies
+# don't drop the connection and the live view doesn't blank out.
+_STREAMING_KEEPALIVE_SECONDS = 20
 
 # アクティブなCLIプロセスを追跡（room_id → Popen）
 _active_processes: Dict[str, subprocess.Popen] = {}
@@ -163,6 +174,7 @@ def _save_execution_event_sync(
     event_type: str,
     project_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
     tool_name: Optional[str] = None,
     tool_label: Optional[str] = None,
     content: Optional[str] = None,
@@ -175,9 +187,12 @@ def _save_execution_event_sync(
     metadata = {}
     if original_type is not None and original_type != normalized_type:
         metadata["original_event_type"] = original_type
+    if turn_id:
+        metadata["turn_id"] = turn_id
     row = {
         "room_id": room_id,
         "run_id": run_id,
+        "turn_id": turn_id,
         "event_type": normalized_type,
         "tool_name": tool_name,
         "tool_label": tool_label,
@@ -254,6 +269,7 @@ def _save_ai_message_sync(
     reasoning_full: Optional[list] = None,
     blocks: Optional[list] = None,
     created_at: Optional[str] = None,
+    turn_id: Optional[str] = None,
 ) -> bool:
     """CLIスレッドからAI応答をchat_messagesに直接保存（sync）。成功=True。disconnect時は1度だけリトライ。
 
@@ -283,6 +299,9 @@ def _save_ai_message_sync(
     if blocks:
         ai_context = ai_context or {}
         ai_context["blocks"] = blocks
+    if turn_id:
+        ai_context = ai_context or {}
+        ai_context["turn_id"] = turn_id
     insert_data = {
         "room_id": room_id,
         "sender_id": None,
@@ -452,8 +471,8 @@ def _build_system_prompt(
         "skills, or infrastructure.\n"
         "- Production websites, dashboards, tools, and client-facing deliverables "
         "must be created under `frontend/src/app/artifacts/<slug>/`.\n"
-        "- Do not create or edit production deliverables under `frontend/src/app/demo/`. "
-        "`/demo` is deprecated and reserved only for explicitly approved proposal-video prototypes.\n"
+        "- Do not create or edit deliverables under `frontend/src/app/demo/`. "
+        "`/demo` has been removed; use `frontend/src/app/artifacts/<slug>/` for user-visible work.\n"
         "- When creating a deliverable, make sure it has a `page.tsx` entry so it can be "
         "registered as a chat artifact and opened from the chat header.\n"
         "- For navigation inside an artifact, do not import `next/link` directly for "
@@ -771,6 +790,7 @@ def _run_cli_process(
     event_queue: thread_queue.Queue,
     project_id: Optional[str] = None,
     run_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
     cwd: Optional[str] = None,
 ) -> Optional[dict]:
     """
@@ -782,6 +802,7 @@ def _run_cli_process(
     session_id_captured = None
     final_text_parts = []
     result_data = None
+    turn_id = turn_id or str(uuid.uuid4())
     reasoning_steps_acc = []  # DB-first: reasoning短縮ラベル蓄積
     reasoning_full_acc = []   # DB-first: reasoning全文蓄積
     # 時系列ブロック: text / tool を「起きた順」に保持し、AIメッセージの
@@ -991,6 +1012,7 @@ def _run_cli_process(
                         tool_label = _format_tool_label(ev.get("name", ""), ev.get("input", {}))
                         _save_execution_event_sync(
                             room_id, "tool_use", project_id=project_id, run_id=run_id,
+                            turn_id=turn_id,
                             tool_name=ev.get("name", ""),
                             tool_label=tool_label,
                         )
@@ -1011,6 +1033,7 @@ def _run_cli_process(
                         if text_preview and len(text_preview) > 10:
                             _save_execution_event_sync(
                                 room_id, "reasoning", project_id=project_id, run_id=run_id,
+                                turn_id=turn_id,
                                 content=text_preview,
                             )
                             reasoning_steps_acc.append(text_preview)
@@ -1126,6 +1149,7 @@ def _run_cli_in_thread(
     """
     _thread_local.room_id = room_id
     _cli_debug(f"Thread started for room {room_id}")
+    turn_id = str(uuid.uuid4())
 
     claude_cmd, cli_js = _resolve_claude_cli()
     if not claude_cmd:
@@ -1183,6 +1207,7 @@ def _run_cli_in_thread(
             event_queue,
             project_id=project_id,
             run_id=run_id,
+            turn_id=turn_id,
             cwd=cwd,
         )
 
@@ -1213,6 +1238,7 @@ def _run_cli_in_thread(
                 project_id=project_id,
                 cwd=cwd,
                 run_id=run_id,
+                turn_id=turn_id,
             )
 
         # 最終結果をキューに送る
@@ -1248,7 +1274,7 @@ def _run_cli_in_thread(
                 reasoning_full_list = result_data.get("reasoning_full", [])
                 blocks = result_data.get("turn_blocks", [])
                 cli_saved = _save_ai_message_sync(
-                    room_id, text, reasoning, reasoning_full_list, blocks=blocks
+                    room_id, text, reasoning, reasoning_full_list, blocks=blocks, turn_id=turn_id
                 )
                 _cli_debug(f"AI message DB save: cli_saved={cli_saved}, text_len={len(text)}")
 
@@ -1263,6 +1289,7 @@ def _run_cli_in_thread(
                 "duration_ms": result_data.get("duration_ms", 0),
                 "is_error": is_error,
                 "cli_saved": cli_saved,
+                "turn_id": turn_id,
             })
             if project_id:
                 _save_execution_event_sync(
@@ -1270,6 +1297,7 @@ def _run_cli_in_thread(
                     "done",
                     project_id=project_id,
                     run_id=run_id,
+                    turn_id=turn_id,
                     content="completed",
                 )
             _update_run_sync(run_id, state="failed" if is_error else "completed")
@@ -1285,12 +1313,14 @@ def _run_cli_in_thread(
             _save_ai_message_sync(
                 room_id,
                 f"処理中にエラーが発生しました。もう一度お試しください。\n（{type(e).__name__}）",
+                turn_id=turn_id,
             )
             _save_execution_event_sync(
                 room_id,
                 "done",
                 project_id=project_id,
                 run_id=run_id,
+                turn_id=turn_id,
                 content="error",
             )
         _update_run_sync(
@@ -1309,6 +1339,7 @@ def _run_cli_in_thread(
                 _save_ai_message_sync(
                     room_id,
                     "処理が中断されました。もう一度お試しください。",
+                    turn_id=turn_id,
                 )
             done_content = "cancelled" if was_cancelled else "interrupted"
             _save_execution_event_sync(
@@ -1316,6 +1347,7 @@ def _run_cli_in_thread(
                 "done",
                 project_id=project_id,
                 run_id=run_id,
+                turn_id=turn_id,
                 content=done_content,
             )
             _update_run_sync(
@@ -1405,6 +1437,7 @@ async def _process_via_streaming_session(
         "reasoning_steps_acc": [],
         "reasoning_full_acc": [],
         "session_id": None,
+        "turn_id": None,
         # ターン開始時刻（最初の assistant イベント時）。保存する ai_message の
         # created_at に使い、追い連絡で割り込まれたターンの回答が時系列で正しく並ぶ
         # ようにする（保存=ターン終了時刻だと追い連絡より後ろにずれる）。
@@ -1432,6 +1465,7 @@ async def _process_via_streaming_session(
                     # 最初の assistant イベント = このターンの開始（ユーザー/追い連絡
                     # メッセージより確実に後の時刻になる）。
                     state["turn_start"] = datetime.now(timezone.utc).isoformat()
+                    state["turn_id"] = str(uuid.uuid4())
                 blocks = (raw_ev.get("message") or {}).get("content") or []
                 for ev in _classify_content_blocks(blocks):
                     if ev["type"] == "text":
@@ -1440,8 +1474,13 @@ async def _process_via_streaming_session(
                             state["final_text_parts"].append(txt)
                             state["turn_blocks"].append({"type": "text", "text": txt})
                         _emit(ev)
-                        if project_id and txt.strip() and len(txt.strip()) > 10:
-                            _save_execution_event_sync(room_id, "reasoning", project_id=project_id, run_id=run_id, content=txt.strip())
+                        # Save EVERY non-empty intermediate text as a reasoning
+                        # event (no length filter), so the live block interleaves
+                        # text+tool exactly like the saved message's blocks → the
+                        # live view renders per-step (text → 「1件の作業 を表示」),
+                        # not all tools lumped into one collapsed monitor.
+                        if project_id and txt.strip():
+                            _save_execution_event_sync(room_id, "reasoning", project_id=project_id, run_id=run_id, turn_id=state["turn_id"], content=txt.strip())
                             state["reasoning_steps_acc"].append(txt.strip())
                             state["reasoning_full_acc"].append(txt.strip())
                     elif ev["type"] == "tool_use":
@@ -1449,7 +1488,7 @@ async def _process_via_streaming_session(
                         tool_label = _format_tool_label(ev.get("name", ""), ev.get("input", {}))
                         _emit(ev)
                         if project_id:
-                            _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=run_id, tool_name=ev.get("name", ""), tool_label=tool_label)
+                            _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=run_id, turn_id=state["turn_id"], tool_name=ev.get("name", ""), tool_label=tool_label)
                             state["reasoning_steps_acc"].append(f"🔧 {tool_label}")
                             state["turn_blocks"].append({"type": "tool", "name": ev.get("name", ""), "label": tool_label, "detail": _tool_detail(ev.get("input", {}))})
                     elif ev["type"] == "reasoning":
@@ -1475,19 +1514,21 @@ async def _process_via_streaming_session(
                 if not text.strip():
                     text = "（応答テキストが空でした。もう一度お試しください。）"
                 turn_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
+                turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
                 if not skip_save:
-                    cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"], created_at=turn_start)
+                    cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"], created_at=turn_start, turn_id=turn_id)
                 if project_id and not continuation:
-                    _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, content="completed")
+                    _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=turn_id, content="completed")
                     _update_run_sync(run_id, state="failed" if is_error else "completed")
-                _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": cli_saved, "created_at": turn_start, "continuation": continuation})
+                _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": cli_saved, "created_at": turn_start, "continuation": continuation, "turn_id": turn_id})
                 # Reset per-turn accumulators for any follow-up turn.
                 state["turn_blocks"] = []
                 state["final_text_parts"] = []
                 state["reasoning_steps_acc"] = []
                 state["reasoning_full_acc"] = []
                 state["turn_start"] = None
+                state["turn_id"] = None
 
             elif rtype == "error":
                 _emit({"type": "error", "message": raw_ev.get("message") or "error"})
@@ -1496,7 +1537,39 @@ async def _process_via_streaming_session(
 
     def run() -> None:
         try:
-            session.run_turn(content, sink, timeout=600)
+            session.run_turn(content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
+            # Idle hang: the turn produced no `result`, so the sink never saved
+            # or emitted one. Instead of silently closing the SSE on silence
+            # (which is what made long tasks "lose" their reply), persist what
+            # streamed so far and tell the user it was cut at a quiet point. The
+            # session was already torn down inside run_turn, so the next message
+            # starts on a clean process.
+            if getattr(session, "last_turn_hung", False):
+                partial = "\n".join(state["final_text_parts"]).strip()
+                note = (
+                    "（長時間の処理が一定時間まったく応答しなくなったため、ここで一旦区切りました。"
+                    "ツールは実行済み＝作業自体は進んでいる場合があります。"
+                    "「続きをやって」や「今どこまで終わってる？」と送ってください。）"
+                )
+                text = (partial + "\n\n" + note) if partial else note
+                t_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
+                t_id = state["turn_id"] or str(uuid.uuid4())
+                if not skip_save:
+                    _save_ai_message_sync(
+                        room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"],
+                        blocks=state["turn_blocks"], created_at=t_start, turn_id=t_id,
+                    )
+                if project_id:
+                    _save_execution_event_sync(
+                        room_id, "done", project_id=project_id, run_id=run_id,
+                        turn_id=t_id, content="timeout",
+                    )
+                    _update_run_sync(run_id, state="failed")
+                _emit({
+                    "type": "result", "text": text, "session_id": state["session_id"],
+                    "is_error": True, "cli_saved": not skip_save, "created_at": t_start,
+                    "continuation": False, "turn_id": t_id,
+                })
         except Exception as e:  # noqa: BLE001
             _emit({"type": "error", "message": str(e)})
         finally:
@@ -1506,9 +1579,15 @@ async def _process_via_streaming_session(
 
     # The generator is now a thin display forwarder. If the SSE consumer goes
     # away, the sink (in the reader thread) keeps classifying + saving, so DB
-    # persistence is decoupled from SSE liveness.
+    # persistence is decoupled from SSE liveness. A keepalive is emitted during
+    # silent stretches so the SSE connection (and the live view) survive a
+    # long-but-quiet step instead of going dark.
     while True:
-        raw = await q.get()
+        try:
+            raw = await asyncio.wait_for(q.get(), timeout=_STREAMING_KEEPALIVE_SECONDS)
+        except asyncio.TimeoutError:
+            yield {"type": "keepalive"}
+            continue
         if raw is _SENTINEL:
             break
         yield raw
