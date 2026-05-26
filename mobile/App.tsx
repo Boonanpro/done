@@ -506,12 +506,23 @@ async function streamDanMessage(
       pollingInterval: 0,
     });
 
-    const timeout = setTimeout(() => {
-      source.close();
-      reject(new Error('DAN response timed out.'));
-    }, 1000 * 60 * 10);
+    // Idle-based timeout: re-armed on every event (incl. keepalive) so a long
+    // but actively-streaming turn is never cut off — mirrors the backend's
+    // idle-timeout fix. Only a genuinely silent/dead connection trips it, and
+    // the chat-screen poll is a further backstop that surfaces the reply even
+    // if this ever fires early.
+    let timeout: ReturnType<typeof setTimeout>;
+    const armTimeout = () => {
+      if (timeout) clearTimeout(timeout);
+      timeout = setTimeout(() => {
+        source.close();
+        reject(new Error('DAN response timed out.'));
+      }, 1000 * 60 * 10);
+    };
+    armTimeout();
 
     source.addEventListener('message', (event) => {
+      armTimeout();
       if (!event.data) return;
       let parsed: StreamEvent;
       try {
@@ -869,6 +880,27 @@ function AppMain() {
     }, 20000);
     return () => clearInterval(id);
   }, [refreshProjects, token]);
+
+  // Poll the OPEN chat for new messages while the user is sitting in it. Without
+  // this, a message that arrives after the immediate stream — Dan's scheduled
+  // auto follow-up, or a reply from another device — would not show until the
+  // user backgrounds/foregrounds, taps a push, or pulls to refresh. Mirrors the
+  // PC web chat, which polls its messages every few seconds while idle. Off
+  // while sending (the SSE stream drives updates then) and while backgrounded.
+  useEffect(() => {
+    if (!token || screen !== 'chat' || sending) return;
+    const roomId = currentProject?.room_id;
+    if (!roomId) return;
+    const id = setInterval(() => {
+      if (AppState.currentState !== 'active') return;
+      apiRequest<MessagesListResponse>(`/chat/rooms/${roomId}/messages?limit=120`, {}, token)
+        .then((data) => {
+          if (data?.messages) setMessages(data.messages);
+        })
+        .catch(() => null);
+    }, 4000);
+    return () => clearInterval(id);
+  }, [token, screen, sending, currentProject?.room_id]);
 
   useEffect(() => {
     if (!token) return;
