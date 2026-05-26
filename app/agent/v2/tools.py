@@ -331,6 +331,7 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
     return [
         BROWSER_TOOL,
         READ_URL_TOOL,
+        SCHEDULE_FOLLOWUP_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
         CHECK_SKILL_TOOL,
@@ -422,6 +423,30 @@ Markdown形式でページ全文を返す。""",
         },
         "required": ["url"]
     }
+}
+
+SCHEDULE_FOLLOWUP_TOOL = {
+    "name": "schedule_followup",
+    "description": """後で自分（ダン）を自動で起こして、続報をチャットに投稿させる予約をする。
+
+【必ず使う場面】今のターン内では終わらない作業（デプロイ/ビルド/外部処理の完了待ち等）を
+始めて「完了したら報告します」と言いたい時。**呼ばずにその約束をしてはいけない**——
+ターンが終わると二度と自分から発言できず、続報は永遠に来ない（ユーザーが『どうなった？』と
+聞くまで沈黙する）。完了をその場で待てるなら待って報告する方がよいが、待てない時はこれを呼ぶ。
+
+【動作】delay_seconds 後にバックグラウンドのポーラーがあなたを新しいターンで起動し note を渡す。
+その時あなたは結果を実際に確認してユーザーに日本語で報告する。まだ終わっていなければ、その新ターン
+内でもう一度 schedule_followup を短い遅延で呼んで再予約してよい。
+
+【例】Vercelデプロイ開始 → schedule_followup(note="new-attack-done.vercel.app のデプロイ完了を確認して結果を報告する", delay_seconds=120)""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "note": {"type": "string", "description": "起こされた時に何を確認して報告すべきか（具体的に書く）"},
+            "delay_seconds": {"type": "integer", "description": "何秒後に起こすか（15〜21600）。デプロイ/ビルドなら90〜180が目安"},
+        },
+        "required": ["note", "delay_seconds"],
+    },
 }
 
 # ============================================
@@ -771,6 +796,9 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "read_url":
         return ("_jina", "read")
+
+    if tool_name == "schedule_followup":
+        return ("_followup", "schedule")
 
     if tool_name == "attach_image":
         return ("_attach_image", "attach")
@@ -1781,6 +1809,10 @@ async def execute_tool(
     # ★★★ URL読み込み（Jina Reader）★★★
     if skill_name == "_jina":
         return await _execute_read_url(params)
+
+    # ★★★ 続報の予約（後で自動で起こして報告させる）★★★
+    if skill_name == "_followup":
+        return await _execute_schedule_followup(params, session_id, user_id)
 
     # ★★★ 最初にスキルの存在を確認（認証チェックより先）★★★
     # 存在しないスキルに対して「認証が必要」と誤った応答を返さないため
@@ -2794,6 +2826,35 @@ async def _execute_read_url(params: Dict[str, Any]) -> Dict[str, Any]:
         "url": url,
         "content": content,
         "message": f"ページを読み込みました（{len(content)}文字）",
+    }
+
+
+async def _execute_schedule_followup(
+    params: Dict[str, Any],
+    session_id: Optional[str],
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """Register a deferred follow-up. room_id = session_id (the MCP server passes
+    DAN_SESSION_ID as session_id, which is the room). A dan-core poller later
+    re-invokes Dan with the note to actually check + report to chat."""
+    import asyncio as _aio
+    from app.services.followups import schedule_followup as _schedule
+
+    room_id = session_id or ""
+    if not room_id:
+        return {"success": False, "error": "room_id (session) が不明なため続報を予約できません。"}
+
+    note = params.get("note", "")
+    delay = params.get("delay_seconds", 120)
+    try:
+        res = await _aio.to_thread(_schedule, room_id, note, delay, user_id)
+    except Exception as e:
+        return {"success": False, "error": f"続報の予約に失敗しました: {e}"}
+
+    return {
+        "success": bool(res.get("scheduled")),
+        "message": res.get("message", ""),
+        "fire_at": res.get("fire_at"),
     }
 
 

@@ -1,4 +1,15 @@
 {
+  "pending_followups": {
+    "name": "pending_followups",
+    "description": "Internal infra (no UI/CRUD/artifact). Deferred follow-up mechanism: Dan calls the schedule_followup tool during a turn; a row records (room_id, note, fire_at). A dan-core background poller wakes Dan later to actually check the result and post the report to chat. Fixes 'completed-then-I'll-report' promises that never arrived because the agent is turn-based and cannot speak after a turn ends.",
+    "created_at": "2026-05-26T00:00:00.000000",
+    "mode": "internal-infra",
+    "files": [
+      "D:\\done\\supabase\\migrations\\061_pending_followups.sql",
+      "D:\\done\\app\\services\\followups.py",
+      "D:\\done\\app\\services\\followup_poller.py"
+    ]
+  },
   "chat_rooms_last_message_preview": {
     "name": "chat_rooms_last_message_preview",
     "description": "LINE-style last-message preview on the chat list. Denormalized `last_message_preview` TEXT column on chat_rooms, written whenever a message is recorded via record_message_delivery_sync. Surfaced through ProjectResponse and shown on the mobile chat list instead of the old 'No summary yet' placeholder.",
