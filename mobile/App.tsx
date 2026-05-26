@@ -499,8 +499,8 @@ function RichMessageContent({
 
 // A run of tool/reasoning/error steps, collapsed under "N件の作業 を表示" —
 // the same inline-timeline treatment the web chat gives ai_context.blocks.
-function TurnToolGroup({ items }: { items: TurnBlock[] }) {
-  const [open, setOpen] = useState(false);
+function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
     <View style={styles.toolGroup}>
       <Pressable onPress={() => setOpen((o) => !o)} style={styles.toolGroupHeader} hitSlop={6}>
@@ -555,10 +555,12 @@ function AiTurnBlocks({
   blocks,
   mine,
   onOpenUrl,
+  defaultOpen = false,
 }: {
   blocks: TurnBlock[];
   mine: boolean;
   onOpenUrl: (url: string) => void;
+  defaultOpen?: boolean;
 }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
@@ -581,7 +583,7 @@ function AiTurnBlocks({
             <RichMessageContent content={g.text} mine={mine} onOpenUrl={onOpenUrl} />
           </View>
         ) : (
-          <TurnToolGroup key={i} items={g.items} />
+          <TurnToolGroup key={i} items={g.items} defaultOpen={defaultOpen} />
         ),
       )}
     </View>
@@ -767,6 +769,11 @@ function AppMain() {
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [sending, setSending] = useState(false);
   const [activity, setActivity] = useState('');
+  // Live in-progress timeline for the current turn (text + tool steps), built
+  // from the SSE `process` events so the chat shows the work building up — like
+  // the web chat — instead of only a one-line status. Cleared when the turn ends
+  // (the saved message, which carries the full ai_context.blocks, takes over).
+  const [liveBlocks, setLiveBlocks] = useState<TurnBlock[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [screen, setScreen] = useState<'projects' | 'chat' | 'artifact' | 'settings'>('projects');
   const [artifacts, setArtifacts] = useState<ChatArtifactResponse[]>([]);
@@ -1429,6 +1436,7 @@ function AppMain() {
     }
 
     setActivity('DAN is working...');
+    setLiveBlocks([]);
 
     const optimistic: MessageResponse = {
       id: `local-${Date.now()}`,
@@ -1457,7 +1465,16 @@ function AppMain() {
 
         if (event.type === 'process') {
           const step = event.step as { label?: string } | undefined;
-          setActivity(step?.label || 'DAN is working...');
+          const label = (step?.label || '').trim();
+          setActivity(label || 'DAN is working...');
+          // Accumulate the step into the live timeline. "🔧 …" labels are tool
+          // steps; everything else is Dan's intermediate narration text.
+          if (label) {
+            setLiveBlocks((cur) => [
+              ...cur,
+              label.startsWith('🔧') ? { type: 'tool', label } : { type: 'text', text: label },
+            ]);
+          }
         } else if (event.type === 'user_message' && isMessageResponse(event.message)) {
           sent = true;
           const incoming = event.message;
@@ -1474,6 +1491,7 @@ function AppMain() {
         } else if (event.type === 'done') {
           sent = true;
           setActivity('Done');
+          setLiveBlocks([]);
         }
       });
     } catch (error) {
@@ -1913,7 +1931,21 @@ function AppMain() {
         ) : (
           <FlatList
             contentContainerStyle={styles.messageList}
-            data={newestMessages}
+            data={
+              sending && liveBlocks.length > 0
+                ? [
+                    {
+                      id: '__live__',
+                      room_id: currentProject?.room_id,
+                      sender_name: 'DAN',
+                      sender_type: 'ai',
+                      content: '',
+                      created_at: '',
+                    } as MessageResponse,
+                    ...newestMessages,
+                  ]
+                : newestMessages
+            }
             initialNumToRender={14}
             inverted
             keyExtractor={(item) => item.id}
@@ -1921,6 +1953,23 @@ function AppMain() {
             ref={listRef}
             removeClippedSubviews
             renderItem={({ item }) => {
+              // Live in-progress turn: render the timeline as it builds (tool
+              // steps expanded) with a spinner, like the web chat's live view.
+              if (item.id === '__live__') {
+                return (
+                  <View style={[styles.messageBubble, styles.aiBubble]}>
+                    <View style={styles.messageMetaRow}>
+                      <Text style={styles.messageSender}>DAN</Text>
+                      <ActivityIndicator color="#7fd1c7" size="small" />
+                    </View>
+                    {liveBlocks.length > 0 ? (
+                      <AiTurnBlocks blocks={liveBlocks} mine={false} onOpenUrl={handleOpenMessageUrl} defaultOpen />
+                    ) : (
+                      <Text style={styles.toolRowText}>作業中…</Text>
+                    )}
+                  </View>
+                );
+              }
               const mine = item.sender_type === 'human';
               // Render the full timeline (text + "N件の作業") when the AI message
               // carries blocks with tool steps or multiple text segments — same
@@ -1950,7 +1999,7 @@ function AppMain() {
           />
         )}
 
-        {activity ? (
+        {activity && !(sending && liveBlocks.length > 0) ? (
           <View style={styles.activityBar}>
             <ActivityIndicator color="#d9d2c8" size="small" />
             <Text style={styles.activityText} numberOfLines={2}>
