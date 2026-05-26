@@ -62,6 +62,13 @@ type UserResponse = {
   display_name: string;
 };
 
+// One step in an AI turn's inline timeline (mirrors the web chat's ai_context.blocks).
+type TurnBlock =
+  | { type: 'text'; text?: string }
+  | { type: 'tool'; name?: string; label?: string; detail?: string }
+  | { type: 'reasoning'; text?: string }
+  | { type: 'error'; text?: string };
+
 type MessageResponse = {
   id: string;
   room_id?: string;
@@ -69,6 +76,10 @@ type MessageResponse = {
   sender_type: 'human' | 'ai' | string;
   content: string;
   created_at: string;
+  ai_context?: {
+    blocks?: TurnBlock[];
+    turn_id?: string;
+  } | null;
 };
 
 type ProjectResponse = {
@@ -482,6 +493,97 @@ function RichMessageContent({
           )}
         </Text>
       ) : null}
+    </View>
+  );
+}
+
+// A run of tool/reasoning/error steps, collapsed under "N件の作業 を表示" —
+// the same inline-timeline treatment the web chat gives ai_context.blocks.
+function TurnToolGroup({ items }: { items: TurnBlock[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View style={styles.toolGroup}>
+      <Pressable onPress={() => setOpen((o) => !o)} style={styles.toolGroupHeader} hitSlop={6}>
+        <Ionicons name={open ? 'chevron-down' : 'chevron-forward'} size={13} color="#a7a19a" />
+        <Ionicons name="terminal-outline" size={13} color="#7fd1c7" />
+        <Text style={styles.toolGroupLabel}>
+          {items.length}件の作業{open ? '' : ' を表示'}
+        </Text>
+      </Pressable>
+      {open ? (
+        <View style={styles.toolGroupBody}>
+          {items.map((it, i) => {
+            const isErr = it.type === 'error';
+            const label =
+              it.type === 'tool'
+                ? it.label || 'ツール実行'
+                : it.type === 'error'
+                  ? it.text || 'エラー'
+                  : it.type === 'reasoning'
+                    ? it.text || '思考'
+                    : 'ツール実行';
+            const detail = it.type === 'tool' ? it.detail || '' : '';
+            return (
+              <View key={i} style={styles.toolRow}>
+                <Ionicons
+                  name={isErr ? 'alert-circle' : 'checkmark-circle'}
+                  size={13}
+                  color={isErr ? '#ff5a3d' : '#6ec98a'}
+                  style={styles.toolRowIcon}
+                />
+                <View style={styles.toolRowMain}>
+                  <Text style={[styles.toolRowText, isErr && styles.toolRowErr]}>{label}</Text>
+                  {detail && detail !== label ? (
+                    <Text style={styles.toolRowDetail} numberOfLines={4}>
+                      {detail}
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+// Render an AI message's full inline timeline (text segments + tool groups),
+// matching the PC web chat. Intermediate narration text is dimmed; the last
+// text segment is the real answer.
+function AiTurnBlocks({
+  blocks,
+  mine,
+  onOpenUrl,
+}: {
+  blocks: TurnBlock[];
+  mine: boolean;
+  onOpenUrl: (url: string) => void;
+}) {
+  const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
+  for (const b of blocks) {
+    if (b.type === 'text' || b.type === 'reasoning') {
+      const t = (b.text || '').trim();
+      if (!t) continue;
+      grouped.push({ kind: 'text', text: t });
+    } else {
+      const last = grouped[grouped.length - 1];
+      if (last && last.kind === 'tools') last.items.push(b);
+      else grouped.push({ kind: 'tools', items: [b] });
+    }
+  }
+  const lastTextIndex = grouped.reduce((acc, g, i) => (g.kind === 'text' ? i : acc), -1);
+  return (
+    <View>
+      {grouped.map((g, i) =>
+        g.kind === 'text' ? (
+          <View key={i} style={i !== lastTextIndex ? styles.mutedSegment : undefined}>
+            <RichMessageContent content={g.text} mine={mine} onOpenUrl={onOpenUrl} />
+          </View>
+        ) : (
+          <TurnToolGroup key={i} items={g.items} />
+        ),
+      )}
     </View>
   );
 }
@@ -1820,13 +1922,26 @@ function AppMain() {
             removeClippedSubviews
             renderItem={({ item }) => {
               const mine = item.sender_type === 'human';
+              // Render the full timeline (text + "N件の作業") when the AI message
+              // carries blocks with tool steps or multiple text segments — same
+              // rule as the web chat. Otherwise just render the final content.
+              const blocks = item.sender_type === 'ai' ? item.ai_context?.blocks : undefined;
+              const useBlocks =
+                !!blocks &&
+                blocks.length > 0 &&
+                (blocks.some((b) => b.type === 'tool' || b.type === 'error') ||
+                  blocks.filter((b) => b.type === 'text' || b.type === 'reasoning').length > 1);
               return (
                 <View style={[styles.messageBubble, mine ? styles.myBubble : styles.aiBubble]}>
                   <View style={styles.messageMetaRow}>
                     <Text style={styles.messageSender}>{mine ? 'You' : item.sender_name || 'DAN'}</Text>
                     <Text style={styles.messageTime}>{formatTime(item.created_at)}</Text>
                   </View>
-                  <RichMessageContent content={item.content} mine={mine} onOpenUrl={handleOpenMessageUrl} />
+                  {useBlocks ? (
+                    <AiTurnBlocks blocks={blocks!} mine={mine} onOpenUrl={handleOpenMessageUrl} />
+                  ) : (
+                    <RichMessageContent content={item.content} mine={mine} onOpenUrl={handleOpenMessageUrl} />
+                  )}
                 </View>
               );
             }}
@@ -2536,6 +2651,53 @@ const styles = StyleSheet.create({
     backgroundColor: '#1f1d19',
     borderColor: '#34302a',
     borderWidth: 1,
+  },
+  mutedSegment: {
+    opacity: 0.55,
+  },
+  toolGroup: {
+    marginVertical: 6,
+  },
+  toolGroupHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 5,
+  },
+  toolGroupLabel: {
+    color: '#a7a19a',
+    fontSize: 12.5,
+  },
+  toolGroupBody: {
+    borderLeftColor: '#3a352e',
+    borderLeftWidth: 2,
+    gap: 6,
+    marginLeft: 6,
+    marginTop: 6,
+    paddingLeft: 10,
+  },
+  toolRow: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  toolRowIcon: {
+    marginTop: 2,
+  },
+  toolRowMain: {
+    flex: 1,
+  },
+  toolRowText: {
+    color: '#c8c2b8',
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  toolRowErr: {
+    color: '#ff8a73',
+  },
+  toolRowDetail: {
+    color: '#8a847b',
+    fontSize: 11.5,
+    lineHeight: 16,
+    marginTop: 2,
   },
   messageMetaRow: {
     alignItems: 'center',
