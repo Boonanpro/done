@@ -329,6 +329,25 @@ class ProjectService:
 
     async def delete_project(self, project_id: str, user_id: str) -> bool:
         """プロジェクトを削除"""
+        # Capture the room before deleting so we can clear its unread state.
+        # Deleting only the projects row leaves the chat_room + membership behind;
+        # any unread on that orphaned room becomes a "phantom" the app can't show
+        # or open (it's no longer a project) yet still fires pushes / inflates the
+        # DB count. Zeroing unread on delete prevents that.
+        room_id = None
+        try:
+            proj = (
+                self.supabase.table("projects")
+                .select("room_id")
+                .eq("id", project_id)
+                .eq("user_id", user_id)
+                .execute()
+            )
+            if proj.data:
+                room_id = proj.data[0].get("room_id")
+        except Exception:
+            pass
+
         result = (
             self.supabase.table("projects")
             .delete()
@@ -336,6 +355,13 @@ class ProjectService:
             .eq("user_id", user_id)
             .execute()
         )
+        if result.data and room_id:
+            try:
+                self.supabase.table("chat_room_members").update(
+                    {"unread_count": 0}
+                ).eq("room_id", room_id).execute()
+            except Exception:
+                pass
         return bool(result.data)
 
     async def get_project_by_room_id(self, room_id: str) -> Optional[dict]:
@@ -356,6 +382,7 @@ class ProjectService:
         room_id: str,
         event_type: str,
         run_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
         tool_name: Optional[str] = None,
         tool_label: Optional[str] = None,
         content: Optional[str] = None,
@@ -366,10 +393,13 @@ class ProjectService:
         normalized_metadata = dict(metadata or {})
         if original_type is not None and original_type != normalized_type:
             normalized_metadata["original_event_type"] = original_type
+        if turn_id:
+            normalized_metadata["turn_id"] = turn_id
 
         row = {
             "room_id": room_id,
             "run_id": run_id,
+            "turn_id": turn_id,
             "event_type": normalized_type,
             "tool_name": tool_name,
             "tool_label": tool_label,
