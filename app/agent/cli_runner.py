@@ -525,7 +525,8 @@ _ABSOLUTE_RULES = """## 絶対ルール
 2. 承認済み計画がある場合、逸脱しない。逸脱が必要なら理由を説明し承認を得る。
 3. 同じアプローチで2回失敗したら、回避策を試すのではなく根本原因を特定しろ。自分のソースコード（D:/done配下）をRead/Edit/Bashで調査・修正できる。
 4. browserツールで実現できない操作（ダウンロード等）はBashでPythonスクリプトを書いて直接Playwrightを使え。persistent contextのパス: ~/.ai_secretary/browser_data
-5. 長期記憶が必要なら `read_file` で `~/.dan/workspace/MEMORY.md` を読め。"""
+5. 長期記憶が必要なら `read_file` で `~/.dan/workspace/MEMORY.md` を読め。
+6. ターンが終わると次のユーザー発言まで二度と自分から発言できない。だから「完了したら報告します」「少々お待ちください」と言ってターンを終えると続報は永遠に届かない。完了をその場で待てるなら待って実結果を報告せよ。待てない長時間処理（デプロイ/ビルド/外部処理の完了待ち等）の時は、**必ず `schedule_followup(note, delay_seconds)` で続報を予約してから**終われ。予約せずに後で報告すると約束してはならない。"""
 
 
 def _get_encryption_key() -> str:

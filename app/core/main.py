@@ -67,6 +67,15 @@ async def lifespan(app: FastAPI):
         except RuntimeError as e:
             logger.warning("sandbox auto-start failed: %s", e)
 
+    # 続報ポーラー: 予約された follow-up を期限到来時に発火し、ダンを再起動して
+    # チャットに報告させる（ターン制エージェントが「完了したら報告します」を守れる
+    # ようにする土台）。失敗してもコア起動は妨げない。
+    try:
+        from app.services.followup_poller import start_poller
+        start_poller()
+    except Exception as e:
+        logger.warning("follow-up poller failed to start: %s", e)
+
     yield
 
     # シャットダウン時にサンドボックスも止める
