@@ -13,7 +13,7 @@
 - `LpShell` + `Section` + `HeroMedia` + `FeatureGrid` + `InquiryForm` + `LocationMap` を組む
 - 全セクションに CTA（問い合わせ / 電話）。モバイルで即タップ可能に
 - セクションごとに構造を変える（均等グリッドの連続禁止）、余白でリズム
-- ヒーローは `HeroMedia`（image-gen の AI 画像 or 実写真）
+- ヒーローは `HeroMedia`（media-gen の AI 画像 or 実写真）
 
 ## モーション（framer-motion）
 - `whileInView` で控えめなフェード / スライドイン、hover で微妙な浮き
