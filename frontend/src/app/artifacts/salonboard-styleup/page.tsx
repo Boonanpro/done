@@ -40,6 +40,7 @@ type Fields = {
   category: SField;
   length: SField;
   menu: MField;
+  menu_text: SField;
   hair_amount: SField;
   hair_quality: SField;
   hair_thickness: SField;
@@ -101,6 +102,7 @@ const FIELD_SEQ: (keyof Fields)[] = [
   'category',
   'length',
   'menu',
+  'menu_text',
   'style_name',
   'comment',
   'hashtags',
@@ -113,6 +115,7 @@ const FIELD_SEQ: (keyof Fields)[] = [
 ];
 
 const LOW = 0.6;
+const HASHTAG_MAX = 10;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const FIELD_DEFAULTS: Partial<Record<keyof Fields, string>> = {
   hair_amount: '普通',
@@ -145,6 +148,12 @@ function normalizeFields(input: Fields): Fields {
         reason: current.reason || '未判定のため初期値',
       };
     }
+  }
+  // メニュー内容(自由記入)が未取得なら、選んだメニュー4択から組み立てる
+  if (!next.menu_text || typeof next.menu_text.value !== 'string') {
+    const labels = (next.menu?.value as string[] | undefined) ?? [];
+    const built = ['カット', ...labels].join('＋');
+    next.menu_text = { value: built, confidence: 0.4, reason: '未判定のため自動生成' };
   }
   return next;
 }
@@ -202,6 +211,7 @@ function makePreviewForm(): Fields {
     category: s('レディース'),
     length: s('ボブ'),
     menu: m(['パーマ']),
+    menu_text: s('カット＋パーマ＋カラー'),
     hair_amount: s('普通'),
     hair_quality: s('普通'),
     hair_thickness: s('普通'),
@@ -364,6 +374,17 @@ export default function SalonboardStyleupPage() {
       return { ...f, [k]: { ...f[k], value: next } };
     });
 
+  // ハッシュタグを手入力で追加する（重複・空白を除き、最大10個まで）
+  const addTag = (raw: string) =>
+    setForm((f) => {
+      if (!f) return f;
+      const tag = raw.replace(/^#/, '').trim().slice(0, 20);
+      if (!tag) return f;
+      const cur = f.hashtags.value;
+      if (cur.includes(tag) || cur.length >= HASHTAG_MAX) return f;
+      return { ...f, hashtags: { ...f.hashtags, value: [...cur, tag] } };
+    });
+
   const post = async () => {
     if (!form) return;
     // チャット右ペインのプレビューは投稿の流れだけ再現する
@@ -492,6 +513,7 @@ export default function SalonboardStyleupPage() {
             setStylist={setStylist}
             setVal={setVal}
             toggleMulti={toggleMulti}
+            addTag={addTag}
             onPost={post}
           />
         )}
@@ -776,6 +798,7 @@ function FormView({
   setStylist,
   setVal,
   toggleMulti,
+  addTag,
   onPost,
 }: {
   photos: Photo[];
@@ -785,6 +808,7 @@ function FormView({
   setStylist: (v: string) => void;
   setVal: (k: keyof Fields, v: string) => void;
   toggleMulti: (k: 'menu' | 'hashtags', opt: string) => void;
+  addTag: (raw: string) => void;
   onPost: () => void;
 }) {
   const [reveal, setReveal] = useState(0);
@@ -904,12 +928,38 @@ function FormView({
           onSelect={(v) => setVal('length', v)}
         />
         <MultiField
-          label="メニュー内容"
+          label="メニュー（該当する施術）"
           field={form.menu}
           options={OPT.menu}
           show={shown('menu')}
           onToggle={(v) => toggleMulti('menu', v)}
         />
+
+        <div className="mt-4">
+          <Label
+            text="メニュー内容"
+            required
+            ai={shown('menu_text')}
+            low={shown('menu_text') && form.menu_text.confidence < LOW}
+          />
+          {shown('menu_text') ? (
+            <>
+              <input
+                value={form.menu_text.value}
+                onChange={(e) => setVal('menu_text', e.target.value.slice(0, 100))}
+                placeholder="例: カット＋カラー＋トリートメント"
+                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#0a3d62]"
+              />
+              <Counter
+                n={form.menu_text.value.length}
+                max={100}
+                reason={form.menu_text.reason}
+              />
+            </>
+          ) : (
+            <Skeleton />
+          )}
+        </div>
 
         <div className="mt-4">
           <Label text="クーポン" />
@@ -938,7 +988,17 @@ function FormView({
                     </button>
                   </span>
                 ))}
+                {form.hashtags.value.length === 0 && (
+                  <span className="text-[11px] text-gray-400">
+                    下の入力欄からタグを追加できます
+                  </span>
+                )}
               </div>
+              <HashtagInput
+                count={form.hashtags.value.length}
+                max={HASHTAG_MAX}
+                onAdd={addTag}
+              />
               {form.hashtags.reason && <Reason text={form.hashtags.reason} />}
             </>
           ) : (
@@ -1229,6 +1289,63 @@ function MultiField({
       ) : (
         <Skeleton />
       )}
+    </div>
+  );
+}
+
+function HashtagInput({
+  count,
+  max,
+  onAdd,
+}: {
+  count: number;
+  max: number;
+  onAdd: (v: string) => void;
+}) {
+  const [text, setText] = useState('');
+  const full = count >= max;
+  const commit = () => {
+    // スペース・カンマ・読点区切りでまとめて追加できる
+    text
+      .split(/[,、\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach(onAdd);
+    setText('');
+  };
+  return (
+    <div className="mt-2">
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">
+            #
+          </span>
+          <input
+            value={text}
+            onChange={(e) => setText(e.target.value.replace(/^#/, '').slice(0, 20))}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                commit();
+              }
+            }}
+            disabled={full}
+            placeholder={full ? '上限に達しました' : 'タグを入力（例: 透明感カラー）'}
+            className="w-full rounded-lg border border-gray-200 py-2 pl-7 pr-3 text-sm text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#0a3d62] disabled:bg-gray-50"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={commit}
+          disabled={full || !text.trim()}
+          className="shrink-0 rounded-lg bg-[#0a3d62] px-4 text-sm font-semibold text-white transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          追加
+        </button>
+      </div>
+      <div className="mt-1 text-right text-[11px] text-gray-400">
+        {count}/{max}
+      </div>
     </div>
   );
 }
