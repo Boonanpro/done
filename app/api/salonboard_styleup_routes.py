@@ -199,7 +199,7 @@ def _coerce_tags(raw: Any) -> dict:
         if s and s not in clean:
             clean.append(s)
     return {
-        "value": clean[:20],
+        "value": clean[:10],
         "confidence": _clamp_confidence(raw.get("confidence")),
         "reason": str(raw.get("reason", ""))[:60],
     }
@@ -325,6 +325,10 @@ import uuid  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 from fastapi import Form  # noqa: E402
+from app.services.salonboard_post_job_service import (  # noqa: E402
+    SalonboardPostJobService,
+    normalize_job_for_api,
+)
 
 # job_id -> {status, message, style_name}
 _POST_JOBS: dict[str, dict] = {}
@@ -380,15 +384,37 @@ async def post_style(
             _POST_JOBS.pop(k, None)
 
     _POST_JOBS[job_id] = {"status": "pending", "message": "投稿を受け付けました", "style_name": None}
+    job_service = SalonboardPostJobService()
+    await job_service.create(
+        job_id=job_id,
+        device_id=device_id,
+        fields=fields_dict,
+        images_meta=images_meta,
+        photo_count=len(photo_paths),
+    )
+
+    def _persist_status(status: str, message: str) -> None:
+        async def _update() -> None:
+            try:
+                await job_service.update(job_id, status=status, message=message)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("salonboard post job status persist failed: %s", e)
+
+        try:
+            asyncio.create_task(_update())
+        except RuntimeError:
+            pass
 
     def _cb(status: str, message: str) -> None:
         if job_id in _POST_JOBS:
             _POST_JOBS[job_id]["status"] = status
             _POST_JOBS[job_id]["message"] = message
+        _persist_status(status, message)
 
     async def _runner() -> None:
         from app.services.salonboard_browser_session import run_style_post
         try:
+            await job_service.update(job_id, status="running", message="投稿処理を開始しました")
             res = await run_style_post(
                 device_id=device_id,
                 photo_paths=photo_paths,
@@ -402,16 +428,49 @@ async def post_style(
                     "status": "done",
                     "message": res.get("message", "登録しました"),
                     "style_name": res.get("style_name"),
+                    "style_id": res.get("style_id"),
+                    "registered": res.get("registered"),
+                    "published": res.get("published"),
                 }
+                await job_service.update(
+                    job_id,
+                    status="done",
+                    message=res.get("message", "サロンボードに登録しました"),
+                    style_name=res.get("style_name"),
+                    style_id=res.get("style_id"),
+                    registered=res.get("registered"),
+                    published=res.get("published"),
+                    result_data=res,
+                )
             else:
                 _POST_JOBS[job_id] = {
                     "status": "error",
                     "message": res.get("message", "投稿に失敗しました"),
-                    "style_name": None,
+                    "style_name": res.get("style_name"),
+                    "style_id": res.get("style_id"),
+                    "registered": res.get("registered"),
+                    "published": res.get("published"),
                 }
+                await job_service.update(
+                    job_id,
+                    status="error",
+                    message=res.get("message", "投稿に失敗しました"),
+                    style_name=res.get("style_name"),
+                    style_id=res.get("style_id"),
+                    registered=res.get("registered"),
+                    published=res.get("published"),
+                    result_data=res,
+                    error=res.get("message"),
+                )
         except Exception as e:  # noqa: BLE001
             logger.error("salonboard post job failed: %s", e, exc_info=True)
             _POST_JOBS[job_id] = {"status": "error", "message": f"投稿中にエラー: {e}", "style_name": None}
+            await job_service.update(
+                job_id,
+                status="error",
+                message=f"投稿中にエラー: {e}",
+                error=str(e),
+            )
 
     asyncio.create_task(_runner())
     return {"job_id": job_id, "status": "pending"}
@@ -420,6 +479,9 @@ async def post_style(
 @router.get("/post-status/{job_id}")
 async def post_status(job_id: str) -> dict:
     """投稿ジョブの状況を返す。"""
+    persisted = await SalonboardPostJobService().get(job_id)
+    if persisted:
+        return normalize_job_for_api(job_id, persisted)
     job = _POST_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="ジョブが見つかりません")

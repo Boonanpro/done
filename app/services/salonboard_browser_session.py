@@ -727,7 +727,7 @@ def build_form_values(fields: dict) -> dict:
         "curly": _CURLY.get(_field_value(fields, "hair_curl"), "1"),
         "face": _FACE.get(_field_value(fields, "face"), "2"),
         "age": _AGE.get(_field_value(fields, "age"), "2"),
-        "hashtags": [str(t).lstrip("#").strip()[:40] for t in tags if str(t).strip()][:8],
+        "hashtags": [str(t).lstrip("#").strip()[:40] for t in tags if str(t).strip()][:10],
     }
 
 
