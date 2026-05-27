@@ -31,7 +31,7 @@ import {
   Wand2,
 } from 'lucide-react';
 import { Reorder } from 'framer-motion';
-import { isDanPreview } from '@/lib/dan-preview';
+import { useSetupGate } from '@/hooks/use-setup-gate';
 
 /* ============ 型 ============ */
 type SField = { value: string; confidence: number; reason: string };
@@ -229,23 +229,11 @@ export default function SalonboardStyleupPage() {
   const [stylist, setStylist] = useState('');
   const [deviceId, setDeviceId] = useState('');
   const [postMsg, setPostMsg] = useState('');
-  const [setupReady, setSetupReady] = useState(false);
-  const [previewMode, setPreviewMode] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  // 起動時: device_id を確保し、サロンボード認証情報の設定状態を確認する
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    // ライブプレビュー（チャット右ペイン）では認証/初期設定ゲートをスキップし、
-    // 管理者として全画面を閲覧・編集できるようにする。
-    if (isDanPreview()) {
-      setPreviewMode(true);
-      setDeviceId('preview-device');
-      setStylist((s) => s || 'プレビュー');
-      setStep('intro');
-      setSetupReady(true);
-      return;
-    }
+  // 初期設定ゲート。ライブプレビューでは useSetupGate が自動でバイパスし、
+  // 管理者として全画面を閲覧・編集できる（プレビュー判定はフック内に集約）。
+  const gate = useSetupGate(async () => {
     let id = window.localStorage.getItem('sb_device_id') ?? '';
     if (!id) {
       id =
@@ -255,32 +243,31 @@ export default function SalonboardStyleupPage() {
       window.localStorage.setItem('sb_device_id', id);
     }
     setDeviceId(id);
-    (async () => {
-      try {
-        const res = await fetch(
-          `/api/v1/salonboard-credentials/status?device_id=${encodeURIComponent(id)}`,
-        );
-        if (res.ok) {
-          const data = (await res.json()) as {
-            has_credentials: boolean;
-            stylist_name?: string | null;
-          };
-          if (data.has_credentials) {
-            if (data.stylist_name) setStylist(data.stylist_name);
-            setStep('intro');
-          } else {
-            setStep('init');
-          }
-        } else {
-          setStep('init');
-        }
-      } catch {
-        setStep('init');
-      } finally {
-        setSetupReady(true);
-      }
-    })();
-  }, []);
+    const res = await fetch(
+      `/api/v1/salonboard-credentials/status?device_id=${encodeURIComponent(id)}`,
+    );
+    if (!res.ok) return false;
+    const data = (await res.json()) as {
+      has_credentials: boolean;
+      stylist_name?: string | null;
+    };
+    if (data.stylist_name) setStylist(data.stylist_name);
+    return !!data.has_credentials;
+  });
+  const previewMode = gate.isPreview;
+  const setupReady = gate.status !== 'loading';
+
+  // ゲート判定が確定したら最初に表示する画面を決める
+  useEffect(() => {
+    if (gate.status === 'loading') return;
+    if (gate.isPreview) {
+      setDeviceId('preview-device');
+      setStylist((s) => s || 'プレビュー');
+      setStep('intro');
+    } else {
+      setStep(gate.status === 'ready' ? 'intro' : 'init');
+    }
+  }, [gate.status, gate.isPreview]);
 
   const runAnalyze = useCallback(async (items: Photo[]) => {
     setError('');
