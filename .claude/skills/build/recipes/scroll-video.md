@@ -12,7 +12,7 @@
 - GSAP ScrollTrigger が進捗を駆動、Lenis が慣性
 
 ## 素材（ヒーロー動画）= media-gen 依存
-- 今: `video-gen`（Kling, image-to-video）で生成可能
+- 今: `media-gen`（Kling, image-to-video）で生成可能
 - より良い: Higgsfield 経由の Veo / Sora（first→last frame 補間）
 - ⚠️ 動画は **スクラブ向き** であること（ゆっくり連続変化・first→last フレームの morph。激しいカット割り不可）
 
