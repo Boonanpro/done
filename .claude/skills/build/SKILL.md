@@ -39,6 +39,23 @@ import 例: `import { HeroSection, Section, FeatureGrid } from "@/components/tem
 
 ---
 
+## 🧩 機能ブロック（再利用）も使う
+
+ログイン・予約など「丸ごと差し込める機能」は毎回スクラッチで作らず、既存の機能ブロック
+を使う。`config`/props で業種・店舗に合わせて調整する。
+
+| 機能 | 使うもの | 場所 |
+|---|---|---|
+| ログイン/初期設定ゲート | `useSetupGate`（フック） | `@/hooks/use-setup-gate` |
+| 予約・カレンダー | `<BookingCalendar>` + `useBooking` | `@/components/booking/booking-calendar`, `@/hooks/use-booking` |
+| スクロール出現アニメ | `<FadeIn>` / `<Stagger>` / `<StaggerItem>` | `@/components/motion` |
+
+例: 予約フォームを置きたい → `<BookingCalendar config={{ slug, openTime, closeTime, slotMinutes, services, staff, closedWeekdays }} />` を埋め込むだけ（バックエンドの予約API/DBは実装済み）。実例: `frontend/src/app/artifacts/bookings/page.tsx`。
+
+（決済・LINE連携・会員ログインは順次このメニューに追加予定。）
+
+---
+
 ## 共通ルール（全用途で厳守）
 
 ### 1. デザイントークンを使う（ハードコード禁止）
