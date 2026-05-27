@@ -15,6 +15,19 @@ import type { Metadata } from 'next';
  * ② InspectorRuntimeLoader は React ハイドレーション後に動作:
  *    バックエンドから最新 overrides を取得 → localStorage 同期 → DOM 再適用。
  *    src/alt 等 CSS で表現できない属性もここで当てる。
+ *
+ * ③ scrollResetStyle:
+ *    ルート globals.css は html/body を `height:100%; overflow:hidden` に固定
+ *    している（チャットシェルが画面いっぱいに収まり、スクロールは内部ペインで
+ *    行う設計のため正しい）。しかし成果物ページ (LP / 募集ページ / 縦長ツール) は
+ *    「ブラウザの通常の文書スクロール」で見るものなので、この床を引き継ぐと
+ *    画面より下が切れてスクロールできなくなる。
+ *    そこで /artifacts・/preview 配下だけ html/body のスクロールを解放する。
+ *    - unlayered な <style> なので globals.css の @layer base より優先される
+ *    - `h-screen` で自分を画面高に固定するダッシュボード型成果物 (例 new-attack) は
+ *      height:100vh で自己完結するため body:auto でも壊れず両立する
+ *    - これにより「成果物は普通にスクロールできる」が既定になり、ページ個別に
+ *      解除を書き忘れて縦長ページが切れる事故が再発しなくなる
  */
 
 const publicArtifactHostMap = JSON.stringify({
@@ -95,9 +108,17 @@ const prePaintScript = `
 })();
 `.trim();
 
+const scrollResetStyle = `
+html, body {
+  height: auto !important;
+  overflow: auto !important;
+}
+`.trim();
+
 export default function ArtifactsLayout({ children }: { children: React.ReactNode }) {
   return (
     <>
+      <style dangerouslySetInnerHTML={{ __html: scrollResetStyle }} />
       <script dangerouslySetInnerHTML={{ __html: prePaintScript }} />
       {children}
       <InspectorRuntimeLoader />
