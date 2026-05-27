@@ -251,5 +251,19 @@
       "D:\\done\\frontend\\src\\app\\artifacts\\salonboard-credentials\\page.tsx",
       "D:\\done\\scripts\\seed_salonboard_credentials.py"
     ]
+  },
+  "bookings": {
+    "name": "bookings",
+    "description": "予約・カレンダー機能ブロック（クライアントHP/ツールに埋め込む再利用部品）",
+    "created_at": "2026-05-27T13:39:37.360048",
+    "mode": "production",
+    "files": [
+      "D:\\done\\supabase\\migrations\\063_bookings.sql",
+      "D:\\done\\app\\models\\bookings_schemas.py",
+      "D:\\done\\app\\services\\bookings_service.py",
+      "D:\\done\\app\\api\\bookings_routes.py",
+      "D:\\done\\frontend\\src\\app\\artifacts\\bookings\\page.tsx",
+      "D:\\done\\scripts\\seed_bookings.py"
+    ]
   }
 }

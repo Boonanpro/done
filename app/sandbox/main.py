@@ -48,6 +48,7 @@ from app.api.publish_routes import router as publish_router
 from app.api.salonboard_styleup_routes import router as salonboard_styleup_router
 from app.api.salonboard_credentials_routes import router as salonboard_credentials_router
 from app.api.client_messaging_routes import router as client_messaging_router
+from app.api.bookings_routes import router as bookings_router
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,7 @@ app.include_router(aix_dashboard_router, prefix="/api/v1")
 app.include_router(publish_router, prefix="/api/v1")
 app.include_router(salonboard_styleup_router, prefix="/api/v1")
 app.include_router(salonboard_credentials_router, prefix="/api/v1")
+app.include_router(bookings_router, prefix="/api/v1")
 app.include_router(client_messaging_router)  # router defines its own /api/v1 prefix
 
 

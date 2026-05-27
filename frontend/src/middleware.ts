@@ -69,7 +69,7 @@ function deliverySlugFromHost(host: string): string | null {
   return slug || null;
 }
 
-const DEFAULT_PUBLIC_ARTIFACT_SLUGS = ['kittoku', 'test-edit', 'salonboard-styleup'];
+const DEFAULT_PUBLIC_ARTIFACT_SLUGS = ['kittoku', 'test-edit', 'salonboard-styleup', 'bookings'];
 
 const PUBLIC_ARTIFACT_SLUGS = new Set<string>([
   ...DEFAULT_PUBLIC_ARTIFACT_SLUGS,
