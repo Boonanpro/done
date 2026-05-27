@@ -1221,18 +1221,12 @@ class Skill:
             return "train", "ex_reservation"
         elif name == "frontend-design":
             return "frontend", "frontend_design"
-        elif name == "amazon":
-            return "product", "amazon"
 
         # 内容による判定（フォールバック）
         if "developer" in name or "開発機能" in content or "self-healing" in content_lower:
             return "developer", "developer"
         elif "ex予約" in content or "新幹線" in content:
             return "train", "ex_reservation"
-        elif "amazon" in content_lower:
-            return "product", "amazon"
-        elif "楽天" in content:
-            return "product", "rakuten"
         elif "高速バス" in content:
             return "bus", "willer"
         elif "電話" in content or "音声" in content:
