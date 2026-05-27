@@ -150,7 +150,39 @@ import { HeroMedia } from "@/components/templates";
 
 ---
 
-### 6. 自己評価ループ（全用途共通）
+### 6. ログイン / 初期設定ゲートは **`useSetupGate` を使う**
+
+ログインや初回登録（認証情報・名前の登録など）が **必須なページ** を作るときは、
+ゲート判定を自前で書かず **必ず `@/hooks/use-setup-gate` の `useSetupGate` を使う**。
+
+**なぜ必須か**：
+
+チャット右ペインのライブプレビューは成果物を iframe で読み込むため、ゲートを自前で
+書くと **プレビューでもログイン/初期設定を求められ、他の画面を閲覧・編集できなくなる**。
+`useSetupGate` はプレビュー（`isDanPreview()`）を検出して **自動でゲートをバイパス**し、
+管理者として全画面を見られるようにする。各ページでプレビュー判定を再実装しないこと。
+
+```tsx
+import { useSetupGate } from '@/hooks/use-setup-gate';
+
+const gate = useSetupGate(async () => {
+  // 設定が完了済みか（true=ready / false=要設定）を返す。プレビューでは呼ばれない。
+  const r = await fetch('/api/.../status?...');
+  return r.ok && (await r.json()).has_credentials;
+});
+
+if (gate.status === 'loading')     return <Spinner />;
+if (gate.status === 'needs-setup') return <SetupScreen onDone={gate.markReady} />;
+return <MainApp />;          // gate.isPreview が true のときは常にここに来る
+```
+
+- 設定完了で先へ進めたいタイミングでは `gate.markReady()` を呼ぶ。
+- 認証境界ではない（プレビューで飛ばしても保存済み認証情報が無ければ実処理は動かない）。
+- 実例: `frontend/src/app/artifacts/salonboard-styleup/page.tsx`
+
+---
+
+### 7. 自己評価ループ（全用途共通）
 
 成果物を出力する前に必ず `actions/create.md` の手順に従う。
 用途ごとの評価基準は `criteria.md` を参照。
