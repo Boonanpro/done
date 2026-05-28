@@ -18,9 +18,8 @@ The classifications:
   Dan app itself.
 - ``artifact:<slug>``: code or assets that belong to a specific
   customer-facing artifact (e.g. ``kittoku``, ``salonboard-styleup``).
-- ``demo:<name>``: ``frontend/src/app/demo/<name>/`` - scratch /
-  prototype space. Treated as neutral: it can be mixed with anything
-  because demos are not deployed to a real audience.
+- ``demo:<name>``: ``frontend/src/app/scratch/<name>/`` prototype space.
+  The legacy ``frontend/src/app/demo`` route is intentionally unsupported.
 - ``ignored``: generated / vendor / lockfile / tunnel state - safe to
   mix in any commit because it has no human-edited intent.
 - ``ambiguous``: did not match any rule. The caller should treat this
@@ -89,12 +88,16 @@ _IGNORED_PATTERNS: tuple[str, ...] = (
 # Keys are the directory under frontend/public/.
 _PUBLIC_DIR_TO_OWNER: dict[str, Scope] = {
     "kikkawa": Scope("artifact", "kittoku"),
+    # LP mock images served at a public (non-/artifacts) path so unauthenticated
+    # ad visitors can load them. Currently only the salonboard-monitor LP uses
+    # this folder; revisit if another artifact's mocks are added here.
+    "lp-mocks": Scope("artifact", "salonboard-monitor"),
     # amagasaki-hero.{mp4,png} files live directly under public/ but are
-    # demo assets used only by frontend/src/app/demo/amagasaki-sales-dashboard.
+    # scratch assets used only by frontend/src/app/scratch/amagasaki-sales-dashboard.
     # They are listed here as a prefix match.
 }
 
-# Top-level public files (no directory) that belong to specific demos.
+# Top-level public files (no directory) that belong to specific prototypes.
 _PUBLIC_FILE_TO_OWNER: dict[str, Scope] = {
     "amagasaki-hero.mp4": Scope("demo", "amagasaki-sales-dashboard"),
     "amagasaki-hero.png": Scope("demo", "amagasaki-sales-dashboard"),
@@ -132,7 +135,7 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "frontend/src/stores/**",
     "frontend/src/types/**",
     "frontend/src/middleware.ts",
-    # Dan's own pages (everything in app/ except /artifacts/, /demo/,
+    # Dan's own pages (everything in app/ except /artifacts/,
     # /scratch/, and the artifact-specific api routes which are matched
     # by _ARTIFACT_API_PREFIXES below).
     "frontend/src/app/*.tsx",
@@ -246,8 +249,8 @@ def classify(path: str) -> Scope:
         if head:
             return Scope("artifact", head)
 
-    # 4. Demo: frontend/src/app/demo/<name>/... (or scratch/).
-    for demo_root in ("frontend/src/app/demo/", "frontend/src/app/scratch/"):
+    # 4. Scratch prototype space. Legacy frontend/src/app/demo is unsupported.
+    for demo_root in ("frontend/src/app/scratch/",):
         if p_match.startswith(demo_root):
             rest = p_match[len(demo_root):]
             head = rest.split("/", 1)[0]
