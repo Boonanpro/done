@@ -25,6 +25,18 @@ function parseObjectPosition(raw: string | undefined): FocalPoint {
   return { x, y };
 }
 
+/** computed style の background-image から url を取り出す。`none` や gradient のみなら ''。 */
+function extractBgUrl(raw: string | undefined): string {
+  if (!raw || raw === 'none') return '';
+  const m = raw.match(/url\((['"]?)(.*?)\1\)/);
+  return m ? m[2] : '';
+}
+
+/** 編集対象の画像。<img> 要素を最優先、無ければ background-image を持つ要素（liveTarget）。 */
+type ImageTarget =
+  | { mode: 'img'; el: HTMLImageElement }
+  | { mode: 'bg'; el: HTMLElement };
+
 export function ImageSection() {
   const liveTarget = usePreviewStore((s) => s.liveTarget);
   const projectId = usePreviewStore((s) => s.projectId);
@@ -33,25 +45,42 @@ export function ImageSection() {
   const [prompt, setPrompt] = useState('');
   const [generating, setGenerating] = useState(false);
 
-  // 選択要素の周辺から <img> を探す（自身・子孫・先祖の順）
-  const img = useMemo<HTMLImageElement | null>(() => {
-    return findMediaInScope(liveTarget, 'img') as HTMLImageElement | null;
+  // 選択要素の周辺から <img> を探す（自身・子孫）。無ければ背景画像 div を対象にする。
+  const target = useMemo<ImageTarget | null>(() => {
+    const imgEl = findMediaInScope(liveTarget, 'img') as HTMLImageElement | null;
+    if (imgEl) return { mode: 'img', el: imgEl };
+    if (liveTarget) {
+      const el = liveTarget as HTMLElement;
+      const win = el.ownerDocument?.defaultView;
+      const bg = win ? win.getComputedStyle(el).backgroundImage : '';
+      if (extractBgUrl(bg)) return { mode: 'bg', el };
+    }
+    return null;
   }, [liveTarget]);
-  const currentSrc = img?.getAttribute('src') || '';
-  const currentAlt = img?.getAttribute('alt') || '';
+
+  const isBg = target?.mode === 'bg';
+  const el = target?.el ?? null;
+
+  const cs = useMemo(() => {
+    if (!el) return null;
+    const win = el.ownerDocument?.defaultView;
+    return win ? win.getComputedStyle(el) : null;
+  }, [el]);
+
+  const currentSrc = isBg
+    ? extractBgUrl(cs?.backgroundImage)
+    : (el?.getAttribute('src') || '');
+  const currentAlt = (!isBg && el?.getAttribute('alt')) || '';
   const [altDraft, setAltDraft] = useState(currentAlt);
 
   useEffect(() => {
     setAltDraft(currentAlt);
   }, [currentAlt]);
 
-  const cs = useMemo(() => {
-    if (!img) return null;
-    const win = img.ownerDocument?.defaultView;
-    return win ? win.getComputedStyle(img) : null;
-  }, [img]);
-
-  const focalPoint = parseObjectPosition(cs?.objectPosition);
+  // focal point: img は object-position、bg は background-position
+  const focalPoint = parseObjectPosition(
+    isBg ? cs?.backgroundPosition : cs?.objectPosition
+  );
 
   const { data: historyItems = [] } = useQuery<HistoryItem[]>({
     queryKey: ['generated-images', projectId],
@@ -74,16 +103,23 @@ export function ImageSection() {
     staleTime: 10_000,
   });
 
-  const applySrc = (url: string) => {
-    if (!img) return;
-    img.setAttribute('src', url);
-    queueInspectorEdit({ target: img, attrsOnly: { src: url } });
+  // 新しい画像 URL を反映。img は src 属性、bg は background-image スタイルに書く。
+  // どちらも writeback で JSX に永続化される（属性 or style={{}} としてマージ）。
+  const applyUrl = (url: string) => {
+    if (!el) return;
+    if (isBg) {
+      // url() は引用符なし（Supabase URL は特殊文字を含まないのでエスケープ不要）
+      applyStyleTo(el, 'background-image', `url(${url})`);
+    } else {
+      el.setAttribute('src', url);
+      queueInspectorEdit({ target: el, attrsOnly: { src: url } });
+    }
   };
 
   const applyAlt = () => {
-    if (!img) return;
-    img.setAttribute('alt', altDraft);
-    queueInspectorEdit({ target: img, attrsOnly: { alt: altDraft } });
+    if (!el || isBg) return;
+    el.setAttribute('alt', altDraft);
+    queueInspectorEdit({ target: el, attrsOnly: { alt: altDraft } });
   };
 
   const handleRegenerate = async () => {
@@ -102,7 +138,7 @@ export function ImageSection() {
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      applySrc(data.url);
+      applyUrl(data.url);
       setPrompt('');
     } catch (e) {
       console.error('regen failed', e);
@@ -112,20 +148,24 @@ export function ImageSection() {
     }
   };
 
-  // focal point / object-fit は <img> 自体に直接書く。applyStyleTo が
-  // styleVersion を bump するので、このコンポーネントも再描画される
+  // focal point / object-fit は対象要素に直接書く。applyStyleTo が styleVersion を
+  // bump するので、このコンポーネントも再描画される
   const onFocalChange = (v: FocalPoint) => {
-    if (!img) return;
-    applyStyleTo(img, 'object-position', `${v.x.toFixed(1)}% ${v.y.toFixed(1)}%`);
+    if (!el) return;
+    applyStyleTo(
+      el,
+      isBg ? 'background-position' : 'object-position',
+      `${v.x.toFixed(1)}% ${v.y.toFixed(1)}%`
+    );
   };
 
-  const setObjectFit = (v: string) => {
-    if (!img) return;
-    applyStyleTo(img, 'object-fit', v);
+  const setFit = (v: string) => {
+    if (!el) return;
+    applyStyleTo(el, isBg ? 'background-size' : 'object-fit', v);
   };
 
-  // overlay（暗転/ぼかし）は画像自体に CSS filter で適用する。
-  // 個別の overlay div は作らない方針
+  // overlay（暗転/ぼかし）は <img> 自体に CSS filter で適用する。
+  // bg-image div では filter が子要素（テキスト等）も暗くしてしまうため出さない。
   const parseFilter = (raw: string): { darken: number; blur: number } => {
     if (!raw || raw === 'none') return { darken: 0, blur: 0 };
     const brightMatch = raw.match(/brightness\(([\d.]+)\)/);
@@ -136,18 +176,18 @@ export function ImageSection() {
   };
   const currentFilter = parseFilter(cs?.filter || '');
   const writeFilter = (next: { darken: number; blur: number }) => {
-    if (!img) return;
+    if (!el) return;
     const parts: string[] = [];
     if (next.darken > 0) parts.push(`brightness(${((100 - next.darken) / 100).toFixed(2)})`);
     if (next.blur > 0) parts.push(`blur(${next.blur}px)`);
-    applyStyleTo(img, 'filter', parts.join(' ') || 'none');
+    applyStyleTo(el, 'filter', parts.join(' ') || 'none');
   };
 
-  if (!img) return null;
+  if (!target) return null;
 
   return (
     <section className="flex flex-col gap-3">
-      <SectionHeader title="Image" />
+      <SectionHeader title={isBg ? 'Background Image' : 'Image'} />
 
       {/* サムネ */}
       <div className="flex items-start gap-2">
@@ -159,29 +199,44 @@ export function ImageSection() {
         />
         <div className="min-w-0 flex-1 space-y-1">
           <div className="truncate text-[10px] text-muted-foreground">{currentSrc}</div>
-          <input
-            type="text"
-            value={altDraft}
-            onChange={(e) => setAltDraft(e.target.value)}
-            onBlur={applyAlt}
-            placeholder="alt 説明"
-            className="w-full rounded border border-border bg-input/30 px-1.5 py-0.5 text-xs"
-          />
+          {isBg ? (
+            <div className="text-[10px] text-muted-foreground">
+              背景画像（&lt;{el?.tagName.toLowerCase()}&gt; の background-image）
+            </div>
+          ) : (
+            <input
+              type="text"
+              value={altDraft}
+              onChange={(e) => setAltDraft(e.target.value)}
+              onBlur={applyAlt}
+              placeholder="alt 説明"
+              className="w-full rounded border border-border bg-input/30 px-1.5 py-0.5 text-xs"
+            />
+          )}
         </div>
       </div>
 
-      {/* object-fit / focal point */}
+      {/* object-fit(img) / background-size(bg) + focal point */}
       <SelectInput
-        label="object-fit"
-        value={cs?.objectFit || 'fill'}
-        options={[
-          { value: 'cover', label: 'cover' },
-          { value: 'contain', label: 'contain' },
-          { value: 'fill', label: 'fill' },
-          { value: 'scale-down', label: 'scale-down' },
-          { value: 'none', label: 'none' },
-        ]}
-        onChange={setObjectFit}
+        label={isBg ? 'background-size' : 'object-fit'}
+        value={(isBg ? cs?.backgroundSize : cs?.objectFit) || (isBg ? 'cover' : 'fill')}
+        options={
+          isBg
+            ? [
+                { value: 'cover', label: 'cover' },
+                { value: 'contain', label: 'contain' },
+                { value: 'auto', label: 'auto' },
+                { value: '100% 100%', label: 'stretch' },
+              ]
+            : [
+                { value: 'cover', label: 'cover' },
+                { value: 'contain', label: 'contain' },
+                { value: 'fill', label: 'fill' },
+                { value: 'scale-down', label: 'scale-down' },
+                { value: 'none', label: 'none' },
+              ]
+        }
+        onChange={setFit}
       />
       <FocalPointPad
         value={focalPoint}
@@ -189,31 +244,35 @@ export function ImageSection() {
         backgroundSrc={currentSrc}
       />
 
-      {/* Overlay（画像に直接かかる暗転/ぼかし） */}
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium text-muted-foreground">Overlay</span>
-        <SliderInput
-          label="darken"
-          value={currentFilter.darken}
-          min={0}
-          max={80}
-          unit="%"
-          onChange={(v) => writeFilter({ ...currentFilter, darken: v })}
-        />
-        <SliderInput
-          label="blur"
-          value={currentFilter.blur}
-          min={0}
-          max={20}
-          step={0.5}
-          unit="px"
-          onChange={(v) => writeFilter({ ...currentFilter, blur: v })}
-        />
-      </div>
+      {/* Overlay（画像に直接かかる暗転/ぼかし）— img のみ */}
+      {!isBg && (
+        <div className="flex flex-col gap-1.5">
+          <span className="text-xs font-medium text-muted-foreground">Overlay</span>
+          <SliderInput
+            label="darken"
+            value={currentFilter.darken}
+            min={0}
+            max={80}
+            unit="%"
+            onChange={(v) => writeFilter({ ...currentFilter, darken: v })}
+          />
+          <SliderInput
+            label="blur"
+            value={currentFilter.blur}
+            min={0}
+            max={20}
+            step={0.5}
+            unit="px"
+            onChange={(v) => writeFilter({ ...currentFilter, blur: v })}
+          />
+        </div>
+      )}
 
       {/* 再生成 */}
       <div className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/20 p-2">
-        <label className="text-xs text-muted-foreground">画像を再生成</label>
+        <label className="text-xs text-muted-foreground">
+          {isBg ? '背景画像を再生成' : '画像を再生成'}
+        </label>
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
@@ -244,7 +303,7 @@ export function ImageSection() {
       <HistoryStrip
         items={historyItems}
         currentUrl={currentSrc}
-        onSelect={(it) => applySrc(it.url)}
+        onSelect={(it) => applyUrl(it.url)}
       />
     </section>
   );
