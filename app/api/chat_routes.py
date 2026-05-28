@@ -1893,6 +1893,24 @@ async def list_dan_skills(current_user: TokenData = Depends(get_current_user)):
     }
 
 
+async def _prepend_first_event(first_task, agen):
+    """Yield an already-primed first event, then the remainder of an async generator.
+
+    Used by the parallel-save fast path: process_message_cli's cold start is kicked
+    off (its first __anext__) before the user message is saved, so the DB save
+    overlaps the CLI cold start. The first event is awaited via ``first_task``;
+    this wrapper splices it back in front of the rest of the stream so the
+    consumer loop below stays unchanged.
+    """
+    try:
+        first = await first_task
+    except StopAsyncIteration:
+        return
+    yield first
+    async for ev in agen:
+        yield ev
+
+
 @router.post("/dan/messages/stream")
 async def send_dan_message_stream(
     request: MessageSendRequest,
@@ -2001,6 +2019,23 @@ async def send_dan_message_stream(
             # Step 1: ユーザーメッセージを保存（or 既存メッセージを上書き）
             mark_latency("project_preload")
             media_content = _build_content_with_media(request.content, request.image_urls or [], request.file_urls or [])
+            # 並列保存の判定: 一番多い「既存セッションへのプレーンな新規メッセージ」だけ、
+            # ユーザーメッセージのDB保存(send_message ~1.27s)を CLI cold start の裏で実行する。
+            # replace(上書き)/新規ルーム/常駐ストリーミングは従来どおり逐次保存する。
+            # DAN_PARALLEL_SEND=0 で即座に従来挙動へ戻せる。
+            import os as _os
+            _parallel_send_enabled = _os.getenv("DAN_PARALLEL_SEND", "1").strip().lower() not in ("0", "false", "no", "off")
+            try:
+                from app.agent.streaming_session import streaming_enabled as _streaming_enabled
+                _streaming_on = _streaming_enabled()
+            except Exception:
+                _streaming_on = False
+            _parallel_save = (
+                _parallel_send_enabled
+                and bool(request.session_id)
+                and not request.replace_message_id
+                and not _streaming_on
+            )
             if request.replace_message_id:
                 # キャンセル後の再送信: 既存メッセージの内容を上書き（INSERTしない）
                 room_id = request.session_id
@@ -2014,6 +2049,11 @@ async def send_dan_message_stream(
                 except Exception as e:
                     logger.warning("Failed to update message %s, falling back to insert: %s", request.replace_message_id, e)
                     message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id)
+            elif _parallel_save:
+                # 並列保存パス: ここでは保存せず room_id だけ確定する。実際の send_message は
+                # process_message_cli の cold start を起動した直後（裏で並走）に実行する。
+                room_id = request.session_id
+                message = None
             elif request.session_id:
                 room_id = request.session_id
                 message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id)
@@ -2024,11 +2064,15 @@ async def send_dan_message_stream(
             # 従来はここで users を再度引いており、send_message 内の get_sender と
             # 二重の往復になっていた。上書き(replace)経路は raw 行で sender_name を
             # 持たないため、その時だけフォールバックで取得する。
-            sender_display_name = message.get("sender_name")
-            if not sender_display_name:
-                _u = await service.get_user_by_id(current_user.user_id)
-                sender_display_name = _u["display_name"] if _u else "You"
-            mark_latency("message_saved")
+            # 並列保存パス(message is None)では保存時に解決するため、ここはスキップ。
+            if message is not None:
+                sender_display_name = message.get("sender_name")
+                if not sender_display_name:
+                    _u = await service.get_user_by_id(current_user.user_id)
+                    sender_display_name = _u["display_name"] if _u else "You"
+                mark_latency("message_saved")
+            else:
+                sender_display_name = None
 
             # 返信先メッセージの内容を取得（ダンのコンテキスト注入 + SSEレスポンス用）
             reply_context_prefix = ""
@@ -2072,29 +2116,31 @@ async def send_dan_message_stream(
             room_id_for_cancel = room_id
             CancellationRegistry.register(room_id)
 
-            user_message = {
-                "id": message["id"],
-                "room_id": room_id,
-                "sender_id": message["sender_id"],
-                "sender_name": sender_display_name or "You",
-                "sender_type": message["sender_type"],
-                "content": message["content"],
-                "created_at": message["created_at"].isoformat() if hasattr(message["created_at"], 'isoformat') else str(message["created_at"]),
-            }
-            if request.reply_to_id:
-                user_message["reply_to_id"] = request.reply_to_id
-                if _reply_msg_data:
-                    user_message["reply_to_message"] = {
-                        "id": _reply_msg_data["id"],
-                        "sender_name": _reply_msg_data["sender"]["display_name"] if _reply_msg_data.get("sender") else "Unknown",
-                        "sender_type": _reply_msg_data["sender_type"],
-                        "content": _reply_msg_data["content"][:200],
-                        "created_at": _reply_msg_data["created_at"],
-                    }
+            # ユーザーメッセージのエコー（即時保存パスのみ即送出。並列保存は cold start 起動後に送出）
+            if message is not None:
+                user_message = {
+                    "id": message["id"],
+                    "room_id": room_id,
+                    "sender_id": message["sender_id"],
+                    "sender_name": sender_display_name or "You",
+                    "sender_type": message["sender_type"],
+                    "content": message["content"],
+                    "created_at": message["created_at"].isoformat() if hasattr(message["created_at"], 'isoformat') else str(message["created_at"]),
+                }
+                if request.reply_to_id:
+                    user_message["reply_to_id"] = request.reply_to_id
+                    if _reply_msg_data:
+                        user_message["reply_to_message"] = {
+                            "id": _reply_msg_data["id"],
+                            "sender_name": _reply_msg_data["sender"]["display_name"] if _reply_msg_data.get("sender") else "Unknown",
+                            "sender_type": _reply_msg_data["sender_type"],
+                            "content": _reply_msg_data["content"][:200],
+                            "created_at": _reply_msg_data["created_at"],
+                        }
 
-            # ユーザーメッセージを送信（session_id付き）
-            yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
-            mark_latency("user_sse_sent")
+                # ユーザーメッセージを送信（session_id付き）
+                yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
+                mark_latency("user_sse_sent")
 
             # 追い連絡を常駐セッションへ注入し、即ackして本リクエストは終了する。
             # 本ターンの回答（次の境界以降）は、継続中の最初のSSEストリームが描画する。
@@ -2273,8 +2319,7 @@ async def send_dan_message_stream(
                     logger.warning("Media artifact extraction failed (non-blocking): %s", media_err)
                 mark_latency("media_artifacts_saved")
 
-                first_cli_event_logged = False
-                async for event in process_message_cli(
+                _cli_agen = process_message_cli(
                     room_id=room_id,
                     user_id=current_user.user_id,
                     content=cli_content,
@@ -2285,7 +2330,55 @@ async def send_dan_message_stream(
                     project_id=project_info.get("id"),
                     run_id=run_id,
                     skill_injection=skill_injection,
-                ):
+                )
+                if message is None:
+                    # 並列保存パス: 先に cold start を起動し（最初の __anext__ でCLIスレッド開始）、
+                    # その裏で send_message(~1.27s) を実行して TTFT を短縮する。
+                    _gen_first = asyncio.ensure_future(_cli_agen.__anext__())
+                    await asyncio.sleep(0)  # CLIスレッド(cold start)を先に走らせてから保存する
+                    try:
+                        message = await service.send_message(
+                            room_id, current_user.user_id, media_content,
+                            sender_type="human", reply_to_id=request.reply_to_id,
+                        )
+                    except Exception:
+                        _gen_first.cancel()
+                        try:
+                            from app.agent.cli_runner import kill_cli_process
+                            kill_cli_process(room_id)
+                        except Exception:
+                            pass
+                        raise
+                    sender_display_name = message.get("sender_name") or "You"
+                    mark_latency("message_saved")
+                    # ユーザーメッセージのエコー（最初のAIイベントより前に送出）
+                    user_message = {
+                        "id": message["id"],
+                        "room_id": room_id,
+                        "sender_id": message["sender_id"],
+                        "sender_name": sender_display_name,
+                        "sender_type": message["sender_type"],
+                        "content": message["content"],
+                        "created_at": message["created_at"].isoformat() if hasattr(message["created_at"], 'isoformat') else str(message["created_at"]),
+                    }
+                    if request.reply_to_id:
+                        user_message["reply_to_id"] = request.reply_to_id
+                        if _reply_msg_data:
+                            user_message["reply_to_message"] = {
+                                "id": _reply_msg_data["id"],
+                                "sender_name": _reply_msg_data["sender"]["display_name"] if _reply_msg_data.get("sender") else "Unknown",
+                                "sender_type": _reply_msg_data["sender_type"],
+                                "content": _reply_msg_data["content"][:200],
+                                "created_at": _reply_msg_data["created_at"],
+                            }
+                    yield f"data: {json.dumps({'type': 'user_message', 'session_id': room_id, 'message': user_message})}\n\n"
+                    mark_latency("user_sse_sent")
+                    _cli_iter = _prepend_first_event(_gen_first, _cli_agen)
+                else:
+                    _cli_iter = _cli_agen
+
+                first_cli_event_logged = False
+                async for event in _cli_iter:
                     if not first_cli_event_logged:
                         mark_latency(f"first_cli_event:{event.get('type', 'unknown')}")
                         log_latency(room_id)
