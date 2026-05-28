@@ -69,6 +69,40 @@ type TurnBlock =
   | { type: 'reasoning'; text?: string }
   | { type: 'error'; text?: string };
 
+// Server-side live-run reconstruction (mirrors the web chat). The live timeline
+// is rebuilt from /current-run + /execution-events rather than only from the
+// SSE stream, so it SURVIVES navigating away and back (and SSE drops) — the
+// in-memory-only approach loses the timeline the moment the stream is torn down.
+type ExecutionEvent = {
+  id: string;
+  run_id?: string | null;
+  turn_id?: string | null;
+  event_type: 'tool_use' | 'reasoning' | 'phase' | 'error' | 'text' | 'done' | string;
+  tool_name?: string | null;
+  tool_label?: string | null;
+  content?: string | null;
+  metadata?: Record<string, unknown> | null;
+  seq?: number | null;
+  created_at: string;
+};
+
+type AgentRun = {
+  id: string;
+  project_id: string;
+  state: 'running' | 'paused' | 'completed' | 'failed' | 'interrupted' | string;
+  created_at: string;
+};
+
+function eventToStep(event: ExecutionEvent): TurnBlock {
+  if (event.event_type === 'tool_use') {
+    return { type: 'tool', label: event.tool_label || event.tool_name || 'ツール実行' };
+  }
+  if (event.event_type === 'error') {
+    return { type: 'error', text: event.content || 'エラー' };
+  }
+  return { type: 'text', text: event.content || event.event_type };
+}
+
 type MessageResponse = {
   id: string;
   room_id?: string;
@@ -773,11 +807,12 @@ function AppMain() {
   // timeline / activity in the chat that is actually streaming. null when idle.
   const [streamingProjectId, setStreamingProjectId] = useState<string | null>(null);
   const [activity, setActivity] = useState('');
-  // Live in-progress timeline for the current turn (text + tool steps), built
-  // from the SSE `process` events so the chat shows the work building up — like
-  // the web chat — instead of only a one-line status. Cleared when the turn ends
-  // (the saved message, which carries the full ai_context.blocks, takes over).
-  const [liveBlocks, setLiveBlocks] = useState<TurnBlock[]>([]);
+  // Live in-progress turn, reconstructed FROM THE SERVER (current-run +
+  // execution-events) so it survives navigating away/back and SSE drops — like
+  // the web chat. The SSE stream only triggers an immediate refetch for low
+  // latency; the rendered timeline always comes from these two values.
+  const [currentRun, setCurrentRun] = useState<AgentRun | null>(null);
+  const [runEvents, setRunEvents] = useState<ExecutionEvent[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [screen, setScreen] = useState<'projects' | 'chat' | 'artifact' | 'settings'>('projects');
   const [artifacts, setArtifacts] = useState<ChatArtifactResponse[]>([]);
@@ -822,6 +857,36 @@ function AppMain() {
       ),
     [messages],
   );
+
+  // Live in-progress turn for the OPEN chat, rebuilt from the server poll. Shows
+  // whenever this chat's run is "running" — independent of the SSE stream — so
+  // it persists across navigating away and back, and across SSE drops.
+  const liveRunActive =
+    !!currentRun &&
+    currentRun.state === 'running' &&
+    currentRun.project_id === currentProject?.id;
+  const liveStepBlocks = useMemo<TurnBlock[]>(() => {
+    if (!liveRunActive || !currentRun) return [];
+    return runEvents
+      .filter(
+        (e) => e.run_id === currentRun.id && e.event_type !== 'done' && e.event_type !== 'phase',
+      )
+      .sort(
+        (a, b) =>
+          (a.seq ?? 0) - (b.seq ?? 0) ||
+          new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+      )
+      .map(eventToStep);
+  }, [liveRunActive, currentRun, runEvents]);
+  // Show the live bubble when the server says this chat's run is active, OR
+  // (for instant feedback) right after sending here before the first poll lands.
+  // The instant-feedback part stops as soon as the run is known to be finished,
+  // so the bubble doesn't linger next to the final answer.
+  const showLiveTurn =
+    liveRunActive ||
+    (sending &&
+      streamingProjectId === currentProject?.id &&
+      (!currentRun || currentRun.state === 'running'));
 
   const unreadTotal = useMemo(
     () => projects.reduce((total, project) => total + (project.unread_count || 0), 0),
@@ -889,6 +954,30 @@ function AppMain() {
       return [];
     } finally {
       setLoadingArtifacts(false);
+    }
+  }, []);
+
+  // Pull the live in-progress run + its steps from the server for a project.
+  // Mirrors the web chat's current-run / execution-events polling so the live
+  // timeline can be reconstructed even after navigating away (SSE-independent).
+  const pollRun = useCallback(async (activeToken: string, projectId: string) => {
+    try {
+      const run = await apiRequest<AgentRun>(`/projects/${projectId}/current-run`, {}, activeToken);
+      setCurrentRun(run);
+      if (run && run.state === 'running') {
+        const events = await apiRequest<ExecutionEvent[]>(
+          `/projects/${projectId}/execution-events?limit=200`,
+          {},
+          activeToken,
+        ).catch(() => [] as ExecutionEvent[]);
+        setRunEvents(events ?? []);
+      } else {
+        setRunEvents([]);
+      }
+    } catch {
+      // 404 = no run for this project (the common idle case).
+      setCurrentRun(null);
+      setRunEvents([]);
     }
   }, []);
 
@@ -1033,6 +1122,36 @@ function AppMain() {
     }, 4000);
     return () => clearInterval(id);
   }, [token, screen, sending, streamingProjectId, currentProject?.room_id, currentProject?.id]);
+
+  // Poll the live run for the OPEN chat so the in-progress timeline shows even
+  // when the SSE stream isn't this device's (e.g. we navigated back into a chat
+  // Dan is still working on, or another device sent the message). Mirrors the
+  // web chat's 2s current-run / execution-events polling. The SSE handler also
+  // calls pollRun directly for low latency while actively streaming here.
+  useEffect(() => {
+    if (!token || screen !== 'chat') return;
+    const projectId = currentProject?.id;
+    if (!projectId) return;
+    let cancelled = false;
+    const tick = () => {
+      if (AppState.currentState === 'active' && !cancelled) {
+        void pollRun(token, projectId);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 2500);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [token, screen, currentProject?.id, pollRun]);
+
+  // Reset the live run view immediately when switching chats so a previous
+  // chat's timeline never flashes in the newly-opened one before the first poll.
+  useEffect(() => {
+    setCurrentRun(null);
+    setRunEvents([]);
+  }, [currentProject?.id]);
 
   useEffect(() => {
     if (!token) return;
@@ -1477,7 +1596,6 @@ function AppMain() {
     }
 
     setActivity('Thinking...');
-    setLiveBlocks([]);
 
     const optimistic: MessageResponse = {
       id: `local-${Date.now()}`,
@@ -1507,24 +1625,20 @@ function AppMain() {
 
         // Is the user currently looking at the chat this stream belongs to? If
         // they navigated to another chat, we keep the stream running (so the
-        // turn finishes + the reply is saved to the DB) and keep building
-        // liveBlocks, but we DON'T touch the visible message list — otherwise
-        // this chat's reply would leak into the chat they're now viewing.
+        // turn finishes + the reply is saved to the DB), but we DON'T touch the
+        // visible message list — otherwise this chat's reply would leak into the
+        // chat they're now viewing. The live timeline itself comes from the
+        // server poll (pollRun), so it shows regardless of which chat is open.
         const viewing = currentProjectIdRef.current === selectedProjectId;
 
         if (event.type === 'process') {
           const step = event.step as { label?: string } | undefined;
           const label = (step?.label || '').trim();
           if (viewing) setActivity(label || 'Thinking...');
-          // Accumulate the step into the live timeline. "🔧 …" labels are tool
-          // steps; everything else is Dan's intermediate narration text. Always
-          // accumulated so returning to this chat shows the up-to-date timeline.
-          if (label) {
-            setLiveBlocks((cur) => [
-              ...cur,
-              label.startsWith('🔧') ? { type: 'tool', label } : { type: 'text', text: label },
-            ]);
-          }
+          // Refetch the live run immediately for low latency (don't wait for the
+          // 2.5s interval). Only when viewing this chat — otherwise the open
+          // chat's own poll owns currentRun. The timeline renders from server state.
+          if (viewing) void pollRun(token, selectedProjectId);
         } else if (event.type === 'user_message' && isMessageResponse(event.message)) {
           sent = true;
           const incoming = event.message;
@@ -1542,8 +1656,10 @@ function AppMain() {
           if (viewing) setMessages((current) => upsertMessage(current, incoming));
         } else if (event.type === 'done') {
           sent = true;
-          if (viewing) setActivity('Done');
-          setLiveBlocks([]);
+          if (viewing) {
+            setActivity('Done');
+            void pollRun(token, selectedProjectId);
+          }
         }
       });
     } catch (error) {
@@ -1976,12 +2092,12 @@ function AppMain() {
           </View>
         ) : null}
 
-        {loadingMessages && newestMessages.length === 0 ? (
+        {loadingMessages && newestMessages.length === 0 && !showLiveTurn ? (
           <View style={styles.centerPanel}>
             <ActivityIndicator color="#f4f0e8" />
             <Text style={styles.mutedText}>Loading history</Text>
           </View>
-        ) : newestMessages.length === 0 ? (
+        ) : newestMessages.length === 0 && !showLiveTurn ? (
           <View style={styles.centerPanel}>
             <Text style={styles.emptyTitle}>DAN</Text>
             <Text style={styles.mutedText}>メッセージを入力してください</Text>
@@ -1990,9 +2106,7 @@ function AppMain() {
           <FlatList
             contentContainerStyle={styles.messageList}
             data={
-              sending &&
-              liveBlocks.length > 0 &&
-              streamingProjectId === currentProject?.id
+              showLiveTurn
                 ? [
                     {
                       id: '__live__',
@@ -2022,10 +2136,10 @@ function AppMain() {
                       <Text style={styles.messageSender}>DAN</Text>
                       <ActivityIndicator color="#7fd1c7" size="small" />
                     </View>
-                    {liveBlocks.length > 0 ? (
-                      <AiTurnBlocks blocks={liveBlocks} mine={false} onOpenUrl={handleOpenMessageUrl} defaultOpen />
+                    {liveStepBlocks.length > 0 ? (
+                      <AiTurnBlocks blocks={liveStepBlocks} mine={false} onOpenUrl={handleOpenMessageUrl} defaultOpen />
                     ) : (
-                      <Text style={styles.toolRowText}>作業中…</Text>
+                      <Text style={styles.toolRowText}>{activity || '考えています…'}</Text>
                     )}
                   </View>
                 );
@@ -2059,16 +2173,8 @@ function AppMain() {
           />
         )}
 
-        {activity &&
-        streamingProjectId === currentProject?.id &&
-        !(sending && liveBlocks.length > 0) ? (
-          <View style={styles.activityBar}>
-            <ActivityIndicator color="#d9d2c8" size="small" />
-            <Text style={styles.activityText} numberOfLines={2}>
-              {activity}
-            </Text>
-          </View>
-        ) : null}
+        {/* The live in-progress status now lives inside the __live__ bubble
+            (server-driven timeline), so no separate activity bar is needed. */}
 
         {attachments.length > 0 ? (
           <ScrollView
