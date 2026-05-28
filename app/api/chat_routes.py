@@ -677,7 +677,7 @@ async def _register_written_chat_artifacts(
     service = ChatArtifactService()
     seen: set[str] = set()
     artifact_page_pattern = re.compile(
-        r"frontend[/\\]src[/\\]app[/\\](artifacts|demo)[/\\]([\w-]+)(?:[/\\]([^:]*?))?[/\\]page\.tsx$"
+        r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)(?:[/\\]([^:]*?))?[/\\]page\.tsx$"
     )
     project_root = Path(__file__).parent.parent.parent
 
@@ -691,10 +691,9 @@ async def _register_written_chat_artifacts(
                 normalized_path,
             )
             continue
-        folder = match.group(1)
-        root_slug = match.group(2)
-        rest = (match.group(3) or "").strip("/")
-        preview_url = f"/{folder}/{root_slug}" + (f"/{rest}" if rest else "")
+        root_slug = match.group(1)
+        rest = (match.group(2) or "").strip("/")
+        preview_url = f"/artifacts/{root_slug}" + (f"/{rest}" if rest else "")
         card_slug = root_slug if not rest else f"{root_slug}-{'-'.join(part for part in rest.split('/') if part)}"
         candidates.append((card_slug, preview_url, normalized_path))
 
@@ -725,7 +724,7 @@ async def _register_written_chat_artifacts(
                     "room_id": room_id,
                     "project_id": project_id,
                     "slug": slug,
-                    "kind": "demo" if preview_url.startswith("/demo/") else "production",
+                    "kind": "production",
                     "artifact_type": service.infer_artifact_type(slug=slug, path=source_path),
                     "label": slug.replace("-", " ").replace("_", " "),
                     "preview_url": preview_url,
@@ -2021,7 +2020,14 @@ async def send_dan_message_stream(
             else:
                 message = await service.send_dan_message(current_user.user_id, media_content)
                 room_id = message["room_id"]
-            user = await service.get_user_by_id(current_user.user_id)
+            # 送信者名は send_message の戻り値（sender_name）を再利用する。
+            # 従来はここで users を再度引いており、send_message 内の get_sender と
+            # 二重の往復になっていた。上書き(replace)経路は raw 行で sender_name を
+            # 持たないため、その時だけフォールバックで取得する。
+            sender_display_name = message.get("sender_name")
+            if not sender_display_name:
+                _u = await service.get_user_by_id(current_user.user_id)
+                sender_display_name = _u["display_name"] if _u else "You"
             mark_latency("message_saved")
 
             # 返信先メッセージの内容を取得（ダンのコンテキスト注入 + SSEレスポンス用）
@@ -2070,7 +2076,7 @@ async def send_dan_message_stream(
                 "id": message["id"],
                 "room_id": room_id,
                 "sender_id": message["sender_id"],
-                "sender_name": user["display_name"] if user else "You",
+                "sender_name": sender_display_name or "You",
                 "sender_type": message["sender_type"],
                 "content": message["content"],
                 "created_at": message["created_at"].isoformat() if hasattr(message["created_at"], 'isoformat') else str(message["created_at"]),
@@ -2117,26 +2123,10 @@ async def send_dan_message_stream(
             except Exception:
                 pass
 
-            # Step 1.5: 同一セッション（ルーム）の会話履歴を取得
-            # 現在のメッセージより前のメッセージを取得（直近10件）
-            conversation_history = []
-            try:
-                # 現在のメッセージを除く直近のメッセージを取得
-                recent_messages = await service.get_messages(room_id, current_user.user_id, limit=11)
-                # 最新のメッセージ（今送ったもの）を除外
-                conversation_history = [
-                    {
-                        "sender_type": msg.get("sender_type", "unknown"),
-                        "sender_name": msg.get("sender_name", ""),
-                        "content": msg.get("content", ""),
-                    }
-                    for msg in recent_messages[1:]  # 最新を除く
-                ]
-                # 時系列順に並べ替え（古い順）
-                conversation_history = list(reversed(conversation_history))
-            except Exception as e:
-                import logging
-                logging.warning(f"Failed to get conversation history: {e}")
+            # Step 1.5（廃止）: ここで毎ターン get_messages（直近11件＋返信先取得で
+            # 約0.28sの往復）を実行していたが、conversation_history はどこからも
+            # 参照されない死にコードだった。CLI は --resume と DB reseed で文脈を
+            # 持つため不要。往復を削除して TTFT を短縮する。
             mark_latency("history_loaded")
             
             # ========================================
@@ -2377,8 +2367,9 @@ async def send_dan_message_stream(
                         # （ループ終了を待つとCLIプロセスの後処理分だけ遅延する）
                         ai_response_content = final_text or "応答を生成できませんでした。もう一度お試しください。"
                         if cli_saved_ai_message:
+                            ai_context = {"turn_id": event.get("turn_id")} if event.get("turn_id") else None
                             ai_message = {
-                                "id": "cli-saved",
+                                "id": f"cli-saved-{event.get('turn_id') or 'latest'}",
                                 "room_id": room_id,
                                 "sender_id": None,
                                 "sender_name": "ダン",
@@ -2388,6 +2379,8 @@ async def send_dan_message_stream(
                                 # 追い連絡で割り込まれたターンが時系列で正しく並ぶように）。
                                 "created_at": event.get("created_at") or datetime.now(timezone.utc).isoformat(),
                             }
+                            if ai_context:
+                                ai_message["ai_context"] = ai_context
                             yield f"data: {json.dumps({'type': 'ai_message', 'session_id': room_id, 'message': ai_message})}\n\n"
                         else:
                             ai_message_data = await service.send_dan_ai_message(
