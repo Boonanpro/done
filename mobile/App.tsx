@@ -768,6 +768,10 @@ function AppMain() {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [sending, setSending] = useState(false);
+  // Which project the in-flight stream belongs to. Lets the user navigate away
+  // to other chats while Dan is still working, and only renders the live
+  // timeline / activity in the chat that is actually streaming. null when idle.
+  const [streamingProjectId, setStreamingProjectId] = useState<string | null>(null);
   const [activity, setActivity] = useState('');
   // Live in-progress timeline for the current turn (text + tool steps), built
   // from the SSE `process` events so the chat shows the work building up — like
@@ -1011,11 +1015,14 @@ function AppMain() {
   // auto follow-up, or a reply from another device — would not show until the
   // user backgrounds/foregrounds, taps a push, or pulls to refresh. Mirrors the
   // PC web chat, which polls its messages every few seconds while idle. Off
-  // while sending (the SSE stream drives updates then) and while backgrounded.
+  // while backgrounded, and off for the chat that is actively streaming (its
+  // SSE stream drives updates — but a DIFFERENT chat viewed during a background
+  // stream still polls, so its messages stay fresh).
   useEffect(() => {
-    if (!token || screen !== 'chat' || sending) return;
+    if (!token || screen !== 'chat') return;
     const roomId = currentProject?.room_id;
     if (!roomId) return;
+    if (sending && streamingProjectId === currentProject?.id) return;
     const id = setInterval(() => {
       if (AppState.currentState !== 'active') return;
       apiRequest<MessagesListResponse>(`/chat/rooms/${roomId}/messages?limit=120`, {}, token)
@@ -1025,7 +1032,7 @@ function AppMain() {
         .catch(() => null);
     }, 4000);
     return () => clearInterval(id);
-  }, [token, screen, sending, currentProject?.room_id]);
+  }, [token, screen, sending, streamingProjectId, currentProject?.room_id, currentProject?.id]);
 
   useEffect(() => {
     if (!token) return;
@@ -1197,7 +1204,9 @@ function AppMain() {
   }
 
   async function handleSelectProject(projectId: string) {
-    if (!token || sending) return;
+    // No `sending` guard: a stream in another chat must not block navigation.
+    // The stream is scoped to streamingProjectId, so switching chats is safe.
+    if (!token) return;
     const project = projects.find((item) => item.id === projectId) ?? null;
     setDrawerOpen(false);
     setMessages([]);
@@ -1210,7 +1219,7 @@ function AppMain() {
   }
 
   async function handleNewProject() {
-    if (!token || sending) return;
+    if (!token) return;
     try {
       const project = await apiRequest<ProjectResponse>(
         '/projects',
@@ -1440,6 +1449,7 @@ function AppMain() {
     setDraft('');
     setAttachments([]);
     setSending(true);
+    setStreamingProjectId(project.id);
 
     // Upload attachments first, then prepend the [添付...] tags Dan + the
     // renderers understand. If upload fails, restore the draft + attachments
@@ -1457,6 +1467,7 @@ function AppMain() {
         finalContent = content ? `${tags}\n\n${content}` : tags;
       } catch (error) {
         setSending(false);
+        setStreamingProjectId(null);
         setActivity('');
         setDraft(content);
         setAttachments(pending);
@@ -1465,7 +1476,7 @@ function AppMain() {
       }
     }
 
-    setActivity('DAN is working...');
+    setActivity('Thinking...');
     setLiveBlocks([]);
 
     const optimistic: MessageResponse = {
@@ -1489,16 +1500,25 @@ function AppMain() {
       await streamDanMessage(token, finalContent, project.room_id, (event) => {
         if (event.created_project_id && event.created_project_id !== selectedProjectId) {
           selectedProjectId = event.created_project_id;
+          setStreamingProjectId(event.created_project_id);
           setCurrentProjectId(event.created_project_id);
           SecureStore.setItemAsync(PROJECT_KEY, event.created_project_id).catch(() => null);
         }
 
+        // Is the user currently looking at the chat this stream belongs to? If
+        // they navigated to another chat, we keep the stream running (so the
+        // turn finishes + the reply is saved to the DB) and keep building
+        // liveBlocks, but we DON'T touch the visible message list — otherwise
+        // this chat's reply would leak into the chat they're now viewing.
+        const viewing = currentProjectIdRef.current === selectedProjectId;
+
         if (event.type === 'process') {
           const step = event.step as { label?: string } | undefined;
           const label = (step?.label || '').trim();
-          setActivity(label || 'DAN is working...');
+          if (viewing) setActivity(label || 'Thinking...');
           // Accumulate the step into the live timeline. "🔧 …" labels are tool
-          // steps; everything else is Dan's intermediate narration text.
+          // steps; everything else is Dan's intermediate narration text. Always
+          // accumulated so returning to this chat shows the up-to-date timeline.
           if (label) {
             setLiveBlocks((cur) => [
               ...cur,
@@ -1508,19 +1528,21 @@ function AppMain() {
         } else if (event.type === 'user_message' && isMessageResponse(event.message)) {
           sent = true;
           const incoming = event.message;
-          setMessages((current) =>
-            upsertMessage(
-              current.filter((message) => message.id !== optimistic.id),
-              incoming,
-            ),
-          );
+          if (viewing) {
+            setMessages((current) =>
+              upsertMessage(
+                current.filter((message) => message.id !== optimistic.id),
+                incoming,
+              ),
+            );
+          }
         } else if (event.type === 'ai_message' && isMessageResponse(event.message)) {
           sent = true;
           const incoming = event.message;
-          setMessages((current) => upsertMessage(current, incoming));
+          if (viewing) setMessages((current) => upsertMessage(current, incoming));
         } else if (event.type === 'done') {
           sent = true;
-          setActivity('Done');
+          if (viewing) setActivity('Done');
           setLiveBlocks([]);
         }
       });
@@ -1532,6 +1554,7 @@ function AppMain() {
         setMessages((current) => current.filter((message) => message.id !== optimistic.id));
         Alert.alert('Send failed', String((error as Error).message));
         setSending(false);
+        setStreamingProjectId(null);
         setActivity('');
         return;
       }
@@ -1539,20 +1562,25 @@ function AppMain() {
       // reconcile from the server instead of treating it as a failure.
     }
 
-    // Reconcile final state (clean done OR sent-but-stream-dropped).
+    // Reconcile final state (clean done OR sent-but-stream-dropped). Only pull
+    // the saved messages into view if the user is STILL looking at this chat —
+    // if they navigated away mid-stream, reloading here would yank them back.
     try {
       const list = await refreshProjects(token).catch(() => projects);
-      const nextProject =
-        list.find((item) => item.id === selectedProjectId) ||
-        list.find((item) => item.room_id === project?.room_id) ||
-        project;
-      if (nextProject?.id) {
-        await loadProjectMessages(token, nextProject.id);
+      if (currentProjectIdRef.current === selectedProjectId) {
+        const nextProject =
+          list.find((item) => item.id === selectedProjectId) ||
+          list.find((item) => item.room_id === project?.room_id) ||
+          project;
+        if (nextProject?.id) {
+          await loadProjectMessages(token, nextProject.id);
+        }
       }
     } catch {
       // best-effort reconcile
     } finally {
       setSending(false);
+      setStreamingProjectId(null);
       setActivity('');
     }
   }
@@ -1962,7 +1990,9 @@ function AppMain() {
           <FlatList
             contentContainerStyle={styles.messageList}
             data={
-              sending && liveBlocks.length > 0
+              sending &&
+              liveBlocks.length > 0 &&
+              streamingProjectId === currentProject?.id
                 ? [
                     {
                       id: '__live__',
@@ -2029,7 +2059,9 @@ function AppMain() {
           />
         )}
 
-        {activity && !(sending && liveBlocks.length > 0) ? (
+        {activity &&
+        streamingProjectId === currentProject?.id &&
+        !(sending && liveBlocks.length > 0) ? (
           <View style={styles.activityBar}>
             <ActivityIndicator color="#d9d2c8" size="small" />
             <Text style={styles.activityText} numberOfLines={2}>
