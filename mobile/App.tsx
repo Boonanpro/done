@@ -800,6 +800,12 @@ function AppMain() {
   useEffect(() => {
     screenRef.current = screen;
   }, [screen]);
+  // When the app is cold-started by tapping a push, the project id to open is
+  // captured here BEFORE loadInitialData runs. loadInitialData honours it and
+  // jumps straight to that chat instead of resetting to the projects list —
+  // otherwise the two race and the "back to projects" reset wins, leaving the
+  // tapped chat unopened.
+  const pendingLaunchProjectRef = useRef<string | null>(null);
 
   const token = auth.status === 'signed_in' ? auth.token : undefined;
   const user = auth.status === 'signed_in' ? auth.user : undefined;
@@ -923,6 +929,16 @@ function AppMain() {
   const loadInitialData = useCallback(
     async (activeToken: string) => {
       await refreshProjects(activeToken);
+      // Cold-started from a notification tap: open that chat directly instead
+      // of landing on (and resetting to) the projects list.
+      const launchTarget = pendingLaunchProjectRef.current;
+      if (launchTarget) {
+        pendingLaunchProjectRef.current = null;
+        setScreen('chat');
+        setDrawerOpen(false);
+        await loadProjectMessages(activeToken, launchTarget);
+        return;
+      }
       setCurrentProject(null);
       setCurrentProjectId(null);
       setMessages([]);
@@ -930,7 +946,7 @@ function AppMain() {
       setArtifactView(null);
       setScreen('projects');
     },
-    [refreshProjects],
+    [refreshProjects, loadProjectMessages],
   );
 
   const openProjectFromNotificationUrl = useCallback(
@@ -1082,6 +1098,20 @@ function AppMain() {
       if (!storedToken) {
         if (alive) setAuth({ status: 'signed_out' });
         return;
+      }
+
+      // If this launch was triggered by tapping a push, remember which chat to
+      // open. loadInitialData (below) reads this and jumps to that chat instead
+      // of resetting to the projects list. Captured up-front so it can't lose a
+      // race with the projects reset.
+      try {
+        const launch = await Notifications.getLastNotificationResponseAsync();
+        const launchUrl = launch?.notification?.request?.content?.data?.url;
+        const launchMatch =
+          typeof launchUrl === 'string' ? launchUrl.match(/\/chat\/([^/?#]+)/) : null;
+        if (launchMatch?.[1]) pendingLaunchProjectRef.current = launchMatch[1];
+      } catch {
+        // best-effort — fall back to the projects list
       }
 
       // Cold-starting from a notification tap, the network is often not ready
