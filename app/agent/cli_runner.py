@@ -211,6 +211,52 @@ def _build_reseed_context(room_id: str, max_chars: int = 8000, max_msgs: int = 4
     )
 
 
+# Transcript size guard. A Claude CLI session transcript grows with every tool
+# result (Read/Grep/Bash output, file contents, screenshots …). Once it is large,
+# resuming it with --resume re-prefills the whole thing and the first token can
+# take minutes. Above this size we drop the session and reseed from the DB
+# instead: the conversation itself lives in chat_messages, so the context is
+# preserved while the per-turn prompt shrinks back to
+# system prompt + recent excerpt + the new message. This is the same mechanism
+# used when a session is poisoned — here it fires on size. Set
+# DAN_TRANSCRIPT_RESET_BYTES=0 to disable the guard.
+_TRANSCRIPT_RESET_BYTES = int(os.getenv("DAN_TRANSCRIPT_RESET_BYTES", str(1_500_000)))
+
+
+def _session_transcript_path(session_id: str) -> Optional[Path]:
+    """Locate the Claude CLI transcript .jsonl for a session id, if present.
+
+    The CLI stores transcripts under ~/.claude/projects/<cwd-slug>/<sid>.jsonl.
+    We glob by session id so this does not depend on the cwd-slug naming.
+    """
+    if not session_id:
+        return None
+    projects = Path.home() / ".claude" / "projects"
+    if not projects.exists():
+        return None
+    try:
+        for p in projects.glob(f"*/{session_id}.jsonl"):
+            return p
+    except Exception:
+        return None
+    return None
+
+
+def _transcript_exceeds_limit(session_id: str) -> bool:
+    """True when a session transcript is big enough that a --resume prefill would
+    dominate latency. Best-effort: returns False when the guard is disabled or
+    the transcript file cannot be found."""
+    if _TRANSCRIPT_RESET_BYTES <= 0:
+        return False
+    path = _session_transcript_path(session_id)
+    if path is None:
+        return False
+    try:
+        return path.stat().st_size >= _TRANSCRIPT_RESET_BYTES
+    except Exception:
+        return False
+
+
 def _is_disconnect_error(err: Exception) -> bool:
     """Detect transient Supabase/httpx disconnect errors worth retrying once."""
     msg = str(err).lower()
@@ -1257,6 +1303,26 @@ def _run_cli_in_thread(
     result_data = None
     done_saved = False
     try:
+        # 履歴肥大ガード: --resume するトランスクリプトが大きすぎると、最初のトークンまで
+        # 数分かかる（巨大プロンプトの再prefill）。閾値を超えたらセッションを手放し、
+        # DB の直近会話を要約して文脈を引き継いだ上で新規セッションとして開始する。
+        # 会話本体は chat_messages に残るので文脈は失われない。
+        if resume_session_id and _transcript_exceeds_limit(resume_session_id):
+            _tx_path = _session_transcript_path(resume_session_id)
+            try:
+                _tx_size = _tx_path.stat().st_size if _tx_path else -1
+            except Exception:
+                _tx_size = -1
+            _cli_debug(
+                f"Transcript for session {resume_session_id} is {_tx_size} bytes "
+                f"(>= {_TRANSCRIPT_RESET_BYTES}); dropping session and reseeding from DB"
+            )
+            _clear_cli_session(room_id)
+            resume_session_id = None
+            reseed = _build_reseed_context(room_id)
+            if reseed:
+                content = f"{reseed}\n\n{content}"
+
         # 1回目: セッション再開を試みる（中断後はfork-sessionで新規セッション分岐）
         need_fork = room_id in _interrupted_rooms
         if need_fork:
