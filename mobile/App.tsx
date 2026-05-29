@@ -845,6 +845,9 @@ function AppMain() {
   // otherwise the two race and the "back to projects" reset wins, leaving the
   // tapped chat unopened.
   const pendingLaunchProjectRef = useRef<string | null>(null);
+  // Last message id we've already marked read in the open chat — so the chat
+  // poll only POSTs /read when something new actually arrives, not every tick.
+  const lastSyncedMsgIdRef = useRef<string | null>(null);
 
   const token = auth.status === 'signed_in' ? auth.token : undefined;
   const user = auth.status === 'signed_in' ? auth.user : undefined;
@@ -889,8 +892,14 @@ function AppMain() {
       (!currentRun || currentRun.state === 'running'));
 
   const unreadTotal = useMemo(
-    () => projects.reduce((total, project) => total + (project.unread_count || 0), 0),
-    [projects],
+    () =>
+      projects.reduce((total, project) => {
+        // The chat you're currently viewing is read by definition — a reply that
+        // arrives while you're looking at it must not light up the badge.
+        if (screen === 'chat' && project.id === currentProject?.id) return total;
+        return total + (project.unread_count || 0);
+      }, 0),
+    [projects, screen, currentProject?.id],
   );
 
   const headerTitle = currentProject?.title || 'DAN';
@@ -1020,7 +1029,7 @@ function AppMain() {
   );
 
   const loadInitialData = useCallback(
-    async (activeToken: string) => {
+    async (activeToken: string, navigateHome = true) => {
       await refreshProjects(activeToken);
       // Cold-started from a notification tap: open that chat directly instead
       // of landing on (and resetting to) the projects list.
@@ -1030,6 +1039,14 @@ function AppMain() {
         setScreen('chat');
         setDrawerOpen(false);
         await loadProjectMessages(activeToken, launchTarget);
+        return;
+      }
+      if (!navigateHome) {
+        // Cold-start restore: do NOT force the projects list. If this launch was
+        // a notification tap whose response wasn't ready yet when restoreSession
+        // checked, the notification effect (getLastNotificationResponseAsync)
+        // opens that chat a moment later — forcing 'projects' here would race it
+        // and bounce the user straight back out of the chat that just opened.
         return;
       }
       setCurrentProject(null);
@@ -1112,16 +1129,27 @@ function AppMain() {
     const roomId = currentProject?.room_id;
     if (!roomId) return;
     if (sending && streamingProjectId === currentProject?.id) return;
+    const projectId = currentProject?.id;
     const id = setInterval(() => {
       if (AppState.currentState !== 'active') return;
       apiRequest<MessagesListResponse>(`/chat/rooms/${roomId}/messages?limit=120`, {}, token)
         .then((data) => {
-          if (data?.messages) setMessages(data.messages);
+          if (!data?.messages) return;
+          setMessages(data.messages);
+          // The chat is open ⇒ a reply that just arrived is already read. Mark it
+          // read on the server (only when the newest message actually changed) so
+          // leaving the chat doesn't leave a phantom unread badge behind.
+          const last = data.messages[data.messages.length - 1];
+          if (last && last.id !== lastSyncedMsgIdRef.current) {
+            lastSyncedMsgIdRef.current = last.id;
+            apiRequest(`/chat/rooms/${roomId}/read`, { method: 'POST' }, token).catch(() => null);
+            if (projectId) markProjectReadLocally(projectId);
+          }
         })
         .catch(() => null);
     }, 4000);
     return () => clearInterval(id);
-  }, [token, screen, sending, streamingProjectId, currentProject?.room_id, currentProject?.id]);
+  }, [token, screen, sending, streamingProjectId, currentProject?.room_id, currentProject?.id, markProjectReadLocally]);
 
   // Poll the live run for the OPEN chat so the in-progress timeline shows even
   // when the SSE stream isn't this device's (e.g. we navigated back into a chat
@@ -1151,6 +1179,7 @@ function AppMain() {
   useEffect(() => {
     setCurrentRun(null);
     setRunEvents([]);
+    lastSyncedMsgIdRef.current = null;
   }, [currentProject?.id]);
 
   useEffect(() => {
@@ -1249,7 +1278,9 @@ function AppMain() {
           const restoredUser = await apiRequest<UserResponse>('/chat/me', {}, storedToken);
           if (!alive) return;
           setAuth({ status: 'signed_in', token: storedToken, user: restoredUser });
-          await loadInitialData(storedToken);
+          // navigateHome=false: don't force the projects list on cold start, so a
+          // notification-tap launch isn't bounced out of its chat (see loadInitialData).
+          await loadInitialData(storedToken, false);
           return;
         } catch (error) {
           if ((error as { status?: number }).status === 401) {
@@ -2856,6 +2887,7 @@ const styles = StyleSheet.create({
   messageBubble: {
     borderRadius: 16,
     maxWidth: '88%',
+    overflow: 'hidden',
     paddingHorizontal: 14,
     paddingVertical: 10,
   },
@@ -2901,9 +2933,14 @@ const styles = StyleSheet.create({
   },
   toolRowMain: {
     flex: 1,
+    // RN flex items default to minWidth:auto, so a long command/path (one
+    // unbreakable "word") refuses to shrink and overflows the bubble. minWidth:0
+    // lets it shrink and the Text wrap/break instead.
+    minWidth: 0,
   },
   toolRowText: {
     color: '#c8c2b8',
+    flexShrink: 1,
     fontSize: 12.5,
     lineHeight: 18,
   },
@@ -2956,6 +2993,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     height: 220,
+    maxWidth: '100%',
     width: 260,
   },
   mediaCard: {
