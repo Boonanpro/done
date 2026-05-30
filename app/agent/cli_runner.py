@@ -164,6 +164,27 @@ def _is_parse_error_text(text: Optional[str]) -> bool:
     return "could not be parsed" in (text or "").lower()
 
 
+def _is_thinking_desync_error(text: Optional[str]) -> bool:
+    """True when a turn failed with the Anthropic 400 that says the assistant's
+    `thinking`/`redacted_thinking` blocks were modified, e.g.:
+
+        API Error: 400 messages.N.content.M: thinking or redacted_thinking
+        blocks in the latest assistant message cannot be modified. These blocks
+        must remain as they were in the original response.
+
+    This happens when a --resume transcript ended up with a turn split across
+    messages (a lone `[thinking]` assistant message separated from its `[text]`
+    continuation), so replaying it no longer byte-matches the signed original.
+    The transcript can't be salvaged in place — like a parse-error poison, the
+    only fix is to drop the session and reseed from the DB so the next turn
+    starts a fresh, well-formed conversation with the context preserved."""
+    low = (text or "").lower()
+    return (
+        ("thinking" in low and "cannot be modified" in low)
+        or "thinking or redacted_thinking blocks" in low
+    )
+
+
 # Lines from history that would re-poison a fresh session if fed back verbatim.
 _RESEED_SKIP_MARKERS = ("<invoke", "could not be parsed", "function_calls")
 
@@ -900,6 +921,7 @@ def _run_cli_process(
     env: dict,
     room_id: str,
     event_queue: thread_queue.Queue,
+    user_id: Optional[str] = None,
     project_id: Optional[str] = None,
     run_id: Optional[str] = None,
     turn_id: Optional[str] = None,
@@ -921,6 +943,7 @@ def _run_cli_process(
     # ai_context.blocks として保存する。フロントはこれをインライン時系列で描画
     # （最後のテキストだけでなく途中のテキストも回答として表示する）。
     turn_blocks: list = []
+    written_file_paths: list[str] = []
 
     # --include-partial-messages による重複を防ぐ
     # メッセージIDごとに「処理済みブロックのスナップショット」を記録
@@ -1102,6 +1125,17 @@ def _run_cli_process(
                         continue
                     if tool_id:
                         emitted_tool_use_ids.add(tool_id)
+                    try:
+                        from app.services.chat_artifact_registration import (
+                            add_written_path,
+                            written_path_from_tool,
+                        )
+                        add_written_path(
+                            written_file_paths,
+                            written_path_from_tool(ev.get("name", ""), ev.get("input", {})),
+                        )
+                    except Exception as e:
+                        _cli_debug(f"artifact path tracking failed: {e}")
                     # Task 系ツールが呼ばれている間は watchdog 閾値を延長
                     # Task 以外のツールに切り替わったらサブエージェント完了扱いでリセット
                     tool_name = ev.get("name", "")
@@ -1172,6 +1206,7 @@ def _run_cli_process(
                 "reasoning_steps": reasoning_steps_acc,
                 "reasoning_full": reasoning_full_acc,
                 "turn_blocks": turn_blocks,
+                "written_file_paths": list(written_file_paths),
             }
 
             _cli_debug(
@@ -1234,6 +1269,11 @@ def _should_retry_without_resume(result_data: Optional[dict], used_resume: bool)
         # 「Prompt is too long」「Out of memory」→ 会話履歴が肥大化。セッションクリアしてリトライ
         if "prompt is too long" in combined or "out of memory" in combined:
             return True
+        # thinking ブロック改変の 400 → resume 中の transcript が壊れている。
+        # 同じ transcript を消さずに再 resume すると毎ターン同じ 400 で詰まるので、
+        # セッションを捨ててフレッシュにリトライ（DB再シードで文脈は保持される）。
+        if _is_thinking_desync_error(combined):
+            return True
         # その他のエラー（ツール失敗、APIエラー等）→ セッションは消さない
         return False
     return False
@@ -1245,6 +1285,7 @@ def _run_cli_in_thread(
     mcp_config_path: str,
     room_id: str,
     event_queue: thread_queue.Queue,
+    user_id: Optional[str] = None,
     resume_session_id: Optional[str] = None,
     project_id: Optional[str] = None,
     run_id: Optional[str] = None,
@@ -1337,6 +1378,7 @@ def _run_cli_in_thread(
             env,
             room_id,
             event_queue,
+            user_id=user_id,
             project_id=project_id,
             run_id=run_id,
             turn_id=turn_id,
@@ -1367,6 +1409,7 @@ def _run_cli_in_thread(
                 env,
                 room_id,
                 event_queue,
+                user_id=user_id,
                 project_id=project_id,
                 cwd=cwd,
                 run_id=run_id,
@@ -1409,6 +1452,27 @@ def _run_cli_in_thread(
                     room_id, text, reasoning, reasoning_full_list, blocks=blocks, turn_id=turn_id
                 )
                 _cli_debug(f"AI message DB save: cli_saved={cli_saved}, text_len={len(text)}")
+
+            written_paths = result_data.get("written_file_paths", [])
+            if user_id and project_id and written_paths:
+                try:
+                    from app.services.chat_artifact_registration import (
+                        register_written_chat_artifacts_sync,
+                    )
+
+                    created = register_written_chat_artifacts_sync(
+                        written_paths,
+                        room_id,
+                        project_id,
+                        user_id,
+                    )
+                    if created:
+                        _cli_debug(
+                            "Registered chat artifacts from CLI thread: "
+                            + ",".join(row.get("slug", "?") for row in created)
+                        )
+                except Exception as e:
+                    _cli_debug(f"CLI artifact registration failed: {e}")
 
             # Queue-first: フロントエンドを即座にアンブロックする。
             # cli_saved=True の場合、SSEハンドラはDB保存をスキップしてクライアント送信のみ行う。
@@ -1593,6 +1657,7 @@ async def _process_via_streaming_session(
         "final_text_parts": [],
         "reasoning_steps_acc": [],
         "reasoning_full_acc": [],
+        "written_file_paths": [],
         "session_id": None,
         "turn_id": None,
         # ターン開始時刻（最初の assistant イベント時）。保存する ai_message の
@@ -1611,6 +1676,29 @@ async def _process_via_streaming_session(
             loop.call_soon_threadsafe(q.put_nowait, display_ev)
         except Exception:
             pass
+
+    def _register_streaming_artifacts() -> None:
+        written_paths = state.get("written_file_paths") or []
+        if not (user_id and project_id and written_paths):
+            return
+        try:
+            from app.services.chat_artifact_registration import (
+                register_written_chat_artifacts_sync,
+            )
+
+            created = register_written_chat_artifacts_sync(
+                written_paths,
+                room_id,
+                project_id,
+                user_id,
+            )
+            if created:
+                _cli_debug(
+                    "[STREAMING] Registered chat artifacts: "
+                    + ",".join(row.get("slug", "?") for row in created)
+                )
+        except Exception as e:
+            _cli_debug(f"[STREAMING] artifact registration failed: {e}")
 
     def sink(raw_ev: Dict[str, Any]) -> None:
         # Runs in the session reader thread. Does classification + DB-first
@@ -1646,6 +1734,17 @@ async def _process_via_streaming_session(
                     elif ev["type"] == "tool_use":
                         from app.api.project_routes import _format_tool_label
                         tool_label = _format_tool_label(ev.get("name", ""), ev.get("input", {}))
+                        try:
+                            from app.services.chat_artifact_registration import (
+                                add_written_path,
+                                written_path_from_tool,
+                            )
+                            add_written_path(
+                                state["written_file_paths"],
+                                written_path_from_tool(ev.get("name", ""), ev.get("input", {})),
+                            )
+                        except Exception as e:
+                            _cli_debug(f"[STREAMING] artifact path tracking failed: {e}")
                         _emit(ev)
                         if project_id:
                             _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=run_id, turn_id=state["turn_id"], tool_name=ev.get("name", ""), tool_label=tool_label)
@@ -1682,11 +1781,17 @@ async def _process_via_streaming_session(
                         "うまく処理できませんでした（内部のツール呼び出しが壊れました）。"
                         "文脈は保持したままセッションを立て直したので、もう一度同じ内容を送ってください。"
                     )
+                elif is_error and _is_thinking_desync_error(result_text):
+                    text = (
+                        "前回の会話の内部状態が壊れていたため、文脈は保持したまま"
+                        "セッションを立て直しました。もう一度同じ内容を送ってください。"
+                    )
                 turn_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
                 if not skip_save:
                     cli_saved = _save_ai_message_sync(room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"], blocks=state["turn_blocks"], created_at=turn_start, turn_id=turn_id)
+                _register_streaming_artifacts()
                 if project_id and not continuation:
                     _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=turn_id, content="completed")
                     _update_run_sync(run_id, state="failed" if is_error else "completed")
@@ -1696,6 +1801,7 @@ async def _process_via_streaming_session(
                 state["final_text_parts"] = []
                 state["reasoning_steps_acc"] = []
                 state["reasoning_full_acc"] = []
+                state["written_file_paths"] = []
                 state["turn_start"] = None
                 state["turn_id"] = None
 
@@ -1732,6 +1838,7 @@ async def _process_via_streaming_session(
                         room_id, text, state["reasoning_steps_acc"], state["reasoning_full_acc"],
                         blocks=state["turn_blocks"], created_at=t_start, turn_id=t_id,
                     )
+                _register_streaming_artifacts()
                 if project_id:
                     _save_execution_event_sync(
                         room_id, "done", project_id=project_id, run_id=run_id,
@@ -1743,6 +1850,7 @@ async def _process_via_streaming_session(
                     "is_error": True, "cli_saved": not skip_save, "created_at": t_start,
                     "continuation": False, "turn_id": t_id,
                 })
+                state["written_file_paths"] = []
             elif res and res.get("is_error") and _is_parse_error_text(res.get("result") or ""):
                 # Poisoned turn: the model emitted an unparseable tool call (the
                 # `<invoke>`-as-text leak). The sink already saved a result, so
@@ -1756,6 +1864,19 @@ async def _process_via_streaming_session(
                 except Exception:
                     pass
                 _cli_debug(f"[STREAMING] parse-error poisoned session cleared for room {room_id[:8]}")
+            elif res and res.get("is_error") and _is_thinking_desync_error(res.get("result") or ""):
+                # The resumed transcript had a split/desynced thinking turn, so
+                # Anthropic rejected the replay with the "thinking blocks cannot
+                # be modified" 400. The sink already saved a friendly result; we
+                # just drop the session + saved id so the NEXT turn starts FRESH
+                # and is re-seeded from the DB (context preserved) instead of
+                # resuming the broken transcript and looping on the same 400.
+                _clear_cli_session(room_id)
+                try:
+                    session.stop()
+                except Exception:
+                    pass
+                _cli_debug(f"[STREAMING] thinking-desync session cleared for room {room_id[:8]}")
             elif resume_session_id and not state["any_result"] and elapsed < 15:
                 # We asked the process to --resume <id> and it produced nothing
                 # and exited almost immediately → the saved transcript was
@@ -1898,6 +2019,7 @@ async def process_message_cli(
             mcp_config_path,
             room_id,
             event_q,
+            user_id,
             resume_session_id,
             project_id,
             run_id,
