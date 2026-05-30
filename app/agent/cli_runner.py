@@ -1968,6 +1968,21 @@ async def process_message_cli(
     mcp_config_path = _build_mcp_config(room_id, user_id, credentials)
     resume_session_id = None if skip_resume else _load_session(room_id)
 
+    # Dead-transcript guard: if the saved session's transcript .jsonl is gone
+    # (manually cleaned, disk loss, a renamed/corrupt file …), `--resume <id>`
+    # does NOT error — the CLI silently starts a FRESH, context-less
+    # conversation, so the room loses its history and Dan answers from global
+    # memory only. Detect the missing transcript here and drop the dead id so
+    # the reseed-from-DB path (session_is_fresh and not resume_session_id) fires
+    # instead. _clear_cli_session also evicts the stale in-memory cache entry.
+    if resume_session_id and _session_transcript_path(resume_session_id) is None:
+        _cli_debug(
+            f"resume transcript missing for {resume_session_id[:8]}; "
+            f"dropping session and reseeding from DB for room {room_id[:8]}"
+        )
+        _clear_cli_session(room_id)
+        resume_session_id = None
+
     # --- DAN_STREAMING_INPUT: 常駐ストリーミングセッション経路（フラグ制御） ---
     # 有効時のみ、ターンを常駐 stream-json セッションに流す（後段で「次の境界」
     # への追い連絡注入を可能にするため）。フラグOFF時は下の1ターン1プロセス経路を
