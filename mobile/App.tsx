@@ -1466,7 +1466,7 @@ function AppMain() {
     try {
       if (Platform.OS === 'android') {
         await Notifications.setNotificationChannelAsync('default', {
-          name: 'DAN',
+          name: 'Done',
           importance: Notifications.AndroidImportance.MAX,
           vibrationPattern: [0, 250, 250, 250],
           lightColor: '#f4f0e8',
@@ -1774,7 +1774,7 @@ function AppMain() {
       <SafeAreaView style={styles.centerScreen}>
         <StatusBar style="light" />
         <ActivityIndicator color="#f4f0e8" />
-        <Text style={styles.mutedText}>Loading DAN</Text>
+        <Text style={styles.mutedText}>Loading Done</Text>
       </SafeAreaView>
     );
   }
@@ -1790,7 +1790,7 @@ function AppMain() {
           <View style={styles.brandMark}>
             <Text style={styles.brandMarkText}>D</Text>
           </View>
-          <Text style={styles.title}>DAN</Text>
+          <Text style={styles.title}>Done</Text>
           <Text style={styles.subtitle}>Native development build</Text>
 
           <View style={styles.form}>
@@ -2016,7 +2016,7 @@ function AppMain() {
             </Pressable>
           </View>
 
-          <Text style={styles.settingsFootnote}>DAN mobile · v1.0.0</Text>
+          <Text style={styles.settingsFootnote}>Done mobile · v1.0.0</Text>
         </ScrollView>
       </View>
     );
@@ -2130,7 +2130,7 @@ function AppMain() {
           </View>
         ) : newestMessages.length === 0 && !showLiveTurn ? (
           <View style={styles.centerPanel}>
-            <Text style={styles.emptyTitle}>DAN</Text>
+            <Text style={styles.emptyTitle}>Done</Text>
             <Text style={styles.mutedText}>メッセージを入力してください</Text>
           </View>
         ) : (
@@ -2165,13 +2165,18 @@ function AppMain() {
                   <View style={[styles.messageBubble, styles.aiBubble]}>
                     <View style={styles.messageMetaRow}>
                       <Text style={styles.messageSender}>DAN</Text>
-                      <ActivityIndicator color="#7fd1c7" size="small" />
                     </View>
                     {liveStepBlocks.length > 0 ? (
                       <AiTurnBlocks blocks={liveStepBlocks} mine={false} onOpenUrl={handleOpenMessageUrl} defaultOpen />
-                    ) : (
-                      <Text style={styles.toolRowText}>{activity || '考えています…'}</Text>
-                    )}
+                    ) : null}
+                    {/* The "running now" spinner sits at the bottom next to the
+                        latest log line, so it's obvious which step is live. */}
+                    <View style={styles.liveStatusRow}>
+                      <ActivityIndicator color="#7fd1c7" size="small" />
+                      <Text style={styles.liveStatusText} numberOfLines={1}>
+                        {activity || '考えています…'}
+                      </Text>
+                    </View>
                   </View>
                 );
               }
@@ -2940,6 +2945,18 @@ const styles = StyleSheet.create({
   },
   toolRowText: {
     color: '#c8c2b8',
+    flexShrink: 1,
+    fontSize: 12.5,
+    lineHeight: 18,
+  },
+  liveStatusRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 6,
+  },
+  liveStatusText: {
+    color: '#7fd1c7',
     flexShrink: 1,
     fontSize: 12.5,
     lineHeight: 18,
