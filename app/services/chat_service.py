@@ -701,9 +701,53 @@ class ChatService:
                 if msg["reply_to"] in reply_map:
                     message_dict["reply_to_message"] = reply_map[msg["reply_to"]]
             messages.append(message_dict)
-        
+
         return messages
-    
+
+    async def search_messages(self, room_id: str, user_id: str, query: str, limit: int = 50) -> list[dict]:
+        """Full-history keyword search within a room's messages (content ILIKE).
+
+        Unlike get_messages (which only returns the newest N), this scans the
+        entire history so the user can find something said long ago. Newest hits
+        first. Returns the same message shape so the UI can render + jump to them.
+        """
+        # Verify membership
+        member = self.supabase.table("chat_room_members").select("*").eq("room_id", room_id).eq("user_id", user_id).execute()
+        if not member.data:
+            raise ValueError("Not a member of this room")
+
+        q = (query or "").strip()
+        if not q:
+            return []
+        # Escape ILIKE wildcards so the user's literal text is matched verbatim.
+        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+        search_q = self.supabase.table("chat_messages").select(
+            "*, sender:users!sender_id(id, display_name, avatar_url)"
+        ).eq("room_id", room_id).ilike("content", f"%{escaped}%").order("created_at", desc=True).limit(limit)
+
+        result = await self._execute_with_retry(
+            "search_messages.fetch_messages",
+            lambda: search_q.execute(),
+        )
+
+        messages = []
+        for msg in result.data or []:
+            message_dict = {
+                "id": msg["id"],
+                "room_id": msg["room_id"],
+                "sender_id": msg["sender_id"],
+                "sender_name": msg["sender"]["display_name"] if msg.get("sender") else "Unknown",
+                "sender_type": msg["sender_type"],
+                "content": msg["content"],
+                "created_at": msg["created_at"],
+            }
+            if msg.get("ai_context"):
+                message_dict["ai_context"] = msg["ai_context"]
+            messages.append(message_dict)
+
+        return messages
+
     async def mark_as_read(self, room_id: str, user_id: str) -> bool:
         """Mark messages as read"""
         latest = self.supabase.table("chat_messages").select("id").eq(

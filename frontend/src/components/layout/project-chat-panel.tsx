@@ -15,6 +15,7 @@ import {
   Mic,
   Paperclip,
   Reply,
+  Search,
   Send,
   Square,
   Terminal,
@@ -35,6 +36,7 @@ import {
   type ExecutionEvent,
   type FileUploadResponse,
   type MessageResponse,
+  type MessagesListResponse,
   type ProcessStep,
   type ProjectStatusType,
   type ReplyToMessage,
@@ -169,6 +171,30 @@ function parseMediaContent(content: string): { images: string[]; videos: string[
     })
     .trim();
   return { images, videos, files, text };
+}
+
+// Build a short snippet around the matched keyword, with the match highlighted,
+// for the search hit-list. Strips attachment/tool markup so the text reads clean.
+function highlightSnippet(content: string, query: string): React.ReactNode {
+  const clean = (content || '')
+    .replace(/\[(添付[^\]]*|画像生成[^\]]*|TOOL:[^\]]*)\]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const q = query.trim();
+  if (!q) return clean.slice(0, 160);
+  const idx = clean.toLowerCase().indexOf(q.toLowerCase());
+  if (idx === -1) return clean.slice(0, 160) + (clean.length > 160 ? '…' : '');
+  const start = Math.max(0, idx - 50);
+  const end = Math.min(clean.length, idx + q.length + 90);
+  return (
+    <>
+      {start > 0 ? '…' : ''}
+      {clean.slice(start, idx)}
+      <mark className="rounded bg-yellow-300/70 px-0.5 text-foreground">{clean.slice(idx, idx + q.length)}</mark>
+      {clean.slice(idx + q.length, end)}
+      {end < clean.length ? '…' : ''}
+    </>
+  );
 }
 
 const ReplyQuote = memo(function ReplyQuote({ replyTo }: { replyTo: ReplyToMessage }) {
@@ -1451,6 +1477,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<MessageResponse | null>(null);
   const [voiceOpen, setVoiceOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<MessageResponse[] | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const pendingJumpRef = useRef<string | null>(null);
   const { warmupMode } = useRecoveryState(projectId);
 
   // Preview pane state
@@ -1800,6 +1831,80 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     setHasNewMessages(false);
   }, []);
 
+  const highlightAndScroll = useCallback((id: string) => {
+    const el = document.querySelector(`[data-message-id="${id}"]`);
+    if (!el) return false;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('ring-2', 'ring-primary/60', 'rounded-lg');
+    setTimeout(() => el.classList.remove('ring-2', 'ring-primary/60', 'rounded-lg'), 1800);
+    return true;
+  }, []);
+
+  const runSearch = useCallback(
+    async (q: string) => {
+      const roomId = project?.room_id;
+      if (!roomId || !q.trim()) {
+        setSearchResults(null);
+        return;
+      }
+      setSearchLoading(true);
+      try {
+        const res = await api.rooms.searchMessages(roomId, q.trim(), 50);
+        setSearchResults(res.messages);
+      } catch {
+        toast.error('検索に失敗しました');
+        setSearchResults([]);
+      } finally {
+        setSearchLoading(false);
+      }
+    },
+    [project?.room_id]
+  );
+
+  // Jump to a search hit. The message may not be in the rendered window — or not
+  // even in the loaded history (older than the fetched 500) — so expand the
+  // window / merge a context fetch, then scroll+highlight once it's on screen.
+  const jumpToMessage = useCallback(
+    async (msg: MessageResponse) => {
+      const roomId = project?.room_id;
+      setSearchOpen(false);
+      if (highlightAndScroll(msg.id)) return;
+      const loaded = messages.some((m) => m.id === msg.id);
+      if (loaded) {
+        setVisibleItemCount(displayItems.length);
+        pendingJumpRef.current = msg.id;
+        return;
+      }
+      if (!roomId) return;
+      try {
+        const before = new Date(new Date(msg.created_at).getTime() + 2000).toISOString();
+        const ctx = await api.rooms.getMessages(roomId, { limit: 100, before });
+        queryClient.setQueryData<MessagesListResponse>(['project-messages', roomId], (prev) => {
+          const map = new Map<string, MessageResponse>();
+          for (const m of prev?.messages || []) map.set(m.id, m);
+          for (const m of ctx.messages) map.set(m.id, m);
+          const merged = [...map.values()].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+          return { messages: merged };
+        });
+        setVisibleItemCount((c) => c + 200);
+        pendingJumpRef.current = msg.id;
+      } catch {
+        toast.error('メッセージへ移動できませんでした');
+      }
+    },
+    [project?.room_id, messages, displayItems.length, highlightAndScroll, queryClient]
+  );
+
+  // Complete a pending jump after the list re-renders (window expand / merge).
+  useEffect(() => {
+    if (!pendingJumpRef.current) return;
+    const id = pendingJumpRef.current;
+    const frame = requestAnimationFrame(() => {
+      if (highlightAndScroll(id)) pendingJumpRef.current = null;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [visibleDisplayItems, highlightAndScroll]);
+
   return (
     <div className="relative flex h-full w-full overflow-hidden">
     {voiceOpen && project?.room_id && (
@@ -1872,6 +1977,20 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         )}
         {project?.room_id && (
           <button
+            onClick={() => setSearchOpen((v) => !v)}
+            className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              searchOpen
+                ? 'border-primary bg-primary/10 text-primary'
+                : 'border-border bg-background text-foreground hover:bg-muted'
+            }`}
+            title="チャット内をワード検索（過去の発言を探す）"
+          >
+            <Search className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">検索</span>
+          </button>
+        )}
+        {project?.room_id && (
+          <button
             onClick={() => setVoiceOpen((v) => !v)}
             className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
               voiceOpen
@@ -1918,6 +2037,71 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           )}
         </div>
       </div>
+
+      {searchOpen && (
+        <div className="shrink-0 border-b border-border bg-background px-3 py-2">
+          <div className="flex items-center gap-2">
+            <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <input
+              autoFocus
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') runSearch(searchQuery);
+                if (e.key === 'Escape') setSearchOpen(false);
+              }}
+              placeholder="チャット内をワード検索…（Enterで検索）"
+              className="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            />
+            {searchLoading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+            <button
+              onClick={() => runSearch(searchQuery)}
+              className="shrink-0 rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-muted"
+            >
+              検索
+            </button>
+            <button
+              onClick={() => setSearchOpen(false)}
+              className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
+              title="閉じる"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          {searchResults && (
+            <div className="mt-2 max-h-[42vh] overflow-y-auto rounded-md border border-border">
+              {searchResults.length === 0 ? (
+                <div className="px-3 py-4 text-center text-sm text-muted-foreground">
+                  一致するメッセージはありません
+                </div>
+              ) : (
+                <>
+                  <div className="border-b border-border/50 px-3 py-1.5 text-xs text-muted-foreground">
+                    {searchResults.length}件ヒット（新しい順）
+                  </div>
+                  {searchResults.map((m) => (
+                    <button
+                      key={m.id}
+                      onClick={() => jumpToMessage(m)}
+                      className="block w-full border-b border-border/40 px-3 py-2 text-left last:border-b-0 hover:bg-muted"
+                    >
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <span className="font-medium text-foreground/80">
+                          {m.sender_type === 'ai' ? 'ダン' : m.sender_name}
+                        </span>
+                        <span>{new Date(m.created_at).toLocaleString('ja-JP')}</span>
+                      </div>
+                      <div className="mt-0.5 line-clamp-2 text-sm">
+                        {highlightSnippet(m.content, searchQuery)}
+                      </div>
+                    </button>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto">
         {hasNewMessages && (

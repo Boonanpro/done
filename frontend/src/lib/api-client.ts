@@ -905,6 +905,13 @@ export const api = {
       );
     },
 
+    searchMessages: (roomId: string, q: string, limit = 50) => {
+      const query = new URLSearchParams({ q, limit: limit.toString() });
+      return request<MessagesListResponse>(
+        `/chat/rooms/${roomId}/messages/search?${query.toString()}`
+      );
+    },
+
     sendMessage: (roomId: string, content: string) =>
       request<MessageResponse>(`/chat/rooms/${roomId}/messages`, {
         method: 'POST',

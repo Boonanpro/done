@@ -585,6 +585,36 @@ function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; def
 // Render an AI message's full inline timeline (text segments + tool groups),
 // matching the PC web chat. Intermediate narration text is dimmed; the last
 // text segment is the real answer.
+// A short snippet around the matched keyword (match shown highlighted) for the
+// search hit-list. Strips attachment/tool markup so the text reads clean.
+function renderSearchSnippet(content: string, query: string) {
+  const clean = (content || '')
+    .replace(/\[(添付[^\]]*|画像生成[^\]]*|TOOL:[^\]]*)\]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const q = query.trim();
+  const idx = q ? clean.toLowerCase().indexOf(q.toLowerCase()) : -1;
+  if (idx === -1) {
+    return (
+      <Text style={styles.searchHitText} numberOfLines={2}>
+        {clean.slice(0, 140)}
+        {clean.length > 140 ? '…' : ''}
+      </Text>
+    );
+  }
+  const start = Math.max(0, idx - 40);
+  const end = Math.min(clean.length, idx + q.length + 80);
+  return (
+    <Text style={styles.searchHitText} numberOfLines={2}>
+      {start > 0 ? '…' : ''}
+      {clean.slice(start, idx)}
+      <Text style={styles.searchHitMark}>{clean.slice(idx, idx + q.length)}</Text>
+      {clean.slice(idx + q.length, end)}
+      {end < clean.length ? '…' : ''}
+    </Text>
+  );
+}
+
 function AiTurnBlocks({
   blocks,
   mine,
@@ -819,6 +849,13 @@ function AppMain() {
   const [loadingArtifacts, setLoadingArtifacts] = useState(false);
   const [artifactView, setArtifactView] = useState<{ title: string; url: string } | null>(null);
   const [notificationStatus, setNotificationStatus] = useState('Off');
+  // In-chat keyword search (find past messages across full history).
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<MessageResponse[] | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [pendingJumpId, setPendingJumpId] = useState<string | null>(null);
   // Long-press action sheet for a chat list item. `mode` lets the same
   // sheet host both the primary menu and the secondary "really delete?"
   // confirm without spawning a second modal.
@@ -1027,6 +1064,89 @@ function AppMain() {
     },
     [dismissNotificationsForProject, markProjectReadLocally, refreshArtifacts],
   );
+
+  const runSearch = useCallback(
+    async (q: string) => {
+      const roomId = currentProject?.room_id;
+      const query = q.trim();
+      if (!roomId || !query) {
+        setSearchResults(null);
+        return;
+      }
+      setSearchLoading(true);
+      try {
+        const data = await apiRequest<MessagesListResponse>(
+          `/chat/rooms/${roomId}/messages/search?q=${encodeURIComponent(query)}&limit=50`,
+          {},
+          token,
+        );
+        setSearchResults(data.messages ?? []);
+      } catch (error) {
+        Alert.alert('検索失敗', String((error as Error).message));
+        setSearchResults([]);
+      } finally {
+        setSearchLoading(false);
+      }
+    },
+    [currentProject?.room_id, token],
+  );
+
+  // Jump from a search hit to that message in the transcript. If it's older than
+  // the loaded 120-message window, pull a context window and merge it in first;
+  // the pendingJump effect scrolls to it once it appears.
+  const jumpToMessage = useCallback(
+    async (msg: MessageResponse) => {
+      setSearchOpen(false);
+      setHighlightId(msg.id);
+      const loaded = messages.some((m) => m.id === msg.id);
+      if (loaded) {
+        setPendingJumpId(msg.id);
+        return;
+      }
+      const roomId = currentProject?.room_id;
+      if (!roomId) return;
+      try {
+        const before = new Date(new Date(msg.created_at).getTime() + 2000).toISOString();
+        const ctx = await apiRequest<MessagesListResponse>(
+          `/chat/rooms/${roomId}/messages?limit=100&before=${encodeURIComponent(before)}`,
+          {},
+          token,
+        );
+        setMessages((prev) => {
+          const map = new Map(prev.map((m) => [m.id, m]));
+          for (const m of ctx.messages ?? []) map.set(m.id, m);
+          return [...map.values()];
+        });
+        setPendingJumpId(msg.id);
+      } catch {
+        Alert.alert('移動できません', 'メッセージへ移動できませんでした');
+      }
+    },
+    [messages, currentProject?.room_id, token],
+  );
+
+  // Complete a pending jump once the target message is in the list.
+  useEffect(() => {
+    if (!pendingJumpId) return;
+    const target = newestMessages.find((m) => m.id === pendingJumpId);
+    if (!target) return;
+    const t = setTimeout(() => {
+      try {
+        listRef.current?.scrollToItem({ item: target, animated: true, viewPosition: 0.5 });
+      } catch {
+        // ignore — onScrollToIndexFailed handles off-screen targets
+      }
+      setPendingJumpId(null);
+    }, 180);
+    return () => clearTimeout(t);
+  }, [pendingJumpId, newestMessages]);
+
+  // Clear the hit highlight a moment after a jump.
+  useEffect(() => {
+    if (!highlightId) return;
+    const t = setTimeout(() => setHighlightId(null), 2200);
+    return () => clearTimeout(t);
+  }, [highlightId]);
 
   const loadInitialData = useCallback(
     async (activeToken: string, navigateHome = true) => {
@@ -2085,19 +2205,26 @@ function AppMain() {
               {headerTitle}
             </Text>
           </View>
-          {unreadTotal > 0 ? (
+          <View style={styles.appBarRight}>
             <Pressable
-              onPress={() => setScreen('projects')}
+              onPress={() => setSearchOpen(true)}
               hitSlop={10}
               style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
             >
-              <View style={styles.appBarBadge}>
-                <Text style={styles.appBarBadgeText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
-              </View>
+              <Ionicons name="search" size={22} color="#f4f0e8" />
             </Pressable>
-          ) : (
-            <View style={styles.appBarIconButton} />
-          )}
+            {unreadTotal > 0 ? (
+              <Pressable
+                onPress={() => setScreen('projects')}
+                hitSlop={10}
+                style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+              >
+                <View style={styles.appBarBadge}>
+                  <Text style={styles.appBarBadgeText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
+                </View>
+              </Pressable>
+            ) : null}
+          </View>
         </View>
 
         {artifacts.length > 0 || loadingArtifacts ? (
@@ -2191,7 +2318,13 @@ function AppMain() {
                 (blocks.some((b) => b.type === 'tool' || b.type === 'error') ||
                   blocks.filter((b) => b.type === 'text' || b.type === 'reasoning').length > 1);
               return (
-                <View style={[styles.messageBubble, mine ? styles.myBubble : styles.aiBubble]}>
+                <View
+                  style={[
+                    styles.messageBubble,
+                    mine ? styles.myBubble : styles.aiBubble,
+                    highlightId === item.id && styles.messageBubbleHighlight,
+                  ]}
+                >
                   <View style={styles.messageMetaRow}>
                     <Text style={styles.messageSender}>{mine ? 'You' : item.sender_name || 'DAN'}</Text>
                     <Text style={styles.messageTime}>{formatTime(item.created_at)}</Text>
@@ -2206,6 +2339,24 @@ function AppMain() {
             }}
             updateCellsBatchingPeriod={30}
             windowSize={7}
+            onScrollToIndexFailed={(info) => {
+              // Target not measured yet — scroll near it, then retry once.
+              listRef.current?.scrollToOffset({
+                offset: info.averageItemLength * info.index,
+                animated: false,
+              });
+              setTimeout(() => {
+                try {
+                  listRef.current?.scrollToIndex({
+                    index: info.index,
+                    animated: true,
+                    viewPosition: 0.5,
+                  });
+                } catch {
+                  // give up silently
+                }
+              }, 320);
+            }}
           />
         )}
 
@@ -2282,6 +2433,66 @@ function AppMain() {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
+
+      <Modal
+        visible={searchOpen}
+        animationType="slide"
+        onRequestClose={() => setSearchOpen(false)}
+        statusBarTranslucent
+      >
+        <View style={[styles.searchModalRoot, { paddingTop: insets.top + 8 }]}>
+          <View style={styles.searchBar}>
+            <Ionicons name="search" size={20} color="#a7a19a" />
+            <TextInput
+              autoFocus
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              onSubmitEditing={() => runSearch(searchQuery)}
+              returnKeyType="search"
+              placeholder="チャット内をワード検索…"
+              placeholderTextColor="#77736b"
+              style={styles.searchInput}
+            />
+            {searchLoading ? <ActivityIndicator color="#7fd1c7" size="small" /> : null}
+            <Pressable onPress={() => setSearchOpen(false)} hitSlop={8}>
+              <Text style={styles.searchCancel}>閉じる</Text>
+            </Pressable>
+          </View>
+          <FlatList
+            data={searchResults ?? []}
+            keyExtractor={(item) => item.id}
+            keyboardShouldPersistTaps="handled"
+            contentContainerStyle={styles.searchListContent}
+            renderItem={({ item }) => (
+              <Pressable
+                onPress={() => jumpToMessage(item)}
+                style={({ pressed }) => [styles.searchHit, pressed && styles.buttonPressed]}
+              >
+                <Text style={styles.searchHitMeta}>
+                  {(item.sender_type === 'ai' ? 'ダン' : item.sender_name || 'You') +
+                    ' ・ ' +
+                    new Date(item.created_at).toLocaleString('ja-JP')}
+                </Text>
+                {renderSearchSnippet(item.content, searchQuery)}
+              </Pressable>
+            )}
+            ListEmptyComponent={
+              searchResults ? (
+                <Text style={styles.searchEmpty}>
+                  {searchLoading ? '検索中…' : '一致するメッセージはありません'}
+                </Text>
+              ) : (
+                <Text style={styles.searchEmpty}>ワードを入力して検索してください</Text>
+              )
+            }
+            ListHeaderComponent={
+              searchResults && searchResults.length > 0 ? (
+                <Text style={styles.searchCount}>{searchResults.length}件ヒット（新しい順）</Text>
+              ) : null
+            }
+          />
+        </View>
+      </Modal>
 
       <Modal
         visible={attachSheetOpen}
@@ -2451,6 +2662,10 @@ const styles = StyleSheet.create({
     height: 40,
     justifyContent: 'center',
     width: 40,
+  },
+  appBarRight: {
+    alignItems: 'center',
+    flexDirection: 'row',
   },
   appBarTitleBlock: {
     alignItems: 'center',
@@ -2960,6 +3175,71 @@ const styles = StyleSheet.create({
     flexShrink: 1,
     fontSize: 12.5,
     lineHeight: 18,
+  },
+  messageBubbleHighlight: {
+    borderColor: '#7fd1c7',
+    borderWidth: 2,
+  },
+  searchModalRoot: {
+    backgroundColor: '#12110f',
+    flex: 1,
+  },
+  searchBar: {
+    alignItems: 'center',
+    borderBottomColor: '#282520',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    paddingBottom: 10,
+    paddingHorizontal: 14,
+  },
+  searchInput: {
+    color: '#f4f0e8',
+    flex: 1,
+    fontSize: 15,
+    paddingVertical: 4,
+  },
+  searchCancel: {
+    color: '#7fd1c7',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  searchListContent: {
+    paddingBottom: 40,
+  },
+  searchCount: {
+    color: '#7c766f',
+    fontSize: 12,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 4,
+  },
+  searchHit: {
+    borderBottomColor: '#1f1d1a',
+    borderBottomWidth: 1,
+    paddingHorizontal: 16,
+    paddingVertical: 11,
+  },
+  searchHitMeta: {
+    color: '#7c766f',
+    fontSize: 11.5,
+    marginBottom: 3,
+  },
+  searchHitText: {
+    color: '#c8c2b8',
+    fontSize: 13.5,
+    lineHeight: 19,
+  },
+  searchHitMark: {
+    backgroundColor: '#caa83a',
+    color: '#111',
+  },
+  searchEmpty: {
+    color: '#77736b',
+    fontSize: 14,
+    paddingHorizontal: 16,
+    paddingVertical: 28,
+    textAlign: 'center',
   },
   toolRowErr: {
     color: '#ff8a73',
