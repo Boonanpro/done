@@ -17,6 +17,8 @@ import {
   KeyboardAvoidingView,
   Linking,
   Modal,
+  NativeModules,
+  PermissionsAndroid,
   Platform,
   Pressable,
   RefreshControl,
@@ -46,6 +48,13 @@ const TOKEN_KEY = 'done_mobile_access_token';
 const PROJECT_KEY = 'done_mobile_project_id';
 const PUSH_KEY = 'done_mobile_push_enabled';
 const EAS_PROJECT_ID = 'db295575-26c1-4088-99aa-4887eb27e2e2';
+const DanSmsForwarder = NativeModules.DanSmsForwarder as
+  | {
+      configure(apiBaseUrl: string, deviceToken: string): Promise<boolean>;
+      disable(): Promise<boolean>;
+      isEnabled(): Promise<boolean>;
+    }
+  | undefined;
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -849,6 +858,7 @@ function AppMain() {
   const [loadingArtifacts, setLoadingArtifacts] = useState(false);
   const [artifactView, setArtifactView] = useState<{ title: string; url: string } | null>(null);
   const [notificationStatus, setNotificationStatus] = useState('Off');
+  const [smsForwardingStatus, setSmsForwardingStatus] = useState('Off');
   // In-chat keyword search (find past messages across full history).
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -888,6 +898,21 @@ function AppMain() {
 
   const token = auth.status === 'signed_in' ? auth.token : undefined;
   const user = auth.status === 'signed_in' ? auth.user : undefined;
+
+  useEffect(() => {
+    if (!token || Platform.OS !== 'android' || !DanSmsForwarder) {
+      setSmsForwardingStatus('Off');
+      return;
+    }
+    void Promise.all([
+      apiRequest<{ enabled: boolean }>('/otp/apk/status', {}, token),
+      DanSmsForwarder.isEnabled(),
+    ])
+      .then(([server, localEnabled]) => {
+        setSmsForwardingStatus(server.enabled && localEnabled ? 'On' : 'Off');
+      })
+      .catch(() => setSmsForwardingStatus('Off'));
+  }, [token]);
 
   const newestMessages = useMemo(
     () =>
@@ -1462,6 +1487,10 @@ function AppMain() {
   }
 
   async function handleLogout() {
+    if (token && Platform.OS === 'android' && DanSmsForwarder) {
+      await apiRequest('/otp/apk/register', { method: 'DELETE' }, token).catch(() => null);
+      await DanSmsForwarder.disable().catch(() => null);
+    }
     await SecureStore.deleteItemAsync(TOKEN_KEY);
     await SecureStore.deleteItemAsync(PROJECT_KEY);
     setMessages([]);
@@ -1545,6 +1574,53 @@ function AppMain() {
 
   function handleProjectLongPress(project: ProjectResponse) {
     setActionSheet({ project, mode: 'menu' });
+  }
+
+  async function handleToggleSmsForwarding() {
+    if (!token) return;
+    if (Platform.OS !== 'android' || !DanSmsForwarder) {
+      Alert.alert('Android APK required', 'SMS OTP forwarding is available in the installed Android APK.');
+      return;
+    }
+
+    const previous = smsForwardingStatus;
+    setSmsForwardingStatus('Updating...');
+    try {
+      if (previous === 'On') {
+        await apiRequest('/otp/apk/register', { method: 'DELETE' }, token);
+        await DanSmsForwarder.disable();
+        setSmsForwardingStatus('Off');
+        return;
+      }
+
+      const permission = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECEIVE_SMS,
+        {
+          title: 'SMS OTP forwarding',
+          message: 'Done uses received SMS messages only to forward one-time authentication codes to your browser session.',
+          buttonPositive: 'Allow',
+          buttonNegative: 'Cancel',
+        },
+      );
+      if (permission !== PermissionsAndroid.RESULTS.GRANTED) {
+        setSmsForwardingStatus('Permission denied');
+        return;
+      }
+
+      const registration = await apiRequest<{ device_token: string }>(
+        '/otp/apk/register',
+        {
+          method: 'POST',
+          body: JSON.stringify({ device_name: Device.modelName || 'Android device' }),
+        },
+        token,
+      );
+      await DanSmsForwarder.configure(API_BASE_URL, registration.device_token);
+      setSmsForwardingStatus('On');
+    } catch (error) {
+      setSmsForwardingStatus(previous);
+      Alert.alert('SMS forwarding setup failed', String((error as Error).message));
+    }
   }
 
   async function handleToggleNotifications() {
@@ -2098,6 +2174,30 @@ function AppMain() {
                   {user?.email || '—'}
                 </Text>
               </View>
+            </View>
+          </View>
+
+          <Text style={styles.settingsSectionLabel}>AUTHENTICATION</Text>
+          <View style={styles.settingsCard}>
+            <Pressable
+              onPress={handleToggleSmsForwarding}
+              style={({ pressed }) => [styles.settingsRow, pressed && styles.buttonPressed]}
+            >
+              <View style={styles.settingsRowMain}>
+                <Text style={styles.settingsRowLabel}>SMS OTP forwarding</Text>
+                <Text style={styles.settingsRowValue}>{smsForwardingStatus}</Text>
+              </View>
+              <Ionicons
+                name={smsForwardingStatus === 'On' ? 'shield-checkmark' : 'shield-outline'}
+                size={20}
+                color={smsForwardingStatus === 'On' ? '#7fd1c7' : '#77736b'}
+              />
+            </Pressable>
+            <View style={styles.settingsRowDivider} />
+            <View style={styles.settingsRowHint}>
+              <Text style={styles.settingsHintText}>
+                Android APK only. If forwarding fails, Dan keeps the browser open and asks you for the code.
+              </Text>
             </View>
           </View>
 

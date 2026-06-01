@@ -7,6 +7,8 @@ import asyncio
 import logging
 import imaplib
 import email as email_lib
+import hashlib
+import secrets
 from email.header import decode_header
 from typing import Optional, List, Tuple
 from datetime import datetime, timedelta, timezone
@@ -719,24 +721,12 @@ class OTPService:
         Returns:
             OTPコード、タイムアウトの場合はNone
         """
-        from app.services.credentials_service import get_credentials_service
-
         if timeout_seconds is None:
             timeout_seconds = self.wait_timeout
         if poll_interval is None:
             poll_interval = self.poll_interval
 
         logger.info(f"Waiting for OTP (service={service}, source={source}, timeout={timeout_seconds}s)")
-
-        # IMAP認証情報があるか確認
-        creds_service = get_credentials_service()
-        has_imap_creds = await creds_service.has_credential(user_id, "gmail_imap")
-        use_imap = source == "email" and has_imap_creds
-
-        if use_imap:
-            logger.info(f"Using IMAP method for OTP extraction (user={user_id})")
-        else:
-            logger.info(f"Using OAuth2/Gmail API method for OTP extraction (user={user_id})")
 
         start_time = datetime.now(timezone.utc)
         deadline = start_time + timedelta(seconds=timeout_seconds)
@@ -748,26 +738,11 @@ class OTPService:
 
             # OTPを抽出
             if source == "email":
-                if use_imap:
-                    # IMAP方式（優先）
-                    logger.debug(f"[IMAP] Polling #{poll_count} for {service}...")
-                    otp_result = await self.extract_otp_from_email_imap(
-                        user_id=user_id,
-                        service=service,
-                        max_age_minutes=2,
-                        subject_filter="[SMSFW]",  # SMS Forwarder経由
-                    )
-                    if otp_result:
-                        logger.info(f"[IMAP] OTP found: {otp_result.code[:2]}****, is_used={otp_result.is_used}")
-                    else:
-                        logger.debug(f"[IMAP] No OTP found in poll #{poll_count}")
-                else:
-                    # OAuth2方式（フォールバック）
-                    otp_result = await self.extract_otp_from_email(
-                        user_id=user_id,
-                        service=service,
-                        max_age_minutes=2,
-                    )
+                otp_result = await self.extract_otp_from_email(
+                    user_id=user_id,
+                    service=service,
+                    max_age_minutes=2,
+                )
             else:
                 otp_result = await self.extract_otp_from_sms(
                     user_id=user_id,
@@ -792,6 +767,7 @@ class OTPService:
         from_number: str,
         body: str,
         message_sid: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Optional[OTPResult]:
         """
         SMS Webhookから受信したOTPを保存
@@ -812,16 +788,19 @@ class OTPService:
             return None
         
         # 電話番号からユーザーを特定
-        conn_result = self.supabase.table("sms_connections").select("user_id").eq(
-            "is_active", True
-        ).execute()
+        conn_result = None
+        if not user_id:
+            conn_result = self.supabase.table("sms_connections").select("user_id").eq(
+                "is_active", True
+            ).execute()
         
-        if not conn_result.data:
+        if not user_id and not conn_result.data:
             logger.warning("No active SMS connection found")
             return None
         
         # 最初のアクティブなユーザーに紐付け（本番では電話番号でマッピング）
-        user_id = conn_result.data[0]["user_id"]
+        if not user_id:
+            user_id = conn_result.data[0]["user_id"]
         
         # サービスを推測（送信元番号ベース）
         service = self._guess_service_from_sms(from_number, body)
@@ -856,6 +835,80 @@ class OTPService:
         
         return None
     
+    async def register_apk_otp_device(
+        self,
+        user_id: str,
+        device_name: Optional[str] = None,
+    ) -> str:
+        """Issue a revocable device token for direct APK SMS forwarding."""
+        raw_token = secrets.token_urlsafe(48)
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        payload = {
+            "user_id": user_id,
+            "device_name": device_name,
+            "token_hash": token_hash,
+            "is_active": True,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        existing = self.supabase.table("apk_otp_devices").select("id").eq(
+            "user_id", user_id
+        ).execute()
+        if existing.data:
+            self.supabase.table("apk_otp_devices").update(payload).eq(
+                "id", existing.data[0]["id"]
+            ).execute()
+        else:
+            self.supabase.table("apk_otp_devices").insert(payload).execute()
+        return raw_token
+
+    async def disable_apk_otp_device(self, user_id: str) -> None:
+        """Revoke SMS forwarding for a user's Android device."""
+        self.supabase.table("apk_otp_devices").update({
+            "is_active": False,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("user_id", user_id).execute()
+
+    async def get_apk_otp_device_status(self, user_id: str) -> dict:
+        result = self.supabase.table("apk_otp_devices").select(
+            "device_name,is_active,last_received_at"
+        ).eq("user_id", user_id).limit(1).execute()
+        if not result.data:
+            return {"enabled": False}
+        device = result.data[0]
+        return {
+            "enabled": bool(device.get("is_active")),
+            "device_name": device.get("device_name"),
+            "last_received_at": device.get("last_received_at"),
+        }
+
+    async def save_apk_forwarded_sms(
+        self,
+        device_token: str,
+        sender: str,
+        body: str,
+        message_id: Optional[str] = None,
+    ) -> Optional[OTPResult]:
+        """Authenticate an APK token and store an OTP without logging the SMS body."""
+        token_hash = hashlib.sha256(device_token.encode("utf-8")).hexdigest()
+        result = self.supabase.table("apk_otp_devices").select("id,user_id").eq(
+            "token_hash", token_hash
+        ).eq("is_active", True).limit(1).execute()
+        if not result.data:
+            raise ValueError("Invalid or revoked APK OTP device token")
+
+        device = result.data[0]
+        now = datetime.now(timezone.utc).isoformat()
+        self.supabase.table("apk_otp_devices").update({
+            "last_received_at": now,
+            "updated_at": now,
+        }).eq("id", device["id"]).execute()
+        return await self.save_sms_otp(
+            from_number=sender,
+            body=body,
+            message_sid=message_id,
+            user_id=device["user_id"],
+        )
+
     def _guess_service_from_sms(self, from_number: str, body: str) -> Optional[str]:
         """SMSの内容からサービスを推測"""
         body_lower = body.lower()

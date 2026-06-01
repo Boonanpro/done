@@ -89,6 +89,29 @@ class SMSWebhookRequest(BaseModel):
     message_sid: Optional[str] = Field(None, alias="MessageSid")
 
 
+class APKOTPDeviceRegisterRequest(BaseModel):
+    """Register an Android device that may forward SMS OTP messages."""
+    device_name: Optional[str] = Field(None, max_length=120)
+
+
+class APKOTPDeviceRegisterResponse(BaseModel):
+    """Raw token is returned once and stored only on the Android device."""
+    enabled: bool
+    device_token: str
+
+
+class APKOTPDeviceStatusResponse(BaseModel):
+    enabled: bool
+    device_name: Optional[str] = None
+    last_received_at: Optional[datetime] = None
+
+
+class APKOTPForwardRequest(BaseModel):
+    sender: str = Field("", max_length=255)
+    body: str = Field(..., min_length=1, max_length=4000)
+    message_id: Optional[str] = Field(None, max_length=255)
+
+
 # ==================== Service-specific OTP Patterns ====================
 
 # 送信元ドメインのホワイトリスト（サービス別）

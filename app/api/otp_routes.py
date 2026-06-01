@@ -1,7 +1,7 @@
 """
 OTP API Routes - Phase 9: OTP Automation
 """
-from fastapi import APIRouter, HTTPException, Query, Header, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Header, Request
 from fastapi.responses import Response
 from typing import Optional
 
@@ -13,7 +13,13 @@ from app.models.otp_schemas import (
     OTPMarkUsedResponse,
     OTPHistoryResponse,
     SMSStatusResponse,
+    APKOTPDeviceRegisterRequest,
+    APKOTPDeviceRegisterResponse,
+    APKOTPDeviceStatusResponse,
+    APKOTPForwardRequest,
 )
+from app.api.chat_routes import get_current_user
+from app.services.auth_service import TokenData
 
 router = APIRouter(prefix="/otp", tags=["OTP"])
 
@@ -220,6 +226,58 @@ async def extract_otp_from_sms(
             success=False,
             message="No OTP found in recent SMS messages",
         )
+
+
+# ==================== Android APK OTP forwarding ====================
+
+@router.post("/apk/register", response_model=APKOTPDeviceRegisterResponse)
+async def register_apk_otp_device(
+    request: APKOTPDeviceRegisterRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Register this Android app installation for direct SMS OTP forwarding."""
+    device_token = await get_otp_service().register_apk_otp_device(
+        user_id=current_user.user_id,
+        device_name=request.device_name,
+    )
+    return APKOTPDeviceRegisterResponse(enabled=True, device_token=device_token)
+
+
+@router.get("/apk/status", response_model=APKOTPDeviceStatusResponse)
+async def get_apk_otp_device_status(
+    current_user: TokenData = Depends(get_current_user),
+):
+    return APKOTPDeviceStatusResponse(
+        **await get_otp_service().get_apk_otp_device_status(current_user.user_id)
+    )
+
+
+@router.delete("/apk/register")
+async def disable_apk_otp_device(
+    current_user: TokenData = Depends(get_current_user),
+):
+    await get_otp_service().disable_apk_otp_device(current_user.user_id)
+    return {"enabled": False}
+
+
+@router.post("/apk/forward")
+async def forward_apk_sms(
+    request: APKOTPForwardRequest,
+    x_dan_otp_device_token: Optional[str] = Header(None),
+):
+    """Receive one SMS from the Android receiver. The SMS body is never logged."""
+    if not x_dan_otp_device_token:
+        raise HTTPException(status_code=401, detail="Missing APK OTP device token")
+    try:
+        otp = await get_otp_service().save_apk_forwarded_sms(
+            device_token=x_dan_otp_device_token,
+            sender=request.sender,
+            body=request.body,
+            message_id=request.message_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    return {"accepted": True, "otp_detected": otp is not None}
 
 
 # ==================== Voice OTP (9C) ====================

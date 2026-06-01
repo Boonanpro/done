@@ -2696,6 +2696,9 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                     else "Target page opened first. Existing browser session was reused; do not log in again."
                 )
                 state["content"].insert(0, {"type": "text", "text": message})
+            else:
+                _browser_auth_state["target_url"] = None
+                _browser_auth_state["login_url"] = None
             return state
 
         elif action == "screenshot":
@@ -2705,6 +2708,7 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             ref = params.get("ref")
             x = params.get("x")
             y = params.get("y")
+            login_was_authorized = bool(_browser_auth_state.get("login_url"))
 
             # クリック前のタブ数を記録
             try:
@@ -2744,6 +2748,19 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                     await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
                 except Exception:
                     pass
+            if _looks_like_login_url(page.url) and not login_was_authorized:
+                try:
+                    await page.go_back()
+                    await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
+                except Exception:
+                    pass
+                state = await _get_browser_state(page)
+                state["success"] = False
+                state["error"] = (
+                    "Navigation to a login page was blocked because the actual destination "
+                    "was not checked first. Use open_target with the destination URL."
+                )
+                return state
             return await _get_browser_state(page)
 
         elif action == "type":
