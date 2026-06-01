@@ -1699,6 +1699,27 @@ async def add_room_member(
 
 # ==================== Message Routes ====================
 
+@router.get("/rooms/{room_id}/messages/search", response_model=MessagesListResponse)
+async def search_messages(
+    room_id: str,
+    q: str,
+    limit: int = 50,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """Keyword-search a room's full message history (content match, newest first)."""
+    try:
+        if not q or not q.strip():
+            return MessagesListResponse(messages=[])
+        messages = await service.search_messages(room_id, current_user.user_id, q, limit=min(limit, 100))
+        return MessagesListResponse(messages=[MessageResponse(**m) for m in messages])
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        logger.warning("Temporary failure in search_messages (room=%s): %s", room_id, e)
+        raise HTTPException(status_code=503, detail="Temporary backend error. Please retry.")
+
+
 @router.get("/rooms/{room_id}/messages", response_model=MessagesListResponse)
 async def get_messages(
     room_id: str,
