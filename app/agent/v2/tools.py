@@ -8,7 +8,9 @@ LLMのテキスト出力がそのままユーザーへの返答になる。
 import re
 import asyncio
 import logging
+import os
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 
@@ -334,6 +336,8 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
         SCHEDULE_FOLLOWUP_TOOL,
         SAVE_CREDENTIALS_TOOL,
         GET_CREDENTIALS_TOOL,
+        REMEMBER_PERSONAL_INFO_TOOL,
+        GET_PERSONAL_INFO_TOOL,
         CHECK_SKILL_TOOL,
         READ_FILE_TOOL,
         WRITE_FILE_TOOL,
@@ -361,13 +365,15 @@ BROWSER_TOOL = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["open", "screenshot", "click", "type", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image"],
+                "enum": ["open", "open_target", "screenshot", "click", "type", "wait_for_otp_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image"],
                 "description": "実行するアクション",
             },
             "url": {"type": "string", "description": "開くURL（action=open）"},
             "ref": {"type": "string", "description": "操作対象の要素ref（例: @e1）"},
             "text": {"type": "string", "description": "入力テキスト（action=type）"},
             "press_enter": {"type": "boolean", "description": "入力後にEnterを押すか（action=type, デフォルト: false）"},
+            "timeout_seconds": {"type": "integer", "description": "OTP待機のタイムアウト秒数（action=wait_for_otp_from_app, デフォルト: 30）"},
+            "service": {"type": "string", "description": "OTPのサービス絞り込み（例: amazon, ex_reservation）"},
             "direction": {"type": "string", "enum": ["down", "up"], "description": "スクロール方向（action=scroll）"},
             "x": {"type": "integer", "description": "X座標（action=click, refが使えない場合）"},
             "y": {"type": "integer", "description": "Y座標（action=click, refが使えない場合）"},
@@ -532,6 +538,69 @@ GET_CREDENTIALS_TOOL = {
             }
         },
         "required": ["service"],
+    },
+}
+
+# ============================================
+# 個人情報の記憶ツール（電話・カード・住所など）
+# ============================================
+
+REMEMBER_PERSONAL_INFO_TOOL = {
+    "name": "remember_personal_info",
+    "description": """ユーザーの個人情報（電話番号・クレジットカード・住所・誕生日など）を
+暗号化して永続保存する。サービスのログイン情報ではない個人情報はこちらを使う
+（ログインID/パスワードは save_credentials を使う）。
+
+★重要: ユーザーが個人情報を口にした瞬間に、聞き返さず即座にこのツールで保存すること。
+保存した情報はシステムプロンプトにマスク表示で常時注入され、次回以降のセッションでも
+「保有済み」として認識される。一度教われば二度と聞き直さないのが目的。
+
+使用例:
+- 「俺の電話は090-1234-5678」→ field_key:"phone", value:"090-1234-5678"
+- 「カードはVISAの4111 1111 1111 1111、有効期限12/28」→ field_key:"credit_card", value:"4111111111111111 exp12/28", label:"VISA"
+- 「実家の住所は◯◯」→ field_key:"address_home", value:"...", category:"address"
+
+実値はDBに暗号化保存され、平文ではどこにも残らない。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "field_key": {
+                "type": "string",
+                "description": "情報の種類キー（例: phone, credit_card, address_home, birthday, email）。同じキーで再保存すると上書き更新される。"
+            },
+            "value": {
+                "type": "string",
+                "description": "保存する実値（電話番号・カード番号など）。そのまま暗号化される。"
+            },
+            "category": {
+                "type": "string",
+                "description": "分類（contact / payment / address / identity / other）。省略時は field_key から自動推論。"
+            },
+            "label": {
+                "type": "string",
+                "description": "人間向けラベル（例: 'メインのVISA', '会社用携帯'）。省略可。"
+            },
+        },
+        "required": ["field_key", "value"],
+    },
+}
+
+GET_PERSONAL_INFO_TOOL = {
+    "name": "get_personal_info",
+    "description": """保存済みの個人情報の実値を復号して取得する。
+フォーム入力・予約・購入など、実値が必要な操作の直前に使う。
+
+システムプロンプトの「保存済み個人情報」一覧にある field_key を指定すると、
+マスクされていない実際の値が返る。一覧に無い情報はユーザーに聞くこと。""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "field_key": {
+                "type": "string",
+                "description": "取得する情報のキー（例: phone, credit_card, address_home）"
+            }
+        },
+        "required": ["field_key"],
     },
 }
 
@@ -782,6 +851,12 @@ def parse_tool_name(tool_name: str) -> Optional[Tuple[str, str]]:
 
     if tool_name == "get_credentials":
         return ("_get_credentials", "get")
+
+    if tool_name == "remember_personal_info":
+        return ("_remember_personal_info", "save")
+
+    if tool_name == "get_personal_info":
+        return ("_get_personal_info", "get")
 
     if tool_name == "check_skill":
         return ("_check_skill", "check")
@@ -1735,6 +1810,53 @@ async def execute_tool(
 
         return {"success": True}
 
+    # ★★★ 個人情報の保存（電話・カード・住所等）★★★
+    if skill_name == "_remember_personal_info":
+        field_key = params.get("field_key")
+        value = params.get("value")
+        if not field_key or value is None or value == "":
+            return {"success": False, "error": "field_key と value が必要です"}
+
+        from app.services.personal_info_service import get_personal_info_service
+        pinfo = get_personal_info_service()
+        result = await pinfo.save(
+            user_id=user_id,
+            field_key=field_key,
+            value=value,
+            category=params.get("category", ""),
+            label=params.get("label", ""),
+        )
+        if result.get("success"):
+            return {
+                "success": True,
+                "field_key": result.get("field_key"),
+                "masked_hint": result.get("masked_hint"),
+                "message": f"{result.get('field_key')} を保存しました（{result.get('masked_hint')}）。次回以降も覚えています。",
+            }
+        return {"success": False, "error": result.get("error", "保存に失敗しました")}
+
+    # ★★★ 個人情報の取得（復号）★★★
+    if skill_name == "_get_personal_info":
+        field_key = params.get("field_key")
+        if not field_key:
+            return {"success": False, "error": "field_key が必要です"}
+
+        from app.services.personal_info_service import get_personal_info_service
+        pinfo = get_personal_info_service()
+        info = await pinfo.get(user_id, field_key)
+        if info and info.get("value") is not None:
+            return {
+                "success": True,
+                "field_key": info.get("field_key"),
+                "value": info.get("value"),
+                "label": info.get("label"),
+            }
+        return {
+            "success": False,
+            "field_key": field_key,
+            "message": f"{field_key} は保存されていません。ユーザーに聞いてください。",
+        }
+
     # ★★★ スキル確認（手順書取得）★★★
     if skill_name == "_check_skill":
         check_skill_name = params.get("skill_name")
@@ -2375,6 +2497,22 @@ BROWSER_LOAD_TIMEOUT = 10000        # ページ遷移後のロード完了待ち
 BROWSER_STATE_TIMEOUT = 3000        # スクショ前のロード完了待ち
 BROWSER_SCREENSHOT_TIMEOUT = 5000   # スクリーンショット取得・要素リスト取得
 
+_browser_auth_state: Dict[str, Any] = {
+    "target_url": None,
+    "login_url": None,
+}
+
+
+def _looks_like_login_url(url: str) -> bool:
+    """Conservatively detect explicit login pages without inspecting credentials."""
+    parsed = urlparse(url)
+    haystack = f"{parsed.path}?{parsed.query}".lower()
+    return any(token in haystack for token in (
+        "/login", "/signin", "/sign-in", "/auth/login", "/account/login",
+        "login=", "signin=", "sign_in=",
+    ))
+
+
 async def _get_browser_state(page) -> Dict[str, Any]:
     """
     操作後のページ状態を取得（スクリーンショット + 要素リスト）
@@ -2533,13 +2671,32 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
     try:
         page = await get_executor_page()
 
-        if action == "open":
+        if action in {"open", "open_target"}:
             url = params.get("url")
             if not url:
                 return {"success": False, "error": "url が必要です"}
+            if action == "open" and _looks_like_login_url(url):
+                return {
+                    "success": False,
+                    "error": (
+                        "Direct navigation to a login page is blocked. "
+                        "Use browser(action=\"open_target\", url=\"<actual destination>\") first "
+                        "so the existing authenticated session can be reused."
+                    ),
+                }
             await page.goto(url)
             await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
-            return await _get_browser_state(page)
+            state = await _get_browser_state(page)
+            if action == "open_target":
+                _browser_auth_state["target_url"] = url
+                _browser_auth_state["login_url"] = page.url if _looks_like_login_url(page.url) else None
+                message = (
+                    "Target page opened first. Authentication is required because the site redirected to a login page."
+                    if _browser_auth_state["login_url"]
+                    else "Target page opened first. Existing browser session was reused; do not log in again."
+                )
+                state["content"].insert(0, {"type": "text", "text": message})
+            return state
 
         elif action == "screenshot":
             return await _get_browser_state(page)
@@ -2605,6 +2762,48 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                     # タイムアウト時はフォールバック
                     await page.wait_for_timeout(2000)
             return await _get_browser_state(page)
+
+        elif action == "wait_for_otp_from_app":
+            ref = params.get("ref")
+            if not ref:
+                return {"success": False, "error": "ref is required"}
+
+            timeout_seconds = max(1, min(int(params.get("timeout_seconds", 30)), 120))
+            user_id = os.environ.get("DAN_USER_ID", "00000000-0000-0000-0000-000000000001")
+
+            from app.services.otp_service import get_otp_service
+
+            otp_code = await get_otp_service().wait_for_otp(
+                user_id=user_id,
+                service=params.get("service"),
+                source="sms",
+                timeout_seconds=timeout_seconds,
+                poll_interval=2,
+            )
+
+            if not otp_code:
+                state = await _get_browser_state(page)
+                state["success"] = False
+                state["error"] = (
+                    f"No OTP arrived from the Android app within {timeout_seconds} seconds. "
+                    "Keep this browser page open and ask the user to enter the code manually."
+                )
+                return state
+
+            await page.fill_by_ref(ref, otp_code)
+            if params.get("press_enter", False):
+                await page.keyboard.press("Enter")
+                try:
+                    await page.wait_for_load_state("domcontentloaded", timeout=BROWSER_LOAD_TIMEOUT)
+                except Exception:
+                    await page.wait_for_timeout(1000)
+
+            state = await _get_browser_state(page)
+            state["content"].insert(0, {
+                "type": "text",
+                "text": "OTP was received from the Android app and entered without exposing the code.",
+            })
+            return state
 
         elif action == "scroll":
             direction = params.get("direction", "down")
