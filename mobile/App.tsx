@@ -663,6 +663,16 @@ function AiTurnBlocks({
   );
 }
 
+// Error that remembers whether the SSE connection ever opened (i.e. the server
+// returned 200 and accepted the POST). Once dispatched, a later drop is just a
+// lost connection — the message is already being processed server-side, so the
+// caller must NOT restore the draft.
+function streamError(message: string, dispatched: boolean): Error {
+  const err = new Error(message) as Error & { dispatched?: boolean };
+  err.dispatched = dispatched;
+  return err;
+}
+
 async function streamDanMessage(
   token: string,
   content: string,
@@ -683,6 +693,13 @@ async function streamDanMessage(
       pollingInterval: 0,
     });
 
+    // True once the server has accepted the POST (200 + stream open). After this
+    // the message is in flight server-side even if the SSE later drops.
+    let opened = false;
+    source.addEventListener('open', () => {
+      opened = true;
+    });
+
     // Idle-based timeout: re-armed on every event (incl. keepalive) so a long
     // but actively-streaming turn is never cut off — mirrors the backend's
     // idle-timeout fix. Only a genuinely silent/dead connection trips it, and
@@ -693,7 +710,7 @@ async function streamDanMessage(
       if (timeout) clearTimeout(timeout);
       timeout = setTimeout(() => {
         source.close();
-        reject(new Error('DAN response timed out.'));
+        reject(streamError('DAN response timed out.', opened));
       }, 1000 * 60 * 10);
     };
     armTimeout();
@@ -724,7 +741,7 @@ async function streamDanMessage(
     source.addEventListener('error', () => {
       clearTimeout(timeout);
       source.close();
-      reject(new Error('Could not connect to DAN.'));
+      reject(streamError('Could not connect to DAN.', opened));
     });
   });
 }
@@ -1890,9 +1907,10 @@ function AppMain() {
         }
       });
     } catch (error) {
-      if (!sent) {
-        // Genuine failure before the message was accepted: put the text back
-        // and drop the optimistic bubble.
+      const dispatched = sent || !!(error as Error & { dispatched?: boolean }).dispatched;
+      if (!dispatched) {
+        // Genuine failure before the server accepted the message (connection
+        // never opened): put the text back and drop the optimistic bubble.
         setDraft(content);
         setMessages((current) => current.filter((message) => message.id !== optimistic.id));
         Alert.alert('Send failed', String((error as Error).message));
@@ -1901,8 +1919,10 @@ function AppMain() {
         setActivity('');
         return;
       }
-      // Sent, but the stream dropped before a clean "done" — fall through and
-      // reconcile from the server instead of treating it as a failure.
+      // The server accepted the POST (stream opened) but the SSE dropped before a
+      // clean "done" — the message is saved/processing server-side. Do NOT restore
+      // the draft (that caused the sent text to reappear in the input). Fall
+      // through and reconcile from the server poll.
     }
 
     // Reconcile final state (clean done OR sent-but-stream-dropped). Only pull
@@ -2296,9 +2316,16 @@ function AppMain() {
           <Pressable
             onPress={handleBackToProjects}
             hitSlop={10}
-            style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
+            style={({ pressed }) => [styles.appBarBackButton, pressed && styles.buttonPressed]}
           >
             <Ionicons name="chevron-back" size={26} color="#f4f0e8" />
+            {/* LINE-style unread count from OTHER chats, shown next to the back
+                button (neutral color, not an alarming red badge). */}
+            {unreadTotal > 0 ? (
+              <View style={styles.backBadge}>
+                <Text style={styles.backBadgeText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
+              </View>
+            ) : null}
           </Pressable>
           <View style={styles.appBarTitleBlockCenter}>
             <Text style={styles.appBarTitleSingle} numberOfLines={1}>
@@ -2313,17 +2340,6 @@ function AppMain() {
             >
               <Ionicons name="search" size={22} color="#f4f0e8" />
             </Pressable>
-            {unreadTotal > 0 ? (
-              <Pressable
-                onPress={() => setScreen('projects')}
-                hitSlop={10}
-                style={({ pressed }) => [styles.appBarIconButton, pressed && styles.buttonPressed]}
-              >
-                <View style={styles.appBarBadge}>
-                  <Text style={styles.appBarBadgeText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
-                </View>
-              </Pressable>
-            ) : null}
           </View>
         </View>
 
@@ -2525,11 +2541,9 @@ function AppMain() {
               (pressed || sending || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
             ]}
           >
-            {sending ? (
-              <ActivityIndicator color="#111" />
-            ) : (
-              <Text style={styles.sendButtonText}>Send</Text>
-            )}
+            {/* No spinner here — the live "working" indicator already shows in
+                Dan's chat bubble; a second one on the send button is redundant. */}
+            <Text style={styles.sendButtonText}>Send</Text>
           </Pressable>
         </View>
       </KeyboardAvoidingView>
@@ -2767,6 +2781,29 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
   },
+  appBarBackButton: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 3,
+    height: 40,
+    justifyContent: 'center',
+    paddingLeft: 2,
+    paddingRight: 6,
+  },
+  backBadge: {
+    alignItems: 'center',
+    backgroundColor: '#3f3a33',
+    borderRadius: 10,
+    height: 20,
+    justifyContent: 'center',
+    minWidth: 20,
+    paddingHorizontal: 6,
+  },
+  backBadgeText: {
+    color: '#f4f0e8',
+    fontSize: 11,
+    fontWeight: '800',
+  },
   appBarTitleBlock: {
     alignItems: 'center',
     flex: 1,
@@ -2797,20 +2834,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     marginTop: 2,
     maxWidth: '85%',
-  },
-  appBarBadge: {
-    alignItems: 'center',
-    backgroundColor: '#ff5a3d',
-    borderRadius: 11,
-    height: 22,
-    justifyContent: 'center',
-    minWidth: 22,
-    paddingHorizontal: 7,
-  },
-  appBarBadgeText: {
-    color: '#fffaf5',
-    fontSize: 11,
-    fontWeight: '900',
   },
   emptyState: {
     alignItems: 'center',
