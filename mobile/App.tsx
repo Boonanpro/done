@@ -663,16 +663,6 @@ function AiTurnBlocks({
   );
 }
 
-// Error that remembers whether the SSE connection ever opened (i.e. the server
-// returned 200 and accepted the POST). Once dispatched, a later drop is just a
-// lost connection — the message is already being processed server-side, so the
-// caller must NOT restore the draft.
-function streamError(message: string, dispatched: boolean): Error {
-  const err = new Error(message) as Error & { dispatched?: boolean };
-  err.dispatched = dispatched;
-  return err;
-}
-
 async function streamDanMessage(
   token: string,
   content: string,
@@ -693,13 +683,6 @@ async function streamDanMessage(
       pollingInterval: 0,
     });
 
-    // True once the server has accepted the POST (200 + stream open). After this
-    // the message is in flight server-side even if the SSE later drops.
-    let opened = false;
-    source.addEventListener('open', () => {
-      opened = true;
-    });
-
     // Idle-based timeout: re-armed on every event (incl. keepalive) so a long
     // but actively-streaming turn is never cut off — mirrors the backend's
     // idle-timeout fix. Only a genuinely silent/dead connection trips it, and
@@ -710,7 +693,7 @@ async function streamDanMessage(
       if (timeout) clearTimeout(timeout);
       timeout = setTimeout(() => {
         source.close();
-        reject(streamError('DAN response timed out.', opened));
+        reject(new Error('DAN response timed out.'));
       }, 1000 * 60 * 10);
     };
     armTimeout();
@@ -741,7 +724,7 @@ async function streamDanMessage(
     source.addEventListener('error', () => {
       clearTimeout(timeout);
       source.close();
-      reject(streamError('Could not connect to DAN.', opened));
+      reject(new Error('Could not connect to DAN.'));
     });
   });
 }
@@ -1852,11 +1835,13 @@ function AppMain() {
     setMessages((current) => [...current, optimistic]);
 
     let selectedProjectId = project.id;
-    // Becomes true once the server has accepted the message (echoes it back as
-    // user_message, or starts replying / finishes). After that point a stream
-    // error is just a dropped connection — the message is already saved, so we
-    // must NOT restore the draft or remove the optimistic bubble.
+    // Becomes true once the server has acked the message via the stream (echoes
+    // it back as user_message, or starts replying / finishes). A fast-path for
+    // "definitely saved" — but NOT required: the reconcile also checks the DB.
     let sent = false;
+    // Set if the SSE throws. On its own this does NOT mean the send failed — the
+    // reconcile verifies against the server before restoring the draft.
+    let streamFailure: Error | null = null;
 
     try {
       await streamDanMessage(token, finalContent, project.room_id, (event) => {
@@ -1907,37 +1892,61 @@ function AppMain() {
         }
       });
     } catch (error) {
-      const dispatched = sent || !!(error as Error & { dispatched?: boolean }).dispatched;
-      if (!dispatched) {
-        // Genuine failure before the server accepted the message (connection
-        // never opened): put the text back and drop the optimistic bubble.
-        setDraft(content);
-        setMessages((current) => current.filter((message) => message.id !== optimistic.id));
-        Alert.alert('Send failed', String((error as Error).message));
-        setSending(false);
-        setStreamingProjectId(null);
-        setActivity('');
-        return;
-      }
-      // The server accepted the POST (stream opened) but the SSE dropped before a
-      // clean "done" — the message is saved/processing server-side. Do NOT restore
-      // the draft (that caused the sent text to reappear in the input). Fall
-      // through and reconcile from the server poll.
+      // Don't decide success/failure from the connection state — it's unreliable.
+      // The SSE can drop AFTER the server already saved the message (reply still
+      // arrives via the poll), or before the client ever sees the 200 even though
+      // the POST was delivered. Deciding "failed" here is exactly what caused the
+      // sent text to reappear in the input. Record the error and let the
+      // server-truth reconcile below decide whether the message actually landed.
+      streamFailure = error as Error;
     }
 
-    // Reconcile final state (clean done OR sent-but-stream-dropped). Only pull
-    // the saved messages into view if the user is STILL looking at this chat —
-    // if they navigated away mid-stream, reloading here would yank them back.
+    // Reconcile from the server (the source of truth). Pull the saved messages
+    // and check whether OUR message actually landed. Only treat it as a real
+    // failure — and only then restore the draft — if the server has no record of
+    // it. This is connection-state-independent, so a dropped SSE on an
+    // already-saved message never resurrects the text in the input.
     try {
       const list = await refreshProjects(token).catch(() => projects);
-      if (currentProjectIdRef.current === selectedProjectId) {
-        const nextProject =
-          list.find((item) => item.id === selectedProjectId) ||
-          list.find((item) => item.room_id === project?.room_id) ||
-          project;
-        if (nextProject?.id) {
-          await loadProjectMessages(token, nextProject.id);
+      const nextProject =
+        list.find((item) => item.id === selectedProjectId) ||
+        list.find((item) => item.room_id === project?.room_id) ||
+        project;
+      const viewing = currentProjectIdRef.current === selectedProjectId;
+
+      if (streamFailure && !sent && nextProject?.room_id) {
+        // Stream errored and we never got a server ack: verify against the DB.
+        // Retry once, since the DB write can briefly lag the SSE drop.
+        const fetchMsgs = async () =>
+          (
+            await apiRequest<MessagesListResponse>(
+              `/chat/rooms/${nextProject.room_id}/messages?limit=120`,
+              {},
+              token,
+            ).catch(() => null)
+          )?.messages ?? [];
+        const isSaved = (msgs: MessageResponse[]) =>
+          msgs.some((m) => m.sender_type === 'human' && m.content === finalContent);
+
+        let serverMsgs = await fetchMsgs();
+        if (!isSaved(serverMsgs)) {
+          await new Promise((r) => setTimeout(r, 900));
+          serverMsgs = await fetchMsgs();
         }
+        const saved = isSaved(serverMsgs);
+        if (saved) {
+          // Safely on the server — show the truth, never restore the draft.
+          if (viewing) setMessages(serverMsgs);
+        } else {
+          // Genuinely not saved — restore the text so nothing is lost (but don't
+          // clobber a new message the user may have started typing meanwhile).
+          if (viewing) setMessages((current) => current.filter((m) => m.id !== optimistic.id));
+          setDraft((d) => (d ? d : content));
+          Alert.alert('Send failed', streamFailure.message);
+        }
+      } else if (viewing && nextProject?.id) {
+        // Clean finish (or server-acked): pull the saved messages into view.
+        await loadProjectMessages(token, nextProject.id);
       }
     } catch {
       // best-effort reconcile
