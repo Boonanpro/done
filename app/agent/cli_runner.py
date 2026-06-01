@@ -189,7 +189,162 @@ def _is_thinking_desync_error(text: Optional[str]) -> bool:
 _RESEED_SKIP_MARKERS = ("<invoke", "could not be parsed", "function_calls")
 
 
-def _build_reseed_context(room_id: str, max_chars: int = 8000, max_msgs: int = 40) -> str:
+def _one_line(value: Any, limit: int = 240) -> str:
+    """Compact DB text for room-state prompts without doing an LLM summary."""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = " ".join(part.strip() for part in text.split("\n") if part.strip())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _is_underspecified_continuation(text: str) -> bool:
+    """Short messages that depend on current room context, not global memory."""
+    s = unicodedata.normalize("NFKC", text or "").strip().lower()
+    s = s.strip(" \t\r\n。、.!?！？")
+    if not s or len(s) > 80:
+        return False
+    markers = (
+        "continue",
+        "go on",
+        "resume",
+        "carry on",
+        "where were we",
+        "what were we doing",
+        "\u7d9a\u3051\u3066",      # 続けて
+        "\u7d9a\u304d",            # 続き
+        "\u3064\u3065\u3051\u3066",  # つづけて
+        "\u4eca\u3069\u3053\u307e\u3067",  # 今どこまで
+        "\u3069\u3053\u307e\u3067",        # どこまで
+        "\u3055\u3063\u304d\u306e\u7d9a\u304d",  # さっきの続き
+    )
+    return any(marker in s for marker in markers)
+
+
+def _build_room_state_context(
+    room_id: str,
+    project_id: Optional[str] = None,
+    *,
+    max_chars: int = 2500,
+    message_limit: int = 8,
+    event_limit: int = 16,
+    run_limit: int = 3,
+) -> str:
+    """Build a small authoritative room state from DB.
+
+    This is intentionally cheap and rule-based. The full chat DB remains the
+    source of truth, while this snapshot gives the model enough context to avoid
+    falling back to global Claude history when its CLI transcript is missing or
+    unreliable.
+    """
+    if not room_id:
+        return ""
+    try:
+        from app.services.supabase_client import get_supabase_client
+
+        sb = get_supabase_client().client
+        messages = (
+            sb.table("chat_messages")
+            .select("sender_type,content,created_at")
+            .eq("room_id", room_id)
+            .order("created_at", desc=True)
+            .limit(message_limit)
+            .execute()
+        ).data or []
+
+        runs = (
+            sb.table("agent_runs")
+            .select("id,state,created_at,updated_at,claude_session_id,metadata")
+            .eq("room_id", room_id)
+            .order("created_at", desc=True)
+            .limit(run_limit)
+            .execute()
+        ).data or []
+
+        events_query = (
+            sb.table("execution_events")
+            .select("event_type,tool_name,tool_label,content,created_at,run_id,seq")
+            .eq("room_id", room_id)
+            .order("seq", desc=True)
+            .limit(event_limit)
+        )
+        events = events_query.execute().data or []
+
+        project = None
+        if project_id:
+            result = (
+                sb.table("projects")
+                .select("id,title,status,description,updated_at")
+                .eq("id", project_id)
+                .limit(1)
+                .execute()
+            )
+            if result.data:
+                project = result.data[0]
+    except Exception as e:
+        _cli_debug(f"_build_room_state_context fetch failed: {e}")
+        return ""
+
+    lines = [
+        "<room_state>",
+        "Authoritative state from DAN DB for this room. Prefer this over any stale Claude CLI transcript.",
+        f"room_id: {room_id}",
+    ]
+    if project:
+        lines.extend([
+            "project:",
+            f"- title: {_one_line(project.get('title'), 120)}",
+            f"- status: {_one_line(project.get('status'), 80)}",
+            f"- description: {_one_line(project.get('description'), 260)}",
+        ])
+
+    if runs:
+        lines.append("recent_runs:")
+        for run in reversed(runs):
+            sid = (run.get("claude_session_id") or "")[:8]
+            lines.append(
+                "- "
+                f"{run.get('created_at', '')} state={run.get('state', '')} "
+                f"run={str(run.get('id', ''))[:8]} cli={sid}"
+            )
+
+    if events:
+        lines.append("recent_work_events:")
+        for ev in reversed(events):
+            label = ev.get("tool_label") or ev.get("content") or ev.get("tool_name") or ev.get("event_type")
+            lines.append(
+                "- "
+                f"{ev.get('created_at', '')} {ev.get('event_type', '')}: "
+                f"{_one_line(label, 180)}"
+            )
+
+    if messages:
+        lines.append("recent_chat:")
+        for msg in reversed(messages):
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            low = content.lower()
+            if any(mark in low for mark in _RESEED_SKIP_MARKERS):
+                continue
+            role = "user" if msg.get("sender_type") in ("human", "user") else "dan"
+            lines.append(f"- {msg.get('created_at', '')} {role}: {_one_line(content, 260)}")
+
+    lines.extend([
+        "If the user asks to continue and the current task is unclear, infer from this room_state first.",
+        "Do not say you cannot identify the prior work until you have used this room-specific DB state.",
+        "</room_state>",
+    ])
+    body = "\n".join(line for line in lines if line is not None)
+    if len(body) > max_chars:
+        # Keep the header/rules and the most recent tail.
+        head = "\n".join(lines[:4]) + "\n...\n"
+        tail_budget = max(0, max_chars - len(head))
+        body = head + body[-tail_budget:]
+    return body
+
+
+def _build_reseed_context_legacy_unused(room_id: str, max_chars: int = 8000, max_msgs: int = 40) -> str:
     """Rebuild a room's recent conversation from the DB as a context preamble
     for a FRESH session. Used after a poisoned/desynced session is dropped so
     Dan keeps the context (no re-explaining) without resuming the contaminated
@@ -230,6 +385,117 @@ def _build_reseed_context(room_id: str, max_chars: int = 8000, max_msgs: int = 4
         f"{body}\n"
         "</conversation_so_far>"
     )
+
+
+# Transcript size guard. A Claude CLI session transcript grows with every tool
+def _build_reseed_context(
+    room_id: str,
+    project_id: Optional[str] = None,
+    max_chars: int = 12000,
+    max_msgs: int = 40,
+) -> str:
+    """Rebuild this room's context from DB for a fresh CLI session.
+
+    This intentionally overrides the older chat-only implementation above.
+    Recovery needs both chat text and work events; otherwise a fresh model can
+    know the conversation topic but still miss where the actual work stopped.
+    """
+    try:
+        from app.services.supabase_client import get_supabase_client
+
+        sb = get_supabase_client().client
+        rows = (
+            sb.table("chat_messages")
+            .select("sender_type,content,created_at")
+            .eq("room_id", room_id)
+            .order("created_at", desc=True)
+            .limit(max_msgs)
+            .execute()
+        ).data or []
+        events = (
+            sb.table("execution_events")
+            .select("event_type,tool_name,tool_label,content,created_at,run_id,seq")
+            .eq("room_id", room_id)
+            .order("seq", desc=True)
+            .limit(40)
+            .execute()
+        ).data or []
+        runs = (
+            sb.table("agent_runs")
+            .select("id,state,created_at,updated_at,claude_session_id,metadata")
+            .eq("room_id", room_id)
+            .order("created_at", desc=True)
+            .limit(5)
+            .execute()
+        ).data or []
+    except Exception as e:
+        _cli_debug(f"_build_reseed_context fetch failed: {e}")
+        return ""
+
+    state = _build_room_state_context(
+        room_id,
+        project_id,
+        max_chars=5000,
+        message_limit=12,
+        event_limit=24,
+        run_limit=5,
+    )
+
+    chat_lines = []
+    for m in reversed(rows):
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        low = content.lower()
+        if any(mark in low for mark in _RESEED_SKIP_MARKERS):
+            continue
+        who = "user" if m.get("sender_type") in ("human", "user") else "dan"
+        chat_lines.append(f"- {m.get('created_at', '')} {who}: {_one_line(content, 900)}")
+
+    event_lines = []
+    for ev in reversed(events):
+        label = ev.get("tool_label") or ev.get("content") or ev.get("tool_name") or ev.get("event_type")
+        event_lines.append(
+            f"- {ev.get('created_at', '')} {ev.get('event_type', '')}: {_one_line(label, 260)}"
+        )
+
+    run_lines = []
+    for run in reversed(runs):
+        run_lines.append(
+            "- "
+            f"{run.get('created_at', '')} state={run.get('state', '')} "
+            f"run={str(run.get('id', ''))[:8]} cli={str(run.get('claude_session_id') or '')[:8]}"
+        )
+
+    sections = []
+    if state:
+        sections.append(state)
+    if run_lines:
+        sections.append("<recent_runs_full>\n" + "\n".join(run_lines) + "\n</recent_runs_full>")
+    if event_lines:
+        sections.append("<recent_work_events_full>\n" + "\n".join(event_lines) + "\n</recent_work_events_full>")
+    if chat_lines:
+        sections.append("<recent_chat_full>\n" + "\n".join(chat_lines) + "\n</recent_chat_full>")
+    if not sections:
+        return ""
+
+    body = "\n\n".join(sections)
+    if len(body) > max_chars:
+        body = body[-max_chars:]
+    return (
+        "<conversation_so_far>\n"
+        "Internal recovery context from this exact room. Use it as context only; "
+        "do not quote this wrapper. Continue naturally from the latest room-specific "
+        "state and avoid replaying old work.\n\n"
+        f"{body}\n"
+        "</conversation_so_far>"
+    )
+
+
+def _wrap_latest_user_message(context: str, content: str) -> str:
+    if not context:
+        return content
+    return f"{context}\n\n<latest_user_message>\n{content}\n</latest_user_message>"
 
 
 # Transcript size guard. A Claude CLI session transcript grows with every tool
@@ -542,6 +808,7 @@ def _build_system_prompt(
     user_messages: str = "",
     latest_user_message: str = "",
     room_id: str = "",
+    user_id: str = "",
 ) -> str:
     """
     Build CLI system prompt.
@@ -563,9 +830,31 @@ def _build_system_prompt(
     if bootstrap:
         parts.append(bootstrap)
 
+    # 保存済み個人情報のマスク一覧（実値は出さない）。
+    # 「一度教われば二度と聞かない」を実現するため毎ターン注入する。値は固定的なので
+    # プロンプトキャッシュが効き、レイテンシへの影響は無視できる。
+    if user_id:
+        try:
+            from app.services.personal_info_service import build_personal_info_prompt_section
+            pinfo_section = build_personal_info_prompt_section(user_id)
+            if pinfo_section:
+                parts.append(pinfo_section)
+        except Exception:
+            pass
+
     # Runtime contract: tool/skill visibility and behavior policy.
     parts.append(_build_runtime_contract_section())
     parts.append(_build_language_alignment_section(latest_user_message, user_messages))
+    parts.append(
+        "## Room State Rule\n\n"
+        "- Treat `<room_state>` and `<conversation_so_far>` as DAN's authoritative "
+        "DB-backed state for the current room.\n"
+        "- Claude CLI transcripts are only a resumable cache. If they are missing, "
+        "stale, reset, or contradictory, prefer the room-specific DB context.\n"
+        "- For underspecified follow-ups such as continue/resume/where were we, "
+        "infer the active task from the room DB context before asking the user. "
+        "Do not fall back to global Claude history."
+    )
 
     # Project context is appended only when project metadata exists.
     # NOTE: title is intentionally excluded to prevent the LLM from
@@ -627,6 +916,7 @@ def _build_system_prompt(
         "`start_url` to `/chat`."
     )
     parts.append(_ABSOLUTE_RULES)
+    parts.append(_BROWSER_AUTH_RULES)
 
     return "\n\n".join(parts)
 _CLI_PROJECT_TEMPLATE = """## プロジェクト
@@ -646,7 +936,18 @@ _ABSOLUTE_RULES = """## 絶対ルール
 3. 同じアプローチで2回失敗したら、回避策を試すのではなく根本原因を特定しろ。自分のソースコード（D:/done配下）をRead/Edit/Bashで調査・修正できる。
 4. browserツールで実現できない操作（ダウンロード等）はBashでPythonスクリプトを書いて直接Playwrightを使え。persistent contextのパス: ~/.ai_secretary/browser_data
 5. 長期記憶が必要なら `read_file` で `~/.dan/workspace/MEMORY.md` を読め。
-6. ターンが終わると次のユーザー発言まで二度と自分から発言できない。だから「完了したら報告します」「少々お待ちください」と言ってターンを終えると続報は永遠に届かない。完了をその場で待てるなら待って実結果を報告せよ。待てない長時間処理（デプロイ/ビルド/外部処理の完了待ち等）の時は、**必ず `schedule_followup(note, delay_seconds)` で続報を予約してから**終われ。予約せずに後で報告すると約束してはならない。"""
+6. ターンが終わると次のユーザー発言まで二度と自分から発言できない。だから「完了したら報告します」「少々お待ちください」と言ってターンを終えると続報は永遠に届かない。完了をその場で待てるなら待って実結果を報告せよ。待てない長時間処理（デプロイ/ビルド/外部処理の完了待ち等）の時は、**必ず `schedule_followup(note, delay_seconds)` で続報を予約してから**終われ。予約せずに後で報告すると約束してはならない。
+7. ユーザーが個人情報（電話番号・クレジットカード・住所・誕生日・メール等）を口にしたら、その場で即座に `remember_personal_info` で保存しろ。一度教われば二度と聞き返すな。システムプロンプトの「保存済み個人情報」一覧にある情報は既に保有済みなので、実値が要る操作の直前にだけ `get_personal_info` で取り出して使え。ログインID/パスワードは従来通り `save_credentials`。"""
+
+
+_BROWSER_AUTH_RULES = """## Browser authentication handoff rules
+
+- For interactive browser work that may require user input later, use the `browser` MCP tool. Do not launch a one-shot Playwright script from Bash.
+- Start authenticated browser tasks with `browser(action="open_target", url="<actual destination>")`. Never open a login page first. Reuse the existing authenticated session when the destination opens successfully; log in only after the destination redirects to an unauthenticated page.
+- When an OTP, SMS code, email code, passkey, or manual approval is required, preserve the current browser page and ask for the missing input. Do not close the browser, navigate away, or resend a code unless the current page has been checked and the code is expired or the user explicitly asks for a resend.
+- When the user sends an OTP, inspect the still-open page first and enter it into the existing challenge. If the page is no longer usable, explain that before requesting a new code.
+- For SMS OTP, prefer `browser(action="wait_for_otp_from_app", ref="...", press_enter=true)` so the Android app can forward and enter the OTP directly without exposing it in chat or tool output. If no OTP arrives within the timeout, keep the current page open and ask the user for the code.
+- Never print, log, or persist OTP values beyond the immediate authentication step."""
 
 
 def _get_encryption_key() -> str:
@@ -1360,9 +1661,9 @@ def _run_cli_in_thread(
             )
             _clear_cli_session(room_id)
             resume_session_id = None
-            reseed = _build_reseed_context(room_id)
+            reseed = _build_reseed_context(room_id, project_id=project_id)
             if reseed:
-                content = f"{reseed}\n\n{content}"
+                content = _wrap_latest_user_message(reseed, content)
 
         # 1回目: セッション再開を試みる（中断後はfork-sessionで新規セッション分岐）
         need_fork = room_id in _interrupted_rooms
@@ -1400,12 +1701,18 @@ def _run_cli_in_thread(
                 _cli_debug(f"Failed to clear session from DB: {e}")
 
             # 2回目: 新規会話として実行
-            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, launch_system_prompt, resume_session_id=None)
-            _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(content)})")
+            retry_content = content
+            if "<conversation_so_far>" not in retry_content:
+                reseed = _build_reseed_context(room_id, project_id=project_id)
+                if reseed:
+                    retry_content = _wrap_latest_user_message(reseed, content)
+            retry_system_prompt, retry_launch_content = _prepare_cli_launch_payload(system_prompt, retry_content)
+            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, retry_system_prompt, resume_session_id=None)
+            _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(retry_content)})")
 
             result_data = _run_cli_process(
                 cmd,
-                launch_content,
+                retry_launch_content,
                 env,
                 room_id,
                 event_queue,
@@ -1641,10 +1948,10 @@ async def _process_via_streaming_session(
     # has to re-explain. Contaminated lines (leaked <invoke> text / parse-error
     # results) are filtered out so the reseed can't re-poison the new session.
     send_content = content
-    if session_is_fresh and not resume_session_id:
-        reseed = _build_reseed_context(room_id)
+    if session_is_fresh and not resume_session_id and "<conversation_so_far>" not in send_content:
+        reseed = _build_reseed_context(room_id, project_id=project_id)
         if reseed:
-            send_content = f"{reseed}\n\n{content}"
+            send_content = _wrap_latest_user_message(reseed, content)
 
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
@@ -1962,6 +2269,7 @@ async def process_message_cli(
             user_messages=user_messages,
             latest_user_message=content,
             room_id=room_id,
+            user_id=user_id,
         )
     if skill_injection:
         system_prompt += f"\n\n{skill_injection}"
@@ -1983,6 +2291,26 @@ async def process_message_cli(
         _clear_cli_session(room_id)
         resume_session_id = None
 
+    content_for_cli = content
+    if room_id and not skip_save:
+        try:
+            if _is_underspecified_continuation(content) or (resume_session_id is None and not skip_resume):
+                context = _build_reseed_context(
+                    room_id,
+                    project_id=project_id,
+                    max_chars=int(os.getenv("DAN_RECOVERY_CONTEXT_MAX_CHARS", "12000")),
+                )
+            else:
+                context = _build_room_state_context(
+                    room_id,
+                    project_id=project_id,
+                    max_chars=int(os.getenv("DAN_ROOM_STATE_MAX_CHARS", "2500")),
+                )
+            if context:
+                content_for_cli = _wrap_latest_user_message(context, content)
+        except Exception as e:
+            _cli_debug(f"Failed to build DB room context for {room_id[:8]}: {e}")
+
     # --- DAN_STREAMING_INPUT: 常駐ストリーミングセッション経路（フラグ制御） ---
     # 有効時のみ、ターンを常駐 stream-json セッションに流す（後段で「次の境界」
     # への追い連絡注入を可能にするため）。フラグOFF時は下の1ターン1プロセス経路を
@@ -1996,7 +2324,7 @@ async def process_message_cli(
         _cli_debug(f"[STREAMING] routing room={room_id} via persistent session")
         from app.services.artifact_url_guard import sanitize_artifact_public_urls
         async for ev in _process_via_streaming_session(
-            room_id, user_id, content, system_prompt, mcp_config_path,
+            room_id, user_id, content_for_cli, system_prompt, mcp_config_path,
             project_id, run_id, skip_save, cwd,
             resume_session_id=resume_session_id,
         ):
@@ -2013,7 +2341,7 @@ async def process_message_cli(
             room_id,
             time.perf_counter() - setup_start,
             len(system_prompt),
-            len(content),
+            len(content_for_cli),
             bool(resume_session_id),
         )
     )
@@ -2029,7 +2357,7 @@ async def process_message_cli(
     cli_thread = threading.Thread(
         target=_run_cli_in_thread,
         args=(
-            content,
+            content_for_cli,
             system_prompt,
             mcp_config_path,
             room_id,

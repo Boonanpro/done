@@ -265,5 +265,15 @@
       "D:\\done\\frontend\\src\\app\\artifacts\\bookings\\page.tsx",
       "D:\\done\\scripts\\seed_bookings.py"
     ]
+  },
+  "personal_info": {
+    "name": "personal_info",
+    "description": "Internal infra (no UI/CRUD/artifact). Encrypted per-user store for personal information (phone, credit card, address, etc.), separate from service login credentials. Dan auto-saves via remember_personal_info tool the moment the user provides info, fetches real values on demand via get_personal_info, and a masked index (masked_hint only) is injected into the system prompt every turn so Dan always knows what it holds. Values are Fernet-encrypted; plaintext never touches workspace md files or git.",
+    "created_at": "2026-06-01T00:00:00.000000",
+    "mode": "internal-infra",
+    "files": [
+      "D:\\done\\supabase\\migrations5_personal_info.sql",
+      "D:\\done\u0007pp\\services\\personal_info_service.py"
+    ]
   }
 }
