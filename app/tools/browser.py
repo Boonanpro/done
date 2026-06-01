@@ -21,6 +21,13 @@ _executor_ready = threading.Event()
 _executor_shutdown = threading.Event()
 _executor_page_proxy = None
 _executor_browser_alive = threading.Event()  # ブラウザ生存フラグ
+_executor_start_error: Optional[str] = None
+
+_EXECUTOR_CDP_ENDPOINT = "http://127.0.0.1:9223"
+_EXECUTOR_CDP_ARGS = [
+    "--remote-debugging-address=127.0.0.1",
+    "--remote-debugging-port=9223",
+]
 
 
 def _executor_thread_main():
@@ -42,9 +49,13 @@ async def _executor_worker():
     """Executor用ブラウザワーカー"""
     from playwright.async_api import async_playwright
 
+    global _executor_start_error
+
     playwright = None
     browser = None
     context = None
+    attached_to_existing_browser = False
+    page = None
 
     # ページ状態を管理（複数タブ対応）
     pages_state = {
@@ -64,28 +75,42 @@ async def _executor_worker():
         user_data_dir = os.path.join(os.path.expanduser("~"), ".ai_secretary", "browser_data")
         os.makedirs(user_data_dir, exist_ok=True)
 
-        context = await playwright.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir,
-            headless=False,
-            slow_mo=100,
-            args=["--disable-blink-features=AutomationControlled"],
-            viewport={"width": 1440, "height": 900},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        )
-        browser = context  # persistent contextではcontextがbrowser相当
+        try:
+            browser = await playwright.chromium.connect_over_cdp(
+                _EXECUTOR_CDP_ENDPOINT,
+                timeout=1000,
+            )
+            context = browser.contexts[0]
+            attached_to_existing_browser = True
+            print("[EXECUTOR_BROWSER] Reconnected to existing browser")
+        except Exception:
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir=user_data_dir,
+                headless=False,
+                slow_mo=100,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    *_EXECUTOR_CDP_ARGS,
+                ],
+                viewport={"width": 1440, "height": 900},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            )
+            browser = context  # persistent contextではcontextがbrowser相当
 
         # 新しいタブを検知するリスナーを登録
         context.on("page", on_new_page)
 
-        # persistent contextは最初のページを自動作成する
+        # 再接続時は最後に使っていたタブを優先する
         if context.pages:
-            page = context.pages[0]
+            pages_state["all_pages"].extend(context.pages)
+            page = context.pages[-1]
         else:
             page = await context.new_page()
+            pages_state["all_pages"].append(page)
         pages_state["current"] = page
-        pages_state["all_pages"].append(page)
 
         print("[EXECUTOR_BROWSER] Browser ready")
+        _executor_start_error = None
         _executor_ready.set()
         _executor_browser_alive.set()  # ブラウザ生存フラグをセット
 
@@ -109,23 +134,28 @@ async def _executor_worker():
                     break  # ワーカーループを終了してスレッドを終了させる
                 _executor_result_queue.put(("error", str(e)))
 
+    except Exception as exc:
+        _executor_start_error = str(exc)
+        _executor_ready.set()
+        raise
     finally:
         _executor_browser_alive.clear()  # ブラウザ死亡をマーク
-        try:
-            if page:
-                await page.close()
-        except Exception:
-            pass
-        try:
-            if context:
-                await context.close()
-        except Exception:
-            pass
-        try:
-            if browser:
-                await browser.close()
-        except Exception:
-            pass
+        if not attached_to_existing_browser:
+            try:
+                if page:
+                    await page.close()
+            except Exception:
+                pass
+            try:
+                if context:
+                    await context.close()
+            except Exception:
+                pass
+            try:
+                if browser:
+                    await browser.close()
+            except Exception:
+                pass
         try:
             if playwright:
                 await playwright.stop()
@@ -519,6 +549,7 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
 def _ensure_executor_thread():
     """Executor用スレッドを確保（ブラウザ生存チェック付き）"""
     global _executor_thread, _executor_command_queue, _executor_result_queue
+    global _executor_start_error
 
     # スレッドが生きていてもブラウザが死んでいれば再起動が必要
     need_restart = (
@@ -537,6 +568,7 @@ def _ensure_executor_thread():
         _executor_ready.clear()
         _executor_shutdown.clear()
         _executor_browser_alive.clear()
+        _executor_start_error = None
 
         # キューをクリア（古いセッションのゴミを除去）
         _executor_command_queue = queue.Queue()
@@ -550,6 +582,8 @@ def _ensure_executor_thread():
         # 準備完了を待機
         if not _executor_ready.wait(timeout=30):
             raise RuntimeError("Executor browser failed to start")
+        if _executor_start_error:
+            raise RuntimeError(f"Executor browser failed to start: {_executor_start_error}")
 
 
 def _send_executor_command(cmd: str, **args) -> dict:
