@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     # Application
     APP_ENV: str = "development"
     APP_SECRET_KEY: str = "change-me-in-production"
+    DAN_STREAMING_INPUT: bool = False
     
     # Supabase
     SUPABASE_URL: str = ""
@@ -112,6 +113,9 @@ class Settings(BaseSettings):
 
     # Studio - fal.ai (Kling O3 video generation)
     FAL_API_KEY: str = ""
+
+    # Captcha solving (2captcha) - reCAPTCHA等を人力中継で突破
+    TWOCAPTCHA_API_KEY: str = ""
 
     # Web Push (VAPID)
     VAPID_PUBLIC_KEY: str = ""
