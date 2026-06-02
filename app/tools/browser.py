@@ -4,10 +4,15 @@ Uses a dedicated thread with its own event loop to avoid Windows asyncio issues
 """
 from typing import Optional, Any
 import asyncio
+import json
 import logging
 import os
-import threading
 import queue
+import socket
+import subprocess
+import threading
+import time
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +33,179 @@ _EXECUTOR_CDP_ARGS = [
     "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=9223",
 ]
+_EXECUTOR_LOCK_NAMES = (
+    "lockfile",
+    "SingletonLock",
+    "SingletonCookie",
+    "SingletonSocket",
+    "DevToolsActivePort",
+)
+
+
+def _executor_profile_dir() -> Path:
+    return Path.home() / ".ai_secretary" / "browser_data"
+
+
+def _write_browser_recovery_log(event: str, **details: Any) -> None:
+    """Persist browser recovery diagnostics without relying on MCP stdout."""
+    try:
+        log_path = Path.home() / ".ai_secretary" / "browser_recovery.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "event": event,
+            **details,
+        }
+        with log_path.open("a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        logger.exception("[EXECUTOR_BROWSER] Failed to write recovery log")
+
+
+def _is_executor_cdp_available() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", 9223), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _list_dedicated_browser_processes() -> tuple[list[dict[str, Any]], bool]:
+    """
+    List only browser processes that explicitly use DAN's dedicated profile.
+
+    Child processes are terminated through taskkill /T after the verified root
+    process is selected. Regular Chrome uses a different profile and is never
+    returned here.
+    """
+    if os.name != "nt":
+        return [], False
+
+    profile_marker = str(_executor_profile_dir()).lower().replace("/", "\\")
+    command = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.Name -match '^(chrome|chromium|msedge|headless_shell)\\.exe$' } | "
+        "Select-Object ProcessId,ParentProcessId,Name,CommandLine | "
+        "ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        raw = result.stdout.strip()
+        if not raw:
+            return [], True
+        rows = json.loads(raw)
+        if isinstance(rows, dict):
+            rows = [rows]
+        matches = []
+        for row in rows:
+            command_line = str(row.get("CommandLine") or "").lower().replace("/", "\\")
+            if profile_marker in command_line:
+                matches.append({
+                    "pid": int(row["ProcessId"]),
+                    "parent_pid": int(row.get("ParentProcessId") or 0),
+                    "name": str(row.get("Name") or ""),
+                })
+        return matches, True
+    except Exception as exc:
+        _write_browser_recovery_log("process_scan_failed", error=str(exc))
+        return [], False
+
+
+def _executor_lock_paths() -> list[Path]:
+    profile_dir = _executor_profile_dir()
+    return [profile_dir / name for name in _EXECUTOR_LOCK_NAMES if (profile_dir / name).exists()]
+
+
+def _remove_executor_locks() -> list[str]:
+    removed = []
+    for lock_path in _executor_lock_paths():
+        try:
+            lock_path.unlink()
+            removed.append(lock_path.name)
+        except OSError as exc:
+            _write_browser_recovery_log(
+                "lock_remove_failed",
+                lock=lock_path.name,
+                error=str(exc),
+            )
+    return removed
+
+
+def _terminate_dedicated_browser_processes(processes: list[dict[str, Any]]) -> list[int]:
+    terminated = []
+    process_ids = {process["pid"] for process in processes}
+    root_processes = [
+        process for process in processes
+        if process["parent_pid"] not in process_ids
+    ]
+    for process in root_processes:
+        pid = process["pid"]
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            terminated.append(pid)
+        except Exception as exc:
+            _write_browser_recovery_log("process_terminate_failed", pid=pid, error=str(exc))
+    return terminated
+
+
+def _recover_stale_executor_profile() -> bool:
+    """
+    Recover DAN's dedicated browser profile without touching regular Chrome.
+
+    Returns True only when it is safe to retry launching the dedicated browser.
+    """
+    cdp_available = _is_executor_cdp_available()
+    processes, scan_ok = _list_dedicated_browser_processes()
+    locks_before = [path.name for path in _executor_lock_paths()]
+    _write_browser_recovery_log(
+        "recovery_started",
+        profile=str(_executor_profile_dir()),
+        cdp_available=cdp_available,
+        dedicated_processes=processes,
+        locks=locks_before,
+    )
+
+    if cdp_available:
+        _write_browser_recovery_log("recovery_skipped_cdp_available")
+        return False
+    if not scan_ok:
+        _write_browser_recovery_log("recovery_aborted_process_scan_failed")
+        return False
+
+    terminated = _terminate_dedicated_browser_processes(processes)
+    if terminated:
+        time.sleep(1)
+
+    remaining_processes, remaining_scan_ok = _list_dedicated_browser_processes()
+    if not remaining_scan_ok or remaining_processes:
+        _write_browser_recovery_log(
+            "recovery_aborted_dedicated_processes_remain",
+            terminated=terminated,
+            remaining_processes=remaining_processes,
+        )
+        return False
+
+    removed_locks = _remove_executor_locks()
+    _write_browser_recovery_log(
+        "recovery_completed",
+        terminated=terminated,
+        removed_locks=removed_locks,
+    )
+    return bool(terminated or removed_locks)
 
 
 def _executor_thread_main():
@@ -72,7 +250,7 @@ async def _executor_worker():
         print("[EXECUTOR_BROWSER] Starting Playwright...")
         playwright = await async_playwright().start()
 
-        user_data_dir = os.path.join(os.path.expanduser("~"), ".ai_secretary", "browser_data")
+        user_data_dir = str(_executor_profile_dir())
         os.makedirs(user_data_dir, exist_ok=True)
 
         try:
@@ -83,18 +261,35 @@ async def _executor_worker():
             context = browser.contexts[0]
             attached_to_existing_browser = True
             print("[EXECUTOR_BROWSER] Reconnected to existing browser")
-        except Exception:
-            context = await playwright.chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                headless=False,
-                slow_mo=100,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    *_EXECUTOR_CDP_ARGS,
-                ],
-                viewport={"width": 1440, "height": 900},
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            )
+        except Exception as connect_exc:
+            async def launch_persistent_context():
+                return await playwright.chromium.launch_persistent_context(
+                    user_data_dir=user_data_dir,
+                    headless=False,
+                    slow_mo=100,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        *_EXECUTOR_CDP_ARGS,
+                    ],
+                    viewport={"width": 1440, "height": 900},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                )
+
+            try:
+                context = await launch_persistent_context()
+            except Exception as launch_exc:
+                _write_browser_recovery_log(
+                    "launch_failed",
+                    profile=user_data_dir,
+                    cdp_available=_is_executor_cdp_available(),
+                    connect_error=str(connect_exc),
+                    launch_error=str(launch_exc),
+                )
+                if not _recover_stale_executor_profile():
+                    raise
+                _write_browser_recovery_log("launch_retry_started", profile=user_data_dir)
+                context = await launch_persistent_context()
+                _write_browser_recovery_log("launch_retry_succeeded", profile=user_data_dir)
             browser = context  # persistent contextではcontextがbrowser相当
 
         # 新しいタブを検知するリスナーを登録
@@ -136,6 +331,7 @@ async def _executor_worker():
 
     except Exception as exc:
         _executor_start_error = str(exc)
+        _write_browser_recovery_log("worker_start_failed", error=str(exc))
         _executor_ready.set()
         raise
     finally:
@@ -581,6 +777,11 @@ def _ensure_executor_thread():
 
         # 準備完了を待機
         if not _executor_ready.wait(timeout=30):
+            _write_browser_recovery_log(
+                "worker_ready_timeout",
+                profile=str(_executor_profile_dir()),
+                cdp_available=_is_executor_cdp_available(),
+            )
             raise RuntimeError("Executor browser failed to start")
         if _executor_start_error:
             raise RuntimeError(f"Executor browser failed to start: {_executor_start_error}")
