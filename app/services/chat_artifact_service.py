@@ -115,8 +115,6 @@ class ChatArtifactService:
         match = re.match(r"^/artifacts/([^/?#]+)([^?#]*)?([?#].*)?$", value)
         if match:
             return f"/preview/{match.group(1)}{match.group(2) or ''}{match.group(3) or ''}"
-        if value.startswith("/demo/"):
-            return value
         return f"/preview/{slug}"
 
     @staticmethod
@@ -125,13 +123,127 @@ class ChatArtifactService:
             return False
         path = url.split("?", 1)[0].split("#", 1)[0].strip("/")
         parts = path.split("/")
-        if not parts or parts[0] not in {"artifacts", "demo", "preview"}:
+        if not parts or parts[0] not in {"artifacts", "preview"}:
             return True
         if len(parts) < 2:
             return False
         if parts[0] == "preview":
             parts[0] = "artifacts"
         return (PROJECT_ROOT / "frontend" / "src" / "app" / Path(*parts) / "page.tsx").exists()
+
+    @staticmethod
+    def _read_source_for_inference(path: str | None) -> str:
+        if not path:
+            return ""
+        normalized = path.replace("\\", "/").split("?", 1)[0].split("#", 1)[0]
+        candidate: Optional[Path] = None
+        if "frontend/src/app/" in normalized:
+            rel = normalized.split("frontend/src/app/", 1)[1]
+            candidate = PROJECT_ROOT / "frontend" / "src" / "app" / Path(*rel.split("/"))
+        elif normalized.startswith("/artifacts/") or normalized.startswith("/preview/"):
+            route_parts = normalized.strip("/").split("/")
+            if route_parts and route_parts[0] == "preview":
+                route_parts[0] = "artifacts"
+            candidate = PROJECT_ROOT / "frontend" / "src" / "app" / Path(*route_parts) / "page.tsx"
+        if not candidate or not candidate.exists() or candidate.suffix not in {".tsx", ".ts", ".jsx", ".js"}:
+            return ""
+        try:
+            return candidate.read_text(encoding="utf-8", errors="ignore")[:80_000]
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _infer_artifact_type_from_source(source: str) -> Optional[str]:
+        if not source:
+            return None
+        text = source.lower()
+
+        website_score = 0
+        tool_score = 0
+        dashboard_score = 0
+
+        website_markers = (
+            "export const metadata",
+            "<header",
+            "<footer",
+            "hero",
+            "cta",
+            "site-nav",
+            "sitefooter",
+            "lpshell",
+            "landing",
+            "company",
+            "corporate",
+            "contact",
+            "services",
+            "about",
+            "testimonials",
+            "pricing",
+            "seo",
+        )
+        tool_markers = (
+            "usestate(",
+            "usememo(",
+            "useeffect(",
+            "fetch(",
+            "input",
+            "textarea",
+            "form",
+            "button",
+            "search",
+            "filter",
+            "sort",
+            "query",
+            "results",
+            "toggle",
+            "submit",
+            "download",
+            "upload",
+            "copytoclipboard",
+        )
+        dashboard_markers = (
+            "dashboard",
+            "analytics",
+            "kpi",
+            "chart",
+            "recharts",
+            "table",
+            "metric",
+            "stats",
+            "card",
+            "trend",
+            "calendar",
+            "bookings",
+            "monitor",
+        )
+
+        website_score += sum(2 for marker in website_markers if marker in text)
+        tool_score += sum(1 for marker in tool_markers if marker in text)
+        dashboard_score += sum(2 for marker in dashboard_markers if marker in text)
+
+        if "export default function" in text:
+            tool_score += 1
+        if re.search(r"const\s+\[[^\]]+,\s*set[A-Z]", source):
+            tool_score += 3
+        if re.search(r"\.(map|filter|sort)\(", text):
+            tool_score += 2
+        if re.search(r"<(form|input|textarea|select)\b", text):
+            tool_score += 3
+        if re.search(r"<(main|section|header|footer)\b", text) and "export const metadata" in text:
+            website_score += 5
+        if "sr-only" in text and ("h1" in text or "<h1" in text):
+            website_score += 1
+
+        # A dashboard is also a tool, but the UI needs a separate handoff policy.
+        if dashboard_score >= 5 and dashboard_score >= website_score:
+            return "dashboard"
+        if website_score >= 8 and website_score >= tool_score + 2:
+            return "website"
+        if tool_score >= 5:
+            return "tool"
+        if website_score >= 5:
+            return "website"
+        return None
 
     @staticmethod
     def infer_artifact_type(slug: str = "", label: str | None = None, path: str | None = None) -> str:
@@ -147,6 +259,13 @@ class ChatArtifactService:
         text = " ".join([slug or "", label or "", path or ""]).lower()
         if any(token in text for token in ("dashboard", "dash", "analytics", "kpi")):
             return "dashboard"
+
+        source_type = ChatArtifactService._infer_artifact_type_from_source(
+            ChatArtifactService._read_source_for_inference(path)
+        )
+        if source_type:
+            return source_type
+
         if any(token in text for token in ("website", "site", "homepage", "hp", "lp", "landing", "corporate", "company")):
             return "website"
         return "tool"
@@ -183,7 +302,7 @@ class ChatArtifactService:
         )
         return result.data[0] if result.data else None
 
-    async def create(self, data: dict, user_id: str) -> Optional[dict]:
+    def create_sync(self, data: dict, user_id: str) -> Optional[dict]:
         payload = self._normalize_payload({**data, "created_by": user_id})
         if payload.get("project_id"):
             payload["project_id"] = str(payload["project_id"])
@@ -224,6 +343,9 @@ class ChatArtifactService:
                 )
 
         return artifact
+
+    async def create(self, data: dict, user_id: str) -> Optional[dict]:
+        return self.create_sync(data, user_id)
 
     async def update(self, artifact_id: str, data: dict, user_id: str) -> Optional[dict]:
         data = self._normalize_payload(data) if data.get("slug") else data

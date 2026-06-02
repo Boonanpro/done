@@ -4,7 +4,13 @@ Pytest configuration and fixtures
 import pytest
 from fastapi.testclient import TestClient
 
-from main import app
+# 2プロセス分離後、チャット系ルートを載せた FastAPI app は app.core.main に移動した
+# （旧 `from main import app` は main モジュール消失で全テストの収集を壊していた）。
+# 純粋関数テストは app を必要としないため、import 失敗時も収集が止まらないようにする。
+try:
+    from app.core.main import app
+except Exception:  # pragma: no cover - app は client fixture を使うテストでのみ必要
+    app = None
 
 
 @pytest.fixture
