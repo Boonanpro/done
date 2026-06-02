@@ -669,89 +669,21 @@ async def _register_written_chat_artifacts(
     result_text: str = "",
 ) -> None:
     """Register production artifacts even if the Claude Code hook missed them."""
-    if not room_id:
-        return
-    import re
-    from app.services.chat_artifact_service import ChatArtifactService
+    from app.services.chat_artifact_registration import register_written_chat_artifacts
 
-    service = ChatArtifactService()
-    seen: set[str] = set()
-    artifact_page_pattern = re.compile(
-        r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)(?:[/\\]([^:]*?))?[/\\]page\.tsx$"
+    await register_written_chat_artifacts(
+        written_file_paths,
+        room_id,
+        project_id,
+        user_id,
     )
-    project_root = Path(__file__).parent.parent.parent
-
-    candidates: list[tuple[str, str, str]] = []
-    for raw_path in written_file_paths:
-        normalized_path = (raw_path or "").replace("\\", "/")
-        match = artifact_page_pattern.search(normalized_path)
-        if not match:
-            logger.info(
-                "Skipping chat artifact auto-registration for non-entry artifact file: %s",
-                normalized_path,
-            )
-            continue
-        root_slug = match.group(1)
-        rest = (match.group(2) or "").strip("/")
-        preview_url = f"/artifacts/{root_slug}" + (f"/{rest}" if rest else "")
-        card_slug = root_slug if not rest else f"{root_slug}-{'-'.join(part for part in rest.split('/') if part)}"
-        candidates.append((card_slug, preview_url, normalized_path))
-
-    for slug, preview_url, source_path in candidates:
-        if slug in seen:
-            continue
-        seen.add(slug)
-
-        try:
-            route_parts = preview_url.strip("/").split("/")
-            page_path = project_root / "frontend" / "src" / "app" / Path(*route_parts) / "page.tsx"
-            if not page_path.exists():
-                logger.info("Skipping chat artifact registration for %s: page.tsx not found", slug)
-                continue
-
-            existing = (
-                service.supabase.table("chat_artifact")
-                .select("id")
-                .eq("room_id", room_id)
-                .eq("preview_url", preview_url)
-                .limit(1)
-                .execute()
-            )
-            if existing.data:
-                continue
-            await service.create(
-                {
-                    "room_id": room_id,
-                    "project_id": project_id,
-                    "slug": slug,
-                    "kind": "production",
-                    "artifact_type": service.infer_artifact_type(slug=slug, path=source_path),
-                    "label": slug.replace("-", " ").replace("_", " "),
-                    "preview_url": preview_url,
-                    "publish_status": "preview_live",
-                },
-                user_id,
-            )
-        except Exception as e:
-            logger.warning("Chat artifact auto-register failed for %s: %s", slug, e)
 
 
 def _artifact_slugs_from_written_paths(written_file_paths: list[str]) -> list[str]:
     """Extract root artifact slugs from written frontend artifact paths."""
-    import re
+    from app.services.chat_artifact_registration import artifact_slugs_from_written_paths
 
-    pattern = re.compile(r"frontend[/\\]src[/\\]app[/\\]artifacts[/\\]([\w-]+)[/\\]")
-    slugs: list[str] = []
-    seen: set[str] = set()
-    for raw_path in written_file_paths:
-        match = pattern.search((raw_path or "").replace("\\", "/"))
-        if not match:
-            continue
-        slug = match.group(1)
-        if slug not in seen:
-            seen.add(slug)
-            slugs.append(slug)
-    return slugs
+    return artifact_slugs_from_written_paths(written_file_paths)
 
 
 def _schedule_artifact_alias_deploy(written_file_paths: list[str]) -> None:
@@ -760,26 +692,11 @@ def _schedule_artifact_alias_deploy(written_file_paths: list[str]) -> None:
     This makes the alias update a harness behavior instead of relying on the LLM
     to remember a deployment command after editing an artifact.
     """
-    slugs = _artifact_slugs_from_written_paths(written_file_paths)
-    if not slugs:
-        return
-    try:
-        import subprocess
-        import sys
-        from pathlib import Path
+    from app.services.chat_artifact_registration import (
+        schedule_artifact_alias_deploy_from_written_paths,
+    )
 
-        root = Path(__file__).resolve().parents[2]
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        subprocess.Popen(
-            [sys.executable, "scripts/deploy_frontend_artifacts.py", *slugs],
-            cwd=str(root),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-        )
-        logger.info("Scheduled artifact alias deploy for slugs=%s", ",".join(slugs))
-    except Exception as e:
-        logger.warning("Failed to schedule artifact alias deploy: %s", e)
+    schedule_artifact_alias_deploy_from_written_paths(written_file_paths)
 
 
 def _fetch_latest_user_message_from_room(service: ChatService, room_id: str) -> str:
@@ -2461,10 +2378,14 @@ async def send_dan_message_stream(
                         # ファイル書き出しを追跡（CLI完了後のartifact保存用）
                         tool_name = event.get("name", "")
                         tool_input = event.get("input", {})
-                        if tool_name in ("write_file", "edit_file", "Write", "Edit", "mcp__dan-tools__write_file"):
-                            file_path = tool_input.get("path") or tool_input.get("file_path")
-                            if file_path and file_path not in written_file_paths:
-                                written_file_paths.append(file_path)
+                        from app.services.chat_artifact_registration import (
+                            add_written_path,
+                            written_path_from_tool,
+                        )
+                        add_written_path(
+                            written_file_paths,
+                            written_path_from_tool(tool_name, tool_input),
+                        )
 
                     elif event["type"] == "text":
                         # textイベントは暫定的に記録（最終回答はresultイベントで確定する）
@@ -2576,7 +2497,6 @@ async def send_dan_message_stream(
                         )
                         if written_file_paths:
                             await _save_written_artifacts(written_file_paths, room_id)
-                            _schedule_artifact_alias_deploy(written_file_paths)
                     except Exception as e:
                         logger.warning("Post-CLI artifact extraction failed (non-blocking): %s", e)
 
