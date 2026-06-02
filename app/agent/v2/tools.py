@@ -359,13 +359,13 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
 
 BROWSER_TOOL = {
     "name": "browser",
-    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。evaluate: JSを実行して結果を返す。content: ページのHTML全体を取得する。keyboard_press: キーを押す（Escape, Tab等）。hover: 要素にマウスを乗せる。reload: ページを再読み込み。",
+    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。evaluate: JSを実行して結果を返す。content: ページのHTML全体を取得する。keyboard_press: キーを押す（Escape, Tab等）。hover: 要素にマウスを乗せる。reload: ページを再読み込み。solve_captcha: ページ上のreCAPTCHA/hCaptcha/Cloudflare Turnstileを2captcha経由で自動的に突破する（フォーム送信前に呼ぶ。ユーザーには絶対に丸投げしない）。",
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["open", "open_target", "screenshot", "click", "type", "wait_for_otp_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image"],
+                "enum": ["open", "open_target", "screenshot", "click", "type", "wait_for_otp_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image", "solve_captcha"],
                 "description": "実行するアクション",
             },
             "url": {"type": "string", "description": "開くURL（action=open）"},
@@ -2703,6 +2703,34 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
 
         elif action == "screenshot":
             return await _get_browser_state(page)
+
+        elif action == "solve_captcha":
+            # reCAPTCHA(v2/v3/Enterprise) / hCaptcha / Cloudflare Turnstile を
+            # 2captcha経由で自動突破する。フォーム送信前に呼ぶ。ユーザーへ丸投げしない。
+            from app.tools.captcha_solver import (
+                solve_page_captchas,
+                CaptchaNotConfigured,
+                CaptchaError,
+            )
+            try:
+                summary = await solve_page_captchas(page)
+            except CaptchaNotConfigured as e:
+                return {"success": False, "error": f"2captcha未設定（.envのTWOCAPTCHA_API_KEY）: {e}"}
+            except CaptchaError as e:
+                state = await _get_browser_state(page)
+                state["content"].insert(0, {"type": "text", "text": f"captcha自動解決に失敗しました: {e}"})
+                return state
+            state = await _get_browser_state(page)
+            if summary["count"] == 0:
+                msg = "このページにcaptchaは検出されませんでした。そのまま送信して問題ありません。"
+            else:
+                types = ", ".join(s["type"] for s in summary["solved"])
+                msg = (
+                    f"captchaを自動突破しました（{summary['count']}件: {types}）。"
+                    "トークン注入済み・送信ボタン解除済み。続けて送信ボタンをクリックしてください。"
+                )
+            state["content"].insert(0, {"type": "text", "text": msg})
+            return state
 
         elif action == "click":
             ref = params.get("ref")

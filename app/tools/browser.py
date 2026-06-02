@@ -492,7 +492,12 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
         return {"content": html}
 
     elif cmd == "evaluate":
-        result = await page.evaluate(args["expression"])
+        # arg を渡せるようにする（captcha_solver のトークン注入等で使用）。
+        # arg=None の従来呼び出しは引数なし evaluate にフォールバックして後方互換。
+        if args.get("arg") is not None:
+            result = await page.evaluate(args["expression"], args["arg"])
+        else:
+            result = await page.evaluate(args["expression"])
         return {"result": result}
 
     elif cmd == "wait_for_selector":
