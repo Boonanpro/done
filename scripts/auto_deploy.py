@@ -199,6 +199,30 @@ def restart_dan_core():
     logging.info(f"start_dan_core.py launched (wrapper PID={proc.pid})")
 
 
+def reload_dan_skills():
+    """ダンコアの SkillRegistry をディスクから再読込させる。
+
+    `.claude/skills/**` が変わったが app/agent 等の .py は変わっていない時に使う。
+    ディスクの SKILL.md を読み直すだけなので、ダンコアを再起動せず（＝実行中の
+    チャットセッションを切らず）にスキル追加・変更を反映できる。
+    """
+    import urllib.error
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            f"{DAN_CORE_URL}/api/v1/chat/dan/skills/reload",
+            method="POST",
+            headers={"User-Agent": "auto_deploy.py"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if resp.status == 200:
+                logging.info("Dan skills reloaded via dan_core (no restart).")
+                return
+    except (urllib.error.URLError, ConnectionRefusedError, TimeoutError) as e:
+        logging.warning("dan_core skill reload failed (%s) — skills may be stale until next core restart.", e)
+
+
 def restart_backend():
     """
     アプリサンドボックスを再起動する。
@@ -296,6 +320,10 @@ def check_and_deploy() -> bool:
         npm_install()
         # Next.js dev server will pick up new dependencies on next HMR cycle
 
+    # ダンコアを再起動したかどうか（再起動すれば SkillRegistry はフレッシュに
+    # 再ロードされるので、別途のスキル reload は不要になる）
+    dan_core_restarted = False
+
     if not needs_pip:
         # uvicorn --reload はWindows上で機能しないため、Pythonファイル変更時は明示的に再起動
         py_changed = [f for f in changed if f.endswith(".py")]
@@ -310,9 +338,21 @@ def check_and_deploy() -> bool:
                     f"{', '.join(dan_core_changed[:5])} → restarting dan-core"
                 )
                 restart_dan_core()
+                dan_core_restarted = True
             else:
                 logging.info(f"Sandbox-only py changed ({len(py_changed)}) → restarting sandbox")
                 restart_backend()
+
+    # スキル定義 (.claude/skills/**) の変更は .py ではないので上の分岐に乗らない。
+    # ダンコアの SkillRegistry は起動時固定なので、再起動していない時だけ
+    # reload エンドポイントを叩いてディスクから読み直させる（セッション維持）。
+    skills_changed = [f for f in changed if f.startswith(".claude/skills/")]
+    if skills_changed and not dan_core_restarted:
+        logging.info(
+            f"Skill definitions changed ({len(skills_changed)}): "
+            f"{', '.join(skills_changed[:5])} → reloading dan-core SkillRegistry"
+        )
+        reload_dan_skills()
 
     ts_changed = [f for f in changed if f.endswith((".ts", ".tsx", ".js", ".jsx", ".css"))]
     if ts_changed:

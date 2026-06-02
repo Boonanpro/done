@@ -1914,6 +1914,23 @@ async def list_dan_skills(current_user: TokenData = Depends(get_current_user)):
     }
 
 
+@router.post("/dan/skills/reload")
+async def reload_dan_skills():
+    """SkillRegistry をディスクから再読込する（ダンコア再起動なしでスキル変更を反映）。
+
+    SkillRegistry はプロセス内シングルトンで起動時に一度だけロードされるため、
+    `.claude/skills/**` を追加・変更してもダンコアを再起動するまで反映されない。
+    このエンドポイントは `.claude/skills/*/SKILL.md` をディスクから読み直すだけで、
+    実行中のチャットセッションには一切触れない。auto_deploy.py が git pull 時に叩く。
+
+    /sandbox/restart と同様、localhost 運用エンドポイントなので認証は不要。
+    """
+    from app.agent.v2.tools import SkillRegistry
+    SkillRegistry.reload()
+    skills = SkillRegistry.list_all()
+    return {"reloaded": True, "count": len(skills), "names": [s.name for s in skills]}
+
+
 async def _prepend_first_event(first_task, agen):
     """Yield an already-primed first event, then the remainder of an async generator.
 
