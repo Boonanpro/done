@@ -2875,7 +2875,8 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             # ref（入力欄）を要求する前にチェックするので、案内だけ単体で試せる。
             if source == "email" and email_address:
                 if not await otp_service.has_imap_access(user_id, email_address):
-                    local = email_address.split("@")[0]
+                    from app.services.otp_service import app_password_guidance
+                    g = app_password_guidance(email_address)
                     return {
                         "success": False,
                         "needs_app_password": True,
@@ -2883,10 +2884,9 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                         "error": (
                             f"{email_address} の受信箱を読む手段（アプリパスワード）が未登録のため、"
                             f"メールに届くOTPを自動取得できません。ユーザーにこう案内してください:\n"
-                            f"「{email_address} のOTPを自動で突破するには、Googleアカウントで2段階認証をONにし、"
-                            f"https://myaccount.google.com/apppasswords でアプリパスワードを発行して、ここに貼ってください」\n"
-                            f"貼られたら save_credentials(service=\"gmail_imap_{local}\", login_id=\"{email_address}\", "
-                            f"password=\"<アプリパスワード16桁>\") で保存し、この操作を再実行する。ブラウザは閉じない。"
+                            f"「{g['note']} で発行したアプリパスワードを、ここに貼ってください」\n"
+                            f"貼られたら save_credentials(service=\"{g['service']}\", login_id=\"{email_address}\", "
+                            f"password=\"<アプリパスワード>\") で保存し、この操作を再実行する。ブラウザは閉じない。"
                         ),
                     }
 

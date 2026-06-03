@@ -64,6 +64,67 @@ def _parse_datetime(dt_str: Optional[str]) -> Optional[datetime]:
             return datetime.now(timezone.utc)
 
 
+# メールプロバイダ別の IMAP ホスト（ドメイン → host）
+_IMAP_HOSTS = {
+    "gmail.com": "imap.gmail.com",
+    "googlemail.com": "imap.gmail.com",
+    "icloud.com": "imap.mail.me.com",
+    "me.com": "imap.mail.me.com",
+    "mac.com": "imap.mail.me.com",
+    "outlook.com": "outlook.office365.com",
+    "outlook.jp": "outlook.office365.com",
+    "hotmail.com": "outlook.office365.com",
+    "hotmail.co.jp": "outlook.office365.com",
+    "live.com": "outlook.office365.com",
+    "live.jp": "outlook.office365.com",
+    "msn.com": "outlook.office365.com",
+    "yahoo.co.jp": "imap.mail.yahoo.co.jp",
+    "yahoo.com": "imap.mail.yahoo.com",
+}
+# プロバイダ別のアプリパスワード発行案内（ドメイン → 案内文）
+_APP_PW_URLS = {
+    "gmail.com": "https://myaccount.google.com/apppasswords （Googleで2段階認証ON必須）",
+    "googlemail.com": "https://myaccount.google.com/apppasswords （Googleで2段階認証ON必須）",
+    "icloud.com": "https://account.apple.com → サインインとセキュリティ → アプリ用パスワード（2ファクタ認証必須）",
+    "me.com": "https://account.apple.com → アプリ用パスワード",
+    "mac.com": "https://account.apple.com → アプリ用パスワード",
+    "outlook.com": "https://account.microsoft.com/security → 追加のセキュリティ → アプリパスワード",
+    "hotmail.com": "https://account.microsoft.com/security → アプリパスワード",
+    "live.com": "https://account.microsoft.com/security → アプリパスワード",
+    "yahoo.co.jp": "Yahoo! JAPAN ID設定 → ログインとセキュリティ → IMAP/SMTP用パスワード",
+    "yahoo.com": "https://login.yahoo.com/myaccount/security → Generate app password",
+}
+
+
+def _email_domain(addr: Optional[str]) -> str:
+    a = (addr or "").strip().lower()
+    return a.split("@")[-1] if "@" in a else ""
+
+
+def imap_host_for(addr: str, override: Optional[str] = None) -> str:
+    """メールアドレスのドメインから IMAP ホストを決める。未知ドメインは imap.<domain> を試す。"""
+    if override:
+        return override
+    d = _email_domain(addr)
+    return _IMAP_HOSTS.get(d) or (f"imap.{d}" if d else "")
+
+
+def app_password_guidance(addr: str) -> dict:
+    """アドレスのプロバイダに応じたアプリパスワード発行案内と保存先サービス名を返す。"""
+    d = _email_domain(addr)
+    local = (addr or "").split("@")[0]
+    url = _APP_PW_URLS.get(d)
+    service = f"gmail_imap_{local}" if d in ("gmail.com", "googlemail.com") else f"imap_{local}"
+    if url:
+        note = f"{addr} のアプリパスワード発行: {url}"
+    else:
+        note = (
+            f"{addr} のメールプロバイダで IMAP 用アプリパスワードを発行してください"
+            f"（IMAPホストが imap.{d} でない場合は、そのホスト名も教えてください）"
+        )
+    return {"provider_domain": d, "url": url, "service": service, "note": note}
+
+
 # デフォルト設定
 DEFAULT_OTP_EXPIRY_MINUTES = 10
 DEFAULT_MAX_AGE_MINUTES = 5
@@ -309,9 +370,10 @@ class OTPService:
             return None
 
         try:
-            # Gmail IMAPに接続
-            logger.info(f"[IMAP] Connecting to Gmail IMAP for user {user_id[:8]}...")
-            imap = imaplib.IMAP4_SSL('imap.gmail.com')
+            # プロバイダに応じた IMAP ホストに接続（Gmail/iCloud/Outlook/Yahoo等）
+            imap_host = gmail_creds.get("imap_host") or imap_host_for(gmail_address)
+            logger.info(f"[IMAP] Connecting to {imap_host} for user {user_id[:8]}...")
+            imap = imaplib.IMAP4_SSL(imap_host)
             imap.login(gmail_address, gmail_password)
             imap.select('INBOX')
             logger.info(f"[IMAP] Connected successfully")
