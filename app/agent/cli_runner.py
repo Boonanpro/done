@@ -230,6 +230,14 @@ _RECOVERY_MESSAGES = {
         "have already run, so the work itself may have progressed. Send \"continue\" "
         "or \"where are we?\" to resume.)",
     },
+    "loop_detected": {
+        "ja": "同じ操作を何度も繰り返して先に進めなくなっていたため、いったん区切りました。"
+        "文脈は保持したままセッションを立て直したので、別のやり方で進めるか、"
+        "状況（うまくいかない画面など）を教えてもらえれば続けます。",
+        "en": "I was repeating the same action over and over without making progress, so I "
+        "stopped here. I rebuilt the session with the context preserved — tell me how "
+        "you'd like to proceed (or what's stuck) and I'll continue with a different approach.",
+    },
 }
 
 
@@ -592,6 +600,58 @@ def _transcript_exceeds_limit(session_id: str) -> bool:
         return path.stat().st_size >= _TRANSCRIPT_RESET_BYTES
     except Exception:
         return False
+
+
+# Behavioral-loop guard. A bloated browser context can degrade the model into
+# re-issuing the SAME tool call (e.g. "open manager.line.biz") many times in a
+# row. The CLI keeps "succeeding" on each step, so is_error never fires and the
+# error-driven recovery (parse-error / thinking-desync) cannot catch it — the
+# turn just loops for minutes. We detect N consecutive identical tool calls and
+# route the turn through the same recovery as a poison (stop + reseed from DB,
+# which sheds the heavy screenshot transcript that drove the loop).
+# Set DAN_LOOP_GUARD_THRESHOLD=0 to disable.
+_LOOP_GUARD_THRESHOLD = int(os.getenv("DAN_LOOP_GUARD_THRESHOLD", "5"))
+
+
+def _tool_call_signature(name: str, tool_input: Optional[Dict[str, Any]]) -> str:
+    """Stable signature for a tool call, used to spot consecutive repeats.
+
+    Same tool name + same input → same signature, so a verbatim-repeated
+    "open <url>" / "click @e5" collapses to one repeating signature.
+    """
+    try:
+        payload = json.dumps(tool_input or {}, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        payload = str(tool_input)
+    return f"{name}|{payload}"
+
+
+class _LoopGuard:
+    """Counts consecutive identical tool-call signatures within a turn.
+
+    ``record(sig)`` returns True once the same signature has been seen
+    ``threshold`` times in a row. A threshold <= 0 disables the guard (record
+    always returns False). ``reset()`` clears the run at each new turn.
+    """
+
+    def __init__(self, threshold: int):
+        self.threshold = threshold
+        self._last_sig: Optional[str] = None
+        self._count = 0
+
+    def reset(self) -> None:
+        self._last_sig = None
+        self._count = 0
+
+    def record(self, sig: str) -> bool:
+        if self.threshold <= 0:
+            return False
+        if sig == self._last_sig:
+            self._count += 1
+        else:
+            self._last_sig = sig
+            self._count = 1
+        return self._count >= self.threshold
 
 
 def _is_disconnect_error(err: Exception) -> bool:
@@ -2036,6 +2096,10 @@ async def _process_via_streaming_session(
         # True once any `result` was seen this call. Used to tell a normal turn
         # apart from a session that died on start (e.g. a stale --resume id).
         "any_result": False,
+        # 振る舞いループ検知（同一ツール呼び出しの連続）。is_error が立たない
+        # ループを parse-error poison と同じ復旧経路へ乗せるためのフラグ。
+        "loop_guard": _LoopGuard(_LOOP_GUARD_THRESHOLD),
+        "loop_detected": False,
     }
 
     def _emit(display_ev: Dict[str, Any]) -> None:
@@ -2083,6 +2147,10 @@ async def _process_via_streaming_session(
                     # メッセージより確実に後の時刻になる）。
                     state["turn_start"] = datetime.now(timezone.utc).isoformat()
                     state["turn_id"] = str(uuid.uuid4())
+                    # 新ターン開始でループ検知をリセット（追い連絡の次ターンが
+                    # 前ターンのカウントを引きずらないように）。
+                    state["loop_guard"].reset()
+                    state["loop_detected"] = False
                 blocks = (raw_ev.get("message") or {}).get("content") or []
                 for ev in _classify_content_blocks(blocks):
                     if ev["type"] == "text":
@@ -2119,6 +2187,22 @@ async def _process_via_streaming_session(
                             _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=run_id, turn_id=state["turn_id"], tool_name=ev.get("name", ""), tool_label=tool_label)
                             state["reasoning_steps_acc"].append(f"🔧 {tool_label}")
                             state["turn_blocks"].append({"type": "tool", "name": ev.get("name", ""), "label": tool_label, "detail": _tool_detail(ev.get("input", {}))})
+                        # 振る舞いループ検知: 同一ツール呼び出しが連続したら割り込んで
+                        # ターンを畳む。is_error が立たないループは error 駆動の復旧では
+                        # 捕まらず数分回り続けるので、ここで能動的に止める。後段の result /
+                        # run() が loop_detected を見て poison と同じ復旧（stop + reseed）に乗せる。
+                        if not state["loop_detected"] and state["loop_guard"].record(
+                            _tool_call_signature(ev.get("name", ""), ev.get("input", {}))
+                        ):
+                            state["loop_detected"] = True
+                            _cli_debug(
+                                f"[STREAMING] behavioral loop detected "
+                                f"(same tool x{_LOOP_GUARD_THRESHOLD}) room {room_id[:8]}; interrupting turn"
+                            )
+                            try:
+                                session._send_interrupt()
+                            except Exception as e:
+                                _cli_debug(f"[STREAMING] loop interrupt failed: {e}")
                     elif ev["type"] == "reasoning":
                         _emit(ev)
                         if ev.get("text", "").strip():
@@ -2145,7 +2229,10 @@ async def _process_via_streaming_session(
                 # Replace the CLI's cryptic parse-error result with a friendly
                 # note. The session is dropped + reseeded afterwards (see run()),
                 # so the user can just resend and continue with full context.
-                if is_error and _is_parse_error_text(result_text):
+                if state.get("loop_detected"):
+                    text = _recovery_message("loop_detected", _detect_user_lang(content))
+                    is_error = True
+                elif is_error and _is_parse_error_text(result_text):
                     text = _recovery_message("parse_error", _detect_user_lang(content))
                 elif is_error and _is_thinking_desync_error(result_text):
                     text = _recovery_message("thinking_desync", _detect_user_lang(content))
@@ -2210,6 +2297,18 @@ async def _process_via_streaming_session(
                     "continuation": False, "turn_id": t_id,
                 })
                 state["written_file_paths"] = []
+            elif state.get("loop_detected"):
+                # Behavioral loop: the model repeated the same tool call until the
+                # loop guard interrupted the turn. The sink already saved a friendly
+                # result; we drop + stop the session so the NEXT turn starts FRESH
+                # and reseeds from the DB — shedding the bloated browser-screenshot
+                # transcript that caused the degradation in the first place.
+                _clear_cli_session(room_id)
+                try:
+                    session.stop()
+                except Exception:
+                    pass
+                _cli_debug(f"[STREAMING] behavioral-loop session cleared for room {room_id[:8]}")
             elif res and res.get("is_error") and _is_parse_error_text(res.get("result") or ""):
                 # Poisoned turn: the model emitted an unparseable tool call (the
                 # `<invoke>`-as-text leak). The sink already saved a result, so
