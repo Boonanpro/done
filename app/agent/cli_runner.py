@@ -189,6 +189,56 @@ def _is_thinking_desync_error(text: Optional[str]) -> bool:
 _RESEED_SKIP_MARKERS = ("<invoke", "could not be parsed", "function_calls")
 
 
+def _detect_user_lang(text: Optional[str]) -> str:
+    """Best-effort UI language for harness-generated notices (recovery messages),
+    inferred from the user's own message. Returns 'ja' when it contains Japanese
+    kana/kanji, 'en' when it is basically Latin script, else 'ja' (this
+    deployment's default). Intentionally simple — extend the map below to add
+    languages."""
+    s = text or ""
+    for ch in s:
+        o = ord(ch)
+        if (0x3040 <= o <= 0x30FF) or (0x4E00 <= o <= 0x9FFF) or (0xFF66 <= o <= 0xFF9D):
+            return "ja"
+    if any("a" <= c.lower() <= "z" for c in s):
+        return "en"
+    return "ja"
+
+
+# Harness-generated recovery notices, by kind and language. These are NOT model
+# output — they replace the CLI's cryptic English errors (e.g. the parse-error
+# poison) with a clear, localized note telling the user the session was rebuilt
+# (context preserved) and they can just resend.
+_RECOVERY_MESSAGES = {
+    "parse_error": {
+        "ja": "うまく処理できませんでした（内部のツール呼び出しが壊れました）。"
+        "文脈は保持したままセッションを立て直したので、もう一度同じ内容を送ってください。",
+        "en": "Something went wrong (an internal tool call was malformed). "
+        "I rebuilt the session with the context preserved — please send the same message again.",
+    },
+    "thinking_desync": {
+        "ja": "前回の会話の内部状態が壊れていたため、文脈は保持したまま"
+        "セッションを立て直しました。もう一度同じ内容を送ってください。",
+        "en": "The previous turn's internal state was corrupted, so I rebuilt the "
+        "session with the context preserved. Please send the same message again.",
+    },
+    "idle_hang": {
+        "ja": "（長時間の処理が一定時間まったく応答しなくなったため、ここで一旦区切りました。"
+        "ツールは実行済み＝作業自体は進んでいる場合があります。"
+        "「続きをやって」や「今どこまで終わってる？」と送ってください。）",
+        "en": "(A long-running task went silent for a while, so I paused here. Tools may "
+        "have already run, so the work itself may have progressed. Send \"continue\" "
+        "or \"where are we?\" to resume.)",
+    },
+}
+
+
+def _recovery_message(kind: str, lang: str = "ja") -> str:
+    """Return a localized harness recovery notice, falling back to Japanese."""
+    by_lang = _RECOVERY_MESSAGES.get(kind, {})
+    return by_lang.get(lang) or by_lang.get("ja", "")
+
+
 def _one_line(value: Any, limit: int = 240) -> str:
     """Compact DB text for room-state prompts without doing an LLM summary."""
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -1738,6 +1788,17 @@ def _run_cli_in_thread(
 
             # エラー時はerrorsの内容をテキストに含める
             text = result_text or "\n".join(final_text_parts)
+            # parse-error poison / thinking-desync: replace the CLI's cryptic
+            # English with a localized recovery notice AND drop the poisoned
+            # session so the NEXT turn starts fresh (reseeded from the DB),
+            # mirroring the streaming path. Without the clear, --resume would
+            # replay the contaminated transcript and loop on the same error.
+            if is_error and _is_parse_error_text(result_text):
+                text = _recovery_message("parse_error", _detect_user_lang(content))
+                _clear_cli_session(room_id)
+            elif is_error and _is_thinking_desync_error(result_text):
+                text = _recovery_message("thinking_desync", _detect_user_lang(content))
+                _clear_cli_session(room_id)
             if is_error and not text and errors:
                 text = f"CLIエラー: {'; '.join(errors)}"
 
@@ -2084,15 +2145,9 @@ async def _process_via_streaming_session(
                 # note. The session is dropped + reseeded afterwards (see run()),
                 # so the user can just resend and continue with full context.
                 if is_error and _is_parse_error_text(result_text):
-                    text = (
-                        "うまく処理できませんでした（内部のツール呼び出しが壊れました）。"
-                        "文脈は保持したままセッションを立て直したので、もう一度同じ内容を送ってください。"
-                    )
+                    text = _recovery_message("parse_error", _detect_user_lang(content))
                 elif is_error and _is_thinking_desync_error(result_text):
-                    text = (
-                        "前回の会話の内部状態が壊れていたため、文脈は保持したまま"
-                        "セッションを立て直しました。もう一度同じ内容を送ってください。"
-                    )
+                    text = _recovery_message("thinking_desync", _detect_user_lang(content))
                 turn_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
                 turn_id = state["turn_id"] or str(uuid.uuid4())
                 cli_saved = False
@@ -2132,11 +2187,7 @@ async def _process_via_streaming_session(
             if getattr(session, "last_turn_hung", False):
                 _clear_cli_session(room_id)
                 partial = "\n".join(state["final_text_parts"]).strip()
-                note = (
-                    "（長時間の処理が一定時間まったく応答しなくなったため、ここで一旦区切りました。"
-                    "ツールは実行済み＝作業自体は進んでいる場合があります。"
-                    "「続きをやって」や「今どこまで終わってる？」と送ってください。）"
-                )
+                note = _recovery_message("idle_hang", _detect_user_lang(content))
                 text = (partial + "\n\n" + note) if partial else note
                 t_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
                 t_id = state["turn_id"] or str(uuid.uuid4())
