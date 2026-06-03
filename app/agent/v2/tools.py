@@ -520,6 +520,10 @@ SAVE_CREDENTIALS_TOOL = {
                 "type": "string",
                 "description": "コピー元のサービス名。「○○と同じ」という指示の場合に使用（例: amazon）"
             },
+            "login_url": {
+                "type": "string",
+                "description": "ログインページのURL/ドメイン（例: account.line.biz）。同じメールが複数サービスにある時、後で url 指定で正しい記録を引けるよう保存しておく"
+            },
         },
         "required": ["service"],
     },
@@ -530,6 +534,11 @@ GET_CREDENTIALS_TOOL = {
     "description": """サービスの認証情報をDBから取得する。
 ログインが必要なサイトを操作する前に、認証情報が保存済みか確認する時に使用。
 
+★推奨: ログインページにいる時は `url` に今のページURLを渡す。
+同じメールアドレスが複数サービスに別パスワードで保存されていても、
+ログイン先ドメインで照合して正しい1件を引ける（メールで推測して取り違える事故を防ぐ）。
+`service` 名が分かっているならそれでもよい。url と service は併用可（url優先）。
+
 返される内容:
 - 保存済みの場合: ログインID と パスワード
 - 未保存の場合: 認証情報が見つからない旨のメッセージ（ユーザーに聞くこと）""",
@@ -539,9 +548,12 @@ GET_CREDENTIALS_TOOL = {
             "service": {
                 "type": "string",
                 "description": "サービス名（例: amazon, rakuten, mercari）"
+            },
+            "url": {
+                "type": "string",
+                "description": "現在のログインページURL（例: https://account.line.biz/login）。ドメイン照合で正しい認証情報を引く"
             }
         },
-        "required": ["service"],
     },
 }
 
@@ -1728,33 +1740,45 @@ async def execute_tool(
     # ★★★ 認証情報取得 ★★★
     if skill_name == "_get_credentials":
         service = params.get("service")
-        if not service:
-            return {"success": False, "error": "service が必要です"}
-
-        # サービス名を正規化（小文字、ドメイン部分除去）
-        service_normalized = _normalize_service_name(service)
+        url = params.get("url")
+        if not service and not url:
+            return {"success": False, "error": "service または url が必要です"}
 
         from app.services.credentials_service import get_credentials_service
         creds_service = get_credentials_service()
 
-        # 正規化名で検索 → 元の名前でフォールバック
-        stored_creds = await creds_service.get_credential(user_id, service_normalized)
-        if not stored_creds and service_normalized != service:
-            stored_creds = await creds_service.get_credential(user_id, service)
+        stored_creds = None
+        matched_service = None
+
+        # 1) URL（ログイン先ドメイン）で照合 — 同一メール複数サービスの取り違えを防ぐ最優先経路
+        if url:
+            stored_creds = await creds_service.find_credential_by_url(user_id, url)
+            if stored_creds:
+                matched_service = stored_creds.get("service")
+
+        # 2) サービス名で取得（正規化 → 元の名前でフォールバック）
+        if not stored_creds and service:
+            service_normalized = _normalize_service_name(service)
+            stored_creds = await creds_service.get_credential(user_id, service_normalized)
+            if not stored_creds and service_normalized != service:
+                stored_creds = await creds_service.get_credential(user_id, service)
+            if stored_creds:
+                matched_service = service_normalized
 
         if stored_creds:
             return {
                 "success": True,
-                "service": service_normalized,
+                "service": matched_service,
                 "login_id": stored_creds.get("id", ""),
                 "password": stored_creds.get("password", ""),
-                "message": f"{service} の認証情報が見つかりました",
+                "message": f"{matched_service} の認証情報が見つかりました",
             }
         else:
+            label = service or url
             return {
                 "success": False,
-                "service": service_normalized,
-                "message": f"{service} の認証情報は保存されていません。ユーザーに聞いてください。",
+                "service": matched_service,
+                "message": f"{label} の認証情報は保存されていません。ユーザーに聞いてください。",
             }
 
     # ★★★ 認証情報保存 ★★★
@@ -1763,6 +1787,7 @@ async def execute_tool(
         copy_from = params.get("copy_from")
         login_id = params.get("login_id")
         password = params.get("password")
+        login_url = params.get("login_url")
 
         if not service:
             return {
@@ -1810,6 +1835,7 @@ async def execute_tool(
             service=service,
             credentials={"id": login_id, "password": password},
             credential_type="login",
+            login_url=login_url,
         )
 
         return {"success": True}

@@ -24,6 +24,36 @@ logger = logging.getLogger(__name__)
 ID_KEYS = ["id", "email", "member_id", "username", "login_id", "user_id"]
 # パスワードとして認識するキー（優先順）
 PASSWORD_KEYS = ["password", "pass", "pw"]
+# ログインURLとして認識するキー（優先順）
+URL_KEYS = ["login_url", "url"]
+
+
+def _host(u: Optional[str]) -> str:
+    """URL/ドメイン文字列からホスト名を抽出（小文字・ポート除去）。"""
+    from urllib.parse import urlparse
+    if not u:
+        return ""
+    u = u.strip()
+    if "://" not in u:
+        u = "https://" + u
+    return urlparse(u).netloc.lower().split(":")[0]
+
+
+def _base_domain(host: str) -> str:
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def _domains_match(h1: str, h2: str) -> bool:
+    """2つのホストが同一ログイン先とみなせるか（サブドメイン差は許容）。"""
+    if not h1 or not h2:
+        return False
+    return (
+        h1 == h2
+        or h1.endswith("." + h2)
+        or h2.endswith("." + h1)
+        or _base_domain(h1) == _base_domain(h2)
+    )
 
 
 def _normalize_credentials(credentials: Dict[str, Any]) -> Dict[str, Any]:
@@ -62,6 +92,12 @@ def _normalize_credentials(credentials: Dict[str, Any]) -> Dict[str, Any]:
     if "_credential_type" in credentials:
         normalized["_credential_type"] = credentials["_credential_type"]
 
+    # login_url があれば保持（ドメイン照合で正しい認証情報を引くため）
+    for key in URL_KEYS:
+        if credentials.get(key):
+            normalized["login_url"] = credentials[key]
+            break
+
     return normalized
 
 
@@ -82,6 +118,7 @@ class CredentialsService:
         service: str,
         credentials: dict[str, str],
         credential_type: str = "login",
+        login_url: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         認証情報を暗号化して保存
@@ -93,6 +130,8 @@ class CredentialsService:
             service: サービス名（ex_reservation, amazon, gmail_imap等）
             credentials: 認証情報（email/member_id/username/id, password/pass/pw）
             credential_type: 認証タイプ（login, api_key, oauth, imap）
+            login_url: ログインページのURL/ドメイン（例 account.line.biz）。
+                       同じメールが複数サービスにある時、ドメイン照合で正しい記録を引くため
 
         Returns:
             保存結果
@@ -103,6 +142,10 @@ class CredentialsService:
 
             # credential_typeを追加
             normalized["_credential_type"] = credential_type
+
+            # login_url（明示指定が優先、無ければ credentials 内の値を維持）
+            if login_url:
+                normalized["login_url"] = login_url
 
             encrypted_data = self.encryption.encrypt_dict(normalized)
             encrypted_str = encrypted_data.decode('utf-8')  # bytesをstrに変換
@@ -185,9 +228,59 @@ class CredentialsService:
                 "password": normalized.get("password"),
                 "service": stored["service_name"],
                 "credential_type": credential_type,
+                "login_url": normalized.get("login_url"),
             }
         except Exception as e:
             logger.error(f"Failed to get credentials: {e}")
+            return None
+
+    async def find_credential_by_url(
+        self,
+        user_id: str,
+        url: str,
+    ) -> Optional[dict[str, Any]]:
+        """
+        ログインページのURL/ドメインに一致する認証情報を返す。
+
+        同じメールアドレスが複数サービスに登録されていても、保存済みの
+        login_url のドメインで照合するため、正しい1件を曖昧さなく引ける。
+
+        Args:
+            user_id: ユーザーID
+            url: 現在のログインページURL（例 https://account.line.biz/login）
+
+        Returns:
+            一致した認証情報（id, password, service, credential_type, login_url）、無ければNone
+        """
+        target = _host(url)
+        if not target:
+            return None
+        try:
+            result = self.supabase.table(self.TABLE_NAME).select("*").eq(
+                "user_id", user_id
+            ).execute()
+            for row in result.data:
+                try:
+                    decrypted = self.encryption.decrypt_dict(
+                        row["encrypted_data"].encode("utf-8")
+                    )
+                except Exception:
+                    continue
+                stored_url = decrypted.get("login_url")
+                if not stored_url or not _domains_match(target, _host(stored_url)):
+                    continue
+                credential_type = decrypted.pop("_credential_type", "login")
+                normalized = _normalize_credentials(decrypted)
+                return {
+                    "id": normalized.get("id"),
+                    "password": normalized.get("password"),
+                    "service": row["service_name"],
+                    "credential_type": credential_type,
+                    "login_url": stored_url,
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Failed to find credential by url: {e}")
             return None
 
     async def list_credentials(
