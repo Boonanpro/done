@@ -157,6 +157,17 @@ class TwoCaptchaClient:
                 "key": self.api_key, "action": "getbalance", "json": 1})
             return r.json().get("request", "")
 
+    async def solve_image(self, base64_image: str, **opts: Any) -> str:
+        """Solve a classic image-to-text captcha (distorted letters).
+
+        base64_image: the captcha image as base64 (no data: prefix).
+        opts: optional 2captcha hints e.g. regsense=1, numeric=1/2/3/4,
+              min_len, max_len, phrase, lang, language.
+        """
+        params: dict[str, Any] = {"method": "base64", "body": base64_image}
+        params.update(opts)
+        return await self.solve(params)
+
     async def solve(self, in_params: dict[str, Any]) -> str:
         """Submit a task and poll until a token is ready. Returns the token."""
         params = {"key": self.api_key, "json": 1, **in_params}
@@ -280,6 +291,92 @@ async def inject_token(page, c: DetectedCaptcha, token: str) -> int:
     if c.type == "turnstile":
         return await page.evaluate(_INJECT_TURNSTILE_JS, token)
     raise CaptchaError(f"Unsupported captcha type: {c.type}")
+
+
+# --------------------------------------------------------------------------
+# Image (distorted-text) captcha
+# --------------------------------------------------------------------------
+
+# Capture the *displayed* captcha image as base64 via canvas. We must NOT
+# re-fetch the src (captcha images are one-time; re-fetching yields a different
+# challenge). Returns null when no image is found, {ok:false} when the canvas
+# is tainted (cross-origin), {ok:true,data:...} otherwise.
+_EXTRACT_IMG_JS = r"""
+(selector) => {
+  let img = selector ? document.querySelector(selector) : null;
+  if (!img) {
+    const imgs = [...document.querySelectorAll('img')];
+    img = imgs.find(e => /captcha|vcode|authcode|seccode|verif|nocache/i.test(
+              ((e.src||'')+(e.alt||'')+(e.className||'')+(e.id||''))));
+    if (!img) img = imgs.find(e => {
+      const w = e.naturalWidth || e.width, h = e.naturalHeight || e.height;
+      return w > 40 && w < 360 && h > 14 && h < 130 && e.closest('form');
+    });
+  }
+  if (!img) return null;
+  try {
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth || img.width;
+    c.height = img.naturalHeight || img.height;
+    c.getContext('2d').drawImage(img, 0, 0);
+    return { ok: true, data: c.toDataURL('image/png') };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+"""
+
+_FILL_INPUT_JS = r"""
+(args) => {
+  const { selector, value } = args;
+  let inp = selector ? document.querySelector(selector) : null;
+  if (!inp) {
+    const inputs = [...document.querySelectorAll('input[type=text], input:not([type]), input[type=tel]')]
+      .filter(e => e.offsetParent !== null);
+    inp = inputs.find(e => /captcha|vcode|authcode|seccode|verif/i.test(
+              ((e.name||'')+(e.id||'')+(e.placeholder||''))))
+        || inputs.find(e => !e.value);
+  }
+  if (!inp) return 0;
+  inp.focus();
+  inp.value = value;
+  inp.dispatchEvent(new Event('input', { bubbles: true }));
+  inp.dispatchEvent(new Event('change', { bubbles: true }));
+  return 1;
+}
+"""
+
+
+async def solve_image_captcha(
+    page,
+    image_selector: Optional[str] = None,
+    input_selector: Optional[str] = None,
+    api_key: Optional[str] = None,
+    fill: bool = True,
+    **opts: Any,
+) -> dict[str, Any]:
+    """Solve a distorted-text image captcha and (optionally) fill its input.
+
+    Returns {"found": bool, "text": str|None, "filled": int}.
+    Raises CaptchaError if an image is found but cannot be captured/solved.
+    """
+    extracted = await page.evaluate(_EXTRACT_IMG_JS, image_selector)
+    if not extracted:
+        return {"found": False, "text": None, "filled": 0}
+    if not extracted.get("ok"):
+        raise CaptchaError(
+            f"画像CAPTCHAを取得できませんでした（canvasがcross-originで汚染）: {extracted.get('error')}"
+        )
+    data_url = extracted["data"]
+    b64 = data_url.split(",", 1)[1] if "," in data_url else data_url
+
+    client = TwoCaptchaClient(api_key=api_key)
+    text = await client.solve_image(b64, **opts)
+    filled = 0
+    if fill:
+        filled = await page.evaluate(_FILL_INPUT_JS, {"selector": input_selector, "value": text})
+    logger.info("image captcha solved: %r (filled %d input)", text, filled)
+    return {"found": True, "text": text, "filled": filled}
 
 
 # --------------------------------------------------------------------------

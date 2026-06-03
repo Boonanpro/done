@@ -381,6 +381,10 @@ BROWSER_TOOL = {
             "expression": {"type": "string", "description": "実行するJavaScriptコード（action=evaluate）"},
             "key": {"type": "string", "description": "押すキー（action=keyboard_press, 例: Escape, Tab, Enter, ArrowDown）"},
             "path": {"type": "string", "description": "保存先ファイルパス（action=save_image）"},
+            "image_ref": {"type": "string", "description": "画像CAPTCHAの画像要素ref（action=solve_captcha, 任意。未指定なら自動検出）"},
+            "input_ref": {"type": "string", "description": "画像CAPTCHAの入力欄ref（action=solve_captcha, 任意。未指定なら自動検出）"},
+            "image_selector": {"type": "string", "description": "画像CAPTCHAの画像CSSセレクタ（action=solve_captcha, 任意）"},
+            "input_selector": {"type": "string", "description": "画像CAPTCHAの入力欄CSSセレクタ（action=solve_captcha, 任意）"},
         },
         "required": ["action"]
     }
@@ -2705,29 +2709,49 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             return await _get_browser_state(page)
 
         elif action == "solve_captcha":
-            # reCAPTCHA(v2/v3/Enterprise) / hCaptcha / Cloudflare Turnstile を
-            # 2captcha経由で自動突破する。フォーム送信前に呼ぶ。ユーザーへ丸投げしない。
+            # reCAPTCHA(v2/v3/Enterprise) / hCaptcha / Cloudflare Turnstile（トークン型）と
+            # 画像文字CAPTCHA（歪んだ文字を読む型）を 2captcha経由で自動突破する。
+            # フォーム送信前・ログイン前に呼ぶ。ユーザーへ丸投げしない。
             from app.tools.captcha_solver import (
                 solve_page_captchas,
+                solve_image_captcha,
                 CaptchaNotConfigured,
                 CaptchaError,
             )
+
+            def _ref_to_sel(v):
+                if not v:
+                    return None
+                return f'[data-dan-ref="{str(v).lstrip("@")}"]'
+
+            image_selector = params.get("image_selector") or _ref_to_sel(params.get("image_ref"))
+            input_selector = params.get("input_selector") or _ref_to_sel(params.get("input_ref"))
+
             try:
                 summary = await solve_page_captchas(page)
+                parts = []
+                if summary["count"]:
+                    types = ", ".join(s["type"] for s in summary["solved"])
+                    parts.append(f"トークン型captchaを突破（{summary['count']}件: {types}）")
+                # 画像文字CAPTCHA（トークン型が無い／指定がある場合に試行）
+                if summary["count"] == 0 or image_selector:
+                    img = await solve_image_captcha(page, image_selector, input_selector)
+                    if img.get("found"):
+                        parts.append(f"画像文字CAPTCHAを突破（『{img['text']}』を入力欄に記入）")
             except CaptchaNotConfigured as e:
                 return {"success": False, "error": f"2captcha未設定（.envのTWOCAPTCHA_API_KEY）: {e}"}
             except CaptchaError as e:
                 state = await _get_browser_state(page)
                 state["content"].insert(0, {"type": "text", "text": f"captcha自動解決に失敗しました: {e}"})
                 return state
+
             state = await _get_browser_state(page)
-            if summary["count"] == 0:
-                msg = "このページにcaptchaは検出されませんでした。そのまま送信して問題ありません。"
+            if not parts:
+                msg = "このページにcaptchaは検出されませんでした。そのまま送信/ログインして問題ありません。"
             else:
-                types = ", ".join(s["type"] for s in summary["solved"])
                 msg = (
-                    f"captchaを自動突破しました（{summary['count']}件: {types}）。"
-                    "トークン注入済み・送信ボタン解除済み。続けて送信ボタンをクリックしてください。"
+                    "captchaを自動突破しました（" + " / ".join(parts) + "）。"
+                    "続けて送信/ログインボタンをクリックしてください。ユーザーには丸投げしないこと。"
                 )
             state["content"].insert(0, {"type": "text", "text": msg})
             return state
