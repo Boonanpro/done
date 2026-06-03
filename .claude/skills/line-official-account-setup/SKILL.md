@@ -71,6 +71,32 @@ Note: rich menus set via Messaging API do NOT appear in the manager's rich-menu 
 - Give out `https://line.me/R/ti/p/<basicId>` as the funnel receptacle link. Verify it opens (shows QR / "友だち追加").
 - The dashboard is reachable only via the owning Business ID (email login), not the user's personal LINE login. To let the user in on their own device, either (a) reset the password via `account.line.biz/profile` (reset link goes to the Business ID email — only the user can read it), or (b) link their personal LINE account (LINEアカウント 未連携 → 連携), after which their LINE login shows the account. Changing the password from the profile requires the *current* password, which is unknown if it was system-generated — use reset instead.
 
+## Client work: ownership & handover (代行構築→クライアント所有)
+
+Agency/制作会社 creating and building a client's account is a legitimate, LINE-supported model (Sales Partner program; Business Manager + per-account 権限管理 exist for exactly this). The reliable, proven path is **operator-owned creation → handover**, NOT creating under the client's email (which may need an email-verification click the client must do).
+
+**Recommended flow** (fully remote, minimal/zero client involvement):
+1. Operator creates + SMS-verifies the account under an email/Business ID the operator controls, using the **operator's own phone** for verification (SMS phone ≠ published contact; it's just a verification gate, not ownership). The OTP auto-forwards via the APK (`wait_for_otp_from_app`).
+2. Operator builds everything (greeting, rich menu) remotely.
+3. Hand over via **権限管理** (設定 → 権限管理, `/account/<id>/setting/authority`): 「メンバーを追加」(top-right) → pick a role → **URL発行** → give the URL to the client. The invite URL is **valid 24h, single-use**; the client opens it and **logs in with their OWN LINE Business ID** to receive the role.
+
+**Permission roles** (verified live, スタイルアップ 2026-06-03):
+
+| 権限 | メッセージ作成 | チャット | 配信 | 分析閲覧 | 設定変更 | 支払い管理 | メンバー管理 |
+|---|---|---|---|---|---|---|---|
+| 管理者 | ○ | ○ | ○ | ○ | ○ | ○ | ○ |
+| 運用担当者 | ○ | ○ | ○ | ○ | ○ | ✕ | ✕ |
+| 運用担当者(配信権限なし) | ○ | ○ | ✕ | ○ | ○ | ✕ | ✕ |
+| 運用担当者(分析の閲覧権限なし) | ○ | ○ | ○ | ✕ | ○ | ✕ | ✕ |
+
+**Only 管理者 has メンバー管理 + 支払い管理.** To give the client full ownership, invite them as **管理者**.
+
+**To make it client-only (operator exits) — order matters:**
+- LINE requires ≥1 admin always, and **you cannot delete yourself while you are the last/only admin** (the delete/change buttons don't even render for a sole admin — verified: a 1-admin account shows no remove UI).
+- So: invite the client as **管理者** FIRST → once there are 2 admins, remove the operator → client is sole owner. Never try to remove yourself before the client is in.
+
+**Pre-existing client account with unknown login:** you can't delete what you can't log into, and recovery needs the reset link sent to whatever email/phone made it. The pragmatic move is to **abandon it and create fresh** (a stray unverified OA is harmless) rather than chase recovery.
+
 ## Pitfalls
 
 - MCP `browser(action="select")` on this site often times out. Set `<select>` values via `evaluate`: find the select, set `.value` via the native setter, dispatch `input`+`change`. Pick options by visible text.
