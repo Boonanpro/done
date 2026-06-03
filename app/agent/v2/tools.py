@@ -2861,34 +2861,37 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             return await _get_browser_state(page)
 
         elif action == "wait_for_otp_from_app":
-            ref = params.get("ref")
-            if not ref:
-                return {"success": False, "error": "ref is required"}
-
             timeout_seconds = max(1, min(int(params.get("timeout_seconds", 30)), 120))
             user_id = os.environ.get("DAN_USER_ID", "00000000-0000-0000-0000-000000000001")
             source = (params.get("source") or "sms").lower()
             email_address = params.get("email_address")
+            ref = params.get("ref")
 
             from app.services.otp_service import get_otp_service
             otp_service = get_otp_service()
 
             # メールOTPモード: そのアドレスの受信箱を読めるか確認。読めなければ
             # 「ただ聞く」のではなくアプリパスワード発行のオンボーディングを案内する。
+            # ref（入力欄）を要求する前にチェックするので、案内だけ単体で試せる。
             if source == "email" and email_address:
                 if not await otp_service.has_imap_access(user_id, email_address):
                     local = email_address.split("@")[0]
-                    state = await _get_browser_state(page)
-                    state["success"] = False
-                    state["error"] = (
-                        f"{email_address} の受信箱を読む手段（アプリパスワード）が未登録のため、"
-                        f"メールに届くOTPを自動取得できません。ユーザーにこう案内してください:\n"
-                        f"「{email_address} のOTPを自動で突破するには、Googleアカウントで2段階認証をONにし、"
-                        f"https://myaccount.google.com/apppasswords でアプリパスワードを発行して、ここに貼ってください」\n"
-                        f"貼られたら save_credentials(service=\"gmail_imap_{local}\", login_id=\"{email_address}\", "
-                        f"password=\"<アプリパスワード16桁>\") で保存し、この操作を再実行する。ブラウザは閉じない。"
-                    )
-                    return state
+                    return {
+                        "success": False,
+                        "needs_app_password": True,
+                        "email_address": email_address,
+                        "error": (
+                            f"{email_address} の受信箱を読む手段（アプリパスワード）が未登録のため、"
+                            f"メールに届くOTPを自動取得できません。ユーザーにこう案内してください:\n"
+                            f"「{email_address} のOTPを自動で突破するには、Googleアカウントで2段階認証をONにし、"
+                            f"https://myaccount.google.com/apppasswords でアプリパスワードを発行して、ここに貼ってください」\n"
+                            f"貼られたら save_credentials(service=\"gmail_imap_{local}\", login_id=\"{email_address}\", "
+                            f"password=\"<アプリパスワード16桁>\") で保存し、この操作を再実行する。ブラウザは閉じない。"
+                        ),
+                    }
+
+            if not ref:
+                return {"success": False, "error": "ref is required"}
 
             otp_code = await otp_service.wait_for_otp(
                 user_id=user_id,
