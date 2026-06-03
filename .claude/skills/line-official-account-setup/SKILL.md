@@ -13,6 +13,9 @@ End-to-end playbook for standing up a LINE Official Account (公式アカウン�
 - The account lives under a **LINE Business ID** (email-based login), NOT the user's personal LINE login. Record which email/Business ID owns it (e.g. memory + credentials).
 - SMS verification (電話番号認証) is required to create an account under an existing Business ID. Ask the user for the phone number; do not invent one. Save it to personal info once given.
 - Reuse the existing logged-in browser session. Start at the destination (manager.line.biz), not a login page. Log in only if redirected to an unauthenticated page.
+- ⚠️ **ログイン方式は必ず「ビジネスアカウントでログイン」（メール＋パスワード, `account.line.biz`）を選ぶ。** 「LINEアカウントでログイン」（個人LINE, `access.line.me/oauth2/...`）は**絶対に選ばない** — そちらは別アカウント種別で、歪んだ文字の画像認証＋reCAPTCHA Enterprise の bot 検知地獄に突っ込み、ログインできずループする。URLが `access.line.me` に飛んだら入口を間違えている。
+- ⚠️ **ログイン認証情報は `get_credentials(service="line")` で取得する。** 同じメール（例 `shub6923@gmail.com`）が `google_shub` / `gmail_shub6923` など別サービスにも保存されており**パスワードが異なる**。メールアドレスで推測して別記録を引くと違うパスワードを使ってログイン失敗する（実際に発生済み）。
+- 画像認証(CAPTCHA)が出たら自分の目で読まず `browser(action="solve_captcha")` を使う。ただし上記の正しいビジネスアカウント経路なら通常CAPTCHAは出ない。
 - Do not hand browser/auth steps to the user unless genuinely impossible (e.g. reading an OTP only the user's device/inbox has).
 - Red-zone (account creation, enabling developer features, sending money) → proceed only with user approval. Enabling Messaging API is a real, free, reversible account feature — get a quick OK before enabling.
 
