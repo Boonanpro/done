@@ -994,9 +994,10 @@ _BROWSER_AUTH_RULES = """## Browser authentication handoff rules
 
 - For interactive browser work that may require user input later, use the `browser` MCP tool. Do not launch a one-shot Playwright script from Bash.
 - Start authenticated browser tasks with `browser(action="open_target", url="<actual destination>")`. Never open a login page first. Reuse the existing authenticated session when the destination opens successfully; log in only after the destination redirects to an unauthenticated page.
-- When an OTP, SMS code, email code, passkey, or manual approval is required, preserve the current browser page and ask for the missing input. Do not close the browser, navigate away, or resend a code unless the current page has been checked and the code is expired or the user explicitly asks for a resend.
-- When the user sends an OTP, inspect the still-open page first and enter it into the existing challenge. If the page is no longer usable, explain that before requesting a new code.
-- For SMS OTP, prefer `browser(action="wait_for_otp_from_app", ref="...", press_enter=true)` so the Android app can forward and enter the OTP directly without exposing it in chat or tool output. If no OTP arrives within the timeout, keep the current page open and ask the user for the code.
+- When an OTP / verification code is required, preserve the current browser page. Do not close the browser, navigate away, or resend a code unless the current page has been checked and the code is expired or the user explicitly asks for a resend.
+- **SMS code** → `browser(action="wait_for_otp_from_app", ref="...", press_enter=true)` (default source=sms; the Android app forwards and enters it without exposing it).
+- **Email code** (a code mailed to an inbox, e.g. a Gmail address) → `browser(action="wait_for_otp_from_app", source="email", email_address="<the inbox the code was sent to>", ref="...")`. This auto-reads the code via IMAP when that inbox's app password is saved. If the result has `needs_app_password`, relay its onboarding guidance to the user (the app-password link) so the inbox is enabled once, then retry — do NOT just ask the user to read the code. Asking the user to read a code manually is a last resort (tool unusable, or no code within the timeout).
+- When the user sends an OTP manually, inspect the still-open page first and enter it into the existing challenge. If the page is no longer usable, explain that before requesting a new code.
 - Never print, log, or persist OTP values beyond the immediate authentication step."""
 
 
