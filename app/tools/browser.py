@@ -46,6 +46,63 @@ def _executor_profile_dir() -> Path:
     return Path.home() / ".ai_secretary" / "browser_data"
 
 
+def _encode_browser_screenshot(png_bytes: bytes) -> tuple[str, str]:
+    """Encode a screenshot for the model's context, shrinking it so the CLI
+    session transcript does not balloon. Every browser step adds an image; a
+    long tool loop (e.g. fighting a CAPTCHA) can bloat the --resume prefill,
+    which both slows the next turn and raises the parse-error/poison risk.
+
+    Operations are driven by the element list (data-dan-ref / @e refs), NOT by
+    pixel-reading the screenshot, so downscaling/recompressing does NOT affect
+    clicking or typing — only fine visual reading (e.g. CAPTCHA, already
+    unreliable at full resolution).
+
+    Env knobs (read per call so they can be tuned without a code change):
+      DAN_BROWSER_SHOT_MAX_WIDTH  downscale if wider, in px. 0 = no downscale. default 1280
+      DAN_BROWSER_SHOT_FORMAT     'jpeg' (smaller, caps busy-page worst case) | 'png' (crisp UI text). default 'jpeg'
+      DAN_BROWSER_SHOT_QUALITY    jpeg quality 1-95. default 82
+    Tuning: for browser-heavy work (funnels, CAPTCHA loops) set MAX_WIDTH=1024
+    for ~33% smaller shots (verified readable); set FORMAT=png MAX_WIDTH=0 to
+    disable shrinking entirely when a task needs full-resolution reading.
+    Falls back to the original PNG on any error.
+    """
+    import base64
+
+    def _int_env(name: str, default: int) -> int:
+        try:
+            return int(os.getenv(name, str(default)))
+        except (TypeError, ValueError):
+            return default
+
+    max_w = _int_env("DAN_BROWSER_SHOT_MAX_WIDTH", 1280)
+    fmt = (os.getenv("DAN_BROWSER_SHOT_FORMAT", "jpeg") or "jpeg").strip().lower()
+    quality = _int_env("DAN_BROWSER_SHOT_QUALITY", 82)
+    try:
+        import io
+
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(png_bytes))
+        if max_w and img.width > max_w:
+            new_h = max(1, round(img.height * max_w / img.width))
+            img = img.resize((max_w, new_h), Image.LANCZOS)
+        buf = io.BytesIO()
+        if fmt == "jpeg":
+            img.convert("RGB").save(buf, format="JPEG", quality=quality, optimize=True)
+            media = "image/jpeg"
+        else:
+            img.save(buf, format="PNG", optimize=True)
+            media = "image/png"
+        data = buf.getvalue()
+        # If the re-encode grew the image (e.g. a tiny flat PNG re-saved as
+        # JPEG), keep the smaller original instead.
+        if len(data) >= len(png_bytes):
+            return base64.b64encode(png_bytes).decode("utf-8"), "image/png"
+        return base64.b64encode(data).decode("utf-8"), media
+    except Exception:
+        return base64.b64encode(png_bytes).decode("utf-8"), "image/png"
+
+
 def _write_browser_recovery_log(event: str, **details: Any) -> None:
     """Persist browser recovery diagnostics without relying on MCP stdout."""
     try:
@@ -462,10 +519,9 @@ async def _execute_page_command(pages_state: dict, context, cmd: str, args: dict
         return {"path": args["path"]}
 
     elif cmd == "screenshot_base64":
-        import base64
         screenshot_bytes = await page.screenshot(full_page=args.get("full_page", False))
-        base64_str = base64.b64encode(screenshot_bytes).decode('utf-8')
-        return {"base64": base64_str, "media_type": "image/png"}
+        base64_str, media_type = _encode_browser_screenshot(screenshot_bytes)
+        return {"base64": base64_str, "media_type": media_type}
 
     elif cmd == "mouse_click":
         await page.mouse.click(args["x"], args["y"])
