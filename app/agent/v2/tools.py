@@ -374,6 +374,8 @@ BROWSER_TOOL = {
             "press_enter": {"type": "boolean", "description": "入力後にEnterを押すか（action=type, デフォルト: false）"},
             "timeout_seconds": {"type": "integer", "description": "OTP待機のタイムアウト秒数（action=wait_for_otp_from_app, デフォルト: 30）"},
             "service": {"type": "string", "description": "OTPのサービス絞り込み（例: amazon, ex_reservation）"},
+            "source": {"type": "string", "enum": ["sms", "email"], "description": "OTPの受信元（action=wait_for_otp_from_app）。SMS(Androidアプリ転送)=sms（既定）、メールに届くコード=email。emailの場合は email_address を指定"},
+            "email_address": {"type": "string", "description": "メールOTPの受信箱アドレス（action=wait_for_otp_from_app, source=email時）。例: shub6923@gmail.com。そのアドレスのアプリパスワードが未登録なら発行案内が返る"},
             "direction": {"type": "string", "enum": ["down", "up"], "description": "スクロール方向（action=scroll）"},
             "x": {"type": "integer", "description": "X座標（action=click, refが使えない場合）"},
             "y": {"type": "integer", "description": "Y座標（action=click, refが使えない場合）"},
@@ -2865,13 +2867,34 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
 
             timeout_seconds = max(1, min(int(params.get("timeout_seconds", 30)), 120))
             user_id = os.environ.get("DAN_USER_ID", "00000000-0000-0000-0000-000000000001")
+            source = (params.get("source") or "sms").lower()
+            email_address = params.get("email_address")
 
             from app.services.otp_service import get_otp_service
+            otp_service = get_otp_service()
 
-            otp_code = await get_otp_service().wait_for_otp(
+            # メールOTPモード: そのアドレスの受信箱を読めるか確認。読めなければ
+            # 「ただ聞く」のではなくアプリパスワード発行のオンボーディングを案内する。
+            if source == "email" and email_address:
+                if not await otp_service.has_imap_access(user_id, email_address):
+                    local = email_address.split("@")[0]
+                    state = await _get_browser_state(page)
+                    state["success"] = False
+                    state["error"] = (
+                        f"{email_address} の受信箱を読む手段（アプリパスワード）が未登録のため、"
+                        f"メールに届くOTPを自動取得できません。ユーザーにこう案内してください:\n"
+                        f"「{email_address} のOTPを自動で突破するには、Googleアカウントで2段階認証をONにし、"
+                        f"https://myaccount.google.com/apppasswords でアプリパスワードを発行して、ここに貼ってください」\n"
+                        f"貼られたら save_credentials(service=\"gmail_imap_{local}\", login_id=\"{email_address}\", "
+                        f"password=\"<アプリパスワード16桁>\") で保存し、この操作を再実行する。ブラウザは閉じない。"
+                    )
+                    return state
+
+            otp_code = await otp_service.wait_for_otp(
                 user_id=user_id,
                 service=params.get("service"),
-                source="sms",
+                source=source,
+                email_address=email_address,
                 timeout_seconds=timeout_seconds,
                 poll_interval=2,
             )
@@ -2879,8 +2902,9 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
             if not otp_code:
                 state = await _get_browser_state(page)
                 state["success"] = False
+                src_label = "メール" if source == "email" else "Androidアプリ(SMS)"
                 state["error"] = (
-                    f"No OTP arrived from the Android app within {timeout_seconds} seconds. "
+                    f"No OTP arrived from {src_label} within {timeout_seconds} seconds. "
                     "Keep this browser page open and ask the user to enter the code manually."
                 )
                 return state

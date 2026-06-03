@@ -230,12 +230,45 @@ class OTPService:
         
         return None
 
+    async def _find_imap_credential(
+        self, user_id: str, email_address: str
+    ) -> Optional[dict]:
+        """指定メールアドレスのIMAP認証情報（アプリパスワード）を探す。
+
+        命名規約 `gmail_imap_<localpart>` を優先し、無ければ imap 系サービスを
+        走査して id がアドレスに一致するものを返す。第三者提供で各テナントが
+        自分のアドレスのアプリパスワードを登録できるようにするための解決経路。
+        """
+        from app.services.credentials_service import get_credentials_service
+        cs = get_credentials_service()
+        addr = (email_address or "").strip().lower()
+        if not addr:
+            return None
+        local = addr.split("@")[0]
+        for svc in (f"gmail_imap_{local}", f"imap_{local}"):
+            c = await cs.get_credential(user_id, svc)
+            if c and (c.get("id") or "").lower() == addr:
+                return c
+        for s in await cs.list_credentials(user_id):
+            name = s.get("service", "")
+            if "imap" not in name.lower():
+                continue
+            c = await cs.get_credential(user_id, name)
+            if c and (c.get("id") or "").lower() == addr:
+                return c
+        return None
+
+    async def has_imap_access(self, user_id: str, email_address: str) -> bool:
+        """指定アドレスのメールOTPをIMAPで読める認証情報があるか。"""
+        return bool(await self._find_imap_credential(user_id, email_address))
+
     async def extract_otp_from_email_imap(
         self,
         user_id: str,
         service: Optional[str] = None,
         max_age_minutes: Optional[int] = None,
         subject_filter: Optional[str] = "[SMSFW]",
+        email_address: Optional[str] = None,
     ) -> Optional[OTPResult]:
         """
         IMAPを使用してGmailからOTPを抽出（OAuth2不要）
@@ -244,7 +277,9 @@ class OTPService:
             user_id: ユーザーID
             service: 対象サービス（amazon, ex_reservation等）
             max_age_minutes: 最大経過時間（分）
-            subject_filter: 件名フィルタ（SMS Forwarderは[SMSFW]を付ける）
+            subject_filter: 件名フィルタ（SMS Forwarderは[SMSFW]。直接届くメールOTPはNone）
+            email_address: 読みたい受信箱のアドレス（指定時はそのアドレスの
+                           アプリパスワードを使う。未指定は既定の gmail_imap）
 
         Returns:
             抽出されたOTP情報
@@ -254,15 +289,19 @@ class OTPService:
         if max_age_minutes is None:
             max_age_minutes = self.max_age_minutes
 
-        # Gmail IMAP認証情報を取得
+        # Gmail IMAP認証情報を取得（アドレス指定があればそのアドレスのものを探す）
         creds_service = get_credentials_service()
-        gmail_creds = await creds_service.get_credential(user_id, "gmail_imap")
+        if email_address:
+            gmail_creds = await self._find_imap_credential(user_id, email_address)
+        else:
+            gmail_creds = await creds_service.get_credential(user_id, "gmail_imap")
 
         if not gmail_creds:
-            logger.warning(f"No gmail_imap credentials for user {user_id}")
+            logger.warning(f"No IMAP credentials for user {user_id} (address={email_address})")
             return None
 
-        gmail_address = gmail_creds.get("email") or gmail_creds.get("username")
+        # 統一スキーマでは id がアドレス、password がアプリパスワード
+        gmail_address = gmail_creds.get("id") or gmail_creds.get("email") or gmail_creds.get("username")
         gmail_password = gmail_creds.get("password") or gmail_creds.get("app_password")
 
         if not gmail_address or not gmail_password:
@@ -707,6 +746,7 @@ class OTPService:
         source: str = "email",
         timeout_seconds: Optional[int] = None,
         poll_interval: Optional[int] = None,
+        email_address: Optional[str] = None,
     ) -> Optional[str]:
         """
         OTPが届くまで待機して取得（Executor向け）
@@ -738,11 +778,22 @@ class OTPService:
 
             # OTPを抽出
             if source == "email":
-                otp_result = await self.extract_otp_from_email(
-                    user_id=user_id,
-                    service=service,
-                    max_age_minutes=2,
-                )
+                if email_address:
+                    # 指定アドレスの受信箱を IMAP で直接読む（直接届くメールOTP）
+                    otp_result = await self.extract_otp_from_email_imap(
+                        user_id=user_id,
+                        service=service,
+                        max_age_minutes=2,
+                        subject_filter=None,
+                        email_address=email_address,
+                    )
+                else:
+                    # 既定: OAuth連携済み（オーナー）の Gmail から
+                    otp_result = await self.extract_otp_from_email(
+                        user_id=user_id,
+                        service=service,
+                        max_age_minutes=2,
+                    )
             else:
                 otp_result = await self.extract_otp_from_sms(
                     user_id=user_id,
