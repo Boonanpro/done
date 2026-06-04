@@ -32,7 +32,7 @@ ALLOWED_EXTENSIONS = {
     "video": {".mp4", ".avi", ".mov", ".mkv", ".webm"},
 }
 
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB (スマホ動画は100MB超が多いため引き上げ)
 
 
 class FileUploadResponse(BaseModel):
@@ -97,7 +97,7 @@ async def upload_file(
     file.file.seek(0)
     
     if file_size > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="File size exceeds 100MB limit")
+        raise HTTPException(status_code=400, detail="File size exceeds 500MB limit")
     
     # Validate file extension
     if not is_allowed_file(file.filename):
@@ -111,11 +111,14 @@ async def upload_file(
     unique_filename = f"{uuid.uuid4()}{file_ext}"
     file_path = UPLOAD_DIR / unique_filename
     
-    # Save file
+    # Save file (チャンク逐次書き込み: 大きい動画でも全体をRAMに載せない)
     try:
-        content = await file.read()
         with open(file_path, "wb") as f:
-            f.write(content)
+            while True:
+                chunk = await file.read(1024 * 1024)  # 1MB ずつ
+                if not chunk:
+                    break
+                f.write(chunk)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
     
