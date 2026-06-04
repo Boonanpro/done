@@ -6,6 +6,7 @@ import * as SecureStore from 'expo-secure-store';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
+import * as VideoThumbnails from 'expo-video-thumbnails';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
@@ -27,6 +28,8 @@ import {
   Text,
   TextInput,
   View,
+  type StyleProp,
+  type ViewStyle,
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import EventSource from 'react-native-sse';
@@ -475,6 +478,58 @@ function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
   });
 }
 
+// 動画のサムネ（最初のフレーム）を生成して表示する。Web版の <video> が
+// 自動でフレームを見せるのに合わせ、APKでも「何の動画か」が一目で分かるようにする。
+// expo-video-thumbnails はローカル/リモート両方の URI に対応。ファイル名は出さない。
+function VideoThumb({
+  uri,
+  style,
+  onPress,
+}: {
+  uri: string;
+  style?: StyleProp<ViewStyle>;
+  onPress?: () => void;
+}) {
+  const [thumb, setThumb] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setThumb(null);
+    setFailed(false);
+    (async () => {
+      try {
+        const result = await VideoThumbnails.getThumbnailAsync(uri, { time: 1000, quality: 0.6 });
+        if (!cancelled) setThumb(result.uri);
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [uri]);
+
+  const inner = (
+    <View style={[styles.videoThumbWrap, style]}>
+      {thumb ? (
+        <>
+          <Image source={{ uri: thumb }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+          <View style={styles.videoPlayBadge} pointerEvents="none">
+            <Ionicons name="play" size={18} color="#12110f" />
+          </View>
+        </>
+      ) : failed ? (
+        <Ionicons name="videocam" size={24} color="#d9d2c8" />
+      ) : (
+        <ActivityIndicator color="#7fd1c7" size="small" />
+      )}
+    </View>
+  );
+
+  return onPress ? <Pressable onPress={onPress}>{inner}</Pressable> : inner;
+}
+
 function RichMessageContent({
   content,
   mine,
@@ -495,16 +550,12 @@ function RichMessageContent({
       ))}
 
       {parsed.videos.map((video, index) => (
-        <Pressable
+        <VideoThumb
           key={`${video.url}-${index}`}
+          uri={video.url}
+          style={styles.messageVideoThumb}
           onPress={() => onOpenUrl(video.url)}
-          style={[styles.mediaCard, styles.mediaCardRow, mine && styles.myMediaCard]}
-        >
-          <Ionicons name="play-circle" size={22} color={mine ? '#1d1b18' : '#f4f0e8'} />
-          <Text style={[styles.mediaCardTitle, mine && styles.myMessageText]} numberOfLines={1}>
-            動画を開く
-          </Text>
-        </Pressable>
+        />
       ))}
 
       {parsed.files.map((file, index) => (
@@ -2535,13 +2586,11 @@ function AppMain() {
               <View key={att.key} style={styles.attachmentChip}>
                 {att.kind === 'image' ? (
                   <Image source={{ uri: att.uri }} style={styles.attachmentThumb} />
+                ) : att.kind === 'video' ? (
+                  <VideoThumb uri={att.uri} style={styles.attachmentThumb} />
                 ) : (
                   <View style={[styles.attachmentThumb, styles.attachmentThumbIcon]}>
-                    <Ionicons
-                      name={att.kind === 'video' ? 'videocam' : 'document'}
-                      size={20}
-                      color="#d9d2c8"
-                    />
+                    <Ionicons name="document" size={20} color="#d9d2c8" />
                   </View>
                 )}
                 {att.kind === 'file' ? (
@@ -3460,6 +3509,28 @@ const styles = StyleSheet.create({
     height: 220,
     maxWidth: '100%',
     width: 260,
+  },
+  videoThumbWrap: {
+    alignItems: 'center',
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  messageVideoThumb: {
+    borderColor: '#34302a',
+    borderRadius: 12,
+    borderWidth: 1,
+    height: 220,
+    maxWidth: '100%',
+    width: 260,
+  },
+  videoPlayBadge: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(244,240,232,0.92)',
+    borderRadius: 999,
+    height: 30,
+    justifyContent: 'center',
+    width: 30,
   },
   mediaCard: {
     backgroundColor: '#15130f',
