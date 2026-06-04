@@ -850,6 +850,11 @@ function AppMain() {
   // timeline / activity in the chat that is actually streaming. null when idle.
   const [streamingProjectId, setStreamingProjectId] = useState<string | null>(null);
   const [activity, setActivity] = useState('');
+  // 添付アップロード中フラグ。大きい動画は数十秒かかるので、この間も必ずライブ表示
+  // （「アップロード中...」スピナー）を出して「固まった/失敗した」と誤解させない。
+  // currentRun が前ターンの完了状態のままだと showLiveTurn が false になり進捗が
+  // 一切出なかった不具合への対策。
+  const [uploading, setUploading] = useState(false);
   // Live in-progress turn, reconstructed FROM THE SERVER (current-run +
   // execution-events) so it survives navigating away/back and SSE drops — like
   // the web chat. The SSE stream only triggers an immediate refetch for low
@@ -953,6 +958,7 @@ function AppMain() {
   // so the bubble doesn't linger next to the final answer.
   const showLiveTurn =
     liveRunActive ||
+    uploading ||
     (sending &&
       streamingProjectId === currentProject?.id &&
       (!currentRun || currentRun.state === 'running'));
@@ -1822,6 +1828,7 @@ function AppMain() {
     // so nothing is lost.
     let finalContent = content;
     if (pending.length > 0) {
+      setUploading(true);
       setActivity(`アップロード中... (0/${pending.length})`);
       try {
         const uploaded: { kind: PendingAttachment['kind']; name: string; url: string }[] = [];
@@ -1838,6 +1845,7 @@ function AppMain() {
         const tags = uploaded.map((u) => mediaTag(u.kind, u.name, u.url)).join('\n');
         finalContent = content ? `${tags}\n\n${content}` : tags;
       } catch (error) {
+        setUploading(false);
         setSending(false);
         setStreamingProjectId(null);
         setActivity('');
@@ -1846,6 +1854,7 @@ function AppMain() {
         Alert.alert('アップロード失敗', String((error as Error).message));
         return;
       }
+      setUploading(false);
     }
 
     setActivity('Thinking...');
@@ -1977,6 +1986,7 @@ function AppMain() {
     } catch {
       // best-effort reconcile
     } finally {
+      setUploading(false);
       setSending(false);
       setStreamingProjectId(null);
       setActivity('');
