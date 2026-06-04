@@ -485,10 +485,12 @@ function VideoThumb({
   uri,
   style,
   onPress,
+  small = false,
 }: {
   uri: string;
   style?: StyleProp<ViewStyle>;
   onPress?: () => void;
+  small?: boolean;
 }) {
   const [thumb, setThumb] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -515,12 +517,13 @@ function VideoThumb({
       {thumb ? (
         <>
           <Image source={{ uri: thumb }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-          <View style={styles.videoPlayBadge} pointerEvents="none">
-            <Ionicons name="play" size={18} color="#12110f" />
+          {/* 再生バッジ。添付チップ(small)では小さく半透明にして、後ろの動画が見えるようにする。 */}
+          <View style={small ? styles.videoPlayBadgeSmall : styles.videoPlayBadge} pointerEvents="none">
+            <Ionicons name="play" size={small ? 11 : 18} color={small ? '#f4f0e8' : '#12110f'} />
           </View>
         </>
       ) : failed ? (
-        <Ionicons name="videocam" size={24} color="#d9d2c8" />
+        <Ionicons name="videocam" size={small ? 18 : 24} color="#d9d2c8" />
       ) : (
         <ActivityIndicator color="#7fd1c7" size="small" />
       )}
@@ -534,10 +537,12 @@ function RichMessageContent({
   content,
   mine,
   onOpenUrl,
+  onPlayVideo,
 }: {
   content: string;
   mine: boolean;
   onOpenUrl: (url: string) => void;
+  onPlayVideo?: (url: string) => void;
 }) {
   const parsed = useMemo(() => parseRichContent(content), [content]);
 
@@ -554,7 +559,7 @@ function RichMessageContent({
           key={`${video.url}-${index}`}
           uri={video.url}
           style={styles.messageVideoThumb}
-          onPress={() => onOpenUrl(video.url)}
+          onPress={() => (onPlayVideo ? onPlayVideo(video.url) : onOpenUrl(video.url))}
         />
       ))}
 
@@ -683,11 +688,13 @@ function AiTurnBlocks({
   blocks,
   mine,
   onOpenUrl,
+  onPlayVideo,
   defaultOpen = false,
 }: {
   blocks: TurnBlock[];
   mine: boolean;
   onOpenUrl: (url: string) => void;
+  onPlayVideo?: (url: string) => void;
   defaultOpen?: boolean;
 }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
@@ -708,7 +715,7 @@ function AiTurnBlocks({
       {grouped.map((g, i) =>
         g.kind === 'text' ? (
           <View key={i} style={i !== lastTextIndex ? styles.mutedSegment : undefined}>
-            <RichMessageContent content={g.text} mine={mine} onOpenUrl={onOpenUrl} />
+            <RichMessageContent content={g.text} mine={mine} onOpenUrl={onOpenUrl} onPlayVideo={onPlayVideo} />
           </View>
         ) : (
           <TurnToolGroup key={i} items={g.items} defaultOpen={defaultOpen} />
@@ -906,6 +913,8 @@ function AppMain() {
   // currentRun が前ターンの完了状態のままだと showLiveTurn が false になり進捗が
   // 一切出なかった不具合への対策。
   const [uploading, setUploading] = useState(false);
+  // アプリ内で再生中の動画URL（LINE/Discordのようにアプリ内のWebViewプレイヤーで再生）。
+  const [playingVideo, setPlayingVideo] = useState<string | null>(null);
   // Live in-progress turn, reconstructed FROM THE SERVER (current-run +
   // execution-events) so it survives navigating away/back and SSE drops — like
   // the web chat. The SSE stream only triggers an immediate refetch for low
@@ -2506,7 +2515,7 @@ function AppMain() {
                       <Text style={styles.messageSender}>DAN</Text>
                     </View>
                     {liveStepBlocks.length > 0 ? (
-                      <AiTurnBlocks blocks={liveStepBlocks} mine={false} onOpenUrl={handleOpenMessageUrl} defaultOpen />
+                      <AiTurnBlocks blocks={liveStepBlocks} mine={false} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} defaultOpen />
                     ) : null}
                     {/* The "running now" spinner sits at the bottom next to the
                         latest log line, so it's obvious which step is live. */}
@@ -2542,9 +2551,9 @@ function AppMain() {
                     <Text style={styles.messageTime}>{formatTime(item.created_at)}</Text>
                   </View>
                   {useBlocks ? (
-                    <AiTurnBlocks blocks={blocks!} mine={mine} onOpenUrl={handleOpenMessageUrl} />
+                    <AiTurnBlocks blocks={blocks!} mine={mine} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
                   ) : (
-                    <RichMessageContent content={item.content} mine={mine} onOpenUrl={handleOpenMessageUrl} />
+                    <RichMessageContent content={item.content} mine={mine} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
                   )}
                 </View>
               );
@@ -2587,7 +2596,7 @@ function AppMain() {
                 {att.kind === 'image' ? (
                   <Image source={{ uri: att.uri }} style={styles.attachmentThumb} />
                 ) : att.kind === 'video' ? (
-                  <VideoThumb uri={att.uri} style={styles.attachmentThumb} />
+                  <VideoThumb uri={att.uri} style={styles.attachmentThumb} small />
                 ) : (
                   <View style={[styles.attachmentThumb, styles.attachmentThumbIcon]}>
                     <Ionicons name="document" size={20} color="#d9d2c8" />
@@ -2736,6 +2745,37 @@ function AppMain() {
               <Text style={styles.sheetCancelText}>キャンセル</Text>
             </Pressable>
           </View>
+        </View>
+      </Modal>
+
+      {/* アプリ内動画プレイヤー（外部ブラウザを開かず、LINE/Discordのように中で再生）。
+          react-native-webview の <video controls> で再生。タップで開いた直後に再生。 */}
+      <Modal
+        visible={!!playingVideo}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setPlayingVideo(null)}
+      >
+        <View style={styles.videoPlayerBackdrop}>
+          {playingVideo ? (
+            <WebView
+              source={{
+                html: `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"></head><body style="margin:0;background:#000;height:100vh;display:flex;align-items:center;justify-content:center"><video src="${playingVideo}" controls autoplay playsinline webkit-playsinline style="width:100%;height:100%;object-fit:contain"></video></body></html>`,
+                baseUrl: API_BASE_URL,
+              }}
+              style={styles.videoPlayerWeb}
+              allowsInlineMediaPlayback
+              mediaPlaybackRequiresUserAction={false}
+              allowsFullscreenVideo
+            />
+          ) : null}
+          <Pressable
+            style={styles.videoPlayerClose}
+            onPress={() => setPlayingVideo(null)}
+            hitSlop={12}
+          >
+            <Ionicons name="close" size={28} color="#fff" />
+          </Pressable>
         </View>
       </Modal>
     </View>
@@ -3532,6 +3572,36 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     width: 30,
   },
+  videoPlayBadgeSmall: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(18,17,15,0.45)',
+    borderRadius: 999,
+    height: 20,
+    justifyContent: 'center',
+    width: 20,
+  },
+  videoPlayerBackdrop: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.95)',
+    flex: 1,
+    justifyContent: 'center',
+  },
+  videoPlayerWeb: {
+    backgroundColor: '#000',
+    flex: 1,
+    width: '100%',
+  },
+  videoPlayerClose: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: 999,
+    height: 40,
+    justifyContent: 'center',
+    position: 'absolute',
+    right: 16,
+    top: 44,
+    width: 40,
+  },
   mediaCard: {
     backgroundColor: '#15130f',
     borderColor: '#34302a',
@@ -3617,8 +3687,8 @@ const styles = StyleSheet.create({
   attachmentThumb: {
     backgroundColor: '#2a2620',
     borderRadius: 8,
-    height: 40,
-    width: 40,
+    height: 56,
+    width: 56,
   },
   attachmentThumbIcon: {
     alignItems: 'center',
