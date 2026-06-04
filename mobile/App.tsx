@@ -216,7 +216,11 @@ type PendingAttachment = {
   name: string;
   mime: string;
   kind: 'image' | 'video' | 'file';
+  size?: number; // bytes (取得できた場合のみ)
 };
+
+// サーバー (app/api/file_routes.py) の MAX_FILE_SIZE と一致させること。
+const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500MB
 
 // Upload one local file to the chat upload endpoint and return its hosted URL.
 // React Native FormData takes {uri,name,type}; we must NOT set Content-Type
@@ -1723,6 +1727,7 @@ function AppMain() {
           name,
           mime: a.mimeType || (isVideo ? 'video/mp4' : 'image/jpeg'),
           kind: isVideo ? 'video' : 'image',
+          size: typeof a.fileSize === 'number' ? a.fileSize : undefined,
         };
       });
       setAttachments((cur) => [...cur, ...picked]);
@@ -1752,6 +1757,7 @@ function AppMain() {
           name,
           mime: a.mimeType || 'application/octet-stream',
           kind,
+          size: typeof a.size === 'number' ? a.size : undefined,
         };
       });
       setAttachments((cur) => [...cur, ...picked]);
@@ -1769,6 +1775,20 @@ function AppMain() {
     const content = draft.trim();
     const pending = attachments;
     if (!content && pending.length === 0) return;
+
+    // 送信前にサイズ超過を弾く。ここで return すれば入力欄・添付はそのまま残る
+    // ので「押した瞬間に全部消えて理由も分からない」状態にならない。
+    const tooBig = pending.filter((a) => typeof a.size === 'number' && a.size > MAX_UPLOAD_BYTES);
+    if (tooBig.length > 0) {
+      const names = tooBig
+        .map((a) => `・${a.name}（${(a.size! / 1024 / 1024).toFixed(0)}MB）`)
+        .join('\n');
+      Alert.alert(
+        'ファイルが大きすぎます',
+        `次のファイルは上限 ${MAX_UPLOAD_BYTES / 1024 / 1024}MB を超えています。外して送るか、短く撮り直してください:\n\n${names}`,
+      );
+      return;
+    }
 
     let project = currentProject;
     if (!project) {
@@ -1806,7 +1826,13 @@ function AppMain() {
       try {
         const uploaded: { kind: PendingAttachment['kind']; name: string; url: string }[] = [];
         for (let i = 0; i < pending.length; i++) {
-          uploaded.push(await uploadAttachment(pending[i], token));
+          const cur = pending[i];
+          try {
+            uploaded.push(await uploadAttachment(cur, token));
+          } catch (e) {
+            // どのファイルで失敗したか分かるよう名前を付けて投げ直す
+            throw new Error(`「${cur.name}」のアップロードに失敗しました: ${(e as Error).message}`);
+          }
           setActivity(`アップロード中... (${i + 1}/${pending.length})`);
         }
         const tags = uploaded.map((u) => mediaTag(u.kind, u.name, u.url)).join('\n');
