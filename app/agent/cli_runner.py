@@ -625,17 +625,23 @@ _LOOP_EXEMPT_BROWSER_ACTIONS = {
 
 
 def _is_loop_exempt(name: str, tool_input: Optional[Dict[str, Any]]) -> bool:
-    """確認用の繰り返しが正当なツール呼び出しか（=ループ判定から外すべきか）。"""
+    """確認用の繰り返しが正当なツール呼び出しか（=ループ判定から外すべきか）。
+
+    実際のツール名は `mcp__dan-tools__browser` のように MCP 接頭辞が付くため、
+    完全一致ではなく部分一致（"browser" in name）で判定する。
+    （`_format_tool_label` も同じ規約を使っている）
+    """
     n = (name or "").lower()
-    # 統合 browser ツール: ev["input"]["action"] に実アクションが入る
-    if n in ("browser", "_browser"):
+    # browser 系（mcp__dan-tools__browser / browser / browser_screenshot 等）。
+    # action（screenshot / scroll …）で閲覧系かどうかを判定する。
+    if "browser" in n:
         action = ""
         if isinstance(tool_input, dict):
             action = str(tool_input.get("action", "")).lower()
-        return action in _LOOP_EXEMPT_BROWSER_ACTIONS
-    # レガシー browser_screenshot / browser_scroll など
-    if n.startswith("browser_"):
-        return n[len("browser_"):] in _LOOP_EXEMPT_BROWSER_ACTIONS
+        if action:
+            return action in _LOOP_EXEMPT_BROWSER_ACTIONS
+        # action が取れないレガシー browser_screenshot 等は名前で判定
+        return any(a in n for a in _LOOP_EXEMPT_BROWSER_ACTIONS)
     return False
 
 
@@ -2227,9 +2233,13 @@ async def _process_via_streaming_session(
                             _tool_call_signature(_ev_name, _ev_input)
                         ):
                             state["loop_detected"] = True
+                            _loop_action = ""
+                            if isinstance(_ev_input, dict):
+                                _loop_action = str(_ev_input.get("action", ""))
                             _cli_debug(
                                 f"[STREAMING] behavioral loop detected "
-                                f"(same tool x{_LOOP_GUARD_THRESHOLD}) room {room_id[:8]}; interrupting turn"
+                                f"(tool={_ev_name} action={_loop_action} x{_LOOP_GUARD_THRESHOLD}) "
+                                f"room {room_id[:8]}; interrupting turn"
                             )
                             try:
                                 session._send_interrupt()
