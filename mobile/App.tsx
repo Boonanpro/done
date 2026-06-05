@@ -7,6 +7,8 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import Svg, { Circle } from 'react-native-svg';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ActivityIndicator,
@@ -228,29 +230,48 @@ const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500MB
 // Upload one local file to the chat upload endpoint and return its hosted URL.
 // React Native FormData takes {uri,name,type}; we must NOT set Content-Type
 // ourselves so fetch can add the multipart boundary.
-async function uploadAttachment(
+function uploadAttachment(
   att: PendingAttachment,
   token: string,
+  onProgress?: (fraction: number) => void,
 ): Promise<{ kind: PendingAttachment['kind']; name: string; url: string }> {
-  const form = new FormData();
-  form.append('file', { uri: att.uri, name: att.name, type: att.mime } as unknown as Blob);
-  const res = await fetch(`${API_BASE_URL}/api/v1/files/upload`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-    body: form,
+  // XMLHttpRequest を使うのは upload.onprogress で進捗が取れるため（fetch では不可）。
+  // これで LINE 風の円形プログレスを駆動する。
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${API_BASE_URL}/api/v1/files/upload`);
+    xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    xhr.upload.onprogress = (e) => {
+      if (onProgress && e.lengthComputable && e.total > 0) {
+        onProgress(e.loaded / e.total);
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          const data = JSON.parse(xhr.responseText) as { url: string };
+          onProgress?.(1);
+          resolve({ kind: att.kind, name: att.name, url: data.url });
+        } catch {
+          reject(new Error('Upload response was not valid JSON'));
+        }
+      } else {
+        let detail = '';
+        try {
+          const body = JSON.parse(xhr.responseText);
+          detail = body?.detail?.message || body?.detail || xhr.responseText;
+        } catch {
+          detail = xhr.responseText;
+        }
+        reject(new Error(detail || `Upload failed: ${xhr.status}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error('Network error during upload'));
+    xhr.ontimeout = () => reject(new Error('Upload timed out'));
+    const form = new FormData();
+    form.append('file', { uri: att.uri, name: att.name, type: att.mime } as unknown as Blob);
+    xhr.send(form);
   });
-  if (!res.ok) {
-    let detail = '';
-    try {
-      const body = await res.json();
-      detail = body?.detail?.message || body?.detail || JSON.stringify(body);
-    } catch {
-      detail = await res.text().catch(() => '');
-    }
-    throw new Error(detail || `Upload failed: ${res.status}`);
-  }
-  const data = (await res.json()) as { url: string };
-  return { kind: att.kind, name: att.name, url: data.url };
 }
 
 function mediaTag(kind: PendingAttachment['kind'], name: string, url: string): string {
@@ -486,11 +507,13 @@ function VideoThumb({
   style,
   onPress,
   small = false,
+  progress,
 }: {
   uri: string;
   style?: StyleProp<ViewStyle>;
   onPress?: () => void;
   small?: boolean;
+  progress?: number;
 }) {
   const [thumb, setThumb] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -512,16 +535,21 @@ function VideoThumb({
     };
   }, [uri]);
 
+  // アップロード中: 動画は即表示しつつ、円形リングが満ちていく（LINE風）。
+  const uploading = typeof progress === 'number' && progress < 1;
+
   const inner = (
     <View style={[styles.videoThumbWrap, style]}>
-      {thumb ? (
-        <>
-          <Image source={{ uri: thumb }} style={StyleSheet.absoluteFill} resizeMode="cover" />
-          {/* 再生バッジ。添付チップ(small)では小さく半透明にして、後ろの動画が見えるようにする。 */}
-          <View style={small ? styles.videoPlayBadgeSmall : styles.videoPlayBadge} pointerEvents="none">
-            <Ionicons name="play" size={small ? 11 : 18} color={small ? '#f4f0e8' : '#12110f'} />
-          </View>
-        </>
+      {thumb ? <Image source={{ uri: thumb }} style={StyleSheet.absoluteFill} resizeMode="cover" /> : null}
+      {uploading ? (
+        <View style={styles.videoCenterOverlay}>
+          <CircularProgress size={small ? 28 : 48} stroke={small ? 3 : 4} progress={progress} />
+        </View>
+      ) : thumb ? (
+        // 再生バッジ。添付チップ(small)では小さく半透明にして後ろの動画が見えるようにする。
+        <View style={small ? styles.videoPlayBadgeSmall : styles.videoPlayBadge} pointerEvents="none">
+          <Ionicons name="play" size={small ? 11 : 18} color={small ? '#f4f0e8' : '#12110f'} />
+        </View>
       ) : failed ? (
         <Ionicons name="videocam" size={small ? 18 : 24} color="#d9d2c8" />
       ) : (
@@ -533,18 +561,80 @@ function VideoThumb({
   return onPress ? <Pressable onPress={onPress}>{inner}</Pressable> : inner;
 }
 
+// LINE風アップロード進捗の円形リング（react-native-svg）。progress: 0..1。
+function CircularProgress({
+  size = 46,
+  stroke = 4,
+  progress,
+}: {
+  size?: number;
+  stroke?: number;
+  progress: number;
+}) {
+  const p = Math.max(0, Math.min(1, progress));
+  const r = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * r;
+  const offset = circumference * (1 - p);
+  const half = size / 2;
+  return (
+    <Svg width={size} height={size}>
+      <Circle cx={half} cy={half} r={r} stroke="rgba(255,255,255,0.28)" strokeWidth={stroke} fill="none" />
+      <Circle
+        cx={half}
+        cy={half}
+        r={r}
+        stroke="#ffffff"
+        strokeWidth={stroke}
+        fill="none"
+        strokeDasharray={circumference}
+        strokeDashoffset={offset}
+        strokeLinecap="round"
+        transform={`rotate(-90 ${half} ${half})`}
+      />
+    </Svg>
+  );
+}
+
+// アプリ内・全画面の動画プレイヤー（expo-video のネイティブプレイヤー）。
+// 外部ブラウザを開かず、音だけ問題も解消、ネイティブコントロールで全画面再生できる。
+function VideoPlayerModal({ uri, onClose }: { uri: string; onClose: () => void }) {
+  const player = useVideoPlayer(uri, (p) => {
+    p.loop = false;
+    p.play();
+  });
+  return (
+    <Modal visible animationType="fade" statusBarTranslucent onRequestClose={onClose}>
+      <View style={styles.videoPlayerBackdrop}>
+        <VideoView
+          style={styles.videoPlayerView}
+          player={player}
+          contentFit="contain"
+          nativeControls
+          allowsFullscreen
+        />
+        <Pressable style={styles.videoPlayerClose} onPress={onClose} hitSlop={12}>
+          <Ionicons name="close" size={28} color="#fff" />
+        </Pressable>
+      </View>
+    </Modal>
+  );
+}
+
 function RichMessageContent({
   content,
   mine,
   onOpenUrl,
   onPlayVideo,
+  videoProgress,
 }: {
   content: string;
   mine: boolean;
   onOpenUrl: (url: string) => void;
   onPlayVideo?: (url: string) => void;
+  videoProgress?: number;
 }) {
   const parsed = useMemo(() => parseRichContent(content), [content]);
+  const isUploading = typeof videoProgress === 'number' && videoProgress < 1;
 
   return (
     <View style={styles.messageContentWrap}>
@@ -559,7 +649,10 @@ function RichMessageContent({
           key={`${video.url}-${index}`}
           uri={video.url}
           style={styles.messageVideoThumb}
-          onPress={() => (onPlayVideo ? onPlayVideo(video.url) : onOpenUrl(video.url))}
+          progress={isUploading ? videoProgress : undefined}
+          onPress={
+            isUploading ? undefined : () => (onPlayVideo ? onPlayVideo(video.url) : onOpenUrl(video.url))
+          }
         />
       ))}
 
@@ -910,11 +1003,10 @@ function AppMain() {
   const [activity, setActivity] = useState('');
   // 添付アップロード中フラグ。大きい動画は数十秒かかるので、この間も必ずライブ表示
   // （「アップロード中...」スピナー）を出して「固まった/失敗した」と誤解させない。
-  // currentRun が前ターンの完了状態のままだと showLiveTurn が false になり進捗が
-  // 一切出なかった不具合への対策。
-  const [uploading, setUploading] = useState(false);
-  // アプリ内で再生中の動画URL（LINE/Discordのようにアプリ内のWebViewプレイヤーで再生）。
+  // アプリ内で再生中の動画URL（expo-video のネイティブプレイヤーで全画面再生）。
   const [playingVideo, setPlayingVideo] = useState<string | null>(null);
+  // アップロード中の楽観メッセージと進捗（0..1）。動画の上に円形リングで表示する。
+  const [uploadProgress, setUploadProgress] = useState<{ id: string; value: number } | null>(null);
   // Live in-progress turn, reconstructed FROM THE SERVER (current-run +
   // execution-events) so it survives navigating away/back and SSE drops — like
   // the web chat. The SSE stream only triggers an immediate refetch for low
@@ -1018,8 +1110,8 @@ function AppMain() {
   // so the bubble doesn't linger next to the final answer.
   const showLiveTurn =
     liveRunActive ||
-    uploading ||
     (sending &&
+      !uploadProgress &&
       streamingProjectId === currentProject?.id &&
       (!currentRun || currentRun.state === 'running'));
 
@@ -1883,51 +1975,63 @@ function AppMain() {
     setSending(true);
     setStreamingProjectId(project.id);
 
-    // Upload attachments first, then prepend the [添付...] tags Dan + the
-    // renderers understand. If upload fails, restore the draft + attachments
-    // so nothing is lost.
+    // LINE風: 送信した瞬間に動画/画像入りのメッセージを画面に出し、アップロードは
+    // その動画の上の円形リングが満ちていく形で進める。完了したらローカルURIを
+    // サーバーURLへ差し替えて Dan に送信する。失敗時は楽観メッセージを取り消す。
+    const optimisticId = `local-${Date.now()}`;
+    const localTags = pending.map((a) => mediaTag(a.kind, a.name, a.uri)).join('\n');
+    const localContent = pending.length > 0 ? (content ? `${localTags}\n\n${content}` : localTags) : content;
+    const optimistic: MessageResponse = {
+      id: optimisticId,
+      room_id: project.room_id,
+      sender_name: 'You',
+      sender_type: 'human',
+      content: localContent,
+      created_at: new Date().toISOString(),
+    };
+    setMessages((current) => [...current, optimistic]);
+
     let finalContent = content;
     if (pending.length > 0) {
-      setUploading(true);
-      setActivity(`アップロード中... (0/${pending.length})`);
+      setUploadProgress({ id: optimisticId, value: 0 });
       try {
         const uploaded: { kind: PendingAttachment['kind']; name: string; url: string }[] = [];
-        for (let i = 0; i < pending.length; i++) {
+        const total = pending.length;
+        for (let i = 0; i < total; i++) {
           const cur = pending[i];
           try {
-            uploaded.push(await uploadAttachment(cur, token));
+            uploaded.push(
+              await uploadAttachment(cur, token, (frac) =>
+                setUploadProgress({ id: optimisticId, value: (i + frac) / total }),
+              ),
+            );
           } catch (e) {
             // どのファイルで失敗したか分かるよう名前を付けて投げ直す
             throw new Error(`「${cur.name}」のアップロードに失敗しました: ${(e as Error).message}`);
           }
-          setActivity(`アップロード中... (${i + 1}/${pending.length})`);
         }
         const tags = uploaded.map((u) => mediaTag(u.kind, u.name, u.url)).join('\n');
         finalContent = content ? `${tags}\n\n${content}` : tags;
+        // 楽観メッセージの中身をサーバーURLへ差し替え（以後の再生・サーバー整合用）。
+        optimistic.content = finalContent;
+        setMessages((current) =>
+          current.map((m) => (m.id === optimisticId ? { ...m, content: finalContent } : m)),
+        );
+        setUploadProgress(null);
       } catch (error) {
-        setUploading(false);
+        setUploadProgress(null);
         setSending(false);
         setStreamingProjectId(null);
         setActivity('');
+        setMessages((current) => current.filter((m) => m.id !== optimisticId));
         setDraft(content);
         setAttachments(pending);
         Alert.alert('アップロード失敗', String((error as Error).message));
         return;
       }
-      setUploading(false);
     }
 
     setActivity('Thinking...');
-
-    const optimistic: MessageResponse = {
-      id: `local-${Date.now()}`,
-      room_id: project.room_id,
-      sender_name: 'You',
-      sender_type: 'human',
-      content: finalContent,
-      created_at: new Date().toISOString(),
-    };
-    setMessages((current) => [...current, optimistic]);
 
     let selectedProjectId = project.id;
     // Becomes true once the server has acked the message via the stream (echoes
@@ -2046,7 +2150,7 @@ function AppMain() {
     } catch {
       // best-effort reconcile
     } finally {
-      setUploading(false);
+      setUploadProgress(null);
       setSending(false);
       setStreamingProjectId(null);
       setActivity('');
@@ -2553,7 +2657,13 @@ function AppMain() {
                   {useBlocks ? (
                     <AiTurnBlocks blocks={blocks!} mine={mine} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
                   ) : (
-                    <RichMessageContent content={item.content} mine={mine} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
+                    <RichMessageContent
+                      content={item.content}
+                      mine={mine}
+                      onOpenUrl={handleOpenMessageUrl}
+                      onPlayVideo={setPlayingVideo}
+                      videoProgress={uploadProgress?.id === item.id ? uploadProgress.value : undefined}
+                    />
                   )}
                 </View>
               );
@@ -2748,36 +2858,10 @@ function AppMain() {
         </View>
       </Modal>
 
-      {/* アプリ内動画プレイヤー（外部ブラウザを開かず、LINE/Discordのように中で再生）。
-          react-native-webview の <video controls> で再生。タップで開いた直後に再生。 */}
-      <Modal
-        visible={!!playingVideo}
-        animationType="fade"
-        transparent
-        onRequestClose={() => setPlayingVideo(null)}
-      >
-        <View style={styles.videoPlayerBackdrop}>
-          {playingVideo ? (
-            <WebView
-              source={{
-                html: `<!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"></head><body style="margin:0;background:#000;height:100vh;display:flex;align-items:center;justify-content:center"><video src="${playingVideo}" controls autoplay playsinline webkit-playsinline style="width:100%;height:100%;object-fit:contain"></video></body></html>`,
-                baseUrl: API_BASE_URL,
-              }}
-              style={styles.videoPlayerWeb}
-              allowsInlineMediaPlayback
-              mediaPlaybackRequiresUserAction={false}
-              allowsFullscreenVideo
-            />
-          ) : null}
-          <Pressable
-            style={styles.videoPlayerClose}
-            onPress={() => setPlayingVideo(null)}
-            hitSlop={12}
-          >
-            <Ionicons name="close" size={28} color="#fff" />
-          </Pressable>
-        </View>
-      </Modal>
+      {/* アプリ内・全画面の動画プレイヤー（expo-video のネイティブプレイヤー）。 */}
+      {playingVideo ? (
+        <VideoPlayerModal uri={playingVideo} onClose={() => setPlayingVideo(null)} />
+      ) : null}
     </View>
   );
 }
@@ -3581,15 +3665,17 @@ const styles = StyleSheet.create({
     width: 20,
   },
   videoPlayerBackdrop: {
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.95)',
+    backgroundColor: '#000',
     flex: 1,
-    justifyContent: 'center',
   },
-  videoPlayerWeb: {
+  videoPlayerView: {
     backgroundColor: '#000',
     flex: 1,
     width: '100%',
+  },
+  videoCenterOverlay: {
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   videoPlayerClose: {
     alignItems: 'center',
