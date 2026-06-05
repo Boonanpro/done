@@ -40,17 +40,19 @@ HP制作の場合、コードを書く前に**ビジネスゴールからデザ�
 4. **必要なコンテンツ**: その確信を生むために見せるべき具体物（写真、数字、事例、地図…）
 5. **デザイン方針**: そのコンテンツを最も効果的に見せるデザイン
    - 何が主役か（写真？テキスト？数字？）→ 主役を最も大きく目立たせるレイアウト
-   - 配色: SKILL.md Bの4層モデル（Neutral/Primary/Secondary/Accent）に従い仮決定
-   - フォント: SKILL.md Bの選定基準テーブルに従い Headline/Body/Label を仮決定
+   - レンダリング方針: dom-first / comp-guided-dom / image-slice-hybrid / media-rich-hybrid
+   - 表現パラメータ: visual_density / cta_intensity / motion_intensity / content_priority / authenticity_policy
+   - 配色: 4層モデル（Neutral/Primary/Secondary/Accent）に従い仮決定
+   - フォント: Headline/Body/Label を仮決定
 6. 上記をプロジェクトフォルダに **`DESIGN.md`** として保存する
 
 ### Step 3: リファレンス収集 (用途 B のみ)
 
 Step 2 で定義したクリエイティブディレクションに基づいてリファレンスを収集する。SKILL.md B「リファレンス駆動デザインプロセス」Phase 1 に従い:
 
-1. ブラウザで Dribbble / Pinterest / 実在サイトを検索 (**DESIGN.md の方向性に合うもの**を探す)
+1. ブラウザでユーザー提供URL、実在サイト、ギャラリーサイトを確認する (**DESIGN.md の方向性に合うもの**を探す)
 2. ヒーロー・タイポグラフィ・配色・インタラクションを別々の参照元から収集
-3. 最低 3 つのスクリーンショットをプロジェクトフォルダに保存
+3. Reference Evidence / Interaction Evidence を DESIGN.md に残す。必要ならスクリーンショットもプロジェクトフォルダに保存する
 4. SKILL.md B の方法 1/2/3 から最適な方法を選択
 
 > **ユーザーが特定の参考サイト URL や画像を提供している場合、それを最優先のリファレンスとして使う。** 自分で Dribbble を漁る前に、提供されたものを WebFetch で開いてアスペクトを把握する。提供素材 (画像・動画・ロゴ) は AI 生成で代替せず実際に組み込む。
@@ -63,7 +65,7 @@ Step 2 で定義したクリエイティブディレクションに基づいて�
 4. **A/B の場合はバックエンドファーストで実装する**: DB 設計 → API 実装 → UI 実装の順。UI を先に作らない
 5. 用途に応じた場所に保存する:
    - ダッシュボード → `frontend/src/app/demo/` 配下
-   - クライアント HP → `D:/dan-workspace/hp-projects/` 配下
+   - クライアント HP → `frontend/src/app/artifacts/{slug}/` 配下
 
 ### Step 5: 自己評価ループ (最大 3 回)
 
