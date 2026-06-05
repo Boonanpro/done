@@ -1928,6 +1928,43 @@ function AppMain() {
     setAttachments((cur) => cur.filter((a) => a.key !== key));
   }
 
+  // チャットのタイトル自動生成（Web版と同条件）。ターン完了後、タイトルが既定
+  // （新しいプロジェクト）のままなら suggest-title で生成して保存する。
+  // 多重発火は guard で防ぎ、既にカスタム名なら何もしない。
+  const titleGenGuard = useRef<Set<string>>(new Set());
+  const maybeGenerateTitle = useCallback(
+    async (projectId: string, roomId: string) => {
+      if (!token || titleGenGuard.current.has(projectId)) return;
+      const proj =
+        projects.find((p) => p.id === projectId) ||
+        (currentProjectIdRef.current === projectId ? currentProject ?? undefined : undefined);
+      const title = (proj?.title || '').trim();
+      if (title && title !== '新しいプロジェクト') return;
+      titleGenGuard.current.add(projectId);
+      try {
+        const res = await apiRequest<{ title: string }>(
+          `/projects/suggest-title?room_id=${roomId}`,
+          {},
+          token,
+        );
+        const suggested = (res?.title || '').trim();
+        if (suggested && suggested !== '新しいプロジェクト') {
+          await apiRequest<ProjectResponse>(
+            `/projects/${projectId}`,
+            { method: 'PATCH', body: JSON.stringify({ title: suggested }) },
+            token,
+          );
+          await refreshProjects(token).catch(() => null);
+        }
+      } catch {
+        // best-effort（失敗時は次のターンで再試行）
+      } finally {
+        titleGenGuard.current.delete(projectId);
+      }
+    },
+    [token, projects, currentProject, refreshProjects],
+  );
+
   async function handleSend() {
     if (!token || sending) return;
     const content = draft.trim();
@@ -2146,6 +2183,10 @@ function AppMain() {
       } else if (viewing && nextProject?.id) {
         // Clean finish (or server-acked): pull the saved messages into view.
         await loadProjectMessages(token, nextProject.id);
+      }
+      // ターン完了後、タイトルが既定のままなら自動生成（Web版と同じ挙動）。
+      if (nextProject?.id && nextProject?.room_id) {
+        void maybeGenerateTitle(nextProject.id, nextProject.room_id);
       }
     } catch {
       // best-effort reconcile
