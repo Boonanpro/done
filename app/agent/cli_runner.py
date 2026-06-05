@@ -610,7 +610,33 @@ def _transcript_exceeds_limit(session_id: str) -> bool:
 # route the turn through the same recovery as a poison (stop + reseed from DB,
 # which sheds the heavy screenshot transcript that drove the loop).
 # Set DAN_LOOP_GUARD_THRESHOLD=0 to disable.
-_LOOP_GUARD_THRESHOLD = int(os.getenv("DAN_LOOP_GUARD_THRESHOLD", "5"))
+_LOOP_GUARD_THRESHOLD = int(os.getenv("DAN_LOOP_GUARD_THRESHOLD", "8"))
+
+# 閲覧系（読み取り専用）のブラウザ操作。長いLPを順に確認するときに同じ
+# screenshot / scroll を何度も繰り返すのは正当な作業なので、ループ判定から除外する。
+# 状態を変える操作（open / click / type / select / back）は引き続き監視対象。
+_LOOP_EXEMPT_BROWSER_ACTIONS = {
+    "screenshot",
+    "scroll",
+    "get_interactive_elements",
+    "get_state",
+    "get_elements",
+}
+
+
+def _is_loop_exempt(name: str, tool_input: Optional[Dict[str, Any]]) -> bool:
+    """確認用の繰り返しが正当なツール呼び出しか（=ループ判定から外すべきか）。"""
+    n = (name or "").lower()
+    # 統合 browser ツール: ev["input"]["action"] に実アクションが入る
+    if n in ("browser", "_browser"):
+        action = ""
+        if isinstance(tool_input, dict):
+            action = str(tool_input.get("action", "")).lower()
+        return action in _LOOP_EXEMPT_BROWSER_ACTIONS
+    # レガシー browser_screenshot / browser_scroll など
+    if n.startswith("browser_"):
+        return n[len("browser_"):] in _LOOP_EXEMPT_BROWSER_ACTIONS
+    return False
 
 
 def _tool_call_signature(name: str, tool_input: Optional[Dict[str, Any]]) -> str:
@@ -2191,8 +2217,14 @@ async def _process_via_streaming_session(
                         # ターンを畳む。is_error が立たないループは error 駆動の復旧では
                         # 捕まらず数分回り続けるので、ここで能動的に止める。後段の result /
                         # run() が loop_detected を見て poison と同じ復旧（stop + reseed）に乗せる。
-                        if not state["loop_detected"] and state["loop_guard"].record(
-                            _tool_call_signature(ev.get("name", ""), ev.get("input", {}))
+                        # ただし screenshot/scroll 等の閲覧系は確認作業で正当に繰り返すため
+                        # 判定対象から外し、カウンタもリセットして誤検知を防ぐ。
+                        _ev_name = ev.get("name", "")
+                        _ev_input = ev.get("input", {})
+                        if _is_loop_exempt(_ev_name, _ev_input):
+                            state["loop_guard"].reset()
+                        elif not state["loop_detected"] and state["loop_guard"].record(
+                            _tool_call_signature(_ev_name, _ev_input)
                         ):
                             state["loop_detected"] = True
                             _cli_debug(
