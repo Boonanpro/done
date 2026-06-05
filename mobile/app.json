@@ -2,7 +2,7 @@
   "expo": {
     "name": "Done",
     "slug": "dan-mobile",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -39,7 +39,8 @@
           "photosPermission": "DANで画像や動画を送るために写真ライブラリへのアクセスを許可してください。",
           "cameraPermission": "DANで写真を撮って送るためにカメラへのアクセスを許可してください。"
         }
-      ]
+      ],
+      "expo-video"
     ],
     "extra": {
       "apiBaseUrl": "https://frontend-liard-rho-29.vercel.app",
