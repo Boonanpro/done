@@ -9,7 +9,7 @@
  *
  * 配色はいじらない（中身の見た目はそのまま）。出現の動きだけを足す部品。
  */
-import { motion, type Variants } from 'framer-motion';
+import { AnimatePresence, motion, type Variants } from 'framer-motion';
 import {
   useReducedMotion,
   useScroll,
@@ -263,36 +263,108 @@ type StickyStoryProps = {
   className?: string;
   mediaClassName?: string;
   contentClassName?: string;
+  chapterClassName?: string;
+  progressLabel?: string;
+  stickyTopClassName?: string;
 };
 
-/** Sticky editorial section: media stays fixed while chapter copy scrolls beside it. */
+/** Sticky editorial section with visible chapter progress and media handoff. */
 export function StickyStory({
   chapters,
   className,
   mediaClassName,
   contentClassName,
+  chapterClassName,
+  progressLabel = 'story',
+  stickyTopClassName = 'lg:top-24',
 }: StickyStoryProps) {
-  const fallbackMedia = chapters.find((chapter) => chapter.media)?.media;
+  const [activeIndex, setActiveIndex] = React.useState(0);
+  const shouldReduceMotion = useReducedMotion();
+  const mediaForActiveChapter =
+    chapters[activeIndex]?.media ??
+    [...chapters.slice(0, activeIndex + 1)].reverse().find((chapter) => chapter.media)?.media ??
+    chapters.find((chapter) => chapter.media)?.media;
 
   return (
-    <section className={`grid gap-10 lg:grid-cols-2 ${className ?? ''}`}>
-      <div className={`lg:sticky lg:top-24 lg:h-[70vh] ${mediaClassName ?? ''}`}>
-        {fallbackMedia}
-      </div>
-      <div className={`space-y-24 ${contentClassName ?? ''}`}>
-        {chapters.map((chapter, index) => (
-          <FadeIn key={`${chapter.title}-${index}`} y={24} className="min-h-[45vh]">
-            {chapter.eyebrow && (
-              <div className="mb-3 text-xs uppercase tracking-[0.28em] text-muted-foreground">
-                {chapter.eyebrow}
+    <section className={`grid gap-12 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)] ${className ?? ''}`}>
+      <div className={`lg:sticky ${stickyTopClassName} lg:h-[calc(100vh-8rem)] ${mediaClassName ?? ''}`}>
+        <div className="relative h-full overflow-hidden rounded-sm">
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={activeIndex}
+              className="h-full"
+              initial={shouldReduceMotion ? false : { opacity: 0, scale: 1.025 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={shouldReduceMotion ? { opacity: 0 } : { opacity: 0, scale: 0.99 }}
+              transition={{ duration: 0.55, ease: EASE }}
+            >
+              {mediaForActiveChapter}
+            </motion.div>
+          </AnimatePresence>
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-4 bg-gradient-to-t from-black/70 via-black/20 to-transparent p-5 text-white">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.28em] text-white/65">
+                {progressLabel}
               </div>
-            )}
-            <h3 className="text-3xl leading-tight md:text-5xl">{chapter.title}</h3>
-            {chapter.body && (
-              <p className="mt-5 max-w-xl leading-8 text-muted-foreground">{chapter.body}</p>
-            )}
-            {index > 0 && chapter.media && <div className="mt-8 lg:hidden">{chapter.media}</div>}
-          </FadeIn>
+              <div className="mt-1 font-serif text-lg">
+                {String(activeIndex + 1).padStart(2, '0')} /{' '}
+                {String(chapters.length).padStart(2, '0')}
+              </div>
+            </div>
+            <div className="flex min-w-28 gap-1.5">
+              {chapters.map((chapter, index) => (
+                <span
+                  key={`${chapter.title}-bar`}
+                  className={`h-px flex-1 transition-colors duration-300 ${
+                    index <= activeIndex ? 'bg-white' : 'bg-white/30'
+                  }`}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className={`relative ${contentClassName ?? ''}`}>
+        <div className="absolute bottom-0 left-4 top-0 hidden w-px bg-border/60 lg:block" />
+        {chapters.map((chapter, index) => (
+          <motion.article
+            key={`${chapter.title}-${index}`}
+            className={`relative flex min-h-[78vh] items-center py-16 pl-0 lg:pl-12 ${chapterClassName ?? ''}`}
+            onViewportEnter={() => setActiveIndex(index)}
+            viewport={{ amount: 0.55, margin: '-15% 0px -25% 0px' }}
+          >
+            <motion.div
+              className="max-w-xl"
+              initial={shouldReduceMotion ? false : { opacity: 0.25, y: 36, scale: 0.985 }}
+              whileInView={{ opacity: 1, y: 0, scale: 1 }}
+              viewport={{ amount: 0.55, margin: '-15% 0px -25% 0px' }}
+              transition={{ duration: 0.65, ease: EASE }}
+            >
+              <div
+                className={`absolute left-0 top-1/2 hidden h-3 w-3 -translate-x-[5px] -translate-y-1/2 rounded-full border transition-colors duration-300 lg:block ${
+                  activeIndex === index
+                    ? 'border-primary bg-primary'
+                    : 'border-border bg-background'
+                }`}
+              />
+              {chapter.eyebrow && (
+                <div
+                  className={`mb-4 text-xs uppercase tracking-[0.28em] transition-colors duration-300 ${
+                    activeIndex === index ? 'text-primary' : 'text-muted-foreground'
+                  }`}
+                >
+                  {chapter.eyebrow}
+                </div>
+              )}
+              <h3 className="text-3xl leading-tight md:text-5xl">{chapter.title}</h3>
+              {chapter.body && (
+                <p className="mt-5 max-w-xl leading-8 text-muted-foreground">{chapter.body}</p>
+              )}
+              {chapter.media && (
+                <div className="mt-8 lg:hidden">{chapter.media}</div>
+              )}
+            </motion.div>
+          </motion.article>
         ))}
       </div>
     </section>
