@@ -66,7 +66,22 @@ CTAの数や強さは `cta_intensity` に従う。
 - `expressive`: 画像リビール、背景変化、レイヤーパララックス。
 - `scroll-driven`: ScrollVideo、GSAP/Lenis、章立てスクロール。性能予算とreduced-motion fallback必須。
 
-参考サイトの動きを採用すると書いた場合、単なるFadeInで済ませず、目的に合う実装を入れる。
+使える標準部品:
+
+- `FadeIn` / `Stagger`: 軽いreveal。subtle向け。
+- `ImageReveal`: 写真がマスクで開く。料理、物件、人物、作品の見せ場向け。
+- `ParallaxMedia`: 写真/動画が少し遅れて動く。フルブリード写真や2カラムの媒体向け。
+- `TextReveal`: 見出しを行単位で出す。ファーストビューや強い章見出し向け。
+- `StickyStory`: 片側の媒体を固定し、章テキストをスクロールで読ませる。採用/ブランド/こだわり説明向け。
+- `SectionThemeShift`: セクション進入で背景色やトーンを変える。明暗の切り替えや没入感向け。
+
+判断ルール:
+
+- `subtle`: `FadeIn` / `Stagger` 中心でよい。
+- `expressive`: `FadeIn` だけで終わらせず、`ImageReveal` / `ParallaxMedia` / `TextReveal` / `SectionThemeShift` から最低1つ使う。
+- `scroll-driven`: `ScrollVideo` または `StickyStory` を主役にし、reduced-motion fallbackを用意する。
+
+参考サイトの動きを採用すると書いた場合、Interaction Evidenceの「目的」と上記部品を対応させる。
 
 ## 素材
 
