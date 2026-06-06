@@ -11,7 +11,6 @@ import {
   SectionThemeShift,
   Stagger,
   StaggerItem,
-  StickyStory,
   TextReveal,
   useScrollRange,
 } from '@/components/motion';
@@ -22,12 +21,11 @@ const imageC = '/yonago-gojo/g4.jpg';
 const videoA = '/yonago-gojo/dish.mp4';
 const posterA = '/yonago-gojo/dish-poster.jpg';
 
-type Status = 'usable' | 'review' | 'risky';
+type Status = 'usable' | 'review';
 
 const statusText: Record<Status, string> = {
   usable: '採用可',
   review: '要確認',
-  risky: '危険',
 };
 
 function DemoBlock({
@@ -46,7 +44,6 @@ function DemoBlock({
   const statusClass = {
     usable: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200',
     review: 'border-amber-400/30 bg-amber-400/10 text-amber-200',
-    risky: 'border-red-400/30 bg-red-400/10 text-red-200',
   }[status];
 
   return (
@@ -100,10 +97,10 @@ function ScrollRangeDemo() {
             useScrollRange
           </div>
           <h3 className="mt-4 text-4xl font-medium leading-tight">
-            スクロール量を別の表現に変換する低レイヤー部品
+            スクロール量を別の表現へ変換する補助部品
           </h3>
           <p className="mt-5 leading-7 text-white/60">
-            これ単体で見た目が完成する部品ではなく、ページ専用の演出を作る時の補助です。
+            これ単体で見た目が完成する部品ではありません。専用演出を作る時の低レイヤー部品です。
           </p>
         </motion.div>
       </div>
@@ -112,6 +109,17 @@ function ScrollRangeDemo() {
 }
 
 export default function MotionComponentsScratchPage() {
+  const navItems = [
+    ['FadeIn / Reveal', 'fadein-reveal'],
+    ['Stagger', 'stagger'],
+    ['ImageReveal', 'imagereveal'],
+    ['ParallaxMedia', 'parallaxmedia'],
+    ['TextReveal', 'textreveal'],
+    ['PinnedStory', 'pinnedstory'],
+    ['SectionThemeShift', 'sectionthemeshift'],
+    ['useScrollRange', 'usescrollrange'],
+  ];
+
   return (
     <main className="h-screen overflow-y-auto bg-[#0b0907] text-white">
       <section className="px-6 py-20 sm:px-10">
@@ -137,19 +145,9 @@ export default function MotionComponentsScratchPage() {
             </p>
           </div>
           <div className="mt-10 grid gap-2 text-sm text-white/60 sm:grid-cols-4">
-            {[
-              'FadeIn / Reveal',
-              'Stagger',
-              'ImageReveal',
-              'ParallaxMedia',
-              'TextReveal',
-              'PinnedStory',
-              'StickyStory',
-              'SectionThemeShift',
-              'useScrollRange',
-            ].map((item) => (
-              <a key={item} href={`#${item.toLowerCase().replaceAll(' / ', '-').replaceAll(' ', '-')}`} className="border border-white/10 px-4 py-3 hover:border-white/30">
-                {item}
+            {navItems.map(([label, id]) => (
+              <a key={id} href={`#${id}`} className="border border-white/10 px-4 py-3 hover:border-white/30">
+                {label}
               </a>
             ))}
           </div>
@@ -160,7 +158,7 @@ export default function MotionComponentsScratchPage() {
         id="fadein-reveal"
         title="FadeIn / Reveal"
         status="usable"
-        notes="基本のフェードインです。低リスクですが、これだけで高級感が出るわけではありません。あくまで最低限の出現演出です。"
+        notes="基本のフェードインです。低リスクですが、これだけで高級感が出るわけではありません。最低限の出現演出です。"
       >
         <div className="grid gap-4 sm:grid-cols-3">
           {[0, 0.12, 0.24].map((delay, index) => (
@@ -252,7 +250,7 @@ export default function MotionComponentsScratchPage() {
         id="pinnedstory"
         title="PinnedStory"
         status="usable"
-        notes="StickyStory の本命置き換え候補です。CSS sticky に頼らず、JS でメディアを擬似固定します。章ごとに画像/動画が切り替わり、最後の章までメディアが残るかを確認します。"
+        notes="スクロールに合わせて片側のメディアを擬似固定し、章ごとに画像/動画を切り替える主力候補です。必要な案件だけで使います。"
       >
         <PinnedStory
           progressLabel="pinned story"
@@ -285,49 +283,6 @@ export default function MotionComponentsScratchPage() {
               eyebrow: '03 / 読了',
               title: '最後までメディアを残す',
               body: '最後の文章を読み終えるまで、左側のメディアが画面内に残る必要があります。',
-              media: <img src={imageC} alt="" className="h-full w-full object-cover" />,
-            },
-          ]}
-        />
-      </DemoBlock>
-
-      <DemoBlock
-        id="stickystory"
-        title="StickyStory"
-        status="risky"
-        notes="片側のメディアを固定し、章ごとに文章と画像/動画を切り替える想定の部品です。現状は CSS sticky と viewport callback に依存しており、実環境で壊れやすいので危険扱いです。"
-      >
-        <StickyStory
-          progressLabel="sticky story"
-          className="min-h-[280vh]"
-          mediaClassName="rounded-sm"
-          chapters={[
-            {
-              eyebrow: '01 / 動画',
-              title: 'メディアが固定されるべき場所',
-              body: 'この途中で左側の映像が流れて消えるなら、本番で使う品質ではありません。',
-              media: (
-                <video
-                  src={videoA}
-                  poster={posterA}
-                  autoPlay
-                  muted
-                  loop
-                  playsInline
-                  className="h-full w-full object-cover"
-                />
-              ),
-            },
-            {
-              eyebrow: '02 / 写真',
-              title: '章が進むと写真が切り替わる',
-              body: '章の切り替わりが分かること、切り替えのタイミングが自然なことを確認します。',
-              media: <img src={imageB} alt="" className="h-full w-full object-cover" />,
-            },
-            {
-              eyebrow: '03 / 最後の保持',
-              title: '最後の章までメディアが残る',
-              body: '五条の craft セクションで問題になった失敗パターンをここで確認します。',
               media: <img src={imageC} alt="" className="h-full w-full object-cover" />,
             },
           ]}

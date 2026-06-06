@@ -161,8 +161,7 @@ Rules:
 - `ImageReveal`: 写真がマスクで開く。料理、物件、人物、作品の見せ場向け。
 - `ParallaxMedia`: 写真/動画が少し遅れて動く。フルブリード写真や2カラムの媒体向け。
 - `TextReveal`: 見出しを行単位で出す。ファーストビューや強い章見出し向け。
-- `PinnedStory`: 片側の媒体を擬似固定し、章テキスト・進捗レール・active章ハイライト・章ごとのmediaフェードで読ませる。CSS `position: sticky` に依存しない主力部品。採用/ブランド/こだわり説明向け。最後の章を読み終える前にmediaが画面外へ流れないことを確認する。
-- `StickyStory`: 旧部品。CSS sticky と viewport callback に依存するため、アプリ/iframe/overflow環境では壊れやすい。新規HPでは原則 `PinnedStory` を使う。
+- `PinnedStory`: 片側の媒体を擬似固定し、章テキスト・進捗レール・active章ハイライト・章ごとのmediaフェードで読ませる。CSS `position: sticky` に依存しない。採用/ブランド/こだわり説明など、スクロールで物語的に見せる必要がある場合だけ使う。最後の章を読み終える前にmediaが画面外へ流れないことを確認する。
 - `SectionThemeShift`: セクション進入で背景色やトーンを変える。明暗の切り替えや没入感向け。
 
 判断ルール:
