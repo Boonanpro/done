@@ -13,13 +13,10 @@
 
 ### Step 0: 用途の特定
 
-成果物の種類を判定する:
-- **A. ダッシュボード/管理画面** → Next.js + shadcn/ui
-- **B. クライアントHP/ツール** → Next.js + shadcn/ui + Tailwind
+build `SKILL.md`（ルーター）で **HP / LP / Tool / Dashboard** に分類し、該当する `references/*.md` を読む。
+`criteria.md` の採点セクションは **Dashboard → A**、**HP / LP / Tool → B** に対応する。
 
-(C. 提案書 HTML はユーザーが「提案書作って」と明示要求した時のみ `actions/proposal_html.md` を参照)
-
-用途によって適用する `criteria.md` のセクション (A/B) が変わる。
+(提案書 HTML はユーザーが「提案書作って」と明示要求した時のみ `actions/proposal_html.md` を参照)
 
 ### Step 1: 要件の整理
 
@@ -32,7 +29,7 @@
 
 ### Step 2: クリエイティブディレクション定義 (用途 B のみ)
 
-HP制作の場合、コードを書く前に**ビジネスゴールからデザイン方針を逆算**する。SKILL.md Bの「ビジネスゴールからデザインへの因果連鎖」に従い:
+HP/LP制作の場合、コードを書く前に**ビジネスゴールからデザイン方針を逆算**する。`references/hp.md`（LPは `references/lp.md`）の必須フローに従い:
 
 1. **ビジネスゴール**: このHPで何を達成したいか
 2. **訪問者の行動**: 訪問者に具体的に何をさせたいか（問い合わせ、予約、購入、資料請求…）
@@ -48,12 +45,12 @@ HP制作の場合、コードを書く前に**ビジネスゴールからデザ�
 
 ### Step 3: リファレンス収集 (用途 B のみ)
 
-Step 2 で定義したクリエイティブディレクションに基づいてリファレンスを収集する。SKILL.md B「リファレンス駆動デザインプロセス」Phase 1 に従い:
+Step 2 で定義したクリエイティブディレクションに基づいてリファレンスを収集する。`references/hp.md` の `Reference Evidence` / `Interaction Evidence` に従い:
 
 1. ブラウザでユーザー提供URL、実在サイト、ギャラリーサイトを確認する (**DESIGN.md の方向性に合うもの**を探す)
 2. ヒーロー・タイポグラフィ・配色・インタラクションを別々の参照元から収集
 3. Reference Evidence / Interaction Evidence を DESIGN.md に残す。必要ならスクリーンショットもプロジェクトフォルダに保存する
-4. SKILL.md B の方法 1/2/3 から最適な方法を選択
+4. `references/hp.md` の `Visual Direction Lock`（Reference-board mode / Brand-guideline image mode / Skip）から最適な方法を選択
 
 > **ユーザーが特定の参考サイト URL や画像を提供している場合、それを最優先のリファレンスとして使う。** 自分で Dribbble を漁る前に、提供されたものを WebFetch で開いてアスペクトを把握する。提供素材 (画像・動画・ロゴ) は AI 生成で代替せず実際に組み込む。
 

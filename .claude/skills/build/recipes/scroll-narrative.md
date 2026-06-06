@@ -20,3 +20,11 @@
 
 ## 自己評価の追加チェック
 - reduced-motion 時に内容が読めるか / モバイルでカクつかないか / コンテンツが DOM にあるか（SEO）
+
+## Current component policy
+
+- Use `PinnedStory` for desktop pinned narrative sections. It is backed by GSAP ScrollTrigger, not custom scroll listeners.
+- On mobile, use the built-in `MobileStoryRail` fallback or the standalone `MobileStoryRail` component: vertical scroll pins the section while cards move horizontally, then normal vertical scrolling resumes. Do not shrink a desktop two-column pinned layout onto a phone.
+- Before writing custom GSAP code, read the relevant skills: `gsap-scrolltrigger` and `gsap-react` at minimum. For timelines, also read `gsap-timeline`.
+- If `PinnedStory` or `ScrollVideo` already fits the goal, use the component instead of writing one-off animation code.
+- If writing one-off ScrollTrigger code, include cleanup via `useGSAP`, set `scroller` when the page uses an internal scroll container, and call `ScrollTrigger.refresh()` after media/layout changes.

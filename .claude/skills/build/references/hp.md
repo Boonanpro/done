@@ -187,3 +187,15 @@ Rules:
 - CTA露出が `cta_intensity` と合っている。
 - 動きが `motion_intensity` と合っている。
 - PC/mobileスクリーンショットで文字、CTA、画像/動画が崩れていない。
+
+## Motion library rules
+
+When creating HP/LP motion, do not hand-roll complex scroll pinning, scroll-scrubbing, or timeline choreography with ad hoc `scroll` listeners and `transform` updates.
+
+- Use the installed GSAP skills when implementing GSAP: `gsap-core`, `gsap-timeline`, `gsap-scrolltrigger`, `gsap-react`, `gsap-performance`, `gsap-plugins`.
+- For scroll-driven pinning, prefer `GSAP ScrollTrigger` (`pin`, `scrub`, `scroller`, cleanup via `useGSAP`) over custom JS.
+- Use `PinnedStory` for desktop narrative pinning only when the content benefits from a story-like scroll section. It is not a default section for every HP.
+- `PinnedStory` uses GSAP ScrollTrigger for desktop and switches to `MobileStoryRail` on mobile. Do not force the desktop two-column pin layout onto mobile.
+- Use `MobileStoryRail` for mobile story sections: the section pins during vertical scroll while media/text cards move horizontally, then normal vertical scrolling resumes after the last card.
+- For subtle reveal only, keep using `FadeIn`, `Stagger`, `TextReveal`, or `ParallaxMedia`; do not introduce GSAP where simple motion is enough.
+- Always verify both desktop and mobile screenshots. For pinned/scroll-driven sections, verify that media does not jitter, disappear early, or block reading.
