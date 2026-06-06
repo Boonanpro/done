@@ -267,6 +267,7 @@ type StickyStoryProps = {
   eyebrowClassName?: string;
   progressLabel?: string;
   stickyTopClassName?: string;
+  endHoldClassName?: string;
 };
 
 /** Sticky editorial section with visible chapter progress and media handoff. */
@@ -279,6 +280,7 @@ export function StickyStory({
   eyebrowClassName,
   progressLabel = 'story',
   stickyTopClassName = 'lg:top-24',
+  endHoldClassName = 'hidden h-[36vh] lg:block',
 }: StickyStoryProps) {
   const [activeIndex, setActiveIndex] = React.useState(0);
   const shouldReduceMotion = useReducedMotion();
@@ -331,7 +333,7 @@ export function StickyStory({
         {chapters.map((chapter, index) => (
           <motion.article
             key={`${chapter.title}-${index}`}
-            className={`relative flex min-h-[78vh] items-center py-16 pl-0 lg:pl-12 ${chapterClassName ?? ''}`}
+            className={`relative flex min-h-[86vh] items-center py-16 pl-0 lg:pl-12 ${chapterClassName ?? ''}`}
             onViewportEnter={() => setActiveIndex(index)}
             viewport={{ amount: 0.55, margin: '-15% 0px -25% 0px' }}
           >
@@ -369,6 +371,7 @@ export function StickyStory({
             </motion.div>
           </motion.article>
         ))}
+        <div aria-hidden="true" className={endHoldClassName} />
       </div>
     </section>
   );
