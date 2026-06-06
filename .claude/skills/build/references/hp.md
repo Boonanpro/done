@@ -19,8 +19,50 @@ HPは、店舗/企業/ブランド/採用/実績掲載など、対象全体へ�
    - `authenticity_policy`: real-assets-only / generated-atmosphere / generated-placeholder
    - `type_system`: headline / body / label のフォント候補、太さ、行間、字間。日本語と英字でtrackingを分ける
 4. 2-3案のビジュアル方向性を出し、1案を選ぶ。
-5. 参考サイトを確認し、`Reference Evidence` と `Interaction Evidence` を残す。
-6. 実装後、設計パラメータと実装が一致しているか確認する。
+5. `Visual Direction Lock` を行う。Reference-board mode / Brand-guideline image mode / Skip のどれかを選び、理由を `DESIGN.md` に書く。
+6. 参考サイトを確認し、`Reference Evidence` と `Interaction Evidence` を残す。
+7. 実装後、設計パラメータと実装が一致しているか確認する。
+
+## Visual Direction Lock
+
+新規HP、プロ品質の一発出し、ブランド/店舗/採用/実績掲載のように見た目の世界観が重要な案件では、実装前に視覚方向を固定する。
+
+次のどれかを選ぶ:
+
+### Reference-board mode
+
+実在サイト、1GUU、Godly、ユーザー提供素材、既存写真から方向性を固める。
+`DESIGN.md` に以下を整理する。
+
+- `type_system`: headline / body / label の候補、太さ、行間、字間
+- `color_system`: neutral / primary / accent / border
+- `photo_tone`: 明るさ、色温度、構図、トリミング
+- `cta_style`: 塗り、罫線、余白、固定表示の有無
+- `editorial_accents`: roundel、罫線、スタンプ、キャプション、情報帯など
+- `motion_direction`: none / subtle / expressive / scroll-driven と採用理由
+
+### Brand-guideline image mode
+
+GPT Image 2でブランドガイドライン画像を作り、そこから方向性を固める。
+向く案件: 店舗、宿、美容、採用、ブランドサイト、実績掲載、ポートフォリオ化したいHP。
+
+画像に含めたい要素:
+
+- ロゴ/仮ロゴの扱い
+- color palette
+- typography samples
+- photography tone
+- CTA/button examples
+- editorial accents such as roundel, rule, seal, caption, info strip
+- layout principle
+- wrong usage if useful
+
+作った画像はそのまま実装仕様として信じない。`DESIGN.md` へ `type_system`、色、CTA形状、アクセント部品、写真トーンとして抽出し、実在フォント/CSS変数/React componentに置き換える。
+
+### Skip
+
+既存HPの軽微修正、情報優先の小ページ、時間優先の修正ではスキップしてよい。
+スキップする場合も `DESIGN.md` に理由を書く。
 
 ## Reference Evidence
 
@@ -87,7 +129,7 @@ CTAの数や強さは `cta_intensity` に従う。
 
 - 日本語本文に大きなletter-spacingをかけない。英字ラベルの広いtrackingを日本語へ流用しない。
 - 高級感は太字や大ボタンではなく、余白、行間、細い罫線、写真、低い色面積で作る。
-- GPT Image 2でブランドガイドライン画像を作った場合は、そこから `type_system`、色、CTA形状、アクセント部品を抽出してDESIGN.mdに書く。
+- Brand-guideline image mode を使った場合は、そこから `type_system`、色、CTA形状、アクセント部品を抽出してDESIGN.mdに書く。
 - 画像内のフォント名やカラーコードはそのまま信じず、実在フォントとCSS変数に置き換える。
 
 ## Motion
