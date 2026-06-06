@@ -335,6 +335,14 @@ export function StickyStory({
             onViewportEnter={() => setActiveIndex(index)}
             viewport={{ amount: 0.55, margin: '-15% 0px -25% 0px' }}
           >
+            <div
+              aria-hidden="true"
+              className={`absolute left-4 top-1/2 hidden h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border transition-colors duration-300 lg:block ${
+                activeIndex === index
+                  ? 'border-primary bg-primary'
+                  : 'border-border bg-background'
+              }`}
+            />
             <motion.div
               className="max-w-xl"
               initial={shouldReduceMotion ? false : { opacity: 0.25, y: 36, scale: 0.985 }}
@@ -342,13 +350,6 @@ export function StickyStory({
               viewport={{ amount: 0.55, margin: '-15% 0px -25% 0px' }}
               transition={{ duration: 0.65, ease: EASE }}
             >
-              <div
-                className={`absolute left-0 top-1/2 hidden h-3 w-3 -translate-x-[5px] -translate-y-1/2 rounded-full border transition-colors duration-300 lg:block ${
-                  activeIndex === index
-                    ? 'border-primary bg-primary'
-                    : 'border-border bg-background'
-                }`}
-              />
               {chapter.eyebrow && (
                 <div
                   className={`mb-4 text-xs tracking-[0.08em] transition-colors duration-300 ${
