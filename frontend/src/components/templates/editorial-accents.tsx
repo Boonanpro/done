@@ -2,6 +2,11 @@ import type { ReactNode } from "react";
 
 import { cn } from "@/lib/utils";
 
+type SvgAccentProps = {
+  className?: string;
+  strokeWidth?: number;
+};
+
 type RoundelBadgeProps = {
   eyebrow?: ReactNode;
   value: ReactNode;
@@ -54,6 +59,88 @@ export function RuleDivider({ label, className }: RuleDividerProps) {
       {label && <span className="font-label text-[10px] uppercase tracking-[0.18em]">{label}</span>}
       <span className="h-px flex-1 bg-current/30" />
     </div>
+  );
+}
+
+export function BrushStroke({ className, strokeWidth = 2.2 }: SvgAccentProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 180 36"
+      fill="none"
+      className={cn("h-7 w-36 text-current", className)}
+      preserveAspectRatio="none"
+    >
+      <path
+        d="M3 23C25 8 47 8 68 19C86 28 101 30 119 21C137 12 153 10 177 16"
+        stroke="currentColor"
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity="0.78"
+      />
+      <path
+        d="M18 19C33 13 49 13 63 21C77 29 93 31 111 24"
+        stroke="currentColor"
+        strokeWidth={Math.max(1, strokeWidth * 0.45)}
+        strokeLinecap="round"
+        opacity="0.38"
+      />
+    </svg>
+  );
+}
+
+export function InkCircle({ className, strokeWidth = 2 }: SvgAccentProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 120 120"
+      fill="none"
+      className={cn("aspect-square w-28 text-current", className)}
+    >
+      <path
+        d="M62 8C86 9 108 25 113 51C119 82 95 108 65 113C36 118 10 100 7 68C4 37 27 9 62 8Z"
+        stroke="currentColor"
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity="0.82"
+      />
+      <path
+        d="M26 22C12 36 8 58 15 77"
+        stroke="currentColor"
+        strokeWidth={Math.max(1, strokeWidth * 0.7)}
+        strokeLinecap="round"
+        opacity="0.34"
+      />
+    </svg>
+  );
+}
+
+export function HandRule({ className, strokeWidth = 1.5 }: SvgAccentProps) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 240 18"
+      fill="none"
+      className={cn("h-4 w-full text-current", className)}
+      preserveAspectRatio="none"
+    >
+      <path
+        d="M2 9C34 7 65 10 96 8.5C132 6.8 166 9.5 202 8C215 7.5 227 7.8 238 9"
+        stroke="currentColor"
+        strokeWidth={strokeWidth}
+        strokeLinecap="round"
+        opacity="0.6"
+      />
+      <path
+        d="M15 12C56 10 87 13 129 11.5C163 10.3 193 12 225 11"
+        stroke="currentColor"
+        strokeWidth={Math.max(1, strokeWidth * 0.55)}
+        strokeLinecap="round"
+        opacity="0.28"
+      />
+    </svg>
   );
 }
 

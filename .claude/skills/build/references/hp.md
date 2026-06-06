@@ -132,6 +132,20 @@ CTAの数や強さは `cta_intensity` に従う。
 - Brand-guideline image mode を使った場合は、そこから `type_system`、色、CTA形状、アクセント部品を抽出してDESIGN.mdに書く。
 - 画像内のフォント名やカラーコードはそのまま信じず、実在フォントとCSS変数に置き換える。
 
+### Transparent Graphic Accents
+
+Use SVG/CSS components for decorative marks that must sit on top of textured or colored backgrounds.
+
+- `BrushStroke`: brush-like one-line marks above menus, section labels, or photography captions. It inherits `currentColor` and has no baked background.
+- `InkCircle`: rough circular emphasis around short facts, distances, stamps, or small notes when `RoundelBadge` feels too formal.
+- `HandRule`: hand-drawn dividers and underlines. Prefer it over generated PNG lines on textured paper backgrounds.
+
+Rules:
+
+- Brush marks, ink circles, hand rules, seals, arrows, and section ornaments should be SVG/CSS by default.
+- If a raster accent is unavoidable, it must be a real transparent PNG/WebP without background color baked into the edges.
+- Never place a paper-colored raster ornament over a different paper/texture background. It will show a rectangular patch.
+
 ## Motion
 
 動きは `motion_intensity` に従う。

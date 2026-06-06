@@ -19,7 +19,10 @@ export {
   VerticalHeroCopy,
 } from "./typography";
 export {
+  BrushStroke,
   EditorialFrame,
+  HandRule,
+  InkCircle,
   InfoStrip,
   PhotoCaption,
   RoundelBadge,
