@@ -17,6 +17,7 @@ HPは、店舗/企業/ブランド/採用/実績掲載など、対象全体へ�
    - `motion_intensity`: none / subtle / expressive / scroll-driven
    - `content_priority`: imagery / copy / proof / utility / interaction
    - `authenticity_policy`: real-assets-only / generated-atmosphere / generated-placeholder
+   - `type_system`: headline / body / label のフォント候補、太さ、行間、字間。日本語と英字でtrackingを分ける
 4. 2-3案のビジュアル方向性を出し、1案を選ぶ。
 5. 参考サイトを確認し、`Reference Evidence` と `Interaction Evidence` を残す。
 6. 実装後、設計パラメータと実装が一致しているか確認する。
@@ -56,6 +57,38 @@ CTAの数や強さは `cta_intensity` に従う。
 - `aggressive`: 広告流入や緊急性が高い場合。固定CTAや複数箇所を許可。
 
 「集客目的」だけで aggressive にしない。
+
+## Typography and Editorial Accents
+
+フォントを1つに固定しない。案件ごとに `type_system` を決め、文字の役割ごとに組む。
+毎回 `text-5xl font-bold tracking-wide` のような直接指定に逃げず、標準部品を使う。
+
+文字組み標準部品:
+
+- `HeroCopy`: 横組みの強いヒーロー見出し。
+- `VerticalHeroCopy`: 縦書きヒーロー見出し。和食、宿、工芸、作家性のある案件向け。
+- `SectionKicker`: 小さな章ラベル。英字/短いラベル向け。
+- `SectionTitle`: セクション見出し。
+- `LeadCopy`: 導入文。余白と行間を大きく取る。
+- `BodyCopy`: 本文。読みやすさ優先。
+- `MetaLabel`: メタ情報、日付、カテゴリ、短い補助ラベル。
+- `EditorialButton`: 色面積に頼らず、罫線・余白・文字で上品に見せるCTA。
+
+編集的アクセント:
+
+- `RoundelBadge`: 円形コールアウト/roundel。距離、実績、限定性など、主見出しではない強調に使う。
+- `SealMark`: 角印/小さなスタンプ風の印。
+- `RuleDivider`: 細い罫線区切り。章の切り替えや余白の整理に使う。
+- `PhotoCaption`: 写真キャプション。
+- `InfoStrip`: 営業時間、所在地、料金、実績などの横断情報。
+- `EditorialFrame`: 写真や情報を細い罫線で囲む。
+
+判断ルール:
+
+- 日本語本文に大きなletter-spacingをかけない。英字ラベルの広いtrackingを日本語へ流用しない。
+- 高級感は太字や大ボタンではなく、余白、行間、細い罫線、写真、低い色面積で作る。
+- GPT Image 2でブランドガイドライン画像を作った場合は、そこから `type_system`、色、CTA形状、アクセント部品を抽出してDESIGN.mdに書く。
+- 画像内のフォント名やカラーコードはそのまま信じず、実在フォントとCSS変数に置き換える。
 
 ## Motion
 
