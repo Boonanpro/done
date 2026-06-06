@@ -264,6 +264,7 @@ type StickyStoryProps = {
   mediaClassName?: string;
   contentClassName?: string;
   chapterClassName?: string;
+  eyebrowClassName?: string;
   progressLabel?: string;
   stickyTopClassName?: string;
 };
@@ -275,6 +276,7 @@ export function StickyStory({
   mediaClassName,
   contentClassName,
   chapterClassName,
+  eyebrowClassName,
   progressLabel = 'story',
   stickyTopClassName = 'lg:top-24',
 }: StickyStoryProps) {
@@ -349,9 +351,9 @@ export function StickyStory({
               />
               {chapter.eyebrow && (
                 <div
-                  className={`mb-4 text-xs uppercase tracking-[0.28em] transition-colors duration-300 ${
+                  className={`mb-4 text-xs tracking-[0.08em] transition-colors duration-300 ${
                     activeIndex === index ? 'text-primary' : 'text-muted-foreground'
-                  }`}
+                  } ${eyebrowClassName ?? ''}`}
                 >
                   {chapter.eyebrow}
                 </div>
