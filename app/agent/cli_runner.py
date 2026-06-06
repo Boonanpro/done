@@ -1958,6 +1958,18 @@ def _run_cli_in_thread(
                     content="completed",
                 )
             _update_run_sync(run_id, state="failed" if is_error else "completed")
+            # Safety net: if Dan ended the turn promising a later report (e.g.
+            # "完了したら報告します" after kicking off a background generation) but
+            # didn't book a follow-up, book one automatically so the report can't
+            # silently vanish at the turn boundary. No-ops unless the text
+            # promises a report AND no follow-up is already queued.
+            if not is_error:
+                try:
+                    from app.services.followups import maybe_autoschedule_for_promise
+                    if maybe_autoschedule_for_promise(room_id, user_id, text):
+                        _cli_debug("auto-scheduled promise follow-up (one-shot)")
+                except Exception as e:
+                    _cli_debug(f"auto-followup check failed (non-fatal): {e}")
 
     except Exception as e:
         import traceback
@@ -2287,6 +2299,17 @@ async def _process_via_streaming_session(
                 if project_id and not continuation:
                     _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=turn_id, content="completed")
                     _update_run_sync(run_id, state="failed" if is_error else "completed")
+                    # Safety net: auto-book a follow-up when Dan ended the turn
+                    # promising a later report (e.g. "完了したら報告します" after a
+                    # background generation) but didn't schedule one. See
+                    # maybe_autoschedule_for_promise for the why.
+                    if not is_error:
+                        try:
+                            from app.services.followups import maybe_autoschedule_for_promise
+                            if maybe_autoschedule_for_promise(room_id, user_id, text):
+                                _cli_debug("[STREAMING] auto-scheduled promise follow-up")
+                        except Exception as e:
+                            _cli_debug(f"[STREAMING] auto-followup check failed: {e}")
                 _emit({"type": "result", "text": text, "session_id": state["session_id"], "is_error": is_error, "cli_saved": cli_saved, "created_at": turn_start, "continuation": continuation, "turn_id": turn_id})
                 # Reset per-turn accumulators for any follow-up turn.
                 state["turn_blocks"] = []
