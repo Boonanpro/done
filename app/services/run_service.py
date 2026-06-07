@@ -4,11 +4,14 @@ Agent run persistence for project chat.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
 from app.models.project_schemas import AgentRunState
 from app.services.supabase_client import get_supabase_client
+
+logger = logging.getLogger(__name__)
 
 
 ACTIVE_RUN_STATES = {
@@ -98,9 +101,25 @@ class RunService:
         if metadata is not None:
             updates["metadata"] = metadata
 
-        query = self.supabase.table("agent_runs").update(updates).eq("id", run_id)
-        result = await asyncio.to_thread(query.execute)
-        return result.data[0] if result.data else None
+        # Retry on transient connection drops (Supabase/httpx 'Server disconnected'
+        # from a stale pooled connection). Without this, a failed run-state write
+        # raised straight up (e.g. attach_claude_session mid-stream) and left the
+        # run state inconsistent — which destabilises the live view during a
+        # follow-up's interrupt→continuation handoff. Best-effort: a run-update
+        # failure must never abort the answer itself.
+        last_err = None
+        for attempt in range(1, 4):
+            try:
+                query = self.supabase.table("agent_runs").update(updates).eq("id", run_id)
+                result = await asyncio.to_thread(query.execute)
+                return result.data[0] if result.data else None
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                logger.warning("run_service.update_run attempt %d failed: %s", attempt, e)
+                if attempt < 3:
+                    await asyncio.sleep(0.3 * attempt)
+        logger.warning("run_service.update_run gave up after retries: %s", last_err)
+        return None
 
     async def attach_claude_session(self, run_id: str, claude_session_id: str) -> Optional[dict]:
         return await self.update_run(run_id, claude_session_id=claude_session_id)
