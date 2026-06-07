@@ -1110,10 +1110,11 @@ function AppMain() {
   // so the bubble doesn't linger next to the final answer.
   const showLiveTurn =
     liveRunActive ||
-    (sending &&
-      !uploadProgress &&
-      streamingProjectId === currentProject?.id &&
-      (!currentRun || currentRun.state === 'running'));
+    // 送信した瞬間に出す（PC の warmupMode 相当の即時フィードバック）。前回ターンの
+    // 完了済み currentRun が残っていても instant 経路をブロックしないよう、currentRun の
+    // 状態では絞らない（これが「送信後すぐ出ず数秒遅れる」原因だった）。sending は送信
+    // フローの finally で false になる＝ターン完了でこの経路は自然に閉じる。
+    (sending && !uploadProgress && streamingProjectId === currentProject?.id);
 
   const unreadTotal = useMemo(
     () =>
@@ -2667,7 +2668,7 @@ function AppMain() {
                     <View style={styles.liveStatusRow}>
                       <ActivityIndicator color="#7fd1c7" size="small" />
                       <Text style={styles.liveStatusText} numberOfLines={1}>
-                        {activity || '考えています…'}
+                        {activity || 'Thinking...'}
                       </Text>
                     </View>
                   </View>
