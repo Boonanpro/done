@@ -95,6 +95,18 @@ class StreamingSession:
         # such a call must NOT start a parallel loop (that double-processes the
         # CLI output and double-saves) — it is routed as a follow-up instead.
         self._running = False
+        # Set by cancel() (user pressed stop): the active turn should stop ASAP.
+        # run_turn checks this each poll, breaks, and returns so the caller can
+        # persist any partial output and tear the session down — so a resend
+        # starts a FRESH run instead of being mis-routed as a follow-up to a
+        # still-"active" session.
+        self._cancelled = threading.Event()
+        self._last_turn_cancelled = False
+        # Set by cancel(rollback=True): the cancel happened before Dan produced
+        # any output, so the caller will delete the run/events/message entirely
+        # ("as if never sent"). The sink must then SKIP its own DB writes so it
+        # doesn't re-create the rows the endpoint is deleting.
+        self._rollback = False
 
     # --- lifecycle ------------------------------------------------------
     def is_alive(self) -> bool:
@@ -213,9 +225,13 @@ class StreamingSession:
                 self._last_activity = time.time()
                 return None
             self._running = True
+            # Fresh turn → no cancel pending yet. (Cancel tears the session down,
+            # so this is normally a brand-new object; clearing is belt-and-braces.)
+            self._cancelled.clear()
 
         self._last_turn_hung = False
         hung = False
+        cancelled = False
         # Re-check often enough to notice a hang promptly even for small idle
         # thresholds, but no more than the normal poll cadence.
         poll = max(0.2, min(_RUN_TURN_POLL_SECONDS, timeout / 2.0))
@@ -229,7 +245,15 @@ class StreamingSession:
             # Keep running follow-up turns until nothing is pending.
             last_result: Optional[TurnEvent] = None
             while True:
+                # User pressed stop: abandon this turn now (partial output is
+                # already in the sink; the caller persists it and tears down).
+                if self._cancelled.is_set():
+                    cancelled = True
+                    break
                 if turn.done.wait(timeout=poll):
+                    if self._cancelled.is_set():
+                        cancelled = True
+                        break
                     last_result = turn.result
                     # If a follow-up was queued, start the next turn for it.
                     follow = self._drain_pending()
@@ -255,10 +279,48 @@ class StreamingSession:
             self._turn = None
             self._running = False
             self._last_turn_hung = hung
+            self._last_turn_cancelled = cancelled
             if hung:
                 # Drop the poisoned/half-finished process; the next turn will
                 # start a fresh CLI via start() in run_turn/get_or_create_session.
                 self.stop()
+
+    @property
+    def last_turn_cancelled(self) -> bool:
+        """True if the most recent run_turn ended because cancel() was called
+        (user pressed stop), as opposed to finishing or hanging."""
+        return self._last_turn_cancelled
+
+    @property
+    def rollback_requested(self) -> bool:
+        """True when the active turn was cancelled before any output and should be
+        fully rolled back (the sink skips its DB writes; the endpoint deletes the
+        run/events/message)."""
+        return self._rollback
+
+    def cancel(self, rollback: bool = False) -> None:
+        """Stop the in-flight turn now (user pressed stop). Signals run_turn to
+        break, nudges the CLI to stop generating, and tears the process down
+        synchronously so is_turn_active() flips False right away — a fast resend
+        then starts a fresh run instead of being mis-routed as a follow-up to a
+        still-"active" session.
+
+        rollback=True: the cancel landed before Dan produced output, so the sink
+        must skip persisting anything (the caller deletes the run/message)."""
+        self._rollback = rollback
+        self._cancelled.set()
+        # Nudge the CLI to stop emitting tokens for the current turn.
+        if self.is_alive() and self._turn is not None:
+            try:
+                self._send_interrupt()
+            except Exception:
+                pass
+        # Unblock the run_turn poll immediately.
+        t = self._turn
+        if t and not t.done.is_set():
+            t.done.set()
+        # Tear the process down so a resend isn't classified as a follow-up.
+        self.stop()
 
     def submit_followup(self, content: str) -> None:
         """Queue a follow-up. If a turn is in flight it will be applied at the
@@ -364,3 +426,25 @@ def get_or_create_session(
 def has_active_session(room_id: str) -> bool:
     s = get_session(room_id)
     return bool(s and s.is_alive())
+
+
+def cancel_session(room_id: str, rollback: bool = False) -> bool:
+    """Cancel a room's in-flight turn (user pressed stop) and drop the session
+    from the registry so the next message starts a fresh run. Returns True if a
+    session existed. Without this, the persistent streaming session is never
+    stopped on cancel (kill_cli_process only knows the one-shot registry), so
+    is_turn_active() stays True and a resend is mis-routed as a follow-up.
+
+    rollback=True signals a "before output" cancel: the sink skips its DB writes
+    so the caller can delete the run/events/message cleanly (CLI-like rollback)."""
+    with _registry_lock:
+        s = _sessions.get(room_id)
+    if s is None:
+        return False
+    try:
+        s.cancel(rollback=rollback)
+    finally:
+        with _registry_lock:
+            if _sessions.get(room_id) is s:
+                _sessions.pop(room_id, None)
+    return True

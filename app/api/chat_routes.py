@@ -49,6 +49,10 @@ from pydantic import BaseModel
 class CancelRequest(BaseModel):
     """キャンセルリクエスト"""
     session_id: str
+    # ダンが最初の出力を出す前のキャンセル → 「送信前」に完全巻き戻しする（CLI流）。
+    # run・execution_events・該当ユーザーメッセージを削除し、残骸（二重グルグル等）を残さない。
+    rollback: bool = False
+    message_id: Optional[str] = None  # 巻き戻し時に削除するユーザーメッセージ
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 security = HTTPBearer(auto_error=False)
@@ -2478,12 +2482,9 @@ async def send_dan_message_stream(
 
                 # ダンの回答完了 → 観察者を即座にバックグラウンド起動
                 if result_saved and run_state != "paused":
-                    await _notify_dan_completion(
-                        room_id,
-                        current_user.user_id,
-                        project_info.get("id"),
-                        final_text,
-                    )
+                    # 完了プッシュ通知は cli_runner の確定完了点（SSE非依存）へ移動した。
+                    # ここ（SSEジェネレータ内）から送ると、ユーザーのリフレッシュ/切断で
+                    # ジェネレータが閉じた場合に発火せず、通知が届かないため。
                     _trigger_observer(room_id, current_user.user_id)
 
                     # ダンが書き出したビジュアル成果物を検知 → Gemini抽出 → 永続保存
@@ -2815,6 +2816,25 @@ async def get_active_session_status(
             "started_at": info["started_at"],
         }
 
+    # 常駐ストリーミングセッションでターンが実行中なら active を返す。
+    # CancellationRegistry は SSE ジェネレータの finally（切断時）で解除されるため、
+    # ページをリフレッシュして SSE が切れると、これと is_cli_active だけでは false に
+    # なり、PC のライブ表示（thinking/実行中）が消えてしまう。常駐セッション＝SSEに
+    # 依存しないターン進行の真実を直接見ることで、モバイルと同じく正しく「実行中」を
+    # 返し、リフレッシュ後もライブ表示が復活する。
+    try:
+        from app.agent.streaming_session import streaming_enabled, get_session
+        if streaming_enabled():
+            s = get_session(session_id)
+            if s is not None and s.is_turn_active():
+                return {
+                    "active": True,
+                    "session_id": session_id,
+                    "started_at": None,
+                }
+    except Exception:
+        pass
+
     # Registry にないが CLI プロセスがまだ動いている場合
     if is_cli_active(session_id):
         return {
@@ -2849,10 +2869,47 @@ async def cancel_dan_session(
     success = CancellationRegistry.cancel(request.session_id)
     cli_killed = kill_cli_process(request.session_id)
 
+    # 常駐ストリーミングセッション（DAN_STREAMING_INPUT）は _active_processes に
+    # 載らないため kill_cli_process では止まらない。明示的に畳む。これをやらないと
+    # is_turn_active() が True のまま残り、再送が「追い連絡」に誤分類されて
+    # thinking/実行中表示が出ず、孤児プロセスが回り続けてダン全体が不安定化する。
+    streaming_cancelled = False
+    try:
+        from app.agent.streaming_session import streaming_enabled, cancel_session
+        if streaming_enabled():
+            streaming_cancelled = cancel_session(request.session_id, rollback=request.rollback)
+    except Exception as e:
+        logger.warning(f"streaming cancel_session failed (room={request.session_id}): {e}")
+
+    # 完全巻き戻し（出力前キャンセル）: run・execution_events・該当ユーザーメッセージを
+    # 削除して「送信前」と同じ状態に戻す。残骸（superseded run / 余った events / 返信の
+    # 無いメッセージ）を残さないので、二重グルグルや表示の乱れが根本から出なくなる。
+    # sink 側は rollback フラグで DB 書き込みをスキップ済みなので競合しない。
+    if request.rollback:
+        try:
+            from app.services.supabase_client import get_supabase_client
+            sb = get_supabase_client().client
+            proj = sb.table("projects").select("id").eq("room_id", request.session_id).limit(1).execute().data
+            project_id = proj[0]["id"] if proj else None
+            if project_id:
+                running = sb.table("agent_runs").select("id").eq(
+                    "project_id", project_id
+                ).eq("state", "running").execute().data
+                for r in running:
+                    rid = r["id"]
+                    sb.table("execution_events").delete().eq("run_id", rid).execute()
+                    sb.table("agent_runs").delete().eq("id", rid).execute()
+            if request.message_id:
+                sb.table("chat_messages").delete().eq(
+                    "id", request.message_id
+                ).eq("room_id", request.session_id).execute()
+        except Exception as e:
+            logger.warning(f"cancel rollback cleanup failed (room={request.session_id}): {e}")
+
     # ブラウザセッションも停止
     abort_executor_session()
 
-    return {"success": success or cli_killed, "session_id": request.session_id}
+    return {"success": success or cli_killed or streaming_cancelled, "session_id": request.session_id}
 
 
 # ==================== Proposal Routes (2G) ====================

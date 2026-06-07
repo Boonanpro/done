@@ -761,25 +761,42 @@ def _update_run_sync(
     state: Optional[str] = None,
     claude_session_id: Optional[str] = None,
 ):
-    """Best-effort sync update for the current agent run."""
+    """Best-effort sync update for the current agent run.
+
+    Retries on transient connection drops (Supabase/httpx 'Server disconnected'
+    from a stale pooled connection — a fresh attempt grabs a new connection).
+    Without the retry, a failed *completion* update leaves the run stuck at
+    state='running', which makes the mobile app — it shows the live「考えています」
+    bubble purely from run.state==='running' — keep spinning forever even after
+    Dan has already answered (only a new message superseding the run clears it).
+    `_save_ai_message_sync` already retries, which is why the answer itself was
+    saved while only the run state got stuck."""
     if not run_id:
         return
-    try:
-        from app.services.supabase_client import get_supabase_client
+    updates = {}
+    if state is not None:
+        updates["state"] = state
+    if claude_session_id is not None:
+        updates["claude_session_id"] = claude_session_id
+    if not updates:
+        return
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
 
-        updates = {}
-        if state is not None:
-            updates["state"] = state
-        if claude_session_id is not None:
-            updates["claude_session_id"] = claude_session_id
-        if not updates:
+    from app.services.supabase_client import get_supabase_client
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            sb = get_supabase_client().client
+            sb.table("agent_runs").update(updates).eq("id", run_id).execute()
+            if attempt > 1:
+                _cli_debug(f"_update_run_sync OK (attempt {attempt}) state={state}")
             return
-
-        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-        sb = get_supabase_client().client
-        sb.table("agent_runs").update(updates).eq("id", run_id).execute()
-    except Exception as e:
-        _cli_debug(f"_update_run_sync failed: {e}")
+        except Exception as e:
+            last_err = e
+            _cli_debug(f"_update_run_sync attempt {attempt} failed: {e}")
+            if attempt < 3:
+                time.sleep(0.3 * attempt)
+    _cli_debug(f"_update_run_sync gave up after retries: {last_err}")
 
 
 def _tool_detail(inp, limit: int = 4000) -> str:
@@ -1958,6 +1975,17 @@ def _run_cli_in_thread(
                     content="completed",
                 )
             _update_run_sync(run_id, state="failed" if is_error else "completed")
+            # 完了プッシュ通知（SSE非依存）。SSE切断/リフレッシュでも届くよう、確定
+            # 完了点から別スレッドで送る（reader をブロックしない）。
+            try:
+                from app.services.push_service import notify_dan_completion_sync
+                threading.Thread(
+                    target=notify_dan_completion_sync,
+                    args=(room_id, user_id, project_id, text),
+                    daemon=True,
+                ).start()
+            except Exception as e:
+                _cli_debug(f"completion push spawn failed: {e}")
             # Safety net: if Dan ended the turn promising a later report (e.g.
             # "完了したら報告します" after kicking off a background generation) but
             # didn't book a follow-up, book one automatically so the report can't
@@ -2299,6 +2327,18 @@ async def _process_via_streaming_session(
                 if project_id and not continuation:
                     _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=turn_id, content="completed")
                     _update_run_sync(run_id, state="failed" if is_error else "completed")
+                    # 完了プッシュ通知（SSE非依存）。SSEジェネレータからではなく、この
+                    # 確定完了点から送ることで、ユーザーがリフレッシュ/切断してSSEが
+                    # 切れても通知が届く。reader をブロックしないよう別スレッドで送る。
+                    try:
+                        from app.services.push_service import notify_dan_completion_sync
+                        threading.Thread(
+                            target=notify_dan_completion_sync,
+                            args=(room_id, user_id, project_id, text),
+                            daemon=True,
+                        ).start()
+                    except Exception as e:
+                        _cli_debug(f"[STREAMING] completion push spawn failed: {e}")
                     # Safety net: auto-book a follow-up when Dan ended the turn
                     # promising a later report (e.g. "完了したら報告します" after a
                     # background generation) but didn't schedule one. See
@@ -2330,6 +2370,45 @@ async def _process_via_streaming_session(
         try:
             res = session.run_turn(send_content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
             elapsed = time.time() - t0
+            # User pressed stop: persist whatever streamed so far so partial work
+            # isn't silently lost (case B), then drop the saved session id so the
+            # next message starts a FRESH run (the session was already torn down
+            # in cancel()). When nothing streamed yet (case A — stop before the
+            # first output), there's no partial to save and the frontend has
+            # already restored the text to the input box for a clean resend.
+            if getattr(session, "last_turn_cancelled", False):
+                _clear_cli_session(room_id)
+                try:
+                    session.stop()
+                except Exception:
+                    pass
+                if getattr(session, "rollback_requested", False):
+                    # 完全巻き戻し（出力前キャンセル）: ここでは何も保存しない。
+                    # run・execution_events・ユーザーメッセージは /dan/cancel
+                    # エンドポイントが削除し、「送信前」と同じ状態に戻す。sink が
+                    # 書き戻すと削除と競合して残骸になるため、DB書き込みは全てスキップ。
+                    _cli_debug(f"[STREAMING] turn rolled back (pre-output cancel) for room {room_id[:8]}")
+                    _emit({"type": "cancelled", "session_id": room_id, "cli_saved": False})
+                    return
+                partial = "\n".join(state["final_text_parts"]).strip()
+                t_start = state["turn_start"] or datetime.now(timezone.utc).isoformat()
+                t_id = state["turn_id"] or str(uuid.uuid4())
+                saved = bool(partial) and not skip_save
+                if saved:
+                    _save_ai_message_sync(
+                        room_id, partial, state["reasoning_steps_acc"], state["reasoning_full_acc"],
+                        blocks=state["turn_blocks"], created_at=t_start, turn_id=t_id,
+                    )
+                    _register_streaming_artifacts()
+                if project_id:
+                    _save_execution_event_sync(
+                        room_id, "done", project_id=project_id, run_id=run_id,
+                        turn_id=t_id, content="cancelled",
+                    )
+                    _update_run_sync(run_id, state="cancelled")
+                _cli_debug(f"[STREAMING] turn cancelled for room {room_id[:8]} (partial_saved={saved})")
+                _emit({"type": "cancelled", "session_id": room_id, "cli_saved": saved})
+                return
             # Idle hang: the turn produced no `result`, so the sink never saved
             # or emitted one. Instead of silently closing the SSE on silence
             # (which is what made long tasks "lose" their reply), persist what

@@ -102,7 +102,73 @@ class PushService:
                 logger.error("Push error: %s", e)
         return {"attempted": len(result.data), "sent": sent, "failed": failed}
 
+    def notify_room_sync(self, room_id: str, exclude_type: str,
+                         title: str, body: str, url: Optional[str] = None) -> dict:
+        """Synchronous variant of notify_room for callers running outside the
+        async event loop (e.g. the streaming sink / one-shot completion in
+        cli_runner, which run in plain reader threads). All I/O here is blocking
+        anyway. This exists because the old completion push fired from the SSE
+        generator, so a client refresh/disconnect dropped the notification."""
+        result = self.supabase.table("push_subscriptions").select("*").eq(
+            "room_id", room_id
+        ).neq("sender_type", exclude_type).execute()
+
+        sent = 0
+        failed = 0
+        for sub in result.data:
+            endpoint = str(sub.get("endpoint", ""))
+            if endpoint.startswith("ExponentPushToken["):
+                if self._send_expo_push_sync(endpoint, title, body, url or "/chat"):
+                    sent += 1
+                else:
+                    failed += 1
+                continue
+
+            if not settings.VAPID_PRIVATE_KEY or not settings.VAPID_PUBLIC_KEY:
+                failed += 1
+                continue
+            try:
+                subscription_info = {
+                    "endpoint": sub["endpoint"],
+                    "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
+                }
+                payload = json.dumps({
+                    "title": title,
+                    "body": body,
+                    "url": url or f"/collab/join/{room_id}",
+                    "icon": "/icon-192x192.png",
+                })
+                webpush(
+                    subscription_info=subscription_info,
+                    data=payload,
+                    vapid_private_key=settings.VAPID_PRIVATE_KEY,
+                    vapid_claims={"sub": "mailto:dan@done.app"},
+                )
+                sent += 1
+            except WebPushException as e:
+                failed += 1
+                if e.response and e.response.status_code in (404, 410):
+                    try:
+                        self.supabase.table("push_subscriptions").delete().match({
+                            "room_id": room_id,
+                            "sender_type": sub["sender_type"],
+                            "endpoint": sub["endpoint"],
+                        }).execute()
+                    except Exception:
+                        pass
+                else:
+                    logger.error("Push failed (sync): %s", e)
+            except Exception as e:
+                failed += 1
+                logger.error("Push error (sync): %s", e)
+        return {"attempted": len(result.data), "sent": sent, "failed": failed}
+
     async def _send_expo_push(self, token: str, title: str, body: str, url: str) -> bool:
+        """Send a native Expo push notification (async wrapper around the sync
+        sender; the underlying HTTP call is blocking)."""
+        return self._send_expo_push_sync(token, title, body, url)
+
+    def _send_expo_push_sync(self, token: str, title: str, body: str, url: str) -> bool:
         """Send a native Expo push notification."""
         payload = json.dumps({
             "to": token,
@@ -141,3 +207,34 @@ class PushService:
 
 def get_push_service() -> PushService:
     return PushService()
+
+
+def notify_dan_completion_sync(
+    room_id: str,
+    user_id: Optional[str],
+    project_id: Optional[str],
+    final_text: str = "",
+) -> None:
+    """Best-effort completion push, callable from non-async threads (the
+    streaming sink / one-shot completion in cli_runner). Fires from the
+    *decoupled* completion point so it is delivered even if the SSE client has
+    refreshed/disconnected — the previous async path fired from the SSE
+    generator and was silently skipped whenever the connection dropped.
+
+    Sends to the chat room (excluding the AI) and to the user's personal
+    `user:<id>` channel, which is where the mobile Expo token is registered."""
+    try:
+        body = " ".join((final_text or "").split())
+        if len(body) > 120:
+            body = body[:120] + "…"
+        if not body:
+            body = "Danの作業が完了しました"
+        url = f"/chat/{project_id}" if project_id else "/chat"
+        svc = PushService()
+        svc.notify_room_sync(room_id=room_id, exclude_type="ai", title="Dan", body=body, url=url)
+        if user_id:
+            svc.notify_room_sync(
+                room_id=f"user:{user_id}", exclude_type="ai", title="Dan", body=body, url=url
+            )
+    except Exception as e:
+        logger.debug("Dan completion push (sync) skipped: %s", e)
