@@ -23,8 +23,8 @@
 
 ## Current component policy
 
-- Use `PinnedStory` for desktop pinned narrative sections. It is backed by GSAP ScrollTrigger, not custom scroll listeners.
-- On mobile, use the built-in `MobileStoryRail` fallback or the standalone `MobileStoryRail` component: vertical scroll pins the section while cards move horizontally, then normal vertical scrolling resumes. Do not shrink a desktop two-column pinned layout onto a phone.
-- Before writing custom GSAP code, read the relevant skills: `gsap-scrolltrigger` and `gsap-react` at minimum. For timelines, also read `gsap-timeline`.
-- If `PinnedStory` or `ScrollVideo` already fits the goal, use the component instead of writing one-off animation code.
-- If writing one-off ScrollTrigger code, include cleanup via `useGSAP`, set `scroller` when the page uses an internal scroll container, and call `ScrollTrigger.refresh()` after media/layout changes.
+- For desktop pinned narrative sections, write them per-case with the `gsap-scrolltrigger` skill. There is no shared pinned-story component (retired — it auto-detected the scroller and was fragile inside custom scroll containers).
+- Pin on the default window scroller (artifacts scroll the document), clean up via `useGSAP`, and call `ScrollTrigger.refresh()` after media/layout changes. Only set `scroller` explicitly if the page genuinely uses an internal scroll container.
+- On mobile, stack the chapters vertically. Do not shrink a desktop two-column pinned layout onto a phone.
+- Before writing GSAP, read the relevant skills: `gsap-scrolltrigger` and `gsap-react` at minimum; for timelines also `gsap-timeline`.
+- If `ScrollVideo` already fits the goal, use that component instead of writing one-off animation code. For simple reveals use the `motion/` helpers or framer-motion `whileInView` directly.

@@ -161,14 +161,15 @@ Rules:
 - `ImageReveal`: 写真がマスクで開く。料理、物件、人物、作品の見せ場向け。
 - `ParallaxMedia`: 写真/動画が少し遅れて動く。フルブリード写真や2カラムの媒体向け。
 - `TextReveal`: 見出しを行単位で出す。ファーストビューや強い章見出し向け。
-- `PinnedStory`: 片側の媒体を擬似固定し、章テキスト・進捗レール・active章ハイライト・章ごとのmediaフェードで読ませる。CSS `position: sticky` に依存しない。採用/ブランド/こだわり説明など、スクロールで物語的に見せる必要がある場合だけ使う。最後の章を読み終える前にmediaが画面外へ流れないことを確認する。
 - `SectionThemeShift`: セクション進入で背景色やトーンを変える。明暗の切り替えや没入感向け。
+
+片側固定のスクロールナラティブ（旧 PinnedStory のような演出）は共通部品にしない。必要な案件ごとに `gsap-scrolltrigger` スキルを直接使って書く（理由: 自動スクローラ検出の共通部品は独自スクロール容器内で揺れて脆かったため引退）。
 
 判断ルール:
 
 - `subtle`: `FadeIn` / `Stagger` 中心でよい。
 - `expressive`: `FadeIn` だけで終わらせず、`ImageReveal` / `ParallaxMedia` / `TextReveal` / `SectionThemeShift` から最低1つ使う。
-- `scroll-driven`: `ScrollVideo` または `PinnedStory` を主役にし、reduced-motion fallbackを用意する。`PinnedStory` は各章にmediaを渡せるなら渡し、章が進んだことを視覚的に分かるようにする。PCではmediaが最後の章の読了まで画面内に残るか確認する。
+- `scroll-driven`: `ScrollVideo` を主役にするか、片側固定のスクロールナラティブが必要なら `gsap-scrolltrigger` スキルを直接使って実装する（既定の window スクローラで pin、`useGSAP` でクリーンアップ）。reduced-motion fallback を用意し、PCでは最後の章の読了までmediaが画面内に残るか確認する。モバイルは固定せず縦に積む（PCの2カラム固定をスマホに強制しない）。
 
 参考サイトの動きを採用すると書いた場合、Interaction Evidenceの「目的」と上記部品を対応させる。
 
@@ -193,9 +194,8 @@ Rules:
 When creating HP/LP motion, do not hand-roll complex scroll pinning, scroll-scrubbing, or timeline choreography with ad hoc `scroll` listeners and `transform` updates.
 
 - Use the installed GSAP skills when implementing GSAP: `gsap-core`, `gsap-timeline`, `gsap-scrolltrigger`, `gsap-react`, `gsap-performance`, `gsap-plugins`.
-- For scroll-driven pinning, prefer `GSAP ScrollTrigger` (`pin`, `scrub`, `scroller`, cleanup via `useGSAP`) over custom JS.
-- Use `PinnedStory` for desktop narrative pinning only when the content benefits from a story-like scroll section. It is not a default section for every HP.
-- `PinnedStory` uses GSAP ScrollTrigger for desktop and switches to `MobileStoryRail` on mobile. Do not force the desktop two-column pin layout onto mobile.
-- Use `MobileStoryRail` for mobile story sections: the section pins during vertical scroll while media/text cards move horizontally, then normal vertical scrolling resumes after the last card.
+- For scroll-driven pinning, prefer `GSAP ScrollTrigger` (`pin`, `scrub`, cleanup via `useGSAP`) over custom JS. Pin on the default window scroller (artifacts scroll the document); only set `scroller` if the page truly uses an internal scroll container.
+- For desktop narrative pinning, write it per-case with the `gsap-scrolltrigger` skill. There is no shared pinned-story component (retired — it auto-detected the scroller and was fragile inside custom scroll containers).
+- On mobile, stack the chapters vertically. Do not force a desktop two-column pin layout onto a phone.
 - For subtle reveal only, keep using `FadeIn`, `Stagger`, `TextReveal`, or `ParallaxMedia`; do not introduce GSAP where simple motion is enough.
 - Always verify both desktop and mobile screenshots. For pinned/scroll-driven sections, verify that media does not jitter, disappear early, or block reading.

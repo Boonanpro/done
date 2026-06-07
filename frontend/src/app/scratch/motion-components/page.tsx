@@ -7,7 +7,6 @@ import {
   FadeIn,
   ImageReveal,
   ParallaxMedia,
-  PinnedStory,
   SectionThemeShift,
   Stagger,
   StaggerItem,
@@ -18,8 +17,6 @@ import {
 const imageA = '/yonago-gojo/g1.jpg';
 const imageB = '/yonago-gojo/g3.jpg';
 const imageC = '/yonago-gojo/g4.jpg';
-const videoA = '/yonago-gojo/dish.mp4';
-const posterA = '/yonago-gojo/dish-poster.jpg';
 
 type Status = 'usable' | 'review';
 
@@ -115,7 +112,6 @@ export default function MotionComponentsScratchPage() {
     ['ImageReveal', 'imagereveal'],
     ['ParallaxMedia', 'parallaxmedia'],
     ['TextReveal', 'textreveal'],
-    ['PinnedStory', 'pinnedstory'],
     ['SectionThemeShift', 'sectionthemeshift'],
     ['useScrollRange', 'usescrollrange'],
   ];
@@ -243,49 +239,6 @@ export default function MotionComponentsScratchPage() {
           as="h2"
           className="text-5xl font-medium leading-[1.08] sm:text-7xl"
           lineClassName="pb-2"
-        />
-      </DemoBlock>
-
-      <DemoBlock
-        id="pinnedstory"
-        title="PinnedStory"
-        status="usable"
-        notes="スクロールに合わせて片側のメディアを擬似固定し、章ごとに画像/動画を切り替える主力候補です。必要な案件だけで使います。"
-      >
-        <PinnedStory
-          progressLabel="pinned story"
-          className="min-h-[280vh]"
-          mediaFrameClassName="border border-white/10 bg-white/5"
-          chapters={[
-            {
-              eyebrow: '01 / 動画',
-              title: 'メディアを画面内に留める',
-              body: '左側の映像がその場に残り、右側の文章だけが進む見せ方です。',
-              media: (
-                <video
-                  src={videoA}
-                  poster={posterA}
-                  autoPlay
-                  muted
-                  loop
-                  playsInline
-                  className="h-full w-full object-cover"
-                />
-              ),
-            },
-            {
-              eyebrow: '02 / 写真',
-              title: '章ごとにメディアを切り替える',
-              body: '章の進行に合わせて、左側の写真や動画が切り替わります。',
-              media: <img src={imageB} alt="" className="h-full w-full object-cover" />,
-            },
-            {
-              eyebrow: '03 / 読了',
-              title: '最後までメディアを残す',
-              body: '最後の文章を読み終えるまで、左側のメディアが画面内に残る必要があります。',
-              media: <img src={imageC} alt="" className="h-full w-full object-cover" />,
-            },
-          ]}
         />
       </DemoBlock>
 
