@@ -1,14 +1,42 @@
 "use client";
 
 import * as React from "react";
+import { useLang } from "./lang-context";
+
+const L = {
+  ja: {
+    namePlaceholder: "お名前（任意）",
+    emailPlaceholder: "メールアドレス",
+    submit: "登録する",
+    submitting: "送信中…",
+    badEmail: "メールアドレスの形式をご確認ください。",
+    failed: "送信に失敗しました。時間をおいて再度お試しください。",
+    note: "提供開始のご案内のみにご利用します。営業メールは送りません。",
+    thanksTitle: "ご登録ありがとうございます。",
+    thanksBody:
+      "Done の提供開始が決まりましたら、このメールアドレスへ最初にご案内します。",
+  },
+  en: {
+    namePlaceholder: "Name (optional)",
+    emailPlaceholder: "Email address",
+    submit: "Register",
+    submitting: "Sending…",
+    badEmail: "Please check the email format.",
+    failed: "Sending failed. Please try again in a moment.",
+    note: "Used only to announce the launch. No marketing emails.",
+    thanksTitle: "Thank you for registering.",
+    thanksBody: "When Done's launch is set, this address will be the first to hear.",
+  },
+};
 
 /**
  * Done ウェイティングリスト登録フォーム（メールのみ）。
- * 既存の /api/v1/inquiries を scope=paina-waitlist で利用し、
+ * /api/v1/inquiries を scope=paina-waitlist で利用し、
  * 送信内容は shub6923@gmail.com へ通知される。
- * tone="dark" は暗色カード上で使う配色。
  */
 export function WaitlistForm({ tone = "light" }: { tone?: "light" | "dark" }) {
+  const { lang } = useLang();
+  const t = L[lang];
   const [email, setEmail] = React.useState("");
   const [name, setName] = React.useState("");
   const [loading, setLoading] = React.useState(false);
@@ -28,7 +56,7 @@ export function WaitlistForm({ tone = "light" }: { tone?: "light" | "dark" }) {
     e.preventDefault();
     if (loading) return;
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
-      setError("メールアドレスの形式をご確認ください。");
+      setError(t.badEmail);
       return;
     }
     setError(null);
@@ -49,7 +77,7 @@ export function WaitlistForm({ tone = "light" }: { tone?: "light" | "dark" }) {
       if (!res.ok) throw new Error(await res.text());
       setDone(true);
     } catch {
-      setError("送信に失敗しました。時間をおいて再度お試しください。");
+      setError(t.failed);
     } finally {
       setLoading(false);
     }
@@ -69,11 +97,9 @@ export function WaitlistForm({ tone = "light" }: { tone?: "light" | "dark" }) {
             dark ? "text-[var(--paina-bg)]" : "text-[var(--paina-fg)]"
           }`}
         >
-          ご登録ありがとうございます。
+          {t.thanksTitle}
         </p>
-        <p className={`mt-3 text-[14px] leading-[2] ${noteCls}`}>
-          Done の提供開始が決まりましたら、このメールアドレスへ最初にご案内します。
-        </p>
+        <p className={`mt-3 text-[14px] leading-[2] ${noteCls}`}>{t.thanksBody}</p>
       </div>
     );
   }
@@ -85,7 +111,7 @@ export function WaitlistForm({ tone = "light" }: { tone?: "light" | "dark" }) {
           type="text"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="お名前（任意）"
+          placeholder={t.namePlaceholder}
           disabled={loading}
           className={`font-label w-full rounded-full border bg-transparent px-5 py-3 text-[14px] outline-none transition-colors sm:max-w-[180px] ${inputCls}`}
         />
@@ -93,7 +119,7 @@ export function WaitlistForm({ tone = "light" }: { tone?: "light" | "dark" }) {
           type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          placeholder="メールアドレス"
+          placeholder={t.emailPlaceholder}
           disabled={loading}
           required
           className={`font-label w-full flex-1 rounded-full border bg-transparent px-5 py-3 text-[14px] outline-none transition-colors ${inputCls}`}
@@ -103,13 +129,11 @@ export function WaitlistForm({ tone = "light" }: { tone?: "light" | "dark" }) {
           disabled={loading}
           className={`font-label whitespace-nowrap rounded-full px-7 py-3 text-[13px] tracking-wide transition-opacity hover:opacity-90 disabled:opacity-60 ${btnCls}`}
         >
-          {loading ? "送信中…" : "登録する"}
+          {loading ? t.submitting : t.submit}
         </button>
       </div>
       {error && <p className="mt-3 text-[13px] text-rose-400">{error}</p>}
-      <p className={`mt-3 text-[12px] ${noteCls}`}>
-        提供開始のご案内のみにご利用します。営業メールは送りません。
-      </p>
+      <p className={`mt-3 text-[12px] ${noteCls}`}>{t.note}</p>
     </form>
   );
 }

@@ -3,6 +3,7 @@
 import * as React from "react";
 import { PainaNav } from "./paina-nav";
 import { PainaFooter } from "./paina-footer";
+import { LangProvider } from "./lang-context";
 
 /**
  * 株式会社パイナ サイト共通シェル。
@@ -90,11 +91,13 @@ export function PainaShell({ children }: { children: React.ReactNode }) {
           .theme-paina [data-reveal] { opacity: 1 !important; transform: none !important; }
         }
       `}</style>
-      <div className="theme-paina">
-        <PainaNav />
-        <main>{children}</main>
-        <PainaFooter />
-      </div>
+      <LangProvider>
+        <div className="theme-paina">
+          <PainaNav />
+          <main>{children}</main>
+          <PainaFooter />
+        </div>
+      </LangProvider>
     </>
   );
 }

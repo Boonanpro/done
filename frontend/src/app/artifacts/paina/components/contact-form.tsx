@@ -1,28 +1,55 @@
 "use client";
 
 import * as React from "react";
+import { useLang } from "./lang-context";
 
-type Field = {
-  key: "name" | "company" | "email" | "phone" | "message";
-  label: string;
-  type: "text" | "email" | "tel" | "textarea";
-  required?: boolean;
-  autoComplete?: string;
+type FieldKey = "name" | "company" | "email" | "phone" | "message";
+
+const LABELS = {
+  ja: {
+    name: "お名前",
+    company: "会社名",
+    email: "メールアドレス",
+    phone: "電話番号",
+    message: "ご相談内容",
+    submit: "送信する",
+    submitting: "送信中…",
+    required: "お名前とご相談内容は必須です。",
+    badEmail: "メールアドレスの形式をご確認ください。",
+    failed: "送信に失敗しました。時間をおいて再度お試しください。",
+    thanksTitle: "お問い合わせありがとうございます。",
+    thanksBody: "内容を確認のうえ、折り返しご連絡いたします。",
+  },
+  en: {
+    name: "Name",
+    company: "Company",
+    email: "Email",
+    phone: "Phone",
+    message: "Your message",
+    submit: "Send",
+    submitting: "Sending…",
+    required: "Name and message are required.",
+    badEmail: "Please check the email format.",
+    failed: "Sending failed. Please try again in a moment.",
+    thanksTitle: "Thank you for your message.",
+    thanksBody: "After reviewing it, I'll get back to you.",
+  },
 };
 
-const FIELDS: Field[] = [
-  { key: "name", label: "お名前", type: "text", required: true, autoComplete: "name" },
-  { key: "company", label: "会社名", type: "text", autoComplete: "organization" },
-  { key: "email", label: "メールアドレス", type: "email", required: true, autoComplete: "email" },
-  { key: "phone", label: "電話番号", type: "tel", autoComplete: "tel" },
-  { key: "message", label: "ご相談内容", type: "textarea", required: true },
+const FIELDS: { key: FieldKey; type: string; required?: boolean; autoComplete?: string }[] = [
+  { key: "name", type: "text", required: true, autoComplete: "name" },
+  { key: "company", type: "text", autoComplete: "organization" },
+  { key: "email", type: "email", required: true, autoComplete: "email" },
+  { key: "phone", type: "tel", autoComplete: "tel" },
+  { key: "message", type: "textarea", required: true },
 ];
 
 const inputCls =
   "font-label w-full rounded-xl border border-[var(--paina-border-strong)] bg-transparent px-4 py-3 text-[15px] text-[var(--paina-fg)] outline-none transition-colors placeholder:text-[var(--paina-faint)] focus:border-[var(--paina-fg)]";
 
-/** 株式会社パイナ ブランドに合わせた問い合わせフォーム。scope=paina-contact。 */
 export function ContactForm() {
+  const { lang } = useLang();
+  const L = LABELS[lang];
   const [state, setState] = React.useState({
     name: "",
     company: "",
@@ -34,7 +61,7 @@ export function ContactForm() {
   const [error, setError] = React.useState<string | null>(null);
   const [done, setDone] = React.useState(false);
 
-  function set(k: string, v: string) {
+  function set(k: FieldKey, v: string) {
     setState((s) => ({ ...s, [k]: v }));
   }
 
@@ -42,11 +69,11 @@ export function ContactForm() {
     e.preventDefault();
     if (loading) return;
     if (!state.name.trim() || !state.message.trim()) {
-      setError("お名前とご相談内容は必須です。");
+      setError(L.required);
       return;
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(state.email.trim())) {
-      setError("メールアドレスの形式をご確認ください。");
+      setError(L.badEmail);
       return;
     }
     setError(null);
@@ -69,7 +96,7 @@ export function ContactForm() {
       if (!res.ok) throw new Error(await res.text());
       setDone(true);
     } catch {
-      setError("送信に失敗しました。時間をおいて再度お試しください。");
+      setError(L.failed);
     } finally {
       setLoading(false);
     }
@@ -79,11 +106,9 @@ export function ContactForm() {
     return (
       <div className="rounded-2xl border border-[var(--paina-border-strong)] bg-[var(--paina-bg)] px-8 py-12 text-center">
         <p className="font-serif-jp text-xl text-[var(--paina-fg)]">
-          お問い合わせありがとうございます。
+          {L.thanksTitle}
         </p>
-        <p className="lead mt-4 text-[14px]">
-          内容を確認のうえ、担当より折り返しご連絡いたします。
-        </p>
+        <p className="lead mt-4 text-[14px]">{L.thanksBody}</p>
       </div>
     );
   }
@@ -96,7 +121,7 @@ export function ContactForm() {
             htmlFor={`cf-${f.key}`}
             className="font-label flex items-center gap-1 text-[12px] tracking-wide text-[var(--paina-muted)]"
           >
-            {f.label}
+            {L[f.key]}
             {f.required && <span className="text-[var(--paina-gold)]">*</span>}
           </label>
           {f.type === "textarea" ? (
@@ -129,7 +154,7 @@ export function ContactForm() {
         disabled={loading}
         className="font-label w-full rounded-full bg-[var(--paina-fg)] px-8 py-3.5 text-[13px] tracking-wide text-[var(--paina-bg)] transition-opacity hover:opacity-90 disabled:opacity-60 sm:w-auto"
       >
-        {loading ? "送信中…" : "送信する"}
+        {loading ? L.submitting : L.submit}
       </button>
     </form>
   );

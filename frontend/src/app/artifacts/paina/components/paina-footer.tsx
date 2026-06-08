@@ -2,8 +2,12 @@
 
 import * as React from "react";
 import { ArtifactLink as Link } from "@/components/artifacts/artifact-link";
+import { useLang } from "./lang-context";
 
 export function PainaFooter() {
+  const { lang } = useLang();
+  const ja = lang === "ja";
+
   return (
     <footer className="mt-32 border-t border-[var(--paina-border)] bg-[var(--paina-bg)]">
       <div className="mx-auto max-w-[1180px] px-6 py-16 md:px-10 md:py-20">
@@ -15,7 +19,9 @@ export function PainaFooter() {
               className="h-[20px] w-auto"
             />
             <p className="lead mt-6 text-[14px] leading-[2]">
-              人とともに働くAIエージェント Done（ダン）を開発しています。
+              {ja
+                ? "人とともに働くAIエージェント Done（ダン）を開発しています。"
+                : "Developing Done — an AI agent that works alongside people."}
             </p>
           </div>
 
@@ -25,13 +31,19 @@ export function PainaFooter() {
                 Site
               </span>
               <Link href="/artifacts/paina" className="link-underline text-[14px]">
-                ホーム
+                {ja ? "ホーム" : "Home"}
               </Link>
-              <Link href="/artifacts/paina/business" className="link-underline text-[14px]">
-                事業内容
+              <Link
+                href="/artifacts/paina/business"
+                className="link-underline text-[14px]"
+              >
+                {ja ? "事業内容" : "Business"}
               </Link>
-              <Link href="/artifacts/paina/contact" className="link-underline text-[14px]">
-                問い合わせ
+              <Link
+                href="/artifacts/paina/contact"
+                className="link-underline text-[14px]"
+              >
+                {ja ? "問い合わせ" : "Contact"}
               </Link>
             </div>
             <div className="flex flex-col gap-3">
