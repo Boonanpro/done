@@ -11,6 +11,7 @@ type CaseItem = {
   reading: string;
   summary: string;
   tags: string[];
+  thumb: string;
   href?: string;
 };
 
@@ -21,6 +22,7 @@ const HP_CASES: CaseItem[] = [
     summary:
       "特装車輌の架装・整備を手がける事業の信頼を、力強いビジュアルと実績の見せ方で伝えるコーポレートサイトを制作。",
     tags: ["コーポレートサイト", "ブランディング"],
+    thumb: "/paina/case-kittoku.png",
     href: "https://kittoku.vercel.app",
   },
   {
@@ -29,6 +31,7 @@ const HP_CASES: CaseItem[] = [
     summary:
       "夜の隠れ家のような世界観を、温かい暗色と縦書き、手書き風のあしらいで表現した飲食店サイトを制作。",
     tags: ["店舗サイト", "ブランディング"],
+    thumb: "/paina/case-gojo.png",
     href: "https://yonago-gojo-done.vercel.app",
   },
 ];
@@ -40,6 +43,7 @@ const DX_CASES: CaseItem[] = [
     summary:
       "美容サロンの予約サイトへのスタイル投稿を自動化。手作業だった掲載運用を仕組みに変え、更新の手間を大きく削減。",
     tags: ["業務自動化", "ツール開発"],
+    thumb: "/paina/case-styleup.png",
   },
   {
     client: "電管ナレッジ",
@@ -47,37 +51,49 @@ const DX_CASES: CaseItem[] = [
     summary:
       "電気主任技術者の現場知識を蓄積・検索できるナレッジ基盤を構築。属人化していた情報を、誰でも引ける形に整理。",
     tags: ["ナレッジ基盤", "DX支援"],
+    thumb: "/paina/case-denki.png",
   },
 ];
 
 function CaseCard({ c, index }: { c: CaseItem; index: number }) {
   const inner = (
-    <div className="group flex h-full flex-col justify-between rounded-2xl border border-[var(--paina-border)] bg-[var(--paina-bg)] p-8 transition-colors hover:border-[var(--paina-border-strong)] md:p-10">
-      <div>
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h4 className="font-serif-jp text-[1.4rem] leading-[1.5] text-[var(--paina-fg)]">
-              {c.client}
-            </h4>
-            <p className="font-en mt-1 text-[13px] italic text-[var(--paina-faint)]">
-              {c.reading}
-            </p>
-          </div>
-          {c.href && (
-            <ArrowUpRight className="mt-1 h-5 w-5 shrink-0 text-[var(--paina-faint)] transition-colors group-hover:text-[var(--paina-fg)]" />
-          )}
-        </div>
-        <p className="lead mt-6 text-[15px] leading-[2]">{c.summary}</p>
-      </div>
-      <div className="mt-8 flex flex-wrap gap-2">
-        {c.tags.map((t) => (
-          <span
-            key={t}
-            className="font-label rounded-full border border-[var(--paina-border)] px-3 py-1 text-[11px] tracking-wide text-[var(--paina-muted)]"
-          >
-            {t}
+    <div className="group flex h-full flex-col overflow-hidden rounded-2xl border border-[var(--paina-border)] bg-[var(--paina-bg)] transition-colors hover:border-[var(--paina-border-strong)]">
+      {/* サムネイル */}
+      <div className="relative aspect-[16/10] overflow-hidden border-b border-[var(--paina-border)] bg-[var(--paina-bg-soft)]">
+        <img
+          src={c.thumb}
+          alt={`${c.client} の実績サムネイル`}
+          loading="lazy"
+          className="h-full w-full object-cover object-top transition-transform duration-700 group-hover:scale-[1.03]"
+        />
+        {c.href && (
+          <span className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-[var(--paina-bg)]/90 text-[var(--paina-fg)] shadow-sm backdrop-blur">
+            <ArrowUpRight className="h-4 w-4" />
           </span>
-        ))}
+        )}
+      </div>
+
+      {/* 本文 */}
+      <div className="flex flex-1 flex-col justify-between p-7 md:p-8">
+        <div>
+          <h4 className="font-serif-jp text-[1.35rem] leading-[1.5] text-[var(--paina-fg)]">
+            {c.client}
+          </h4>
+          <p className="font-en mt-1 text-[13px] italic text-[var(--paina-faint)]">
+            {c.reading}
+          </p>
+          <p className="lead mt-5 text-[15px] leading-[2]">{c.summary}</p>
+        </div>
+        <div className="mt-7 flex flex-wrap gap-2">
+          {c.tags.map((t) => (
+            <span
+              key={t}
+              className="font-label rounded-full border border-[var(--paina-border)] px-3 py-1 text-[11px] tracking-wide text-[var(--paina-muted)]"
+            >
+              {t}
+            </span>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -124,15 +140,24 @@ export default function PainaBusiness() {
         <div className="mx-auto max-w-[1180px]">
           <div className="overflow-hidden rounded-3xl bg-[var(--paina-fg)] px-8 py-14 text-[var(--paina-bg)] md:px-16 md:py-20">
             <Reveal>
-              <div className="flex items-center gap-4">
-                <span className="font-en text-[1.4rem] italic text-[var(--paina-gold)]">01</span>
-                <span className="font-label rounded-full border border-[var(--paina-gold-soft)]/40 px-3 py-1 text-[11px] uppercase tracking-[0.24em] text-[var(--paina-gold-soft)]">
-                  Product — Coming soon
-                </span>
+              <div className="flex items-start gap-5 sm:gap-6">
+                <img
+                  src="/paina/done-icon.png"
+                  alt="ダン（Done）アプリアイコン"
+                  className="h-16 w-16 shrink-0 rounded-[18px] shadow-lg shadow-black/20 sm:h-[76px] sm:w-[76px]"
+                />
+                <div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="font-en text-[1.4rem] italic text-[var(--paina-gold)]">01</span>
+                    <span className="font-label rounded-full border border-[var(--paina-gold-soft)]/40 px-3 py-1 text-[11px] uppercase tracking-[0.24em] text-[var(--paina-gold-soft)]">
+                      Product — Coming soon
+                    </span>
+                  </div>
+                  <h2 className="font-serif-jp mt-4 max-w-[20ch] text-[2rem] leading-[1.4] md:text-[2.6rem]">
+                    Done（ダン）の開発
+                  </h2>
+                </div>
               </div>
-              <h2 className="font-serif-jp mt-7 max-w-[20ch] text-[2rem] leading-[1.45] md:text-[2.8rem]">
-                Done（ダン）の開発
-              </h2>
               <p className="mt-7 max-w-[58ch] text-[16px] leading-[2.1] text-[var(--paina-bg)]/80">
                 「やっておいて」が、本当に終わっている。
                 調べ、判断し、操作し、結果を確かめて直すまでを自分で完結する、

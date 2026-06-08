@@ -6,7 +6,6 @@ import { ArtifactLink as Link } from "@/components/artifacts/artifact-link";
 import { Menu, X } from "lucide-react";
 
 const NAV = [
-  { label: "ホーム", en: "Home", href: "/artifacts/paina" },
   { label: "事業内容", en: "Business", href: "/artifacts/paina/business" },
   { label: "問い合わせ", en: "Contact", href: "/artifacts/paina/contact" },
 ];
@@ -68,7 +67,7 @@ export function PainaNav() {
               href="/artifacts/paina/business#done"
               className="font-label rounded-full border border-[var(--paina-border-strong)] px-5 py-2 text-[12px] tracking-wide text-[var(--paina-fg)] transition-colors hover:border-[var(--paina-fg)]"
             >
-              Done を待つ
+              ダンを待つ
             </Link>
           </nav>
 
@@ -108,7 +107,7 @@ export function PainaNav() {
             onClick={() => setOpen(false)}
             className="font-label mt-8 flex items-center justify-center rounded-full border border-[var(--paina-fg)] px-6 py-3 text-sm tracking-wide"
           >
-            Done を待つ
+            ダンを待つ
           </Link>
         </div>
       )}
