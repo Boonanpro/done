@@ -76,20 +76,20 @@ function absolutePublicUrl(pathOrUrl: string): string {
 }
 
 function cleanArtifactUrl(artifact: ArtifactRecord, pathOrUrl: string): string {
-  // Live workspace/preview URL on the current origin. Always served (the files
-  // are on disk), so it never 404s while a deploy is still in flight or failed.
-  const localFallback = absolutePublicUrl(artifactSharePath(pathOrUrl || artifact.slug));
+  // Provisional delivery URL: <origin>/preview/<slug>. This is the clean single
+  // public URL (RULES.md). It is served by the production deployment once the
+  // artifact is committed to main, and locally from disk meanwhile — so it never
+  // 404s. We do NOT fabricate a per-slug <slug>-done.vercel.app alias (retired:
+  // that second URL pinned to stale deployments and 404'd as DEPLOYMENT_NOT_FOUND).
+  const previewUrl = absolutePublicUrl(artifactSharePath(pathOrUrl || artifact.slug));
 
-  // Only point at the public delivery domain (<slug>-done.vercel.app) once the
-  // artifact is actually published. production_url is set only after the alias
-  // health check passes; custom_domain / KNOWN_CUSTOM_DOMAINS are known-live.
-  // Otherwise we'd fabricate a URL whose Vercel alias may not exist yet, which
-  // is exactly the "404 DEPLOYMENT_NOT_FOUND" the user hit.
-  const isPublished =
+  // Only a custom-domain publish overrides the /preview URL. production_url is
+  // set only for custom domains; KNOWN_CUSTOM_DOMAINS are known-live.
+  const hasCustomDomain =
     !!artifact.production_url ||
     !!artifact.custom_domain ||
     (KNOWN_CUSTOM_DOMAINS[artifact.slug]?.length ?? 0) > 0;
-  if (!isPublished) return localFallback;
+  if (!hasCustomDomain) return previewUrl;
 
   return (
     artifactProductionUrl({
@@ -97,7 +97,7 @@ function cleanArtifactUrl(artifact: ArtifactRecord, pathOrUrl: string): string {
       pathOrUrl,
       productionUrl: artifact.production_url,
       customDomain: artifact.custom_domain,
-    }) || localFallback
+    }) || previewUrl
   );
 }
 

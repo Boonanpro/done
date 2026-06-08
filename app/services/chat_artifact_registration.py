@@ -8,9 +8,6 @@ from __future__ import annotations
 
 import logging
 import re
-import subprocess
-import sys
-import time
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -19,8 +16,6 @@ from app.services.chat_artifact_service import ChatArtifactService
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-ALIAS_DEPLOY_LOG = PROJECT_ROOT / "artifact_alias_deploy.log"
-ALIAS_DEPLOY_DEBOUNCE_SECONDS = 30
 WRITE_TOOL_NAMES = {
     "write_file",
     "edit_file",
@@ -104,47 +99,23 @@ def artifact_slugs_from_written_paths(written_file_paths: Iterable[str]) -> list
     return slugs
 
 
-def schedule_artifact_alias_deploy(slugs: Iterable[str]) -> None:
-    """Start a background Vercel deploy that assigns stable delivery aliases."""
-    unique_slugs: list[str] = []
-    seen: set[str] = set()
-    for raw_slug in slugs:
-        slug = (raw_slug or "").strip()
-        if not slug or slug in seen:
-            continue
-        seen.add(slug)
-        unique_slugs.append(slug)
-
-    if not unique_slugs:
-        return
-
-    try:
-        lock_name = "artifact_alias_deploy_" + "_".join(unique_slugs) + ".lock"
-        lock_path = PROJECT_ROOT / ".tmp" / re.sub(r"[^a-zA-Z0-9_.-]", "_", lock_name)
-        lock_path.parent.mkdir(exist_ok=True)
-        now = time.time()
-        if lock_path.exists() and now - lock_path.stat().st_mtime < ALIAS_DEPLOY_DEBOUNCE_SECONDS:
-            logger.info("Skipping duplicate artifact alias deploy for slugs=%s", ",".join(unique_slugs))
-            return
-        lock_path.write_text(str(now), encoding="utf-8")
-
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        with ALIAS_DEPLOY_LOG.open("ab") as log_file:
-            subprocess.Popen(
-                [sys.executable, "scripts/deploy_frontend_artifacts.py", *unique_slugs],
-                cwd=str(PROJECT_ROOT),
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                creationflags=creationflags,
-            )
-        logger.info("Scheduled artifact alias deploy for slugs=%s", ",".join(unique_slugs))
-    except Exception as e:  # noqa: BLE001 - publishing must not break chat completion
-        logger.warning("Failed to schedule artifact alias deploy: %s", e)
-
-
 def schedule_artifact_alias_deploy_from_written_paths(written_file_paths: Iterable[str]) -> None:
-    """Schedule public alias deployment for any artifact root touched by writes."""
-    schedule_artifact_alias_deploy(artifact_slugs_from_written_paths(written_file_paths))
+    """Schedule the provisional publish for any artifact root touched by writes.
+
+    The moment an artifact is registered it should be publicly viewable at
+    ``<host>/preview/<slug>``. We achieve that by committing the artifact to the
+    production branch (``main``) so Vercel builds and serves it — see
+    ``app.services.artifact_git_publish``.
+
+    Historically this assigned a ``<slug>-done.vercel.app`` Vercel alias. That
+    alias path is retired (RULES.md): it created a second URL that pinned to a
+    stale deployment and 404'd. The clean single URL is ``/preview/<slug>``.
+    The function name is kept so existing callers (chat routes, registration)
+    keep working without changes.
+    """
+    from app.services.artifact_git_publish import schedule_artifact_git_publish
+
+    schedule_artifact_git_publish(artifact_slugs_from_written_paths(written_file_paths))
 
 
 def _page_exists(preview_url: str) -> bool:
