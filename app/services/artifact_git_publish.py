@@ -198,7 +198,9 @@ def preview_url_for(slug: str) -> str:
 
 
 def _wait_until_live(slug: str) -> bool:
-    url = preview_url_for(slug) + "/"
+    # No trailing slash: <host>/preview/<slug>/ 308-redirects to the no-slash
+    # form, and urllib (<=3.10) raises on 308 instead of following it.
+    url = preview_url_for(slug)
     for _ in range(LIVE_CHECK_ATTEMPTS):
         try:
             req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "dan-publish-check"})
