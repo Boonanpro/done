@@ -43,6 +43,16 @@ const API_BASE_URL =
   Constants.expoConfig.extra.apiBaseUrl.trim()
     ? Constants.expoConfig.extra.apiBaseUrl.trim().replace(/\/+$/, '')
     : DEFAULT_API_BASE_URL;
+// Clean, name-bearing host for provisional artifact share/full-screen URLs.
+// Must match the web NEXT_PUBLIC_SHARE_ORIGIN so PC and mobile show the SAME
+// URL. Kept separate from API_BASE_URL: this alias is re-pointed to the latest
+// production on every artifact publish, whereas API calls use an auto-following
+// host. Override via expoConfig.extra.shareBaseUrl.
+const SHARE_BASE_URL =
+  typeof Constants.expoConfig?.extra?.shareBaseUrl === 'string' &&
+  Constants.expoConfig.extra.shareBaseUrl.trim()
+    ? Constants.expoConfig.extra.shareBaseUrl.trim().replace(/\/+$/, '')
+    : 'https://done-studio.vercel.app';
 const LEGACY_BASE_URL = 'https://frontend-mikis-projects-86652663.vercel.app';
 const LEGACY_VERCEL_HOST_PATTERN = /^https?:\/\/frontend-[^.]*mikis-projects-86652663\.vercel\.app/i;
 const KNOWN_ARTIFACT_URLS: Record<string, string> = {
@@ -397,7 +407,15 @@ function cleanArtifactUrl(artifact: ChatArtifactResponse) {
     }
   }
 
-  return normalizeUrl(path);
+  // No custom domain: provisional preview lives on the shared name-bearing host
+  // (done-studio), the same host the web dashboard uses, so PC and mobile show
+  // an identical URL for the same full-screen button.
+  const previewPath = (path || `/preview/${artifact.slug}`).replace('/artifacts/', '/preview/');
+  try {
+    return new URL(previewPath.startsWith('/') ? previewPath : `/${previewPath}`, SHARE_BASE_URL).toString();
+  } catch {
+    return normalizeUrl(path);
+  }
 }
 
 function parseRichContent(content: string): ParsedMediaContent {
@@ -1110,10 +1128,11 @@ function AppMain() {
   // so the bubble doesn't linger next to the final answer.
   const showLiveTurn =
     liveRunActive ||
-    (sending &&
-      !uploadProgress &&
-      streamingProjectId === currentProject?.id &&
-      (!currentRun || currentRun.state === 'running'));
+    // 送信した瞬間に出す（PC の warmupMode 相当の即時フィードバック）。前回ターンの
+    // 完了済み currentRun が残っていても instant 経路をブロックしないよう、currentRun の
+    // 状態では絞らない（これが「送信後すぐ出ず数秒遅れる」原因だった）。sending は送信
+    // フローの finally で false になる＝ターン完了でこの経路は自然に閉じる。
+    (sending && !uploadProgress && streamingProjectId === currentProject?.id);
 
   const unreadTotal = useMemo(
     () =>
@@ -2667,7 +2686,7 @@ function AppMain() {
                     <View style={styles.liveStatusRow}>
                       <ActivityIndicator color="#7fd1c7" size="small" />
                       <Text style={styles.liveStatusText} numberOfLines={1}>
-                        {activity || '考えています…'}
+                        {activity || 'Thinking...'}
                       </Text>
                     </View>
                   </View>
