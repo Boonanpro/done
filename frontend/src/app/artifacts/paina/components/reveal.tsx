@@ -32,20 +32,23 @@ export function Reveal({ children, delay = 0, className, as = "div" }: RevealPro
     return () => io.disconnect();
   }, []);
 
+  // `as` is a dynamic tag name; building the element via createElement avoids
+  // the JSX "children expects type 'never'" error that React.ElementType raises
+  // when used directly as a <Tag> in strict TS.
   const Tag = as as React.ElementType;
-  return (
-    <Tag
-      ref={ref}
-      data-reveal
-      className={className}
-      style={{
+  return React.createElement(
+    Tag,
+    {
+      ref,
+      "data-reveal": true,
+      className,
+      style: {
         opacity: shown ? 1 : 0,
         transform: shown ? "translateY(0)" : "translateY(16px)",
         transition: `opacity 0.9s cubic-bezier(0.22,1,0.36,1) ${delay}ms, transform 0.9s cubic-bezier(0.22,1,0.36,1) ${delay}ms`,
         willChange: "opacity, transform",
-      }}
-    >
-      {children}
-    </Tag>
+      },
+    },
+    children,
   );
 }
