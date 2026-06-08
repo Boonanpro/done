@@ -52,8 +52,23 @@ def add_written_path(paths: list[str], path: Optional[str]) -> None:
 def artifact_candidates_from_written_paths(
     written_file_paths: Iterable[str],
 ) -> list[tuple[str, str, str]]:
-    """Extract (card_slug, preview_url, source_path) for artifact entry pages."""
-    candidates: list[tuple[str, str, str]] = []
+    """Extract (card_slug, preview_url, source_path) — one entry per artifact root.
+
+    A multi-page site lives under a single root directory as nested App Router
+    routes, e.g.::
+
+        artifacts/paina/page.tsx           -> /artifacts/paina
+        artifacts/paina/business/page.tsx  -> /artifacts/paina/business
+        artifacts/paina/contact/page.tsx   -> /artifacts/paina/contact
+
+    These are pages of ONE deliverable, not three separate ones. We therefore
+    collapse every written ``page.tsx`` to its root slug and register a single
+    card whose ``preview_url`` is the root entry (``/artifacts/<slug>``). The
+    root ``page.tsx`` is preferred as the representative source path when it is
+    among the written files.
+    """
+    roots: dict[str, str] = {}
+    order: list[str] = []
     for raw_path in written_file_paths:
         normalized_path = (raw_path or "").replace("\\", "/")
         match = ARTIFACT_PAGE_RE.search(normalized_path)
@@ -64,15 +79,14 @@ def artifact_candidates_from_written_paths(
             )
             continue
         root_slug = match.group(1)
-        rest = (match.group(2) or "").strip("/")
-        preview_url = f"/artifacts/{root_slug}" + (f"/{rest}" if rest else "")
-        card_slug = (
-            root_slug
-            if not rest
-            else f"{root_slug}-{'-'.join(part for part in rest.split('/') if part)}"
-        )
-        candidates.append((card_slug, preview_url, normalized_path))
-    return candidates
+        is_root_page = not (match.group(2) or "").strip("/")
+        if root_slug not in roots:
+            order.append(root_slug)
+            roots[root_slug] = normalized_path
+        elif is_root_page:
+            # Prefer the root page.tsx as the representative source path.
+            roots[root_slug] = normalized_path
+    return [(slug, f"/artifacts/{slug}", roots[slug]) for slug in order]
 
 
 def artifact_slugs_from_written_paths(written_file_paths: Iterable[str]) -> list[str]:

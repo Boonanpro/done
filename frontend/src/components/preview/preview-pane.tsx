@@ -8,7 +8,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { usePreviewStore, flushInspectorEdits, type ArtifactRecord } from '@/stores/preview-store';
 import { useEditHistoryStore } from '@/stores/edit-history-store';
-import { artifactProductionUrl, artifactSharePath } from '@/lib/artifact-paths';
+import { artifactProductionUrl, artifactSharePath, KNOWN_CUSTOM_DOMAINS } from '@/lib/artifact-paths';
 import { attachInspector, detachInspector } from './iframe-inspector';
 import { CommentPopover } from './comment-popover';
 import { InspectorPanel } from './inspector-panel';
@@ -76,13 +76,28 @@ function absolutePublicUrl(pathOrUrl: string): string {
 }
 
 function cleanArtifactUrl(artifact: ArtifactRecord, pathOrUrl: string): string {
+  // Live workspace/preview URL on the current origin. Always served (the files
+  // are on disk), so it never 404s while a deploy is still in flight or failed.
+  const localFallback = absolutePublicUrl(artifactSharePath(pathOrUrl || artifact.slug));
+
+  // Only point at the public delivery domain (<slug>-done.vercel.app) once the
+  // artifact is actually published. production_url is set only after the alias
+  // health check passes; custom_domain / KNOWN_CUSTOM_DOMAINS are known-live.
+  // Otherwise we'd fabricate a URL whose Vercel alias may not exist yet, which
+  // is exactly the "404 DEPLOYMENT_NOT_FOUND" the user hit.
+  const isPublished =
+    !!artifact.production_url ||
+    !!artifact.custom_domain ||
+    (KNOWN_CUSTOM_DOMAINS[artifact.slug]?.length ?? 0) > 0;
+  if (!isPublished) return localFallback;
+
   return (
     artifactProductionUrl({
       slug: artifact.slug,
       pathOrUrl,
       productionUrl: artifact.production_url,
       customDomain: artifact.custom_domain,
-    }) || absolutePublicUrl(artifactSharePath(pathOrUrl || artifact.slug))
+    }) || localFallback
   );
 }
 
@@ -357,7 +372,7 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
           target="_blank"
           rel="noopener noreferrer"
           className="shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-          title="仮公開URLを開く"
+          title="全画面で開く"
         >
           <ExternalLink className="h-3.5 w-3.5" />
         </a>
@@ -365,20 +380,20 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
           <button
             onClick={() => setShowDeliveryModal(true)}
             className="shrink-0 rounded bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
-            title="納品準備"
+            title="納品設定"
           >
             <ClipboardList className="mr-1 inline h-3 w-3" />
-            納品準備
+            納品設定
           </button>
         )}
         {isWebsite && (
           <button
             onClick={() => setShowPublishModal(true)}
             className="shrink-0 rounded bg-primary px-2 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
-            title="カスタムドメインを購入して公開"
+            title="独自ドメイン公開"
           >
             <Rocket className="mr-1 inline h-3 w-3" />
-            公開
+            独自ドメイン公開
           </button>
         )}
         {isEditMode && (
