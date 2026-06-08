@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
@@ -25,7 +25,6 @@ import {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { copyToClipboard } from '@/lib/clipboard';
 import type { ArtifactRecord } from '@/stores/preview-store';
 
 // 公開先の Vercel プロジェクト。内部固定値（UI には出さない）。
@@ -70,7 +69,7 @@ interface Props {
 
 const STAGE_TITLE: Record<Stage, string> = {
   domain: '公開するURLを決める',
-  payer: 'ドメイン代の支払い',
+  payer: 'ドメイン代の支払いは誰？',
   confirm: '内容の確認',
   publishing: '公開しています',
   done: '公開結果',
@@ -109,6 +108,7 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
   const [check, setCheck] = useState<DomainCheckResponse | null>(null);
   const [result, setResult] = useState<PublishResponse | null>(null);
   const [clientUrl, setClientUrl] = useState('');
+  const urlInputRef = useRef<HTMLInputElement>(null);
 
   const reset = () => {
     setStage('domain');
@@ -206,7 +206,28 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
   const total = Number(exact?.pricing?.registration_cost ?? 0) * years;
 
   const copyClientUrl = async () => {
-    const ok = await copyToClipboard(clientUrl);
+    let ok = false;
+    // HTTPS/localhost なら Clipboard API
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(clientUrl);
+        ok = true;
+      }
+    } catch {
+      /* フォールバックへ */
+    }
+    // 非セキュア環境(IP/HTTP)はダイアログ内の入力欄を選択して execCommand
+    if (!ok && urlInputRef.current) {
+      const el = urlInputRef.current;
+      el.focus();
+      el.select();
+      el.setSelectionRange(0, clientUrl.length);
+      try {
+        ok = document.execCommand('copy');
+      } catch {
+        ok = false;
+      }
+    }
     if (ok) toast.success('コピーしました');
     else toast.error('コピーできませんでした');
   };
@@ -267,7 +288,7 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
             >
               <UserRound className="mt-0.5 h-5 w-5 shrink-0" />
               <span>
-                <span className="block font-medium">自分で払う</span>
+                <span className="block font-medium">あなた</span>
                 <span className="block text-xs text-muted-foreground">今すぐ取得して公開します</span>
               </span>
             </button>
@@ -283,7 +304,7 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
                 <Send className="mt-0.5 h-5 w-5 shrink-0" />
               )}
               <span>
-                <span className="block font-medium">相手に払ってもらう</span>
+                <span className="block font-medium">あなた以外</span>
                 <span className="block text-xs text-muted-foreground">相手に送るURLを発行します</span>
               </span>
             </button>
@@ -371,9 +392,13 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
         {stage === 'guide' && (
           <div className="space-y-3">
             <p className="text-sm text-muted-foreground">このURLを相手に送ってください。</p>
-            <div className="break-all rounded-md bg-muted px-3 py-2 font-mono text-xs">
-              {clientUrl}
-            </div>
+            <Input
+              ref={urlInputRef}
+              readOnly
+              value={clientUrl}
+              onFocus={(e) => e.currentTarget.select()}
+              className="font-mono text-xs"
+            />
             <Button variant="secondary" size="sm" onClick={copyClientUrl}>
               <Copy className="mr-1 h-3.5 w-3.5" /> コピー
             </Button>
@@ -413,6 +438,11 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
           {stage === 'publishing' && (
             <Button disabled variant="ghost">
               <Loader2 className="mr-2 h-3 w-3 animate-spin" /> 実行中
+            </Button>
+          )}
+          {stage === 'guide' && (
+            <Button variant="ghost" onClick={() => setStage('payer')}>
+              戻る
             </Button>
           )}
           {(stage === 'done' || stage === 'guide') && (
