@@ -97,6 +97,13 @@ _PUBLIC_DIR_TO_OWNER: dict[str, Scope] = {
     # They are listed here as a prefix match.
 }
 
+# Public asset directories that are SHARED across artifacts (or otherwise not
+# owned by a single artifact). These must stay infra; everything else under
+# frontend/public/<dir>/ defaults to artifact:<dir> (see classify step 5).
+_PUBLIC_SHARED_DIRS: frozenset[str] = frozenset({
+    "models",  # shared 3D assets (e.g. garbage_truck) used by multiple artifacts
+})
+
 # Top-level public files (no directory) that belong to specific prototypes.
 _PUBLIC_FILE_TO_OWNER: dict[str, Scope] = {
     "amagasaki-hero.mp4": Scope("demo", "amagasaki-sales-dashboard"),
@@ -261,13 +268,25 @@ def classify(path: str) -> Scope:
     if p_match.startswith("frontend/public/"):
         rest = p_match[len("frontend/public/"):]
         if "/" in rest:
-            head = rest.split("/", 1)[0]
+            head, tail = rest.split("/", 1)
+            # public/artifacts/<slug>/... is owned by that <slug> (icons are
+            # already caught as ignored in step 1).
+            if head == "artifacts":
+                inner = tail.split("/", 1)[0]
+                if inner:
+                    return Scope("artifact", inner)
             owner = _PUBLIC_DIR_TO_OWNER.get(head)
             if owner:
                 return owner
-            # Unknown public/<dir>/ - treat as ambiguous so a rule must be added.
-            # (Don't auto-classify as infra to avoid silently accepting unknown assets.)
-            # Fall through to infra match list so PWA / icon assets still match.
+            # Shared/non-artifact public dirs stay infra.
+            if head in _PUBLIC_SHARED_DIRS:
+                return Scope("infra")
+            # Default: a public asset directory is owned by the artifact of the
+            # same name (e.g. frontend/public/paina/ -> artifact:paina). This
+            # lets a new artifact publish its assets without a manual rule edit.
+            # Name mismatches (kikkawa->kittoku) and shared dirs are handled
+            # above and take precedence.
+            return Scope("artifact", head)
         else:
             # public/<file> (no subdirectory)
             owner = _PUBLIC_FILE_TO_OWNER.get(rest)

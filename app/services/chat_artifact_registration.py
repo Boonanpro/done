@@ -8,9 +8,6 @@ from __future__ import annotations
 
 import logging
 import re
-import subprocess
-import sys
-import time
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -19,8 +16,6 @@ from app.services.chat_artifact_service import ChatArtifactService
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-ALIAS_DEPLOY_LOG = PROJECT_ROOT / "artifact_alias_deploy.log"
-ALIAS_DEPLOY_DEBOUNCE_SECONDS = 30
 WRITE_TOOL_NAMES = {
     "write_file",
     "edit_file",
@@ -52,8 +47,23 @@ def add_written_path(paths: list[str], path: Optional[str]) -> None:
 def artifact_candidates_from_written_paths(
     written_file_paths: Iterable[str],
 ) -> list[tuple[str, str, str]]:
-    """Extract (card_slug, preview_url, source_path) for artifact entry pages."""
-    candidates: list[tuple[str, str, str]] = []
+    """Extract (card_slug, preview_url, source_path) — one entry per artifact root.
+
+    A multi-page site lives under a single root directory as nested App Router
+    routes, e.g.::
+
+        artifacts/paina/page.tsx           -> /artifacts/paina
+        artifacts/paina/business/page.tsx  -> /artifacts/paina/business
+        artifacts/paina/contact/page.tsx   -> /artifacts/paina/contact
+
+    These are pages of ONE deliverable, not three separate ones. We therefore
+    collapse every written ``page.tsx`` to its root slug and register a single
+    card whose ``preview_url`` is the root entry (``/artifacts/<slug>``). The
+    root ``page.tsx`` is preferred as the representative source path when it is
+    among the written files.
+    """
+    roots: dict[str, str] = {}
+    order: list[str] = []
     for raw_path in written_file_paths:
         normalized_path = (raw_path or "").replace("\\", "/")
         match = ARTIFACT_PAGE_RE.search(normalized_path)
@@ -64,15 +74,14 @@ def artifact_candidates_from_written_paths(
             )
             continue
         root_slug = match.group(1)
-        rest = (match.group(2) or "").strip("/")
-        preview_url = f"/artifacts/{root_slug}" + (f"/{rest}" if rest else "")
-        card_slug = (
-            root_slug
-            if not rest
-            else f"{root_slug}-{'-'.join(part for part in rest.split('/') if part)}"
-        )
-        candidates.append((card_slug, preview_url, normalized_path))
-    return candidates
+        is_root_page = not (match.group(2) or "").strip("/")
+        if root_slug not in roots:
+            order.append(root_slug)
+            roots[root_slug] = normalized_path
+        elif is_root_page:
+            # Prefer the root page.tsx as the representative source path.
+            roots[root_slug] = normalized_path
+    return [(slug, f"/artifacts/{slug}", roots[slug]) for slug in order]
 
 
 def artifact_slugs_from_written_paths(written_file_paths: Iterable[str]) -> list[str]:
@@ -90,47 +99,23 @@ def artifact_slugs_from_written_paths(written_file_paths: Iterable[str]) -> list
     return slugs
 
 
-def schedule_artifact_alias_deploy(slugs: Iterable[str]) -> None:
-    """Start a background Vercel deploy that assigns stable delivery aliases."""
-    unique_slugs: list[str] = []
-    seen: set[str] = set()
-    for raw_slug in slugs:
-        slug = (raw_slug or "").strip()
-        if not slug or slug in seen:
-            continue
-        seen.add(slug)
-        unique_slugs.append(slug)
-
-    if not unique_slugs:
-        return
-
-    try:
-        lock_name = "artifact_alias_deploy_" + "_".join(unique_slugs) + ".lock"
-        lock_path = PROJECT_ROOT / ".tmp" / re.sub(r"[^a-zA-Z0-9_.-]", "_", lock_name)
-        lock_path.parent.mkdir(exist_ok=True)
-        now = time.time()
-        if lock_path.exists() and now - lock_path.stat().st_mtime < ALIAS_DEPLOY_DEBOUNCE_SECONDS:
-            logger.info("Skipping duplicate artifact alias deploy for slugs=%s", ",".join(unique_slugs))
-            return
-        lock_path.write_text(str(now), encoding="utf-8")
-
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        with ALIAS_DEPLOY_LOG.open("ab") as log_file:
-            subprocess.Popen(
-                [sys.executable, "scripts/deploy_frontend_artifacts.py", *unique_slugs],
-                cwd=str(PROJECT_ROOT),
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                creationflags=creationflags,
-            )
-        logger.info("Scheduled artifact alias deploy for slugs=%s", ",".join(unique_slugs))
-    except Exception as e:  # noqa: BLE001 - publishing must not break chat completion
-        logger.warning("Failed to schedule artifact alias deploy: %s", e)
-
-
 def schedule_artifact_alias_deploy_from_written_paths(written_file_paths: Iterable[str]) -> None:
-    """Schedule public alias deployment for any artifact root touched by writes."""
-    schedule_artifact_alias_deploy(artifact_slugs_from_written_paths(written_file_paths))
+    """Schedule the provisional publish for any artifact root touched by writes.
+
+    The moment an artifact is registered it should be publicly viewable at
+    ``<host>/preview/<slug>``. We achieve that by committing the artifact to the
+    production branch (``main``) so Vercel builds and serves it — see
+    ``app.services.artifact_git_publish``.
+
+    Historically this assigned a ``<slug>-done.vercel.app`` Vercel alias. That
+    alias path is retired (RULES.md): it created a second URL that pinned to a
+    stale deployment and 404'd. The clean single URL is ``/preview/<slug>``.
+    The function name is kept so existing callers (chat routes, registration)
+    keep working without changes.
+    """
+    from app.services.artifact_git_publish import schedule_artifact_git_publish
+
+    schedule_artifact_git_publish(artifact_slugs_from_written_paths(written_file_paths))
 
 
 def _page_exists(preview_url: str) -> bool:

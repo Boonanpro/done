@@ -151,6 +151,62 @@ def load_artifact_descriptions(room_id: str = "") -> str:
     )
 
 
+def load_artifact_publish_state(room_id: str = "") -> str:
+    """Inject the current room's artifacts and their live publish state.
+
+    Dan otherwise has no view of whether an artifact is published, so it asks
+    "shall I publish?" even when the site is already live. This surfaces the
+    DB truth (provisional /preview URL, live / publishing / failed, and any
+    custom domain) so Dan can answer directly.
+    """
+    if not room_id:
+        return ""
+    try:
+        from app.services.supabase_client import get_supabase_client
+
+        sb = get_supabase_client().client
+        rows = (
+            sb.table("chat_artifact")
+            .select(
+                "slug, share_url, delivery_status, custom_domain, last_publish_error, created_at"
+            )
+            .eq("room_id", room_id)
+            .order("created_at", desc=False)
+            .execute()
+            .data
+        ) or []
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+
+    lines = []
+    for r in rows:
+        slug = r.get("slug") or "?"
+        share = r.get("share_url") or f"/preview/{slug}"
+        status = r.get("delivery_status") or "preview"
+        custom = r.get("custom_domain")
+        if custom:
+            state = f"独自ドメインで公開中: https://{custom}"
+        elif status == "ready":
+            state = f"仮公開済み（ライブ）: {share}"
+        elif status == "error":
+            err = (r.get("last_publish_error") or "").strip().splitlines()
+            state = f"公開に失敗: {share}（{err[0] if err else 'エラー'}）"
+        else:
+            state = f"公開処理中（数分で {share} に反映）"
+        lines.append(f"- `{slug}` — {state}")
+
+    return (
+        "## この部屋の成果物の公開状態（DBの真実）\n\n"
+        "成果物は登録された時点で自動的に `<host>/preview/<slug>` で仮公開されます。"
+        "現在の状態は以下です。公開状態やURLを聞かれたら、まずこれを根拠に直接答えてください"
+        "（既に公開済みのものに「公開しましょうか？」と聞き返さない）。"
+        "独自ドメインでの本公開はユーザーが別途「独自ドメインを取得」から行います。\n\n"
+        + "\n".join(lines)
+    )
+
+
 def load_active_plan(room_id: str = "") -> str:
     """Return a short summary of the active plan (path + step list).
 

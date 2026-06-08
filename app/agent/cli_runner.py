@@ -960,7 +960,7 @@ def _build_system_prompt(
     """
     from app.agent.bootstrap_context import (
         get_core_prompt, load_all_bootstrap_files, load_active_plan,
-        load_artifact_descriptions,
+        load_artifact_descriptions, load_artifact_publish_state,
     )
 
     parts = []
@@ -1013,6 +1013,12 @@ def _build_system_prompt(
     if artifact_desc:
         parts.append(artifact_desc)
 
+    # Publish state of this room's artifacts so Dan knows what is already live
+    # (and stops asking "shall I publish?" for already-published sites).
+    artifact_state = load_artifact_publish_state(room_id=room_id)
+    if artifact_state:
+        parts.append(artifact_state)
+
     # Approved plan injection is experimental. Keep it switchable so we can
     # compare observer-backed memory against a lean Codex-like runtime.
     if _env_flag("DAN_PLAN_INJECTION_ENABLED", False):
@@ -1043,15 +1049,15 @@ def _build_system_prompt(
         "`@/components/artifacts/artifact-link` and alias it as `Link`, or use helpers "
         "from `@/lib/artifact-paths` when storing URLs. This preserves `/preview/<slug>` "
         "and custom-domain clean paths while the source stays under `/artifacts/<slug>`.\n"
-        "- Client-facing artifact URLs are stable delivery aliases: "
-        "`https://<slug>-done.vercel.app/`. Vercel deployment URLs such as "
-        "`frontend-xxxxx.vercel.app` are internal build outputs and must not be given to "
-        "the user as the share/delivery URL.\n"
-        "- When fixing an existing artifact, update the existing artifact source and make "
-        "sure its stable `*-done.vercel.app` alias points at the new deployment; do not "
-        "solve delivery by handing out a new deployment URL. Prefer "
-        "`python scripts/deploy_frontend_artifacts.py <slug>` after frontend artifact "
-        "changes so the production deployment and alias update happen together.\n"
+        "- An artifact's public delivery URL is `<host>/preview/<slug>` (the DB "
+        "`share_url`). Use that when telling the user where their site is. Vercel "
+        "deployment URLs (`frontend-xxxxx.vercel.app`) and any `<slug>-done.vercel.app` "
+        "alias are internal or retired — never give them as the delivery URL.\n"
+        "- Publishing is automatic: registering an artifact commits it to the production "
+        "branch so it goes live at `<host>/preview/<slug>` within a couple of minutes. "
+        "You do NOT need to run any deploy script (`deploy_frontend_artifacts.py` is "
+        "retired). Editing an existing artifact re-runs the same auto-publish; do not "
+        "solve delivery by handing out a new URL.\n"
         "- Public artifacts must not inherit DAN's app identity. Add or preserve "
         "artifact-specific metadata and PWA manifest settings; the public manifest must "
         "not be `/manifest.json`, must not use `Done - AI Secretary`, and must not set "
