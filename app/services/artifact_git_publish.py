@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,15 @@ PUBLISH_HOST = (
 ).rstrip("/")
 
 PUSH_BRANCH = os.environ.get("DAN_PUBLISH_BRANCH", "main")
+
+# Clean, name-bearing host that users see: <SHARE_ALIAS>/preview/<slug>. It is a
+# free vercel.app alias re-pointed to the latest production on every publish so
+# it never goes stale (a bare `vercel alias set` pins to one deployment). Set to
+# empty to disable. The same value must be configured as NEXT_PUBLIC_SHARE_ORIGIN
+# (web) and the mobile app base URL so every device shows the same URL.
+SHARE_ALIAS = os.environ.get("DAN_SHARE_ALIAS", "done-studio.vercel.app").strip()
+VERCEL = shutil.which("vercel") or shutil.which("vercel.cmd") or "vercel"
+_DEPLOYMENT_RE = re.compile(r"https://frontend-[a-z0-9]+-[\w-]+\.vercel\.app")
 
 GLOBAL_LOCK_TIMEOUT = 900
 GLOBAL_LOCK_STALE = 1800
@@ -369,6 +379,61 @@ def _publish_one(slug: str, *, push: bool, wait_live: bool) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Share alias (clean name-bearing host, re-pointed to latest production)
+# ---------------------------------------------------------------------------
+
+def _current_production_deployment() -> Optional[str]:
+    """Resolve the deployment that the auto-following production host points to."""
+    try:
+        proc = subprocess.run(
+            [VERCEL, "inspect", PUBLISH_HOST.replace("https://", "")],
+            cwd=str(PROJECT_ROOT),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=90,
+        )
+        m = _DEPLOYMENT_RE.search(proc.stdout or "")
+        return m.group(0) if m else None
+    except Exception as e:  # noqa: BLE001
+        _emit(f"[git-publish] could not resolve production deployment: {e}")
+        return None
+
+
+def _repoint_share_alias() -> None:
+    """Point SHARE_ALIAS at the current production so it never goes stale.
+
+    A bare ``vercel alias set`` pins to one deployment, so we re-point the single
+    share host on every publish (one alias, cheap) instead of relying on
+    per-artifact aliases. Best-effort: failure must not fail the publish.
+    """
+    if not SHARE_ALIAS:
+        return
+    deployment = _current_production_deployment()
+    if not deployment:
+        return
+    try:
+        proc = subprocess.run(
+            [VERCEL, "alias", "set", deployment, SHARE_ALIAS],
+            cwd=str(PROJECT_ROOT),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=120,
+        )
+        if proc.returncode == 0:
+            _emit(f"[git-publish] share alias {SHARE_ALIAS} -> {deployment}")
+        else:
+            _emit(f"[git-publish] share alias re-point failed:\n{proc.stdout}")
+    except Exception as e:  # noqa: BLE001
+        _emit(f"[git-publish] share alias re-point error: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Public entry points
 # ---------------------------------------------------------------------------
 
@@ -389,7 +454,11 @@ def publish_artifacts_via_git(
     if not _acquire_lock():
         return [{"slug": s, "status": "deferred", "url": preview_url_for(s), "error": "another publish in progress"} for s in unique]
     try:
-        return [_publish_one(s, push=push, wait_live=wait_live) for s in unique]
+        results = [_publish_one(s, push=push, wait_live=wait_live) for s in unique]
+        # Keep the clean share host pointing at the freshly built production.
+        if push and any(r.get("status") in ("live", "pushed") for r in results):
+            _repoint_share_alias()
+        return results
     finally:
         _release_lock()
 
