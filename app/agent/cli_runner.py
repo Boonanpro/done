@@ -723,6 +723,9 @@ def _save_execution_event_sync(
     from app.services.execution_events import normalize_event_type
     from app.services.supabase_client import get_supabase_client
 
+    # Heartbeat the run so an active turn never looks stale to the sweeper.
+    _heartbeat_run_sync(run_id)
+
     normalized_type, original_type = normalize_event_type(event_type)
     metadata = {}
     if original_type is not None and original_type != normalized_type:
@@ -780,6 +783,35 @@ def _update_run_sync(
         sb.table("agent_runs").update(updates).eq("id", run_id).execute()
     except Exception as e:
         _cli_debug(f"_update_run_sync failed: {e}")
+
+
+_RUN_HEARTBEAT_AT: dict[str, float] = {}
+_RUN_HEARTBEAT_INTERVAL = 15.0  # seconds; must stay well under run_service.STALE_RUN_SECONDS
+
+
+def _heartbeat_run_sync(run_id: Optional[str]) -> None:
+    """Bump the run's updated_at so an active turn isn't mistaken for a zombie.
+
+    Called on every execution event (throttled). A long, genuinely-active turn
+    keeps updated_at fresh; if the turn dies without writing its final state, the
+    heartbeat stops and run_service.get_current_run sweeps it after
+    STALE_RUN_SECONDS so the mobile live bubble stops spinning. Best-effort.
+    """
+    if not run_id:
+        return
+    now = time.monotonic()
+    if now - _RUN_HEARTBEAT_AT.get(run_id, 0.0) < _RUN_HEARTBEAT_INTERVAL:
+        return
+    _RUN_HEARTBEAT_AT[run_id] = now
+    try:
+        from app.services.supabase_client import get_supabase_client
+
+        sb = get_supabase_client().client
+        sb.table("agent_runs").update(
+            {"updated_at": datetime.now(timezone.utc).isoformat()}
+        ).eq("id", run_id).execute()
+    except Exception as e:  # noqa: BLE001 - heartbeat must never break the turn
+        _cli_debug(f"_heartbeat_run_sync failed: {e}")
 
 
 def _tool_detail(inp, limit: int = 4000) -> str:
