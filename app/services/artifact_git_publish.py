@@ -17,6 +17,7 @@ clean single delivery URL is ``<host>/preview/<slug>`` (see RULES.md).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -287,6 +288,86 @@ def _mark_error(slug: str, message: str) -> None:
 # Publish one slug
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Pre-publish build prerequisite check
+#
+# A per-artifact publish only carries the artifact's own files (scope
+# artifact:<slug>). If the artifact imports a shared component (@/components/..)
+# or an npm package that isn't on `main` yet (those are infra scope), pushing the
+# artifact alone breaks the WHOLE frontend build — which blocks every other
+# artifact's publish too (this happened with yonago-gojo's gsap/motion deps,
+# 2026-06-09). So before pushing, verify everything the artifact imports already
+# exists on the target. If not, hold the publish and report exactly what's
+# missing, instead of breaking production.
+# ---------------------------------------------------------------------------
+
+_IMPORT_RE = re.compile(
+    r"""(?:from|import)\s*['"]([^'"]+)['"]|import\s*\(\s*['"]([^'"]+)['"]\s*\)"""
+)
+_SRC_EXTS = (".tsx", ".ts", ".jsx", ".js")
+# Packages assumed always present (Next/React core + Node builtins).
+_ALWAYS_PRESENT = {"react", "react-dom", "next", "node"}
+
+
+def _scan_imports(file_path: Path) -> set[str]:
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return set()
+    specs: set[str] = set()
+    for m in _IMPORT_RE.finditer(text):
+        spec = m.group(1) or m.group(2)
+        if spec:
+            specs.add(spec)
+    return specs
+
+
+def _alias_target_exists(wt: Path, spec: str) -> bool:
+    # "@/x/y" maps to frontend/src/x/y (file or dir with an index).
+    base = wt / "frontend" / "src" / spec[2:]
+    for ext in _SRC_EXTS:
+        if base.with_suffix(ext).exists():
+            return True
+        if (base / f"index{ext}").exists():
+            return True
+    return base.exists()
+
+
+def _pkg_name(spec: str) -> str:
+    if spec.startswith("@"):
+        return "/".join(spec.split("/")[:2])
+    return spec.split("/")[0]
+
+
+def _missing_build_prereqs(wt: Path, paths: list[str]) -> list[str]:
+    """Return import specs the artifact needs that are NOT present on the target."""
+    try:
+        pkg = json.loads((wt / "frontend" / "package.json").read_text(encoding="utf-8"))
+        deps = set(pkg.get("dependencies", {})) | set(pkg.get("devDependencies", {}))
+    except Exception:  # noqa: BLE001 - if we can't read deps, don't block
+        deps = None
+
+    missing: set[str] = set()
+    for rel in paths:
+        root = wt / rel
+        files = [f for f in root.rglob("*") if f.suffix.lower() in _SRC_EXTS] if root.is_dir() \
+            else ([root] if root.suffix.lower() in _SRC_EXTS else [])
+        for f in files:
+            for spec in _scan_imports(f):
+                if spec.startswith(".") or spec.startswith("node:"):
+                    continue  # relative (own files) / node builtins
+                if spec.startswith("@/"):
+                    if not _alias_target_exists(wt, spec):
+                        missing.add(spec)
+                else:
+                    name = _pkg_name(spec)
+                    if name in _ALWAYS_PRESENT or name.startswith("next/"):
+                        continue
+                    if deps is not None and name not in deps:
+                        missing.add(name)
+    return sorted(missing)
+
+
 def _commit_and_push(wt: Path, slug: str, paths: list[str]) -> tuple[bool, str]:
     """Mirror, commit (scope-isolated), and push. Returns (changed, error)."""
     last_err = ""
@@ -295,6 +376,17 @@ def _commit_and_push(wt: Path, slug: str, paths: list[str]) -> tuple[bool, str]:
         _git(["reset", "--hard", f"origin/{PUSH_BRANCH}"], cwd=wt)
         _git(["clean", "-fd"], cwd=wt)
         _mirror_into_worktree(wt, paths)
+
+        # Gate: don't push an artifact whose imports aren't on the target — it
+        # would break the whole-frontend build and block every other publish.
+        missing = _missing_build_prereqs(wt, paths)
+        if missing:
+            return False, (
+                "公開を保留しました（このまま出すと本番ビルドが壊れ他の成果物も巻き添えになるため）。"
+                f"main にまだ無い依存/共有部品: {', '.join(missing)}. "
+                "これらを infra として先に main へ入れてから再公開してください。"
+            )
+
         _git(["add", "--", *paths], cwd=wt)
 
         staged = _git(["diff", "--cached", "--name-only"], cwd=wt).stdout.strip()
