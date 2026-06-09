@@ -51,6 +51,9 @@ PUSH_BRANCH = os.environ.get("DAN_PUBLISH_BRANCH", "main")
 # empty to disable. The same value must be configured as NEXT_PUBLIC_SHARE_ORIGIN
 # (web) and the mobile app base URL so every device shows the same URL.
 SHARE_ALIAS = os.environ.get("DAN_SHARE_ALIAS", "done-studio.vercel.app").strip()
+# How long to wait for the new production build before re-pointing the share host.
+SHARE_BUILD_ATTEMPTS = 40   # x SHARE_BUILD_DELAY = ~10 min ceiling
+SHARE_BUILD_DELAY = 15
 VERCEL = shutil.which("vercel") or shutil.which("vercel.cmd") or "vercel"
 _DEPLOYMENT_RE = re.compile(r"https://frontend-[a-z0-9]+-[\w-]+\.vercel\.app")
 
@@ -98,8 +101,9 @@ def artifact_files_for_slug(slug: str) -> list[str]:
 def _emit(message: str) -> None:
     logger.info(message)
     try:
+        stamp = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
         with PUBLISH_LOG.open("a", encoding="utf-8") as fh:
-            fh.write(message.rstrip("\n") + "\n")
+            fh.write(f"[{stamp}] {message.rstrip(chr(10))}\n")
     except Exception:  # noqa: BLE001
         pass
 
@@ -316,6 +320,7 @@ def _commit_and_push(wt: Path, slug: str, paths: list[str]) -> tuple[bool, str]:
 
 
 def _publish_one(slug: str, *, push: bool, wait_live: bool) -> dict:
+    _emit(f"[git-publish] {slug}: publish START (push={push}, wait_live={wait_live})")
     result = {"slug": slug, "status": "pending", "url": preview_url_for(slug), "error": ""}
     paths = artifact_files_for_slug(slug)
     if not paths:
@@ -359,6 +364,7 @@ def _publish_one(slug: str, *, push: bool, wait_live: bool) -> dict:
         _emit(f"[git-publish] {slug}: FAILED\n{err}")
         return result
 
+    result["changed"] = changed
     if not changed:
         _emit(f"[git-publish] {slug}: already up to date on {PUSH_BRANCH}")
 
@@ -382,11 +388,11 @@ def _publish_one(slug: str, *, push: bool, wait_live: bool) -> dict:
 # Share alias (clean name-bearing host, re-pointed to latest production)
 # ---------------------------------------------------------------------------
 
-def _current_production_deployment() -> Optional[str]:
-    """Resolve the deployment that the auto-following production host points to."""
+def _latest_ready_production() -> Optional[str]:
+    """Return the newest READY production deployment URL (top of `vercel ls`)."""
     try:
         proc = subprocess.run(
-            [VERCEL, "inspect", PUBLISH_HOST.replace("https://", "")],
+            [VERCEL, "ls", "frontend", "--prod"],
             cwd=str(PROJECT_ROOT),
             text=True,
             encoding="utf-8",
@@ -395,28 +401,47 @@ def _current_production_deployment() -> Optional[str]:
             stderr=subprocess.STDOUT,
             timeout=90,
         )
-        m = _DEPLOYMENT_RE.search(proc.stdout or "")
-        return m.group(0) if m else None
+        for line in (proc.stdout or "").splitlines():
+            if "Ready" in line and "Production" in line:
+                m = _DEPLOYMENT_RE.search(line)
+                if m:
+                    return m.group(0)
     except Exception as e:  # noqa: BLE001
-        _emit(f"[git-publish] could not resolve production deployment: {e}")
-        return None
+        _emit(f"[git-publish] could not list production deployments: {e}")
+    return None
 
 
-def _repoint_share_alias() -> None:
-    """Point SHARE_ALIAS at the current production so it never goes stale.
+def _wait_for_new_production(baseline: Optional[str]) -> Optional[str]:
+    """Wait until a NEW Ready production deployment (the build of our push) appears."""
+    for _ in range(SHARE_BUILD_ATTEMPTS):
+        latest = _latest_ready_production()
+        if latest and latest != baseline:
+            return latest
+        time.sleep(SHARE_BUILD_DELAY)
+    return None
 
-    A bare ``vercel alias set`` pins to one deployment, so we re-point the single
-    share host on every publish (one alias, cheap) instead of relying on
-    per-artifact aliases. Best-effort: failure must not fail the publish.
+
+def _repoint_share_alias(baseline: Optional[str]) -> None:
+    """Point SHARE_ALIAS at the build produced by THIS publish.
+
+    Re-points the single clean share host (cheap, one alias) instead of relying
+    on per-artifact aliases. Crucially it WAITS until the new production build is
+    Ready before re-pointing: re-pointing immediately after `git push` pins
+    SHARE_ALIAS to the *pre-build* deployment and serves stale content (the bug
+    found 2026-06-09 — edits appeared not to publish). Best-effort: failure must
+    not fail the publish.
     """
     if not SHARE_ALIAS:
         return
-    deployment = _current_production_deployment()
-    if not deployment:
+    target = _wait_for_new_production(baseline)
+    if not target:
+        _emit("[git-publish] no new build detected in time; pinning current latest")
+        target = _latest_ready_production()
+    if not target:
         return
     try:
         proc = subprocess.run(
-            [VERCEL, "alias", "set", deployment, SHARE_ALIAS],
+            [VERCEL, "alias", "set", target, SHARE_ALIAS],
             cwd=str(PROJECT_ROOT),
             text=True,
             encoding="utf-8",
@@ -426,7 +451,7 @@ def _repoint_share_alias() -> None:
             timeout=120,
         )
         if proc.returncode == 0:
-            _emit(f"[git-publish] share alias {SHARE_ALIAS} -> {deployment}")
+            _emit(f"[git-publish] share alias {SHARE_ALIAS} -> {target} (fresh build)")
         else:
             _emit(f"[git-publish] share alias re-point failed:\n{proc.stdout}")
     except Exception as e:  # noqa: BLE001
@@ -454,10 +479,16 @@ def publish_artifacts_via_git(
     if not _acquire_lock():
         return [{"slug": s, "status": "deferred", "url": preview_url_for(s), "error": "another publish in progress"} for s in unique]
     try:
+        # Record the production build BEFORE we push, so the share-alias re-point
+        # can wait for OUR build (a *different*, newer one) to be Ready.
+        baseline = _latest_ready_production() if push else None
         results = [_publish_one(s, push=push, wait_live=wait_live) for s in unique]
-        # Keep the clean share host pointing at the freshly built production.
+        # Point the clean share host at the build produced by this publish.
         if push and any(r.get("status") in ("live", "pushed") for r in results):
-            _repoint_share_alias()
+            # Only wait for a fresh build when something actually changed; for a
+            # no-op publish just re-point to current latest (baseline=None skips the wait).
+            changed_any = any(r.get("changed") for r in results)
+            _repoint_share_alias(baseline if changed_any else None)
         return results
     finally:
         _release_lock()
