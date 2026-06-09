@@ -13,8 +13,8 @@ type CaseItem = {
   summary: { ja: string; en: string };
   tags: { ja: string[]; en: string[] };
   thumb: string;
-  /** ヒーローの動きをそのままサムネで見せる場合のループ動画 */
-  video?: { mp4: string; webm: string; poster: string };
+  /** 実サイトのヒーローをそのまま生で埋め込んで動かす（href のページを表示） */
+  liveHero?: boolean;
   href?: string;
 };
 
@@ -31,11 +31,7 @@ const HP_CASES: CaseItem[] = [
       en: ["Corporate site", "Branding"],
     },
     thumb: "/paina/case-kittoku-poster.jpg",
-    video: {
-      mp4: "/paina/case-kittoku.mp4",
-      webm: "/paina/case-kittoku.webm",
-      poster: "/paina/case-kittoku-poster.jpg",
-    },
+    liveHero: true,
     href: "https://done-studio.vercel.app/preview/kittoku/v2",
   },
   {
@@ -50,11 +46,7 @@ const HP_CASES: CaseItem[] = [
       en: ["Restaurant site", "Branding"],
     },
     thumb: "/paina/case-gojo-poster.jpg",
-    video: {
-      mp4: "/paina/case-gojo.mp4",
-      webm: "/paina/case-gojo.webm",
-      poster: "/paina/case-gojo-poster.jpg",
-    },
+    liveHero: true,
     href: "https://yonago-gojo-done.vercel.app",
   },
 ];
@@ -122,9 +114,11 @@ const T = {
         "所在地",
         "〒651-0084 兵庫県神戸市中央区磯辺通1丁目1番18号 カサベラ国際プラザビル707号室",
       ],
+      ["代表者", "代表取締役 本田 樹"],
+      ["資本金", "100万円"],
       [
         "事業内容",
-        "AIエージェント「Done（ダン）」の開発／ホームページ制作／ソフトウェア・ツールによるDX支援",
+        "AIエージェント「Done（ダン）」の開発／インターネットを使ったサービスの提供",
       ],
       ["連絡先", "shub6923@gmail.com"],
     ] as [string, string][],
@@ -163,31 +157,105 @@ const T = {
         "Address",
         "Room 707, Casabella Kokusai Plaza Bldg., 1-1-18 Isobedori, Chuo-ku, Kobe, Hyogo 651-0084, Japan",
       ],
+      ["Representative", "Miki Honda, Representative Director"],
+      ["Capital", "JPY 1,000,000"],
       [
         "Business",
-        "Development of the AI agent “Done” / Website production / DX support with software & tools",
+        "Development of the AI agent “Done” / Internet-based services",
       ],
       ["Contact", "shub6923@gmail.com"],
     ] as [string, string][],
   },
 };
 
+/**
+ * 実サイトのヒーローを生のまま埋め込んで動かす。録画ではなく本物の <iframe> を
+ * デスクトップ幅でレンダリングし、カード幅に合わせて縮小表示する。操作は無効
+ * （pointer-events:none）。読み込むまではポスター画像を表示する。
+ */
+function LiveHero({
+  src,
+  poster,
+  title,
+}: {
+  src: string;
+  poster: string;
+  title: string;
+}) {
+  const boxRef = React.useRef<HTMLDivElement>(null);
+  const [scale, setScale] = React.useState(0);
+  const [show, setShow] = React.useState(false); // 画面に入ったらiframeを生成
+  const [loaded, setLoaded] = React.useState(false);
+
+  const BASE_W = 1366;
+  const BASE_H = Math.round((BASE_W * 10) / 16); // 16:10
+
+  React.useEffect(() => {
+    const el = boxRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      setScale(el.clientWidth / BASE_W);
+    });
+    ro.observe(el);
+    setScale(el.clientWidth / BASE_W);
+
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setShow(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: "200px" }
+    );
+    io.observe(el);
+
+    return () => {
+      ro.disconnect();
+      io.disconnect();
+    };
+  }, []);
+
+  return (
+    <div
+      ref={boxRef}
+      className="absolute inset-0 overflow-hidden transition-transform duration-700 group-hover:scale-[1.03]"
+    >
+      <img
+        src={poster}
+        alt={title}
+        aria-hidden
+        className={`absolute inset-0 h-full w-full object-cover object-top transition-opacity duration-500 ${
+          loaded ? "opacity-0" : "opacity-100"
+        }`}
+      />
+      {show && scale > 0 && (
+        <iframe
+          src={src}
+          title={title}
+          tabIndex={-1}
+          scrolling="no"
+          loading="lazy"
+          onLoad={() => setLoaded(true)}
+          className="pointer-events-none absolute left-0 top-0 border-0"
+          style={{
+            width: BASE_W,
+            height: BASE_H,
+            transform: `scale(${scale})`,
+            transformOrigin: "top left",
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 function CaseCard({ c, index, lang }: { c: CaseItem; index: number; lang: Lang }) {
   const inner = (
     <div className="group flex h-full flex-col overflow-hidden rounded-2xl border border-[var(--paina-border)] bg-[var(--paina-bg)] transition-colors hover:border-[var(--paina-border-strong)]">
       <div className="relative aspect-[16/10] overflow-hidden border-b border-[var(--paina-border)] bg-[var(--paina-bg-soft)]">
-        {c.video ? (
-          <video
-            autoPlay
-            muted
-            loop
-            playsInline
-            poster={c.video.poster}
-            className="h-full w-full object-cover object-top transition-transform duration-700 group-hover:scale-[1.03]"
-          >
-            <source src={c.video.webm} type="video/webm" />
-            <source src={c.video.mp4} type="video/mp4" />
-          </video>
+        {c.liveHero && c.href ? (
+          <LiveHero src={c.href} poster={c.thumb} title={c.client} />
         ) : (
           <img
             src={c.thumb}
@@ -258,7 +326,7 @@ export default function PainaBusiness() {
             <p className="kicker">{t.kicker}</p>
           </Reveal>
           <Reveal delay={120}>
-            <h1 className="font-serif-jp mt-7 text-[2.4rem] leading-[1.32] text-[var(--paina-fg)] md:text-[3.4rem]">
+            <h1 className="font-serif-jp mt-7 text-[1.55rem] leading-[1.4] text-[var(--paina-fg)] sm:text-[2.6rem]">
               {t.title}
             </h1>
           </Reveal>
@@ -283,7 +351,7 @@ export default function PainaBusiness() {
                   {t.doneBadge}
                 </span>
               </div>
-              <h2 className="font-serif-jp mt-7 max-w-[20ch] text-[2rem] leading-[1.45] md:text-[2.8rem]">
+              <h2 className="font-serif-jp mt-7 max-w-[20ch] text-[1.55rem] leading-[1.45] sm:text-[2.6rem]">
                 {t.doneTitle}
               </h2>
               <p className="mt-7 max-w-[58ch] text-[16px] leading-[2.1] text-[var(--paina-bg)]/80">
@@ -335,7 +403,7 @@ export default function PainaBusiness() {
                 Service
               </span>
             </div>
-            <h2 className="font-serif-jp mt-6 text-[1.9rem] leading-[1.5] text-[var(--paina-fg)] md:text-[2.6rem]">
+            <h2 className="font-serif-jp mt-6 text-[1.55rem] leading-[1.5] text-[var(--paina-fg)] sm:text-[2.6rem]">
               {t.hpTitle}
             </h2>
             <p className="lead mt-6 max-w-[54ch] text-[16px]">{t.hpIntro}</p>
@@ -361,7 +429,7 @@ export default function PainaBusiness() {
                 Service
               </span>
             </div>
-            <h2 className="font-serif-jp mt-6 text-[1.9rem] leading-[1.5] text-[var(--paina-fg)] md:text-[2.6rem]">
+            <h2 className="font-serif-jp mt-6 text-[1.55rem] leading-[1.5] text-[var(--paina-fg)] sm:text-[2.6rem]">
               {t.dxTitle}
             </h2>
             <p className="lead mt-6 max-w-[54ch] text-[16px]">{t.dxIntro}</p>
@@ -380,7 +448,7 @@ export default function PainaBusiness() {
         <div className="mx-auto max-w-[1180px]">
           <Reveal>
             <p className="kicker">{t.companyKicker}</p>
-            <h2 className="font-serif-jp mt-6 text-[1.9rem] leading-[1.5] text-[var(--paina-fg)] md:text-[2.6rem]">
+            <h2 className="font-serif-jp mt-6 text-[1.55rem] leading-[1.5] text-[var(--paina-fg)] sm:text-[2.6rem]">
               {t.companyTitle}
             </h2>
           </Reveal>
@@ -408,7 +476,7 @@ export default function PainaBusiness() {
       <section className="px-6 py-24 md:px-10 md:py-32">
         <div className="mx-auto max-w-[1180px] text-center">
           <Reveal>
-            <h2 className="font-serif-jp text-[1.8rem] leading-[1.55] text-[var(--paina-fg)] md:text-[2.4rem]">
+            <h2 className="font-serif-jp text-[1.55rem] leading-[1.55] text-[var(--paina-fg)] sm:text-[2.6rem]">
               {t.ctaTitle}
             </h2>
             <p className="lead mx-auto mt-6 max-w-[48ch] text-[16px]">

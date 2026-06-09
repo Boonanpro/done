@@ -12,7 +12,7 @@ const T = {
     intro:
       "ホームページ制作、ソフトウェア・ツールによるDX支援、そのほかご相談など、どうぞお気軽にお寄せください。内容を確認のうえ、折り返しご連絡します。",
     emailLabel: "Email",
-    note: "Done（ダン）の提供開始のご案内をご希望の方は、事業内容ページのウェイティングリストもご利用いただけます。",
+    note: "Done（ダン）の提供開始のご案内をご希望の方は、パイナについてページのウェイティングリストもご利用いただけます。",
   },
   en: {
     kicker: "Contact",
@@ -20,7 +20,7 @@ const T = {
     intro:
       "Website production, DX support with software and tools, or any other inquiry — feel free to reach out. After reviewing your message, I'll get back to you.",
     emailLabel: "Email",
-    note: "If you'd like to be notified when Done opens, you can also use the waiting list on the Business page.",
+    note: "If you'd like to be notified when Done opens, you can also use the waiting list on the About page.",
   },
 };
 
@@ -38,7 +38,7 @@ export default function PainaContact() {
                 <p className="kicker">{t.kicker}</p>
               </Reveal>
               <Reveal delay={120}>
-                <h1 className="font-serif-jp mt-7 text-[2.4rem] leading-[1.32] text-[var(--paina-fg)] md:text-[3.2rem]">
+                <h1 className="font-serif-jp mt-7 text-[1.55rem] leading-[1.4] text-[var(--paina-fg)] sm:text-[2.6rem]">
                   {t.title}
                 </h1>
               </Reveal>
