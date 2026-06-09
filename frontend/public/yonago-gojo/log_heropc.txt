@@ -1,0 +1,74 @@
+ffmpeg version 7.1-essentials_build-www.gyan.dev Copyright (c) 2000-2024 the FFmpeg developers
+  built with gcc 14.2.0 (Rev1, Built by MSYS2 project)
+  configuration: --enable-gpl --enable-version3 --enable-static --disable-w32threads --disable-autodetect --enable-fontconfig --enable-iconv --enable-gnutls --enable-libxml2 --enable-gmp --enable-bzlib --enable-lzma --enable-zlib --enable-libsrt --enable-libssh --enable-libzmq --enable-avisynth --enable-sdl2 --enable-libwebp --enable-libx264 --enable-libx265 --enable-libxvid --enable-libaom --enable-libopenjpeg --enable-libvpx --enable-mediafoundation --enable-libass --enable-libfreetype --enable-libfribidi --enable-libharfbuzz --enable-libvidstab --enable-libvmaf --enable-libzimg --enable-amf --enable-cuda-llvm --enable-cuvid --enable-dxva2 --enable-d3d11va --enable-d3d12va --enable-ffnvcodec --enable-libvpl --enable-nvdec --enable-nvenc --enable-vaapi --enable-libgme --enable-libopenmpt --enable-libopencore-amrwb --enable-libmp3lame --enable-libtheora --enable-libvo-amrwbenc --enable-libgsm --enable-libopencore-amrnb --enable-libopus --enable-libspeex --enable-libvorbis --enable-librubberband
+  libavutil      59. 39.100 / 59. 39.100
+  libavcodec     61. 19.100 / 61. 19.100
+  libavformat    61.  7.100 / 61.  7.100
+  libavdevice    61.  3.100 / 61.  3.100
+  libavfilter    10.  4.100 / 10.  4.100
+  libswscale      8.  3.100 /  8.  3.100
+  libswresample   5.  3.100 /  5.  3.100
+  libpostproc    58.  3.100 / 58.  3.100
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'D:/done/uploads/8ce144d9-68a5-404b-a95c-649614884e7b.mp4':
+  Metadata:
+    major_brand     : mp42
+    minor_version   : 0
+    compatible_brands: isommp42
+    creation_time   : 2026-05-03T12:52:50.000000Z
+    com.android.version: 16
+    com.samsung.android.utc_offset: +0900
+  Duration: 00:00:19.02, start: 0.000000, bitrate: 35472 kb/s
+  Stream #0:0[0x1](eng): Video: h264 (High) (avc1 / 0x31637661), yuv420p(tv, bt709, progressive), 3840x2160, 35210 kb/s, 23.97 fps, 23.98 tbr, 90k tbn (default)
+      Metadata:
+        creation_time   : 2026-06-04T08:28:41.000000Z
+        handler_name    : VideoHandle
+        vendor_id       : [0][0][0][0]
+  Stream #0:1[0x2](eng): Audio: aac (LC) (mp4a / 0x6134706D), 48000 Hz, stereo, fltp, 128 kb/s (default)
+      Metadata:
+        creation_time   : 2026-06-04T08:28:41.000000Z
+        handler_name    : SoundHandle
+        vendor_id       : [0][0][0][0]
+Stream mapping:
+  Stream #0:0 -> #0:0 (h264 (native) -> h264 (libx264))
+Press [q] to stop, [?] for help
+[libx264 @ 000001ffd4848980] using cpu capabilities: MMX2 SSE2Fast SSSE3 SSE4.2 AVX FMA3 BMI2 AVX2
+[libx264 @ 000001ffd4848980] profile High, level 5.0, 4:2:0, 8-bit
+[libx264 @ 000001ffd4848980] 264 - core 164 r3192 c24e06c - H.264/MPEG-4 AVC codec - Copyleft 2003-2024 - http://www.videolan.org/x264.html - options: cabac=1 ref=5 deblock=1:0:0 analyse=0x3:0x113 me=hex subme=8 psy=1 psy_rd=1.00:0.00 mixed_ref=1 me_range=16 chroma_me=1 trellis=2 8x8dct=1 cqm=0 deadzone=21,11 fast_pskip=1 chroma_qp_offset=-2 threads=30 lookahead_threads=5 sliced_threads=0 nr=0 decimate=1 interlaced=0 bluray_compat=0 constrained_intra=0 bframes=3 b_pyramid=2 b_adapt=1 b_bias=0 direct=3 weightb=1 open_gop=0 weightp=2 keyint=250 keyint_min=23 scenecut=40 intra_refresh=0 rc_lookahead=50 rc=crf mbtree=1 crf=22.0 qcomp=0.60 qpmin=0 qpmax=69 qpstep=4 ip_ratio=1.40 aq=1:1.00
+Output #0, mp4, to 'D:/done/frontend/public/yonago-gojo/hero-pc.mp4':
+  Metadata:
+    major_brand     : mp42
+    minor_version   : 0
+    compatible_brands: isommp42
+    com.samsung.android.utc_offset: +0900
+    com.android.version: 16
+    encoder         : Lavf61.7.100
+  Stream #0:0(eng): Video: h264 (avc1 / 0x31637661), yuv420p(tv, bt709, progressive), 1920x1080, q=2-31, 23.98 fps, 24k tbn (default)
+      Metadata:
+        creation_time   : 2026-06-04T08:28:41.000000Z
+        handler_name    : VideoHandle
+        vendor_id       : [0][0][0][0]
+        encoder         : Lavc61.19.100 libx264
+      Side data:
+        cpb: bitrate max/min/avg: 0/0/0 buffer size: 0 vbv_delay: N/A
+frame=    0 fps=0.0 q=0.0 size=       0KiB time=N/A bitrate=N/A speed=N/A    frame=    0 fps=0.0 q=0.0 size=       0KiB time=N/A bitrate=N/A speed=N/A    frame=    0 fps=0.0 q=0.0 size=       0KiB time=N/A bitrate=N/A speed=N/A    frame=   17 fps=8.2 q=27.0 size=     512KiB time=00:00:00.62 bitrate=6704.8kbits/s speed=0.302x    frame=   37 fps= 14 q=27.0 size=    1280KiB time=00:00:01.45 bitrate=7183.3kbits/s speed=0.564x    frame=   57 fps= 18 q=27.0 size=    2048KiB time=00:00:02.29 bitrate=7313.8kbits/s speed=0.741x    frame=   85 fps= 24 q=27.0 size=    3072KiB time=00:00:03.46 bitrate=7269.7kbits/s speed=0.958x    frame=  105 fps= 25 q=27.0 size=    3584KiB time=00:00:04.29 bitrate=6834.5kbits/s speed=1.04x    frame=  127 fps= 27 q=27.0 size=    4096KiB time=00:00:05.21 bitrate=6436.1kbits/s speed=1.12x    frame=  154 fps= 30 q=27.0 size=    5120KiB time=00:00:06.33 bitrate=6616.0kbits/s speed=1.22x    frame=  174 fps= 31 q=27.0 size=    5632KiB time=00:00:07.17 bitrate=6431.4kbits/s speed=1.26x    frame=  198 fps= 32 q=27.0 size=    6144KiB time=00:00:08.17 bitrate=6156.9kbits/s speed=1.32x    frame=  224 fps= 33 q=27.0 size=    6912KiB time=00:00:09.25 bitrate=6115.3kbits/s speed=1.38x    frame=  246 fps= 34 q=27.0 size=    7424KiB time=00:00:10.17 bitrate=5976.1kbits/s speed=1.41x    frame=  266 fps= 34 q=27.0 size=    8192KiB time=00:00:11.01 bitrate=6094.7kbits/s speed=1.42x    frame=  290 fps= 35 q=27.0 size=    8704KiB time=00:00:12.01 bitrate=5936.0kbits/s speed=1.45x    frame=  318 fps= 36 q=27.0 size=    9472KiB time=00:00:13.17 bitrate=5887.4kbits/s speed= 1.5x    frame=  346 fps= 37 q=27.0 size=   10240KiB time=00:00:14.34 bitrate=5846.7kbits/s speed=1.54x    frame=  367 fps= 37 q=27.0 size=   10752KiB time=00:00:15.22 bitrate=5785.8kbits/s speed=1.55x    frame=  410 fps= 40 q=27.0 size=   11776KiB time=00:00:17.01 bitrate=5669.0kbits/s speed=1.65x    [mp4 @ 000001ffd4620f00] Starting second pass: moving the moov atom to the beginning of the file
+[out#0/mp4 @ 000001ffd4625c40] video:12573KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 0.050364%
+frame=  456 fps= 42 q=-1.0 Lsize=   12579KiB time=00:00:18.93 bitrate=5442.0kbits/s speed=1.76x    
+[libx264 @ 000001ffd4848980] frame I:3     Avg QP:21.06  size:117149
+[libx264 @ 000001ffd4848980] frame P:117   Avg QP:22.13  size: 61668
+[libx264 @ 000001ffd4848980] frame B:336   Avg QP:23.71  size: 15795
+[libx264 @ 000001ffd4848980] consecutive B-frames:  1.1%  0.9%  3.3% 94.7%
+[libx264 @ 000001ffd4848980] mb I  I16..4: 20.2% 68.1% 11.8%
+[libx264 @ 000001ffd4848980] mb P  I16..4:  8.0% 12.3%  1.4%  P16..4: 48.3% 15.7%  9.1%  0.0%  0.0%    skip: 5.2%
+[libx264 @ 000001ffd4848980] mb B  I16..4:  0.4%  0.8%  0.1%  B16..8: 46.2%  5.6%  1.0%  direct: 7.0%  skip:39.0%  L0:42.7% L1:53.5% BI: 3.8%
+[libx264 @ 000001ffd4848980] 8x8 transform intra:58.5% inter:74.5%
+[libx264 @ 000001ffd4848980] direct mvs  spatial:95.2% temporal:4.8%
+[libx264 @ 000001ffd4848980] coded y,uvDC,uvAC intra: 51.0% 89.1% 58.2% inter: 16.4% 29.7% 1.7%
+[libx264 @ 000001ffd4848980] i16 v,h,dc,p: 65% 11% 10% 14%
+[libx264 @ 000001ffd4848980] i8 v,h,dc,ddl,ddr,vr,hd,vl,hu: 13% 10% 15%  8% 11% 10% 13%  9% 11%
+[libx264 @ 000001ffd4848980] i4 v,h,dc,ddl,ddr,vr,hd,vl,hu: 14%  9%  8%  9% 13% 11% 14% 10% 12%
+[libx264 @ 000001ffd4848980] i8c dc,h,v,p: 49% 23% 18% 10%
+[libx264 @ 000001ffd4848980] Weighted P-Frames: Y:18.8% UV:1.7%
+[libx264 @ 000001ffd4848980] ref P L0: 53.6% 18.0% 16.7%  6.1%  4.8%  0.7%
+[libx264 @ 000001ffd4848980] ref B L0: 91.1%  6.8%  1.6%  0.5%
+[libx264 @ 000001ffd4848980] ref B L1: 97.8%  2.2%
+[libx264 @ 000001ffd4848980] kb/s:5415.09
