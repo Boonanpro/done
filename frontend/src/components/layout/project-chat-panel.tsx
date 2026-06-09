@@ -575,6 +575,10 @@ function ChatInput({
   const skillsCacheRef = useRef<DanSkill[] | null>(null);
   const [skills, setSkills] = useState<DanSkill[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // 追い連絡の下書きがある時、1回目の Esc は停止せず下書きを保持（armed）、
+  // 2回目の Esc で本当に停止する。escStopHint は「もう一度Escで停止」表示。
+  const [escStopHint, setEscStopHint] = useState(false);
+  const escArmedRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const pendingMessageRef = useRef<{ text: string; files: typeof attachedFiles; replyTo: typeof replyTo } | null>(null);
@@ -1121,6 +1125,8 @@ function ChatInput({
       setMessage('');
       setAttachedFiles([]);
       onClearReply?.();
+      escArmedRef.current = false;
+      setEscStopHint(false);
       await sendFollowup(content, imageUrls, fileUrls, currentReplyTo);
       return;
     }
@@ -1206,18 +1212,34 @@ function ChatInput({
   );
 
   useEffect(() => {
-    if (!isBusy) return;
+    if (!isBusy) {
+      escArmedRef.current = false;
+      setEscStopHint(false);
+      return;
+    }
 
     const handleEsc = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      if (event.key !== 'Escape') return;
+      // 追い連絡の下書きを書いている最中（入力欄に文字あり）は、1回目の Esc で
+      // 作業を止めない。下書きはそのまま編集を続けられ、「もう一度Escで停止」を表示。
+      // 2回目の Esc（armed）で本当に停止する。下書きが無ければ従来どおり即停止。
+      const hasDraft = message.trim().length > 0;
+      if (hasDraft && !escArmedRef.current) {
         event.preventDefault();
-        handleCancel();
+        escArmedRef.current = true;
+        setEscStopHint(true);
+        textareaRef.current?.focus();
+        return;
       }
+      event.preventDefault();
+      escArmedRef.current = false;
+      setEscStopHint(false);
+      handleCancel();
     };
 
     window.addEventListener('keydown', handleEsc);
     return () => window.removeEventListener('keydown', handleEsc);
-  }, [handleCancel, isBusy]);
+  }, [handleCancel, isBusy, message]);
 
   return (
     <div
@@ -1322,6 +1344,13 @@ function ChatInput({
           >
             <X className="h-3 w-3" />
           </button>
+        </div>
+      )}
+      {escStopHint && (
+        <div className="mb-1.5 flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+          <span>編集を続けられます。</span>
+          <kbd className="rounded border bg-muted px-1 font-mono text-[10px]">Esc</kbd>
+          <span>をもう一度押すと作業を停止します。</span>
         </div>
       )}
       <div className={`flex items-end gap-2 rounded-xl border bg-input/30 p-2 transition-colors ${isCommentMode ? 'border-primary/40' : 'border-border focus-within:border-primary/50'}`}>
@@ -1612,9 +1641,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     queryFn: () => api.sm.getActiveStatus(project!.room_id!),
     enabled: !!project?.room_id,
     retry: 1,
-    // SSE接続中はポーリング不要（SSEイベントでキャッシュを直接更新する）
-    // SSE未接続時のみポーリングで状態を確認
-    refetchInterval: () => (sseConnectedRef.current ? false : 3000),
+    // SSE未接続時は 3s ポーリング。SSE接続中もイベントでキャッシュ更新するが、
+    // 追い連絡/cancel等でSSEがデシンク（接続扱いのまま無音）すると active 状態が
+    // 更新源を失い「Thinking...」のまま固着しうる。10s のバックストップで必ず
+    // backend の実状態に追従させ、固着を自己回復させる。
+    refetchInterval: () => (sseConnectedRef.current ? 10000 : 3000),
   });
 
   const isActiveExecution = !!activeStatus?.active;
