@@ -37,7 +37,7 @@ export function PainaFooter() {
                 href="/artifacts/paina/business"
                 className="link-underline text-[14px]"
               >
-                {ja ? "事業内容" : "Business"}
+                {ja ? "パイナについて" : "About"}
               </Link>
               <Link
                 href="/artifacts/paina/contact"

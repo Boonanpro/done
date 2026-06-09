@@ -7,7 +7,7 @@ import { Menu, X } from "lucide-react";
 import { useLang } from "./lang-context";
 
 const NAV = [
-  { ja: "事業内容", en: "Business", href: "/artifacts/paina/business" },
+  { ja: "パイナについて", en: "About", href: "/artifacts/paina/business" },
   { ja: "問い合わせ", en: "Contact", href: "/artifacts/paina/contact" },
 ];
 

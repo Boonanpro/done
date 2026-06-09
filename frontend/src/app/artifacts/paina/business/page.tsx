@@ -13,6 +13,8 @@ type CaseItem = {
   summary: { ja: string; en: string };
   tags: { ja: string[]; en: string[] };
   thumb: string;
+  /** ヒーローの動きをそのままサムネで見せる場合のループ動画 */
+  video?: { mp4: string; webm: string; poster: string };
   href?: string;
 };
 
@@ -28,7 +30,12 @@ const HP_CASES: CaseItem[] = [
       ja: ["コーポレートサイト", "ブランディング"],
       en: ["Corporate site", "Branding"],
     },
-    thumb: "/paina/case-kittoku.png",
+    thumb: "/paina/case-kittoku-poster.jpg",
+    video: {
+      mp4: "/paina/case-kittoku.mp4",
+      webm: "/paina/case-kittoku.webm",
+      poster: "/paina/case-kittoku-poster.jpg",
+    },
     href: "https://done-studio.vercel.app/preview/kittoku/v2",
   },
   {
@@ -42,7 +49,12 @@ const HP_CASES: CaseItem[] = [
       ja: ["店舗サイト", "ブランディング"],
       en: ["Restaurant site", "Branding"],
     },
-    thumb: "/paina/case-gojo.png",
+    thumb: "/paina/case-gojo-poster.jpg",
+    video: {
+      mp4: "/paina/case-gojo.mp4",
+      webm: "/paina/case-gojo.webm",
+      poster: "/paina/case-gojo-poster.jpg",
+    },
     href: "https://yonago-gojo-done.vercel.app",
   },
 ];
@@ -59,7 +71,7 @@ const DX_CASES: CaseItem[] = [
       ja: ["業務自動化", "ツール開発"],
       en: ["Automation", "Tool development"],
     },
-    thumb: "/paina/case-styleup.png",
+    thumb: "/paina/case-styleup.jpg",
   },
   {
     client: "電管ナレッジ",
@@ -72,14 +84,14 @@ const DX_CASES: CaseItem[] = [
       ja: ["ナレッジ基盤", "DX支援"],
       en: ["Knowledge base", "DX support"],
     },
-    thumb: "/paina/case-denki.png",
+    thumb: "/paina/case-denki.jpg",
   },
 ];
 
 const T = {
   ja: {
-    kicker: "Business",
-    title: "事業内容",
+    kicker: "About",
+    title: "パイナについて",
     intro:
       "中心にあるのは、AIエージェント「Done（ダン）」の開発です。そこで培った技術と視点を、ホームページ制作とDX支援という形で、いまの事業者の課題解決にも還元しています。",
     doneBadge: "Product — Coming soon",
@@ -102,10 +114,24 @@ const T = {
     ctaTitle: "制作・DX支援のご相談はお気軽に。",
     ctaBody: "小さな自動化から、サイト制作まで。まずはお話を聞かせてください。",
     ctaButton: "問い合わせる",
+    companyKicker: "Company",
+    companyTitle: "会社概要",
+    company: [
+      ["会社名", "株式会社パイナ（PAINA Inc.）"],
+      [
+        "所在地",
+        "〒651-0084 兵庫県神戸市中央区磯辺通1丁目1番18号 カサベラ国際プラザビル707号室",
+      ],
+      [
+        "事業内容",
+        "AIエージェント「Done（ダン）」の開発／ホームページ制作／ソフトウェア・ツールによるDX支援",
+      ],
+      ["連絡先", "shub6923@gmail.com"],
+    ] as [string, string][],
   },
   en: {
-    kicker: "Business",
-    title: "Business",
+    kicker: "About",
+    title: "About PAINA",
     intro:
       "At the center is the development of the AI agent “Done.” The technology and perspective built there are also returned to today's businesses through website production and DX support.",
     doneBadge: "Product — Coming soon",
@@ -129,6 +155,20 @@ const T = {
     ctaBody:
       "From small automations to full sites — start by telling me what you need.",
     ctaButton: "Get in touch",
+    companyKicker: "Company",
+    companyTitle: "Company profile",
+    company: [
+      ["Company", "PAINA Inc. (株式会社パイナ)"],
+      [
+        "Address",
+        "Room 707, Casabella Kokusai Plaza Bldg., 1-1-18 Isobedori, Chuo-ku, Kobe, Hyogo 651-0084, Japan",
+      ],
+      [
+        "Business",
+        "Development of the AI agent “Done” / Website production / DX support with software & tools",
+      ],
+      ["Contact", "shub6923@gmail.com"],
+    ] as [string, string][],
   },
 };
 
@@ -136,12 +176,26 @@ function CaseCard({ c, index, lang }: { c: CaseItem; index: number; lang: Lang }
   const inner = (
     <div className="group flex h-full flex-col overflow-hidden rounded-2xl border border-[var(--paina-border)] bg-[var(--paina-bg)] transition-colors hover:border-[var(--paina-border-strong)]">
       <div className="relative aspect-[16/10] overflow-hidden border-b border-[var(--paina-border)] bg-[var(--paina-bg-soft)]">
-        <img
-          src={c.thumb}
-          alt={`${c.client}`}
-          loading="lazy"
-          className="h-full w-full object-cover object-top transition-transform duration-700 group-hover:scale-[1.03]"
-        />
+        {c.video ? (
+          <video
+            autoPlay
+            muted
+            loop
+            playsInline
+            poster={c.video.poster}
+            className="h-full w-full object-cover object-top transition-transform duration-700 group-hover:scale-[1.03]"
+          >
+            <source src={c.video.webm} type="video/webm" />
+            <source src={c.video.mp4} type="video/mp4" />
+          </video>
+        ) : (
+          <img
+            src={c.thumb}
+            alt={`${c.client}`}
+            loading="lazy"
+            className="h-full w-full object-cover object-top transition-transform duration-700 group-hover:scale-[1.03]"
+          />
+        )}
         {c.href && (
           <span className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-[var(--paina-bg)]/90 text-[var(--paina-fg)] shadow-sm backdrop-blur">
             <ArrowUpRight className="h-4 w-4" />
@@ -318,6 +372,35 @@ export default function PainaBusiness() {
               <CaseCard key={c.client} c={c} index={i} lang={lang} />
             ))}
           </div>
+        </div>
+      </section>
+
+      {/* Company profile */}
+      <section className="border-t border-[var(--paina-border)] px-6 py-20 md:px-10 md:py-28">
+        <div className="mx-auto max-w-[1180px]">
+          <Reveal>
+            <p className="kicker">{t.companyKicker}</p>
+            <h2 className="font-serif-jp mt-6 text-[1.9rem] leading-[1.5] text-[var(--paina-fg)] md:text-[2.6rem]">
+              {t.companyTitle}
+            </h2>
+          </Reveal>
+          <Reveal delay={120}>
+            <dl className="mt-12 border-t border-[var(--paina-border)]">
+              {t.company.map(([k, v]) => (
+                <div
+                  key={k}
+                  className="flex flex-col gap-1 border-b border-[var(--paina-border)] py-6 md:flex-row md:gap-10 md:py-7"
+                >
+                  <dt className="font-label w-full shrink-0 text-[12px] uppercase tracking-[0.18em] text-[var(--paina-muted)] md:w-[180px] md:pt-1">
+                    {k}
+                  </dt>
+                  <dd className="text-[15px] leading-[2] text-[var(--paina-fg)]">
+                    {v}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </Reveal>
         </div>
       </section>
 
