@@ -56,8 +56,8 @@ const DX_CASES: CaseItem[] = [
     client: "スタイルアップ",
     reading: "Style Up",
     summary: {
-      ja: "美容サロンの予約サイトへのスタイル投稿を自動化。手作業だった掲載運用を仕組みに変え、更新の手間を大きく削減。",
-      en: "Automated style posting to a salon booking site. A manual posting workflow became a system, greatly cutting the update effort.",
+      ja: "サロンボードへのスタイル投稿を自動化。手作業だった掲載運用を仕組みに変え、更新の手間を大きく削減。",
+      en: "Automated style posting to Salon Board. A manual posting workflow became a system, greatly cutting the update effort.",
     },
     tags: {
       ja: ["業務自動化", "ツール開発"],
