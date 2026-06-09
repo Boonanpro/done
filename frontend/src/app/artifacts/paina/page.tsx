@@ -42,7 +42,7 @@ export default function PainaHome() {
       <Reveal>
         <div className="mx-auto max-w-[640px] text-center">
           <h1
-            className="font-serif-jp text-[2.1rem] leading-[1.5] tracking-[0.01em] text-[var(--paina-fg)] sm:text-[2.6rem]"
+            className="font-serif-jp whitespace-nowrap text-[1.55rem] leading-[1.5] tracking-[0.01em] text-[var(--paina-fg)] sm:whitespace-normal sm:text-[2.6rem]"
             data-edit-id="home-title"
           >
             {c.title}
