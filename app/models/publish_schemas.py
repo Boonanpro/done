@@ -22,6 +22,7 @@ class DomainCheckCandidate(BaseModel):
     registrable: bool
     tier: Optional[str] = None
     pricing: Optional[dict[str, Any]] = None
+    reason: Optional[str] = None  # available | taken | unsupported
 
 
 class DomainCheckResponse(BaseModel):

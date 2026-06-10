@@ -37,6 +37,10 @@ from app.tools.publish_site.cloudflare_registrar import (
     RegistrarError,
     get_cloudflare_registrar,
 )
+from app.tools.publish_site.registrar_router import (
+    get_registrar_by_name,
+    resolve_domain,
+)
 from app.tools.publish_site.seo_generator import (
     BusinessInfo,
     generate_robots_ts,
@@ -89,18 +93,27 @@ class PublishResult:
 async def check_domain(query: str, *, include_suggestions: bool = True) -> dict[str, Any]:
     """UI が「公開」ボタン押下後に呼ぶ事前チェック。
 
+    TLD に応じて Cloudflare / Porkbun を自動選択する。Cloudflare に振った TLD が
+    実は非対応（registrable=False かつ価格なし）だった場合は Porkbun に再問い合わせる。
+
     Returns:
         ``{"exact": {...}, "suggestions": [...]}``  両方とも domain-check 形式。
     """
-    r = await get_cloudflare_registrar()
-    exact_list = await r.check_availability([query])
-    exact = exact_list[0] if exact_list else None
+    # 両レジストラを比較して安い方を採用＋理由(available/taken/unsupported)を判定
+    exact, _provider = await resolve_domain(query)
+
+    # 候補（予測サジェスト）は Cloudflare の domain-search を使う。
+    # Porkbun の checkDomain は「10秒1回」制限で多数照会に向かないため、
+    # 高速かつ複数TLDをまとめて返せる Cloudflare 検索に一本化する。
     suggestions: list[dict[str, Any]] = []
     if include_suggestions:
+        base = query.strip().lower().rstrip(".")
+        keyword = base.rsplit(".", 1)[0] if "." in base else base
         try:
-            suggestions = await r.search(query, limit=8)
-        except RegistrarError as e:
-            logger.warning("search failed (non-fatal): %s", e)
+            cf = await get_cloudflare_registrar()
+            suggestions = await cf.search(keyword, limit=8)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("suggestion search failed (non-fatal): %s", e)
     return {"exact": exact, "suggestions": suggestions}
 
 
@@ -201,19 +214,20 @@ async def publish_with_custom_domain(
     result = PublishResult(success=False, artifact_id=artifact_id, domain=domain, steps=rec.steps)
 
     try:
-        registrar = await get_cloudflare_registrar(user_id)
         vercel = await get_vercel(user_id)
         cf_dns = await get_cloudflare_dns(user_id)
 
-        # 1. 空き確認
+        # 1. 空き確認（両レジストラを比較し、初年度が安い方を採用）
         s = rec.start("check_availability")
-        avail = (await registrar.check_availability([domain]))[0]
-        if not avail.get("registrable"):
-            rec.fail(s, f"{domain} is not registrable (tier={avail.get('tier')})")
-            result.error = f"{domain} is not available"
+        exact, provider = await resolve_domain(domain, user_id)
+        if provider is None or not exact.get("registrable"):
+            reason = (exact or {}).get("reason", "unavailable")
+            rec.fail(s, f"{domain} is not registrable ({reason})")
+            result.error = f"{domain} is not available ({reason})"
             return result
-        result.pricing = avail.get("pricing")
-        rec.complete(s, f"${result.pricing.get('registration_cost')}/y")
+        registrar = await get_registrar_by_name(provider, user_id)
+        result.pricing = exact.get("pricing")
+        rec.complete(s, f"${(result.pricing or {}).get('registration_cost')}/y via {provider}")
 
         # 2. 購入
         s = rec.start("register_domain")
@@ -232,6 +246,24 @@ async def publish_with_custom_domain(
         else:
             await _wait_registration_complete(registrar, domain)
             rec.complete(s)
+
+        # 3.5 外部レジストラ(Porkbun等): Cloudflare にゾーン作成し NS を向ける。
+        #     Cloudflare Registrar で取得した場合はゾーンが自動作成されるので不要。
+        if provider != "cloudflare":
+            s = rec.start("setup_dns_zone")
+            if dry_run:
+                rec.complete(s, "[DRY-RUN] would create CF zone + point NS")
+            else:
+                try:
+                    zone_obj = await cf_dns.ensure_zone(domain)
+                    nameservers = zone_obj.get("name_servers") or []
+                    if nameservers and hasattr(registrar, "update_nameservers"):
+                        await registrar.update_nameservers(domain, nameservers)
+                    rec.complete(s, f"CF zone + NS→{','.join(nameservers[:2])}")
+                except Exception as e:  # noqa: BLE001
+                    rec.fail(s, str(e))
+                    result.error = f"DNS zone setup failed: {e}"
+                    return result
 
         # 4. Vercel に紐付け
         s = rec.start("attach_to_vercel")
@@ -399,14 +431,20 @@ def _setup_price(setup: dict[str, Any]) -> Optional[str]:
     Cloudflare 原価に Stripe 手数料分を上乗せした額。運営者の受取が原価を
     下回らないようにするためで、利益は乗せていない。
     """
-    pricing = (((setup.get("availability") or {}).get("exact")) or {}).get("pricing") or {}
+    exact = ((setup.get("availability") or {}).get("exact")) or {}
+    pricing = exact.get("pricing") or {}
     cost = pricing.get("registration_cost")
     if cost is None:
         return None
+    # .ai 等は最低登録年数(min_duration)があるので総額で請求する（.com系は1で従来どおり）
+    try:
+        min_dur = max(int(exact.get("min_duration") or 1), 1)
+    except (TypeError, ValueError):
+        min_dur = 1
     try:
         from app.tools.publish_site.stripe_payments import gross_up_for_fee
 
-        cents = gross_up_for_fee(round(float(cost) * 100))
+        cents = gross_up_for_fee(round(float(cost) * min_dur * 100))
     except (TypeError, ValueError):
         return None
     return f"{cents / 100:.2f}"
@@ -523,7 +561,7 @@ async def create_domain_checkout(token: str, *, return_origin: str) -> dict[str,
         url = await create_checkout_session(
             amount_cents=amount_cents,
             currency="usd",
-            product_name=f"独自ドメイン取得・公開: {domain}（1年）",
+            product_name=f"独自ドメイン取得・公開: {domain}",
             success_url=f"{origin}/domain-setup/{token}?session_id={{CHECKOUT_SESSION_ID}}",
             cancel_url=f"{origin}/domain-setup/{token}",
             metadata={"token": token, "domain": domain},
