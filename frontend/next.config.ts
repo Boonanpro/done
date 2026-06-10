@@ -69,6 +69,17 @@ const nextConfig: NextConfig = {
         source: '/preview/:path*',
         destination: '/artifacts/:path*',
       },
+      // 独自ドメインの汎用ルート: middleware が付けた x-artifact-slug ヘッダを見て
+      // サブパスを成果物配下に振り向ける（ドメインごとの焼き込み不要・接続したら自動）。
+      // middleware の直接 rewrite ではネスト静的ルートが解決されないため、信頼できる
+      // next.config rewrite(afterFiles) 側で解決させる。
+      {
+        source: '/:path+',
+        has: [
+          { type: 'header', key: 'x-artifact-slug', value: '(?<artifactSlug>[^/]+)' },
+        ],
+        destination: '/artifacts/:artifactSlug/:path+',
+      },
       // ダンコア向け: 具体的な path を先に評価させる
       {
         source: '/api/v1/chat/:path*',
