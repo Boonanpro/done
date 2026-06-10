@@ -35,6 +35,14 @@ function isInternalVercelUrl(value?: string | null): boolean {
   }
 }
 
+/** localhost / *.vercel.app 以外＝成果物がドメイン直下で配信される独自ドメイン。 */
+function isPublicCustomDomainHost(hostname: string): boolean {
+  if (!hostname) return false;
+  if (hostname.startsWith('localhost') || hostname.startsWith('127.0.0.1')) return false;
+  if (hostname.endsWith('.vercel.app')) return false;
+  return true;
+}
+
 function normalizeRest(rest = ''): string {
   if (!rest || rest === '/') return '';
   return rest.startsWith('/') ? rest : `/${rest}`;
@@ -77,7 +85,15 @@ export function artifactVisiblePath({
   hostname?: string;
 }): string {
   const customDomains = KNOWN_CUSTOM_DOMAINS[slug] || [];
-  if (hostname && (customDomains.includes(hostname) || hostname === artifactDeliveryDomain(slug))) {
+  // 独自ドメイン上では常にクリーンURL（/business 等）を出す。静的リスト(KNOWN_CUSTOM_DOMAINS)
+  // に無い動的接続ドメインでも、localhost / *.vercel.app 以外＝独自ドメインなら成果物は
+  // ドメイン直下で配信されているので、リンクも /preview を付けずクリーンにする。
+  if (
+    hostname &&
+    (customDomains.includes(hostname) ||
+      hostname === artifactDeliveryDomain(slug) ||
+      isPublicCustomDomainHost(hostname))
+  ) {
     return cleanPath(rest);
   }
 
