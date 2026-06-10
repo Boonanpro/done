@@ -1,4 +1,4 @@
-const { AndroidConfig, withAndroidManifest, withDangerousMod, withMainApplication } = require('@expo/config-plugins');
+const { AndroidConfig, withAndroidManifest, withAppBuildGradle, withDangerousMod, withMainApplication } = require('@expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
 
@@ -66,9 +66,13 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.provider.Telephony
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
+import androidx.work.BackoffPolicy
+import androidx.work.Constraints
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
+import java.util.concurrent.TimeUnit
 
 class DanSmsForwarderReceiver : BroadcastReceiver() {
   companion object {
@@ -81,34 +85,74 @@ class DanSmsForwarderReceiver : BroadcastReceiver() {
     if (!prefs.getBoolean("enabled", false)) return
     val apiBaseUrl = prefs.getString("apiBaseUrl", null) ?: return
     val deviceToken = prefs.getString("deviceToken", null) ?: return
-    val pending = goAsync()
+    val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
+    val sender = messages.firstOrNull()?.displayOriginatingAddress ?: ""
+    val body = messages.joinToString("") { it.displayMessageBody ?: "" }
+    if (!Regex("""\\b\\d{4,8}\\b""").containsMatchIn(body)) return
 
-    Thread {
-      try {
-        val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-        val sender = messages.firstOrNull()?.displayOriginatingAddress ?: ""
-        val body = messages.joinToString("") { it.displayMessageBody ?: "" }
-        if (!Regex("""\\b\\d{4,8}\\b""").containsMatchIn(body)) return@Thread
-        val payload = JSONObject()
-          .put("sender", sender)
-          .put("body", body)
-          .put("message_id", messages.firstOrNull()?.timestampMillis?.toString())
-        val connection = URL("$apiBaseUrl/api/v1/otp/apk/forward").openConnection() as HttpURLConnection
-        connection.requestMethod = "POST"
-        connection.connectTimeout = 10000
-        connection.readTimeout = 10000
-        connection.doOutput = true
-        connection.setRequestProperty("Content-Type", "application/json")
-        connection.setRequestProperty("X-Dan-Otp-Device-Token", deviceToken)
-        connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
-        connection.inputStream.use { it.readBytes() }
-        connection.disconnect()
-      } catch (_: Exception) {
-        // OTP remains available on the phone for manual entry.
-      } finally {
-        pending.finish()
+    // Hand the POST to WorkManager: a one-shot fire-and-forget request loses the
+    // code forever on any transient network/server failure, and OTPs cannot be
+    // re-fetched. WorkManager retries with backoff and survives process death.
+    val request = OneTimeWorkRequestBuilder<DanSmsForwardWorker>()
+      .setConstraints(
+        Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
+      )
+      .setBackoffCriteria(BackoffPolicy.LINEAR, 30, TimeUnit.SECONDS)
+      .setInputData(
+        workDataOf(
+          "apiBaseUrl" to apiBaseUrl,
+          "deviceToken" to deviceToken,
+          "sender" to sender,
+          "body" to body,
+          "messageId" to (messages.firstOrNull()?.timestampMillis?.toString() ?: ""),
+        )
+      )
+      .build()
+    WorkManager.getInstance(context).enqueue(request)
+  }
+}
+`);
+
+  fs.writeFileSync(path.join(dir, 'DanSmsForwardWorker.kt'), `package app.done.dan.sms
+
+import android.content.Context
+import androidx.work.Worker
+import androidx.work.WorkerParameters
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+
+class DanSmsForwardWorker(context: Context, params: WorkerParameters) :
+  Worker(context, params) {
+  override fun doWork(): Result {
+    // OTPs expire in ~10 minutes; with linear 30s backoff, attempt 6 lands past
+    // that window, so further retries would only deliver dead codes.
+    if (runAttemptCount >= 6) return Result.failure()
+    val apiBaseUrl = inputData.getString("apiBaseUrl") ?: return Result.failure()
+    val deviceToken = inputData.getString("deviceToken") ?: return Result.failure()
+    val payload = JSONObject()
+      .put("sender", inputData.getString("sender") ?: "")
+      .put("body", inputData.getString("body") ?: "")
+      .put("message_id", inputData.getString("messageId") ?: "")
+    return try {
+      val connection = URL("$apiBaseUrl/api/v1/otp/apk/forward").openConnection() as HttpURLConnection
+      connection.requestMethod = "POST"
+      connection.connectTimeout = 10000
+      connection.readTimeout = 15000
+      connection.doOutput = true
+      connection.setRequestProperty("Content-Type", "application/json")
+      connection.setRequestProperty("X-Dan-Otp-Device-Token", deviceToken)
+      connection.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
+      val code = connection.responseCode
+      connection.disconnect()
+      when {
+        code in 200..299 -> Result.success()
+        code == 401 -> Result.failure() // token revoked — retrying cannot help
+        else -> Result.retry()
       }
-    }.start()
+    } catch (_: Exception) {
+      Result.retry()
+    }
   }
 }
 `);
@@ -135,6 +179,16 @@ module.exports = function withDanSmsForwarder(config) {
           action: [{ $: { 'android:name': 'android.provider.Telephony.SMS_RECEIVED' } }],
         }],
       });
+    }
+    return mod;
+  });
+
+  config = withAppBuildGradle(config, (mod) => {
+    if (!mod.modResults.contents.includes('androidx.work:work-runtime')) {
+      mod.modResults.contents = mod.modResults.contents.replace(
+        /dependencies\s*\{/,
+        'dependencies {\n    implementation("androidx.work:work-runtime-ktx:2.9.1")',
+      );
     }
     return mod;
   });
