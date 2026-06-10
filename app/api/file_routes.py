@@ -149,4 +149,12 @@ async def get_file(filename: str):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
+    # APK is a zip container; without an explicit MIME type browsers save it as
+    # .zip instead of offering the Android install flow.
+    if file_path.suffix.lower() == ".apk":
+        return FileResponse(
+            file_path,
+            media_type="application/vnd.android.package-archive",
+            filename=file_path.name,
+        )
     return FileResponse(file_path)
