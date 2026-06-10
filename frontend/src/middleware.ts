@@ -129,10 +129,10 @@ export async function middleware(request: NextRequest) {
     }
 
     // ルート (/) は /artifacts/<slug>（[slug]動的ルートが解決）に rewrite。
-    // サブパスを middleware が直接 /artifacts/<slug>/<sub> に rewrite すると
-    // ネスト静的ルートが解決されず404になるため、リクエストに x-artifact-slug
-    // ヘッダを付け、next.config の汎用 rewrite（has: header → /artifacts/:slug/:path+）
-    // に振り分けを任せる（next.config の rewrite は afterFiles で信頼できる）。
+    // サブパス (/business 等) は middleware が直接 /artifacts/<slug>/<sub> に rewrite
+    // するとネスト静的ルートが解決されず404になるため、ここでは next() で素通しし、
+    // next.config の host条件付き rewrite（custom-domain-rewrites.generated）に
+    // 振り分けを任せる。接続済みドメインは再デプロイ後にクリーンURLで配信される。
     if (pathname === '/') {
       const url = request.nextUrl.clone();
       url.pathname = `/artifacts/${customDomainSlug}`;
@@ -140,9 +140,7 @@ export async function middleware(request: NextRequest) {
       if (deliverySlug) response.headers.set('X-Robots-Tag', 'noindex, nofollow');
       return response;
     }
-    const requestHeaders = new Headers(request.headers);
-    requestHeaders.set('x-artifact-slug', customDomainSlug);
-    const response = NextResponse.next({ request: { headers: requestHeaders } });
+    const response = NextResponse.next();
     // 納品URL (<slug>-done.vercel.app) は確認用なので検索インデックスから除外する。
     if (deliverySlug) {
       response.headers.set('X-Robots-Tag', 'noindex, nofollow');
