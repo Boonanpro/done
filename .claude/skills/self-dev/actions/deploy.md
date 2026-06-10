@@ -42,7 +42,19 @@ curl http://127.0.0.1:8000/api/v1/chat/dan/sessions/active-list \
 - 10分経っても空かない場合: ユーザーに報告して判断を仰ぐ
   - 「セッション XXX がまだアクティブです。強制的にデプロイしますか？」
 
-### Step 4: git push
+### Step 4: Scope規律の確認（commit前・必須）
+
+このプロジェクトは **1 commit = 1 scope** を pre-commit hook と CI で物理強制している。混在した commit は作成できない。
+
+```bash
+python scripts/scope_diff.py --working
+```
+
+- ダン infra（`app/**`, `.claude/**` 等）と 成果物（`artifacts/<slug>/**`）を同じ commit に混ぜない
+- 違う scope が混在していたら scope ごとに `git add <path>` を分けて別 commit にする
+- 詳細は `CLAUDE.md` の「Scope規律」節を参照
+
+### Step 5: git push
 
 ```bash
 git add <変更ファイル>
@@ -50,7 +62,7 @@ git commit -m "変更内容の説明"
 git push origin main
 ```
 
-### Step 5: 報告
+### Step 6: 報告
 
 以下のように報告する:
 
