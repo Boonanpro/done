@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.models.publish_schemas import (
+    ConnectDomainRequest,
     DomainCheckCandidate,
     DomainCheckRequest,
     DomainCheckResponse,
@@ -33,6 +34,7 @@ from app.services.chat_artifact_service import ChatArtifactService
 from app.tools.publish_site.orchestrator import (
     check_domain,
     confirm_domain_payment,
+    connect_existing_domain,
     create_domain_checkout,
     create_domain_setup,
     get_domain_setup_state,
@@ -109,6 +111,34 @@ async def run(
         steps=[PublishStepDTO(**s.__dict__) for s in result.steps],
         error=result.error,
         pricing=result.pricing,
+    )
+
+
+@router.post("/connect", response_model=PublishResponse)
+async def connect(
+    data: ConnectDomainRequest,
+    user: TokenData = Depends(get_current_user),
+):
+    """既に所有しているドメインを接続して公開する（購入なし）。
+
+    Vercel紐付け→DNSをVercelへ向ける（Name.com/Cloudflareは自動・外部は手動レコード案内）
+    →成果物にマッピング→反映確認。
+    """
+    result = await connect_existing_domain(
+        artifact_id=data.artifact_id,
+        domain=data.domain,
+        vercel_project=data.vercel_project,
+        user_id=user.user_id,
+    )
+    return PublishResponse(
+        success=result.success,
+        artifact_id=result.artifact_id,
+        domain=result.domain,
+        deploy_url=result.deploy_url,
+        steps=[PublishStepDTO(**s.__dict__) for s in result.steps],
+        error=result.error,
+        pricing=result.pricing,
+        dns_instructions=result.dns_instructions,
     )
 
 

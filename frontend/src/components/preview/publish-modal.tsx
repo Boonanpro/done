@@ -48,12 +48,17 @@ interface PublishStepDTO {
   detail: string;
   duration_ms: number;
 }
+interface DnsRecord {
+  host: string;
+  value: string;
+}
 interface PublishResponse {
   success: boolean;
   domain: string;
   deploy_url: string | null;
   steps: PublishStepDTO[];
   error: string | null;
+  dns_instructions?: { a?: DnsRecord; cname?: DnsRecord } | null;
 }
 interface DomainSetupResponse {
   success: boolean;
@@ -78,6 +83,7 @@ const STAGE_TITLE: Record<Stage, string> = {
 };
 
 const STEP_LABEL: Record<string, string> = {
+  detect_provider: 'ドメイン確認',
   check_availability: 'ドメイン確認',
   register_domain: 'ドメイン購入',
   wait_registration_complete: '購入完了待ち',
@@ -175,6 +181,37 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
     },
   });
 
+  // 既に持っているドメインを接続（購入なし）
+  const connectMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/v1/publish/connect', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          artifact_id: artifact.id,
+          domain,
+          vercel_project: VERCEL_PROJECT,
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<PublishResponse>;
+    },
+    onMutate: () => setStage('publishing'),
+    onSuccess: (data) => {
+      setResult(data);
+      setStage('done');
+      if (data.success) {
+        toast.success('ドメインを接続しました');
+        onPublished?.();
+      }
+    },
+    onError: (e) => {
+      setResult({ success: false, domain, deploy_url: null, steps: [], error: String(e) });
+      setStage('done');
+    },
+  });
+
   const guideMutation = useMutation({
     mutationFn: async () => {
       const res = await fetch('/api/v1/publish/domain-setup', {
@@ -258,11 +295,25 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
               />
             </div>
             {exact && !exact.registrable && (
-              <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700">
-                <AlertCircle className="h-4 w-4" />
-                {exact.reason === 'unsupported'
-                  ? `「.${exact.name.split('.').pop()}」は現在取り扱っていないドメインです`
-                  : `${exact.name} は既に取得されています`}
+              <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+                <div className="flex items-center gap-2 text-amber-700">
+                  <AlertCircle className="h-4 w-4" />
+                  {exact.reason === 'unsupported'
+                    ? `「.${exact.name.split('.').pop()}」は現在取り扱っていないドメインです`
+                    : `${exact.name} は既に取得されています`}
+                </div>
+                {exact.reason === 'taken' && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="w-full"
+                    onClick={() => connectMutation.mutate()}
+                    disabled={connectMutation.isPending}
+                  >
+                    {connectMutation.isPending && <Loader2 className="mr-2 h-3 w-3 animate-spin" />}
+                    自分で持っているドメインなら接続して公開
+                  </Button>
+                )}
               </div>
             )}
             {check && check.suggestions.filter((s) => s.registrable).length > 0 && (
@@ -348,16 +399,13 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
 
         {/* ステップ3a': 公開処理中 */}
         {stage === 'publishing' && (
-          <div className="space-y-1.5 text-sm">
-            {Object.entries(STEP_LABEL).map(([key, label]) => {
-              const step = result?.steps.find((s) => s.name === key);
-              return (
-                <div key={key} className="flex items-center gap-3 px-1 py-1">
-                  <StepIcon status={step?.status ?? 'pending'} />
-                  <span>{label}</span>
-                </div>
-              );
-            })}
+          <div className="flex flex-col items-center gap-3 py-6 text-center text-sm">
+            <Loader2 className="h-7 w-7 animate-spin text-primary" />
+            <div className="font-medium">公開処理を実行中です</div>
+            <div className="text-xs text-muted-foreground">
+              ドメイン設定・DNS・サイト接続を進めています。<br />
+              DNSの反映に数分かかる場合があります。
+            </div>
           </div>
         )}
 
@@ -390,6 +438,38 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
                     {result.error}
                   </pre>
                 )}
+              </div>
+            )}
+
+            {/* 外部DNSの場合: 手動で設定するレコードを案内 */}
+            {result.dns_instructions && (
+              <div className="space-y-2 rounded-md border p-3 text-sm">
+                <div className="font-medium">ドメイン側で次のDNSを設定してください</div>
+                <p className="text-xs text-muted-foreground">
+                  このドメインのDNSは別の場所で管理されています。お使いのレジストラのDNS設定に以下を追加すると、数分で公開されます。
+                </p>
+                {result.dns_instructions.a && (
+                  <div className="rounded bg-muted px-2 py-1 font-mono text-xs">
+                    A &nbsp; {result.dns_instructions.a.host} &nbsp;→&nbsp; {result.dns_instructions.a.value}
+                  </div>
+                )}
+                {result.dns_instructions.cname && (
+                  <div className="rounded bg-muted px-2 py-1 font-mono text-xs">
+                    CNAME &nbsp; {result.dns_instructions.cname.host} &nbsp;→&nbsp; {result.dns_instructions.cname.value}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 進捗ステップの結果 */}
+            {result.steps.length > 0 && (
+              <div className="space-y-1 text-sm">
+                {result.steps.map((step, i) => (
+                  <div key={`${step.name}-${i}`} className="flex items-center gap-3 px-1 py-0.5">
+                    <StepIcon status={step.status} />
+                    <span>{STEP_LABEL[step.name] ?? step.name}</span>
+                  </div>
+                ))}
               </div>
             )}
           </div>

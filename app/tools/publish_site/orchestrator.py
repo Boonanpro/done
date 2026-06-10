@@ -37,6 +37,7 @@ from app.tools.publish_site.cloudflare_registrar import (
     RegistrarError,
     get_cloudflare_registrar,
 )
+from app.tools.publish_site.namecom_registrar import NameComError, get_namecom_registrar
 from app.tools.publish_site.registrar_router import (
     get_registrar_by_name,
     resolve_domain,
@@ -77,6 +78,7 @@ class PublishResult:
     steps: list[PublishStep] = field(default_factory=list)
     error: Optional[str] = None
     pricing: Optional[dict[str, Any]] = None
+    dns_instructions: Optional[dict[str, Any]] = None  # 外部DNS時に手動設定するレコード
 
 
 # 旧 issue_dedicated_delivery_url（<slug>-done.vercel.app 専用 alias 発行）は廃止。
@@ -403,6 +405,140 @@ async def publish_with_custom_domain(
         for s in rec.steps:
             if s.status == "running":
                 rec.fail(s, repr(e))
+        result.error = repr(e)
+        return result
+
+
+# ============================================
+# 既に所有しているドメインを接続する（購入なし）
+# ============================================
+
+
+async def _detect_dns_provider(domain: str, user_id: Optional[str] = None) -> str:
+    """ドメインのDNSをどこで設定できるか判定。"namecom" | "cloudflare" | "external"。"""
+    try:
+        nc = await get_namecom_registrar(user_id)
+        if domain in await nc.list_owned_domains():
+            return "namecom"
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        cf_dns = await get_cloudflare_dns(user_id)
+        if await cf_dns.get_zone_by_name(domain):
+            return "cloudflare"
+    except Exception:  # noqa: BLE001
+        pass
+    return "external"
+
+
+async def connect_existing_domain(
+    *,
+    artifact_id: str,
+    domain: str,
+    vercel_project: str = DEFAULT_VERCEL_PROJECT,
+    user_id: Optional[str] = None,
+) -> PublishResult:
+    """既に所有しているドメイン（購入なし）を成果物に接続して公開する。
+
+    Vercel紐付け → DNSをVercelへ向ける（管理元別）→ 成果物にマッピング → 反映確認。
+    DNSが外部管理の場合は設定すべきレコードを ``dns_instructions`` で返す。
+    """
+    rec = _StepRecorder()
+    domain = _normalize_domain(domain)
+    base_url = f"https://{domain}"
+    result = PublishResult(success=False, artifact_id=artifact_id, domain=domain, steps=rec.steps)
+    try:
+        vercel = await get_vercel(user_id)
+
+        # 1. DNS管理元を判定
+        s = rec.start("detect_provider")
+        provider = await _detect_dns_provider(domain, user_id)
+        rec.complete(s, provider)
+
+        # 2. Vercel に紐付け
+        s = rec.start("attach_to_vercel")
+        try:
+            await vercel.add_domain_to_project(vercel_project, domain)
+            rec.complete(s, f"attached to {vercel_project}")
+        except VercelError as e:
+            if e.status == 409:
+                rec.complete(s, "already attached")
+            else:
+                raise
+
+        # 3. Vercel が要求するレコードを取得
+        cfg = await vercel.get_domain_config(domain)
+        rec_ipv4 = (cfg.get("recommendedIPv4") or [])
+        apex_ip = "76.76.21.21"
+        if rec_ipv4 and rec_ipv4[0].get("value"):
+            apex_ip = rec_ipv4[0]["value"][0]
+        rec_cname = (cfg.get("recommendedCNAME") or [])
+        cname_target = rec_cname[0]["value"].rstrip(".") if rec_cname else "cname.vercel-dns.com"
+
+        # 4. DNS を Vercel に向ける
+        s = rec.start("configure_dns")
+        if provider == "namecom":
+            nc = await get_namecom_registrar(user_id)
+            await nc.set_vercel_dns(domain, apex_ip=apex_ip, cname_target=cname_target)
+            rec.complete(s, f"A @→{apex_ip} / CNAME www→{cname_target}")
+        elif provider == "cloudflare":
+            cf_dns = await get_cloudflare_dns(user_id)
+            zone = await cf_dns.get_zone_by_name(domain)
+            await cf_dns.upsert_record(zone["id"], type="CNAME", name="@", content=cname_target)
+            await cf_dns.upsert_record(zone["id"], type="CNAME", name="www", content=cname_target)
+            rec.complete(s, f"CNAME @+www→{cname_target}")
+        else:
+            # 外部DNS: 自動設定できないので手動レコードを案内
+            result.dns_instructions = {
+                "a": {"host": "@", "value": apex_ip},
+                "cname": {"host": "www", "value": cname_target},
+            }
+            rec.complete(s, "外部DNS: 手動でレコード設定が必要")
+
+        # 5. 成果物にマッピング（custom_domain）
+        s = rec.start("update_artifact_db")
+        try:
+            svc = ChatArtifactService()
+            update_data = {
+                "custom_domain": domain,
+                "production_url": base_url,
+                "publish_status": "live",
+                "delivery_mode": "client_domain",
+                "last_publish_error": None,
+            }
+            if user_id:
+                await svc.update(artifact_id, update_data, user_id)
+            else:
+                svc.supabase.table(svc.table).update(update_data).eq("id", artifact_id).execute()
+            rec.complete(s)
+        except Exception as e:  # noqa: BLE001
+            rec.fail(s, f"DB update failed: {e}")
+
+        # 6. 反映確認（外部DNSはユーザー設定待ちなのでスキップ）
+        s = rec.start("verify_dns_propagation")
+        if provider == "external":
+            s.status = "skipped"
+            s.detail = "手動DNS設定後に反映されます"
+        else:
+            try:
+                await _wait_vercel_dns_verified(vercel, domain)
+                rec.complete(s)
+            except TimeoutError as e:
+                rec.fail(s, f"反映待ち（数分かかる場合あり）: {e}")
+
+        result.success = True
+        result.deploy_url = base_url
+        return result
+    except (VercelError, CloudflareDNSError, NameComError) as e:
+        for st in rec.steps:
+            if st.status == "running":
+                rec.fail(st, str(e))
+        result.error = str(e)
+        return result
+    except Exception as e:  # noqa: BLE001
+        for st in rec.steps:
+            if st.status == "running":
+                rec.fail(st, repr(e))
         result.error = repr(e)
         return result
 
