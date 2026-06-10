@@ -103,6 +103,12 @@ export async function middleware(request: NextRequest) {
       return NextResponse.rewrite(url);
     }
 
+    // SEO: /robots.txt と /sitemap.xml はアプリ直下の host 判定 robots.ts /
+    // sitemap.ts に素通しさせる（独自ドメイン直下で確実に配信する）。
+    if (pathname === '/robots.txt' || pathname === '/sitemap.xml') {
+      return NextResponse.next();
+    }
+
     if (first === 'preview' && slug === customDomainSlug) {
       const url = request.nextUrl.clone();
       const rest = segments.slice(2).join('/');
