@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
+import { CUSTOM_DOMAIN_SLUG_MAP } from './lib/custom-domain-rewrites.generated';
+
 const ACCESS_TOKEN_COOKIE = 'done_access_token';
 
 const DEFAULT_CUSTOM_DOMAIN_MAP: Record<string, string[]> = {
+  ...CUSTOM_DOMAIN_SLUG_MAP,
   kittoku: ['kittoku.vercel.app', 'yoshikawa-tokuso.vercel.app'],
 };
 
