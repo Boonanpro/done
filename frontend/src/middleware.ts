@@ -122,9 +122,16 @@ export async function middleware(request: NextRequest) {
       return NextResponse.redirect(url);
     }
 
+    // ルート (/) は /artifacts/<slug>（[slug]動的ルートが解決）でOKだが、
+    // サブパスを middleware が直接 /artifacts/<slug>/<sub> に rewrite すると
+    // ネスト静的ルートが解決されず404になる。next.config の
+    // `/preview/:path* → /artifacts/:path*`(afterFiles) は信頼できるので、
+    // サブパスは /preview/<slug>/... 経由でその rewrite に乗せる。
     const url = request.nextUrl.clone();
     url.pathname =
-      pathname === '/' ? `/artifacts/${customDomainSlug}` : `/artifacts/${customDomainSlug}${pathname}`;
+      pathname === '/'
+        ? `/artifacts/${customDomainSlug}`
+        : `/preview/${customDomainSlug}${pathname}`;
     const response = NextResponse.rewrite(url);
     // 納品URL (<slug>-done.vercel.app) は確認用なので検索インデックスから除外する。
     // 本番の独自ドメインで公開した時のみ検索に載るようにする。
