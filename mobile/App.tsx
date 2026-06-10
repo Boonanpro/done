@@ -1087,7 +1087,29 @@ function AppMain() {
       apiRequest<{ enabled: boolean }>('/otp/apk/status', {}, token),
       DanSmsForwarder.isEnabled(),
     ])
-      .then(([server, localEnabled]) => {
+      .then(async ([server, localEnabled]) => {
+        if (server.enabled && !localEnabled) {
+          // Server-side intent is ON but this install lost its local config
+          // (reinstall / cleared data / failed logout) — the forwarder would
+          // stay silently dead while the server reports it enabled. Self-heal
+          // when the SMS permission is already granted; never prompt on launch.
+          const granted = await PermissionsAndroid.check(
+            PermissionsAndroid.PERMISSIONS.RECEIVE_SMS,
+          );
+          if (granted) {
+            const registration = await apiRequest<{ device_token: string }>(
+              '/otp/apk/register',
+              {
+                method: 'POST',
+                body: JSON.stringify({ device_name: Device.modelName || 'Android device' }),
+              },
+              token,
+            );
+            await DanSmsForwarder.configure(API_BASE_URL, registration.device_token);
+            setSmsForwardingStatus('On');
+            return;
+          }
+        }
         setSmsForwardingStatus(server.enabled && localEnabled ? 'On' : 'Off');
       })
       .catch(() => setSmsForwardingStatus('Off'));

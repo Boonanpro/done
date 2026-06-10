@@ -2906,9 +2906,24 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                 state = await _get_browser_state(page)
                 state["success"] = False
                 src_label = "メール" if source == "email" else "Androidアプリ(SMS)"
+                hint = ""
+                if source == "sms":
+                    try:
+                        dev = await otp_service.get_apk_otp_device_status(user_id)
+                        hint = (
+                            f" Forwarder device status: enabled={dev.get('enabled')}, "
+                            f"device={dev.get('device_name')}, last_received_at={dev.get('last_received_at')}."
+                            " If the user says the SMS DID arrive on their phone, the app's local"
+                            " forwarding setting was probably lost (reinstall/logout) — ask them to"
+                            " open the Dan app once (opening it self-repairs the setting) and then"
+                            " resend the code, instead of asking them to read the code aloud."
+                        )
+                    except Exception:
+                        pass
                 state["error"] = (
-                    f"No OTP arrived from {src_label} within {timeout_seconds} seconds. "
-                    "Keep this browser page open and ask the user to enter the code manually."
+                    f"No OTP arrived from {src_label} within {timeout_seconds} seconds."
+                    + hint
+                    + " Keep this browser page open. If a resend is not possible, ask the user to enter the code manually."
                 )
                 return state
 
