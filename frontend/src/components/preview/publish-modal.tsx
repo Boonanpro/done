@@ -93,6 +93,7 @@ const STEP_LABEL: Record<string, string> = {
   attach_to_vercel: 'サイトに接続',
   configure_dns: 'URL設定',
   verify_dns_propagation: '反映確認',
+  submit_search_console: '検索エンジンに登録',
   generate_seo_assets: '検索向けファイル作成',
   submit_to_search_console: '検索エンジンに登録',
   update_artifact_db: '保存',

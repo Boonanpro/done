@@ -580,6 +580,40 @@ async def connect_existing_domain(
         except Exception as e:  # noqa: BLE001
             rec.fail(s, f"DB update failed: {e}")
 
+        # 7. SEO: Search Console 所有権確認 + sitemap 申請（検証OK & DNS自社管理のみ）
+        s = rec.start("submit_search_console")
+        if verified and provider in ("namecom", "cloudflare"):
+            try:
+                from app.tools.publish_site.search_console import (
+                    get_dns_verification_record,
+                    verify_and_submit,
+                )
+
+                sc_rec = await get_dns_verification_record(domain)
+                if not sc_rec:
+                    s.status = "skipped"
+                    s.detail = "Search Console 未設定"
+                else:
+                    if provider == "namecom":
+                        nc = await get_namecom_registrar(user_id)
+                        await nc.set_txt_record(domain, sc_rec["value"])
+                    else:
+                        cf_dns = await get_cloudflare_dns(user_id)
+                        zone = await cf_dns.get_zone_by_name(domain)
+                        await cf_dns.upsert_record(
+                            zone["id"], type="TXT", name="@", content=sc_rec["value"]
+                        )
+                    sc = await verify_and_submit(domain, f"https://{domain}/sitemap.xml")
+                    if sc.get("sitemap_submitted"):
+                        rec.complete(s, "Search Console に sitemap 申請完了")
+                    else:
+                        rec.fail(s, sc.get("detail", "Search Console 申請に一部失敗"))
+            except Exception as e:  # noqa: BLE001
+                rec.fail(s, f"Search Console 申請でエラー: {e}")
+        else:
+            s.status = "skipped"
+            s.detail = "外部DNS or 未検証のためスキップ"
+
         result.success = True
         result.deploy_url = base_url if verified else None
         return result

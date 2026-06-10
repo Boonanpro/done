@@ -191,6 +191,18 @@ class NameComRegistrar:
         await self._request("POST", f"/domains/{domain}/records",
                             {"host": "www", "type": "CNAME", "answer": cname_target, "ttl": 300})
 
+    async def set_txt_record(self, domain: str, value: str, host: str = "") -> None:
+        """TXT レコードを設定（Search Console 所有権確認等）。同 host の既存TXTは置換。"""
+        data = await self._request("GET", f"/domains/{domain}/records")
+        for r in (data.get("records") or []):
+            if r.get("type") == "TXT" and (r.get("host") or "") == host:
+                try:
+                    await self._request("DELETE", f"/domains/{domain}/records/{r.get('id')}")
+                except NameComError:
+                    pass
+        await self._request("POST", f"/domains/{domain}/records",
+                            {"host": host, "type": "TXT", "answer": value, "ttl": 300})
+
 
 async def get_namecom_registrar(user_id: Optional[str] = None) -> NameComRegistrar:
     """credentials DB から認証情報を取得して :class:`NameComRegistrar` を返す。
