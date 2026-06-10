@@ -36,6 +36,16 @@ import {
 import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import EventSource from 'react-native-sse';
 import { WebView } from 'react-native-webview';
+import {
+  buildChatListItems,
+  collectSavedTurnIds,
+  computeUnreadFollowupIds,
+  groupLiveTurns,
+  type AgentRun,
+  type ChatListItem as ChatListItemOf,
+  type ExecutionEvent,
+  type TurnBlock,
+} from './chatTimeline';
 
 const DEFAULT_API_BASE_URL = 'https://frontend-liard-rho-29.vercel.app';
 const API_BASE_URL =
@@ -86,46 +96,8 @@ type UserResponse = {
   display_name: string;
 };
 
-// One step in an AI turn's inline timeline (mirrors the web chat's ai_context.blocks).
-type TurnBlock =
-  | { type: 'text'; text?: string }
-  | { type: 'tool'; name?: string; label?: string; detail?: string }
-  | { type: 'reasoning'; text?: string }
-  | { type: 'error'; text?: string };
-
-// Server-side live-run reconstruction (mirrors the web chat). The live timeline
-// is rebuilt from /current-run + /execution-events rather than only from the
-// SSE stream, so it SURVIVES navigating away and back (and SSE drops) — the
-// in-memory-only approach loses the timeline the moment the stream is torn down.
-type ExecutionEvent = {
-  id: string;
-  run_id?: string | null;
-  turn_id?: string | null;
-  event_type: 'tool_use' | 'reasoning' | 'phase' | 'error' | 'text' | 'done' | string;
-  tool_name?: string | null;
-  tool_label?: string | null;
-  content?: string | null;
-  metadata?: Record<string, unknown> | null;
-  seq?: number | null;
-  created_at: string;
-};
-
-type AgentRun = {
-  id: string;
-  project_id: string;
-  state: 'running' | 'paused' | 'completed' | 'failed' | 'interrupted' | string;
-  created_at: string;
-};
-
-function eventToStep(event: ExecutionEvent): TurnBlock {
-  if (event.event_type === 'tool_use') {
-    return { type: 'tool', label: event.tool_label || event.tool_name || 'ツール実行' };
-  }
-  if (event.event_type === 'error') {
-    return { type: 'error', text: event.content || 'エラー' };
-  }
-  return { type: 'text', text: event.content || event.event_type };
-}
+// タイムラインの型と並び替えロジックは ./chatTimeline に切り出してある
+// （UI抜きで並び順をテストするため。scripts/test_chat_timeline.ts 参照）。
 
 type MessageResponse = {
   id: string;
@@ -139,6 +111,9 @@ type MessageResponse = {
     turn_id?: string;
   } | null;
 };
+
+// チャット FlatList の1行（保存済みメッセージ or ライブのターン吹き出し）。
+type ChatListItem = ChatListItemOf<MessageResponse>;
 
 type ProjectResponse = {
   id: string;
@@ -1019,6 +994,13 @@ function AppMain() {
   // timeline / activity in the chat that is actually streaming. null when idle.
   const [streamingProjectId, setStreamingProjectId] = useState<string | null>(null);
   const [activity, setActivity] = useState('');
+  // 追い連絡（ダンのターン実行中に送ったメッセージ）の仮送信状態。
+  // message id → 送信時刻(ms)。ダンが次の区切りで読み込むと、それ以降の作業
+  // （新しいターン）がこのメッセージより後に始まるので、それを検知して解除する。
+  const [pendingFollowups, setPendingFollowups] = useState<Record<string, number>>({});
+  // 送信の連打ガード。以前は `sending` が兼ねていたが、追い連絡（ターン実行中の
+  // 送信）を許可するために sending では弾けなくなった。
+  const lastSendAtRef = useRef(0);
   // 添付アップロード中フラグ。大きい動画は数十秒かかるので、この間も必ずライブ表示
   // （「アップロード中...」スピナー）を出して「固まった/失敗した」と誤解させない。
   // アプリ内で再生中の動画URL（expo-video のネイティブプレイヤーで全画面再生）。
@@ -1052,7 +1034,7 @@ function AppMain() {
     project: ProjectResponse;
     mode: 'menu' | 'confirm-delete';
   } | null>(null);
-  const listRef = useRef<FlatList<MessageResponse>>(null);
+  const listRef = useRef<FlatList<ChatListItem>>(null);
   // Live-tracking ref for the notification listener (which we don't want to
   // re-subscribe on every project switch).
   const currentProjectIdRef = useRef<string | null>(null);
@@ -1115,14 +1097,9 @@ function AppMain() {
       .catch(() => setSmsForwardingStatus('Off'));
   }, [token]);
 
-  const newestMessages = useMemo(
-    () =>
-      [...messages].sort(
-        (a, b) =>
-          new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-      ),
-    [messages],
-  );
+  // Turns that already arrived as saved ai_messages — their live event groups
+  // must not render twice.
+  const savedTurnIds = useMemo(() => collectSavedTurnIds(messages), [messages]);
 
   // Live in-progress turn for the OPEN chat, rebuilt from the server poll. Shows
   // whenever this chat's run is "running" — independent of the SSE stream — so
@@ -1131,19 +1108,10 @@ function AppMain() {
     !!currentRun &&
     currentRun.state === 'running' &&
     currentRun.project_id === currentProject?.id;
-  const liveStepBlocks = useMemo<TurnBlock[]>(() => {
-    if (!liveRunActive || !currentRun) return [];
-    return runEvents
-      .filter(
-        (e) => e.run_id === currentRun.id && e.event_type !== 'done' && e.event_type !== 'phase',
-      )
-      .sort(
-        (a, b) =>
-          (a.seq ?? 0) - (b.seq ?? 0) ||
-          new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-      )
-      .map(eventToStep);
-  }, [liveRunActive, currentRun, runEvents]);
+  const liveTurnGroups = useMemo(
+    () => groupLiveTurns({ liveRunActive, currentRun, runEvents, savedTurnIds }),
+    [liveRunActive, currentRun, runEvents, savedTurnIds],
+  );
   // Show the live bubble when the server says this chat's run is active, OR
   // (for instant feedback) right after sending here before the first poll lands.
   // The instant-feedback part stops as soon as the run is known to be finished,
@@ -1155,6 +1123,32 @@ function AppMain() {
     // 状態では絞らない（これが「送信後すぐ出ず数秒遅れる」原因だった）。sending は送信
     // フローの finally で false になる＝ターン完了でこの経路は自然に閉じる。
     (sending && !uploadProgress && streamingProjectId === currentProject?.id);
+
+  // まだダンに読み込まれていない追い連絡。読み込まれるまで半透明＋「仮送信」表示。
+  const activePendingIds = useMemo(
+    () => computeUnreadFollowupIds({ pendingFollowups, messages, liveTurnGroups }),
+    [pendingFollowups, messages, liveTurnGroups],
+  );
+
+  // run が終わった（完了・停止・中断）のに残った仮送信フラグは意味を失うので捨てる。
+  useEffect(() => {
+    if (Object.keys(pendingFollowups).length === 0) return;
+    if (liveRunActive || sending) return;
+    setPendingFollowups({});
+  }, [liveRunActive, sending, pendingFollowups]);
+
+  // チャットの行リスト。保存済みメッセージとライブのターン吹き出しを「実際に
+  // 起きた時刻」で1本のタイムラインに混ぜる。これにより、ダン作業中に送った
+  // 追い連絡は「それまでの作業の下＝最新位置」に出て、読み込まれた後の作業は
+  // その下に続く — 完了後に保存される並びと常に同じ時系列になる。
+  const chatListItems = useMemo<ChatListItem[]>(
+    () => buildChatListItems({ messages, liveTurnGroups, showLiveTurn }),
+    [messages, liveTurnGroups, showLiveTurn],
+  );
+
+  // 送信ボタンを塞ぐのは「別チャット宛のストリームが生きている間」だけ。
+  // このチャットのターン実行中は追い連絡として送れる。
+  const sendBlocked = sending && streamingProjectId !== currentProject?.id;
 
   const unreadTotal = useMemo(
     () =>
@@ -1356,7 +1350,7 @@ function AppMain() {
   // Complete a pending jump once the target message is in the list.
   useEffect(() => {
     if (!pendingJumpId) return;
-    const target = newestMessages.find((m) => m.id === pendingJumpId);
+    const target = chatListItems.find((item) => item.kind === 'message' && item.msg.id === pendingJumpId);
     if (!target) return;
     const t = setTimeout(() => {
       try {
@@ -1367,7 +1361,7 @@ function AppMain() {
       setPendingJumpId(null);
     }, 180);
     return () => clearTimeout(t);
-  }, [pendingJumpId, newestMessages]);
+  }, [pendingJumpId, chatListItems]);
 
   // Clear the hit highlight a moment after a jump.
   useEffect(() => {
@@ -1527,6 +1521,7 @@ function AppMain() {
   useEffect(() => {
     setCurrentRun(null);
     setRunEvents([]);
+    setPendingFollowups({});
     lastSyncedMsgIdRef.current = null;
   }, [currentProject?.id]);
 
@@ -2007,7 +2002,18 @@ function AppMain() {
   );
 
   async function handleSend() {
-    if (!token || sending) return;
+    if (!token) return;
+    // 連打ガード（以前は sending が兼ねていたが、追い連絡を許可するため時刻で弾く）。
+    const tappedAt = Date.now();
+    if (tappedAt - lastSendAtRef.current < 700) return;
+    lastSendAtRef.current = tappedAt;
+    // 送信中でも「いまストリーミング中のこのチャット」へは追い連絡として送れる。
+    // 別チャット宛のストリームが生きている間は従来どおりブロック。
+    if (sending && streamingProjectId !== currentProject?.id) return;
+    // このチャットの最初のストリームがまだ生きている間の送信（=追い連絡）は、
+    // sending / streamingProjectId を触らない。これらは最初の送信フローが所有
+    // していて、追い連絡側の finally で先に false に戻すと表示が崩れるため。
+    const ownsSendingState = !(sending && streamingProjectId === currentProject?.id);
     const content = draft.trim();
     const pending = attachments;
     if (!content && pending.length === 0) return;
@@ -2050,8 +2056,10 @@ function AppMain() {
 
     setDraft('');
     setAttachments([]);
-    setSending(true);
-    setStreamingProjectId(project.id);
+    if (ownsSendingState) {
+      setSending(true);
+      setStreamingProjectId(project.id);
+    }
 
     // LINE風: 送信した瞬間に動画/画像入りのメッセージを画面に出し、アップロードは
     // その動画の上の円形リングが満ちていく形で進める。完了したらローカルURIを
@@ -2098,9 +2106,11 @@ function AppMain() {
         setUploadProgress(null);
       } catch (error) {
         setUploadProgress(null);
-        setSending(false);
-        setStreamingProjectId(null);
-        setActivity('');
+        if (ownsSendingState) {
+          setSending(false);
+          setStreamingProjectId(null);
+          setActivity('');
+        }
         setMessages((current) => current.filter((m) => m.id !== optimisticId));
         setDraft(content);
         setAttachments(pending);
@@ -2119,6 +2129,9 @@ function AppMain() {
     // Set if the SSE throws. On its own this does NOT mean the send failed — the
     // reconcile verifies against the server before restoring the draft.
     let streamFailure: Error | null = null;
+    // サーバーがエコーしてきた自分のメッセージ。followup_queued（追い連絡として
+    // 受理）が来たときに、仮送信の基準時刻を取るのに使う。
+    let echoedUserMsg: MessageResponse | null = null;
 
     try {
       await streamDanMessage(token, finalContent, project.room_id, (event) => {
@@ -2148,6 +2161,7 @@ function AppMain() {
         } else if (event.type === 'user_message' && isMessageResponse(event.message)) {
           sent = true;
           const incoming = event.message;
+          echoedUserMsg = incoming;
           if (viewing) {
             setMessages((current) =>
               upsertMessage(
@@ -2155,6 +2169,20 @@ function AppMain() {
                 incoming,
               ),
             );
+          }
+        } else if (event.type === 'followup_queued') {
+          // ダン作業中の追い連絡として受理された（このストリームはすぐ done で
+          // 終わり、回答は実行中のターンの続きとして届く）。読み込まれるまで
+          // このメッセージを「仮送信」表示にする。
+          sent = true;
+          const messageId =
+            typeof (event as { message_id?: unknown }).message_id === 'string'
+              ? ((event as { message_id?: string }).message_id as string)
+              : null;
+          if (messageId && viewing) {
+            const queuedMs =
+              (echoedUserMsg ? new Date(echoedUserMsg.created_at).getTime() : 0) || Date.now();
+            setPendingFollowups((current) => ({ ...current, [messageId]: queuedMs }));
           }
         } else if (event.type === 'ai_message' && isMessageResponse(event.message)) {
           sent = true;
@@ -2233,9 +2261,11 @@ function AppMain() {
       // best-effort reconcile
     } finally {
       setUploadProgress(null);
-      setSending(false);
-      setStreamingProjectId(null);
-      setActivity('');
+      if (ownsSendingState) {
+        setSending(false);
+        setStreamingProjectId(null);
+        setActivity('');
+      }
     }
   }
 
@@ -2657,12 +2687,12 @@ function AppMain() {
           </View>
         ) : null}
 
-        {loadingMessages && newestMessages.length === 0 && !showLiveTurn ? (
+        {loadingMessages && messages.length === 0 && !showLiveTurn ? (
           <View style={styles.centerPanel}>
             <ActivityIndicator color="#f4f0e8" />
             <Text style={styles.mutedText}>Loading history</Text>
           </View>
-        ) : newestMessages.length === 0 && !showLiveTurn ? (
+        ) : messages.length === 0 && !showLiveTurn ? (
           <View style={styles.centerPanel}>
             <Text style={styles.emptyTitle}>Done</Text>
             <Text style={styles.mutedText}>メッセージを入力してください</Text>
@@ -2670,55 +2700,49 @@ function AppMain() {
         ) : (
           <FlatList
             contentContainerStyle={styles.messageList}
-            data={
-              showLiveTurn
-                ? [
-                    {
-                      id: '__live__',
-                      room_id: currentProject?.room_id,
-                      sender_name: 'DAN',
-                      sender_type: 'ai',
-                      content: '',
-                      created_at: '',
-                    } as MessageResponse,
-                    ...newestMessages,
-                  ]
-                : newestMessages
-            }
+            data={chatListItems}
             initialNumToRender={14}
             inverted
-            keyExtractor={(item) => item.id}
+            keyExtractor={(item) => item.key}
             maxToRenderPerBatch={8}
             ref={listRef}
             removeClippedSubviews
             renderItem={({ item }) => {
               // Live in-progress turn: render the timeline as it builds (tool
               // steps expanded) with a spinner, like the web chat's live view.
-              if (item.id === '__live__') {
+              // Anchored chronologically — a follow-up message sent mid-run
+              // stays BELOW the work that happened before it.
+              if (item.kind === 'live') {
                 return (
                   <View style={[styles.messageBubble, styles.aiBubble]}>
                     <View style={styles.messageMetaRow}>
                       <Text style={styles.messageSender}>DAN</Text>
                     </View>
-                    {liveStepBlocks.length > 0 ? (
-                      <AiTurnBlocks blocks={liveStepBlocks} mine={false} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} defaultOpen />
+                    {item.blocks.length > 0 ? (
+                      <AiTurnBlocks blocks={item.blocks} mine={false} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} defaultOpen />
                     ) : null}
                     {/* The "running now" spinner sits at the bottom next to the
                         latest log line, so it's obvious which step is live. */}
-                    <View style={styles.liveStatusRow}>
-                      <ActivityIndicator color="#7fd1c7" size="small" />
-                      <Text style={styles.liveStatusText} numberOfLines={1}>
-                        {activity || 'Thinking...'}
-                      </Text>
-                    </View>
+                    {item.showSpinner ? (
+                      <View style={styles.liveStatusRow}>
+                        <ActivityIndicator color="#7fd1c7" size="small" />
+                        <Text style={styles.liveStatusText} numberOfLines={1}>
+                          {activity || 'Thinking...'}
+                        </Text>
+                      </View>
+                    ) : null}
                   </View>
                 );
               }
-              const mine = item.sender_type === 'human';
+              const msg = item.msg;
+              const mine = msg.sender_type === 'human';
+              // ダンが読み込むまでの追い連絡は半透明＋「仮送信」で、読み込まれた
+              // 時点（次のターンが始まった時点）で通常表示に固定される。
+              const pendingFollowup = activePendingIds.has(msg.id);
               // Render the full timeline (text + "N件の作業") when the AI message
               // carries blocks with tool steps or multiple text segments — same
               // rule as the web chat. Otherwise just render the final content.
-              const blocks = item.sender_type === 'ai' ? item.ai_context?.blocks : undefined;
+              const blocks = msg.sender_type === 'ai' ? msg.ai_context?.blocks : undefined;
               const useBlocks =
                 !!blocks &&
                 blocks.length > 0 &&
@@ -2729,24 +2753,28 @@ function AppMain() {
                   style={[
                     styles.messageBubble,
                     mine ? styles.myBubble : styles.aiBubble,
-                    highlightId === item.id && styles.messageBubbleHighlight,
+                    pendingFollowup && styles.pendingFollowupBubble,
+                    highlightId === msg.id && styles.messageBubbleHighlight,
                   ]}
                 >
                   <View style={styles.messageMetaRow}>
-                    <Text style={styles.messageSender}>{mine ? 'You' : item.sender_name || 'DAN'}</Text>
-                    <Text style={styles.messageTime}>{formatTime(item.created_at)}</Text>
+                    <Text style={styles.messageSender}>{mine ? 'You' : msg.sender_name || 'DAN'}</Text>
+                    <Text style={styles.messageTime}>{formatTime(msg.created_at)}</Text>
                   </View>
                   {useBlocks ? (
                     <AiTurnBlocks blocks={blocks!} mine={mine} onOpenUrl={handleOpenMessageUrl} onPlayVideo={setPlayingVideo} />
                   ) : (
                     <RichMessageContent
-                      content={item.content}
+                      content={msg.content}
                       mine={mine}
                       onOpenUrl={handleOpenMessageUrl}
                       onPlayVideo={setPlayingVideo}
-                      videoProgress={uploadProgress?.id === item.id ? uploadProgress.value : undefined}
+                      videoProgress={uploadProgress?.id === msg.id ? uploadProgress.value : undefined}
                     />
                   )}
+                  {pendingFollowup ? (
+                    <Text style={styles.pendingFollowupLabel}>仮送信・次の区切りで反映</Text>
+                  ) : null}
                 </View>
               );
             }}
@@ -2829,11 +2857,11 @@ function AppMain() {
             value={draft}
           />
           <Pressable
-            disabled={sending || (!draft.trim() && attachments.length === 0)}
+            disabled={sendBlocked || (!draft.trim() && attachments.length === 0)}
             onPress={handleSend}
             style={({ pressed }) => [
               styles.sendButton,
-              (pressed || sending || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
+              (pressed || sendBlocked || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
             ]}
           >
             {/* No spinner here — the live "working" indicator already shows in
@@ -3602,6 +3630,16 @@ const styles = StyleSheet.create({
   messageBubbleHighlight: {
     borderColor: '#7fd1c7',
     borderWidth: 2,
+  },
+  // ダンがまだ読み込んでいない追い連絡（仮送信）。読み込まれると通常表示に戻る。
+  pendingFollowupBubble: {
+    opacity: 0.55,
+  },
+  pendingFollowupLabel: {
+    color: '#a7a19a',
+    fontSize: 11,
+    marginTop: 4,
+    textAlign: 'right',
   },
   searchModalRoot: {
     backgroundColor: '#12110f',
