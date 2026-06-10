@@ -1336,19 +1336,51 @@ def run_oneshot_cli(
     return (proc.stdout or "").strip() or None
 
 
+_ALLOWED_CLI_MODELS = {"opus", "sonnet", "haiku", "fable"}
+# room_id → 解決済みモデル。作成時に固定され以後不変なので恒久キャッシュでよい。
+_room_model_cache: Dict[str, str] = {}
+
+
 def _resolve_cli_model(room_id: Optional[str] = None) -> str:
     """CLI を起動するモデル名を解決する。
 
     解決順（上が優先）:
-      1. （B2予定）ルーム単位の DB オーバーライド
-      2. `DAN_CLI_MODEL` 環境変数（例: "fable" で全ルーム一括切替）
+      1. ルーム単位の選択（projects.metadata.model を room_id で引く）
+      2. `DAN_CLI_MODEL` 環境変数（全ルーム一括切替用）
       3. "opus"（デフォルト）
 
-    `room_id` は B2 でルーム単位オーバーライドを足す時に呼び出し側を
-    変えずに済むよう、今のうちから受け取っておく（現状は未使用）。
+    許可リスト外の値は無視して次の手段にフォールバックする（--model への
+    不正な引数混入を防ぐ安全弁）。
     """
-    model = (os.environ.get("DAN_CLI_MODEL") or "").strip()
-    return model or "opus"
+    # 1. ルーム単位の選択（新チャット作成時に保存された値）
+    if room_id:
+        cached = _room_model_cache.get(room_id)
+        if cached:
+            return cached
+        try:
+            from app.services.supabase_client import get_supabase_client
+            sb = get_supabase_client().client
+            res = (
+                sb.table("projects").select("metadata")
+                .eq("room_id", room_id).limit(1).execute()
+            )
+            if res.data:
+                meta = res.data[0].get("metadata") or {}
+                if isinstance(meta, dict):
+                    m = (meta.get("model") or "").strip().lower()
+                    if m in _ALLOWED_CLI_MODELS:
+                        _room_model_cache[room_id] = m
+                        return m
+        except Exception as e:
+            logger.debug("resolve model failed for room %s: %s", room_id, e)
+
+    # 2. 環境変数による全ルーム一括切替
+    env = (os.environ.get("DAN_CLI_MODEL") or "").strip().lower()
+    if env in _ALLOWED_CLI_MODELS:
+        return env
+
+    # 3. デフォルト
+    return "opus"
 
 
 def _build_cli_cmd(

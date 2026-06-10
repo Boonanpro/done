@@ -205,11 +205,17 @@ async def create_project(
     service: ProjectService = Depends(get_project_service),
 ):
     """プロジェクトを作成"""
+    # 新チャットで選んだモデルを projects.metadata.model に保存する。
+    # 値の正当性（許可リスト照合）は CLI 起動時の _resolve_cli_model 側で行う。
+    metadata = None
+    if request.model:
+        metadata = {"model": request.model.strip().lower()}
     project = await service.create_project(
         user_id=current_user.user_id,
         title=request.title,
         description=request.description,
         origin_room_id=request.origin_room_id,
+        metadata=metadata,
     )
     return project
 
