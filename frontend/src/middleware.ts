@@ -104,18 +104,12 @@ export async function middleware(request: NextRequest) {
     }
 
     if (first === 'preview' && slug === customDomainSlug) {
-      const rest = segments.slice(2).join('/');
-      // 独自ドメインでは URL に /preview/<slug> を露出させない。
-      // 静的アセット (manifest/icon) はパスが必要なので rewrite、それ以外は
-      // クリーンな URL (/<rest>) に redirect する（root ハンドラが再 rewrite）。
-      if (rest === 'manifest.webmanifest' || /^icon-\d+\.png$/.test(rest)) {
-        const url = request.nextUrl.clone();
-        url.pathname = `/artifacts/${customDomainSlug}/${rest}`;
-        return NextResponse.rewrite(url);
-      }
       const url = request.nextUrl.clone();
-      url.pathname = rest ? `/${rest}` : '/';
-      return NextResponse.redirect(url);
+      const rest = segments.slice(2).join('/');
+      url.pathname = rest
+        ? `/artifacts/${customDomainSlug}/${rest}`
+        : `/artifacts/${customDomainSlug}`;
+      return NextResponse.rewrite(url);
     }
 
     if (first === 'artifacts' && slug === customDomainSlug) {
