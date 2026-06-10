@@ -614,6 +614,22 @@ async def connect_existing_domain(
             s.status = "skipped"
             s.detail = "外部DNS or 未検証のためスキップ"
 
+        # 8. クリーンURL配信: 接続ドメインの host rewrite を再生成して main へ push
+        #    （Vercel 再デプロイで /business 等がクリーンURLで配信される）。ベストエフォート。
+        s = rec.start("publish_routing")
+        try:
+            from app.services.artifact_git_publish import publish_custom_domain_rewrites
+
+            pub = await publish_custom_domain_rewrites()
+            if pub.get("pushed"):
+                rec.complete(s, "クリーンURL設定を反映（数分で公開）")
+            elif pub.get("changed") is False:
+                rec.complete(s, "クリーンURL設定は最新")
+            else:
+                rec.fail(s, pub.get("detail", "ルーティング反映に失敗"))
+        except Exception as e:  # noqa: BLE001
+            rec.fail(s, f"ルーティング反映でエラー: {e}")
+
         result.success = True
         result.deploy_url = base_url if verified else None
         return result

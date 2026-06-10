@@ -411,6 +411,69 @@ def _commit_and_push(wt: Path, slug: str, paths: list[str]) -> tuple[bool, str]:
     return False, last_err or "push failed"
 
 
+REWRITES_REL = "frontend/src/lib/custom-domain-rewrites.generated.ts"
+
+
+def _publish_rewrites_sync() -> tuple[bool, str]:
+    """custom-domain-rewrites 生成ファイル(infra)を main に commit+push する。
+
+    隔離 worktree＋ロックで開発ツリー/Danの作業を汚さない。(changed, error) を返す。
+    """
+    if not _acquire_lock():
+        return False, "publish lock busy"
+    try:
+        wt = _ensure_worktree()
+        last_err = ""
+        for attempt in range(1, PUSH_ATTEMPTS + 1):
+            _git(["reset", "--hard", f"origin/{PUSH_BRANCH}"], cwd=wt)
+            _git(["clean", "-fd"], cwd=wt)
+            _mirror_into_worktree(wt, [REWRITES_REL])
+            _git(["add", "--", REWRITES_REL], cwd=wt)
+            staged = _git(["diff", "--cached", "--name-only"], cwd=wt).stdout.strip()
+            if not staged:
+                return False, ""  # 既に最新
+            message = (
+                "chore(routing): 接続ドメインの custom-domain rewrites を自動再生成\n\n"
+                "Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+            )
+            commit = _git(["commit", "-m", message], cwd=wt, check=False)
+            if commit.returncode != 0:
+                return False, f"commit blocked:\n{commit.stdout}"
+            push = _git(["push", "origin", f"HEAD:{PUSH_BRANCH}"], cwd=wt, check=False, timeout=180)
+            if push.returncode == 0:
+                return True, ""
+            last_err = push.stdout
+            _emit(f"[git-publish] rewrites push attempt {attempt} failed; refetching")
+            _git(["fetch", "origin", PUSH_BRANCH, "--quiet"], cwd=PROJECT_ROOT, check=False)
+            time.sleep(min(15, 5 * attempt))
+        return False, last_err or "push failed"
+    finally:
+        _release_lock()
+
+
+async def publish_custom_domain_rewrites() -> dict:
+    """接続ドメインの rewrites を再生成し、変化があれば main に commit+push する。
+
+    ベストエフォート（例外は握りつぶして status を返す）。push されると Vercel が
+    再デプロイし、そのドメインのサブパスがクリーンURLで配信されるようになる。
+    """
+    import asyncio
+
+    try:
+        from scripts.generate_custom_domain_rewrites import regenerate
+
+        changed = await regenerate()
+        if not changed:
+            return {"changed": False, "pushed": False, "detail": "rewrites already current"}
+        pushed, err = await asyncio.to_thread(_publish_rewrites_sync)
+        if pushed:
+            return {"changed": True, "pushed": True,
+                    "detail": "rewrites pushed to main (Vercel redeploy で反映)"}
+        return {"changed": True, "pushed": False, "detail": err or "nothing to push"}
+    except Exception as e:  # noqa: BLE001
+        return {"changed": False, "pushed": False, "detail": f"error: {e}"}
+
+
 def _publish_one(slug: str, *, push: bool, wait_live: bool) -> dict:
     _emit(f"[git-publish] {slug}: publish START (push={push}, wait_live={wait_live})")
     result = {"slug": slug, "status": "pending", "url": preview_url_for(slug), "error": ""}
