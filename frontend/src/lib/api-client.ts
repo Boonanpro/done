@@ -1297,7 +1297,7 @@ export const api = {
     suggestTitle: (roomId?: string) =>
       request<{ title: string }>(`/projects/suggest-title${roomId ? `?room_id=${roomId}` : ''}`),
 
-    create: (data: { title: string; description?: string; origin_room_id?: string }) =>
+    create: (data: { title: string; description?: string; origin_room_id?: string; model?: string }) =>
       request<ProjectResponse>('/projects', {
         method: 'POST',
         body: JSON.stringify(data),

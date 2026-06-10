@@ -34,6 +34,9 @@ class ProjectCreateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
     origin_room_id: Optional[str] = None
+    # 新チャットで使う Claude モデル（"opus" / "fable" 等）。未指定なら既定(opus)。
+    # サーバー側で許可リスト照合し、projects.metadata.model に保存する。
+    model: Optional[str] = None
 
 
 class ProjectUpdateRequest(BaseModel):
