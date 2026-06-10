@@ -1,6 +1,8 @@
 import type { NextConfig } from 'next';
 import withPWA from 'next-pwa';
 
+import { CUSTOM_DOMAIN_REWRITES } from './src/lib/custom-domain-rewrites.generated';
+
 // 静的アセットのキャッシュバスト用バージョン文字列を build-time に決定する。
 // Vercel では VERCEL_GIT_COMMIT_SHA が自動付与される。ローカル dev ではタイムスタンプ。
 // 各 page で `process.env.NEXT_PUBLIC_ASSET_VERSION` を参照して使う。
@@ -68,17 +70,6 @@ const nextConfig: NextConfig = {
       {
         source: '/preview/:path*',
         destination: '/artifacts/:path*',
-      },
-      // 独自ドメインの汎用ルート: middleware が付けた x-artifact-slug ヘッダを見て
-      // サブパスを成果物配下に振り向ける（ドメインごとの焼き込み不要・接続したら自動）。
-      // middleware の直接 rewrite ではネスト静的ルートが解決されないため、信頼できる
-      // next.config rewrite(afterFiles) 側で解決させる。
-      {
-        source: '/:path+',
-        has: [
-          { type: 'header', key: 'x-artifact-slug', value: '(?<artifactSlug>[^/]+)' },
-        ],
-        destination: '/artifacts/:artifactSlug/:path+',
       },
       // ダンコア向け: 具体的な path を先に評価させる
       {
@@ -179,6 +170,11 @@ const nextConfig: NextConfig = {
         source: '/kikkawa-tokuso/:path*',
         destination: '/artifacts/kittoku/:path*',
       },
+      // 接続済み独自ドメインの host条件付き rewrite（DB由来で自動生成）。
+      // 配列末尾＝filesystem ルートと先行 rewrite の後に評価されるので、クリーンパス
+      // (/business 等)だけを成果物配下に振り向ける（/robots.txt /sitemap.xml /_next
+      // /api /artifacts は先に解決され影響しない）。
+      ...CUSTOM_DOMAIN_REWRITES,
     ];
   },
 };
