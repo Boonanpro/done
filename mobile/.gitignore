@@ -39,3 +39,6 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# chatTimeline テストのコンパイル出力（scripts/test_chat_timeline.ts 参照）
+.testbuild/
