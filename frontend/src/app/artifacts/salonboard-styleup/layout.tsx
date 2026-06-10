@@ -8,6 +8,10 @@ export const metadata: Metadata = {
   title: 'StyleSnap — サロンボード スタイル投稿',
   description: '写真を選ぶだけで、サロンボードのスタイル投稿が完成します。',
   manifest: '/artifacts/salonboard-styleup/manifest.webmanifest',
+  icons: {
+    icon: '/artifacts/salonboard-styleup/icon-192.png',
+    apple: '/artifacts/salonboard-styleup/apple-touch-icon.png',
+  },
   appleWebApp: {
     capable: true,
     title: 'StyleSnap',
