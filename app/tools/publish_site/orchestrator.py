@@ -79,6 +79,8 @@ class PublishResult:
     error: Optional[str] = None
     pricing: Optional[dict[str, Any]] = None
     dns_instructions: Optional[dict[str, Any]] = None  # 外部DNS時に手動設定するレコード
+    conflict_label: Optional[str] = None  # 同じドメインを使用中の別成果物名(上書き確認用)
+    verified: bool = True  # 外部DNSが未反映なら False(本番URLは未確定)
 
 
 # 旧 issue_dedicated_delivery_url（<slug>-done.vercel.app 専用 alias 発行）は廃止。
@@ -431,17 +433,35 @@ async def _detect_dns_provider(domain: str, user_id: Optional[str] = None) -> st
     return "external"
 
 
+async def _artifact_using_domain(svc: ChatArtifactService, domain: str) -> Optional[dict[str, Any]]:
+    """その custom_domain を使っている成果物を1件返す（無ければ None）。"""
+    try:
+        res = (
+            svc.supabase.table(svc.table)
+            .select("id, slug, label, custom_domain")
+            .eq("custom_domain", domain)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def connect_existing_domain(
     *,
     artifact_id: str,
     domain: str,
     vercel_project: str = DEFAULT_VERCEL_PROJECT,
     user_id: Optional[str] = None,
+    replace: bool = False,
 ) -> PublishResult:
     """既に所有しているドメイン（購入なし）を成果物に接続して公開する。
 
-    Vercel紐付け → DNSをVercelへ向ける（管理元別）→ 成果物にマッピング → 反映確認。
-    DNSが外部管理の場合は設定すべきレコードを ``dns_instructions`` で返す。
+    - 別の成果物が同じドメインを使用中なら ``replace=False`` で error="domain_in_use" を返す
+      （UIで確認 → replace=True で差し替え）。
+    - 外部DNS管理のドメインは、実際に Vercel を向いている（検証OK）まで本番URLを確定しない
+      （他人のドメイン誤接続で production_url が誤って立つ事故の防止）。
     """
     rec = _StepRecorder()
     domain = _normalize_domain(domain)
@@ -449,6 +469,28 @@ async def connect_existing_domain(
     result = PublishResult(success=False, artifact_id=artifact_id, domain=domain, steps=rec.steps)
     try:
         vercel = await get_vercel(user_id)
+        svc = ChatArtifactService()
+
+        # 0. 上書きチェック（別成果物が同じドメインを使っていないか）
+        s = rec.start("check_conflict")
+        other = await _artifact_using_domain(svc, domain)
+        if other and other.get("id") != artifact_id:
+            label = other.get("label") or other.get("slug") or "別の成果物"
+            if not replace:
+                rec.fail(s, f"{domain} は「{label}」が使用中")
+                result.error = "domain_in_use"
+                result.conflict_label = label
+                return result
+            # 差し替え: 旧成果物からドメインを外す
+            try:
+                svc.supabase.table(svc.table).update(
+                    {"custom_domain": None, "production_url": None, "publish_status": "preview_live"}
+                ).eq("id", other["id"]).execute()
+            except Exception:  # noqa: BLE001
+                pass
+            rec.complete(s, f"「{label}」から差し替え")
+        else:
+            rec.complete(s, "ok")
 
         # 1. DNS管理元を判定
         s = rec.start("detect_provider")
@@ -495,39 +537,51 @@ async def connect_existing_domain(
             }
             rec.complete(s, "外部DNS: 手動でレコード設定が必要")
 
-        # 5. 成果物にマッピング（custom_domain）
+        # 5. 反映確認。外部DNSは「実際にVercelを向いているか」を検証し、未検証なら
+        #    本番URLを確定しない（他人のドメイン誤接続で production_url が立つ事故の防止）。
+        s = rec.start("verify_dns_propagation")
+        verified = provider != "external"  # うちの口座内ドメインは所有確定
+        if provider == "external":
+            try:
+                cfg2 = await vercel.get_domain_config(domain)
+                verified = not cfg2.get("misconfigured", True)
+            except Exception:  # noqa: BLE001
+                verified = False
+        if verified:
+            try:
+                await _wait_vercel_dns_verified(vercel, domain)
+            except TimeoutError:
+                pass  # うちのドメインは設定済みなので致命的にしない
+            rec.complete(s, "反映確認OK")
+        else:
+            s.status = "skipped"
+            s.detail = "DNS未反映: 上記レコードを設定すると公開されます"
+        result.verified = verified
+
+        # 6. 成果物にマッピング（検証OKの時だけ本番URLを確定）
         s = rec.start("update_artifact_db")
         try:
-            svc = ChatArtifactService()
-            update_data = {
-                "custom_domain": domain,
-                "production_url": base_url,
-                "publish_status": "live",
-                "delivery_mode": "client_domain",
-                "last_publish_error": None,
-            }
+            if verified:
+                update_data = {
+                    "custom_domain": domain,
+                    "production_url": base_url,
+                    "publish_status": "live",
+                    "delivery_mode": "client_domain",
+                    "last_publish_error": None,
+                }
+            else:
+                # 外部DNS未反映: 本番URL/マッピングはまだ立てない（誤接続事故防止）
+                update_data = {"publish_status": "pending_dns"}
             if user_id:
                 await svc.update(artifact_id, update_data, user_id)
             else:
                 svc.supabase.table(svc.table).update(update_data).eq("id", artifact_id).execute()
-            rec.complete(s)
+            rec.complete(s, "保存" if verified else "DNS設定待ちとして保存")
         except Exception as e:  # noqa: BLE001
             rec.fail(s, f"DB update failed: {e}")
 
-        # 6. 反映確認（外部DNSはユーザー設定待ちなのでスキップ）
-        s = rec.start("verify_dns_propagation")
-        if provider == "external":
-            s.status = "skipped"
-            s.detail = "手動DNS設定後に反映されます"
-        else:
-            try:
-                await _wait_vercel_dns_verified(vercel, domain)
-                rec.complete(s)
-            except TimeoutError as e:
-                rec.fail(s, f"反映待ち（数分かかる場合あり）: {e}")
-
         result.success = True
-        result.deploy_url = base_url
+        result.deploy_url = base_url if verified else None
         return result
     except (VercelError, CloudflareDNSError, NameComError) as e:
         for st in rec.steps:

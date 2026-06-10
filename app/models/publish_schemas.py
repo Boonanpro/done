@@ -52,6 +52,7 @@ class ConnectDomainRequest(BaseModel):
     artifact_id: str
     domain: str = Field(..., min_length=3)
     vercel_project: str = "frontend"
+    replace: bool = False  # 別成果物が使用中でも差し替えるか
 
 
 class DeliveryUrlRequest(BaseModel):
@@ -76,6 +77,8 @@ class PublishResponse(BaseModel):
     error: Optional[str] = None
     pricing: Optional[dict[str, Any]] = None
     dns_instructions: Optional[dict[str, Any]] = None  # 外部DNS時の手動設定レコード
+    conflict_label: Optional[str] = None  # 同じドメインを使用中の別成果物名
+    verified: bool = True  # 外部DNSが反映済みか（false=本番URL未確定）
 
 
 class DeliveryUrlResponse(BaseModel):
