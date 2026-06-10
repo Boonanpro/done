@@ -284,6 +284,26 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
         {/* ステップ1: URL入力 */}
         {stage === 'domain' && (
           <div className="space-y-3">
+            {/* 現在の独自ドメイン状態 */}
+            {artifact.custom_domain ? (
+              <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm">
+                <div className="flex items-center gap-2 text-emerald-700">
+                  <CheckCircle2 className="h-4 w-4" /> 現在この成果物は独自ドメインで公開中です
+                </div>
+                <a
+                  href={`https://${artifact.custom_domain}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1 block break-all font-mono text-sm text-primary underline"
+                >
+                  {artifact.custom_domain}
+                </a>
+              </div>
+            ) : (
+              <div className="rounded-md border bg-muted/50 p-3 text-sm text-muted-foreground">
+                まだ独自ドメインは設定されていません。
+              </div>
+            )}
             <div className="space-y-2">
               <Label htmlFor="domain">公開したいURL</Label>
               <Input
