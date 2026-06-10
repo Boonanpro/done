@@ -38,20 +38,25 @@ End-to-end playbook for standing up a brand Instagram account and building the p
 - `instagram.com/accounts/edit/` → 自己紹介 textarea → type → 送信する. Max 150 chars.
 - ⚠️ The **website link is mobile-app-only on web** ("リンクはモバイルデバイスからのみ編集できます"). Hand the link to the user to add via their phone, or set it via the app later.
 
-### 4. Profile icon — fill `<input type=file>` IN-BROWSER (no OS dialog)
-The 写真を変更 button opens an OS file chooser the MCP browser can't drive, but the page has hidden `input[type=file]` (accept image/jpeg,image/png). Inject in-page:
-1. Build the icon with PIL (logo on solid brand square). **Keep base64 SMALL: ~300px, palette-quantized (`convert("P", colors=4)`) → ~2KB file → ~2.6KB base64.** A base64 string over ~4.5KB gets **truncated mid-`evaluate`-expression → SyntaxError**. Verify by Reading the `.b64` file fully.
-2. Inject:
+### 4. Profile icon — design it properly, then fill `<input type=file>` IN-BROWSER (no OS dialog)
+⚠️ Do NOT ship a quick PIL text box — it looks cheap and got rejected ("くそダサい"). Make a real designed icon.
+- **Get the brand color from the actual product, don't guess.** Open the tool/artifact and sample it: `getComputedStyle(el).backgroundImage` on the header to read the exact gradient (StyleUp = `linear-gradient(#E8607F → #C8587A)`, rose pink). Using an invented purple was a real mistake.
+- **Generate the icon with media-gen / AI image** (OpenAI GPT Image). Prompt a premium rounded-square app icon: brand-color gradient bg + a clean white emblem (e.g. hair scissors + sparkle), flat vector, no text, reads well in a circle. Direct call works: `POST https://api.openai.com/v1/images/generations` with `OPENAI_API_KEY` + `IMAGE_GENERATION_MODEL` from `.env`, `size 1024x1024`, `quality high`, take `data[0].b64_json`. Review a downscaled preview before uploading.
+
+Upload (the 写真を変更 button opens an OS chooser the MCP browser can't drive, but the page has hidden `input[type=file]`):
+1. Compress for transport: resize ~256px, JPEG → base64.
+2. ⚠️ **A single `evaluate` expression truncates around ~4200 chars.** For anything bigger, **chunk the base64**: first `evaluate` sets `window.__b64="<chunk>"`, then append more with `window.__b64+="<chunk>"`, each returning `window.__b64.length` so you VERIFY the running total. To avoid hand-assembly errors, compute exact substrings with Bash (`b[4200:]`) rather than eyeballing chunk boundaries.
+3. Build + inject (handle BOTH file inputs; IG has 2):
    ```js
-   const bin=atob(b64);const a=new Uint8Array(bin.length);
+   const bin=atob(window.__b64);const a=new Uint8Array(bin.length);
    for(let i=0;i<bin.length;i++)a[i]=bin.charCodeAt(i);
-   const f=new File([a],'icon.png',{type:'image/png'});
+   const f=new File([a],'icon.jpg',{type:'image/jpeg'});
    const dt=new DataTransfer();dt.items.add(f);
-   const inp=document.querySelector('input[type=file]');inp.files=dt.files;
-   inp.dispatchEvent(new Event('change',{bubbles:true}));
-   return inp.files[0].size; // must equal the real PNG size
+   [...document.querySelectorAll('input[type=file]')].forEach(inp=>{
+     inp.files=dt.files;inp.dispatchEvent(new Event('change',{bubbles:true}));});
+   return inp.files[0].size; // must equal the real file size
    ```
-3. IG web applies the avatar immediately on file selection (no separate save; the left-nav avatar updates). No cropper on web.
+4. IG web applies the avatar immediately on file selection (no separate save; the left-nav avatar updates). No cropper on web. Reload the profile to confirm.
 
 ### 5. Convert to professional (business) account
 - 設定 → アカウントの種類とツール → 「プロアカウントに切り替える」 → choose **ビジネス** (for a tool/service/brand) → 次へ → カテゴリ select (e.g. 商品・サービス) → 完了 → 「次へ」 confirm → on 連絡先情報の確認, click **「連絡先情報を使用しない」** (don't publish personal contact) → 完了.
