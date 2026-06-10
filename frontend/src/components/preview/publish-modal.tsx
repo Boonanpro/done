@@ -59,6 +59,8 @@ interface PublishResponse {
   steps: PublishStepDTO[];
   error: string | null;
   dns_instructions?: { a?: DnsRecord; cname?: DnsRecord } | null;
+  conflict_label?: string | null;
+  verified?: boolean;
 }
 interface DomainSetupResponse {
   success: boolean;
@@ -181,9 +183,9 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
     },
   });
 
-  // 既に持っているドメインを接続（購入なし）
+  // 既に持っているドメインを接続（購入なし）。replace=true で別成果物から差し替え。
   const connectMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (replace: boolean = false) => {
       const res = await fetch('/api/v1/publish/connect', {
         method: 'POST',
         credentials: 'include',
@@ -192,6 +194,7 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
           artifact_id: artifact.id,
           domain,
           vercel_project: VERCEL_PROJECT,
+          replace,
         }),
       });
       if (!res.ok) throw new Error(await res.text());
@@ -202,7 +205,7 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
       setResult(data);
       setStage('done');
       if (data.success) {
-        toast.success('ドメインを接続しました');
+        toast.success(data.verified === false ? 'DNS設定後に公開されます' : 'ドメインを接続しました');
         onPublished?.();
       }
     },
@@ -307,7 +310,7 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
                     size="sm"
                     variant="secondary"
                     className="w-full"
-                    onClick={() => connectMutation.mutate()}
+                    onClick={() => connectMutation.mutate(false)}
                     disabled={connectMutation.isPending}
                   >
                     {connectMutation.isPending && <Loader2 className="mr-2 h-3 w-3 animate-spin" />}
@@ -412,10 +415,30 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
         {/* 公開結果 */}
         {stage === 'done' && result && (
           <div className="space-y-3">
-            {result.success ? (
+            {result.error === 'domain_in_use' ? (
+              <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+                <div className="flex items-center gap-2 font-medium text-amber-700">
+                  <AlertCircle className="h-5 w-5" /> このドメインは別の成果物で使用中です
+                </div>
+                <p className="text-amber-800">
+                  「{result.conflict_label}」が {domain} を使っています。差し替えると元の成果物は
+                  このドメインで表示されなくなります。
+                </p>
+                <Button
+                  size="sm"
+                  className="w-full"
+                  onClick={() => connectMutation.mutate(true)}
+                  disabled={connectMutation.isPending}
+                >
+                  {connectMutation.isPending && <Loader2 className="mr-2 h-3 w-3 animate-spin" />}
+                  差し替えて接続する
+                </Button>
+              </div>
+            ) : result.success ? (
               <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3">
                 <div className="flex items-center gap-2 font-medium text-emerald-700">
-                  <CheckCircle2 className="h-5 w-5" /> 公開しました
+                  <CheckCircle2 className="h-5 w-5" />
+                  {result.verified === false ? 'DNS設定後に公開されます' : '公開しました'}
                 </div>
                 {result.deploy_url && (
                   <a

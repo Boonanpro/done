@@ -129,6 +129,7 @@ async def connect(
         domain=data.domain,
         vercel_project=data.vercel_project,
         user_id=user.user_id,
+        replace=data.replace,
     )
     return PublishResponse(
         success=result.success,
@@ -139,6 +140,8 @@ async def connect(
         error=result.error,
         pricing=result.pricing,
         dns_instructions=result.dns_instructions,
+        conflict_label=result.conflict_label,
+        verified=result.verified,
     )
 
 
