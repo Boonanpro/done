@@ -1336,6 +1336,21 @@ def run_oneshot_cli(
     return (proc.stdout or "").strip() or None
 
 
+def _resolve_cli_model(room_id: Optional[str] = None) -> str:
+    """CLI を起動するモデル名を解決する。
+
+    解決順（上が優先）:
+      1. （B2予定）ルーム単位の DB オーバーライド
+      2. `DAN_CLI_MODEL` 環境変数（例: "fable" で全ルーム一括切替）
+      3. "opus"（デフォルト）
+
+    `room_id` は B2 でルーム単位オーバーライドを足す時に呼び出し側を
+    変えずに済むよう、今のうちから受け取っておく（現状は未使用）。
+    """
+    model = (os.environ.get("DAN_CLI_MODEL") or "").strip()
+    return model or "opus"
+
+
 def _build_cli_cmd(
     claude_cmd: str,
     cli_js: Optional[str],
@@ -1343,6 +1358,7 @@ def _build_cli_cmd(
     system_prompt: str,
     resume_session_id: Optional[str] = None,
     fork_session: bool = False,
+    model: str = "opus",
 ) -> list[str]:
     """CLIコマンドライン引数を組み立てる"""
     if cli_js:
@@ -1356,7 +1372,7 @@ def _build_cli_cmd(
         "--include-partial-messages",
         "--verbose",
         "--dangerously-skip-permissions",
-        "--model", "opus",
+        "--model", model,
         "--max-turns", "200",
         "--mcp-config", mcp_config_path,
         "--append-system-prompt", system_prompt,
@@ -1856,8 +1872,9 @@ def _run_cli_in_thread(
         need_fork = room_id in _interrupted_rooms
         if need_fork:
             _interrupted_rooms.discard(room_id)
+        cli_model = _resolve_cli_model(room_id)
         launch_system_prompt, launch_content = _prepare_cli_launch_payload(system_prompt, content)
-        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, launch_system_prompt, resume_session_id, fork_session=need_fork)
+        cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, launch_system_prompt, resume_session_id, fork_session=need_fork, model=cli_model)
         _cli_debug(f"CLI attempt 1 (resume={resume_session_id is not None}, fork={need_fork}, prompt len={len(content)})")
 
         result_data = _run_cli_process(
@@ -1894,7 +1911,7 @@ def _run_cli_in_thread(
                 if reseed:
                     retry_content = _wrap_latest_user_message(reseed, content)
             retry_system_prompt, retry_launch_content = _prepare_cli_launch_payload(system_prompt, retry_content)
-            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, retry_system_prompt, resume_session_id=None)
+            cmd = _build_cli_cmd(claude_cmd, cli_js, mcp_config_path, retry_system_prompt, resume_session_id=None, model=cli_model)
             _cli_debug(f"CLI attempt 2 (fresh session, prompt len={len(retry_content)})")
 
             result_data = _run_cli_process(
@@ -2120,6 +2137,8 @@ async def _process_via_streaming_session(
         yield {"type": "error", "message": "claude CLI が見つかりません"}
         return
 
+    cli_model = _resolve_cli_model(room_id)
+
     def build_cmd() -> list:
         c = [claude_cmd, cli_js] if cli_js else [claude_cmd]
         c += [
@@ -2128,7 +2147,7 @@ async def _process_via_streaming_session(
             "--output-format", "stream-json",
             "--verbose",
             "--dangerously-skip-permissions",
-            "--model", "opus",
+            "--model", cli_model,
             "--max-turns", "200",
             "--mcp-config", mcp_config_path,
             "--append-system-prompt", system_prompt,
