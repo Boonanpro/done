@@ -94,6 +94,7 @@ const STEP_LABEL: Record<string, string> = {
   configure_dns: 'URL設定',
   verify_dns_propagation: '反映確認',
   submit_search_console: '検索エンジンに登録',
+  publish_routing: 'クリーンURL設定',
   generate_seo_assets: '検索向けファイル作成',
   submit_to_search_console: '検索エンジンに登録',
   update_artifact_db: '保存',
