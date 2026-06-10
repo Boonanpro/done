@@ -36,6 +36,7 @@ interface DomainCheckCandidate {
   name: string;
   registrable: boolean;
   pricing?: { currency: string; registration_cost: string; renewal_cost: string } | null;
+  reason?: string; // available | taken | unsupported
 }
 interface DomainCheckResponse {
   exact: DomainCheckCandidate | null;
@@ -80,6 +81,7 @@ const STEP_LABEL: Record<string, string> = {
   check_availability: 'ドメイン確認',
   register_domain: 'ドメイン購入',
   wait_registration_complete: '購入完了待ち',
+  setup_dns_zone: 'DNS準備',
   attach_to_vercel: 'サイトに接続',
   configure_dns: 'URL設定',
   verify_dns_propagation: '反映確認',
@@ -104,7 +106,6 @@ function StepIcon({ status }: { status: PublishStepDTO['status'] }) {
 export function PublishModal({ open, onOpenChange, artifact, onPublished }: Props) {
   const [stage, setStage] = useState<Stage>('domain');
   const [domain, setDomain] = useState(artifact.custom_domain || `${artifact.slug}.com`);
-  const [years, setYears] = useState(1);
   const [check, setCheck] = useState<DomainCheckResponse | null>(null);
   const [result, setResult] = useState<PublishResponse | null>(null);
   const [clientUrl, setClientUrl] = useState('');
@@ -151,7 +152,7 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
           vercel_project: VERCEL_PROJECT,
           artifact_dir: `frontend/src/app/artifacts/${artifact.slug}`,
           write_seo_files: true,
-          years,
+          years: 1,
           auto_renew: true,
           dry_run: false,
         }),
@@ -203,7 +204,7 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
   });
 
   const exact = check?.exact;
-  const total = Number(exact?.pricing?.registration_cost ?? 0) * years;
+  const total = Number(exact?.pricing?.registration_cost ?? 0);
 
   const copyClientUrl = async () => {
     let ok = false;
@@ -257,22 +258,36 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
               />
             </div>
             {exact && !exact.registrable && (
-              <div className="space-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
-                <div className="flex items-center gap-2 text-amber-700">
-                  <AlertCircle className="h-4 w-4" /> {exact.name} は使えません
-                </div>
-                {check!.suggestions.slice(0, 5).map((s) => (
-                  <button
-                    key={s.name}
-                    onClick={() => {
-                      setDomain(s.name);
-                      setCheck(null);
-                    }}
-                    className="block w-full rounded px-2 py-1 text-left font-mono text-xs hover:bg-background"
-                  >
-                    {s.name}
-                  </button>
-                ))}
+              <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700">
+                <AlertCircle className="h-4 w-4" />
+                {exact.reason === 'unsupported'
+                  ? `「.${exact.name.split('.').pop()}」は現在取り扱っていないドメインです`
+                  : `${exact.name} は既に取得されています`}
+              </div>
+            )}
+            {check && check.suggestions.filter((s) => s.registrable).length > 0 && (
+              <div className="space-y-1 rounded-md border p-2">
+                <div className="px-1 text-xs text-muted-foreground">使える候補</div>
+                {check.suggestions
+                  .filter((s) => s.registrable)
+                  .slice(0, 6)
+                  .map((s) => (
+                    <button
+                      key={s.name}
+                      onClick={() => {
+                        setDomain(s.name);
+                        setCheck(null);
+                      }}
+                      className="flex w-full items-center justify-between gap-2 rounded px-2 py-1 text-left font-mono text-xs hover:bg-muted"
+                    >
+                      <span>{s.name}</span>
+                      {s.pricing && (
+                        <span className="shrink-0 text-muted-foreground">
+                          ${money(s.pricing.registration_cost)}/年
+                        </span>
+                      )}
+                    </button>
+                  ))}
               </div>
             )}
           </div>
@@ -318,24 +333,16 @@ export function PublishModal({ open, onOpenChange, artifact, onPublished }: Prop
               <div className="font-mono text-base">{exact.name}</div>
               {exact.pricing && (
                 <div className="mt-2 grid grid-cols-2 gap-1 text-sm">
-                  <span className="text-muted-foreground">初年度</span>
-                  <span className="text-right">${money(exact.pricing.registration_cost)} / 年</span>
-                  <span className="text-muted-foreground">翌年以降</span>
+                  <span className="text-muted-foreground">今回（1年分）</span>
+                  <span className="text-right">${money(exact.pricing.registration_cost)}</span>
+                  <span className="text-muted-foreground">翌年以降の更新</span>
                   <span className="text-right">${money(exact.pricing.renewal_cost)} / 年</span>
                 </div>
               )}
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="years">取得年数</Label>
-              <Input
-                id="years"
-                type="number"
-                min={1}
-                max={10}
-                value={years}
-                onChange={(e) => setYears(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
-              />
-            </div>
+            <p className="text-xs text-muted-foreground">
+              1年分を取得します。更新しなければ1年で失効します（自動更新は後から切替可）。
+            </p>
           </div>
         )}
 

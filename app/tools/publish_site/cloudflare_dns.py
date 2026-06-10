@@ -39,8 +39,9 @@ class CloudflareDNSError(RuntimeError):
 class CloudflareDNS:
     """zone-scoped DNS レコード操作の薄いラッパー"""
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, account_id: Optional[str] = None) -> None:
         self.token = token
+        self.account_id = account_id
         self._headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -78,6 +79,26 @@ class CloudflareDNS:
         """ドメイン名で zone を1件取得 (なければ None)"""
         zones = await self.list_zones(name=name)
         return zones[0] if zones else None
+
+    async def create_zone(self, name: str) -> dict[str, Any]:
+        """Cloudflare に zone を新規作成。``result`` に ``name_servers`` を含む。
+
+        外部レジストラ(Porkbun等)で取得したドメインを Cloudflare DNS 管理下に
+        置くために使う。作成後、レジストラ側の NS をこの ``name_servers`` に向ける。
+        """
+        if not self.account_id:
+            raise CloudflareDNSError(0, [{"code": -1, "message": "account_id required for create_zone"}])
+        return await self._request(
+            "POST", "/zones",
+            json={"name": name, "account": {"id": self.account_id}, "type": "full"},
+        )
+
+    async def ensure_zone(self, name: str) -> dict[str, Any]:
+        """zone があれば取得、無ければ作成して返す。"""
+        zone = await self.get_zone_by_name(name)
+        if zone:
+            return zone
+        return await self.create_zone(name)
 
     async def list_records(
         self, zone_id: str, *, type: Optional[DnsRecordType] = None
@@ -148,4 +169,4 @@ async def get_cloudflare_dns(user_id: Optional[str] = None) -> CloudflareDNS:
     )
     if not cred or not cred.get("password"):
         raise RuntimeError("Cloudflare credentials が credentials DB に存在しません")
-    return CloudflareDNS(token=cred["password"])
+    return CloudflareDNS(token=cred["password"], account_id=cred.get("id"))
