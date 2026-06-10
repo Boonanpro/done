@@ -156,12 +156,40 @@ class NameComRegistrar:
         """Name.com の登録は同期完了。常に active を返す（互換用）。"""
         return {"status": "active", "domain": domain}
 
-    # ---- DNS（ネームサーバ）----
+    async def list_owned_domains(self) -> set[str]:
+        """このアカウントで保有しているドメイン名の集合。"""
+        data = await self._request("GET", "/domains")
+        return {d.get("domainName") for d in (data.get("domains") or []) if d.get("domainName")}
+
+    # ---- DNS（ネームサーバ / レコード）----
 
     async def update_nameservers(self, domain: str, nameservers: list[str]) -> dict[str, Any]:
         return await self._request(
             "POST", f"/domains/{domain}:setNameservers", {"nameservers": nameservers}
         )
+
+    async def set_vercel_dns(
+        self, domain: str, apex_ip: str = "76.76.21.21",
+        cname_target: str = "cname.vercel-dns.com",
+    ) -> None:
+        """root を Vercel の A、www を Vercel の CNAME に向ける（既存の root A / www は置換）。
+
+        Name.com の NS を保ったまま、DNSレコードだけで Vercel に向ける（NS切替不要）。
+        """
+        data = await self._request("GET", f"/domains/{domain}/records")
+        for r in (data.get("records") or []):
+            host = r.get("host") or ""
+            is_root_a = r.get("type") == "A" and host in ("", "@")
+            is_www = host == "www" and r.get("type") in ("A", "AAAA", "CNAME", "ALIAS")
+            if is_root_a or is_www:
+                try:
+                    await self._request("DELETE", f"/domains/{domain}/records/{r.get('id')}")
+                except NameComError:
+                    pass
+        await self._request("POST", f"/domains/{domain}/records",
+                            {"host": "", "type": "A", "answer": apex_ip, "ttl": 300})
+        await self._request("POST", f"/domains/{domain}/records",
+                            {"host": "www", "type": "CNAME", "answer": cname_target, "ttl": 300})
 
 
 async def get_namecom_registrar(user_id: Optional[str] = None) -> NameComRegistrar:

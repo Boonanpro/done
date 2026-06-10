@@ -46,6 +46,14 @@ class PublishRequest(BaseModel):
     payment_responsibility: Literal["owner_pays", "client_pays"] = "owner_pays"
 
 
+class ConnectDomainRequest(BaseModel):
+    """既に所有しているドメインを接続する（購入なし）リクエスト。"""
+
+    artifact_id: str
+    domain: str = Field(..., min_length=3)
+    vercel_project: str = "frontend"
+
+
 class DeliveryUrlRequest(BaseModel):
     artifact_id: str
     slug: str = Field(..., min_length=1)
@@ -67,6 +75,7 @@ class PublishResponse(BaseModel):
     steps: list[PublishStepDTO] = []
     error: Optional[str] = None
     pricing: Optional[dict[str, Any]] = None
+    dns_instructions: Optional[dict[str, Any]] = None  # 外部DNS時の手動設定レコード
 
 
 class DeliveryUrlResponse(BaseModel):
