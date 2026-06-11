@@ -2830,6 +2830,23 @@ async def get_active_session_status(
             "started_at": None,
         }
 
+    # 常駐ストリーミングセッション（追い連絡経路）のターン実行中。
+    # この経路は CancellationRegistry にも _active_processes にも載らないため、
+    # 送信元のSSEが切れる（=チャットを閉じる）と上の2チェックは false になるが、
+    # 処理は sink スレッドで続いている。ここを見ないと「開き直すと止まって見える」。
+    try:
+        from app.agent.streaming_session import streaming_enabled, get_session
+        if streaming_enabled():
+            _sess = get_session(session_id)
+            if _sess is not None and _sess.is_turn_active():
+                return {
+                    "active": True,
+                    "session_id": session_id,
+                    "started_at": None,
+                }
+    except Exception:
+        pass
+
     return {
         "active": False,
         "session_id": session_id,
