@@ -123,6 +123,53 @@ export function groupLiveTurns(args: {
   }));
 }
 
+// pollRun のレスポンスを runEvents へ反映するときのマージ。レスポンスは並行・
+// 順不同で届く（2.5sの定期実行＋processイベント駆動）ので、丸ごと置き換えると
+// 古いスナップショットが新しい状態を巻き戻し、ライブ表示の吹き出しが消えたり
+// 縮んだりしてちらつく。イベントは追記専用ログなので「増える方向にだけ」足す。
+// run が変わったら前の run のイベントは捨てる。変化が無ければ prev をそのまま
+// 返し、無駄な再レンダリングを起こさない。
+export function mergeRunEvents(
+  prev: ExecutionEvent[],
+  incoming: ExecutionEvent[],
+  runId: string,
+): ExecutionEvent[] {
+  const next = prev.filter((e) => e.run_id === runId);
+  const ids = new Set(next.map((e) => e.id));
+  let changed = next.length !== prev.length;
+  for (const e of incoming) {
+    if (e.run_id !== runId || ids.has(e.id)) continue;
+    next.push(e);
+    ids.add(e.id);
+    changed = true;
+  }
+  return changed ? next : prev;
+}
+
+// 追い連絡を送った「瞬間」に仮送信表示を出すための基準時刻。サーバーの
+// followup_queued を待つと数秒遅れるので、送信時にローカルで先に立てる。
+// computeUnreadFollowupIds の消化判定（この時刻より後に始まったターンが
+// あるか）が既存のターン/保存済みAIメッセージで即座に成立してしまわない
+// よう、いま画面が知っている最新の時刻より必ず後ろに置く（端末とサーバーの
+// 時計ズレ対策）。
+export function followupQueuedMsAtSend(args: {
+  nowMs: number;
+  messages: TimelineMessageLike[];
+  liveTurnGroups: LiveTurnGroup[];
+}): number {
+  const { nowMs, messages, liveTurnGroups } = args;
+  let ms = nowMs;
+  for (const m of messages) {
+    if (m.sender_type !== 'ai') continue;
+    const t = new Date(m.created_at).getTime() || 0;
+    if (t >= ms) ms = t + 1;
+  }
+  for (const g of liveTurnGroups) {
+    if (g.anchorMs >= ms) ms = g.anchorMs + 1;
+  }
+  return ms;
+}
+
 // まだダンに読み込まれていない追い連絡の id。読み込まれた＝そのメッセージより
 // 後に AI のターンが始まった（ライブのイベント or 保存済み ai_message。どちらも
 // created_at がターン開始時刻）こと。
