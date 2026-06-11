@@ -294,3 +294,17 @@ async def custom_domains_map():
         logger.warning("custom-domains map failed: %s", e)
         mapping = {}
     return {"map": mapping}
+
+
+@router.get("/site-meta")
+async def site_meta(host: str = ""):
+    """独自ドメイン(host) のSEO用メタ {slug,name,type,url} を返す（公開・認証なし）。
+
+    成果物共通レイアウトが JSON-LD 構造化データを自動生成するために使う。
+    """
+    try:
+        meta = await ChatArtifactService().get_site_meta_by_host(host)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("site-meta failed: %s", e)
+        meta = None
+    return {"meta": meta}

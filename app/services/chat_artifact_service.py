@@ -417,6 +417,36 @@ class ChatArtifactService:
                 mapping[f"www.{domain}"] = slug
         return mapping
 
+    async def get_site_meta_by_host(self, host: str) -> Optional[dict]:
+        """独自ドメイン(host)からSEO構造化データ用の最小メタを返す（公開・認証なし）。
+
+        全成果物が独自ドメインを取得した時、共通レイアウトが host からこの情報を引いて
+        JSON-LD(WebSite/Organization) を自動で埋め込めるようにするための土台。
+        住所/電話などの NAP は構造化保持していないので name/url/type のみ返す。
+        """
+        h = (host or "").strip().lower()
+        if h.startswith("www."):
+            h = h[4:]
+        if not h:
+            return None
+        try:
+            result = (
+                self.supabase.table(self.table)
+                .select("slug, label, custom_domain")
+                .in_("custom_domain", [h, f"www.{h}"])
+                .limit(1)
+                .execute()
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        if not result.data:
+            return None
+        row = result.data[0]
+        slug = row.get("slug") or ""
+        label = row.get("label") or slug.replace("-", " ").replace("_", " ").strip()
+        atype = self.infer_artifact_type(slug, row.get("label"))
+        return {"slug": slug, "name": label or h, "type": atype, "url": f"https://{h}"}
+
     async def get_by_domain_setup_token(self, token: str) -> Optional[dict]:
         """ドメイン案内フローのトークンで artifact を引く (公開ページ用・認証なし)。"""
         if not token:

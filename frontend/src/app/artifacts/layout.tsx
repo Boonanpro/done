@@ -1,6 +1,8 @@
 import { InspectorRuntimeLoader } from '@/components/dan/inspector-runtime-loader';
 import type { Metadata } from 'next';
 
+import { ArtifactStructuredData } from './_seo/structured-data';
+
 /**
  * artifacts ページ共通レイアウト。
  *
@@ -120,6 +122,7 @@ export default function ArtifactsLayout({ children }: { children: React.ReactNod
     <>
       <style dangerouslySetInnerHTML={{ __html: scrollResetStyle }} />
       <script dangerouslySetInnerHTML={{ __html: prePaintScript }} />
+      <ArtifactStructuredData />
       {children}
       <InspectorRuntimeLoader />
     </>
