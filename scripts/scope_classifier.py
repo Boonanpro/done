@@ -175,9 +175,11 @@ _INFRA_PATTERNS: tuple[str, ...] = (
     "frontend/public/next.svg",
     "frontend/public/vercel.svg",
     "frontend/public/window.svg",
-    # /artifacts/{layout.tsx,publish/**} are Dan infra inside the
-    # artifacts route group (shared chrome + publish flow page).
+    # /artifacts/{layout.tsx,_seo/**,publish/**} are Dan infra inside the
+    # artifacts route group (shared chrome + 全成果物共通のSEO構造化データ +
+    # publish flow page). _seo/ は slug ではなく全成果物共通のヘルパー置き場。
     "frontend/src/app/artifacts/layout.tsx",
+    "frontend/src/app/artifacts/_seo/**",
     "frontend/src/app/artifacts/publish/**",
     # API v1 is Dan backend; artifact-specific api routes are matched
     # below by _ARTIFACT_API_PREFIXES.
@@ -234,10 +236,10 @@ def classify(path: str) -> Scope:
     # 2. Artifact sources: frontend/src/app/artifacts/<slug>/...
     if p_match.startswith("frontend/src/app/artifacts/"):
         rest = p_match[len("frontend/src/app/artifacts/"):]
-        # /artifacts/{layout.tsx,publish/**} are Dan infra (caught below
-        # by the infra rule list as well, but handle explicitly to make
-        # ordering robust).
-        if rest in {"layout.tsx"} or rest.startswith("publish/"):
+        # /artifacts/{layout.tsx,_seo/**,publish/**} are Dan infra (caught
+        # below by the infra rule list as well, but handle explicitly to make
+        # ordering robust). _seo/ は slug ではなく全成果物共通のSEOヘルパー。
+        if rest in {"layout.tsx"} or rest.startswith(("publish/", "_seo/")):
             return Scope("infra")
         if rest.startswith("[slug]/"):
             return Scope("infra")
