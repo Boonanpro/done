@@ -76,6 +76,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("follow-up poller failed to start: %s", e)
 
+    # 孤児 run 復旧: 旧コアの突然死で running のまま取り残された run を failed にし、
+    # execution_events から途中経過を ai_message として保存（作業表示の消失防止）。
+    try:
+        from app.services.run_recovery import recover_orphaned_runs
+        asyncio.create_task(recover_orphaned_runs())
+    except Exception as e:
+        logger.warning("run recovery failed to schedule: %s", e)
+
     yield
 
     # シャットダウン時にサンドボックスも止める

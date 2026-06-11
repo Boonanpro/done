@@ -1899,6 +1899,12 @@ async def send_dan_message_stream(
             _write_latency_log(message)
 
         mark_latency("request_start")
+        # リクエスト到着時刻。並列保存パス（DAN_PARALLEL_SEND）はユーザーメッセージの
+        # insert を run 作成・CLI起動の後に行うため、DBの now() に任せると
+        # 「runがメッセージより先」に時刻が逆転し、フロントの時系列表示が崩れる。
+        # 到着時刻を created_at として明示し、保存順に関係なく実時刻を保つ。
+        from datetime import datetime as _dt, timezone as _tz
+        request_arrival_iso = _dt.now(_tz.utc).isoformat()
         # リクエストIDを生成（プログレスコールバック用）
         request_id = str(uuid.uuid4())
         progress_queue = ProgressCallbackRegistry.create_queue(request_id)
@@ -2295,6 +2301,7 @@ async def send_dan_message_stream(
                         message = await service.send_message(
                             room_id, current_user.user_id, media_content,
                             sender_type="human", reply_to_id=request.reply_to_id,
+                            created_at=request_arrival_iso,
                         )
                     except Exception:
                         _gen_first.cancel()
