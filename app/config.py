@@ -3,6 +3,7 @@ Application Configuration - Phase 6 updated
 """
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
@@ -139,7 +140,9 @@ class Settings(BaseSettings):
         return self.GMAIL_REDIRECT_URI
     
     class Config:
-        env_file = ".env"
+        # cwd相対だと MCP サブプロセス（cwd=D:\dan-workspace）が .env を見失うため、
+        # プロジェクトルート基準の絶対パスで固定する
+        env_file = str(Path(__file__).resolve().parent.parent / ".env")
         env_file_encoding = "utf-8"
 
 
