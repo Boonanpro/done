@@ -40,7 +40,9 @@ import {
   buildChatListItems,
   collectSavedTurnIds,
   computeUnreadFollowupIds,
+  followupQueuedMsAtSend,
   groupLiveTurns,
+  mergeRunEvents,
   type AgentRun,
   type ChatListItem as ChatListItemOf,
   type ExecutionEvent,
@@ -1001,6 +1003,8 @@ function AppMain() {
   // 送信の連打ガード。以前は `sending` が兼ねていたが、追い連絡（ターン実行中の
   // 送信）を許可するために sending では弾けなくなった。
   const lastSendAtRef = useRef(0);
+  // process イベント起点の pollRun 再取得のスロットル（連発防止）。
+  const lastProcessPollAtRef = useRef(0);
   // 添付アップロード中フラグ。大きい動画は数十秒かかるので、この間も必ずライブ表示
   // （「アップロード中...」スピナー）を出して「固まった/失敗した」と誤解させない。
   // アプリ内で再生中の動画URL（expo-video のネイティブプレイヤーで全画面再生）。
@@ -1228,21 +1232,43 @@ function AppMain() {
   // Pull the live in-progress run + its steps from the server for a project.
   // Mirrors the web chat's current-run / execution-events polling so the live
   // timeline can be reconstructed even after navigating away (SSE-independent).
+  //
+  // pollRun は2.5sの定期実行に加えて process イベントでも呼ばれ、複数の
+  // リクエストが同時に飛ぶ。レスポンスは順不同で返るので、何も守らないと
+  // 「完了を見た直後に古い running スナップショットが届いてライブ表示が
+  // 復活→次のポーリングでまた消える」という、回答が出る瞬間のちらつきになる。
+  // 対策: 後から開始したリクエストが結果を適用済みなら、古いリクエストの
+  // 結果は捨てる（applied = 適用済みリクエストの開始順）。
+  const pollRunSeqRef = useRef({ issued: 0, applied: 0 });
   const pollRun = useCallback(async (activeToken: string, projectId: string) => {
+    const guard = pollRunSeqRef.current;
+    const seq = ++guard.issued;
+    // 開いているチャットが変わっていたら、前のチャット宛の結果は適用しない
+    // （プロジェクト切替時の setCurrentRun(null) リセットを上書きしないため）。
+    const stale = () => seq < guard.applied || currentProjectIdRef.current !== projectId;
     try {
       const run = await apiRequest<AgentRun>(`/projects/${projectId}/current-run`, {}, activeToken);
+      if (stale()) return;
+      guard.applied = seq;
       setCurrentRun(run);
       if (run && run.state === 'running') {
         const events = await apiRequest<ExecutionEvent[]>(
           `/projects/${projectId}/execution-events?limit=200`,
           {},
           activeToken,
-        ).catch(() => [] as ExecutionEvent[]);
-        setRunEvents(events ?? []);
+        ).catch(() => null);
+        if (stale()) return;
+        guard.applied = seq;
+        // 一時的な取得失敗（null）ではクリアしない。成功時もイベントは増える
+        // 方向にだけマージし、limit やレスポンス順による欠けが吹き出しの
+        // 消失・位置ジャンプにならないようにする。
+        if (events) setRunEvents((prev) => mergeRunEvents(prev, events, run.id));
       } else {
         setRunEvents([]);
       }
     } catch {
+      if (stale()) return;
+      guard.applied = seq;
       // 404 = no run for this project (the common idle case).
       setCurrentRun(null);
       setRunEvents([]);
@@ -2077,6 +2103,21 @@ function AppMain() {
     };
     setMessages((current) => [...current, optimistic]);
 
+    // このチャットの run が動いている最中の送信＝追い連絡。サーバーの
+    // followup_queued を待つと半透明になるまで数秒空くので、送った瞬間から
+    // 仮送信表示にする（エコーが届いたら実IDへ引き継ぐ。万一 run がその間に
+    // 終わって普通の送信として扱われても、次ターン開始の検知で自然に解除）。
+    const expectFollowup =
+      project.id === currentProject?.id && (liveRunActive || !ownsSendingState);
+    if (expectFollowup) {
+      const queuedMs = followupQueuedMsAtSend({
+        nowMs: Date.now(),
+        messages,
+        liveTurnGroups,
+      });
+      setPendingFollowups((current) => ({ ...current, [optimisticId]: queuedMs }));
+    }
+
     let finalContent = content;
     if (pending.length > 0) {
       setUploadProgress({ id: optimisticId, value: 0 });
@@ -2112,6 +2153,12 @@ function AppMain() {
           setActivity('');
         }
         setMessages((current) => current.filter((m) => m.id !== optimisticId));
+        setPendingFollowups((current) => {
+          if (!(optimisticId in current)) return current;
+          const next = { ...current };
+          delete next[optimisticId];
+          return next;
+        });
         setDraft(content);
         setAttachments(pending);
         Alert.alert('アップロード失敗', String((error as Error).message));
@@ -2157,7 +2204,13 @@ function AppMain() {
           // Refetch the live run immediately for low latency (don't wait for the
           // 2.5s interval). Only when viewing this chat — otherwise the open
           // chat's own poll owns currentRun. The timeline renders from server state.
-          if (viewing) void pollRun(token, selectedProjectId);
+          // process イベントは連発するので、ここ起点の再取得は800msに1回まで
+          // （同時リクエストの山がレスポンス順不同→ちらつきの温床になる）。
+          const nowMs = Date.now();
+          if (viewing && nowMs - lastProcessPollAtRef.current >= 800) {
+            lastProcessPollAtRef.current = nowMs;
+            void pollRun(token, selectedProjectId);
+          }
         } else if (event.type === 'user_message' && isMessageResponse(event.message)) {
           sent = true;
           const incoming = event.message;
@@ -2169,6 +2222,16 @@ function AppMain() {
                 incoming,
               ),
             );
+            // 楽観メッセージに付けた仮送信フラグを実IDへ引き継ぐ。基準時刻は
+            // サーバーの created_at が正（端末の時計に依存しない）。
+            setPendingFollowups((current) => {
+              if (!(optimisticId in current)) return current;
+              const carried = current[optimisticId];
+              const next = { ...current };
+              delete next[optimisticId];
+              next[incoming.id] = new Date(incoming.created_at).getTime() || carried;
+              return next;
+            });
           }
         } else if (event.type === 'followup_queued') {
           // ダン作業中の追い連絡として受理された（このストリームはすぐ done で

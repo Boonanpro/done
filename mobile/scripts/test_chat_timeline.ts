@@ -12,7 +12,9 @@ import {
   buildChatListItems,
   collectSavedTurnIds,
   computeUnreadFollowupIds,
+  followupQueuedMsAtSend,
   groupLiveTurns,
+  mergeRunEvents,
   type AgentRun,
   type ExecutionEvent,
   type TimelineMessageLike,
@@ -141,6 +143,58 @@ function ascendingKeys(args: Parameters<typeof buildChatListItems>[0]): string[]
   assert.deepStrictEqual(groups.map((g) => g.key), ['run:r1']);
   assert.deepStrictEqual(ascendingKeys({ messages: [msg1], liveTurnGroups: groups, showLiveTurn: true }),
     ['msg1', '__live__:run:r1']);
+}
+
+// --- mergeRunEvents: 順不同レスポンスでイベントが巻き戻らない ----------------
+{
+  // 新しいスナップショット（3件）の後に古いスナップショット（2件）が届いても減らない
+  const newer = mergeRunEvents([], [ev('e1', 'tx', 1000, 1), ev('e2', 'tx', 2000, 2), ev('e3', 'tx', 3000, 3)], 'r1');
+  assert.strictEqual(newer.length, 3);
+  const afterStale = mergeRunEvents(newer, [ev('e1', 'tx', 1000, 1), ev('e2', 'tx', 2000, 2)], 'r1');
+  assert.strictEqual(afterStale.length, 3);
+  // 変化が無ければ同じ配列参照を返す（無駄な再レンダリングをしない）
+  assert.strictEqual(afterStale, newer);
+  // 新イベントは追加される
+  const grown = mergeRunEvents(newer, [ev('e4', 'ty', 4000, 4)], 'r1');
+  assert.strictEqual(grown.length, 4);
+  // run が変わったら前の run のイベントは捨てる
+  const r2only = mergeRunEvents(grown, [{ ...ev('f1', 'tz', 5000, 1), run_id: 'r2' }], 'r2');
+  assert.deepStrictEqual(r2only.map((e) => e.id), ['f1']);
+  // 他 run のイベントが混ざっていても取り込まない
+  const filtered = mergeRunEvents([], [ev('e1', 'tx', 1000, 1), { ...ev('g1', 'tw', 1500, 2), run_id: 'r9' }], 'r1');
+  assert.deepStrictEqual(filtered.map((e) => e.id), ['e1']);
+}
+
+// --- followupQueuedMsAtSend: 送った瞬間の仮送信が即座に消化されない ----------
+{
+  const messages = [msg1, partialX]; // partialX: ai, t+3s
+  const groups = groupLiveTurns({
+    liveRunActive: true, currentRun: run, runEvents: turnXEvents, savedTurnIds: new Set(),
+  });
+  // 端末の時計がサーバーより遅れているケース（now が既存ターン開始より過去）
+  const skewedNow = T + 1000;
+  const queuedMs = followupQueuedMsAtSend({ nowMs: skewedNow, messages, liveTurnGroups: groups });
+  // 既存のAIメッセージ・既存ターンの開始時刻より必ず後ろ
+  assert.ok(queuedMs > T + 3000);
+  const unread = computeUnreadFollowupIds({
+    pendingFollowups: { local1: queuedMs }, messages, liveTurnGroups: groups,
+  });
+  assert.deepStrictEqual([...unread], ['local1']); // 送った瞬間から仮送信のまま
+  // 次のターン（msg2読込後）が始まったら消化される
+  const groupsWithY = groupLiveTurns({
+    liveRunActive: true, currentRun: run, runEvents: [...turnXEvents, ...turnYEvents],
+    savedTurnIds: new Set(),
+  });
+  const unread2 = computeUnreadFollowupIds({
+    pendingFollowups: { local1: queuedMs }, messages, liveTurnGroups: groupsWithY,
+  });
+  assert.strictEqual(unread2.size, 0);
+  // 時計が進んでいる側（now が最新より未来）は now をそのまま使う
+  const aheadNow = T + 60000;
+  assert.strictEqual(
+    followupQueuedMsAtSend({ nowMs: aheadNow, messages, liveTurnGroups: groups }),
+    aheadNow,
+  );
 }
 
 console.log('test_chat_timeline: all assertions passed');
