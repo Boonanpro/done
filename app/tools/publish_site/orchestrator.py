@@ -393,6 +393,25 @@ async def publish_with_custom_domain(
                 rec.fail(s, f"DB update failed: {e}")
                 # DB エラーでも公開自体は成立しているので致命的にしない
 
+        # 10. クリーンURL配信: 取得ドメインの host rewrite を再生成して main へ push
+        #     （接続フローと同じ。購入で取得した場合も /business 等をクリーンURLで配信する）。
+        s = rec.start("publish_routing")
+        if dry_run:
+            rec.complete(s, "[DRY-RUN] skipped")
+        else:
+            try:
+                from app.services.artifact_git_publish import publish_custom_domain_rewrites
+
+                pub = await publish_custom_domain_rewrites()
+                if pub.get("pushed"):
+                    rec.complete(s, "クリーンURL設定を反映（数分で公開）")
+                elif pub.get("changed") is False:
+                    rec.complete(s, "クリーンURL設定は最新")
+                else:
+                    rec.fail(s, pub.get("detail", "ルーティング反映に失敗"))
+            except Exception as e:  # noqa: BLE001
+                rec.fail(s, f"ルーティング反映でエラー: {e}")
+
         result.success = True
         result.deploy_url = base_url
         return result
