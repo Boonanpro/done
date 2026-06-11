@@ -814,6 +814,29 @@ def _heartbeat_run_sync(run_id: Optional[str]) -> None:
         _cli_debug(f"_heartbeat_run_sync failed: {e}")
 
 
+def _start_run_heartbeat(run_id: Optional[str]) -> threading.Event:
+    """ターン実行中、発話が無くても run の updated_at を打ち続ける心拍スレッド。
+
+    心拍は従来 execution_events の保存時にしか打たれず、発話のない長いツール実行
+    （90秒超のスクリプト等）の間に run_service.get_current_run の stale sweep が
+    実行中の run を failed に誤判定し、ライブ表示が消えていた（current-run は
+    フロントから2秒間隔でポーリングされるので必ず踏む）。イベントの有無に
+    依存しない心拍で「本当に死んだ run」だけが掃除されるようにする。
+
+    Returns: stop用 Event（set() で停止）。run_id が無ければ何もしない。
+    """
+    stop = threading.Event()
+    if not run_id:
+        return stop
+
+    def _beat() -> None:
+        while not stop.wait(_RUN_HEARTBEAT_INTERVAL):
+            _heartbeat_run_sync(run_id)
+
+    threading.Thread(target=_beat, daemon=True).start()
+    return stop
+
+
 def _tool_detail(inp, limit: int = 4000) -> str:
     """Readable detail of a tool call's input for the expandable tool row.
     Picks the most useful field (command / file content / edit text / query),
@@ -1879,6 +1902,8 @@ def _run_cli_in_thread(
 
     result_data = None
     done_saved = False
+    # 無音ツール実行中も run を stale sweep から守る心拍（finallyで停止）
+    _hb_stop = _start_run_heartbeat(run_id)
     try:
         # 履歴肥大ガード: --resume するトランスクリプトが大きすぎると、最初のトークンまで
         # 数分かかる（巨大プロンプトの再prefill）。閾値を超えたらセッションを手放し、
@@ -2090,6 +2115,7 @@ def _run_cli_in_thread(
             state="paused" if CancellationRegistry.is_cancelled(room_id) else "failed",
         )
     finally:
+        _hb_stop.set()
         # セーフティネット: 正常パス(result_data)もexceptパス(done_saved)も通らなかった場合
         # = CLIがresultを出す前に静かに終了した場合
         if project_id and not result_data and not done_saved:
@@ -2372,6 +2398,15 @@ async def _process_via_streaming_session(
                 # _interrupt_sent はこの sink と同じリーダースレッドで同期的にセットされる
                 # ので result 到達時点で信頼できる。継続中は done を出さずライブ表示を維持。
                 continuation = bool(getattr(session, "_interrupt_sent", False))
+                if not continuation:
+                    # 境界レース対策: 割り込み無しでターンが完了しても、キューに追い連絡が
+                    # 残っていれば run_turn のループが直後に次ターンを始める。ここで run を
+                    # 完了させると後続ターンが「完了済み run」の下で実行され、ライブ表示
+                    # から消える（done も二重になる）。キュー残があれば継続扱いにする。
+                    try:
+                        continuation = not session._pending.empty()
+                    except Exception:
+                        pass
                 text = result_text or "\n".join(state["final_text_parts"])
                 if not text.strip():
                     text = "（応答テキストが空でした。もう一度お試しください。）"
@@ -2422,6 +2457,8 @@ async def _process_via_streaming_session(
 
     def run() -> None:
         t0 = time.time()
+        # 無音ツール実行中も run を stale sweep から守る心拍（finallyで停止）
+        _hb_stop = _start_run_heartbeat(run_id)
         try:
             res = session.run_turn(send_content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
             elapsed = time.time() - t0
@@ -2519,6 +2556,7 @@ async def _process_via_streaming_session(
         except Exception as e:  # noqa: BLE001
             _emit({"type": "error", "message": str(e)})
         finally:
+            _hb_stop.set()
             _emit(_SENTINEL)
 
     threading.Thread(target=run, daemon=True).start()
@@ -2621,6 +2659,29 @@ async def process_message_cli(
                 content_for_cli = _wrap_latest_user_message(context, content)
         except Exception as e:
             _cli_debug(f"Failed to build DB room context for {room_id[:8]}: {e}")
+
+    # --- run可視性の保証（runなしターンの根絶） ---
+    # 内部トリガー（続報ポーラー等）は run_id=None で呼ぶため、ターンが「runなし」で
+    # 走り、execution_events も run_id=None で保存される。フロント(PC/モバイル)は
+    # 「state=running の run + その run のイベント」だけをライブ描画するので、
+    # runなしターンは作業中の表示が一切出ない。さらにその間に届いたユーザーの
+    # メッセージは追い連絡として同じ呼び出しに合流し、run_id=None を継承して
+    # 連鎖的に不可視になる（2026-06-11「thinkingがすぐ消えて止まって見える」の
+    # 根本原因）。project のある部屋では必ず run を作ってから処理する。
+    # 完了時の state 更新は streaming/one-shot 両経路の sink が既に行う。
+    # skip_save のターン（タイトル生成等のユーザー非対面処理）は対象外。
+    if run_id is None and project_id and not skip_save:
+        try:
+            from app.services.run_service import RunService
+            _auto_run = await RunService().create_run(
+                project_id=project_id,
+                room_id=room_id,
+                metadata={"started_by": "internal_auto"},
+            )
+            run_id = _auto_run["id"]
+            _cli_debug(f"auto-created run {run_id[:8]} for internal turn (room {room_id[:8]})")
+        except Exception as e:
+            _cli_debug(f"auto run creation failed (room {room_id[:8]}): {e}")
 
     # --- DAN_STREAMING_INPUT: 常駐ストリーミングセッション経路（フラグ制御） ---
     # 有効時のみ、ターンを常駐 stream-json セッションに流す（後段で「次の境界」
