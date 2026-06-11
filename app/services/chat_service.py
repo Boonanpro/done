@@ -540,8 +540,14 @@ class ChatService:
         except Exception as exc:
             self.logger.warning("Unread counter update failed: %s", exc)
     
-    async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human", reply_to_id: str = None) -> dict:
-        """Send a message to a room"""
+    async def send_message(self, room_id: str, sender_id: str, content: str, sender_type: str = "human", reply_to_id: str = None, created_at: str = None) -> dict:
+        """Send a message to a room
+
+        created_at: 明示指定時はその時刻で保存（既定はDBの now()）。並列保存パス
+        （DAN_PARALLEL_SEND）は run 作成や CLI 起動の後に insert するため、DB任せだと
+        メッセージの時刻が run より後に逆転し、フロントの時系列表示が崩れる。
+        リクエスト到着時刻を渡して実際の送信時刻を保つ。
+        """
         # Verify membership
         member = await self._execute_with_retry(
             "send_message.membership_check",
@@ -566,6 +572,8 @@ class ChatService:
         }
         if reply_to_id:
             insert_data["reply_to"] = reply_to_id
+        if created_at:
+            insert_data["created_at"] = created_at
 
         result = await self._execute_with_retry(
             "send_message.insert_message",

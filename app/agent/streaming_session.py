@@ -35,9 +35,42 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional
 
 
+_DOTENV_FLAG_CACHE: Optional[bool] = None
+
+
+def _dotenv_streaming_flag() -> bool:
+    """プロジェクト .env の DAN_STREAMING_INPUT を読む（プロセス環境に無い時の既定）。
+
+    watchdog (dan_core_autostart.bat) 経由の自動再起動はユーザー環境変数を
+    引き継がないため、環境変数だけに依存すると再起動のたびに追い連絡が
+    黙ってOFFになる（2026-06-11 に実際に発生: OFF化で DAN_PARALLEL_SEND の
+    時刻逆転パスが有効化し、表示順バグとして顕在化した）。
+    """
+    global _DOTENV_FLAG_CACHE
+    if _DOTENV_FLAG_CACHE is None:
+        value = ""
+        try:
+            from pathlib import Path
+            env_path = Path(__file__).resolve().parents[2] / ".env"
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("DAN_STREAMING_INPUT="):
+                    value = line.split("=", 1)[1].strip().strip('"').strip("'")
+        except Exception:
+            value = ""
+        _DOTENV_FLAG_CACHE = value.lower() in ("1", "true", "yes", "on")
+    return _DOTENV_FLAG_CACHE
+
+
 def streaming_enabled() -> bool:
-    """True when the persistent streaming session path is opted in."""
-    return os.environ.get("DAN_STREAMING_INPUT", "").lower() in ("1", "true", "yes", "on")
+    """True when the persistent streaming session path is opted in.
+
+    プロセス環境変数が最優先（明示的な ON/OFF 切替用）。未設定なら .env を見る。
+    """
+    raw = os.environ.get("DAN_STREAMING_INPUT")
+    if raw is not None and raw.strip() != "":
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return _dotenv_streaming_flag()
 
 
 # How often run_turn wakes to re-check idle/liveness while waiting on a turn.
