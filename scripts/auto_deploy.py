@@ -24,6 +24,7 @@ Auto-deploy script — GitHub mainブランチの変更を検知して自動反�
 
 import argparse
 import logging
+import shutil
 import subprocess
 import sys
 import time
@@ -144,7 +145,18 @@ def pip_install():
 
 def npm_install():
     logging.info("package.json changed → running npm install...")
-    r = run(["npm", "install"], cwd=FRONTEND_DIR, timeout=120)
+    # npm は npm.cmd なので CreateProcess の素の PATH 解決では見つからない
+    # (WinError 2)。例外を上に投げるとデプロイサイクル全体が中断し、
+    # save_last_deploy_hash に到達せず同じ commit 範囲で無限リトライになる。
+    npm = shutil.which("npm") or shutil.which("npm.cmd")
+    if not npm:
+        logging.error("npm not found in PATH — skipping npm install.")
+        return
+    try:
+        r = run([npm, "install"], cwd=FRONTEND_DIR, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logging.error(f"npm install failed: {e}")
+        return
     if r.returncode == 0:
         logging.info("npm install completed.")
     else:
