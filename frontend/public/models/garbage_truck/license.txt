@@ -1,0 +1,11 @@
+Model Information:
+* title:	GARBAGE TRUCK
+* source:	https://sketchfab.com/3d-models/garbage-truck-9aee01b569f043b290cd7dc1abf38b71
+* author:	liebherr996litronic (https://sketchfab.com/liebherr996litronic)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "GARBAGE TRUCK" (https://sketchfab.com/3d-models/garbage-truck-9aee01b569f043b290cd7dc1abf38b71) by liebherr996litronic (https://sketchfab.com/liebherr996litronic) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)

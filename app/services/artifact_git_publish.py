@@ -71,7 +71,11 @@ LIVE_CHECK_DELAY = 6
 
 def artifact_files_for_slug(slug: str) -> list[str]:
     """Return repo-relative paths on disk that belong to ``artifact:<slug>``."""
-    from scripts.scope_classifier import _PUBLIC_DIR_TO_OWNER  # type: ignore
+    from scripts.scope_classifier import (  # type: ignore
+        _APP_API_DIR_TO_OWNER,
+        _PUBLIC_DIR_TO_OWNER,
+        _PUBLIC_FILE_TO_OWNER,
+    )
 
     roots: list[str] = [
         f"frontend/src/app/artifacts/{slug}",
@@ -83,6 +87,14 @@ def artifact_files_for_slug(slug: str) -> list[str]:
     for pubdir, owner in _PUBLIC_DIR_TO_OWNER.items():
         if owner.kind == "artifact" and owner.name == slug:
             roots.append(f"frontend/public/{pubdir}")
+    # API route dirs whose name differs from the slug (e.g. denki-qa->denki-knowledge).
+    for apidir, owner in _APP_API_DIR_TO_OWNER.items():
+        if owner.kind == "artifact" and owner.name == slug:
+            roots.append(f"frontend/src/app/api/{apidir}")
+    # Top-level public files owned by this slug (e.g. denki-knowledge-index.json).
+    for fname, owner in _PUBLIC_FILE_TO_OWNER.items():
+        if owner.kind == "artifact" and owner.name == slug:
+            roots.append(f"frontend/public/{fname}")
 
     seen: set[str] = set()
     existing: list[str] = []
