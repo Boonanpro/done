@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SalonboardCredentialsSet(BaseModel):
@@ -11,9 +11,18 @@ class SalonboardCredentialsSet(BaseModel):
 
     device_id: str = Field(..., min_length=8, max_length=128)
     stylist_name: str = Field(..., min_length=1, max_length=50)
+    email: str = Field(..., min_length=3, max_length=200, description="連絡用メールアドレス")
     login_id: str = Field(..., min_length=1, max_length=200)
     password: str = Field(..., min_length=1, max_length=200)
     consent: bool = Field(..., description="秘密保持と取扱いへの同意")
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, v: str) -> str:
+        v = v.strip()
+        if "@" not in v or "." not in v.split("@")[-1]:
+            raise ValueError("メールアドレスの形式が正しくありません")
+        return v
 
 
 class SalonboardCredentialsStatus(BaseModel):

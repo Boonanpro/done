@@ -28,6 +28,7 @@ class SalonboardCredentialsService:
         stylist_name: str,
         login_id: str,
         password: str,
+        email: Optional[str] = None,
     ) -> dict:
         """設定の保存。同じ device_id があれば上書き。"""
         encrypted_id = self.enc.encrypt(login_id)
@@ -41,16 +42,17 @@ class SalonboardCredentialsService:
             .execute()
         )
         if existing.data:
+            update_fields = {
+                "stylist_name": stylist_name,
+                "encrypted_login_id": encrypted_id,
+                "encrypted_password": encrypted_pw,
+                "consent_at": consent_at,
+            }
+            if email is not None:
+                update_fields["email"] = email
             result = (
                 self.supabase.table(self.table)
-                .update(
-                    {
-                        "stylist_name": stylist_name,
-                        "encrypted_login_id": encrypted_id,
-                        "encrypted_password": encrypted_pw,
-                        "consent_at": consent_at,
-                    }
-                )
+                .update(update_fields)
                 .eq("device_id", device_id)
                 .execute()
             )
@@ -61,6 +63,7 @@ class SalonboardCredentialsService:
                     {
                         "device_id": device_id,
                         "stylist_name": stylist_name,
+                        "email": email,
                         "encrypted_login_id": encrypted_id,
                         "encrypted_password": encrypted_pw,
                         "consent_at": consent_at,

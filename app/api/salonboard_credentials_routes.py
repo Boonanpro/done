@@ -45,6 +45,7 @@ async def set_credentials(payload: SalonboardCredentialsSet):
         stylist_name=payload.stylist_name,
         login_id=payload.login_id,
         password=payload.password,
+        email=payload.email,
     )
     if not saved:
         raise HTTPException(status_code=500, detail="保存に失敗しました")
