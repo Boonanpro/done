@@ -1398,6 +1398,7 @@ function InitScreen({
   onDone: (stylistName: string) => void;
 }) {
   const [stylistName, setStylistName] = useState(initialStylistName);
+  const [email, setEmail] = useState('');
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
   const [showPw, setShowPw] = useState(false);
@@ -1405,8 +1406,11 @@ function InitScreen({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+
   const canSubmit =
     stylistName.trim().length > 0 &&
+    emailValid &&
     loginId.trim().length > 0 &&
     password.length > 0 &&
     agree &&
@@ -1423,6 +1427,7 @@ function InitScreen({
         body: JSON.stringify({
           device_id: deviceId,
           stylist_name: stylistName.trim(),
+          email: email.trim(),
           login_id: loginId.trim(),
           password,
           consent: true,
@@ -1449,7 +1454,7 @@ function InitScreen({
         </div>
         <h1 className="mt-4 text-[24px] font-bold leading-snug">最初の設定</h1>
         <p className="mt-3 text-sm leading-relaxed text-white/90">
-          初回だけ、お名前とサロンボードのログイン情報をお預かりします。暗号化して保管するので、開発者を含め誰も中身を見ることはできません。
+          初回だけ、お名前・メールアドレス・サロンボードのログイン情報をお預かりします。ログイン情報は暗号化して保管するので、開発者を含め誰も中身を見ることはできません。
         </p>
       </div>
 
@@ -1462,6 +1467,24 @@ function InitScreen({
             placeholder="お名前(例: 田中 美咲)"
             className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#0a3d62]"
           />
+        </div>
+
+        <div>
+          <Label text="メールアドレス" required />
+          <input
+            value={email}
+            onChange={(e) => setEmail(e.target.value.slice(0, 200))}
+            type="email"
+            inputMode="email"
+            placeholder="example@salon.jp"
+            autoComplete="email"
+            className="w-full rounded-lg border border-gray-200 px-3 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 outline-none focus:border-[#0a3d62]"
+          />
+          {email.trim().length > 0 && !emailValid && (
+            <p className="mt-1 text-[11px] text-red-500">
+              メールアドレスの形式を確認してください
+            </p>
+          )}
         </div>
 
         <div>
