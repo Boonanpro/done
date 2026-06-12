@@ -111,6 +111,14 @@ _PUBLIC_FILE_TO_OWNER: dict[str, Scope] = {
     "inspection-template.docx": Scope("artifact", "inspection-report"),
     "inspection-template.xlsm": Scope("artifact", "inspection-report"),
     "annual-inspection-template.xlsm": Scope("artifact", "inspection-report"),
+    "denki-knowledge-index.json": Scope("artifact", "denki-knowledge"),
+}
+
+# frontend/src/app/api/<dir>/ ownership overrides for API route dirs whose name
+# does not match the artifact slug (default is artifact:<dir>). Required so the
+# publish mirror (artifact_files_for_slug) ships the API together with the page.
+_APP_API_DIR_TO_OWNER: dict[str, Scope] = {
+    "denki-qa": Scope("artifact", "denki-knowledge"),
 }
 
 # Patterns that are infrastructure (Dan core / shared frontend).
@@ -255,6 +263,9 @@ def classify(path: str) -> Scope:
         # api/v1/** is Dan backend (handled by infra rules below).
         if head == "v1":
             return Scope("infra")
+        owner = _APP_API_DIR_TO_OWNER.get(head)
+        if owner:
+            return owner
         if head:
             return Scope("artifact", head)
 
