@@ -16,6 +16,13 @@ const nextConfig: NextConfig = {
   compress: false, // SSE ストリーミングのバッファリング防止
   devIndicators: false,
   turbopack: {},
+  experimental: {
+    // middleware(proxy) があると Next がリクエストボディをバッファし、
+    // デフォルト10MBで打ち切る（超過分は欠落→バックエンドへのproxyが
+    // socket hang up で 500 になる）。チャット添付はバックエンド側が
+    // 500MB 上限なので、proxy層がボトルネックにならない値にする。
+    proxyClientMaxBodySize: '550mb',
+  },
   env: {
     NEXT_PUBLIC_ASSET_VERSION: ASSET_VERSION,
   },
