@@ -10,6 +10,8 @@ import re
 import time
 import os
 import sys
+import threading
+from datetime import datetime
 
 CLOUDFLARED = os.path.join(
     os.environ.get("LOCALAPPDATA", ""),
@@ -24,6 +26,38 @@ VERCEL_PROJECT_DIR = REPO_ROOT
 ENV_FILE = os.path.join(REPO_ROOT, ".env")
 CORE_TUNNEL_URL_FILE = os.path.join(REPO_ROOT, ".tunnel_core_url")
 SANDBOX_TUNNEL_URL_FILE = os.path.join(REPO_ROOT, ".tunnel_sandbox_url")
+LOG_DIR = os.path.join(REPO_ROOT, "logs")
+
+# Keep cloudflared Popen objects alive for the whole process lifetime. Without a
+# strong reference they can be GC'd, which closes the stdout pipe and breaks
+# cloudflared's logging (broken pipe). The drain threads below hold the pipe open.
+_TUNNEL_PROCS = []
+
+
+def _drain_to_log(name: str, proc: subprocess.Popen, log_path: str) -> None:
+    """Continuously read cloudflared's output and append it to a logfile.
+
+    Critical: after the startup URL is parsed, *something* must keep reading the
+    stdout pipe. cloudflared logs connection/retry/error events for the tunnel's
+    entire lifetime; if nobody drains the pipe, the ~64KB OS buffer fills and
+    cloudflared blocks on its next write — which can stall or drop in-flight
+    requests (e.g. a long 50MB upload). Draining here both prevents that stall
+    and gives us a persistent record to diagnose tunnel drops after the fact.
+    """
+    try:
+        with open(log_path, "a", encoding="utf-8", errors="replace") as logf:
+            logf.write(f"\n===== {name} drain started {datetime.now().isoformat()} =====\n")
+            logf.flush()
+            for line in proc.stdout:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                logf.write(f"[{ts}] {line.rstrip()}\n")
+                logf.flush()
+    except Exception as e:  # pragma: no cover - best-effort logging only
+        try:
+            with open(log_path, "a", encoding="utf-8", errors="replace") as logf:
+                logf.write(f"[drain-error] {name}: {e}\n")
+        except Exception:
+            pass
 VERCEL_CMD = os.path.join(os.environ.get("APPDATA", ""), "npm", "vercel.cmd")
 
 
@@ -67,6 +101,18 @@ def start_tunnel(name: str, port: int) -> str:
         sys.exit(1)
 
     print(f"[tunnel] {name} Tunnel URL: {url}")
+
+    # Hand the still-running process to a daemon drain thread so its stdout pipe
+    # keeps being read for the tunnel's whole lifetime (see _drain_to_log).
+    os.makedirs(LOG_DIR, exist_ok=True)
+    safe = name.lower().replace(" ", "_")
+    log_path = os.path.join(LOG_DIR, f"cloudflared_{safe}.log")
+    _TUNNEL_PROCS.append(proc)
+    t = threading.Thread(
+        target=_drain_to_log, args=(name, proc, log_path), daemon=True
+    )
+    t.start()
+    print(f"[tunnel] {name} output -> {log_path}")
 
     return url
 
