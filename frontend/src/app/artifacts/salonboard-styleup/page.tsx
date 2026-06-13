@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * StyleSnap — サロンボード スタイルアップ補助ツール（デモ）
+ * StyleUp — サロンボード スタイルアップ補助ツール（デモ）
  *
  * ヘアスタイル写真を選ぶと、AIがサロンボードのスタイル投稿項目を自動推定。
  * サロンボードそっくりの投稿画面に項目が自動入力され、手直しして投稿できる。
@@ -585,7 +585,7 @@ function Intro({
       <div className="bg-gradient-to-b from-[#e8607f] to-[#c8587a] px-6 pb-11 pt-14 text-white">
         <div className="flex items-center gap-1.5 text-sm font-semibold text-white/90">
           <Sparkles className="h-4 w-4" />
-          StyleSnap
+          StyleUp
           {onOpenSetup && (
             <button
               onClick={onOpenSetup}
@@ -1450,7 +1450,7 @@ function InitScreen({
       <div className="bg-gradient-to-b from-[#e8607f] to-[#c8587a] px-6 pb-9 pt-14 text-white">
         <div className="flex items-center gap-1.5 text-sm font-semibold text-white/90">
           <Sparkles className="h-4 w-4" />
-          StyleSnap
+          StyleUp
         </div>
         <h1 className="mt-4 text-[24px] font-bold leading-snug">最初の設定</h1>
         <p className="mt-3 text-sm leading-relaxed text-white/90">

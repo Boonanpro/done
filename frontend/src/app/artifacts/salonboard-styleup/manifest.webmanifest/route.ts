@@ -8,8 +8,8 @@
 // 成果物フォルダ内のルートハンドラとして配信することで、ダン共通の
 // public/ 資産には手を加えず、このツール単体の変更として完結させている。
 const MANIFEST = {
-  name: 'StyleSnap — スタイル投稿',
-  short_name: 'StyleSnap',
+  name: 'StyleUp — スタイル投稿',
+  short_name: 'StyleUp',
   description: '写真を選ぶだけで、サロンボードのスタイル投稿が完成します。',
   start_url: '/preview/salonboard-styleup',
   scope: '/preview/salonboard-styleup',

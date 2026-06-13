@@ -5,7 +5,7 @@ import type { Metadata, Viewport } from 'next';
 // ホーム画面のアイコンから起動した時に必ずツール本体(/preview/salonboard-styleup)が
 // 開くようにする。これによりダンのログイン画面に飛ぶのを防ぐ。
 export const metadata: Metadata = {
-  title: 'StyleSnap — サロンボード スタイル投稿',
+  title: 'StyleUp — サロンボード スタイル投稿',
   description: '写真を選ぶだけで、サロンボードのスタイル投稿が完成します。',
   manifest: '/artifacts/salonboard-styleup/manifest.webmanifest',
   icons: {
@@ -14,7 +14,7 @@ export const metadata: Metadata = {
   },
   appleWebApp: {
     capable: true,
-    title: 'StyleSnap',
+    title: 'StyleUp',
     statusBarStyle: 'default',
   },
 };
