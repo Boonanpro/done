@@ -612,6 +612,18 @@ def _transcript_exceeds_limit(session_id: str) -> bool:
 # Set DAN_LOOP_GUARD_THRESHOLD=0 to disable.
 _LOOP_GUARD_THRESHOLD = int(os.getenv("DAN_LOOP_GUARD_THRESHOLD", "8"))
 
+# Text-repetition guard. A bloated/degraded context can also collapse the model
+# into emitting the SAME output LINE over and over ("court — proceeding:" x500),
+# leaking English and bleeding unrelated context. Unlike a tool-call loop this
+# never raises is_error and the tool-loop guard above does not see it (no tool
+# call), so it streams garbage to the UI until the idle timeout — and because the
+# turn never finalizes, the spam is never persisted (only ever lives in the
+# stream). We detect N consecutive identical non-blank output lines and route the
+# turn through the SAME recovery as a behavioral loop (interrupt → friendly
+# result → stop + reseed from DB). The detected sample is logged so the otherwise
+# unpersistable repetition is finally captured. Set 0 to disable.
+_TEXT_LOOP_GUARD_THRESHOLD = int(os.getenv("DAN_TEXT_LOOP_GUARD_THRESHOLD", "12"))
+
 # 閲覧系（読み取り専用）のブラウザ操作。長いLPを順に確認するときに同じ
 # screenshot / scroll を何度も繰り返すのは正当な作業なので、ループ判定から除外する。
 # 状態を変える操作（open / click / type / select / back）は引き続き監視対象。
@@ -684,6 +696,66 @@ class _LoopGuard:
             self._last_sig = sig
             self._count = 1
         return self._count >= self.threshold
+
+
+class _TextLoopGuard:
+    """Counts consecutive identical non-blank output lines within a turn.
+
+    Streamed assistant text arrives in fragments across events; ``record(text)``
+    accumulates them, splits on newlines, and returns True once the same
+    non-blank line has appeared ``threshold`` times in a row. Blank lines do not
+    break the streak (the degenerate output is usually ``LINE\\n\\nLINE\\n\\n…``);
+    trivial lines (< 3 chars, e.g. a table rule) are ignored and reset the streak
+    to avoid false positives. ``threshold`` <= 0 disables. ``sample`` holds the
+    offending line for logging. ``reset()`` clears the run at each new turn.
+    """
+
+    def __init__(self, threshold: int):
+        self.threshold = threshold
+        self._buf = ""
+        self._last: Optional[str] = None
+        self._count = 0
+        self._sample = ""
+
+    def reset(self) -> None:
+        self._buf = ""
+        self._last = None
+        self._count = 0
+        self._sample = ""
+
+    def record(self, text: str) -> bool:
+        if self.threshold <= 0 or not text:
+            return False
+        self._buf += text
+        # Bound the buffer: only the trailing incomplete line matters.
+        if len(self._buf) > 8192:
+            self._buf = self._buf[-8192:]
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            s = line.strip()
+            if not s:
+                continue  # blank separators don't reset the streak
+            if len(s) < 3 or not any(ch.isalnum() for ch in s):
+                # trivial / separator-only line (e.g. '---', '===', '| --- |'):
+                # ignore and reset so legit horizontal rules / table rules that
+                # legitimately repeat don't trip the guard. (CJK counts as alnum,
+                # so Japanese repeated lines are still caught.)
+                self._last = None
+                self._count = 0
+                continue
+            if s == self._last:
+                self._count += 1
+            else:
+                self._last = s
+                self._count = 1
+                self._sample = s
+            if self._count >= self.threshold:
+                return True
+        return False
+
+    @property
+    def sample(self) -> str:
+        return self._sample
 
 
 def _is_disconnect_error(err: Exception) -> bool:
@@ -2265,6 +2337,7 @@ async def _process_via_streaming_session(
         # 振る舞いループ検知（同一ツール呼び出しの連続）。is_error が立たない
         # ループを parse-error poison と同じ復旧経路へ乗せるためのフラグ。
         "loop_guard": _LoopGuard(_LOOP_GUARD_THRESHOLD),
+        "text_loop_guard": _TextLoopGuard(_TEXT_LOOP_GUARD_THRESHOLD),
         "loop_detected": False,
     }
 
@@ -2316,6 +2389,7 @@ async def _process_via_streaming_session(
                     # 新ターン開始でループ検知をリセット（追い連絡の次ターンが
                     # 前ターンのカウントを引きずらないように）。
                     state["loop_guard"].reset()
+                    state["text_loop_guard"].reset()
                     state["loop_detected"] = False
                 blocks = (raw_ev.get("message") or {}).get("content") or []
                 for ev in _classify_content_blocks(blocks):
@@ -2325,6 +2399,23 @@ async def _process_via_streaming_session(
                             state["final_text_parts"].append(txt)
                             state["turn_blocks"].append({"type": "text", "text": txt})
                         _emit(ev)
+                        # テキスト反復崩壊の検知。同一出力行が連続 N 回出たら割り込み、
+                        # 後段の result / run() が loop_detected を見て friendly result +
+                        # stop + reseed（ツールループと同じ復旧）に乗せる。崩壊テキストは
+                        # ターンが完了しない限りどこにも永続化されないため、検知サンプルを
+                        # ログに残して初めて事後解析できるようにする。
+                        if not state["loop_detected"] and state["text_loop_guard"].record(txt):
+                            state["loop_detected"] = True
+                            _txt_sample = state["text_loop_guard"].sample
+                            _cli_debug(
+                                f"[STREAMING] TEXT loop detected "
+                                f"(line x{_TEXT_LOOP_GUARD_THRESHOLD}) room {room_id[:8]}; "
+                                f"interrupting turn; sample={_txt_sample[:200]!r}"
+                            )
+                            try:
+                                session._send_interrupt()
+                            except Exception as e:
+                                _cli_debug(f"[STREAMING] text-loop interrupt failed: {e}")
                         # Save EVERY non-empty intermediate text as a reasoning
                         # event (no length filter), so the live block interleaves
                         # text+tool exactly like the saved message's blocks → the
