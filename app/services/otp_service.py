@@ -328,7 +328,7 @@ class OTPService:
         user_id: str,
         service: Optional[str] = None,
         max_age_minutes: Optional[int] = None,
-        subject_filter: Optional[str] = "[SMSFW]",
+        subject_filter: Optional[str] = None,
         email_address: Optional[str] = None,
     ) -> Optional[OTPResult]:
         """
@@ -338,7 +338,8 @@ class OTPService:
             user_id: ユーザーID
             service: 対象サービス（amazon, ex_reservation等）
             max_age_minutes: 最大経過時間（分）
-            subject_filter: 件名フィルタ（SMS Forwarderは[SMSFW]。直接届くメールOTPはNone）
+            subject_filter: 件名フィルタ（直接届くメールOTPはNone=未読を走査）。
+                            ※旧SMS Forwarder([SMSFW])経路はAPK転送に置換済みで廃止
             email_address: 読みたい受信箱のアドレス（指定時はそのアドレスの
                            アプリパスワードを使う。未指定は既定の gmail_imap）
 
