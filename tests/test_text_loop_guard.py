@@ -83,3 +83,20 @@ def test_reset_clears_streak():
     # after reset the streak restarts; 11 more must not fire
     for _ in range(11):
         assert not g.record("same line\n")
+
+
+def test_tool_calls_between_repeated_text_prevent_false_positive():
+    """妥当な「同じ一文 → ツール実行 → 繰り返し」は誤検知させない。
+
+    sink は tool_use イベントごとに text_loop_guard.reset() を呼ぶ。ここでは
+    その挙動を模して、同一ナレーション行ごとに reset を挟めば 30 回繰り返しても
+    発火しないことを保証する（純テキスト連発の崩壊だけが残るようにする設計）。
+    """
+    g = _TextLoopGuard(12)
+    fired = False
+    for _ in range(30):
+        if g.record("スクショを撮ります\n"):
+            fired = True
+            break
+        g.reset()  # = sink が tool_use(screenshot) で呼ぶリセット
+    assert not fired

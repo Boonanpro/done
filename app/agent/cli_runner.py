@@ -2426,6 +2426,14 @@ async def _process_via_streaming_session(
                             state["reasoning_steps_acc"].append(txt.strip())
                             state["reasoning_full_acc"].append(txt.strip())
                     elif ev["type"] == "tool_use":
+                        # A real tool call = genuine progress, not a text-only
+                        # degeneration. Reset the text-repetition streak so a
+                        # legitimate "narrate the same line → act → repeat" loop
+                        # (e.g. the same caption before each of 12 screenshots)
+                        # never trips the text-loop guard; only tool-less text
+                        # spam accumulates. (Repeated tool calls are caught
+                        # separately by the tool loop_guard below.)
+                        state["text_loop_guard"].reset()
                         from app.api.project_routes import _format_tool_label
                         tool_label = _format_tool_label(ev.get("name", ""), ev.get("input", {}))
                         try:
