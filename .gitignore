@@ -177,6 +177,28 @@ scripts/yoshikawa_proposal/frames_v*/
 tests/screenshot_*.png
 tests/**/screenshot_*.png
 
+# === 成果物(artifacts)は別リポジトリ done-artifacts へ分離（2026-06-14）===
+# D:/done では追跡しない。ローカルプレビュー用にディスクには残す。
+# Dan は従来通りここに書き、publisher(app/services/artifact_git_publish.py)が
+# done-artifacts へ commit&push して公開する。infra扱いの layout.tsx/_seo/
+# publish/[slug] は追跡継続（下で除外）。
+/frontend/src/app/artifacts/*/
+!/frontend/src/app/artifacts/_seo/
+!/frontend/src/app/artifacts/publish/
+!/frontend/src/app/artifacts/\[slug\]/
+/frontend/src/app/api/denki-qa/
+/frontend/src/app/api/kittoku/
+/frontend/public/artifacts/
+/frontend/public/kikkawa/
+/frontend/public/yonago-gojo/
+/frontend/public/yonago-gojo-comp/
+/frontend/public/paina/
+/frontend/public/lp-mocks/
+/frontend/public/denki-knowledge-index.json
+/frontend/public/inspection-template.xlsm
+/frontend/public/inspection-template.docx
+/frontend/public/annual-inspection-template.xlsm
+
 # Node modules (all subdirectories)
 **/node_modules/
 
