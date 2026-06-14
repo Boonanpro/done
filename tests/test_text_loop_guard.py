@@ -36,6 +36,27 @@ def test_detects_repeated_checklist_line():
     assert fired
 
 
+def test_detects_cyclic_repetition_not_just_consecutive():
+    """実際の循環型崩壊: 数行が回り続け、同じ行が連続はしないが頻出する。
+
+    "court 停止。" は毎回別の行を挟むので consecutive-only では捕まらない。
+    窓内出現回数で数えることで検知する。
+    """
+    cycle = [
+        "I run it now:\n",
+        "court 停止。\n",
+        "court — proceeding:\n",
+        "court 停止。\n",
+        "ok run:\n",
+        "court 停止。\n",
+        "Now executing:\n",
+        "court 停止。\n",
+    ]
+    fired, sample = _fires(cycle * 6)
+    assert fired
+    assert sample == "court 停止。"
+
+
 def test_detects_when_line_split_across_fragments():
     """ストリームのデルタは行をまたいで断片で届く。"""
     fired, _ = _fires((["court ", "— proce", "eding:\n"]) * 15)
