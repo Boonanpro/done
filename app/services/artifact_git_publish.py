@@ -38,10 +38,28 @@ WORKTREE_DIR = TMP_DIR / "publish-main"
 GLOBAL_LOCK = TMP_DIR / "artifact_git_publish.lock"
 PUBLISH_LOG = PROJECT_ROOT / "artifact_git_publish.log"
 
-# Production host whose /preview/<slug> serves the artifact (Vercel `main`).
+# 成果物（クライアント納品物）は Dan infra とは別リポジトリ(done-artifacts)へ公開する。
+# Dan は従来通り D:/done の frontend/src/app/artifacts/<slug> に書き（ローカル
+# プレビューもそのまま）、publisher がそのファイルを done-artifacts リポジトリへ
+# commit & push する（done-artifacts はルートが Next アプリなので frontend/ プレ
+# フィックスを剥がしてパス変換する）。done-artifacts は GitHub 連携済みなので
+# push → Vercel 自動ビルドで /preview/<slug> が配信される。
+ARTIFACTS_REPO = Path(
+    os.environ.get("DAN_ARTIFACTS_REPO") or str(PROJECT_ROOT.parent / "done-artifacts")
+).resolve()
+# done-artifacts 公開用 worktree は両リポジトリの外に置く（D:/done を一切汚さない）。
+ARTIFACTS_WORKTREE_DIR = ARTIFACTS_REPO.parent / ".dan-artifacts-publish-wt"
+
+
+def _target_rel(rel: str) -> str:
+    """D:/done レイアウト(frontend/...) を done-artifacts レイアウト(ルート=Nextアプリ)へ変換。"""
+    return rel[len("frontend/") :] if rel.startswith("frontend/") else rel
+
+
+# Production host whose /preview/<slug> serves the artifact (done-artifacts on Vercel).
 PUBLISH_HOST = (
     os.environ.get("DAN_PUBLISH_HOST")
-    or "https://frontend-mikis-projects-86652663.vercel.app"
+    or "https://done-artifacts.vercel.app"
 ).rstrip("/")
 
 PUSH_BRANCH = os.environ.get("DAN_PUBLISH_BRANCH", "main")
@@ -51,7 +69,10 @@ PUSH_BRANCH = os.environ.get("DAN_PUBLISH_BRANCH", "main")
 # it never goes stale (a bare `vercel alias set` pins to one deployment). Set to
 # empty to disable. The same value must be configured as NEXT_PUBLIC_SHARE_ORIGIN
 # (web) and the mobile app base URL so every device shows the same URL.
-SHARE_ALIAS = os.environ.get("DAN_SHARE_ALIAS", "done-studio.vercel.app").strip()
+# 分離後は done-artifacts の Vercel プロジェクトドメインが本番デプロイへ自動追従
+# するため、CLI による share alias 再ポイントは不要（既定は無効）。done-studio
+# 等の独自ドメイン移設はフェーズ③で別途行う。env で再有効化可能。
+SHARE_ALIAS = os.environ.get("DAN_SHARE_ALIAS", "").strip()
 # How long to wait for the new production build before re-pointing the share host.
 SHARE_BUILD_ATTEMPTS = 40   # x SHARE_BUILD_DELAY = ~10 min ceiling
 SHARE_BUILD_DELAY = 15
@@ -181,32 +202,36 @@ def _release_lock() -> None:
 # Worktree management
 # ---------------------------------------------------------------------------
 
-def _ensure_worktree() -> Path:
-    """Create or refresh a detached worktree pinned to ``origin/<branch>``."""
-    TMP_DIR.mkdir(exist_ok=True)
-    _git(["fetch", "origin", PUSH_BRANCH, "--quiet"], cwd=PROJECT_ROOT)
+def _ensure_worktree(repo: Path = PROJECT_ROOT, wt_dir: Path = WORKTREE_DIR) -> Path:
+    """Create or refresh a detached worktree of ``repo`` pinned to ``origin/<branch>``."""
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+    _git(["fetch", "origin", PUSH_BRANCH, "--quiet"], cwd=repo)
 
-    git_marker = WORKTREE_DIR / ".git"
+    git_marker = wt_dir / ".git"
     if not git_marker.exists():
-        if WORKTREE_DIR.exists():
-            shutil.rmtree(WORKTREE_DIR, ignore_errors=True)
+        if wt_dir.exists():
+            shutil.rmtree(wt_dir, ignore_errors=True)
         # Prune any stale registration of this path before re-adding.
-        _git(["worktree", "prune"], cwd=PROJECT_ROOT, check=False)
+        _git(["worktree", "prune"], cwd=repo, check=False)
         _git(
-            ["worktree", "add", "--force", "--detach", str(WORKTREE_DIR), f"origin/{PUSH_BRANCH}"],
-            cwd=PROJECT_ROOT,
+            ["worktree", "add", "--force", "--detach", str(wt_dir), f"origin/{PUSH_BRANCH}"],
+            cwd=repo,
         )
     else:
-        _git(["reset", "--hard", f"origin/{PUSH_BRANCH}"], cwd=WORKTREE_DIR)
-        _git(["clean", "-fd"], cwd=WORKTREE_DIR)
-    return WORKTREE_DIR
+        _git(["reset", "--hard", f"origin/{PUSH_BRANCH}"], cwd=wt_dir)
+        _git(["clean", "-fd"], cwd=wt_dir)
+    return wt_dir
 
 
-def _mirror_into_worktree(wt: Path, paths: list[str]) -> None:
-    """Mirror each slug path from the live tree into the worktree."""
+def _mirror_into_worktree(wt: Path, paths: list[str], *, translate: bool = False) -> None:
+    """Mirror each slug path from the D:/done live tree into the worktree.
+
+    ``translate=True`` maps D:/done paths (frontend/...) to the done-artifacts
+    layout (root = Next app) when copying into the destination worktree.
+    """
     for rel in paths:
         src = PROJECT_ROOT / rel
-        dst = wt / rel
+        dst = wt / (_target_rel(rel) if translate else rel)
         if src.is_dir():
             if dst.exists():
                 shutil.rmtree(dst, ignore_errors=True)
@@ -335,8 +360,8 @@ def _scan_imports(file_path: Path) -> set[str]:
 
 
 def _alias_target_exists(wt: Path, spec: str) -> bool:
-    # "@/x/y" maps to frontend/src/x/y (file or dir with an index).
-    base = wt / "frontend" / "src" / spec[2:]
+    # done-artifacts はルートが Next アプリ。"@/x/y" は src/x/y にマップ。
+    base = wt / "src" / spec[2:]
     for ext in _SRC_EXTS:
         if base.with_suffix(ext).exists():
             return True
@@ -354,14 +379,14 @@ def _pkg_name(spec: str) -> str:
 def _missing_build_prereqs(wt: Path, paths: list[str]) -> list[str]:
     """Return import specs the artifact needs that are NOT present on the target."""
     try:
-        pkg = json.loads((wt / "frontend" / "package.json").read_text(encoding="utf-8"))
+        pkg = json.loads((wt / "package.json").read_text(encoding="utf-8"))
         deps = set(pkg.get("dependencies", {})) | set(pkg.get("devDependencies", {}))
     except Exception:  # noqa: BLE001 - if we can't read deps, don't block
         deps = None
 
     missing: set[str] = set()
     for rel in paths:
-        root = wt / rel
+        root = wt / _target_rel(rel)
         files = [f for f in root.rglob("*") if f.suffix.lower() in _SRC_EXTS] if root.is_dir() \
             else ([root] if root.suffix.lower() in _SRC_EXTS else [])
         for f in files:
@@ -387,7 +412,7 @@ def _commit_and_push(wt: Path, slug: str, paths: list[str]) -> tuple[bool, str]:
         # Always start from a clean, up-to-date branch tip.
         _git(["reset", "--hard", f"origin/{PUSH_BRANCH}"], cwd=wt)
         _git(["clean", "-fd"], cwd=wt)
-        _mirror_into_worktree(wt, paths)
+        _mirror_into_worktree(wt, paths, translate=True)
 
         # Gate: don't push an artifact whose imports aren't on the target — it
         # would break the whole-frontend build and block every other publish.
@@ -399,7 +424,8 @@ def _commit_and_push(wt: Path, slug: str, paths: list[str]) -> tuple[bool, str]:
                 "これらを infra として先に main へ入れてから再公開してください。"
             )
 
-        _git(["add", "--", *paths], cwd=wt)
+        target_paths = [_target_rel(p) for p in paths]
+        _git(["add", "--", *target_paths], cwd=wt)
 
         staged = _git(["diff", "--cached", "--name-only"], cwd=wt).stdout.strip()
         if not staged:
@@ -418,7 +444,7 @@ def _commit_and_push(wt: Path, slug: str, paths: list[str]) -> tuple[bool, str]:
             return True, ""
         last_err = push.stdout
         _emit(f"[git-publish] push attempt {attempt} failed for {slug}; refetching")
-        _git(["fetch", "origin", PUSH_BRANCH, "--quiet"], cwd=PROJECT_ROOT, check=False)
+        _git(["fetch", "origin", PUSH_BRANCH, "--quiet"], cwd=ARTIFACTS_REPO, check=False)
         time.sleep(min(15, 5 * attempt))
     return False, last_err or "push failed"
 
@@ -497,7 +523,7 @@ def _publish_one(slug: str, *, push: bool, wait_live: bool) -> dict:
         return result
 
     try:
-        wt = _ensure_worktree()
+        wt = _ensure_worktree(ARTIFACTS_REPO, ARTIFACTS_WORKTREE_DIR)
     except Exception as e:  # noqa: BLE001
         result["status"] = "error"
         result["error"] = f"worktree setup failed: {e}"
@@ -508,8 +534,8 @@ def _publish_one(slug: str, *, push: bool, wait_live: bool) -> dict:
         # Dry run: mirror + stage so the caller can inspect, but do not commit.
         _git(["reset", "--hard", f"origin/{PUSH_BRANCH}"], cwd=wt)
         _git(["clean", "-fd"], cwd=wt)
-        _mirror_into_worktree(wt, paths)
-        _git(["add", "--", *paths], cwd=wt)
+        _mirror_into_worktree(wt, paths, translate=True)
+        _git(["add", "--", *[_target_rel(p) for p in paths]], cwd=wt)
         staged = _git(["diff", "--cached", "--name-only"], cwd=wt).stdout.strip()
         result["status"] = "dry-run"
         result["error"] = ""
