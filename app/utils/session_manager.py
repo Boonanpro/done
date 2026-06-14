@@ -19,7 +19,10 @@ class SessionManager:
             service_name: サービス名（例: "smartex"）
         """
         self.service_name = service_name
-        self.session_dir = Path("sessions")
+        # cwd相対だと呼び出し元の作業ディレクトリ次第で保存先がブレる
+        # （ダンCLIは D:\dan-workspace で動く）。リポジトリルート基準に固定する。
+        repo_root = Path(__file__).resolve().parents[2]  # app/utils/ → app/ → repo
+        self.session_dir = repo_root / "sessions"
         self.session_dir.mkdir(exist_ok=True)
         self.session_file = self.session_dir / f"{service_name}_session.json"
 
