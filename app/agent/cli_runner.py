@@ -699,28 +699,37 @@ class _LoopGuard:
 
 
 class _TextLoopGuard:
-    """Counts consecutive identical non-blank output lines within a turn.
+    """Detects degenerate repetition in streamed output text within a turn.
 
-    Streamed assistant text arrives in fragments across events; ``record(text)``
-    accumulates them, splits on newlines, and returns True once the same
-    non-blank line has appeared ``threshold`` times in a row. Blank lines do not
-    break the streak (the degenerate output is usually ``LINE\\n\\nLINE\\n\\n…``);
-    trivial lines (< 3 chars, e.g. a table rule) are ignored and reset the streak
-    to avoid false positives. ``threshold`` <= 0 disables. ``sample`` holds the
-    offending line for logging. ``reset()`` clears the run at each new turn.
+    Streamed assistant text arrives in fragments; ``record(text)`` accumulates
+    them, splits on newlines, and tracks the last ``window`` substantive lines.
+    It returns True once ANY single line has appeared ``threshold`` times within
+    that window. Counting over a window (not just strictly consecutive) catches
+    BOTH a line repeated back-to-back AND a small set of lines cycling — e.g.
+    ``court 停止。`` interleaved with ``court — proceeding:`` / ``ok run:`` /
+    ``Now executing:`` — which a consecutive-only check misses.
+
+    Blank lines and trivial/separator-only lines (< 3 chars or no alphanumeric,
+    e.g. '---', '| --- |') are ignored so legit rules don't trip it. CJK counts
+    as alphanumeric, so Japanese repeated lines are still caught. ``threshold``
+    <= 0 disables. ``sample`` holds the offending line for logging. The sink also
+    calls ``reset()`` on every tool_use (a real action = genuine progress), so
+    only tool-less text spam accumulates. ``reset()`` also clears the run at each
+    new turn.
     """
 
-    def __init__(self, threshold: int):
+    def __init__(self, threshold: int, window: int = 40):
         self.threshold = threshold
+        self.window = max(window, threshold)
         self._buf = ""
-        self._last: Optional[str] = None
-        self._count = 0
+        self._win: list = []
+        self._counts: Dict[str, int] = {}
         self._sample = ""
 
     def reset(self) -> None:
         self._buf = ""
-        self._last = None
-        self._count = 0
+        self._win = []
+        self._counts = {}
         self._sample = ""
 
     def record(self, text: str) -> bool:
@@ -730,28 +739,26 @@ class _TextLoopGuard:
         # Bound the buffer: only the trailing incomplete line matters.
         if len(self._buf) > 8192:
             self._buf = self._buf[-8192:]
+        fired = False
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             s = line.strip()
-            if not s:
-                continue  # blank separators don't reset the streak
-            if len(s) < 3 or not any(ch.isalnum() for ch in s):
-                # trivial / separator-only line (e.g. '---', '===', '| --- |'):
-                # ignore and reset so legit horizontal rules / table rules that
-                # legitimately repeat don't trip the guard. (CJK counts as alnum,
-                # so Japanese repeated lines are still caught.)
-                self._last = None
-                self._count = 0
+            if not s or len(s) < 3 or not any(ch.isalnum() for ch in s):
+                # blank / trivial / separator-only line: ignore (don't count) so
+                # legit horizontal rules / table rules never trip the guard.
                 continue
-            if s == self._last:
-                self._count += 1
-            else:
-                self._last = s
-                self._count = 1
+            self._win.append(s)
+            self._counts[s] = self._counts.get(s, 0) + 1
+            if len(self._win) > self.window:
+                old = self._win.pop(0)
+                self._counts[old] -= 1
+                if self._counts[old] <= 0:
+                    del self._counts[old]
+            if self._counts[s] >= self.threshold:
                 self._sample = s
-            if self._count >= self.threshold:
-                return True
-        return False
+                fired = True
+                break
+        return fired
 
     @property
     def sample(self) -> str:
