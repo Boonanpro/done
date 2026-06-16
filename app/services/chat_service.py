@@ -1371,23 +1371,32 @@ class ChatService:
         user_id: str,
         status: Optional[str] = None,
         limit: int = 50,
+        types: Optional[list[str]] = None,
+        exclude_types: Optional[list[str]] = None,
     ) -> list[dict]:
         """
         ユーザーの提案一覧を取得
-        
+
         Args:
             user_id: ユーザーID
             status: フィルターするステータス（None=全て）
             limit: 取得件数
-            
+            types: この type のみに絞る（None=全て）
+            exclude_types: この type を除外する（例: ["observation"] で情報通知を除く）
+
         Returns:
             提案リスト
         """
         query = self.supabase.table("dan_proposals").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(limit)
-        
+
         if status:
             query = query.eq("status", status)
-        
+        if types:
+            query = query.in_("type", types)
+        if exclude_types:
+            # PostgREST: not.in.(a,b) 形式
+            query = query.not_.in_("type", exclude_types)
+
         result = query.execute()
         
         proposals = []
@@ -1480,20 +1489,72 @@ class ChatService:
         return updated_proposal
     
     async def _execute_reply_proposal(self, proposal: dict, content: str) -> None:
-        """返信提案を実行"""
-        source_room_id = proposal.get("source_room_id")
+        """返信提案を実行。
+
+        - 外部チャネル（フォーム/メール返信）の場合は実際に外部送信する。
+        - それ以外は従来通り、元チャットルームにメッセージを投稿する。
+        """
+        import logging
+
+        action_data = proposal.get("action_data") or {}
+        action = action_data.get("action")
+        channel = action_data.get("channel")
         user_id = proposal["user_id"]
-        
+
+        # 外部メール返信（フォーム問い合わせへの返信など）
+        if action == "send_inquiry_reply" or channel == "email":
+            try:
+                await self._send_external_email_reply(proposal, content, action_data)
+            except Exception as e:
+                logging.error(f"Failed to send external email reply: {e}")
+            return
+
+        # 従来: 元チャットルームへ投稿
+        source_room_id = proposal.get("source_room_id")
         if source_room_id:
             try:
                 await self.send_message(source_room_id, user_id, content, sender_type="human")
             except Exception as e:
-                import logging
                 logging.error(f"Failed to execute reply proposal: {e}")
+
+    async def _send_external_email_reply(self, proposal: dict, content: str, action_data: dict) -> None:
+        """承認された返信案を SMTP で外部送信し、必要なら inquiry のステータスを更新する。"""
+        import asyncio as _asyncio
+        import logging
+
+        to_addr = action_data.get("to")
+        subject = action_data.get("subject") or "Re: お問い合わせ"
+        from_name = action_data.get("reply_from_name") or "サポート"
+        if not to_addr:
+            logging.warning("external email reply: 宛先メール無し proposal=%s", proposal.get("id"))
+            return
+
+        from app.services.inquiry_notify import _send_smtp, OWNER_REPLY_TO
+
+        await _asyncio.to_thread(
+            _send_smtp, to_addr, subject, content,
+            from_name=from_name, reply_to=OWNER_REPLY_TO,
+        )
+        logging.info("external email reply sent to=%s subject=%s", to_addr, subject)
+
+        # inquiry を replied に
+        inquiry_id = action_data.get("inquiry_id")
+        if inquiry_id:
+            try:
+                await _asyncio.to_thread(
+                    lambda: self.supabase.table("inquiries").update({"status": "replied"}).eq("id", inquiry_id).execute()
+                )
+            except Exception as e:
+                logging.warning("inquiry status update failed: %s", e)
     
-    async def get_pending_proposals_count(self, user_id: str) -> int:
-        """保留中の提案数を取得"""
-        result = self.supabase.table("dan_proposals").select("id", count="exact").eq("user_id", user_id).eq("status", "pending").execute()
+    async def get_pending_proposals_count(
+        self, user_id: str, exclude_types: Optional[list[str]] = None
+    ) -> int:
+        """保留中の提案数を取得（exclude_types で情報通知などを除外可能）"""
+        query = self.supabase.table("dan_proposals").select("id", count="exact").eq("user_id", user_id).eq("status", "pending")
+        if exclude_types:
+            query = query.not_.in_("type", exclude_types)
+        result = query.execute()
         return result.count or 0
 
 

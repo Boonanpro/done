@@ -276,6 +276,16 @@ async def _create_observer_notification(room_id: str, user_id: str, summaries: l
 
         from app.services.supabase_client import get_supabase_client
         sb = get_supabase_client().client
+        # 同じルームの旧 observation を失効させ、通知タブに無限蓄積しないようにする
+        # （情報通知は最新1件だけ pending で残す）
+        try:
+            sb.table("dan_proposals").update({"status": "expired"}).eq(
+                "user_id", user_id
+            ).eq("type", "observation").eq("source_room_id", room_id).eq(
+                "status", "pending"
+            ).execute()
+        except Exception:
+            logger.warning("[Observer] prior observation expire failed (non-fatal)")
         sb.table("dan_proposals").insert({
             "user_id": user_id,
             "type": "observation",
@@ -2885,18 +2895,29 @@ async def cancel_dan_session(
 async def get_proposals(
     status: Optional[str] = None,
     limit: int = 50,
+    types: Optional[str] = None,
+    exclude_types: Optional[str] = None,
     current_user: TokenData = Depends(get_current_user),
     service: ChatService = Depends(get_chat_service),
 ):
     """
     ダンからの提案一覧を取得
-    
+
     - status: フィルター（pending, approved, rejected, expired）
     - limit: 取得件数（デフォルト50）
+    - types: この type のみ（カンマ区切り。例: reply,action）
+    - exclude_types: この type を除外（カンマ区切り。例: observation で情報通知を除く）
     """
     try:
-        proposals = await service.get_proposals(current_user.user_id, status=status, limit=limit)
-        pending_count = await service.get_pending_proposals_count(current_user.user_id)
+        type_list = [t.strip() for t in types.split(",") if t.strip()] if types else None
+        exclude_list = [t.strip() for t in exclude_types.split(",") if t.strip()] if exclude_types else None
+        proposals = await service.get_proposals(
+            current_user.user_id, status=status, limit=limit,
+            types=type_list, exclude_types=exclude_list,
+        )
+        pending_count = await service.get_pending_proposals_count(
+            current_user.user_id, exclude_types=exclude_list,
+        )
         return ProposalsListResponse(
             proposals=[ProposalResponse(**p) for p in proposals],
             total_count=len(proposals),
