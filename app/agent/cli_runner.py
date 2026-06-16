@@ -602,6 +602,110 @@ def _transcript_exceeds_limit(session_id: str) -> bool:
         return False
 
 
+# Image-eviction guard (root fix for screenshot-driven bloat & collapse).
+# Browser screenshots dominate transcript size — each is ~125KB of base64 and a
+# single browsing turn can add a dozen. Re-prefilling every old screenshot on
+# each --resume both slows the first token AND degrades the model into
+# repetition collapse ("court" spam). Unlike text, a stale screenshot carries
+# almost no value: the model only needs the most RECENT views to keep acting.
+# Before each resume we rewrite the transcript jsonl in place, keeping the last
+# DAN_IMAGE_EVICT_KEEP screenshots intact and replacing older image blocks with
+# a tiny text placeholder. The conversation thread — and every
+# tool_use/tool_result pairing — stays intact, so unlike the size-triggered
+# drop+reseed this loses NO conversational context. Set DAN_IMAGE_EVICT_KEEP=0
+# to disable.
+_IMAGE_EVICT_KEEP = int(os.getenv("DAN_IMAGE_EVICT_KEEP", "3"))
+
+
+def _iter_image_blocks(blocks):
+    """Yield (list, index) for every image block in a content list, recursing
+    into tool_result content (where browser screenshots actually live)."""
+    if not isinstance(blocks, list):
+        return
+    for i, b in enumerate(blocks):
+        if not isinstance(b, dict):
+            continue
+        bt = b.get("type")
+        if bt == "image":
+            yield (blocks, i)
+        elif bt == "tool_result":
+            inner = b.get("content")
+            if isinstance(inner, list):
+                yield from _iter_image_blocks(inner)
+
+
+def _compact_transcript_images(session_id: str, keep_recent: Optional[int] = None) -> bool:
+    """Strip stale screenshots from a CLI transcript, keeping the last N intact.
+
+    Returns True if the transcript was rewritten (images evicted). Best-effort:
+    any failure leaves the transcript untouched and returns False, so the caller
+    falls back to the existing size-triggered drop+reseed.
+    """
+    keep = _IMAGE_EVICT_KEEP if keep_recent is None else keep_recent
+    if keep <= 0:
+        return False
+    path = _session_transcript_path(session_id)
+    if path is None:
+        return False
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception as e:
+        _cli_debug(f"_compact_transcript_images read failed: {e}")
+        return False
+
+    parsed: list = []          # per line: dict (json) | str (verbatim) | None (blank)
+    image_refs: list = []      # (container_list, index) for every image block, in file order
+    for line in raw_lines:
+        if not line.strip():
+            parsed.append(None)
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            parsed.append(line)  # un-parseable: preserve verbatim
+            continue
+        parsed.append(obj)
+        msg = obj.get("message") if isinstance(obj, dict) else None
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            image_refs.extend(_iter_image_blocks(content))
+
+    if len(image_refs) <= keep:
+        return False  # nothing stale to evict
+
+    for blocks, idx in image_refs[:-keep]:
+        try:
+            media = (blocks[idx].get("source") or {}).get("media_type", "") or ""
+        except Exception:
+            media = ""
+        suffix = f" ({media})" if media else ""
+        blocks[idx] = {
+            "type": "text",
+            "text": f"[古いスクリーンショットは文脈節約のため省略{suffix}]",
+        }
+
+    try:
+        out_lines = []
+        for item in parsed:
+            if item is None:
+                out_lines.append("")
+            elif isinstance(item, str):
+                out_lines.append(item)
+            else:
+                out_lines.append(json.dumps(item, ensure_ascii=False))
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except Exception as e:
+        _cli_debug(f"_compact_transcript_images write failed: {e}")
+        return False
+    _cli_debug(
+        f"_compact_transcript_images: evicted {len(image_refs) - keep} stale "
+        f"screenshots (kept {keep}) from session {session_id}"
+    )
+    return True
+
+
 # Behavioral-loop guard. A bloated browser context can degrade the model into
 # re-issuing the SAME tool call (e.g. "open manager.line.biz") many times in a
 # row. The CLI keeps "succeeding" on each step, so is_error never fires and the
@@ -1989,6 +2093,15 @@ def _run_cli_in_thread(
         # 数分かかる（巨大プロンプトの再prefill）。閾値を超えたらセッションを手放し、
         # DB の直近会話を要約して文脈を引き継いだ上で新規セッションとして開始する。
         # 会話本体は chat_messages に残るので文脈は失われない。
+        # 根本対策: --resume の前に古いスクリーンショットを退避する。画像はトランスクリプト
+        # 肥大の主因（1枚 ~125KB）で、古い画像は文脈価値がほぼ無いのに毎ターン再prefillされ、
+        # 初動の遅延とモデルの反復崩壊（"court" 連発）を招く。直近 N 枚だけ残して古い画像を
+        # テキストプレースホルダに置換する。会話スレッドは保たれるので文脈は失われない。
+        if resume_session_id:
+            _compact_transcript_images(resume_session_id)
+
+        # 退避してもなお巨大なら（画像以外のテキストで肥大）、従来どおりセッションを手放して
+        # DB から reseed する保険に乗せる。
         if resume_session_id and _transcript_exceeds_limit(resume_session_id):
             _tx_path = _session_transcript_path(resume_session_id)
             try:
