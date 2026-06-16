@@ -8,15 +8,23 @@ import {
   applyBlockStyle,
   applyInlineStyle,
   applyText,
+  readModelFromAttrs,
   type EditModel,
 } from '@/lib/inspector-model';
-import {
-  applyModelToElement,
-  selectionToTextRange,
-} from '@/lib/inspector-render';
-import { isEditableTextLeaf } from '@/lib/inspector-edit-target';
-import { normalizeToModel } from '@/lib/inspector-migrate';
 import { useEditHistoryStore, makeEditSummary } from '@/stores/edit-history-store';
+import { sendToIframe } from '@/components/preview/inspector-bridge';
+import type { SelectionSnapshot, MediaInfo, OverrideRow } from '@/lib/inspector-protocol';
+
+/**
+ * クロスオリジン Inspector ストア。
+ *
+ * 設計: docs/proposals/inspector_cross_origin.md
+ *
+ * 旧版は live DOM(`liveTarget: Element`) と live `Range` を保持して直接DOMを編集していた
+ * （同一オリジン限定）。新版は DOM を一切持たず、iframe から来た **snapshot**（選択情報）と
+ * **文字オフセット**（選択範囲）だけを扱い、編集は inspector-bridge 経由で iframe へ
+ * postMessage する。保存は従来の API（認証付き）に親が代行する。
+ */
 
 export interface SelectedElement {
   refId: string;
@@ -25,11 +33,16 @@ export interface SelectedElement {
   outerHtmlSnippet: string;
   rect: { x: number; y: number; width: number; height: number };
   className?: string;
-  ancestors?: string[];
-  bgColor?: string;
+  ancestors?: { tagName: string; className: string; elementKey: string | null }[];
+  bgColor?: string | null;
   /** 編集単位の識別子（@<edit-id> または DOM パス）。 */
   elementKey?: string;
-  stackHint?: { index: number; total: number };
+  /** iframe が計算した computedStyle の抜粋（パネルはこれを読む。live DOM は読まない）。 */
+  computedStyles?: Record<string, string>;
+  /** インラインテキスト編集できる葉要素か。 */
+  isTextLeaf?: boolean;
+  /** img/video の場合の情報。 */
+  media?: MediaInfo;
 }
 
 export interface ArtifactRecord {
@@ -62,6 +75,13 @@ export interface ArtifactRecord {
 
 export type InspectorMode = 'comment' | 'edit';
 
+/** 文字オフセットで表した選択範囲（live Range の代替）。 */
+export interface SelectionRange {
+  elementKey: string;
+  start: number;
+  end: number;
+}
+
 interface PreviewState {
   isOpen: boolean;
   projectId: string | null;
@@ -72,17 +92,12 @@ interface PreviewState {
   refCounter: number;
 
   inspectorMode: InspectorMode;
-  liveTarget: Element | null;
-  /** iframe 内で現在選択されているテキスト範囲。null = 選択なし or 折りたたみ */
-  selectedRange: Range | null;
-  /** elementKey → 現在のモデル（DOMより真）。新規操作時に DOM から構築。 */
+  /** iframe 内で現在選択されているテキスト範囲（文字オフセット）。null=なし。 */
+  selectedRange: SelectionRange | null;
+  /** elementKey → 現在のモデル（DOMより真）。fetch した override や編集で更新。 */
   models: Record<string, EditModel>;
-  /** 変更通知用バージョン。 */
   styleVersion: number;
-  /** JSXファイルへの書き戻し（direct-write / restore-file）が成功するたびに+1。
-   *  preview-pane が iframe src の `?t=` に反映し、Vercel CDN / ブラウザキャッシュをバイパスして
-   *  iframe を強制的に最新HTMLで再ロードする。styleVersion は keystroke 単位で bump するので
-   *  別フィールドにしている。 */
+  /** JSXファイル書き戻し成功時に+1。preview-pane が iframe src の ?t= に反映し再ロード。 */
   contentVersion: number;
 }
 
@@ -90,19 +105,27 @@ interface PreviewActions {
   openArtifact: (projectId: string, artifact: ArtifactRecord) => void;
   closePreview: () => void;
   toggleEditMode: () => void;
-  selectElement: (el: Omit<SelectedElement, 'refId'>, target?: Element | null) => void;
+  /** iframe からの選択 snapshot を受けて選択状態を更新する。 */
+  selectFromSnapshot: (snap: SelectionSnapshot) => void;
   clearSelection: () => void;
   setPopoverDraft: (v: string) => void;
   consumeDraft: () => { text: string; element: SelectedElement | null };
 
   setInspectorMode: (mode: InspectorMode) => void;
+  /** iframe からの選択範囲（文字オフセット）を受ける。null payload で解除。 */
+  setSelectionRange: (payload: SelectionRange | null) => void;
+  /** スタイルを適用（選択範囲ありなら部分span、なければblock）。iframeへ送信＋永続化。 */
   setLiveStyle: (property: string, value: string, important?: boolean) => void;
-  setLiveText: (text: string) => void;
-  applyStyleTo: (target: Element | null, property: string, value: string, important?: boolean) => void;
+  /** インラインテキスト確定（iframe agent からの commit を受ける）。 */
+  commitText: (elementKey: string, text: string) => void;
+  /** 任意要素にスタイルだけ当てる（img/video 用）。elementKey 指定。 */
+  applyStyleTo: (elementKey: string | undefined, property: string, value: string, important?: boolean) => void;
+  /** 属性(src/alt/href等)を当てる（img/video 用）。 */
+  applyAttrs: (elementKey: string | undefined, attrs: Record<string, string>) => void;
   resetElementEdits: () => void;
-  /** 選択中要素を JSX から完全削除（ハード削除）。成功時は選択解除。 */
-  deleteSelectedElement: () => Promise<boolean>;
-  /** JSXファイル書き戻しが成功した時に呼ぶ。iframe が新URLで再ロードされる。 */
+  deleteSelectedElement: (opts?: { elementKey?: string; tagName?: string }) => Promise<boolean>;
+  /** fetch した override 行で models キャッシュを種付けする。 */
+  seedModels: (rows: OverrideRow[]) => void;
   bumpContentVersion: () => void;
 }
 
@@ -117,60 +140,18 @@ const INITIAL: PreviewState = {
   popoverDraft: '',
   refCounter: 0,
   inspectorMode: 'comment',
-  liveTarget: null,
   selectedRange: null,
   models: {},
   styleVersion: 0,
   contentVersion: 0,
 };
 
-/**
- * 要素から現在のモデルを取得 or 新規作成。
- * - store の models[key] にあればそれを返す
- * - 無ければ inspector-runtime のキャッシュ（サーバから取得した model_v2 を含む）を参照
- * - それも無ければ DOM から初期モデル（text=textContent, blockStyle なし）を作る
- *
- * これがないと、サーバ保存済みの spans/blockStyle が編集開始時に空モデルで上書きされ、
- * テキストだけ編集したのに色や大きさの装飾が全消えする事故が起きる。
- */
-/**
- * DOM 要素の表示テキスト（改行込み）を取得する。
- * - <br> や block 要素の境界で \n が入る innerText を優先
- * - innerText は layout を強制するので、JSDOM 等で undefined のことがある
- *   → fallback で textContent を使う（この場合 \n は消える）
- */
-function readDisplayText(el: Element): string {
-  const ie = (el as HTMLElement).innerText;
-  if (typeof ie === 'string') return ie;
-  return el.textContent ?? '';
-}
-
-function getOrInitModel(
-  key: string,
-  el: Element,
-  models: Record<string, EditModel>
-): EditModel {
+/** キャッシュ or 空モデル（text を seed）から現在モデルを得る。DOM には触れない。 */
+function getOrInitModel(key: string, text: string, models: Record<string, EditModel>): EditModel {
   const existing = models[key];
   if (existing) return existing;
-
-  // runtime キャッシュ（サーバ取得済みの model）を優先
-  if (typeof window !== 'undefined') {
-    const win = window as unknown as Record<string, unknown>;
-    const api = win['__DAN_INSPECTOR__'] as
-      | { getModel: (k: string) => EditModel | null }
-      | undefined;
-    const fromRuntime = api?.getModel?.(key);
-    if (fromRuntime) {
-      if (fromRuntime.text === null) {
-        fromRuntime.text = readDisplayText(el);
-      }
-      return fromRuntime;
-    }
-  }
-
-  // フォールバック: 完全新規モデル
   const m = emptyModel();
-  m.text = readDisplayText(el);
+  m.text = text;
   return m;
 }
 
@@ -180,7 +161,6 @@ export const usePreviewStore = create<PreviewStore>()(
       ...INITIAL,
 
       openArtifact: (projectId, artifact) => {
-        // artifact 切り替え時は履歴をクリア（別ファイルの Undo は混ぜたくない）
         useEditHistoryStore.getState().clear();
         set({
           isOpen: true,
@@ -190,8 +170,8 @@ export const usePreviewStore = create<PreviewStore>()(
           selectedElement: null,
           popoverDraft: '',
           refCounter: 0,
-          liveTarget: null,
           models: {},
+          selectedRange: null,
           inspectorMode: 'comment',
         });
       },
@@ -206,272 +186,172 @@ export const usePreviewStore = create<PreviewStore>()(
           isEditMode: !s.isEditMode,
           selectedElement: null,
           popoverDraft: '',
-          liveTarget: null,
+          selectedRange: null,
         })),
 
-      selectElement: (el, target = null) => {
+      selectFromSnapshot: (snap) => {
         const counter = get().refCounter + 1;
-        const prev = get().liveTarget;
-        // liveTarget が変わったら sticky な selectedRange をリセット
-        // （別要素を選択したのに前要素の text range が残ると誤適用する）
-        const rangeReset = prev !== target ? { selectedRange: null } : {};
+        const prevKey = get().selectedElement?.elementKey;
+        const rangeReset = prevKey !== snap.elementKey ? { selectedRange: null } : {};
         set({
-          selectedElement: { ...el, refId: `e${counter}` },
+          selectedElement: {
+            refId: `e${counter}`,
+            tagName: snap.tagName,
+            text: snap.text,
+            outerHtmlSnippet: snap.outerHtmlSnippet,
+            rect: snap.rect,
+            className: snap.className,
+            ancestors: snap.ancestors,
+            bgColor: snap.bgColor,
+            elementKey: snap.elementKey,
+            computedStyles: snap.computedStyles,
+            isTextLeaf: snap.isTextLeaf,
+            media: snap.media,
+          },
           refCounter: counter,
           popoverDraft: '',
-          liveTarget: target,
           ...rangeReset,
         });
       },
 
-      clearSelection: () =>
-        set({
-          selectedElement: null,
-          popoverDraft: '',
-          liveTarget: null,
-          selectedRange: null,
-        }),
+      clearSelection: () => {
+        set({ selectedElement: null, popoverDraft: '', selectedRange: null });
+        sendToIframe({ type: 'inspector:clear-selection', payload: {} });
+      },
 
       setPopoverDraft: (v) => set({ popoverDraft: v }),
 
       consumeDraft: () => {
         const { popoverDraft, selectedElement } = get();
-        set({ selectedElement: null, popoverDraft: '', liveTarget: null });
+        set({ selectedElement: null, popoverDraft: '', selectedRange: null });
         return { text: popoverDraft, element: selectedElement };
       },
 
       setInspectorMode: (mode) => set({ inspectorMode: mode }),
 
-      /**
-       * 装飾を適用する。
-       * - 部分テキスト選択中（selectedRange あり）→ inline span として model.spans に追記
-       * - それ以外 → model.blockStyle に追記
-       * モデルを更新したら DOM に反映 → 永続化キュー。
-       */
-      setLiveStyle: (property, value, important = false) => {
-        const { liveTarget, selectedElement, selectedRange, models, styleVersion } = get();
-        if (!liveTarget || !selectedElement?.elementKey) return;
-        const key = selectedElement.elementKey;
-        const current = getOrInitModel(key, liveTarget, models);
-        let next: EditModel;
-
-        const partialRange =
-          selectedRange &&
-          !selectedRange.collapsed &&
-          liveTarget.contains(selectedRange.commonAncestorContainer)
-            ? selectionToTextRange(liveTarget, selectedRange)
-            : null;
-
-        if (partialRange && current.text) {
-          next = applyInlineStyle(current, partialRange.start, partialRange.end, property, value);
-        } else {
-          next = applyBlockStyle(current, property, value);
-        }
-
-        // DOM 反映
-        try {
-          applyModelToElement(liveTarget as HTMLElement, next);
-          // 部分装飾後は span が再構築されるので、選択を「同じ start/end の範囲」に再設定しておく
-          if (partialRange) {
-            try {
-              restoreTextRangeSelection(liveTarget, partialRange.start, partialRange.end, set);
-            } catch {
-              /* ignore */
-            }
-          }
-        } catch {
-          /* ignore */
-        }
-
-        set({
-          models: { ...models, [key]: next },
-          styleVersion: styleVersion + 1,
-        });
-
-        queueInspectorEdit({
-          target: liveTarget,
-          elementKey: key,
-          model: next,
-          // important hint は blockStyle の場合のみ意味がある
-          important,
-          historyMeta: {
-            summary: makeEditSummary({
-              kind: 'style',
-              prop: property,
-              value,
-              elementHint: selectedElement.tagName,
-            }),
-          },
-        });
-      },
-
-      /**
-       * テキストを差し替える。spans の位置は自動補正される。
-       *
-       * 統一原則 (isEditableTextLeaf): text 編集は「data-edit-id 持ち & 子 Element 無し」の
-       * leaf のみ。子要素を持つ要素に保存すると、再描画時に innerHTML 上書きで
-       * 子要素 (h2/p や <strong>/<em>) が plaintext で潰れる。
-       */
-      setLiveText: (text) => {
-        const { liveTarget, selectedElement, models, styleVersion } = get();
-        if (!liveTarget || !selectedElement?.elementKey) return;
-        const key = selectedElement.elementKey;
-        const el = liveTarget as HTMLElement;
-        if (!isEditableTextLeaf(el)) {
-          console.warn(
-            '[preview-store] setLiveText blocked: liveTarget is not an editable text leaf.',
-            { tag: el.tagName, children: el.children.length, editId: el.getAttribute?.('data-edit-id') }
-          );
+      setSelectionRange: (payload) => {
+        if (!payload || (payload.end <= payload.start)) {
+          // 折りたたみ/空は前の選択を保持（sticky）— null 明示時のみクリア
+          if (payload === null) set({ selectedRange: null });
           return;
         }
+        set({ selectedRange: payload });
+      },
 
-        const current = getOrInitModel(key, liveTarget, models);
-        const next = applyText(current, text);
-
-        try {
-          applyModelToElement(liveTarget as HTMLElement, next);
-        } catch {
-          /* ignore */
-        }
-
-        set({
-          models: { ...models, [key]: next },
-          styleVersion: styleVersion + 1,
-        });
-
+      setLiveStyle: (property, value) => {
+        const { selectedElement, selectedRange, models, styleVersion, artifact } = get();
+        const key = selectedElement?.elementKey;
+        if (!key) return;
+        const slug = artifact?.slug || '';
+        const current = getOrInitModel(key, selectedElement?.text || '', models);
+        const partial =
+          selectedRange && selectedRange.elementKey === key && selectedRange.end > selectedRange.start && current.text
+            ? selectedRange
+            : null;
+        const next = partial
+          ? applyInlineStyle(current, partial.start, partial.end, property, value)
+          : applyBlockStyle(current, property, value);
+        set({ models: { ...models, [key]: next }, styleVersion: styleVersion + 1 });
+        sendToIframe({ type: 'inspector:apply', payload: { elementKey: key, model: next } });
         queueInspectorEdit({
-          target: liveTarget,
+          slug,
           elementKey: key,
           model: next,
           historyMeta: {
-            summary: makeEditSummary({
-              kind: 'text',
-              elementHint: selectedElement.tagName,
-            }),
+            summary: makeEditSummary({ kind: 'style', prop: property, value, elementHint: selectedElement?.tagName }),
           },
         });
       },
 
-      /** 任意要素にスタイルだけ当てる（モデルなしの軽量版、img/video 用）。 */
-      applyStyleTo: (target, property, value, important = false) => {
-        if (!target) return;
-        try {
-          (target as HTMLElement).style.setProperty(
-            property,
-            value,
-            important ? 'important' : ''
-          );
-        } catch {
-          /* ignore */
-        }
-        set((s) => ({ styleVersion: s.styleVersion + 1 }));
-        // モデルを使わずスタイルだけ送る（後で読み込まれた時は blockStyle 相当として扱われる）
+      commitText: (elementKey, text) => {
+        const { models, styleVersion, artifact, selectedElement } = get();
+        const slug = artifact?.slug || '';
+        const current = getOrInitModel(elementKey, text, models);
+        const next = applyText(current, text);
+        set({ models: { ...models, [elementKey]: next }, styleVersion: styleVersion + 1 });
+        sendToIframe({ type: 'inspector:apply', payload: { elementKey, model: next } });
         queueInspectorEdit({
-          target,
-          stylesOnly: { [property]: value },
-          historyMeta: {
-            summary: makeEditSummary({
-              kind: 'style',
-              prop: property,
-              value,
-              elementHint: target.tagName.toLowerCase(),
-            }),
-          },
+          slug,
+          elementKey,
+          model: next,
+          historyMeta: { summary: makeEditSummary({ kind: 'text', elementHint: selectedElement?.tagName }) },
         });
       },
 
-      /**
-       * 選択中要素を JSX から完全削除（ハード削除）。
-       * - 即座に DOM から `liveTarget.remove()` で消す（プレビュー反映）
-       * - サーバに `/inspector-overrides/delete-element` を投げて JSX を物理削除
-       * - 失敗したら toast でエラー報告。DOM 削除は復元しない（後でリロードすればJSXが正）
-       * - 成功したら選択解除
-       *
-       * `@<edit-id>` キーが付いていない要素はサーバが拒否するので、UI 側でも事前ガードする。
-       */
-      deleteSelectedElement: async () => {
-        const { liveTarget, selectedElement, artifact, models, styleVersion } = get();
-        if (!liveTarget || !selectedElement?.elementKey) {
+      applyStyleTo: (elementKey, property, value) => {
+        if (!elementKey) return;
+        const { models, styleVersion, artifact } = get();
+        const slug = artifact?.slug || '';
+        const current = getOrInitModel(elementKey, '', models);
+        const next = applyBlockStyle(current, property, value);
+        set({ models: { ...models, [elementKey]: next }, styleVersion: styleVersion + 1 });
+        sendToIframe({ type: 'inspector:apply', payload: { elementKey, model: next } });
+        queueInspectorEdit({
+          slug,
+          elementKey,
+          model: next,
+          historyMeta: { summary: makeEditSummary({ kind: 'style', prop: property, value, elementHint: 'media' }) },
+        });
+      },
+
+      applyAttrs: (elementKey, attrs) => {
+        if (!elementKey) return;
+        const { artifact, styleVersion } = get();
+        const slug = artifact?.slug || '';
+        set({ styleVersion: styleVersion + 1 });
+        sendToIframe({ type: 'inspector:apply', payload: { elementKey, attrs } });
+        queueInspectorEdit({
+          slug,
+          elementKey,
+          attrsOnly: attrs,
+          historyMeta: { summary: makeEditSummary({ kind: 'style', prop: 'attr', value: '', elementHint: 'media' }) },
+        });
+      },
+
+      deleteSelectedElement: async (opts) => {
+        const { selectedElement, artifact, models, styleVersion } = get();
+        const key = opts?.elementKey || selectedElement?.elementKey;
+        if (!key) {
           toast.error('削除対象が選択されていません');
           return false;
         }
-        const key = selectedElement.elementKey;
         if (!key.startsWith('@')) {
           toast.error('この要素には data-edit-id が無いので削除できません');
           return false;
         }
-        const doc = liveTarget.ownerDocument;
-        const win = doc?.defaultView as unknown as { __DAN_INSPECTOR__?: { slug?: string } } | undefined;
-        const slug = win?.__DAN_INSPECTOR__?.slug || artifact?.slug || '';
+        const slug = artifact?.slug || '';
         if (!slug) {
           toast.error('artifact slug が取得できません');
           return false;
         }
-
-        // 楽観的に「視覚的に」消す（プレビューに即時反映）。
-        // ⚠️ .remove() で DOM ノードを物理削除すると、iframe 内の React (artifact ページ) の
-        //    fiber tree が stale 参照を保ったままになり、後続の HMR 再レンダリングで
-        //    parent.removeChild(staleNode) が走って NotFoundError を出す。
-        //    display:none なら DOM ノードはそのまま、視覚的にだけ消える。
-        //    JSX 書き戻し → HMR reload で正しく rebuild されるので最終的に消える。
-        try {
-          (liveTarget as HTMLElement).style.setProperty('display', 'none', 'important');
-        } catch {
-          /* ignore */
-        }
-
-        // store からも該当 model を削除（残骸を防ぐ）
+        // 楽観的に iframe で非表示化（display:none）。
+        sendToIframe({ type: 'inspector:apply', payload: { elementKey: key, styles: { display: 'none' } } });
         const nextModels = { ...models };
         delete nextModels[key];
-        set({
-          models: nextModels,
-          styleVersion: styleVersion + 1,
-          selectedElement: null,
-          liveTarget: null,
-        });
-
-        // localStorage の override もクリア
+        set({ models: nextModels, styleVersion: styleVersion + 1, selectedElement: null });
         removeLocalStorageOverride(slug, key);
 
-        const tagHint = selectedElement.tagName;
+        const tagHint = opts?.tagName || selectedElement?.tagName;
         try {
           const res = await fetch('/api/v1/inspector-overrides/delete-element', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
-            body: JSON.stringify({
-              artifact_slug: slug,
-              element_key: key,
-            }),
+            body: JSON.stringify({ artifact_slug: slug, element_key: key }),
           });
           if (!res.ok) {
             const txt = await res.text();
             toast.error('要素の削除に失敗しました', { description: txt.slice(0, 200) });
-            // DOM は楽観削除済みなので、リロードして整合させる
-            try { doc?.defaultView?.location.reload(); } catch { /* ignore */ }
             return false;
           }
-          // 削除成功: before/after を Undo に積む
           try {
             const body = (await res.json()) as {
-              removed?: boolean;
-              file?: string | null;
-              before_content?: string | null;
-              after_content?: string | null;
+              removed?: boolean; file?: string | null; before_content?: string | null; after_content?: string | null;
             };
-            if (
-              body.removed &&
-              body.file &&
-              typeof body.before_content === 'string' &&
-              typeof body.after_content === 'string'
-            ) {
+            if (body.removed && body.file && typeof body.before_content === 'string' && typeof body.after_content === 'string') {
               useEditHistoryStore.getState().push({
-                slug,
-                filePath: body.file,
-                before: body.before_content,
-                after: body.after_content,
-                elementKey: key,
-                summary: makeEditSummary({ kind: 'delete', elementHint: tagHint }),
+                slug, filePath: body.file, before: body.before_content, after: body.after_content,
+                elementKey: key, summary: makeEditSummary({ kind: 'delete', elementHint: tagHint }),
               });
             }
           } catch (e) {
@@ -481,31 +361,15 @@ export const usePreviewStore = create<PreviewStore>()(
           return true;
         } catch (err) {
           toast.error('要素削除のリクエストに失敗', { description: String(err).slice(0, 200) });
-          try { doc?.defaultView?.location.reload(); } catch { /* ignore */ }
           return false;
         }
       },
 
-      /** 選択中要素の編集をリセット（モデルを空に戻す）。 */
       resetElementEdits: () => {
-        const { liveTarget, selectedElement, models, styleVersion, artifact } = get();
-        if (!liveTarget || !selectedElement?.elementKey) return;
-        const key = selectedElement.elementKey;
-        const doc = liveTarget.ownerDocument;
-        const win = doc?.defaultView as unknown as { __DAN_INSPECTOR__?: { slug?: string } } | undefined;
-        const slug = win?.__DAN_INSPECTOR__?.slug || artifact?.slug || '';
-        try {
-          // inline style をクリア
-          const cur = models[key];
-          if (cur) {
-            for (const prop of Object.keys(cur.blockStyle)) {
-              (liveTarget as HTMLElement).style.removeProperty(prop);
-            }
-            // text を JSX オリジナルに戻す手段がないので、現在の textContent を保つ
-          }
-        } catch {
-          /* ignore */
-        }
+        const { selectedElement, models, styleVersion, artifact } = get();
+        const key = selectedElement?.elementKey;
+        if (!key) return;
+        const slug = artifact?.slug || '';
         const nextModels = { ...models };
         delete nextModels[key];
         set({ models: nextModels, styleVersion: styleVersion + 1 });
@@ -514,166 +378,82 @@ export const usePreviewStore = create<PreviewStore>()(
         void deleteInspectorOverride(slug, key)
           .catch((err) => {
             console.warn('[inspector-overrides] delete failed', err);
-            try {
-              toast.error('編集のリセットに失敗しました', {
-                description: String(err).slice(0, 200),
-              });
-            } catch {
-              /* ignore */
-            }
+            try { toast.error('編集のリセットに失敗しました', { description: String(err).slice(0, 200) }); } catch { /* ignore */ }
           })
           .finally(() => {
-            try {
-              doc?.defaultView?.location.reload();
-            } catch {
-              /* ignore */
-            }
+            // iframe に最新を取り直させる（contentVersion bump で再ロード）。
+            usePreviewStore.getState().bumpContentVersion();
           });
       },
 
-      bumpContentVersion: () =>
-        set((s) => ({ contentVersion: s.contentVersion + 1 })),
+      seedModels: (rows) => {
+        const models = { ...get().models };
+        for (const r of rows) {
+          const m = readModelFromAttrs((r.attrs as Record<string, unknown>) || {});
+          if (m) {
+            if (r.styles) for (const [k, v] of Object.entries(r.styles)) if (typeof v === 'string') m.blockStyle[k] = v;
+            models[r.element_key] = m;
+          }
+        }
+        set({ models });
+      },
+
+      bumpContentVersion: () => set((s) => ({ contentVersion: s.contentVersion + 1 })),
     }),
     {
       name: 'dan-preview-state',
-      // version bump: 既存ユーザの localStorage に残っている artifact / projectId / isOpen を
-      // 強制破棄するため。migrate() が version < 2 を検知したら state 全部捨てる。
       version: 2,
       storage: createJSONStorage(() => (typeof window !== 'undefined' ? localStorage : undefined as unknown as Storage)),
-      // 永続化はUI 嗜好のみ（モード）。
-      // artifact / projectId / isOpen など「コンテンツ系」は session 限り。
-      // 未ログイン状態でも見えてしまう「幽霊プレビュー」を防ぐ。
-      partialize: (s) => ({
-        isEditMode: s.isEditMode,
-        inspectorMode: s.inspectorMode,
-      }),
+      partialize: (s) => ({ isEditMode: s.isEditMode, inspectorMode: s.inspectorMode }),
       migrate: (_persisted, version) => {
-        if (version < 2) {
-          // v1 で保存されていた artifact 等を捨てて、デフォルトを返す
-          return { isEditMode: false, inspectorMode: 'comment' as const };
-        }
+        if (version < 2) return { isEditMode: false, inspectorMode: 'comment' as const };
         return _persisted as { isEditMode: boolean; inspectorMode: 'comment' | 'edit' };
       },
     }
   )
 );
 
-/**
- * 部分テキスト適用後、DOM が再構築されているので Selection を文字位置で復元する。
- * iframe の Selection / Range API を使って start/end の文字位置に対応する text node を見つける。
- */
-function restoreTextRangeSelection(
-  el: Element,
-  start: number,
-  end: number,
-  set: (partial: Partial<PreviewState>) => void
-): void {
-  const doc = el.ownerDocument;
-  if (!doc) return;
-  const win = doc.defaultView;
-  if (!win) return;
-  const range = doc.createRange();
-  let acc = 0;
-  let startSet = false;
-  const walker = doc.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-  let node: Node | null = walker.nextNode();
-  while (node) {
-    const len = node.textContent?.length ?? 0;
-    if (!startSet && acc + len >= start) {
-      range.setStart(node, start - acc);
-      startSet = true;
-    }
-    if (acc + len >= end) {
-      range.setEnd(node, end - acc);
-      const sel = win.getSelection();
-      sel?.removeAllRanges();
-      sel?.addRange(range);
-      set({ selectedRange: range.cloneRange() });
-      return;
-    }
-    acc += len;
-    node = walker.nextNode();
-  }
-}
+/* ========== Runtime Overrides Layer（永続化） ========== */
 
-/* ========== Runtime Overrides Layer ========== */
-
-type LocalOverride = {
-  elementKey: string;
-  styles: Record<string, string>;
-  attrs: Record<string, unknown>;
-};
-
-type PendingOverride = LocalOverride & {
-  slug: string;
-  _historyMeta?: { summary: string };
-};
+type LocalOverride = { elementKey: string; styles: Record<string, string>; attrs: Record<string, unknown> };
+type PendingOverride = LocalOverride & { slug: string; _historyMeta?: { summary: string } };
 
 const pendingOverrides: Record<string, PendingOverride> = {};
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 const FLUSH_DEBOUNCE_MS = 100;
 
 type QueueContext = {
-  target: Element | null;
-  elementKey?: string;
-  /** 完全な編集モデル。これがあれば attrs.model_v2 として送信。 */
+  slug: string;
+  elementKey: string;
   model?: EditModel;
-  /** モデルなしで style だけ送る場合（applyStyleTo 用）。 */
   stylesOnly?: Record<string, string>;
-  /** モデルなしで attrs（src/href/alt 等）だけ送る場合（image/video 用）。 */
   attrsOnly?: Record<string, string>;
-  /** important フラグ（blockStyle 全体に適用したいケース用、現状未使用）。 */
-  important?: boolean;
-  /** Undo 履歴の要約文（toast 表示用）。 */
   historyMeta?: { summary: string };
 };
 
 export function queueInspectorEdit(ctx: QueueContext) {
-  if (!ctx.target && !ctx.elementKey) return;
-  const doc = ctx.target?.ownerDocument;
-  const win = doc?.defaultView as unknown as Record<string, unknown> | undefined;
-  type DanApi = {
-    computeKey: (el: Element) => string;
-    applyOverride: (k: string, s: Record<string, string>, a: Record<string, unknown>) => void;
-    slug: string;
-  };
-  const danApi = win?.__DAN_INSPECTOR__ as DanApi | undefined;
-  const key =
-    ctx.elementKey ||
-    (danApi && ctx.target ? danApi.computeKey(ctx.target) : '');
-  if (!key) return;
-
-  const urlSlug = danApi?.slug || usePreviewStore.getState().artifact?.slug || '';
-  if (!urlSlug) {
-    console.warn('[inspector-overrides] no slug derivable, drop edit', key);
+  const key = ctx.elementKey;
+  const slug = ctx.slug || usePreviewStore.getState().artifact?.slug || '';
+  if (!key || !slug) {
+    console.warn('[inspector-overrides] missing key/slug, drop edit', key, slug);
     return;
   }
-
   let attrs: Record<string, unknown> = {};
   let styles: Record<string, string> = {};
-
   if (ctx.model) {
     attrs = { model_v2: JSON.stringify(ctx.model) };
-    // blockStyle は styles 列にも入れると、データベースのインデックス /
-    // 旧フェッチコードからも見えるので二重保存。
     styles = { ...ctx.model.blockStyle };
   } else if (ctx.stylesOnly) {
     styles = { ...ctx.stylesOnly };
   } else if (ctx.attrsOnly) {
     attrs = { ...ctx.attrsOnly };
   }
-
-  if (danApi) {
-    danApi.applyOverride(key, styles, attrs);
-  }
-
   const existing = pendingOverrides[key];
   pendingOverrides[key] = {
     elementKey: key,
-    // model 送信時は attrs を「全置換」する（v1 の html / text を残さない）
     styles: ctx.model ? styles : { ...(existing?.styles || {}), ...styles },
     attrs: ctx.model ? attrs : { ...(existing?.attrs || {}), ...attrs },
-    slug: urlSlug,
+    slug,
     _historyMeta: ctx.historyMeta,
   };
   if (flushTimer) clearTimeout(flushTimer);
@@ -681,10 +461,7 @@ export function queueInspectorEdit(ctx: QueueContext) {
 }
 
 export function flushInspectorEdits(): Promise<void> {
-  if (flushTimer) {
-    clearTimeout(flushTimer);
-    flushTimer = null;
-  }
+  if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
   return flushPendingOverrides();
 }
 
@@ -698,20 +475,13 @@ function removeLocalStorageOverride(slug: string, elementKey: string): void {
     const next = rows.filter((r) => r.elementKey !== elementKey);
     if (next.length) window.localStorage.setItem(LS_KEY(slug), JSON.stringify(next));
     else window.localStorage.removeItem(LS_KEY(slug));
-  } catch {
-    /* ignore */
-  }
+  } catch { /* ignore */ }
 }
 
 async function deleteInspectorOverride(slug: string, elementKey: string): Promise<void> {
   const params = new URLSearchParams({ slug, element_key: elementKey });
-  const res = await fetch(`/api/v1/inspector-overrides?${params.toString()}`, {
-    method: 'DELETE',
-    credentials: 'include',
-  });
-  if (!res.ok && res.status !== 404) {
-    throw new Error(await res.text());
-  }
+  const res = await fetch(`/api/v1/inspector-overrides?${params.toString()}`, { method: 'DELETE', credentials: 'include' });
+  if (!res.ok && res.status !== 404) throw new Error(await res.text());
 }
 
 function upsertLocalStorage(slug: string, entry: LocalOverride): void {
@@ -723,17 +493,13 @@ function upsertLocalStorage(slug: string, entry: LocalOverride): void {
     const merged: LocalOverride = idx >= 0
       ? {
           elementKey: entry.elementKey,
-          // v2 model_v2 が来ていれば attrs を全置換
           styles: 'model_v2' in entry.attrs ? entry.styles : { ...(rows[idx].styles || {}), ...entry.styles },
           attrs: 'model_v2' in entry.attrs ? entry.attrs : { ...(rows[idx].attrs || {}), ...entry.attrs },
         }
       : { ...entry };
-    if (idx >= 0) rows[idx] = merged;
-    else rows.push(merged);
+    if (idx >= 0) rows[idx] = merged; else rows.push(merged);
     window.localStorage.setItem(LS_KEY(slug), JSON.stringify(rows));
-  } catch {
-    /* ignore */
-  }
+  } catch { /* ignore */ }
 }
 
 export function syncLocalStorageFromServer(
@@ -742,15 +508,9 @@ export function syncLocalStorageFromServer(
 ) {
   if (typeof window === 'undefined') return;
   try {
-    const entries: LocalOverride[] = rows.map((r) => ({
-      elementKey: r.element_key,
-      styles: r.styles || {},
-      attrs: r.attrs || {},
-    }));
+    const entries: LocalOverride[] = rows.map((r) => ({ elementKey: r.element_key, styles: r.styles || {}, attrs: r.attrs || {} }));
     window.localStorage.setItem(LS_KEY(slug), JSON.stringify(entries));
-  } catch {
-    /* ignore */
-  }
+  } catch { /* ignore */ }
 }
 
 async function flushPendingOverrides(): Promise<void> {
@@ -761,17 +521,12 @@ async function flushPendingOverrides(): Promise<void> {
   const state = usePreviewStore.getState();
   const projectId = state.projectId || undefined;
 
-  for (const [, edit] of entries) {
-    upsertLocalStorage(edit.slug, edit);
-  }
+  for (const [, edit] of entries) upsertLocalStorage(edit.slug, edit);
 
   let failures = 0;
   let lastError: { status?: number; text?: string } | null = null;
   for (const [, edit] of entries) {
     try {
-      // direct-write: DB をバイパスして JSX ファイルに直接書き込む。
-      // HMR が拾うのでローカルプレビューに即時反映される。
-      // 本番（Vercel）への反映は git commit & push 後の再ビルドを待つ。
       const res = await fetch('/api/v1/inspector-overrides/direct-write', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -790,28 +545,15 @@ async function flushPendingOverrides(): Promise<void> {
         lastError = { status: res.status, text: await res.text() };
         console.warn('[inspector-overrides] direct-write failed', res.status, lastError.text);
       } else {
-        // 成功時、before/after を Undo スタックに積む
         try {
           const body = (await res.json()) as {
-            applied?: boolean;
-            file?: string | null;
-            before_content?: string | null;
-            after_content?: string | null;
+            applied?: boolean; file?: string | null; before_content?: string | null; after_content?: string | null;
           };
-          if (
-            body.applied &&
-            body.file &&
-            typeof body.before_content === 'string' &&
-            typeof body.after_content === 'string'
-          ) {
+          if (body.applied && body.file && typeof body.before_content === 'string' && typeof body.after_content === 'string') {
             const meta = (edit as PendingOverride)._historyMeta;
             useEditHistoryStore.getState().push({
-              slug: edit.slug,
-              filePath: body.file,
-              before: body.before_content,
-              after: body.after_content,
-              elementKey: edit.elementKey,
-              summary: meta?.summary || `${edit.elementKey} を編集`,
+              slug: edit.slug, filePath: body.file, before: body.before_content, after: body.after_content,
+              elementKey: edit.elementKey, summary: meta?.summary || `${edit.elementKey} を編集`,
             });
           }
         } catch (e) {
@@ -829,20 +571,11 @@ async function flushPendingOverrides(): Promise<void> {
     const msg = lastError?.status === 401 || lastError?.status === 403
       ? '編集の保存に失敗しました（ログインが切れています）'
       : `編集の保存に失敗しました（${failures}件）`;
-    try {
-      toast.error(msg, { description: lastError?.text?.slice(0, 200) });
-    } catch { /* ignore */ }
-  }
-
-  // 少なくとも1件成功したら iframe を最新HTMLで再ロードさせる。
-  // contentVersion を bump すると preview-pane の iframeSrc に `?t=N` が反映され、
-  // Vercel CDN/ブラウザのキャッシュをバイパスして新HTMLが取得される。
-  if (entries.length - failures > 0) {
-    usePreviewStore.getState().bumpContentVersion();
+    try { toast.error(msg, { description: lastError?.text?.slice(0, 200) }); } catch { /* ignore */ }
   }
 }
 
-/** 互換 API: 旧コードで使われている可能性があるので残す。 */
+/** 互換 API（旧コード用）。 */
 export function findMediaInScope(target: Element | null, tag: 'img' | 'video'): HTMLElement | null {
   if (!target) return null;
   const upper = tag.toUpperCase();
@@ -850,5 +583,4 @@ export function findMediaInScope(target: Element | null, tag: 'img' | 'video'): 
   return (target.querySelector?.(tag) as HTMLElement | null) ?? null;
 }
 
-/** 互換: 旧コードが import している場合のため、normalizeToModel を再エクスポート。 */
-export { normalizeToModel };
+export { normalizeToModel } from '@/lib/inspector-migrate';

@@ -43,13 +43,14 @@ const INLINE_TEXT_TAGS = new Set([
   'td', 'th', 'figcaption', 'div',
 ]);
 
-/** パネルが必要とする computedStyle のキー（snapshot に載せる分）。 */
+/** パネルが必要とする computedStyle のキー（snapshot に載せる分）。
+ *  inspector-panel.tsx / image-section.tsx / video-section.tsx が読む実キーに合わせる。 */
 const SNAPSHOT_STYLE_KEYS = [
   'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'color', 'textAlign', 'fontFamily',
   'width', 'height', 'aspectRatio',
   'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
   'marginTop', 'marginBottom',
-  'borderRadius', 'borderWidth', 'borderColor', 'opacity',
+  'borderTopLeftRadius', 'borderTopWidth', 'borderTopColor', 'opacity',
   'backgroundColor', 'backgroundImage', 'backgroundSize', 'backgroundPosition',
   'objectFit', 'objectPosition', 'filter',
 ] as const;
