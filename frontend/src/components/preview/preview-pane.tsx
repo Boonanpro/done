@@ -9,7 +9,8 @@ import { Button } from '@/components/ui/button';
 import { usePreviewStore, flushInspectorEdits, type ArtifactRecord } from '@/stores/preview-store';
 import { useEditHistoryStore } from '@/stores/edit-history-store';
 import { artifactProductionUrl, artifactSharePath, KNOWN_CUSTOM_DOMAINS } from '@/lib/artifact-paths';
-import { attachInspector, detachInspector } from './iframe-inspector';
+import { attachInspectorBridge, detachInspectorBridge, sendToIframe } from './inspector-bridge';
+import type { OverrideRow } from '@/lib/inspector-protocol';
 import { CommentPopover } from './comment-popover';
 import { InspectorPanel } from './inspector-panel';
 import { PublishModal } from './publish-modal';
@@ -223,7 +224,9 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
   const draftUrl = artifact ? artifact.draft_url || publicPreviewUrl : '';
   const shareUrl = artifact ? artifact.share_url || draftUrl || publicPreviewUrl : '';
   const publicShareUrl = artifact && shareUrl ? cleanArtifactUrl(artifact, shareUrl) : '';
-  const baseIframeSrc = draftUrl || publicPreviewUrl || shareUrl;
+  // クロスオリジン化: プレビューiframe は成果物配信オリジン(done-studio/done-artifacts)を
+  // 読む。編集は inspector-bridge(postMessage) 経由なので別オリジンでも動く。
+  const baseIframeSrc = absolutePublicUrl(draftUrl || publicPreviewUrl || shareUrl);
   // ライブプレビューでは成果物に「プレビュー中」を伝える dan_preview=1 を必ず付与する。
   // 成果物側 (isDanPreview()) はこれを見てログイン/初期設定ゲートをスキップし、
   // 管理者として全画面を閲覧・編集できる。公開URL/共有URLには付かない（iframe src 限定）。
@@ -241,77 +244,89 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     setIframeLoadSeq(0);
   }, [artifact?.id, iframeSrc]);
 
+  // クロスオリジン Inspector: iframe と postMessage で通信するブリッジをアタッチ。
+  // iframe 内の agent が選択/編集/適用を行い、ここは選択 snapshot 等を受けて store に反映する。
   useEffect(() => {
     const iframe = iframeRef.current;
     if (!iframe || !loaded) return;
-    // 古い contentDocument から念のためデタッチしてから再アタッチ
-    detachInspector(iframe);
-    if (isEditMode) {
-      attachInspector(iframe);
-    }
-    return () => detachInspector(iframe);
-  }, [isEditMode, loaded, iframeLoadSeq]);
+    const shareOrigin = publicShareOrigin();
+    const allowed = [shareOrigin].filter(Boolean) as string[];
 
-  // Cmd+Z / Ctrl+Z で Undo、Cmd+Shift+Z / Ctrl+Y で Redo。
-  //
-  // iframe 内にフォーカスがある時、parent window の keydown は発火しない。
-  // そこで iframe.contentWindow / iframe.contentDocument にも capture: true で
-  // 同じハンドラを bind する。capture phase なので、iframe 内の任意要素より先に走る。
-  // editMode が ON の間は常時バインドし、選択中/非選択中によらず効くようにする。
+    const fetchOverrides = async (slug: string): Promise<OverrideRow[]> => {
+      try {
+        const res = await fetch(`/api/v1/inspector-overrides?slug=${encodeURIComponent(slug)}`, { credentials: 'include' });
+        if (!res.ok) return [];
+        const rows = (await res.json()) as OverrideRow[];
+        return Array.isArray(rows) ? rows : [];
+      } catch {
+        return [];
+      }
+    };
+
+    const pushModeAndOverrides = async () => {
+      const st = usePreviewStore.getState();
+      const slug = st.artifact?.slug;
+      if (slug) {
+        const rows = await fetchOverrides(slug);
+        if (rows.length) {
+          st.seedModels(rows);
+          sendToIframe({ type: 'inspector:apply-overrides', payload: { overrides: rows } });
+        }
+      }
+      const s2 = usePreviewStore.getState();
+      sendToIframe({ type: 'inspector:set-mode', payload: { mode: s2.isEditMode ? s2.inspectorMode : 'off' } });
+    };
+
+    const detach = attachInspectorBridge(
+      iframe,
+      {
+        onReady: () => { void pushModeAndOverrides(); },
+        onReloaded: () => { void pushModeAndOverrides(); },
+        onSelected: (snap) => usePreviewStore.getState().selectFromSnapshot(snap),
+        onTextCommitted: (elementKey, text) => usePreviewStore.getState().commitText(elementKey, text),
+        onSelectionRange: (payload) =>
+          usePreviewStore.getState().setSelectionRange('elementKey' in payload && payload.elementKey ? payload : null),
+      },
+      allowed,
+    );
+    return detach;
+  }, [loaded, iframeLoadSeq]);
+
+  // 編集モード/inspectorモードが変わったら iframe にモードを通知。
+  useEffect(() => {
+    sendToIframe({ type: 'inspector:set-mode', payload: { mode: isEditMode ? inspectorMode : 'off' } });
+  }, [isEditMode, inspectorMode, loaded, iframeLoadSeq]);
+
+  // Cmd+Z / Ctrl+Z Undo・Cmd+Shift+Z / Ctrl+Y Redo（親ウィンドウのみ。iframe は別オリジンで
+  // contentWindow に触れないため、フォーカスが iframe 内のときは効かない＝ step7 で agent 経由に拡張予定）。
   useEffect(() => {
     if (!isEditMode) return;
-    const reloadIframe = () => {
-      // contentVersion を bump → iframeSrc が ?t=N で変わり、iframe が完全再ロード（CDNキャッシュもバイパス）。
-      bumpContentVersion();
-    };
     const handler = async (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
-      // input/textarea/contentEditable 上では OS の undo に任せる
       const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) {
-        return;
-      }
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
       const key = e.key.toLowerCase();
       if (key === 'z' && !e.shiftKey) {
         e.preventDefault();
         e.stopPropagation();
         const store = useEditHistoryStore.getState();
-        if (store.canUndo()) {
-          const ok = await store.undo();
-          if (ok) reloadIframe();
-        } else {
-          toast.info('これ以上戻せません');
-        }
+        if (store.canUndo()) { const ok = await store.undo(); if (ok) bumpContentVersion(); }
+        else toast.info('これ以上戻せません');
         return;
       }
       if ((key === 'z' && e.shiftKey) || key === 'y') {
         e.preventDefault();
         e.stopPropagation();
         const store = useEditHistoryStore.getState();
-        if (store.canRedo()) {
-          const ok = await store.redo();
-          if (ok) reloadIframe();
-        } else {
-          toast.info('これ以上やり直せません');
-        }
+        if (store.canRedo()) { const ok = await store.redo(); if (ok) bumpContentVersion(); }
+        else toast.info('これ以上やり直せません');
       }
     };
     const wrap = (e: Event) => void handler(e as KeyboardEvent);
-    // parent window（Inspector パネル側、編集モードトグル後など）
     window.addEventListener('keydown', wrap, { capture: true });
-    // iframe 内のあらゆる場所からも拾う
-    const iframe = iframeRef.current;
-    const innerWin = iframe?.contentWindow as Window | null;
-    const innerDoc = iframe?.contentDocument;
-    innerWin?.addEventListener('keydown', wrap, { capture: true });
-    innerDoc?.addEventListener('keydown', wrap, { capture: true });
-    return () => {
-      window.removeEventListener('keydown', wrap, { capture: true });
-      innerWin?.removeEventListener('keydown', wrap, { capture: true });
-      innerDoc?.removeEventListener('keydown', wrap, { capture: true });
-    };
-  }, [isEditMode, loaded, iframeLoadSeq, bumpContentVersion]);
+    return () => window.removeEventListener('keydown', wrap, { capture: true });
+  }, [isEditMode, bumpContentVersion]);
 
 
   if (!artifact) return null;
