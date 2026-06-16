@@ -44,15 +44,24 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
   const [question, setQuestion] = useState('');
   const questionInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch proposals from API
+  // 要対応の提案（フォーム/メール返信など）。情報通知(observation)は除外してバッジもこちらで数える
   const { data: proposalsData, isLoading } = useQuery({
-    queryKey: ['proposals', 'pending'],
-    queryFn: () => api.proposals.list({ status: 'pending', limit: 20 }),
+    queryKey: ['proposals', 'pending', 'actionable'],
+    queryFn: () => api.proposals.list({ status: 'pending', limit: 20, excludeTypes: 'observation' }),
     refetchInterval: 30000, // Refetch every 30 seconds
+  });
+
+  // 情報通知(observation)。要対応とは分けて、控えめに別枠表示する
+  const { data: infoData } = useQuery({
+    queryKey: ['proposals', 'pending', 'observation'],
+    queryFn: () => api.proposals.list({ status: 'pending', limit: 20, types: 'observation' }),
+    refetchInterval: 60000,
+    enabled: isExpanded,
   });
 
   const proposals = proposalsData?.proposals || [];
   const pendingCount = proposalsData?.pending_count || proposals.length;
+  const infoProposals = infoData?.proposals || [];
 
   // Respond to proposal mutation
   const respondMutation = useMutation({
@@ -402,6 +411,41 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
                             </motion.div>
                           );
                         })
+                      )}
+
+                      {/* 情報通知(observation)。要対応とは分けて控えめに表示 */}
+                      {infoProposals.length > 0 && (
+                        <div className="pt-2 mt-1 border-t border-border/60">
+                          <p className="px-2 py-1 text-[10px] uppercase tracking-wide text-muted-foreground/60">
+                            情報 ({infoProposals.length})
+                          </p>
+                          {infoProposals.map((proposal) => (
+                            <div
+                              key={proposal.id}
+                              className="group flex items-start gap-3 p-2 rounded-lg cursor-pointer hover:bg-muted/40 transition-colors opacity-70"
+                              onClick={() => handleProposalClick(proposal)}
+                            >
+                              <div className="shrink-0 w-7 h-7 rounded-lg bg-muted/60 flex items-center justify-center">
+                                <Bell className="h-3.5 w-3.5 text-muted-foreground" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs font-medium truncate">{proposal.title}</p>
+                                <p className="text-[11px] text-muted-foreground truncate">
+                                  {proposal.content || proposal.type}
+                                </p>
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
+                                onClick={(e) => handleDismiss(proposal.id, e)}
+                                disabled={respondMutation.isPending}
+                              >
+                                <X className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
                       )}
                     </div>
                   </div>

@@ -974,10 +974,12 @@ export const api = {
 
   // Proposals endpoints
   proposals: {
-    list: (params?: { status?: ProposalStatus; limit?: number }) => {
+    list: (params?: { status?: ProposalStatus; limit?: number; types?: string; excludeTypes?: string }) => {
       const query = new URLSearchParams();
       if (params?.status) query.set('status', params.status);
       if (params?.limit) query.set('limit', params.limit.toString());
+      if (params?.types) query.set('types', params.types);
+      if (params?.excludeTypes) query.set('exclude_types', params.excludeTypes);
       const queryString = query.toString();
       return request<ProposalsListResponse>(
         `/chat/proposals${queryString ? `?${queryString}` : ''}`

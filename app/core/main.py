@@ -76,6 +76,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("follow-up poller failed to start: %s", e)
 
+    # メール受信ポーラー: Gmail/iCloud を定期取り込みし、ダンの送信台帳に一致する
+    # 返信だけを「返信案」提案として通知タブに出す。失敗してもコア起動は妨げない。
+    try:
+        from app.services.email_poller import start_poller as start_email_poller
+        start_email_poller()
+    except Exception as e:
+        logger.warning("email poller failed to start: %s", e)
+
     # 孤児 run 復旧: 旧コアの突然死で running のまま取り残された run を failed にし、
     # execution_events から途中経過を ai_message として保存（作業表示の消失防止）。
     try:

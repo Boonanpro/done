@@ -1,0 +1,126 @@
+# -*- coding: utf-8 -*-
+"""Background poller that ingests inbound email and routes replies.
+
+Runs as a single asyncio task inside dan-core. Every POLL_INTERVAL it:
+  1. fetch_all(owner) で Gmail/iCloud から新着メールを取り込み、detected_messages
+     と dan-notion inbox に投入する（従来は手動トリガーのみだった部分の自動化）。
+  2. 未ルーティングの受信メールを external_message_routing で照合し、ダンの送信
+     台帳(external_message_routes)に一致するものだけ「返信案(reply)」提案を作る。
+     一致しない受信(コールド/メルマガ等)は inbox に残るだけで通知タブを汚さない。
+
+照合できるのは「送信時に record_outbound で記録された相手からの返信」だけ。
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+POLL_INTERVAL = int(os.getenv("DAN_EMAIL_POLL_INTERVAL", "180"))  # 秒
+MAX_ROUTE_PER_CYCLE = 3   # 草案生成(CLI)が重いので1サイクルの照合上限
+
+_started = False
+_task: Optional["asyncio.Task"] = None
+
+
+def _enabled() -> bool:
+    return os.getenv("DAN_EMAIL_POLLER_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
+
+
+async def _ingest(owner_id: str) -> None:
+    """IMAP fetch_all で新着メールを取り込む（best-effort）。"""
+    try:
+        from app.services.imap_email_service import fetch_all
+        results = await fetch_all(owner_id)
+        fetched = sum(r.get("fetched", 0) for r in (results or []))
+        if fetched:
+            logger.info("[email] ingested %d new message(s)", fetched)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[email] ingest failed: %s", e)
+
+
+def _unrouted_messages(owner_id: str) -> List[Dict[str, Any]]:
+    """未ルーティング・照合未試行の受信メールを取得（同期）。"""
+    from app.services.supabase_client import get_supabase_client
+    sb = get_supabase_client().client
+    rows = (
+        sb.table("detected_messages")
+        .select("*")
+        .eq("user_id", owner_id)
+        .eq("source", "gmail")
+        .is_("routed_room_id", "null")
+        .order("created_at", desc=True)
+        .limit(20)
+        .execute()
+        .data
+        or []
+    )
+    # processing_result.routing_attempted が立っていないものだけ
+    out = []
+    for r in rows:
+        pr = r.get("processing_result") or {}
+        if not pr.get("routing_attempted"):
+            out.append(r)
+    return out[:MAX_ROUTE_PER_CYCLE]
+
+
+def _mark_attempted(message_id: str) -> None:
+    from app.services.supabase_client import get_supabase_client
+    sb = get_supabase_client().client
+    cur = sb.table("detected_messages").select("processing_result").eq("id", message_id).execute().data
+    pr = (cur[0].get("processing_result") if cur else None) or {}
+    pr["routing_attempted"] = True
+    sb.table("detected_messages").update({"processing_result": pr}).eq("id", message_id).execute()
+
+
+async def _route_new(owner_id: str) -> None:
+    from app.services.external_message_routing import get_external_message_routing_service
+    svc = get_external_message_routing_service()
+    msgs = await asyncio.to_thread(_unrouted_messages, owner_id)
+    for msg in msgs:
+        try:
+            # route_detected_message は async。重い草案生成は内部で to_thread 済み。
+            result = await svc.route_detected_message(msg)
+            if result:
+                logger.info("[email] routed reply to room=%s", result.get("route", {}).get("origin_room_id"))
+            else:
+                # 未一致 → 再試行しないよう印を付ける（inbox には残る）
+                await asyncio.to_thread(_mark_attempted, msg["id"])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[email] route failed for msg=%s: %s", msg.get("id"), e)
+
+
+async def _tick() -> None:
+    from app.services.owner import resolve_owner_user_id
+    owner_id = resolve_owner_user_id()
+    if not owner_id:
+        return
+    await _ingest(owner_id)
+    await _route_new(owner_id)
+
+
+async def poller_loop() -> None:
+    logger.info("[email] poller started (interval=%ss)", POLL_INTERVAL)
+    while True:
+        try:
+            if _enabled():
+                await _tick()
+        except Exception as e:  # noqa: BLE001
+            logger.error("[email] tick error: %s", e)
+        await asyncio.sleep(POLL_INTERVAL)
+
+
+def start_poller() -> Optional["asyncio.Task"]:
+    """Start the email poller once. Safe to call from FastAPI lifespan startup."""
+    global _started, _task
+    if _started:
+        return _task
+    if not _enabled():
+        logger.info("[email] poller disabled (DAN_EMAIL_POLLER_ENABLED)")
+        return None
+    _started = True
+    _task = asyncio.create_task(poller_loop())
+    return _task
