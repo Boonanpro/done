@@ -414,8 +414,10 @@ function handleParentMessage(msg: ParentToIframeMessage): void {
     case 'inspector:apply': {
       const { elementKey, model, styles, attrs } = msg.payload;
       if (model) {
-        const el = findElementByKey(document, elementKey) as HTMLElement | null;
-        if (el) applyModelToElement(el, model as EditModel);
+        // model も __DAN_INSPECTOR__ のキャッシュに載せる（MutationObserver が React 再描画
+        // やクライアント遷移後にも再適用できるようにする）。直接 applyModelToElement だと
+        // キャッシュに入らず、ページ遷移で編集が消える。
+        applyDanInspector(elementKey, {}, { model_v2: JSON.stringify(model) });
       } else {
         applyDanInspector(elementKey, styles || {}, attrs || {});
       }
