@@ -61,6 +61,7 @@ let parentOrigin = '*';
 let allowedOrigins: string[] = [];
 let mode: InspectorMode = 'off';
 let activeTarget: Element | null = null;
+let gotParentMessage = false;
 
 // ---------------------------------------------------------------------------
 // メッセージ送信
@@ -458,9 +459,19 @@ export function initInspectorIframeAgent(opts: { slug: string; allowedOrigins?: 
   window.addEventListener('message', (event: MessageEvent) => {
     if (!isInspectorEnvelope(event.data)) return;
     if (!isAllowedInspectorOrigin(event.origin, window.location.origin, allowedOrigins)) return;
+    gotParentMessage = true; // 親のリスナが立った＝ready再送を止めてよい
     parentOrigin = event.origin; // 以後の送信先を確定
     handleParentMessage(event.data as ParentToIframeMessage);
   });
 
-  post({ type: 'inspector:ready', payload: { slug } });
+  // ready を「親から最初のメッセージが来るまで」数回再送する。
+  // ナビゲーション直後は親がリスナを張り直すまで時間差があり、1回だと取りこぼす。
+  let tries = 0;
+  const announce = () => {
+    if (gotParentMessage || tries >= 8) return;
+    tries++;
+    post({ type: 'inspector:ready', payload: { slug } });
+    setTimeout(announce, 400);
+  };
+  announce();
 }
