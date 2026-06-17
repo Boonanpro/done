@@ -527,7 +527,11 @@ async function flushPendingOverrides(): Promise<void> {
   let lastError: { status?: number; text?: string } | null = null;
   for (const [, edit] of entries) {
     try {
-      const res = await fetch('/api/v1/inspector-overrides/direct-write', {
+      // DB(inspector_overrides)に upsert する。クロスオリジンの iframe は done-artifacts
+      // 公開版を読むため、JSX 直書き(/direct-write)では反映されない。DB に入れておけば
+      // 親がナビゲーション/再読込のたびに取得して iframe へ apply-overrides で再適用できる。
+      // 公開(canonical)への焼き込みは別途 writeback(DB→JSX)→publish で行う。
+      const res = await fetch('/api/v1/inspector-overrides', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -543,27 +547,12 @@ async function flushPendingOverrides(): Promise<void> {
       if (!res.ok) {
         failures++;
         lastError = { status: res.status, text: await res.text() };
-        console.warn('[inspector-overrides] direct-write failed', res.status, lastError.text);
-      } else {
-        try {
-          const body = (await res.json()) as {
-            applied?: boolean; file?: string | null; before_content?: string | null; after_content?: string | null;
-          };
-          if (body.applied && body.file && typeof body.before_content === 'string' && typeof body.after_content === 'string') {
-            const meta = (edit as PendingOverride)._historyMeta;
-            useEditHistoryStore.getState().push({
-              slug: edit.slug, filePath: body.file, before: body.before_content, after: body.after_content,
-              elementKey: edit.elementKey, summary: meta?.summary || `${edit.elementKey} を編集`,
-            });
-          }
-        } catch (e) {
-          console.warn('[inspector-overrides] failed to record history', e);
-        }
+        console.warn('[inspector-overrides] upsert failed', res.status, lastError.text);
       }
     } catch (err) {
       failures++;
       lastError = { text: String(err) };
-      console.warn('[inspector-overrides] direct-write exception', err);
+      console.warn('[inspector-overrides] upsert exception', err);
     }
   }
 
