@@ -337,9 +337,11 @@ function enableInlineEdit(el: HTMLElement): void {
   const commit = () => {
     if (cancelled) return;
     const newText = el.innerText ?? el.textContent ?? '';
+    console.log('[DAN-INSP] agent.commit', { key, changed: newText !== original, parentOrigin });
     if (newText !== original) {
       // 親へ「テキスト編集確定」を通知（生テキスト）。model 構築・保存は親が行う。
       post({ type: 'inspector:text-committed', payload: { elementKey: key, text: newText } });
+      console.log('[DAN-INSP] agent.post text-committed ->', parentOrigin);
     }
   };
   const onBlur = () => { commit(); cleanup(); };

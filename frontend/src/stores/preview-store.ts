@@ -266,6 +266,7 @@ export const usePreviewStore = create<PreviewStore>()(
       commitText: (elementKey, text) => {
         const { models, styleVersion, artifact, selectedElement } = get();
         const slug = artifact?.slug || '';
+        console.log('[DAN-INSP] commitText', { elementKey, slug, hasArtifact: !!artifact });
         const current = getOrInitModel(elementKey, text, models);
         const next = applyText(current, text);
         set({ models: { ...models, [elementKey]: next }, styleVersion: styleVersion + 1 });
@@ -544,6 +545,7 @@ async function flushPendingOverrides(): Promise<void> {
           replace_attrs: 'model_v2' in (edit.attrs as Record<string, unknown>),
         }),
       });
+      console.log('[DAN-INSP] flush POST result', edit.elementKey, res.status);
       if (!res.ok) {
         failures++;
         lastError = { status: res.status, text: await res.text() };

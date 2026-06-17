@@ -283,7 +283,10 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
         onReady: () => { void pushModeAndOverrides(); },
         onReloaded: () => { void pushModeAndOverrides(); },
         onSelected: (snap) => usePreviewStore.getState().selectFromSnapshot(snap),
-        onTextCommitted: (elementKey, text) => usePreviewStore.getState().commitText(elementKey, text),
+        onTextCommitted: (elementKey, text) => {
+          console.log('[DAN-INSP] parent.recv text-committed', elementKey);
+          usePreviewStore.getState().commitText(elementKey, text);
+        },
         onSelectionRange: (payload) =>
           usePreviewStore.getState().setSelectionRange('elementKey' in payload && payload.elementKey ? payload : null),
       },
