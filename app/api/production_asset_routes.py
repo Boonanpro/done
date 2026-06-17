@@ -972,6 +972,7 @@ def _build_dan_timeline(
                 text = text[:_EDIT_ANALYSIS_INJECT_LIMIT] + "\n...(以下略・全文はアセットにキャッシュ済)"
             analysis_parts.append(f"### asset {aid} ({asset.get('filename') or ''})\n{text}")
     analysis_block = "\n\n".join(analysis_parts) if analysis_parts else "(映像分析なし。ffprobe/フレーム抽出で自分で把握すること)"
+    audio_check = PROJECT_ROOT / "scripts" / "dan_audio_check.py"
 
     prompt = f"""
 You are DAN, the editor inside the production workspace. Your deliverable is a FINISHED, RENDERED video — not a plan.
@@ -987,10 +988,15 @@ PRIMARY DELIVERABLE — render the finished video to this exact path:
 RENDER EXECUTION (critical): Run ffmpeg in the FOREGROUND and wait for each call to finish. Do NOT start the render as a background/detached process and then poll for it (do not background it and wait via Monitor) — when your turn ends, detached child processes are killed and the output is lost. If you build the video in segments, run each ffmpeg call in the foreground, then concat to {render_path} as the final foreground step. Keep each ffmpeg call reasonably fast: prefer the proxy files, and if you need ranges deep inside a long source, cut those ranges to short intermediates first instead of re-seeking the full file repeatedly. Before you finish, confirm with ffprobe that {render_path} exists and has the expected duration.
 
 How to work:
-1. A Gemini analysis of each clip (timestamped transcript, scene segmentation = talking-head vs screen-operation, and blur candidates) is provided below under "映像分析(Gemini)". Use it as your PRIMARY source for what is said, what happens, and when — this is how you decide caption wording, where to cut silence/restatements, and exactly when to switch to the wipe/screen composition. Then verify and refine the precise timings with ffprobe and frame extraction. Do not guess from metadata alone.
+1. A Gemini analysis of each clip (timestamped transcript, scene segmentation = talking-head vs screen-operation, and blur candidates) is provided below under "映像分析(Gemini)". Use it as your PRIMARY source for what is said, what happens, and when — this is how you decide caption wording, where to cut silence/restatements, and exactly when to switch to the wipe/screen composition. Gemini's timestamps are only mm:ss-coarse, so for FRAME-ACCURATE cut points — and to find dead air and 言い直し (restatement) takes precisely — run the audio analysis tool on the talking-head source clip:
+   python "{audio_check}" "<clip path>"
+   It prints (and writes a JSON of) a word-timestamped transcript plus `dead_air` (silence gaps to trim) and `restatements` (adjacent duplicate takes; keep the later, drop the earlier). Use these exact boundaries to plan your cuts. Then confirm with ffprobe / frame extraction. Do not guess from metadata alone.
 2. Execute real edits with ffmpeg: trim/cut, multi-clip concat, picture-in-picture / wipe (overlay one camera as a small window over another), captions/telop, audio replacement (e.g. use only the main-camera audio), and blur/mosaic. Every requirement in the brief (PiP/wipe, blur regions, audio source, no-cut sections, caption-free sections) must be honored in the actual rendered pixels — not just described.
 3. Honor the requested blur style. If the brief asks for a soft/blended mosaic that follows a moving region, do that; do not settle for a single static hard box if the brief forbids it.
-4. SELF-VERIFY before finishing: extract several frames from {render_path} (intro, each PiP/operation section, each blur section) and confirm the wipe, captions, and blur are actually present and correct. If anything is wrong, fix it and re-render. Never hand off a video you have not visually checked.
+4. VISUAL SELF-VERIFY: extract several frames from {render_path} (intro, each PiP/operation section, each blur section) and confirm the wipe, captions, and blur are actually present and correct. If anything is wrong, fix it and re-render. Never hand off a video you have not visually checked.
+4b. AUDIO SELF-VERIFY (do not skip — this is your "ears"): after rendering, run
+   python "{audio_check}" "{render_path}"
+   If it reports any `dead_air` spans or `restatements`, those are leftover dead silence and duplicate 言い直し takes that survived in the FINAL video. Remove those exact spans — cutting video AND audio together so they stay in sync — and re-render. Repeat until the report shows clean=true (or there is no further improvement after 2 passes). A frame can look perfect while the audio still drags; you only know the pacing is tight by checking it here.
 5. Use the proxy_path files for fast iteration; use the local_path originals when you need full resolution for the final render.
 
 AFTER the video at {render_path} exists and you have verified it, write a production-state JSON that DESCRIBES the edit you actually rendered (so the user can fine-tune it on the timeline) here:
