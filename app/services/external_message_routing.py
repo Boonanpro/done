@@ -325,15 +325,21 @@ class ExternalMessageRoutingService:
         """
         try:
             from app.agent.cli_runner import run_oneshot_cli
+            from app.config import settings
+            from_name = settings.DAN_DEFAULT_FROM_NAME
         except Exception:
             return None, None
         prompt = (
-            "あなたは運用担当者本人のアシスタントです。以下の受信メールについて、"
+            f"あなたは「{from_name}」の担当者として、以下の受信メールに返信します。\n"
             "(1)状況の自然な要約 と (2)返信メール本文 を作ってください。\n"
             "出力は次の形式を厳守し、他の文字を足さないこと:\n"
             "【概要】<1〜2文の自然な日本語。誰から何の件で、何を求めているか。"
             "例: 吉田さんからホームページ制作の件で、料金と納期についての問い合わせです。>\n"
             "【返信案】\n<丁寧で簡潔な返信メール本文のみ。件名・説明・マークダウンは不要。>\n\n"
+            f"重要な制約:\n"
+            f"- 署名・名乗りは必ず「{from_name}」にすること。個人名を勝手に作って名乗ってはいけない。\n"
+            f"- メール本文に書かれていない予定・日時・約束・事実を創作しないこと。"
+            f"相手が日時を提示していればそれに沿って答え、こちらから架空の候補日時を作らない。\n\n"
             f"--- 受信メール ---\n差出人: {sender}\n件名: {subject}\n本文:\n{body[:2000]}\n"
         )
         try:
