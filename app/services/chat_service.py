@@ -1522,9 +1522,11 @@ class ChatService:
         import asyncio as _asyncio
         import logging
 
+        from app.config import settings
+
         to_addr = action_data.get("to")
         subject = action_data.get("subject") or "Re: お問い合わせ"
-        from_name = action_data.get("reply_from_name") or "サポート"
+        from_name = action_data.get("reply_from_name") or settings.DAN_DEFAULT_FROM_NAME
         if not to_addr:
             logging.warning("external email reply: 宛先メール無し proposal=%s", proposal.get("id"))
             return

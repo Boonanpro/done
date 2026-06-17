@@ -246,8 +246,17 @@ async def fetch_provider(user_id: str, provider_key: str, max_messages: int = 30
 
 
 async def fetch_all(user_id: str, max_messages_per_provider: int = 30) -> list[dict]:
-    """設定済みの全 provider を順次 fetch"""
+    """設定済みの provider を順次 fetch。
+
+    既定では gmail のみ。icloud は DAN_POLL_ICLOUD=1 の時だけ含める
+    （複数の自分のアドレスを同時に巡回すると、自分が送った返信を別アドレスで
+    再取込して『自分宛に返信する自己ループ』が起きるため、既定で除外）。
+    """
+    import os
+    poll_icloud = os.getenv("DAN_POLL_ICLOUD", "0").lower() in {"1", "true", "yes", "on"}
     out = []
     for key in PROVIDERS:
+        if key == "icloud" and not poll_icloud:
+            continue
         out.append(await fetch_provider(user_id, key, max_messages_per_provider))
     return out

@@ -87,10 +87,29 @@ async def _route_new(owner_id: str) -> None:
         STRONG_REASONS,
         get_external_message_routing_service,
     )
+    import os as _os
+    from app.config import settings
+    from app.services.external_message_routing import _extract_email
+    # 自己ループ防止の「自分のアドレス」＝実際に送信/巡回しているメールボックスのみ。
+    # 既定は送信元の GMAIL_ADDRESS だけ。icloud を巡回している時だけ icloud も含める。
+    own_addrs = {(settings.GMAIL_ADDRESS or "").lower()}
+    if _os.getenv("DAN_POLL_ICLOUD", "0").lower() in {"1", "true", "yes", "on"}:
+        own_addrs.add((settings.ICLOUD_ADDRESS or "").lower())
+    own_addrs -= {""}
+
     svc = get_external_message_routing_service()
     msgs = await asyncio.to_thread(_unrouted_messages, owner_id)
     for msg in msgs:
         try:
+            # 自分のアドレスから来たメール（＝自分の送信が戻ったもの）には返信しない。
+            # 自己ループ防止。inbox には残すだけ。
+            si = msg.get("sender_info") or {}
+            sender_email = (_extract_email(si.get("from")) or si.get("email") or "").lower()
+            if sender_email and sender_email in own_addrs:
+                logger.info("[email] skip own-sender msg=%s (%s)", msg.get("id"), sender_email)
+                await asyncio.to_thread(_mark_attempted, msg["id"])
+                continue
+
             # ① 機械照合
             match = await asyncio.to_thread(svc.find_route, msg)
             if match and match.reason in STRONG_REASONS:
