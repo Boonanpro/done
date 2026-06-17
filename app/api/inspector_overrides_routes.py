@@ -95,6 +95,55 @@ async def direct_write_override(
     return result
 
 
+@router.post("/publish")
+async def publish_overrides(
+    slug: str = Query(..., min_length=1),
+    user: TokenData = Depends(get_current_user),
+    service: InspectorOverridesService = Depends(get_service),
+):
+    """slug の全 override を JSX に焼き込み、done-artifacts へ自動公開する。
+
+    Inspector のライブ編集を「公開ボタンを押さずに」本番反映するための自動公開トリガ。
+    フロントが編集保存後にデバウンスして叩く。焼き込み(DB→JSX)後に
+    schedule_artifact_git_publish で done-artifacts へ push し、Vercel 再ビルドで
+    公開URL/クライアントに反映される（〜1〜2分）。DB の override は消さない
+    （ライブプレビューの継続適用のため。JSX と内容一致で無害）。
+    """
+    overrides = await service.list_by_slug(slug, user.user_id)
+    applied = 0
+    skipped: list[str] = []
+    for ov in overrides:
+        try:
+            r = apply_override_for_slug(
+                slug=slug,
+                element_key=ov.get("element_key", ""),
+                styles=ov.get("styles") or {},
+                attrs=ov.get("attrs") or {},
+            )
+            if r.get("applied"):
+                applied += 1
+            elif r.get("reason"):
+                skipped.append(f"{ov.get('element_key')}: {r['reason']}")
+        except Exception as e:  # noqa: BLE001 - 1件の失敗で全体を止めない
+            skipped.append(f"{ov.get('element_key')}: {e}")
+
+    publish_scheduled = False
+    try:
+        from app.services.artifact_git_publish import schedule_artifact_git_publish
+        schedule_artifact_git_publish([slug])
+        publish_scheduled = True
+    except Exception as e:  # noqa: BLE001
+        skipped.append(f"publish schedule failed: {e}")
+
+    return {
+        "slug": slug,
+        "overrides": len(overrides),
+        "applied": applied,
+        "publish_scheduled": publish_scheduled,
+        "skipped": skipped,
+    }
+
+
 @router.post("/restore-file")
 async def restore_file(
     data: RestoreFileRequest,

@@ -432,6 +432,38 @@ const pendingOverrides: Record<string, PendingOverride> = {};
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 const FLUSH_DEBOUNCE_MS = 100;
 
+// 自動公開: 編集が一段落したら（最後の保存から数秒後）、ボタン操作なしで
+// 「JSX焼き込み→done-artifacts公開」を裏で走らせる。公開URL/クライアントには
+// Vercel再ビルド分（〜1〜2分）遅れて反映される。ユーザーの「公開を押さずとも
+// 自動反映」思想に合わせた実装。
+let autoPublishTimer: ReturnType<typeof setTimeout> | null = null;
+const AUTO_PUBLISH_DEBOUNCE_MS = 8000;
+let autoPublishNoticeShown = false;
+
+function scheduleAutoPublish(slug: string): void {
+  if (!slug) return;
+  if (autoPublishTimer) clearTimeout(autoPublishTimer);
+  autoPublishTimer = setTimeout(async () => {
+    autoPublishTimer = null;
+    try {
+      const res = await fetch(`/api/v1/inspector-overrides/publish?slug=${encodeURIComponent(slug)}`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (res.ok && !autoPublishNoticeShown) {
+        autoPublishNoticeShown = true;
+        try {
+          toast.success('編集を本番に反映中…', {
+            description: '公開URL/クライアントには1〜2分で自動反映されます（操作不要）',
+          });
+        } catch { /* ignore */ }
+      }
+    } catch (e) {
+      console.warn('[inspector-overrides] auto-publish failed', e);
+    }
+  }, AUTO_PUBLISH_DEBOUNCE_MS);
+}
+
 type QueueContext = {
   slug: string;
   elementKey: string;
@@ -571,6 +603,12 @@ async function flushPendingOverrides(): Promise<void> {
       ? '編集の保存に失敗しました（ログインが切れています）'
       : `編集の保存に失敗しました（${failures}件）`;
     try { toast.error(msg, { description: lastError?.text?.slice(0, 200) }); } catch { /* ignore */ }
+  }
+
+  // 1件でも保存できたら自動公開をスケジュール（ボタン不要で本番反映）。
+  if (entries.length - failures > 0) {
+    const slug = entries.map(([, e]) => e.slug).find(Boolean);
+    if (slug) scheduleAutoPublish(slug);
   }
 }
 
