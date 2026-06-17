@@ -58,6 +58,11 @@ def _first_routing_key(*texts: Optional[str]) -> Optional[str]:
     return None
 
 
+# 「確実」とみなす照合理由（ヘッダ/合言葉=事実）。これらは内容判定を挟まず即確定。
+# 送信者アドレス+直近(external_recipient_id_recent)は弱いので内容判定でダブルチェックする。
+STRONG_REASONS = frozenset({"external_thread_id", "in_reply_to_message_id", "routing_key"})
+
+
 @dataclass(frozen=True)
 class RouteMatch:
     route: dict[str, Any]
@@ -110,11 +115,18 @@ class ExternalMessageRoutingService:
         return result.data[0]
 
     async def route_detected_message(self, detected_message: dict[str, Any]) -> Optional[dict[str, Any]]:
-        """Route a detected inbound message and create a Dan action proposal."""
+        """Route a detected inbound message and create a Dan action proposal.
+
+        機械照合(find_route)で一致したものを適用する。強弱の判定や内容判定の
+        フォールバックは呼び出し側(email_poller)が STRONG_REASONS / apply_match で行う。
+        """
         match = self.find_route(detected_message)
         if not match:
             return None
+        return await self.apply_match(detected_message, match)
 
+    async def apply_match(self, detected_message: dict[str, Any], match: RouteMatch) -> dict[str, Any]:
+        """確定した RouteMatch を detected_messages に反映し、返信案/通知の提案を作る。"""
         detected_id = detected_message["id"]
         room_id = match.route["origin_room_id"]
         now = datetime.now(timezone.utc).isoformat()
