@@ -77,17 +77,28 @@ def _mark_attempted(message_id: str) -> None:
 
 
 async def _route_new(owner_id: str) -> None:
-    from app.services.external_message_routing import get_external_message_routing_service
+    from app.services.external_message_routing import (
+        STRONG_REASONS,
+        get_external_message_routing_service,
+    )
     svc = get_external_message_routing_service()
     msgs = await asyncio.to_thread(_unrouted_messages, owner_id)
     for msg in msgs:
         try:
-            # route_detected_message は async。重い草案生成は内部で to_thread 済み。
-            result = await svc.route_detected_message(msg)
-            if result:
-                logger.info("[email] routed reply to room=%s", result.get("route", {}).get("origin_room_id"))
+            # ① 機械照合
+            match = await asyncio.to_thread(svc.find_route, msg)
+            if match and match.reason in STRONG_REASONS:
+                # 強い一致(ヘッダ/合言葉)＝事実なので即確定
+                result = await svc.apply_match(msg, match)
             else:
-                # 未一致 → 再試行しないよう印を付ける（inbox には残る）
+                # 弱い一致(送信者+直近) or 未一致 → 内容判定で漏れ拾い/ダブルチェック
+                from app.services.inbound_content_router import classify_and_route
+                result = await classify_and_route(msg, svc, weak_match=match)
+
+            if result:
+                logger.info("[email] routed msg=%s -> %s", msg.get("id"), result.get("decision") or result.get("reason"))
+            else:
+                # 対応不要/非メール/判定不能 → 再試行しないよう印（inbox には残る）
                 await asyncio.to_thread(_mark_attempted, msg["id"])
         except Exception as e:  # noqa: BLE001
             logger.warning("[email] route failed for msg=%s: %s", msg.get("id"), e)
