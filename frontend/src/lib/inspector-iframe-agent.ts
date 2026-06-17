@@ -337,11 +337,9 @@ function enableInlineEdit(el: HTMLElement): void {
   const commit = () => {
     if (cancelled) return;
     const newText = el.innerText ?? el.textContent ?? '';
-    console.log('[DAN-INSP] agent.commit', { key, changed: newText !== original, parentOrigin });
     if (newText !== original) {
       // 親へ「テキスト編集確定」を通知（生テキスト）。model 構築・保存は親が行う。
       post({ type: 'inspector:text-committed', payload: { elementKey: key, text: newText } });
-      console.log('[DAN-INSP] agent.post text-committed ->', parentOrigin);
     }
   };
   const onBlur = () => { commit(); cleanup(); };
@@ -425,7 +423,6 @@ function handleParentMessage(msg: ParentToIframeMessage): void {
       break;
     }
     case 'inspector:apply-overrides':
-      console.log('[DAN-INSP] agent.apply-overrides count=', (msg.payload.overrides || []).length);
       for (const row of msg.payload.overrides || []) {
         applyDanInspector(row.element_key, (row.styles as Record<string, string>) || {}, (row.attrs as Record<string, unknown>) || {});
       }
@@ -466,7 +463,6 @@ export function initInspectorIframeAgent(opts: { slug: string; allowedOrigins?: 
     if (!isAllowedInspectorOrigin(event.origin, window.location.origin, allowedOrigins)) return;
     gotParentMessage = true; // 親のリスナが立った＝ready再送を止めてよい
     parentOrigin = event.origin; // 以後の送信先を確定
-    console.log('[DAN-INSP] agent.recv', (event.data as { type?: string }).type);
     handleParentMessage(event.data as ParentToIframeMessage);
   });
 
@@ -479,6 +475,5 @@ export function initInspectorIframeAgent(opts: { slug: string; allowedOrigins?: 
     post({ type: 'inspector:ready', payload: { slug } });
     setTimeout(announce, 400);
   };
-  console.log('[DAN-INSP] agent.init (inIframe) slug=', slug);
   announce();
 }
