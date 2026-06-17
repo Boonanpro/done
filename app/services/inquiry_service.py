@@ -85,7 +85,7 @@ class InquiryService:
             label = SCOPE_LABEL.get(scope, "お問い合わせ")
             subject = f"Re: {label}ありがとうございます（{company}）"
 
-            draft = await self._generate_draft(inquiry, company, label)
+            summary, draft = await self._generate_draft(inquiry, company, label)
 
             has_email = bool(sender_email)
             if has_email and draft:
@@ -100,6 +100,9 @@ class InquiryService:
                     "subject": subject,
                     "scope": scope,
                     "reply_from_name": company,
+                    "summary": summary,
+                    "from_sender": f"{name}（{inquiry.get('company') or '個人'}）",
+                    "original_body": (inquiry.get("message") or "")[:2000],
                 }
             else:
                 # 返信先メール無し or 草案生成失敗 → 通知のみ(action)。承認=確認済み扱い。
@@ -136,29 +139,33 @@ class InquiryService:
         except Exception:
             logger.exception("inquiry draft/propose failed")
 
-    async def _generate_draft(self, inquiry: dict, company: str, label: str) -> Optional[str]:
-        """run_oneshot_cli（定額CLI）で日本語の返信メール草案を生成する。"""
+    async def _generate_draft(self, inquiry: dict, company: str, label: str):
+        """run_oneshot_cli で (自然な概要, 返信本文) を生成する。失敗時 (None, None)。"""
         try:
             from app.agent.cli_runner import run_oneshot_cli
+            from app.services.external_message_routing import _split_summary_reply
         except Exception:
             logger.warning("run_oneshot_cli をimportできず草案生成をスキップ")
-            return None
+            return None, None
 
         name = inquiry.get("name") or "お客様"
         msg = inquiry.get("message") or ""
         comp = inquiry.get("company")
         prompt = (
             f"あなたは「{company}」の担当者です。自社サイトの{label}フォームに以下の問い合わせが届きました。\n"
-            f"これに対する丁寧で簡潔な返信メールの本文だけを、日本語で書いてください。\n"
-            f"署名は「{company}」とし、宛名は「{name} 様」で始めてください。\n"
-            f"件名・前置き・説明・マークダウンは不要。メール本文のみを出力してください。\n\n"
+            f"(1)状況の自然な要約 と (2)返信メール本文 を作ってください。\n"
+            f"出力は次の形式を厳守し、他の文字を足さないこと:\n"
+            f"【概要】<1〜2文の自然な日本語。誰から何の件で何を求めているか。"
+            f"例: {name}さんから{label}で、料金についての問い合わせです。>\n"
+            f"【返信案】\n"
+            f"<丁寧で簡潔な返信本文のみ。署名は「{company}」、宛名は「{name} 様」で始める。件名・説明・マークダウン不要。>\n\n"
             f"--- 問い合わせ ---\n"
             f"お名前: {name}\n"
             + (f"会社名: {comp}\n" if comp else "")
             + f"内容: {msg}\n"
         )
-        draft = await asyncio.to_thread(run_oneshot_cli, prompt, "sonnet", 90)
-        return (draft or "").strip() or None
+        raw = await asyncio.to_thread(run_oneshot_cli, prompt, "sonnet", 90)
+        return _split_summary_reply(raw)
 
     async def list(self, scope: Optional[str] = None, limit: int = 100) -> List[dict]:
         def _query():
