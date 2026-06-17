@@ -92,6 +92,10 @@ interface PreviewState {
   refCounter: number;
 
   inspectorMode: InspectorMode;
+  /** iframe が実際に表示している成果物 slug（agent が URL から検出して ready で報告）。
+   *  保存/取得はこの slug を優先する。chat_artifact レコードの slug が中身とズレていても
+   *  （例: ラベル kittoku-v2 だが中身は kittoku）、編集が正しい場所に保存され公開も通る。 */
+  iframeSlug: string | null;
   /** iframe 内で現在選択されているテキスト範囲（文字オフセット）。null=なし。 */
   selectedRange: SelectionRange | null;
   /** elementKey → 現在のモデル（DOMより真）。fetch した override や編集で更新。 */
@@ -112,6 +116,8 @@ interface PreviewActions {
   consumeDraft: () => { text: string; element: SelectedElement | null };
 
   setInspectorMode: (mode: InspectorMode) => void;
+  /** agent が ready で報告した「iframe実表示slug」を記録する。 */
+  setIframeSlug: (slug: string | null) => void;
   /** iframe からの選択範囲（文字オフセット）を受ける。null payload で解除。 */
   setSelectionRange: (payload: SelectionRange | null) => void;
   /** スタイルを適用（選択範囲ありなら部分span、なければblock）。iframeへ送信＋永続化。 */
@@ -140,6 +146,7 @@ const INITIAL: PreviewState = {
   popoverDraft: '',
   refCounter: 0,
   inspectorMode: 'comment',
+  iframeSlug: null,
   selectedRange: null,
   models: {},
   styleVersion: 0,
@@ -172,6 +179,7 @@ export const usePreviewStore = create<PreviewStore>()(
           refCounter: 0,
           models: {},
           selectedRange: null,
+          iframeSlug: null,
           inspectorMode: 'comment',
         });
       },
@@ -229,6 +237,8 @@ export const usePreviewStore = create<PreviewStore>()(
 
       setInspectorMode: (mode) => set({ inspectorMode: mode }),
 
+      setIframeSlug: (slug) => set({ iframeSlug: slug }),
+
       setSelectionRange: (payload) => {
         if (!payload || (payload.end <= payload.start)) {
           // 折りたたみ/空は前の選択を保持（sticky）— null 明示時のみクリア
@@ -242,7 +252,7 @@ export const usePreviewStore = create<PreviewStore>()(
         const { selectedElement, selectedRange, models, styleVersion, artifact } = get();
         const key = selectedElement?.elementKey;
         if (!key) return;
-        const slug = artifact?.slug || '';
+        const slug = get().iframeSlug || artifact?.slug || '';
         const current = getOrInitModel(key, selectedElement?.text || '', models);
         const partial =
           selectedRange && selectedRange.elementKey === key && selectedRange.end > selectedRange.start && current.text
@@ -265,7 +275,7 @@ export const usePreviewStore = create<PreviewStore>()(
 
       commitText: (elementKey, text) => {
         const { models, styleVersion, artifact, selectedElement } = get();
-        const slug = artifact?.slug || '';
+        const slug = get().iframeSlug || artifact?.slug || '';
         const current = getOrInitModel(elementKey, text, models);
         const next = applyText(current, text);
         set({ models: { ...models, [elementKey]: next }, styleVersion: styleVersion + 1 });
@@ -281,7 +291,7 @@ export const usePreviewStore = create<PreviewStore>()(
       applyStyleTo: (elementKey, property, value) => {
         if (!elementKey) return;
         const { models, styleVersion, artifact } = get();
-        const slug = artifact?.slug || '';
+        const slug = get().iframeSlug || artifact?.slug || '';
         const current = getOrInitModel(elementKey, '', models);
         const next = applyBlockStyle(current, property, value);
         set({ models: { ...models, [elementKey]: next }, styleVersion: styleVersion + 1 });
@@ -297,7 +307,7 @@ export const usePreviewStore = create<PreviewStore>()(
       applyAttrs: (elementKey, attrs) => {
         if (!elementKey) return;
         const { artifact, styleVersion } = get();
-        const slug = artifact?.slug || '';
+        const slug = get().iframeSlug || artifact?.slug || '';
         set({ styleVersion: styleVersion + 1 });
         sendToIframe({ type: 'inspector:apply', payload: { elementKey, attrs } });
         queueInspectorEdit({
@@ -319,7 +329,7 @@ export const usePreviewStore = create<PreviewStore>()(
           toast.error('この要素には data-edit-id が無いので削除できません');
           return false;
         }
-        const slug = artifact?.slug || '';
+        const slug = get().iframeSlug || artifact?.slug || '';
         if (!slug) {
           toast.error('artifact slug が取得できません');
           return false;
@@ -369,7 +379,7 @@ export const usePreviewStore = create<PreviewStore>()(
         const { selectedElement, models, styleVersion, artifact } = get();
         const key = selectedElement?.elementKey;
         if (!key) return;
-        const slug = artifact?.slug || '';
+        const slug = get().iframeSlug || artifact?.slug || '';
         const nextModels = { ...models };
         delete nextModels[key];
         set({ models: nextModels, styleVersion: styleVersion + 1 });
