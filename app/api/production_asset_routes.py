@@ -874,6 +874,61 @@ def _append_job_event(room_id: str, job_id: str, event: dict[str, Any]) -> None:
         pass
 
 
+PRODUCTION_ANALYSIS_PROMPT = (
+    "この動画を、動画編集者が使うための『編集用メモ』として分析してください。\n"
+    "必ず mm:ss のタイムスタンプ付きで、以下を出力してください:\n\n"
+    "1. シーン分割（タイムスタンプ範囲つき）: 各区間が『人物が喋る(トーキングヘッド)』か"
+    "『画面操作/デモ』か『その他』かを明記。どこで切り替わるかが分かるように。\n"
+    "2. 発話の書き起こし（タイムスタンプつき）: 実際に喋っている言葉をそのまま。言い直し・"
+    "フィラー(えー/あの等)・不要な無音/間は [無音] のように明示。\n"
+    "3. 画面操作の手順（操作デモ区間）: 何の画面で何を操作しているかを時系列で。\n"
+    "4. 画面に映る固有名詞・個人情報・入力値など、ぼかすべき可能性がある要素の位置と時刻。\n"
+    "推測は推測と明記。日本語で、簡潔かつ具体的に。"
+)
+
+# Cap per-asset analysis injected into the edit prompt (full text is cached on the asset).
+_EDIT_ANALYSIS_INJECT_LIMIT = 4500
+
+
+async def _analyze_assets_for_edit(room_id: str, source_assets: list[dict[str, Any]]) -> dict[str, str]:
+    """Give Dan 'eyes': run Gemini multimodal analysis on each video asset and return
+    {asset_id: analysis_text}. Results are cached on the asset metadata so repeat jobs
+    on the same footage do not re-pay the upload+analysis cost. Analyzes the proxy
+    (light) rather than the original (often multi-GB)."""
+    from app.services.video_analyzer import analyze_video
+
+    assets = _read_assets(room_id)
+    by_id = {str(a.get("id")): a for a in assets if a.get("id")}
+    results: dict[str, str] = {}
+    dirty = False
+    for asset in source_assets:
+        if not isinstance(asset, dict) or asset.get("kind") != "video":
+            continue
+        aid = str(asset.get("id") or "")
+        if not aid:
+            continue
+        src = asset.get("proxy_path") or asset.get("local_path")
+        if not src or not Path(src).exists():
+            continue
+        live = by_id.get(aid)
+        meta = (live.get("metadata") if live and isinstance(live.get("metadata"), dict) else {}) or {}
+        if meta.get("edit_analysis") and meta.get("edit_analysis_src") == str(src):
+            results[aid] = meta["edit_analysis"]
+            continue
+        text = await analyze_video(str(src), prompt=PRODUCTION_ANALYSIS_PROMPT)
+        if text:
+            results[aid] = text
+            if live is not None:
+                meta = dict(meta)
+                meta["edit_analysis"] = text
+                meta["edit_analysis_src"] = str(src)
+                live["metadata"] = meta
+                dirty = True
+    if dirty:
+        _write_assets(room_id, assets)
+    return results
+
+
 def _build_dan_timeline(
     room_id: str,
     user_id: str,
@@ -897,6 +952,27 @@ def _build_dan_timeline(
         if isinstance(asset, dict)
     ]
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
+
+    # Give Dan "eyes": Gemini multimodal read of each clip (timestamped transcript,
+    # talking-head vs screen-operation segmentation, blur candidates). This is the
+    # semantic layer that chat-Dan gets and the production tab previously lacked.
+    analyses: dict[str, str] = {}
+    try:
+        analyses = asyncio.run(_analyze_assets_for_edit(room_id, source_assets))
+    except Exception:
+        analyses = {}
+    if analyses:
+        _append_job_event(room_id, job_id, {"type": "status", "text": f"映像分析(Gemini)完了: {len(analyses)}本"})
+    analysis_parts = []
+    for asset in source_assets:
+        aid = str(asset.get("id") or "")
+        if aid in analyses:
+            text = analyses[aid]
+            if len(text) > _EDIT_ANALYSIS_INJECT_LIMIT:
+                text = text[:_EDIT_ANALYSIS_INJECT_LIMIT] + "\n...(以下略・全文はアセットにキャッシュ済)"
+            analysis_parts.append(f"### asset {aid} ({asset.get('filename') or ''})\n{text}")
+    analysis_block = "\n\n".join(analysis_parts) if analysis_parts else "(映像分析なし。ffprobe/フレーム抽出で自分で把握すること)"
+
     prompt = f"""
 You are DAN, the editor inside the production workspace. Your deliverable is a FINISHED, RENDERED video — not a plan.
 
@@ -908,8 +984,10 @@ Read the full job instruction (brief, blur annotations, audio policy, format) he
 PRIMARY DELIVERABLE — render the finished video to this exact path:
 {render_path}
 
+RENDER EXECUTION (critical): Run ffmpeg in the FOREGROUND and wait for each call to finish. Do NOT start the render as a background/detached process and then poll for it (do not background it and wait via Monitor) — when your turn ends, detached child processes are killed and the output is lost. If you build the video in segments, run each ffmpeg call in the foreground, then concat to {render_path} as the final foreground step. Keep each ffmpeg call reasonably fast: prefer the proxy files, and if you need ranges deep inside a long source, cut those ranges to short intermediates first instead of re-seeking the full file repeatedly. Before you finish, confirm with ffprobe that {render_path} exists and has the expected duration.
+
 How to work:
-1. Inspect the real footage with ffprobe and by extracting frames — find the actual cut points, sync points, and the exact regions/text that must be blurred. Do not guess from metadata alone.
+1. A Gemini analysis of each clip (timestamped transcript, scene segmentation = talking-head vs screen-operation, and blur candidates) is provided below under "映像分析(Gemini)". Use it as your PRIMARY source for what is said, what happens, and when — this is how you decide caption wording, where to cut silence/restatements, and exactly when to switch to the wipe/screen composition. Then verify and refine the precise timings with ffprobe and frame extraction. Do not guess from metadata alone.
 2. Execute real edits with ffmpeg: trim/cut, multi-clip concat, picture-in-picture / wipe (overlay one camera as a small window over another), captions/telop, audio replacement (e.g. use only the main-camera audio), and blur/mosaic. Every requirement in the brief (PiP/wipe, blur regions, audio source, no-cut sections, caption-free sections) must be honored in the actual rendered pixels — not just described.
 3. Honor the requested blur style. If the brief asks for a soft/blended mosaic that follows a moving region, do that; do not settle for a single static hard box if the brief forbids it.
 4. SELF-VERIFY before finishing: extract several frames from {render_path} (intro, each PiP/operation section, each blur section) and confirm the wipe, captions, and blur are actually present and correct. If anything is wrong, fix it and re-render. Never hand off a video you have not visually checked.
@@ -973,6 +1051,9 @@ Important:
 - If the brief says all audio uses the main camera, the rendered audio must come from the main-camera asset only.
 - You may create analysis notes or helper files in the job directory; the final video and the UI handoff JSON must be written to the exact paths above.
 - Print a concise status summary including the final video path after you finish.
+
+映像分析(Gemini) — 各クリップの編集用メモ（タイムスタンプ・発話書き起こし・シーン分割・ぼかし候補）:
+{analysis_block}
 
 Selected assets:
 {json.dumps(source_assets, ensure_ascii=False, indent=2)}
