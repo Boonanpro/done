@@ -1001,6 +1001,16 @@ export const api = {
           edited_content: editedContent,
         }),
       }),
+
+    // 提案への自由指示（書き換え/依頼/質問）
+    instruct: (proposalId: string, instruction: string) =>
+      request<{ mode: 'revise' | 'delegate' | 'answer'; message: string; proposal?: ProposalResponse }>(
+        `/chat/proposals/${proposalId}/instruct`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ instruction }),
+        }
+      ),
   },
 
   // User endpoints

@@ -48,6 +48,21 @@ def _extract_email(value: Optional[str]) -> Optional[str]:
     return m.group(0) if m else None
 
 
+def _split_summary_reply(raw: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """run_oneshot_cli 出力を (概要, 返信本文) に分解する。
+
+    期待形式: 【概要】... 【返信案】... 。マーカーが無ければ全体を返信本文扱い。
+    """
+    if not raw:
+        return None, None
+    text = raw.strip()
+    if "【返信案】" in text:
+        head, _, body = text.partition("【返信案】")
+        summary = head.replace("【概要】", "").strip()
+        return (summary or None), (body.strip() or None)
+    return None, (text or None)
+
+
 def _first_routing_key(*texts: Optional[str]) -> Optional[str]:
     for text in texts:
         if not text:
@@ -247,7 +262,7 @@ class ExternalMessageRoutingService:
         # メール返信なら、ダンが返信草案を作って「要対応の返信案(reply)」として提案する。
         # 承認すると chat_service._execute_reply_proposal が SMTP で送信する。
         if channel in ("gmail", "email", "icloud") and sender_email:
-            draft = await self._draft_email_reply(sender, subject, body)
+            summary, draft = await self._draft_email_reply(sender, subject, body)
             if draft:
                 reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
                 result = self.supabase.table("dan_proposals").insert({
@@ -263,6 +278,9 @@ class ExternalMessageRoutingService:
                         "channel": "email",
                         "to": sender_email,
                         "subject": reply_subject,
+                        "summary": summary,
+                        "from_sender": sender,
+                        "original_body": body[:2000],
                         "detected_message_id": detected_message["id"],
                         "external_route_id": match.route["id"],
                         "routing_reason": match.reason,
@@ -298,27 +316,32 @@ class ExternalMessageRoutingService:
         }).execute()
         return result.data[0] if result.data else None
 
-    async def _draft_email_reply(self, sender: str, subject: str, body: str) -> Optional[str]:
-        """受信メール返信への草案を run_oneshot_cli（定額CLI）で生成する。失敗時 None。
+    async def _draft_email_reply(self, sender: str, subject: str, body: str) -> tuple[Optional[str], Optional[str]]:
+        """受信メールの「自然な概要」と「返信本文」を run_oneshot_cli で生成する。
 
+        Returns: (summary, reply)。概要=誰から何の件かを自然な日本語で1〜2文。
+        reply=送信用の返信本文のみ。失敗時は (None, None)。
         重い CLI 呼び出しはスレッドに逃がし、core のイベントループを塞がない。
         """
         try:
             from app.agent.cli_runner import run_oneshot_cli
         except Exception:
-            return None
+            return None, None
         prompt = (
-            "あなたは運用担当者本人として、以下の受信メールに返信します。\n"
-            "丁寧で簡潔な日本語の返信メール本文だけを書いてください。\n"
-            "件名・前置き・説明・マークダウンは不要。本文のみ。\n\n"
+            "あなたは運用担当者本人のアシスタントです。以下の受信メールについて、"
+            "(1)状況の自然な要約 と (2)返信メール本文 を作ってください。\n"
+            "出力は次の形式を厳守し、他の文字を足さないこと:\n"
+            "【概要】<1〜2文の自然な日本語。誰から何の件で、何を求めているか。"
+            "例: 吉田さんからホームページ制作の件で、料金と納期についての問い合わせです。>\n"
+            "【返信案】\n<丁寧で簡潔な返信メール本文のみ。件名・説明・マークダウンは不要。>\n\n"
             f"--- 受信メール ---\n差出人: {sender}\n件名: {subject}\n本文:\n{body[:2000]}\n"
         )
         try:
             import asyncio as _asyncio
-            draft = await _asyncio.to_thread(run_oneshot_cli, prompt, "sonnet", 90)
+            raw = await _asyncio.to_thread(run_oneshot_cli, prompt, "sonnet", 90)
         except Exception:
-            return None
-        return (draft or "").strip() or None
+            return None, None
+        return _split_summary_reply(raw)
 
 
 _routing_service: Optional[ExternalMessageRoutingService] = None

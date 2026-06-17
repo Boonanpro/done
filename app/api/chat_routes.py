@@ -2971,6 +2971,32 @@ async def respond_to_proposal(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class InstructRequest(BaseModel):
+    """提案へのユーザー自由指示"""
+    instruction: str
+
+
+@router.post("/proposals/{proposal_id}/instruct")
+async def instruct_proposal(
+    proposal_id: str,
+    request: InstructRequest,
+    current_user: TokenData = Depends(get_current_user),
+    service: ChatService = Depends(get_chat_service),
+):
+    """
+    提案にユーザーが自由な指示を出す。
+    - 「もっと丁寧に」「料金表を添えて」等 → 返信案を書き換えて返す(mode=revise)
+    - 「○○さんにこの件でメールして」等 → ダンのメインチャットで実行(mode=delegate)
+    - 質問 → その場で回答(mode=answer)
+    """
+    try:
+        return await service.instruct_proposal(
+            proposal_id, current_user.user_id, request.instruction.strip(),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 # ==================== WebSocket ====================
 
 class ConnectionManager:

@@ -1547,6 +1547,107 @@ class ChatService:
             except Exception as e:
                 logging.warning("inquiry status update failed: %s", e)
     
+    async def instruct_proposal(self, proposal_id: str, user_id: str, instruction: str) -> dict:
+        """通知タブの提案に対するユーザーの自由指示を処理する。
+
+        - revise: 返信案の修正依頼 → 草案を書き換えて提案を更新
+        - delegate: 別作業の依頼(他者へメール/調査等) → ダンのメインチャットに文脈付きで投げて実行
+        - answer: 質問 → その場で回答
+
+        Returns: {"mode", "message", "proposal"(reviseのみ)}
+        """
+        import asyncio as _asyncio
+        import json
+        import logging
+
+        proposal = await self.get_proposal(proposal_id, user_id)
+        if not proposal:
+            raise ValueError("Proposal not found")
+
+        ad = proposal.get("action_data") or {}
+        summary = ad.get("summary") or ""
+        from_sender = ad.get("from_sender") or ""
+        current = proposal.get("content") or ""
+
+        try:
+            from app.agent.cli_runner import run_oneshot_cli
+        except Exception:
+            return {"mode": "answer", "message": "今は指示を処理できません（CLI未利用）。"}
+
+        prompt = (
+            "あなたは運用担当者のアシスタントです。ユーザーが『返信案の提案』に対して指示を出しました。\n"
+            "指示を分類し、次のJSONだけを出力してください（前後に文章を付けない）:\n"
+            '{"mode":"revise|delegate|answer","reply":"<modeがreviseの時のみ:指示を反映した新しい返信本文の全文>","message":"<ユーザーへの短い一言(日本語)>"}\n'
+            "- revise: 返信案そのものの修正（言い回し変更/追記/トーン/短縮など）。replyに修正後の本文全体、messageは「〜に書き換えました」。\n"
+            "- delegate: 返信案の修正ではない別の作業依頼（他の人にメール/調査/電話など）。messageは何をするかの確認。\n"
+            "- answer: 質問への回答。messageに回答。\n\n"
+            f"--- 提案情報 ---\n元メール概要: {summary}\n差出人: {from_sender}\n"
+            f"現在の返信案:\n{current}\n\n--- ユーザーの指示 ---\n{instruction}\n"
+        )
+        raw = await _asyncio.to_thread(run_oneshot_cli, prompt, "sonnet", 90)
+
+        data = None
+        if raw:
+            try:
+                data = json.loads(raw)
+            except Exception:
+                import re as _re
+                m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+                if m:
+                    try:
+                        data = json.loads(m.group(0))
+                    except Exception:
+                        data = None
+        if not data or data.get("mode") not in ("revise", "delegate", "answer"):
+            return {"mode": "answer", "message": (raw or "うまく解釈できませんでした。もう一度お願いします。")[:600]}
+
+        mode = data["mode"]
+        if mode == "revise" and data.get("reply"):
+            self.supabase.table("dan_proposals").update({"content": data["reply"]}).eq("id", proposal_id).execute()
+            updated = await self.get_proposal(proposal_id, user_id)
+            return {"mode": "revise", "message": data.get("message") or "返信案を書き換えました。", "proposal": updated}
+
+        if mode == "delegate":
+            try:
+                await self._delegate_to_dan(user_id, proposal, instruction)
+            except Exception:
+                logging.exception("delegate to dan failed")
+                return {"mode": "answer", "message": "依頼の起動に失敗しました。メインチャットで直接お願いします。"}
+            return {"mode": "delegate", "message": data.get("message") or "ダンに依頼しました。メインチャットで対応します。"}
+
+        return {"mode": "answer", "message": data.get("message") or "（回答が空でした）"}
+
+    async def _delegate_to_dan(self, user_id: str, proposal: dict, instruction: str) -> None:
+        """提案の文脈＋指示をダンのメインチャットに投げ、エージェントを背景起動する。"""
+        import asyncio as _asyncio
+        import logging
+
+        dan_room = await self.get_or_create_dan_room(user_id)
+        room_id = dan_room["id"]
+        ad = proposal.get("action_data") or {}
+        content = (
+            f"[通知タブの提案「{proposal.get('title')}」についての指示]\n"
+            f"元メール概要: {ad.get('summary') or '-'}\n"
+            f"差出人: {ad.get('from_sender') or '-'}\n"
+            f"現在の返信案:\n{proposal.get('content') or '-'}\n\n"
+            f"ユーザーの指示: {instruction}\n\n"
+            f"この指示に従って対応し、結果を日本語で報告してください。"
+            f"メール送信が必要なら email-send スキルを使ってください。"
+        )
+
+        async def _run():
+            try:
+                from app.agent.cli_runner import process_message_cli
+                async for _ev in process_message_cli(
+                    room_id=room_id, user_id=user_id, content=content,
+                    project_id=None, run_id=None,
+                ):
+                    pass
+            except Exception:
+                logging.exception("delegate agent run failed")
+
+        _asyncio.create_task(_run())
+
     async def get_pending_proposals_count(
         self, user_id: str, exclude_types: Optional[list[str]] = None
     ) -> int:

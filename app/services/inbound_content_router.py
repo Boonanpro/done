@@ -145,13 +145,18 @@ async def classify_and_route(
     sender_email = _extract_email(sender) or _pick(sender_info.get("email"))
     subject = detected_message.get("subject") or "(件名なし)"
     body = detected_message.get("content") or ""
-    draft = await svc._draft_email_reply(sender, subject, body)
+    summary, draft = await svc._draft_email_reply(sender, subject, body)
 
     if not sender_email or not draft:
         logger.info("[content-route] 返信先メール無し or 草案失敗 → 通知のみ")
         title = "新規メール（要対応）" if decision == "new" else "メール（要対応）"
         content = f"差出人: {sender}\n件名: {subject}\n\n{body[:1200]}"
-        action_data = {"action": "inbound_email_no_reply", "detected_message_id": detected_message["id"]}
+        action_data = {
+            "action": "inbound_email_no_reply",
+            "summary": summary,
+            "from_sender": sender,
+            "detected_message_id": detected_message["id"],
+        }
         ptype = "action"
     else:
         reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
@@ -162,6 +167,9 @@ async def classify_and_route(
             "channel": "email",
             "to": sender_email,
             "subject": reply_subject,
+            "summary": summary,
+            "from_sender": sender,
+            "original_body": body[:2000],
             "detected_message_id": detected_message["id"],
             "routing_reason": f"content:{decision}",
         }

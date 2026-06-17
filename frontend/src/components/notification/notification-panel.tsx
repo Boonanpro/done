@@ -42,6 +42,7 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
   const [editMode, setEditMode] = useState(false);
   const [editedContent, setEditedContent] = useState('');
   const [question, setQuestion] = useState('');
+  const [instructReply, setInstructReply] = useState('');
   const questionInputRef = useRef<HTMLInputElement>(null);
 
   // 要対応の提案（フォーム/メール返信など）。情報通知(observation)は除外してバッジもこちらで数える
@@ -88,21 +89,29 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
     },
   });
 
-  // Send question about proposal (sends to Dan)
-  const askQuestionMutation = useMutation({
-    mutationFn: async (content: string) => {
-      // Send message to Dan about this proposal
-      const questionContent = selectedProposal
-        ? `【${selectedProposal.title}について質問】\n${content}`
-        : content;
-      return api.dan.sendMessage(questionContent);
+  // Instruct Dan about this proposal (rewrite draft / delegate task / answer)
+  const instructMutation = useMutation({
+    mutationFn: async (instruction: string) => {
+      if (!selectedProposal) throw new Error('no proposal');
+      return api.proposals.instruct(selectedProposal.id, instruction);
     },
-    onSuccess: () => {
+    onSuccess: (res) => {
       setQuestion('');
-      toast.success('質問を送信しました');
+      if (res.mode === 'revise' && res.proposal) {
+        // 草案がその場で更新される
+        setSelectedProposal(res.proposal);
+        setEditMode(false);
+        setEditedContent('');
+        queryClient.invalidateQueries({ queryKey: ['proposals'] });
+      }
+      setInstructReply(res.message || '');
+      toast.success(
+        res.mode === 'revise' ? '返信案を書き換えました' :
+        res.mode === 'delegate' ? 'ダンに依頼しました' : '回答しました'
+      );
     },
     onError: () => {
-      toast.error('質問の送信に失敗しました');
+      toast.error('指示の処理に失敗しました');
     },
   });
 
@@ -129,13 +138,14 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
 
   const handleAskQuestion = () => {
     if (!question.trim()) return;
-    askQuestionMutation.mutate(question.trim());
+    instructMutation.mutate(question.trim());
   };
 
   const handleProposalClick = (proposal: ProposalResponse) => {
     setSelectedProposal(proposal);
     setEditMode(false);
     setEditedContent('');
+    setInstructReply('');
   };
 
   const handleDismiss = (id: string, e: React.MouseEvent) => {
@@ -184,6 +194,21 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
 
             {/* Detail Content */}
             <div className="p-4 space-y-4 overflow-y-auto" style={{ maxHeight: 'calc(80vh - 52px)' }}>
+              {/* 自然文の経緯（誰から何の件か） */}
+              {(() => {
+                const summary = (selectedProposal.action_data as { summary?: string } | null)?.summary;
+                if (!summary) return null;
+                const isReply = selectedProposal.type === 'reply';
+                return (
+                  <div className="text-sm bg-muted/40 border border-border rounded-lg p-3 space-y-1">
+                    <p className="whitespace-pre-wrap break-words">{summary}</p>
+                    {isReply && (
+                      <p className="text-xs text-muted-foreground">以下の内容で返信しますか？</p>
+                    )}
+                  </div>
+                );
+              })()}
+
               {editMode ? (
                 <textarea
                   value={editedContent}
@@ -268,11 +293,16 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
                 </>
               )}
 
-              {/* Mini Chat */}
+              {/* ダンに指示（書き換え・依頼・質問） */}
               <div className="pt-3 border-t border-border">
                 <p className="text-xs text-muted-foreground mb-2">
-                  この件についてダンに質問できます
+                  ダンに指示できます（例:「もっと丁寧に」「料金表を添えて」「○○さんにこの件で相談メールして」）
                 </p>
+                {instructReply && (
+                  <p className="text-xs text-foreground bg-muted/40 border border-border rounded-lg p-2 mb-2 whitespace-pre-wrap break-words">
+                    {instructReply}
+                  </p>
+                )}
                 <div className="flex gap-2">
                   <input
                     ref={questionInputRef}
@@ -285,17 +315,17 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
                         handleAskQuestion();
                       }
                     }}
-                    placeholder="質問を入力..."
+                    placeholder="指示を入力..."
                     className="flex-1 h-8 px-3 text-sm bg-input border border-border rounded-lg focus:outline-none focus:ring-1 focus:ring-ring"
-                    disabled={askQuestionMutation.isPending}
+                    disabled={instructMutation.isPending}
                   />
                   <Button
                     size="sm"
                     variant="secondary"
                     onClick={handleAskQuestion}
-                    disabled={!question.trim() || askQuestionMutation.isPending}
+                    disabled={!question.trim() || instructMutation.isPending}
                   >
-                    {askQuestionMutation.isPending ? (
+                    {instructMutation.isPending ? (
                       <Loader2 className="h-3 w-3 animate-spin" />
                     ) : (
                       <Send className="h-3 w-3" />
