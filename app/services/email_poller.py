@@ -15,12 +15,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = int(os.getenv("DAN_EMAIL_POLL_INTERVAL", "180"))  # 秒
 MAX_ROUTE_PER_CYCLE = 3   # 草案生成(CLI)が重いので1サイクルの照合上限
+# 取り込みが新しいものだけ照合対象にする。過去メールの大量バックログを掘り起こして
+# 古い用件を「新規返信案」として今さら浮上させないためのカットオフ。
+MAX_AGE_HOURS = int(os.getenv("DAN_EMAIL_ROUTE_MAX_AGE_HOURS", "72"))
 
 _started = False
 _task: Optional["asyncio.Task"] = None
@@ -46,12 +50,14 @@ def _unrouted_messages(owner_id: str) -> List[Dict[str, Any]]:
     """未ルーティング・照合未試行の受信メールを取得（同期）。"""
     from app.services.supabase_client import get_supabase_client
     sb = get_supabase_client().client
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=MAX_AGE_HOURS)).isoformat()
     rows = (
         sb.table("detected_messages")
         .select("*")
         .eq("user_id", owner_id)
         .eq("source", "gmail")
         .is_("routed_room_id", "null")
+        .gte("created_at", cutoff)  # 取り込みが新しいものだけ（過去バックログを掘り起こさない）
         .order("created_at", desc=True)
         .limit(20)
         .execute()
