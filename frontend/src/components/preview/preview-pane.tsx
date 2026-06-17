@@ -268,10 +268,13 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
       const slug = st.artifact?.slug;
       if (slug) {
         const rows = await fetchOverrides(slug);
+        console.log('[DAN-INSP] parent.pushOverrides', { slug, count: rows.length });
         if (rows.length) {
           st.seedModels(rows);
           sendToIframe({ type: 'inspector:apply-overrides', payload: { overrides: rows } });
         }
+      } else {
+        console.log('[DAN-INSP] parent.pushOverrides: no slug');
       }
       const s2 = usePreviewStore.getState();
       sendToIframe({ type: 'inspector:set-mode', payload: { mode: s2.isEditMode ? s2.inspectorMode : 'off' } });
