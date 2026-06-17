@@ -136,6 +136,7 @@ export function ProductionWorkspace({
   const [jobs, setJobs] = useState<ProductionJob[]>([]);
   const [jobEvents, setJobEvents] = useState<ProductionJobEvent[]>([]);
   const [activeVideoAssetId, setActiveVideoAssetId] = useState<string | null>(null);
+  const [revisionNote, setRevisionNote] = useState('');
 
   const hasProcessing = useMemo(() => assets.some((a) => a.status === 'processing'), [assets]);
   const selectedContentAssets = useMemo(
@@ -483,7 +484,7 @@ export function ProductionWorkspace({
     }
   };
 
-  const requestDanEdit = async () => {
+  const requestDanEdit = async (revision?: string) => {
     if (!selectedContent) return;
     const selectedAssets = selectedSourceAssets;
     if (selectedAssets.length === 0) {
@@ -491,6 +492,11 @@ export function ProductionWorkspace({
       return;
     }
     const timeline = selectedContent.timeline || {};
+    const baseBrief = typeof timeline.brief === 'string' ? timeline.brief : '';
+    const trimmedRevision = (revision || '').trim();
+    const briefForJob = trimmedRevision
+      ? `${baseBrief}\n\n# 修正指示（前回の出力からの直し。ここを最優先で反映する）\n${trimmedRevision}`
+      : baseBrief;
     const instruction = {
       mode: 'dan_edit',
       content_id: selectedContent.id,
@@ -505,7 +511,7 @@ export function ProductionWorkspace({
         source_type: asset.source_type,
         metadata: asset.metadata,
       })),
-      brief: typeof timeline.brief === 'string' ? timeline.brief : '',
+      brief: briefForJob,
       workflow_preset: typeof timeline.workflow_preset === 'string' ? timeline.workflow_preset : 'video_ugc',
       timeline: {
         ...timeline,
@@ -523,7 +529,8 @@ export function ProductionWorkspace({
         body: JSON.stringify({ room_id: roomId, content_id: selectedContent.id, instruction }),
       });
       if (!res.ok) throw new Error(await res.text());
-      toast.success('Danに制作を依頼しました');
+      toast.success(trimmedRevision ? '修正指示でDanに作り直しを依頼しました' : 'Danに制作を依頼しました');
+      if (trimmedRevision) setRevisionNote('');
       await loadJobs();
       window.setTimeout(() => {
         void loadJobs();
@@ -655,11 +662,20 @@ export function ProductionWorkspace({
             {selectedContent.outputs.length > 0 ? (
               <div className="rounded-md border border-border p-3">
                 <div className="mb-2 text-sm font-medium">最新出力</div>
+                {typeof selectedContent.outputs[0]?.url === 'string' ? (
+                  <video
+                    key={String(selectedContent.outputs[0].asset_id || selectedContent.outputs[0].path)}
+                    controls
+                    playsInline
+                    src={String(selectedContent.outputs[0].url)}
+                    className="mb-2 w-full rounded bg-black"
+                  />
+                ) : null}
                 <div className="space-y-2">
                   {selectedContent.outputs.slice(0, 3).map((output, index) => (
                     <div key={`${String(output.asset_id || output.path || index)}`} className="rounded border border-border bg-muted/30 p-2 text-xs">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium">{String(output.kind || 'video')}</span>
+                        <span className="font-medium">{index === 0 ? '最新' : String(output.kind || 'video')}</span>
                         {typeof output.created_at === 'string' ? (
                           <span className="text-muted-foreground">{new Date(output.created_at).toLocaleTimeString()}</span>
                         ) : null}
@@ -671,11 +687,31 @@ export function ProductionWorkspace({
                           rel="noreferrer"
                           className="mt-1 block truncate text-primary underline-offset-2 hover:underline"
                         >
-                          出力動画を開く
+                          新しいタブで開く
                         </a>
                       ) : null}
                     </div>
                   ))}
+                </div>
+                <div className="mt-3 border-t border-border pt-3">
+                  <div className="mb-1 text-sm font-medium">この出力を直す</div>
+                  <p className="mb-2 text-xs text-muted-foreground">
+                    気になった点を書いて作り直すと、前回の編集に対する修正としてDanが反映します。
+                  </p>
+                  <Textarea
+                    value={revisionNote}
+                    onChange={(event) => setRevisionNote(event.target.value)}
+                    placeholder="例: 言い直しだけ切って。語尾を切らないで。テロップの黒背景をやめてフチ+影で。小窓パートはテロップ無し。"
+                    className="min-h-20 text-xs"
+                  />
+                  <Button
+                    className="mt-2 w-full"
+                    size="sm"
+                    disabled={!revisionNote.trim()}
+                    onClick={() => void requestDanEdit(revisionNote)}
+                  >
+                    この指示で作り直す
+                  </Button>
                 </div>
               </div>
             ) : null}
