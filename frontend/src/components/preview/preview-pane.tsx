@@ -263,9 +263,10 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
       }
     };
 
-    const pushModeAndOverrides = async () => {
+    const pushModeAndOverrides = async (reportedSlug?: string) => {
       const st = usePreviewStore.getState();
-      const slug = st.artifact?.slug;
+      // iframe が実際に表示している slug を最優先（chat_artifact のラベルズレ対策）。
+      const slug = reportedSlug || st.iframeSlug || st.artifact?.slug;
       if (slug) {
         const rows = await fetchOverrides(slug);
         if (rows.length) {
@@ -280,7 +281,10 @@ export function PreviewPane({ onSubmitComment }: { onSubmitComment: () => void }
     const detach = attachInspectorBridge(
       iframe,
       {
-        onReady: () => { void pushModeAndOverrides(); },
+        onReady: (slug) => {
+          usePreviewStore.getState().setIframeSlug(slug);
+          void pushModeAndOverrides(slug);
+        },
         onReloaded: () => { void pushModeAndOverrides(); },
         onSelected: (snap) => usePreviewStore.getState().selectFromSnapshot(snap),
         onTextCommitted: (elementKey, text) => usePreviewStore.getState().commitText(elementKey, text),
