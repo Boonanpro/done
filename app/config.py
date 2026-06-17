@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     # iCloud Mail App-specific Password (dan-notion IMAP fetch)
     ICLOUD_ADDRESS: str = ""
     ICLOUD_APP_PASSWORD: str = ""
+
+    # ダンが送るメールの既定の差出人表示名（reply_from_name 未指定時のフォールバック）
+    DAN_DEFAULT_FROM_NAME: str = "株式会社パイナ"
     
     # Attachment Storage (Phase 5C)
     ATTACHMENT_STORAGE_PATH: str = "./data/attachments"
