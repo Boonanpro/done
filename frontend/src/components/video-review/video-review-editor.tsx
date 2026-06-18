@@ -254,7 +254,6 @@ export function VideoReviewEditor({
   initialAnnotations,
   initialSequence,
   sequenceAssets,
-  renderedUrl,
   embedded = false,
   onBack,
   onSaveTimeline,
@@ -268,14 +267,12 @@ export function VideoReviewEditor({
   initialAnnotations?: ReviewAnnotation[];
   initialSequence?: EditSequence | null;
   sequenceAssets?: SequenceAsset[];
-  renderedUrl?: string | null;
   embedded?: boolean;
   onBack?: () => void;
   onSaveTimeline?: (payload: SessionPayload) => void | Promise<void>;
   onExecute?: (payload: SessionPayload) => void | Promise<void>;
   sidePanelTop?: ReactNode;
 }) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
@@ -285,7 +282,7 @@ export function VideoReviewEditor({
   const isHistoryJumpRef = useRef(false);
   const [videoPath, setVideoPath] = useState(initialPath || '');
   const [videoUrl, setVideoUrl] = useState(initialUrl || '');
-  const [duration, setDuration] = useState(0);
+  const [duration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [tool, setTool] = useState<Tool>('rect');
   const [intent, setIntent] = useState<Intent>('blur');
@@ -310,13 +307,11 @@ export function VideoReviewEditor({
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [timelineHeight, setTimelineHeight] = useState(300);
   const [timelineResizeStart, setTimelineResizeStart] = useState<{ clientY: number; height: number } | null>(null);
-  const [videoContentStyle, setVideoContentStyle] = useState<CSSProperties>({ inset: 0 });
-  const [playbackRateIndex, setPlaybackRateIndex] = useState(0);
-  const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
+  // The preview canvas (TimelinePreview) fills the aspect-locked stage exactly, so
+  // the annotation overlay always maps to the full stage rect — no per-frame measuring.
+  const videoContentStyle: CSSProperties = { inset: 0 };
   const [playing, setPlaying] = useState(false);
-  const pendingSeekRef = useRef<number | null>(null);
   const fps = useMemo(() => parseFps(initialFps) || 30, [initialFps]);
-  const playbackRates = useMemo(() => [1, 2, 4], []);
 
   const sequenceAssetMap = useMemo(
     () => new Map((sequenceAssets || []).map((asset) => [asset.id, asset])),
@@ -325,10 +320,6 @@ export function VideoReviewEditor({
 
   const sequenceVideoClips = useMemo(
     () => (editSequence?.tracks || []).flatMap((track) => (track.type === 'video' ? track.clips || [] : [])),
-    [editSequence]
-  );
-  const sequenceCaptionClips = useMemo(
-    () => (editSequence?.tracks || []).flatMap((track) => (track.type === 'caption' ? track.clips || [] : [])),
     [editSequence]
   );
   const allSequenceClips = useMemo(
@@ -436,55 +427,6 @@ export function VideoReviewEditor({
   }, [timelineLanes]);
   laneGeomRef.current = laneGeom;
 
-  const clipAtTime = useCallback(
-    (time: number) =>
-      sequenceVideoClips.find(
-        (clip) => time >= clip.timeline_start && time < clip.timeline_end
-      ) || sequenceVideoClips[sequenceVideoClips.length - 1] || null,
-    [sequenceVideoClips]
-  );
-
-  const activePreviewClip = useMemo(() => {
-    if (sequenceVideoClips.length === 0) return null;
-    const byAsset = previewAssetId
-      ? sequenceVideoClips.find(
-          (clip) =>
-            clip.asset_id === previewAssetId &&
-            currentTime >= clip.timeline_start &&
-            currentTime < clip.timeline_end
-        )
-      : null;
-    return byAsset || clipAtTime(currentTime);
-  }, [clipAtTime, currentTime, previewAssetId, sequenceVideoClips]);
-
-  const activeSequenceAsset = activePreviewClip?.asset_id
-    ? sequenceAssetMap.get(activePreviewClip.asset_id)
-    : null;
-  const activeSequenceCaptions = useMemo(
-    () =>
-      sequenceCaptionClips.filter(
-        (clip) =>
-          currentTime >= clip.timeline_start &&
-          currentTime <= clip.timeline_end &&
-          typeof clip.text === 'string' &&
-          clip.text.trim()
-      ),
-    [currentTime, sequenceCaptionClips]
-  );
-
-  // When a rendered output mp4 is available, the timeline plays that single
-  // file directly (the playhead scrubs the real render), instead of the virtual
-  // clip-switching preview reconstructed from source assets.
-  const renderedMode = !!renderedUrl;
-  const source = useMemo(() => {
-    if (renderedUrl) return renderedUrl;
-    if (activeSequenceAsset?.url) return activeSequenceAsset.url;
-    if (activeSequenceAsset?.path) return `/api/v1/video-review/media?path=${encodeURIComponent(activeSequenceAsset.path)}`;
-    if (videoUrl) return videoUrl;
-    if (!videoPath) return '';
-    return `/api/v1/video-review/media?path=${encodeURIComponent(videoPath)}`;
-  }, [renderedUrl, activeSequenceAsset, videoPath, videoUrl]);
-
   const sessionQuery = useMemo(() => {
     const params = new URLSearchParams();
     if (videoPath) params.set('video_path', videoPath);
@@ -565,65 +507,6 @@ export function VideoReviewEditor({
     historyFutureRef.current = [];
     historySnapshotRef.current = snapshot;
   }, [annotations]);
-
-  const updateVideoContentRect = useCallback(() => {
-    const stage = stageRef.current;
-    const video = videoRef.current;
-    if (!stage || !video || !video.videoWidth || !video.videoHeight) {
-      setVideoContentStyle({ inset: 0 });
-      return;
-    }
-    const stageRect = stage.getBoundingClientRect();
-    const videoRect = video.getBoundingClientRect();
-    const videoRatio = video.videoWidth / video.videoHeight;
-    const boxRatio = videoRect.width / videoRect.height;
-    let contentWidth = videoRect.width;
-    let contentHeight = videoRect.height;
-    let offsetX = 0;
-    let offsetY = 0;
-
-    if (boxRatio > videoRatio) {
-      contentHeight = videoRect.height;
-      contentWidth = contentHeight * videoRatio;
-      offsetX = (videoRect.width - contentWidth) / 2;
-    } else {
-      contentWidth = videoRect.width;
-      contentHeight = contentWidth / videoRatio;
-      offsetY = (videoRect.height - contentHeight) / 2;
-    }
-
-    setVideoContentStyle({
-      left: videoRect.left - stageRect.left + offsetX,
-      top: videoRect.top - stageRect.top + offsetY,
-      width: contentWidth,
-      height: contentHeight,
-    });
-  }, []);
-
-  useEffect(() => {
-    updateVideoContentRect();
-    const observer = new ResizeObserver(() => updateVideoContentRect());
-    if (stageRef.current) observer.observe(stageRef.current);
-    if (videoRef.current) observer.observe(videoRef.current);
-    window.addEventListener('resize', updateVideoContentRect);
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('resize', updateVideoContentRect);
-    };
-  }, [source, timelineHeight, updateVideoContentRect]);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || pendingSeekRef.current == null) return;
-    const target = pendingSeekRef.current;
-    const applySeek = () => {
-      video.currentTime = target;
-      pendingSeekRef.current = null;
-    };
-    if (video.readyState >= 1) applySeek();
-    else video.addEventListener('loadedmetadata', applySeek, { once: true });
-    return () => video.removeEventListener('loadedmetadata', applySeek);
-  }, [source]);
 
   const getPoint = useCallback((event: React.PointerEvent): Point | null => {
     const stage = stageRef.current;
@@ -887,10 +770,6 @@ export function VideoReviewEditor({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [currentTime, deleteSelected, duration, fps, redoAnnotations, seekTimeline, timelineDuration, undoAnnotations]);
-
-  useEffect(() => {
-    if (videoRef.current) videoRef.current.playbackRate = playbackRates[playbackRateIndex];
-  }, [playbackRateIndex, playbackRates]);
 
   const handlePointerDown = useCallback(
     (event: React.PointerEvent) => {
@@ -1400,13 +1279,8 @@ export function VideoReviewEditor({
                   {draftRectStyle && (
                     <div className="absolute border-2 border-orange-400 bg-orange-500/15" style={draftRectStyle} />
                   )}
-                  {!renderedMode && activeSequenceCaptions.length > 0 ? (
-                    <div className="absolute inset-x-4 bottom-8 flex justify-center">
-                      <div className="max-w-[92%] rounded bg-black/70 px-3 py-1.5 text-center text-lg font-bold leading-snug text-white shadow-lg">
-                        {activeSequenceCaptions[activeSequenceCaptions.length - 1].text}
-                      </div>
-                    </div>
-                  ) : null}
+                  {/* Captions are composited by TimelinePreview onto the canvas (matches the
+                      final render); no separate HTML overlay needed here. */}
                 </div>
               </div>
             </div>
