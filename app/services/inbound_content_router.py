@@ -80,20 +80,24 @@ def _classify(detected_message: dict, rooms: list[dict], weak_room_id: Optional[
                 break
 
     prompt = (
-        "あなたは運用担当者のアシスタントです。受信メールを読み、下の既存チャット一覧の"
-        "どれに関する用件かを判断してください。\n"
+        "あなたは運用担当者のアシスタントです。受信メールを読み、運用担当者に"
+        "どう扱うべきかを判断してください。\n"
         "次のJSONだけを出力（前後に文章を付けない）:\n"
-        '{"decision":"existing|new|ignore","room_index":<番号 or null>,"reason":"<短く>"}\n'
-        "- existing: 既存チャットのどれかの件への返信/続き → room_index にその番号\n"
-        "- new: 既存のどれとも無関係な新規の用件（新規の問い合わせ・営業・依頼など）\n"
-        "- ignore: メルマガ・広告・自動通知・領収書など、人間の返信が不要なもの\n"
+        '{"decision":"existing|new|notify|ignore","room_index":<番号 or null>,"reason":"<短く>"}\n'
+        "- existing: 既存チャットのどれかの件への返信/続きで、人間が返信すべき → room_index にその番号\n"
+        "- new: 既存のどれとも無関係な新規の用件で、人間が返信すべき（新規の問い合わせ・営業・依頼など）\n"
+        "- notify: 返信は不要だが、運用担当者に知らせるべき重要な情報。例: 予約/日程の確定・変更、"
+        "支払い/入金/請求、配送・発送、契約・ドメイン・サブスクの期限/更新/停止の警告、"
+        "本人宛の重要な事務連絡、面談調整完了など。\n"
+        "- ignore: メルマガ・広告・キャンペーン・ポイント通知・定型マーケティングなど、知らせる価値が低いもの\n"
+        "迷ったら notify（取りこぼすより知らせる）。ただし明らかな宣伝/メルマガは ignore。\n"
         f"{weak_hint}\n"
         f"--- 受信メール ---\n差出人: {sender}\n件名: {subject}\n本文:\n{body}\n\n"
         f"--- 既存チャット一覧 ---\n{rooms_text}\n"
     )
     raw = run_oneshot_cli(prompt, "sonnet", 90)
     data = _parse_json(raw)
-    if not data or data.get("decision") not in ("existing", "new", "ignore"):
+    if not data or data.get("decision") not in ("existing", "new", "notify", "ignore"):
         return None
     return data
 
@@ -139,7 +143,7 @@ async def classify_and_route(
         else:
             decision = "new"  # 番号不正なら新規扱い
 
-    # 返信草案を生成
+    # 概要（reply の場合は返信草案も）を生成
     sender_info = detected_message.get("sender_info") or {}
     sender = _pick(sender_info.get("from"), sender_info.get("email"), "不明")
     sender_email = _extract_email(sender) or _pick(sender_info.get("email"))
@@ -147,7 +151,21 @@ async def classify_and_route(
     body = detected_message.get("content") or ""
     summary, draft = await svc._draft_email_reply(sender, subject, body)
 
-    if not sender_email or not draft:
+    if decision == "notify":
+        # 返信不要だが知らせるべき重要情報 → 通知のみ（返信案なし）
+        logger.info("[content-route] notify: %s", data.get("reason"))
+        title = f"メール: {sender}"
+        content = summary or f"{sender} から「{subject}」のメールが届いています。"
+        action_data = {
+            "action": "inbound_notify",
+            "summary": summary,
+            "from_sender": sender,
+            "original_body": body[:2000],
+            "detected_message_id": detected_message["id"],
+            "routing_reason": "content:notify",
+        }
+        ptype = "notify"
+    elif not sender_email or not draft:
         logger.info("[content-route] 返信先メール無し or 草案失敗 → 通知のみ")
         title = "新規メール（要対応）" if decision == "new" else "メール（要対応）"
         content = f"差出人: {sender}\n件名: {subject}\n\n{body[:1200]}"
