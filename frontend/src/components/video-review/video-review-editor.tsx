@@ -490,7 +490,16 @@ export function VideoReviewEditor({
 
   const selected = annotations.find((a) => a.id === selectedId) || null;
   const selectedSequenceClip = allSequenceClips.find((clip) => clip.id === selectedSequenceClipId) || null;
+  // Sync the working copy from the prop ONLY when its content genuinely changes
+  // (e.g. a fresh Dan render), NOT on every parent re-render / poll. The parent
+  // re-creates an equal-value sequence object on each poll; without this guard the
+  // effect would reset editSequence every few seconds and wipe in-progress manual
+  // edits (drag/trim/delete appeared to "do nothing").
+  const lastSyncedSeqSig = useRef<string>('__init__');
   useEffect(() => {
+    const sig = JSON.stringify(initialSequence ?? null);
+    if (sig === lastSyncedSeqSig.current) return;
+    lastSyncedSeqSig.current = sig;
     setEditSequence(initialSequence || null);
   }, [initialSequence]);
 
@@ -1089,7 +1098,6 @@ export function VideoReviewEditor({
     (event: React.PointerEvent, annotation: ReviewAnnotation, mode: TimelineDrag['mode']) => {
       event.preventDefault();
       event.stopPropagation();
-      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
       selectAnnotation(annotation.id, event.shiftKey || event.ctrlKey || event.metaKey);
       setTimelineDrag({
         id: annotation.id,
@@ -1098,6 +1106,11 @@ export function VideoReviewEditor({
         originalStart: annotation.start,
         originalEnd: annotation.end ?? annotation.start + 0.5,
       });
+      try {
+        (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+      } catch {
+        /* ignore */
+      }
     },
     [selectAnnotation]
   );
@@ -1107,13 +1120,17 @@ export function VideoReviewEditor({
       if (!pendingAnnotation) return;
       event.preventDefault();
       event.stopPropagation();
-      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
       setPendingTimelineDrag({
         mode,
         startClientX: event.clientX,
         originalStart: pendingAnnotation.start,
         originalEnd: pendingAnnotation.end ?? pendingAnnotation.start + 0.5,
       });
+      try {
+        (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+      } catch {
+        /* ignore */
+      }
     },
     [pendingAnnotation]
   );
@@ -1141,7 +1158,6 @@ export function VideoReviewEditor({
       event.stopPropagation();
       selectSequenceClip(clip.id, event.shiftKey || event.ctrlKey || event.metaKey);
       seekTimeline(getTimelineTime(event));
-      (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
       setSequenceClipDrag({
         id: clip.id,
         mode,
@@ -1154,6 +1170,13 @@ export function VideoReviewEditor({
         originalSourceStart: Number(clip.source_start || 0),
         originalSourceEnd: Number(clip.source_end || 0),
       });
+      // pointer capture is best-effort; the window pointermove/up listeners drive
+      // the drag regardless, so a throw here must not abort starting the drag.
+      try {
+        (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+      } catch {
+        /* ignore */
+      }
     },
     [getTimelineTime, seekTimeline, selectSequenceClip]
   );
