@@ -149,7 +149,7 @@ async def classify_and_route(
     sender_email = _extract_email(sender) or _pick(sender_info.get("email"))
     subject = detected_message.get("subject") or "(件名なし)"
     body = detected_message.get("content") or ""
-    summary, draft = await svc._draft_email_reply(sender, subject, body)
+    summary, draft = await svc._draft_email_reply(sender, subject, body, detected_message.get("user_id"))
 
     if decision == "notify":
         # 返信不要だが知らせるべき重要情報 → 通知のみ（返信案なし）
