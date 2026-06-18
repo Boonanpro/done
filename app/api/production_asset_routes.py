@@ -631,9 +631,10 @@ def _clip_source_range(clip: dict[str, Any], metadata: dict[str, Any]) -> tuple[
     """Return (source_start, source_end, out_duration, source_duration, is_freeze).
 
     The clip's TIMELINE duration (timeline_end - timeline_start) is authoritative
-    for how long it occupies the output: out_duration = timeline duration. The
-    source range [start,end] is then fit into that (1x for a plain cut, time-warped
-    when the source span differs — e.g. a screen-operation timelapse).
+    for how long it occupies the output: out_duration = timeline duration. Playback
+    is always 1x (NO time-warp): if the source span is longer than the slot it is
+    trimmed (the head is shown at normal speed); if shorter, the caller freeze-pads
+    the last frame. This avoids fast-forward/slow-motion.
     A clip with source_start >= source_end is a freeze-frame held for out_duration."""
     asset_duration = float(metadata.get("duration") or clip.get("source_duration") or 0)
     source_start = max(0.0, float(clip.get("source_start") or 0))
@@ -645,7 +646,11 @@ def _clip_source_range(clip: dict[str, Any], metadata: dict[str, Any]) -> tuple[
         if asset_duration > 0:
             source_end = min(source_end, asset_duration)
         src_dur = max(0.05, source_end - source_start)
-        return source_start, source_end, (tl_dur if tl_dur > 0 else src_dur), src_dur, False
+        out_dur = tl_dur if tl_dur > 0 else src_dur
+        if src_dur > out_dur:  # source longer than slot: trim tail, keep 1x speed
+            source_end = source_start + out_dur
+            src_dur = out_dur
+        return source_start, source_end, out_dur, src_dur, False
     # freeze-frame: one frame held for the timeline duration
     return source_start, source_start + 0.04, max(0.05, tl_dur or 2.0), 0.0, True
 
@@ -705,11 +710,13 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
         source_start, source_end, out_dur, src_dur, is_freeze = _clip_source_range(clip, metadata)
         command.extend(["-i", str(source_path)])
-        speed = (out_dur / src_dur) if (not is_freeze and src_dur > 0.05) else 1.0
+        pad_needed = 0.0 if is_freeze else max(0.0, out_dur - src_dur)
+        _scale = f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30"
         if is_freeze:
-            setpts = f"setpts=PTS-STARTPTS,scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
+            setpts = f"setpts=PTS-STARTPTS,{_scale},tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
         else:
-            setpts = f"setpts={speed:.6f}*(PTS-STARTPTS),scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30"
+            _pad = f",tpad=stop_mode=clone:stop_duration={pad_needed:.3f}" if pad_needed > 0.02 else ""
+            setpts = f"setpts=PTS-STARTPTS,{_scale}{_pad}"
         filters.append(
             f"[{input_index}:v]"
             f"trim=start={source_start:.3f}:end={source_end:.3f},"
@@ -717,11 +724,11 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             f"[v{rendered_count}]"
         )
         if not has_audio_track:
-            if metadata.get("audio_codec") and not clip.get("muted") and not is_freeze and abs(speed - 1.0) < 0.02:
+            if metadata.get("audio_codec") and not clip.get("muted") and not is_freeze:
                 filters.append(
                     f"[{input_index}:a]"
                     f"atrim=start={source_start:.3f}:end={source_end:.3f},"
-                    "asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo"
+                    f"asetpts=PTS-STARTPTS,apad,atrim=duration={out_dur:.3f},aresample=48000,aformat=channel_layouts=stereo"
                     f"[a{rendered_count}]"
                 )
             else:
@@ -786,11 +793,11 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         py = max(0, min(output_height - 2, round(float(pos.get("y") or 0.835) * output_height)))
         ts = max(0.0, float(clip.get("timeline_start") or 0))
         te = max(ts + 0.05, float(clip.get("timeline_end") or (ts + ov_dur)))
-        ov_speed = (ov_dur / ov_src) if (not ov_freeze and ov_src > 0.05) else 1.0
+        ov_pad = 0.0 if ov_freeze else max(0.0, ov_dur - ov_src)
         if ov_freeze:
             ov_pre = f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={ov_dur:.3f},"
         else:
-            ov_pre = f"setpts={ov_speed:.6f}*(PTS-STARTPTS),"
+            ov_pre = "setpts=PTS-STARTPTS," + (f"tpad=stop_mode=clone:stop_duration={ov_pad:.3f}," if ov_pad > 0.02 else "")
         command.extend(["-i", str(source_path)])
         filters.append(
             f"[{input_index}:v]"
