@@ -4,8 +4,6 @@ import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, us
 import {
   ArrowLeft,
   Check,
-  ChevronDown,
-  ChevronUp,
   Eraser,
   MessageSquare,
   MousePointer2,
@@ -82,6 +80,7 @@ type TimelineLane = {
   key: string;
   label: string;
   zone: 'visual' | 'audio';
+  layer: number;
   height: number;
   items: LaneItem[];
 };
@@ -153,6 +152,9 @@ type SequenceClipDrag = {
   id: string;
   mode: 'start' | 'end' | 'move';
   startClientX: number;
+  startClientY: number;
+  zone: 'visual' | 'audio';
+  originalLayer: number;
   originalTimelineStart: number;
   originalTimelineEnd: number;
   originalSourceStart: number;
@@ -298,6 +300,9 @@ export function VideoReviewEditor({
   const [timelineDrag, setTimelineDrag] = useState<TimelineDrag | null>(null);
   const [pendingTimelineDrag, setPendingTimelineDrag] = useState<PendingTimelineDrag | null>(null);
   const [sequenceClipDrag, setSequenceClipDrag] = useState<SequenceClipDrag | null>(null);
+  const [extraLanes, setExtraLanes] = useState<{ visual: number; audio: number }>({ visual: 0, audio: 0 });
+  const [openNoteKey, setOpenNoteKey] = useState<string | null>(null);
+  const laneGeomRef = useRef<Array<{ zone: 'visual' | 'audio'; layer: number; top: number; bottom: number }>>([]);
   const [isTimelineScrubbing, setIsTimelineScrubbing] = useState(false);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [timelineHeight, setTimelineHeight] = useState(300);
@@ -390,17 +395,20 @@ export function VideoReviewEditor({
 
     const buildZone = (zone: 'visual' | 'audio'): TimelineLane[] => {
       const zoneAggs = aggs.filter((g) => g.zone === zone);
-      const layers = Array.from(new Set(zoneAggs.map((g) => g.layer)));
-      // visual: higher layer on top (descending). audio: lower layer on top (ascending).
-      layers.sort((x, y) => (zone === 'visual' ? y - x : x - y));
-      if (layers.length === 0) layers.push(0);
-      return layers.map((layer, i) => {
+      const layers = new Set(zoneAggs.map((g) => g.layer));
+      // Always offer empty lanes (added via "+段") so clips can be dragged onto them.
+      const maxUsed = layers.size ? Math.max(...layers) : 0;
+      for (let k = 1; k <= extraLanes[zone]; k += 1) layers.add(maxUsed + k);
+      if (layers.size === 0) layers.add(0);
+      const ordered = Array.from(layers).sort((x, y) => (zone === 'visual' ? y - x : x - y));
+      return ordered.map((layer, i) => {
         const items = zoneAggs.filter((g) => g.layer === layer).map((g) => g.item);
         const hasVideo = items.some((it) => it.itemType === 'video');
         return {
           key: `${zone}-${layer}`,
           label: `${zone === 'visual' ? '映像' : '音声'}${i + 1}`,
           zone,
+          layer,
           height: zone === 'audio' ? 26 : hasVideo ? 52 : 30,
           items,
         };
@@ -408,7 +416,21 @@ export function VideoReviewEditor({
     };
 
     return [...buildZone('visual'), ...buildZone('audio')];
-  }, [editSequence, annotations]);
+  }, [editSequence, annotations, extraLanes]);
+
+  // Y-geometry of each lane within the tracks column, for vertical drag hit-testing.
+  const laneGeom = useMemo(() => {
+    const out: Array<{ zone: 'visual' | 'audio'; layer: number; top: number; bottom: number }> = [];
+    let cursor = 0;
+    timelineLanes.forEach((lane, i) => {
+      if (i > 0) cursor += timelineLanes[i - 1].zone !== lane.zone ? 14 : 4;
+      const top = cursor;
+      cursor += lane.height;
+      out.push({ zone: lane.zone, layer: lane.layer, top, bottom: cursor });
+    });
+    return out;
+  }, [timelineLanes]);
+  laneGeomRef.current = laneGeom;
 
   const clipAtTime = useCallback(
     (time: number) =>
@@ -1124,6 +1146,9 @@ export function VideoReviewEditor({
         id: clip.id,
         mode,
         startClientX: event.clientX,
+        startClientY: event.clientY,
+        zone: clip.track === 'audio' || clip.role ? 'audio' : 'visual',
+        originalLayer: clip.layer ?? clipDefaultLayer(clip),
         originalTimelineStart: clip.timeline_start,
         originalTimelineEnd: clip.timeline_end,
         originalSourceStart: Number(clip.source_start || 0),
@@ -1166,10 +1191,20 @@ export function VideoReviewEditor({
       } else {
         const length = sequenceClipDrag.originalTimelineEnd - sequenceClipDrag.originalTimelineStart;
         const nextStart = Math.max(0, sequenceClipDrag.originalTimelineStart + delta);
-        updateSequenceClip(sequenceClipDrag.id, {
+        const patch: Partial<SequenceClip> = {
           timeline_start: Number(nextStart.toFixed(2)),
           timeline_end: Number((nextStart + length).toFixed(2)),
-        });
+        };
+        // Vertical: dropping onto another lane in the same zone changes the
+        // clip's layer (z-order). Cross-zone (visual<->audio) moves are ignored.
+        const yWithin = event.clientY - rect.top;
+        const target = laneGeomRef.current.find(
+          (g) => g.zone === sequenceClipDrag.zone && yWithin >= g.top && yWithin < g.bottom
+        );
+        if (target && target.layer !== (clip.layer ?? sequenceClipDrag.originalLayer)) {
+          patch.layer = target.layer;
+        }
+        updateSequenceClip(sequenceClipDrag.id, patch);
       }
     };
     const clearDrag = () => setSequenceClipDrag(null);
@@ -1412,10 +1447,36 @@ export function VideoReviewEditor({
                     <option key={it.value} value={it.value}>{it.label}</option>
                   ))}
                 </select>
-                <div className="ml-auto text-sm tabular-nums text-muted-foreground">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="ml-auto h-7 px-2 text-xs"
+                  title="映像の段を追加"
+                  onClick={() => setExtraLanes((s) => ({ ...s, visual: s.visual + 1 }))}
+                >
+                  + 映像段
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
+                  title="音声の段を追加"
+                  onClick={() => setExtraLanes((s) => ({ ...s, audio: s.audio + 1 }))}
+                >
+                  + 音声段
+                </Button>
+                <div className="text-sm tabular-nums text-muted-foreground">
                   {fmtTime(currentTime)} / {fmtTime(timelineDuration)}
                 </div>
               </div>
+              {openNoteKey ? (
+                <div className="mt-2 flex items-start gap-2 rounded-md border border-border bg-muted/40 p-2 text-xs">
+                  <span className="flex-1 whitespace-pre-wrap">{openNoteKey}</span>
+                  <button type="button" className="shrink-0 text-muted-foreground hover:text-foreground" onClick={() => setOpenNoteKey(null)} aria-label="閉じる">
+                    ×
+                  </button>
+                </div>
+              ) : null}
               <div ref={timelineScrollRef} className="mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2" onWheel={handleTimelineWheel}>
                 <div className="flex gap-x-2 text-[11px]">
                   <div className="flex w-[82px] shrink-0 flex-col">
@@ -1475,6 +1536,21 @@ export function VideoReviewEditor({
                                       aria-label="Resize start"
                                     />
                                     <span className="min-w-0 flex-1 truncate px-1">{itemTypeBadge(item.itemType)}</span>
+                                    {a.note ? (
+                                      <button
+                                        type="button"
+                                        className="h-full shrink-0 px-1 text-[9px] hover:bg-black/25"
+                                        title="メモを読む"
+                                        aria-label="メモ"
+                                        onPointerDown={(event) => event.stopPropagation()}
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          setOpenNoteKey((cur) => (cur === a.note ? null : a.note || null));
+                                        }}
+                                      >
+                                        ▼
+                                      </button>
+                                    ) : null}
                                     <button
                                       type="button"
                                       className="h-full w-2 cursor-ew-resize bg-black/25"
@@ -1761,40 +1837,9 @@ export function VideoReviewEditor({
                     placeholder="テロップ本文"
                   />
                 ) : null}
-                <div className="flex items-center justify-between gap-2 pt-1">
-                  <span className="text-xs text-muted-foreground">レイヤー（上=手前）</span>
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 w-7 p-0"
-                      title="上のレイヤーへ（手前）"
-                      onClick={() =>
-                        updateSelectedSequenceClip({
-                          layer: (selectedSequenceClip.layer ?? clipDefaultLayer(selectedSequenceClip)) + 1,
-                        })
-                      }
-                    >
-                      <ChevronUp className="h-4 w-4" />
-                    </Button>
-                    <span className="w-5 text-center text-xs tabular-nums">
-                      {selectedSequenceClip.layer ?? clipDefaultLayer(selectedSequenceClip)}
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="h-7 w-7 p-0"
-                      title="下のレイヤーへ（奥）"
-                      onClick={() =>
-                        updateSelectedSequenceClip({
-                          layer: Math.max(0, (selectedSequenceClip.layer ?? clipDefaultLayer(selectedSequenceClip)) - 1),
-                        })
-                      }
-                    >
-                      <ChevronDown className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </div>
+                <p className="pt-1 text-[10px] text-muted-foreground">
+                  クリップを掴んで左右で移動、端でトリミング、上下の段へドラッグで重ね順（レイヤー）を変更。Deleteで削除。
+                </p>
               </div>
             )}
           </aside>
