@@ -625,7 +625,6 @@ export function ProductionWorkspace({
         initialAnnotations={(selectedContent.timeline?.annotations as ReviewAnnotation[] | undefined) || undefined}
         initialSequence={(selectedContent.timeline?.sequence as EditSequence | undefined) || undefined}
         sequenceAssets={selectedSourceAssets.filter((asset) => asset.kind === 'video').map(sequenceAssetForEditor)}
-        renderedUrl={typeof selectedContent.outputs?.[0]?.url === 'string' ? (selectedContent.outputs[0].url as string) : undefined}
         sidePanelTop={
           <div className="mb-3 space-y-3">
             <div className="rounded-md border border-border p-3">
