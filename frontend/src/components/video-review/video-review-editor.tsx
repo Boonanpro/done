@@ -59,6 +59,29 @@ export type SequenceClip = {
   timeline_start: number;
   timeline_end: number;
   track?: string | null;
+  composition?: 'fullscreen' | 'pip' | 'background' | 'overlay' | string | null;
+  position?: { x: number; y: number; width: number; height: number } | null;
+  role?: 'dialogue' | 'music' | 'sfx' | string | null;
+  layer?: number | null;
+  type?: string | null;
+};
+
+type LaneItem = {
+  key: string;
+  kind: 'clip' | 'annotation';
+  itemType: string;
+  start: number;
+  end: number;
+  clip?: SequenceClip;
+  annotation?: ReviewAnnotation;
+};
+
+type TimelineLane = {
+  key: string;
+  label: string;
+  zone: 'visual' | 'audio';
+  height: number;
+  items: LaneItem[];
 };
 
 export type EditSequence = {
@@ -140,6 +163,34 @@ function trackForIntent(intent: string): 'audio' | 'visual' {
   return intent === 'audio' ? 'audio' : 'visual';
 }
 
+function itemTypeBadge(itemType: string): string {
+  switch (itemType) {
+    case 'video':
+      return '動画';
+    case 'caption':
+      return 'テロップ';
+    case 'effect':
+      return '効果';
+    case 'audio':
+      return '音声';
+    default:
+      return INTENTS.find((it) => it.value === itemType)?.label || itemType;
+  }
+}
+
+function clipItemColor(itemType: string): string {
+  switch (itemType) {
+    case 'caption':
+      return 'bg-violet-500/60';
+    case 'effect':
+      return 'bg-amber-600/70';
+    case 'audio':
+      return 'bg-lime-600/60';
+    default:
+      return 'bg-neutral-700/80';
+  }
+}
+
 function laneColor(intent: string, selected: boolean): string {
   if (selected) return 'border-yellow-300 bg-yellow-300/80 text-black';
   if (intent === 'blur') return 'border-sky-300 bg-sky-500/55 text-white';
@@ -174,6 +225,7 @@ export function VideoReviewEditor({
   initialAnnotations,
   initialSequence,
   sequenceAssets,
+  renderedUrl,
   embedded = false,
   onBack,
   onSaveTimeline,
@@ -187,6 +239,7 @@ export function VideoReviewEditor({
   initialAnnotations?: ReviewAnnotation[];
   initialSequence?: EditSequence | null;
   sequenceAssets?: SequenceAsset[];
+  renderedUrl?: string | null;
   embedded?: boolean;
   onBack?: () => void;
   onSaveTimeline?: (payload: SessionPayload) => void | Promise<void>;
@@ -250,6 +303,89 @@ export function VideoReviewEditor({
     [editSequence]
   );
 
+  // NLE-style ordered lanes derived from the sequence tracks + annotations.
+  // Order top→bottom: visual instructions, captions, effects, overlay video
+  // layers, base video (middle), audio lanes by role, audio instructions.
+  const timelineLanes = useMemo<TimelineLane[]>(() => {
+    const tracks = editSequence?.tracks || [];
+    // NLE-style free layers: the only fixed rule is visual-on-top / audio-on-bottom.
+    // Within each zone, layers are free — any clip/annotation can sit on any layer,
+    // higher layer = closer to front (z-order). Roles/types are per-item badges, not
+    // dedicated lanes.
+    type Agg = { zone: 'visual' | 'audio'; layer: number; item: LaneItem };
+    const aggs: Agg[] = [];
+    const audioRoleLayer = (role?: string | null) => (role === 'sfx' ? 1 : role === 'music' ? 2 : 0);
+
+    let counter = 0;
+    for (const track of tracks) {
+      for (const clip of track.clips || []) {
+        let zone: 'visual' | 'audio' = 'visual';
+        let itemType = 'video';
+        let layer = clip.layer ?? 0;
+        if (track.type === 'audio') {
+          zone = 'audio';
+          itemType = 'audio';
+          layer = clip.layer ?? audioRoleLayer(clip.role);
+        } else if (track.type === 'caption') {
+          itemType = 'caption';
+          layer = clip.layer ?? 2;
+        } else if (track.type === 'effect') {
+          itemType = 'effect';
+          layer = clip.layer ?? 3;
+        } else if (track.type === 'overlay') {
+          itemType = 'video';
+          layer = clip.layer ?? 1;
+        } else {
+          const overlay = clip.composition === 'pip' || clip.composition === 'overlay';
+          itemType = 'video';
+          layer = clip.layer ?? (overlay ? 1 : 0);
+        }
+        aggs.push({
+          zone,
+          layer,
+          item: {
+            key: clip.id || `${track.id || 'tk'}-${counter++}`,
+            kind: 'clip',
+            itemType,
+            start: clip.timeline_start,
+            end: clip.timeline_end,
+            clip,
+          },
+        });
+      }
+    }
+
+    for (const a of annotations) {
+      const zone = trackForIntent(a.intent);
+      aggs.push({
+        zone,
+        layer: 5,
+        item: { key: a.id, kind: 'annotation', itemType: a.intent, start: a.start, end: a.end ?? a.start + 0.2, annotation: a },
+      });
+    }
+
+    const buildZone = (zone: 'visual' | 'audio'): TimelineLane[] => {
+      const zoneAggs = aggs.filter((g) => g.zone === zone);
+      const layers = Array.from(new Set(zoneAggs.map((g) => g.layer)));
+      // visual: higher layer on top (descending). audio: lower layer on top (ascending).
+      layers.sort((x, y) => (zone === 'visual' ? y - x : x - y));
+      if (layers.length === 0) layers.push(0);
+      return layers.map((layer, i) => {
+        const items = zoneAggs.filter((g) => g.layer === layer).map((g) => g.item);
+        const hasVideo = items.some((it) => it.itemType === 'video');
+        return {
+          key: `${zone}-${layer}`,
+          label: `${zone === 'visual' ? '映像' : '音声'}${i + 1}`,
+          zone,
+          height: zone === 'audio' ? 26 : hasVideo ? 52 : 30,
+          items,
+        };
+      });
+    };
+
+    return [...buildZone('visual'), ...buildZone('audio')];
+  }, [editSequence, annotations]);
+
   const clipAtTime = useCallback(
     (time: number) =>
       sequenceVideoClips.find(
@@ -286,13 +422,18 @@ export function VideoReviewEditor({
     [currentTime, sequenceCaptionClips]
   );
 
+  // When a rendered output mp4 is available, the timeline plays that single
+  // file directly (the playhead scrubs the real render), instead of the virtual
+  // clip-switching preview reconstructed from source assets.
+  const renderedMode = !!renderedUrl;
   const source = useMemo(() => {
+    if (renderedUrl) return renderedUrl;
     if (activeSequenceAsset?.url) return activeSequenceAsset.url;
     if (activeSequenceAsset?.path) return `/api/v1/video-review/media?path=${encodeURIComponent(activeSequenceAsset.path)}`;
     if (videoUrl) return videoUrl;
     if (!videoPath) return '';
     return `/api/v1/video-review/media?path=${encodeURIComponent(videoPath)}`;
-  }, [activeSequenceAsset, videoPath, videoUrl]);
+  }, [renderedUrl, activeSequenceAsset, videoPath, videoUrl]);
 
   const sessionQuery = useMemo(() => {
     const params = new URLSearchParams();
@@ -311,14 +452,20 @@ export function VideoReviewEditor({
     () => Number(editSequence?.duration || Math.max(0, ...sequenceVideoClips.map((clip) => clip.timeline_end || 0))),
     [editSequence, sequenceVideoClips]
   );
-  const timelineDuration = sequenceDuration > 0 ? sequenceDuration : duration;
+  const timelineDuration = renderedMode
+    ? (duration > 0 ? duration : sequenceDuration)
+    : (sequenceDuration > 0 ? sequenceDuration : duration);
   const seekTimeline = useCallback(
     (time: number) => {
       const maxDuration = timelineDuration || duration || 0;
       const nextTime = Number(clamp(time, 0, maxDuration).toFixed(3));
       setCurrentTime(nextTime);
-      const clip = clipAtTime(nextTime);
       const video = videoRef.current;
+      if (renderedMode) {
+        if (video) video.currentTime = nextTime;
+        return;
+      }
+      const clip = clipAtTime(nextTime);
       if (clip?.asset_id && sequenceAssetMap.has(clip.asset_id)) {
         setPreviewAssetId(clip.asset_id);
         pendingSeekRef.current = clip.source_start + (nextTime - clip.timeline_start);
@@ -330,7 +477,7 @@ export function VideoReviewEditor({
       }
       if (video) video.currentTime = nextTime;
     },
-    [clipAtTime, duration, previewAssetId, sequenceAssetMap, timelineDuration]
+    [clipAtTime, duration, previewAssetId, sequenceAssetMap, timelineDuration, renderedMode]
   );
   const isActiveAnnotation = useCallback(
     (annotation: Pick<ReviewAnnotation, 'start' | 'end'>) => (
@@ -1058,7 +1205,7 @@ export function VideoReviewEditor({
                     className="block h-full w-full select-none object-contain"
                     onLoadedMetadata={(e) => {
                       const d = e.currentTarget.duration || 0;
-                      if (sequenceVideoClips.length === 0) setDuration(Number(d.toFixed(3)));
+                      if (renderedMode || sequenceVideoClips.length === 0) setDuration(Number(d.toFixed(3)));
                       if (pendingSeekRef.current != null) {
                         e.currentTarget.currentTime = pendingSeekRef.current;
                         pendingSeekRef.current = null;
@@ -1066,7 +1213,7 @@ export function VideoReviewEditor({
                       window.requestAnimationFrame(updateVideoContentRect);
                     }}
                     onTimeUpdate={(e) => {
-                      if (activePreviewClip && sequenceVideoClips.length > 0) {
+                      if (!renderedMode && activePreviewClip && sequenceVideoClips.length > 0) {
                         const sourceTime = e.currentTarget.currentTime;
                         const nextTimelineTime = activePreviewClip.timeline_start + (sourceTime - activePreviewClip.source_start);
                         if (sourceTime >= activePreviewClip.source_end - 0.03) {
@@ -1191,7 +1338,7 @@ export function VideoReviewEditor({
                   {draftRectStyle && (
                     <div className="absolute border-2 border-orange-400 bg-orange-500/15" style={draftRectStyle} />
                   )}
-                  {activeSequenceCaptions.length > 0 ? (
+                  {!renderedMode && activeSequenceCaptions.length > 0 ? (
                     <div className="absolute inset-x-4 bottom-8 flex justify-center">
                       <div className="max-w-[92%] rounded bg-black/70 px-3 py-1.5 text-center text-lg font-bold leading-snug text-white shadow-lg">
                         {activeSequenceCaptions[activeSequenceCaptions.length - 1].text}
@@ -1239,210 +1386,157 @@ export function VideoReviewEditor({
                 </div>
               </div>
               <div ref={timelineScrollRef} className="mt-3 h-[calc(100%-48px)] overflow-auto rounded-md border border-border bg-muted/40 p-2" onWheel={handleTimelineWheel}>
-                <div className="grid grid-cols-[82px_1fr] gap-x-2 text-[11px]">
-                  <div className="flex h-16 items-center justify-end pr-1 font-medium text-muted-foreground">Video</div>
-                  <div
-                    ref={timelineRef}
-                    className={`relative h-16 overflow-hidden rounded bg-neutral-900 ${isTimelineScrubbing ? 'cursor-grabbing' : 'cursor-ew-resize'}`}
-                    style={timelineTrackStyle}
-                    onPointerDown={handleTimelinePointerDown}
-                    onPointerUp={() => setTimelineDrag(null)}
-                    onPointerCancel={() => setTimelineDrag(null)}
-                  >
-                    <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(255,255,255,0.08)_0,rgba(255,255,255,0.08)_1px,transparent_1px,transparent_48px)]" />
-                    <div className="pointer-events-none absolute inset-x-0 top-0 h-4 border-b border-white/10 bg-white/5" />
-                    {sequenceVideoClips.length > 0 ? (
-                      <div className="pointer-events-none absolute inset-0 flex">
-                        {sequenceVideoClips.map((clip, index) => {
-                          const left = timelineDuration ? (clip.timeline_start / timelineDuration) * 100 : 0;
-                          const width = timelineDuration
-                            ? Math.max(1.2, ((clip.timeline_end - clip.timeline_start) / timelineDuration) * 100)
-                            : 1;
-                          const clipAsset = clip.asset_id ? sequenceAssetMap.get(clip.asset_id) : null;
-                          return (
-                            <div
-                              key={clip.id || `${clip.asset_id}-${index}`}
-                              className={`pointer-events-none absolute top-5 flex h-10 overflow-hidden rounded border bg-neutral-700/80 bg-cover bg-center text-[10px] text-white shadow-sm ${
-                                selectedSequenceClipIds.includes(clip.id) ? 'border-yellow-300 ring-2 ring-yellow-300/70' : 'border-white/30'
-                              }`}
-                              style={{
-                                left: `${left}%`,
-                                width: `${width}%`,
-                                ...(clipAsset?.thumbnail_url
-                                  ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.38), rgba(0,0,0,0.38)), url(${clipAsset.thumbnail_url})` }
-                                  : {}),
-                              }}
-                              title={`${clip.label || clip.asset_id || '素材'} / source ${fmtTime(clip.source_start)}-${fmtTime(clip.source_end)}`}
-                            >
-                              <button
-                                type="button"
-                                className="pointer-events-auto h-full w-2 shrink-0 cursor-ew-resize bg-black/35"
-                                onPointerDown={(event) => startSequenceClipDrag(event, clip, 'start')}
-                                aria-label="Resize clip start"
-                              />
-                              <div
-                                className="pointer-events-auto min-w-0 flex-1 cursor-grab px-1 py-1 active:cursor-grabbing"
-                                onPointerDown={(event) => startSequenceClipDrag(event, clip, 'move')}
-                                onDoubleClick={(event) => {
-                                  event.stopPropagation();
-                                  selectSequenceClip(clip.id);
-                                  seekTimeline(clip.timeline_start);
-                                }}
-                              >
-                                <div className="truncate font-medium">{clip.label || `素材 ${index + 1}`}</div>
-                                <div className="truncate opacity-75">{fmtTime(clip.source_start)}-{fmtTime(clip.source_end)}</div>
-                              </div>
-                              <button
-                                type="button"
-                                className="pointer-events-auto h-full w-2 shrink-0 cursor-ew-resize bg-black/35"
-                                onPointerDown={(event) => startSequenceClipDrag(event, clip, 'end')}
-                                aria-label="Resize clip end"
-                              />
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                    <div
-                      className="pointer-events-none absolute top-0 h-full w-px bg-destructive"
-                      style={{ left: `${timelineDuration ? (currentTime / timelineDuration) * 100 : 0}%` }}
-                    />
-                  </div>
-
-                  <div className="mt-1 flex h-8 items-center justify-end pr-1 text-muted-foreground">テロップ</div>
-                  <div
-                    className="relative mt-1 h-8 overflow-hidden rounded border border-border/60 bg-background"
-                    style={timelineTrackStyle}
-                    onPointerDown={handleTimelinePointerDown}
-                  >
-                    <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
-                    {sequenceCaptionClips.map((clip, index) => {
-                      const left = timelineDuration ? (clip.timeline_start / timelineDuration) * 100 : 0;
-                      const width = timelineDuration
-                        ? Math.max(0.8, ((clip.timeline_end - clip.timeline_start) / timelineDuration) * 100)
-                        : 1;
-                      return (
-                        <div
-                          key={clip.id || `caption-${index}`}
-                          className={`absolute top-1 flex h-6 items-center overflow-hidden rounded border bg-violet-500/60 text-[10px] text-white shadow-sm ${
-                            selectedSequenceClipIds.includes(clip.id) ? 'border-yellow-300 ring-2 ring-yellow-300/70' : 'border-violet-300'
-                          }`}
-                          style={{ left: `${left}%`, width: `${width}%` }}
-                          title={clip.text || ''}
-                        >
-                          <button
-                            type="button"
-                            className="h-full w-2 shrink-0 cursor-ew-resize bg-black/25"
-                            onPointerDown={(event) => startSequenceClipDrag(event, clip, 'start')}
-                            aria-label="Resize caption start"
-                          />
-                          <button
-                            type="button"
-                            className="min-w-0 flex-1 cursor-grab truncate px-1 text-left active:cursor-grabbing"
-                            onPointerDown={(event) => startSequenceClipDrag(event, clip, 'move')}
-                            onDoubleClick={(event) => {
-                              event.stopPropagation();
-                              selectSequenceClip(clip.id);
-                              seekTimeline(clip.timeline_start);
-                            }}
-                          >
-                            {clip.text || 'テロップ'}
-                          </button>
-                          <button
-                            type="button"
-                            className="h-full w-2 shrink-0 cursor-ew-resize bg-black/25"
-                            onPointerDown={(event) => startSequenceClipDrag(event, clip, 'end')}
-                            aria-label="Resize caption end"
-                          />
-                        </div>
-                      );
-                    })}
-                    <div
-                      className="pointer-events-none absolute top-0 h-full w-px bg-destructive"
-                      style={{ left: `${timelineDuration ? (currentTime / timelineDuration) * 100 : 0}%` }}
-                    />
-                  </div>
-
-                  {[
-                    { key: 'visual', label: '映像指示' },
-                    { key: 'audio', label: '音声指示' },
-                  ].map((track) => (
-                    <div key={track.key} className="contents">
-                      <div className="mt-1 flex h-8 items-center justify-end pr-1 text-muted-foreground">{track.label}</div>
+                <div className="flex gap-x-2 text-[11px]">
+                  <div className="flex w-[82px] shrink-0 flex-col">
+                    {timelineLanes.map((lane, i) => (
                       <div
-                        className="relative mt-1 h-8 overflow-hidden rounded border border-border/60 bg-background"
-                        style={timelineTrackStyle}
-                        onPointerDown={(event) => {
-                          if (event.target === event.currentTarget) clearSelection();
-                        }}
+                        key={lane.key}
+                        className="flex items-center justify-end pr-1 text-right font-medium text-muted-foreground"
+                        style={{ height: lane.height, marginTop: i === 0 ? 0 : timelineLanes[i - 1].zone !== lane.zone ? 14 : 4 }}
                       >
-                        <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
-                        {annotations
-                          .filter((a) => trackForIntent(a.intent) === track.key)
-                          .map((a) => {
-                            const left = timelineDuration ? (a.start / timelineDuration) * 100 : 0;
-                            const width = timelineDuration ? Math.max(0.8, (((a.end ?? a.start + 0.2) - a.start) / timelineDuration) * 100) : 1;
-                            return (
+                        <span className="truncate">{lane.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div ref={timelineRef} className="relative" style={timelineTrackStyle}>
+                      {timelineLanes.map((lane, laneIndex) => {
+                        const zoneChanged = laneIndex > 0 && timelineLanes[laneIndex - 1].zone !== lane.zone;
+                        const showPending =
+                          !!pendingAnnotation &&
+                          lane.zone === trackForIntent(pendingAnnotation.intent) &&
+                          timelineLanes.findIndex((l) => l.zone === lane.zone) === laneIndex;
+                        return (
+                          <div
+                            key={lane.key}
+                            className={`relative w-full overflow-hidden rounded border ${
+                              lane.zone === 'audio' ? 'border-border/60 bg-background' : 'border-white/10 bg-neutral-900'
+                            } ${isTimelineScrubbing ? 'cursor-grabbing' : 'cursor-ew-resize'}`}
+                            style={{ height: lane.height, marginTop: laneIndex === 0 ? 0 : zoneChanged ? 14 : 4 }}
+                            onPointerDown={(event) => {
+                              if (event.target === event.currentTarget) handleTimelinePointerDown(event);
+                            }}
+                            onPointerUp={() => setTimelineDrag(null)}
+                            onPointerCancel={() => setTimelineDrag(null)}
+                          >
+                            <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
+                            {lane.items.map((item) => {
+                              const left = timelineDuration ? (item.start / timelineDuration) * 100 : 0;
+                              const width = timelineDuration ? Math.max(0.8, ((item.end - item.start) / timelineDuration) * 100) : 1;
+                              if (item.kind === 'annotation' && item.annotation) {
+                                const a = item.annotation;
+                                return (
+                                  <div
+                                    key={item.key}
+                                    className={`absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${laneColor(a.intent, selectedIds.includes(a.id))}`}
+                                    style={{ left: `${left}%`, width: `${width}%` }}
+                                    onPointerDown={(event) => startTimelineDrag(event, a, 'move')}
+                                    onDoubleClick={() => {
+                                      selectAnnotation(a.id);
+                                      seekTimeline(a.start);
+                                    }}
+                                    title={`${a.intent}: ${fmtTime(a.start)} - ${fmtTime(a.end)} ${a.note || ''}`}
+                                  >
+                                    <button
+                                      type="button"
+                                      className="h-full w-2 cursor-ew-resize bg-black/25"
+                                      onPointerDown={(event) => startTimelineDrag(event, a, 'start')}
+                                      aria-label="Resize start"
+                                    />
+                                    <span className="min-w-0 flex-1 truncate px-1">{itemTypeBadge(item.itemType)}</span>
+                                    <button
+                                      type="button"
+                                      className="h-full w-2 cursor-ew-resize bg-black/25"
+                                      onPointerDown={(event) => startTimelineDrag(event, a, 'end')}
+                                      aria-label="Resize end"
+                                    />
+                                  </div>
+                                );
+                              }
+                              const clip = item.clip;
+                              if (!clip) return null;
+                              const clipAsset = clip.asset_id ? sequenceAssetMap.get(clip.asset_id) : null;
+                              const selected = selectedSequenceClipIds.includes(clip.id);
+                              const isVideo = item.itemType === 'video';
+                              const labelText =
+                                item.itemType === 'caption' ? clip.text || 'テロップ' : clip.label || (item.itemType === 'audio' ? '音声' : '素材');
+                              return (
+                                <div
+                                  key={item.key}
+                                  className={`absolute flex items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm ${clipItemColor(item.itemType)} ${
+                                    selected ? 'border-yellow-300 ring-2 ring-yellow-300/70' : 'border-white/30'
+                                  }`}
+                                  style={{
+                                    left: `${left}%`,
+                                    width: `${width}%`,
+                                    top: 3,
+                                    bottom: 3,
+                                    ...(isVideo && clipAsset?.thumbnail_url
+                                      ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.4)), url(${clipAsset.thumbnail_url})` }
+                                      : {}),
+                                  }}
+                                  title={`${itemTypeBadge(item.itemType)}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}`}
+                                >
+                                  <button
+                                    type="button"
+                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
+                                    onPointerDown={(event) => startSequenceClipDrag(event, clip, 'start')}
+                                    aria-label="Resize clip start"
+                                  />
+                                  <div
+                                    className="flex min-w-0 flex-1 cursor-grab items-center gap-1 truncate px-1 active:cursor-grabbing"
+                                    onPointerDown={(event) => startSequenceClipDrag(event, clip, 'move')}
+                                    onDoubleClick={(event) => {
+                                      event.stopPropagation();
+                                      selectSequenceClip(clip.id);
+                                      seekTimeline(clip.timeline_start);
+                                    }}
+                                  >
+                                    <span className="shrink-0 rounded bg-black/45 px-1 text-[8px] leading-tight">{itemTypeBadge(item.itemType)}</span>
+                                    <span className="truncate">{labelText}</span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="h-full w-2 shrink-0 cursor-ew-resize bg-black/30"
+                                    onPointerDown={(event) => startSequenceClipDrag(event, clip, 'end')}
+                                    aria-label="Resize clip end"
+                                  />
+                                </div>
+                              );
+                            })}
+                            {showPending && pendingAnnotation ? (
                               <div
-                                key={a.id}
-                                className={`absolute top-1 flex h-6 cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${laneColor(a.intent, selectedIds.includes(a.id))}`}
-                                style={{ left: `${left}%`, width: `${width}%` }}
-                                onPointerDown={(event) => startTimelineDrag(event, a, 'move')}
-                                onDoubleClick={() => {
-                                  selectAnnotation(a.id);
-                                  seekTimeline(a.start);
+                                className="absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border border-orange-300 bg-orange-400/65 text-[10px] text-black active:cursor-grabbing"
+                                style={{
+                                  left: `${timelineDuration ? (pendingAnnotation.start / timelineDuration) * 100 : 0}%`,
+                                  width: `${timelineDuration ? Math.max(0.8, (((pendingAnnotation.end ?? pendingAnnotation.start + 0.2) - pendingAnnotation.start) / timelineDuration) * 100) : 1}%`,
                                 }}
-                                title={`${a.intent}: ${fmtTime(a.start)} - ${fmtTime(a.end)} ${a.note || ''}`}
+                                onPointerDown={(event) => startPendingTimelineDrag(event, 'move')}
                               >
                                 <button
                                   type="button"
                                   className="h-full w-2 cursor-ew-resize bg-black/25"
-                                  onPointerDown={(event) => startTimelineDrag(event, a, 'start')}
-                                  aria-label="Resize start"
+                                  onPointerDown={(event) => startPendingTimelineDrag(event, 'start')}
+                                  aria-label="Resize pending start"
                                 />
-                                <span className="min-w-0 flex-1 truncate px-1">
-                                  {INTENTS.find((it) => it.value === a.intent)?.label || a.intent}
-                                </span>
+                                <span className="min-w-0 flex-1 truncate px-1">未確定</span>
                                 <button
                                   type="button"
                                   className="h-full w-2 cursor-ew-resize bg-black/25"
-                                  onPointerDown={(event) => startTimelineDrag(event, a, 'end')}
-                                  aria-label="Resize end"
+                                  onPointerDown={(event) => startPendingTimelineDrag(event, 'end')}
+                                  aria-label="Resize pending end"
                                 />
                               </div>
-                            );
-                          })}
-                        {pendingAnnotation && trackForIntent(pendingAnnotation.intent) === track.key ? (
-                          <div
-                            className="absolute top-1 flex h-6 cursor-grab items-center overflow-hidden rounded border border-orange-300 bg-orange-400/65 text-[10px] text-black active:cursor-grabbing"
-                            style={{
-                              left: `${timelineDuration ? (pendingAnnotation.start / timelineDuration) * 100 : 0}%`,
-                              width: `${timelineDuration ? Math.max(0.8, (((pendingAnnotation.end ?? pendingAnnotation.start + 0.2) - pendingAnnotation.start) / timelineDuration) * 100) : 1}%`,
-                            }}
-                            onPointerDown={(event) => startPendingTimelineDrag(event, 'move')}
-                          >
-                            <button
-                              type="button"
-                              className="h-full w-2 cursor-ew-resize bg-black/25"
-                              onPointerDown={(event) => startPendingTimelineDrag(event, 'start')}
-                              aria-label="Resize pending start"
-                            />
-                            <span className="min-w-0 flex-1 truncate px-1">未確定</span>
-                            <button
-                              type="button"
-                              className="h-full w-2 cursor-ew-resize bg-black/25"
-                              onPointerDown={(event) => startPendingTimelineDrag(event, 'end')}
-                              aria-label="Resize pending end"
-                            />
+                            ) : null}
                           </div>
-                        ) : null}
-                        <div
-                          className="pointer-events-none absolute top-0 h-full w-px bg-destructive"
-                          style={{ left: `${timelineDuration ? (currentTime / timelineDuration) * 100 : 0}%` }}
-                        />
-                      </div>
+                        );
+                      })}
+                      <div
+                        className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-destructive"
+                        style={{ left: `${timelineDuration ? (currentTime / timelineDuration) * 100 : 0}%` }}
+                      />
                     </div>
-                  ))}
+                  </div>
                 </div>
               </div>
             </div>
