@@ -225,7 +225,9 @@ export function ProductionWorkspace({
         void loadAll();
       }
     } catch (error) {
-      toast.error('Failed to load production jobs', { description: String(error).slice(0, 160) });
+      // Polled every 2s; a transient failure (e.g. the sandbox restarting on deploy)
+      // self-heals on the next tick, so don't spam a toast for it.
+      console.warn('loadJobs failed (will retry):', String(error).slice(0, 160));
     }
   }, [loadAll, roomId, selectedContent]);
 
