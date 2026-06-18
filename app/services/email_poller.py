@@ -125,6 +125,17 @@ async def _route_new(owner_id: str) -> None:
             else:
                 # 対応不要/非メール/判定不能 → 再試行しないよう印（inbox には残る）
                 await asyncio.to_thread(_mark_attempted, msg["id"])
+
+            # 添付付きの着信は dan-notion の案件×フォルダへ自動仕分け（契約書/動画素材等）
+            atts = (msg.get("metadata") or {}).get("attachments") or []
+            if atts:
+                try:
+                    from app.services.dan_notion_sorter import sort_detected_message
+                    sorted_res = await sort_detected_message(msg)
+                    if sorted_res:
+                        logger.info("[notion-sort] msg=%s -> %s", msg.get("id"), sorted_res.get("decision"))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[notion-sort] failed msg=%s: %s", msg.get("id"), e)
         except Exception as e:  # noqa: BLE001
             logger.warning("[email] route failed for msg=%s: %s", msg.get("id"), e)
 
