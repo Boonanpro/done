@@ -579,15 +579,112 @@ def _blur_annotations(instruction: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _is_overlay_clip(clip: dict[str, Any]) -> bool:
+    return str(clip.get("composition") or "") in ("pip", "overlay")
+
+
+def _sequence_overlay_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Clips that should be composited ON TOP of the base video (PiP / wipe).
+    From overlay-type tracks, plus video-track clips marked composition pip/overlay."""
+    if not isinstance(sequence, dict):
+        return []
+    clips: list[dict[str, Any]] = []
+    for track in sequence.get("tracks") or []:
+        if not isinstance(track, dict):
+            continue
+        ttype = track.get("type")
+        for clip in track.get("clips") or []:
+            if not isinstance(clip, dict):
+                continue
+            if ttype == "overlay" or (ttype == "video" and _is_overlay_clip(clip)):
+                clips.append(clip)
+    return sorted(clips, key=lambda c: (float(c.get("layer") or 0), float(c.get("timeline_start") or 0)))
+
+
+def _sequence_audio_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(sequence, dict):
+        return []
+    clips: list[dict[str, Any]] = []
+    for track in sequence.get("tracks") or []:
+        if not isinstance(track, dict) or track.get("type") != "audio":
+            continue
+        for clip in track.get("clips") or []:
+            if isinstance(clip, dict) and clip.get("asset_id"):
+                clips.append(clip)
+    return sorted(clips, key=lambda c: float(c.get("timeline_start") or 0))
+
+
+def _sequence_effect_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(sequence, dict):
+        return []
+    clips: list[dict[str, Any]] = []
+    for track in sequence.get("tracks") or []:
+        if not isinstance(track, dict) or track.get("type") != "effect":
+            continue
+        for clip in track.get("clips") or []:
+            if isinstance(clip, dict) and isinstance(clip.get("region"), dict):
+                clips.append(clip)
+    return clips
+
+
+def _clip_source_range(clip: dict[str, Any], metadata: dict[str, Any]) -> tuple[float, float, float, float, bool]:
+    """Return (source_start, source_end, out_duration, source_duration, is_freeze).
+
+    The clip's TIMELINE duration (timeline_end - timeline_start) is authoritative
+    for how long it occupies the output: out_duration = timeline duration. The
+    source range [start,end] is then fit into that (1x for a plain cut, time-warped
+    when the source span differs — e.g. a screen-operation timelapse).
+    A clip with source_start >= source_end is a freeze-frame held for out_duration."""
+    asset_duration = float(metadata.get("duration") or clip.get("source_duration") or 0)
+    source_start = max(0.0, float(clip.get("source_start") or 0))
+    source_end = float(clip.get("source_end") or 0)
+    tl_start = float(clip.get("timeline_start") or 0)
+    tl_end = float(clip.get("timeline_end") or 0)
+    tl_dur = tl_end - tl_start if tl_end > tl_start else 0.0
+    if source_end > source_start:
+        if asset_duration > 0:
+            source_end = min(source_end, asset_duration)
+        src_dur = max(0.05, source_end - source_start)
+        return source_start, source_end, (tl_dur if tl_dur > 0 else src_dur), src_dur, False
+    # freeze-frame: one frame held for the timeline duration
+    return source_start, source_start + 0.04, max(0.05, tl_dur or 2.0), 0.0, True
+
+
+def _blur_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int, start: float, end: float, style: str) -> tuple[str, str]:
+    """Return (filter_string, out_label) for a time-gated regional blur/mosaic overlay."""
+    out = f"vblur{idx}"
+    base, crop, blurred = f"bbase{idx}", f"bcrop{idx}", f"bblur{idx}"
+    style = (style or "").lower()
+    if "mosaic" in style:
+        down_w = max(2, w // 12)
+        down_h = max(2, h // 12)
+        proc = f"crop={w}:{h}:{x}:{y},scale={down_w}:{down_h}:flags=neighbor,scale={w}:{h}:flags=neighbor"
+    elif "gaussian" in style or "gblur" in style or "soft" in style:
+        proc = f"crop={w}:{h}:{x}:{y},gblur=sigma=18"
+    else:
+        proc = f"crop={w}:{h}:{x}:{y},boxblur=18:2"
+    filt = (
+        f"[{video_in}]split[{base}][{crop}];"
+        f"[{crop}]{proc}[{blurred}];"
+        f"[{base}][{blurred}]overlay={x}:{y}:enable='between(t\\,{start:.3f}\\,{end:.3f})'[{out}]"
+    )
+    return filt, out
+
+
 def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
     if not isinstance(sequence, dict):
         return None
 
-    clips = _sequence_video_clips(sequence)
-    if not clips:
+    base_clips = [c for c in _sequence_video_clips(sequence) if not _is_overlay_clip(c)]
+    if not base_clips:
         return None
+
+    overlay_clips = _sequence_overlay_clips(sequence)
+    audio_clips = _sequence_audio_clips(sequence)
+    effect_clips = _sequence_effect_clips(sequence)
+    has_audio_track = len(audio_clips) > 0
 
     assets = _assets_by_id(room_id)
     output_width, output_height = _output_size(str(sequence.get("format") or timeline.get("format") or "9:16"))
@@ -595,71 +692,118 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
 
     command = [_ffmpeg(), "-y"]
     filters: list[str] = []
+    input_index = 0
+
+    # --- base video: concat the full-frame clips (pip/overlay clips excluded) ---
     concat_parts: list[str] = []
     rendered_count = 0
-
-    for index, clip in enumerate(clips):
-        asset_id = str(clip.get("asset_id") or "")
-        asset = assets.get(asset_id)
+    for clip in base_clips:
+        asset = assets.get(str(clip.get("asset_id") or ""))
         if not asset or asset.get("kind") != "video":
             continue
-
         source_path = _asset_source_path(asset)
         metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
-        source_duration = float(metadata.get("duration") or clip.get("source_duration") or 0)
-        source_start = max(0.0, float(clip.get("source_start") or 0))
-        source_end = float(clip.get("source_end") or 0)
-        if source_end <= source_start:
-            source_end = source_duration if source_duration > source_start else source_start + 1.0
-        if source_duration > 0:
-            source_end = min(source_end, source_duration)
-        clip_duration = max(0.05, source_end - source_start)
-
-        input_index = rendered_count
+        source_start, source_end, out_dur, src_dur, is_freeze = _clip_source_range(clip, metadata)
         command.extend(["-i", str(source_path)])
+        speed = (out_dur / src_dur) if (not is_freeze and src_dur > 0.05) else 1.0
+        if is_freeze:
+            setpts = f"setpts=PTS-STARTPTS,scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
+        else:
+            setpts = f"setpts={speed:.6f}*(PTS-STARTPTS),scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30"
         filters.append(
             f"[{input_index}:v]"
             f"trim=start={source_start:.3f}:end={source_end:.3f},"
-            "setpts=PTS-STARTPTS,"
-            f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
-            f"crop={output_width}:{output_height},"
-            "setsar=1,fps=30,format=yuv420p"
+            f"{setpts},format=yuv420p"
             f"[v{rendered_count}]"
         )
-        if metadata.get("audio_codec"):
-            filters.append(
-                f"[{input_index}:a]"
-                f"atrim=start={source_start:.3f}:end={source_end:.3f},"
-                "asetpts=PTS-STARTPTS,aresample=48000"
-                f"[a{rendered_count}]"
-            )
+        if not has_audio_track:
+            if metadata.get("audio_codec") and not clip.get("muted") and not is_freeze and abs(speed - 1.0) < 0.02:
+                filters.append(
+                    f"[{input_index}:a]"
+                    f"atrim=start={source_start:.3f}:end={source_end:.3f},"
+                    "asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo"
+                    f"[a{rendered_count}]"
+                )
+            else:
+                filters.append(
+                    f"anullsrc=r=48000:cl=stereo,atrim=duration={out_dur:.3f},asetpts=PTS-STARTPTS"
+                    f"[a{rendered_count}]"
+                )
+            concat_parts.extend([f"[v{rendered_count}]", f"[a{rendered_count}]"])
         else:
-            filters.append(
-                f"anullsrc=r=48000:cl=stereo,atrim=duration={clip_duration:.3f},asetpts=PTS-STARTPTS"
-                f"[a{rendered_count}]"
-            )
-        concat_parts.extend([f"[v{rendered_count}]", f"[a{rendered_count}]"])
+            concat_parts.append(f"[v{rendered_count}]")
+        input_index += 1
         rendered_count += 1
 
     if rendered_count == 0:
         return None
 
-    filters.append("".join(concat_parts) + f"concat=n={rendered_count}:v=1:a=1[vcat][acat]")
+    if has_audio_track:
+        filters.append("".join(concat_parts) + f"concat=n={rendered_count}:v=1:a=0[vcat]")
+        base_audio_out: str | None = None
+    else:
+        filters.append("".join(concat_parts) + f"concat=n={rendered_count}:v=1:a=1[vcat][acat]")
+        base_audio_out = "acat"
     video_out = "vcat"
-    for blur_index, annotation in enumerate(_blur_annotations(instruction), start=1):
+
+    # --- regional blur / mosaic: effect-track clips + blur annotations (honor style) ---
+    blur_specs: list[dict[str, Any]] = []
+    for clip in effect_clips:
+        region = clip.get("region") if isinstance(clip.get("region"), dict) else {}
+        blur_specs.append({
+            "x": region.get("x"), "y": region.get("y"), "width": region.get("width"), "height": region.get("height"),
+            "start": clip.get("timeline_start"), "end": clip.get("timeline_end"), "style": clip.get("style"),
+        })
+    for annotation in _blur_annotations(instruction):
         data = annotation.get("data") or {}
-        x = max(0, min(output_width - 2, round(float(data.get("x") or 0) * output_width)))
-        y = max(0, min(output_height - 2, round(float(data.get("y") or 0) * output_height)))
-        w = max(2, min(output_width - x, round(float(data.get("width") or 0) * output_width)))
-        h = max(2, min(output_height - y, round(float(data.get("height") or 0) * output_height)))
-        start = max(0.0, float(annotation.get("start") or 0))
-        end = max(start + 0.01, float(annotation.get("end") or (start + 0.5)))
+        blur_specs.append({
+            "x": data.get("x"), "y": data.get("y"), "width": data.get("width"), "height": data.get("height"),
+            "start": annotation.get("start"), "end": annotation.get("end"),
+            "style": data.get("blur_style") or data.get("style"),
+        })
+    for bi, spec in enumerate(blur_specs, start=1):
+        x = max(0, min(output_width - 2, round(float(spec.get("x") or 0) * output_width)))
+        y = max(0, min(output_height - 2, round(float(spec.get("y") or 0) * output_height)))
+        w = max(2, min(output_width - x, round(float(spec.get("width") or 0) * output_width)))
+        h = max(2, min(output_height - y, round(float(spec.get("height") or 0) * output_height)))
+        start = max(0.0, float(spec.get("start") or 0))
+        end = max(start + 0.01, float(spec.get("end") or (start + 0.5)))
+        filt, video_out = _blur_chain(video_out, bi, x, y, w, h, start, end, str(spec.get("style") or ""))
+        filters.append(filt)
+
+    # --- overlay / PiP (wipe): composite on top, ascending layer = closer to front ---
+    for oi, clip in enumerate(overlay_clips, start=1):
+        asset = assets.get(str(clip.get("asset_id") or ""))
+        if not asset or asset.get("kind") != "video":
+            continue
+        source_path = _asset_source_path(asset)
+        metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
+        source_start, source_end, ov_dur, ov_src, ov_freeze = _clip_source_range(clip, metadata)
+        pos = clip.get("position") if isinstance(clip.get("position"), dict) else {}
+        ow = max(2, round(float(pos.get("width") or 0.46) * output_width))
+        oh = max(2, round(float(pos.get("height") or 0.145) * output_height))
+        px = max(0, min(output_width - 2, round(float(pos.get("x") or 0.27) * output_width)))
+        py = max(0, min(output_height - 2, round(float(pos.get("y") or 0.835) * output_height)))
+        ts = max(0.0, float(clip.get("timeline_start") or 0))
+        te = max(ts + 0.05, float(clip.get("timeline_end") or (ts + ov_dur)))
+        ov_speed = (ov_dur / ov_src) if (not ov_freeze and ov_src > 0.05) else 1.0
+        if ov_freeze:
+            ov_pre = f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={ov_dur:.3f},"
+        else:
+            ov_pre = f"setpts={ov_speed:.6f}*(PTS-STARTPTS),"
+        command.extend(["-i", str(source_path)])
         filters.append(
-            f"[{video_out}]split[seqbase{blur_index}][seqcrop{blur_index}src];"
-            f"[seqcrop{blur_index}src]crop={w}:{h}:{x}:{y},boxblur=18:2[seqblur{blur_index}];"
-            f"[seqbase{blur_index}][seqblur{blur_index}]overlay={x}:{y}:enable='between(t\\,{start:.3f}\\,{end:.3f})'[vseq{blur_index}]"
+            f"[{input_index}:v]"
+            f"trim=start={source_start:.3f}:end={source_end:.3f},"
+            f"{ov_pre}"
+            f"scale={ow}:{oh},setsar=1,setpts=PTS-STARTPTS+{ts:.3f}/TB,format=yuv420p"
+            f"[ov{oi}]"
         )
-        video_out = f"vseq{blur_index}"
+        filters.append(
+            f"[{video_out}][ov{oi}]overlay={px}:{py}:enable='between(t\\,{ts:.3f}\\,{te:.3f})'[vov{oi}]"
+        )
+        video_out = f"vov{oi}"
+        input_index += 1
 
     captions = _sequence_caption_clips(sequence)
     if captions:
@@ -669,31 +813,65 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         filters.append(f"[{video_out}]subtitles='{escaped_ass}'[vcap]")
         video_out = "vcap"
 
+    # --- audio: when an audio track exists, mix its clips (replaces base clip audio) ---
+    audio_out = base_audio_out
+    if has_audio_track:
+        audio_labels: list[str] = []
+        for clip in audio_clips:
+            asset = assets.get(str(clip.get("asset_id") or ""))
+            if not asset or asset.get("kind") != "video":
+                continue
+            source_path = _asset_source_path(asset)
+            metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
+            if not metadata.get("audio_codec"):
+                continue
+            source_start, source_end, _dur, _src, au_freeze = _clip_source_range(clip, metadata)
+            if au_freeze:
+                continue
+            ts_ms = max(0, round(float(clip.get("timeline_start") or 0) * 1000))
+            label = f"au{len(audio_labels)}"
+            command.extend(["-i", str(source_path)])
+            filters.append(
+                f"[{input_index}:a]"
+                f"atrim=start={source_start:.3f}:end={source_end:.3f},"
+                f"asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,adelay={ts_ms}|{ts_ms}"
+                f"[{label}]"
+            )
+            audio_labels.append(label)
+            input_index += 1
+        if len(audio_labels) == 1:
+            audio_out = audio_labels[0]
+        elif len(audio_labels) > 1:
+            filters.append("".join(f"[{l}]" for l in audio_labels) + f"amix=inputs={len(audio_labels)}:duration=longest:normalize=0[aout]")
+            audio_out = "aout"
+        else:
+            audio_out = None
+
     creationflags = 0
     if hasattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS"):
         creationflags = subprocess.BELOW_NORMAL_PRIORITY_CLASS  # type: ignore[attr-defined]
     elif hasattr(subprocess, "CREATE_NO_WINDOW"):
         creationflags = subprocess.CREATE_NO_WINDOW
 
+    maps = ["-map", f"[{video_out}]"]
+    audio_args = ["-an"]
+    if audio_out:
+        maps += ["-map", f"[{audio_out}]"]
+        audio_args = ["-c:a", "aac", "-b:a", "128k"]
+
     subprocess.run(
         [
             *command,
             "-filter_complex",
             ";".join(filters),
-            "-map",
-            f"[{video_out}]",
-            "-map",
-            "[acat]",
+            *maps,
             "-c:v",
             "libx264",
             "-preset",
             "veryfast",
             "-crf",
             "22",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
+            *audio_args,
             "-movflags",
             "+faststart",
             str(out_path),
