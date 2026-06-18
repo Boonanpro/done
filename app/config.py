@@ -66,6 +66,15 @@ class Settings(BaseSettings):
 
     # ダンが送るメールの既定の差出人表示名（reply_from_name 未指定時のフォールバック）
     DAN_DEFAULT_FROM_NAME: str = "株式会社パイナ"
+
+    # ダンが送るメール本文の末尾に自動付与する署名ブロック（パイナ名義）
+    DAN_EMAIL_SIGNATURE: str = (
+        "ーーー\n"
+        "株式会社パイナ　本田 樹\n"
+        "HP:https://paina.info\n"
+        "連絡先:shub6923@gmail.com\n"
+        "ーーー"
+    )
     
     # Attachment Storage (Phase 5C)
     ATTACHMENT_STORAGE_PATH: str = "./data/attachments"
