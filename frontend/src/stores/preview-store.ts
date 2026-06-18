@@ -218,6 +218,8 @@ export const usePreviewStore = create<PreviewStore>()(
           },
           refCounter: counter,
           popoverDraft: '',
+          // 選択の瞬間に iframe 実表示slugを確定（保存/取得をこれに固定）。
+          iframeSlug: snap.slug || get().iframeSlug,
           ...rangeReset,
         });
       },

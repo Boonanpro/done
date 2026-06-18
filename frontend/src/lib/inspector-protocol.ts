@@ -59,6 +59,10 @@ export interface MediaInfo {
  * パネルUIはこのスナップショットを読んで表示する（live DOM は読まない）。
  */
 export interface SelectionSnapshot {
+  /** この要素が属する成果物 slug（iframe が実際に表示している中身の slug）。
+   *  保存/取得をこの slug に固定し、chat_artifact のラベルズレやハンドシェイク
+   *  タイミングに依存しないようにする。 */
+  slug: string;
   /** 論理識別子（`@<data-edit-id>` か DOMパスフォールバック）。 */
   elementKey: string;
   tagName: string;
