@@ -63,6 +63,21 @@ def _split_summary_reply(raw: Optional[str]) -> tuple[Optional[str], Optional[st
     return None, (text or None)
 
 
+def _with_signature(reply: Optional[str]) -> Optional[str]:
+    """返信本文の末尾にパイナ署名ブロックを付与する。reply が空なら None のまま。"""
+    if not reply:
+        return reply
+    try:
+        from app.config import settings
+        sig = settings.DAN_EMAIL_SIGNATURE
+    except Exception:
+        return reply
+    body = reply.rstrip()
+    if sig and sig.strip() and sig.strip() not in body:
+        return f"{body}\n\n{sig}"
+    return body
+
+
 def _first_routing_key(*texts: Optional[str]) -> Optional[str]:
     for text in texts:
         if not text:
@@ -334,10 +349,10 @@ class ExternalMessageRoutingService:
             "(1)状況の自然な要約 と (2)返信メール本文 を作ってください。\n"
             "出力は次の形式を厳守し、他の文字を足さないこと:\n"
             "【概要】<1〜2文の自然な日本語。誰から何の件で、何を求めているか。"
-            "例: 吉田さんからホームページ制作の件で、料金と納期についての問い合わせです。>\n"
-            "【返信案】\n<丁寧で簡潔な返信メール本文のみ。件名・説明・マークダウンは不要。>\n\n"
+            "例: 本田さんからホームページ制作の件で、料金と納期についての問い合わせです。>\n"
+            "【返信案】\n<丁寧で簡潔な返信メール本文のみ。件名・マークダウンは不要。>\n\n"
             f"重要な制約:\n"
-            f"- 署名・名乗りは必ず「{from_name}」にすること。個人名を勝手に作って名乗ってはいけない。\n"
+            f"- 本文末尾に署名・会社名・個人名・連絡先を書かないこと（署名はシステムが自動で付ける）。\n"
             f"- メール本文に書かれていない予定・日時・約束・事実を創作しないこと。"
             f"相手が日時を提示していればそれに沿って答え、こちらから架空の候補日時を作らない。\n\n"
             f"--- 受信メール ---\n差出人: {sender}\n件名: {subject}\n本文:\n{body[:2000]}\n"
@@ -347,7 +362,8 @@ class ExternalMessageRoutingService:
             raw = await _asyncio.to_thread(run_oneshot_cli, prompt, "sonnet", 90)
         except Exception:
             return None, None
-        return _split_summary_reply(raw)
+        summary, reply = _split_summary_reply(raw)
+        return summary, _with_signature(reply)
 
 
 _routing_service: Optional[ExternalMessageRoutingService] = None

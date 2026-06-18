@@ -43,6 +43,7 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
   const [editedContent, setEditedContent] = useState('');
   const [question, setQuestion] = useState('');
   const [instructReply, setInstructReply] = useState('');
+  const [showOriginal, setShowOriginal] = useState(false);
   const questionInputRef = useRef<HTMLInputElement>(null);
 
   // 要対応の提案（フォーム/メール返信など）。情報通知(observation)は除外してバッジもこちらで数える
@@ -146,6 +147,7 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
     setEditMode(false);
     setEditedContent('');
     setInstructReply('');
+    setShowOriginal(false);
   };
 
   const handleDismiss = (id: string, e: React.MouseEvent) => {
@@ -204,6 +206,27 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
                     <p className="whitespace-pre-wrap break-words">{summary}</p>
                     {isReply && (
                       <p className="text-xs text-muted-foreground">以下の内容で返信しますか？</p>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* 元のメールを開閉表示 */}
+              {(() => {
+                const original = (selectedProposal.action_data as { original_body?: string } | null)?.original_body;
+                if (!original) return null;
+                return (
+                  <div>
+                    <button
+                      onClick={() => setShowOriginal((v) => !v)}
+                      className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+                    >
+                      {showOriginal ? '元のメールを隠す' : '元のメールを見る'}
+                    </button>
+                    {showOriginal && (
+                      <pre className="mt-2 text-xs text-muted-foreground whitespace-pre-wrap break-words bg-muted/30 border border-border rounded-lg p-2 max-h-60 overflow-y-auto font-sans">
+                        {original}
+                      </pre>
                     )}
                   </div>
                 );
@@ -295,9 +318,6 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
 
               {/* ダンに指示（書き換え・依頼・質問） */}
               <div className="pt-3 border-t border-border">
-                <p className="text-xs text-muted-foreground mb-2">
-                  ダンに指示できます（例:「もっと丁寧に」「料金表を添えて」「○○さんにこの件で相談メールして」）
-                </p>
                 {instructReply && (
                   <p className="text-xs text-foreground bg-muted/40 border border-border rounded-lg p-2 mb-2 whitespace-pre-wrap break-words">
                     {instructReply}
@@ -315,7 +335,7 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
                         handleAskQuestion();
                       }
                     }}
-                    placeholder="指示を入力..."
+                    placeholder="質問・指示"
                     className="flex-1 h-8 px-3 text-sm bg-input border border-border rounded-lg focus:outline-none focus:ring-1 focus:ring-ring"
                     disabled={instructMutation.isPending}
                   />
