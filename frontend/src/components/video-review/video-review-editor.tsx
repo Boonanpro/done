@@ -4,6 +4,8 @@ import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, us
 import {
   ArrowLeft,
   Check,
+  ChevronDown,
+  ChevronUp,
   Eraser,
   MessageSquare,
   MousePointer2,
@@ -161,6 +163,28 @@ type DraftAnnotation = Omit<ReviewAnnotation, 'id' | 'created_at'>;
 
 function trackForIntent(intent: string): 'audio' | 'visual' {
   return intent === 'audio' ? 'audio' : 'visual';
+}
+
+function audioRoleLabel(role?: string | null): string {
+  switch (role) {
+    case 'dialogue':
+      return '台詞';
+    case 'music':
+      return 'BGM';
+    case 'sfx':
+      return 'SE';
+    default:
+      return '音声';
+  }
+}
+
+// Effective z-order layer of a clip when not explicitly set (matches timelineLanes).
+function clipDefaultLayer(clip: SequenceClip): number {
+  if (clip.track === 'audio' || clip.role) return clip.role === 'sfx' ? 1 : clip.role === 'music' ? 2 : 0;
+  if (clip.track === 'caption' || typeof clip.text === 'string') return 2;
+  if (clip.track === 'effect') return 3;
+  if (clip.track === 'overlay' || clip.composition === 'pip' || clip.composition === 'overlay') return 1;
+  return 0;
 }
 
 function itemTypeBadge(itemType: string): string {
@@ -1183,8 +1207,15 @@ export function VideoReviewEditor({
             Save
           </Button>
           {onExecute ? (
-            <Button size="sm" onClick={() => void onExecute(payload)}>
-              書き出し
+            <Button
+              size="sm"
+              disabled={isSaving}
+              onClick={async () => {
+                await saveSession();
+                await onExecute(payload);
+              }}
+            >
+              この編集で作り直す
             </Button>
           ) : null}
         </div>
@@ -1459,7 +1490,11 @@ export function VideoReviewEditor({
                               const selected = selectedSequenceClipIds.includes(clip.id);
                               const isVideo = item.itemType === 'video';
                               const labelText =
-                                item.itemType === 'caption' ? clip.text || 'テロップ' : clip.label || (item.itemType === 'audio' ? '音声' : '素材');
+                                item.itemType === 'caption'
+                                  ? clip.text || 'テロップ'
+                                  : item.itemType === 'audio'
+                                    ? [audioRoleLabel(clip.role), clipAsset?.label || clip.label].filter(Boolean).join('・')
+                                    : clip.label || '素材';
                               return (
                                 <div
                                   key={item.key}
@@ -1726,6 +1761,40 @@ export function VideoReviewEditor({
                     placeholder="テロップ本文"
                   />
                 ) : null}
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <span className="text-xs text-muted-foreground">レイヤー（上=手前）</span>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 w-7 p-0"
+                      title="上のレイヤーへ（手前）"
+                      onClick={() =>
+                        updateSelectedSequenceClip({
+                          layer: (selectedSequenceClip.layer ?? clipDefaultLayer(selectedSequenceClip)) + 1,
+                        })
+                      }
+                    >
+                      <ChevronUp className="h-4 w-4" />
+                    </Button>
+                    <span className="w-5 text-center text-xs tabular-nums">
+                      {selectedSequenceClip.layer ?? clipDefaultLayer(selectedSequenceClip)}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 w-7 p-0"
+                      title="下のレイヤーへ（奥）"
+                      onClick={() =>
+                        updateSelectedSequenceClip({
+                          layer: Math.max(0, (selectedSequenceClip.layer ?? clipDefaultLayer(selectedSequenceClip)) - 1),
+                        })
+                      }
+                    >
+                      <ChevronDown className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
               </div>
             )}
           </aside>
