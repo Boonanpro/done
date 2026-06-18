@@ -7,7 +7,9 @@ import {
   Eraser,
   MessageSquare,
   MousePointer2,
+  Pause,
   Pencil,
+  Play,
   Save,
   Square,
   Trash2,
@@ -20,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { TimelinePreview } from './timeline-preview';
 
 type Tool = 'select' | 'rect' | 'freehand' | 'marker';
 type Intent = 'blur' | 'cut_keep' | 'cut_remove' | 'caption' | 'replace' | 'generate' | 'motion' | 'audio' | 'comment';
@@ -310,6 +313,7 @@ export function VideoReviewEditor({
   const [videoContentStyle, setVideoContentStyle] = useState<CSSProperties>({ inset: 0 });
   const [playbackRateIndex, setPlaybackRateIndex] = useState(0);
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
+  const [playing, setPlaying] = useState(false);
   const pendingSeekRef = useRef<number | null>(null);
   const fps = useMemo(() => parseFps(initialFps) || 30, [initialFps]);
   const playbackRates = useMemo(() => [1, 2, 4], []);
@@ -507,32 +511,19 @@ export function VideoReviewEditor({
     () => Number(editSequence?.duration || Math.max(0, ...sequenceVideoClips.map((clip) => clip.timeline_end || 0))),
     [editSequence, sequenceVideoClips]
   );
-  const timelineDuration = renderedMode
-    ? (duration > 0 ? duration : sequenceDuration)
-    : (sequenceDuration > 0 ? sequenceDuration : duration);
+  const timelineDuration = sequenceDuration > 0 ? sequenceDuration : duration;
+  const previewAspect = useMemo(() => {
+    const [a, b] = (editSequence?.format || initialSequence?.format || '9:16').split(':');
+    return `${Number(a) || 9} / ${Number(b) || 16}`;
+  }, [editSequence?.format, initialSequence?.format]);
   const seekTimeline = useCallback(
     (time: number) => {
       const maxDuration = timelineDuration || duration || 0;
       const nextTime = Number(clamp(time, 0, maxDuration).toFixed(3));
+      setPlaying(false);
       setCurrentTime(nextTime);
-      const video = videoRef.current;
-      if (renderedMode) {
-        if (video) video.currentTime = nextTime;
-        return;
-      }
-      const clip = clipAtTime(nextTime);
-      if (clip?.asset_id && sequenceAssetMap.has(clip.asset_id)) {
-        setPreviewAssetId(clip.asset_id);
-        pendingSeekRef.current = clip.source_start + (nextTime - clip.timeline_start);
-        if (video && previewAssetId === clip.asset_id) {
-          video.currentTime = pendingSeekRef.current;
-          pendingSeekRef.current = null;
-        }
-        return;
-      }
-      if (video) video.currentTime = nextTime;
     },
-    [clipAtTime, duration, previewAssetId, sequenceAssetMap, timelineDuration, renderedMode]
+    [duration, timelineDuration]
   );
   const isActiveAnnotation = useCallback(
     (annotation: Pick<ReviewAnnotation, 'start' | 'end'>) => (
@@ -854,7 +845,10 @@ export function VideoReviewEditor({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, select, button')) return;
+      // Don't steal keys while typing, but DO allow Space/Delete/arrows when a button
+      // has focus (e.g. right after clicking Play or a tool) — Space/etc. handlers
+      // below call preventDefault so the focused button isn't also triggered.
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
       const modKey = event.ctrlKey || event.metaKey;
       if (modKey && event.key.toLowerCase() === 'z') {
         event.preventDefault();
@@ -867,12 +861,9 @@ export function VideoReviewEditor({
         redoAnnotations();
         return;
       }
-      const video = videoRef.current;
-      if (!video) return;
       if (event.code === 'Space') {
         event.preventDefault();
-        if (video.paused) void video.play();
-        else video.pause();
+        setPlaying((p) => !p);
         return;
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
@@ -880,27 +871,18 @@ export function VideoReviewEditor({
         deleteSelected();
         return;
       }
-      if (event.key.toLowerCase() === 'l') {
-        event.preventDefault();
-        setPlaybackRateIndex((index) => {
-          const nextIndex = (index + 1) % playbackRates.length;
-          video.playbackRate = playbackRates[nextIndex];
-          return nextIndex;
-        });
-        if (video.paused) void video.play();
-        return;
-      }
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
         event.preventDefault();
+        setPlaying(false);
         const unit = (event.shiftKey ? 10 : 1) / fps;
         const direction = event.key === 'ArrowRight' ? 1 : -1;
-        const nextTime = Number(clamp(currentTime + direction * unit, 0, timelineDuration || duration || video.duration || 0).toFixed(3));
+        const nextTime = Number(clamp(currentTime + direction * unit, 0, timelineDuration || duration || 0).toFixed(3));
         seekTimeline(nextTime);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentTime, deleteSelected, duration, fps, playbackRates, redoAnnotations, seekTimeline, timelineDuration, undoAnnotations]);
+  }, [currentTime, deleteSelected, duration, fps, redoAnnotations, seekTimeline, timelineDuration, undoAnnotations]);
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.playbackRate = playbackRates[playbackRateIndex];
@@ -1301,48 +1283,18 @@ export function VideoReviewEditor({
               <div
                 ref={stageRef}
                 className="relative h-full max-h-full max-w-full overflow-hidden bg-black"
-                style={{ aspectRatio: videoRef.current?.videoWidth && videoRef.current?.videoHeight ? `${videoRef.current.videoWidth}/${videoRef.current.videoHeight}` : '9 / 16' }}
+                style={{ aspectRatio: previewAspect }}
               >
-                {source ? (
-                  <video
-                    ref={videoRef}
-                    src={source}
-                    controls
-                    className="block h-full w-full select-none object-contain"
-                    onLoadedMetadata={(e) => {
-                      const d = e.currentTarget.duration || 0;
-                      if (renderedMode || sequenceVideoClips.length === 0) setDuration(Number(d.toFixed(3)));
-                      if (pendingSeekRef.current != null) {
-                        e.currentTarget.currentTime = pendingSeekRef.current;
-                        pendingSeekRef.current = null;
-                      }
-                      window.requestAnimationFrame(updateVideoContentRect);
-                    }}
-                    onTimeUpdate={(e) => {
-                      if (!renderedMode && activePreviewClip && sequenceVideoClips.length > 0) {
-                        const sourceTime = e.currentTarget.currentTime;
-                        const nextTimelineTime = activePreviewClip.timeline_start + (sourceTime - activePreviewClip.source_start);
-                        if (sourceTime >= activePreviewClip.source_end - 0.03) {
-                          const nextClip = clipAtTime(activePreviewClip.timeline_end + 0.001);
-                          if (nextClip && nextClip.id !== activePreviewClip.id) {
-                            seekTimeline(nextClip.timeline_start);
-                          } else {
-                            e.currentTarget.pause();
-                            setCurrentTime(Number(activePreviewClip.timeline_end.toFixed(3)));
-                          }
-                          return;
-                        }
-                        setCurrentTime(Number(clamp(nextTimelineTime, activePreviewClip.timeline_start, activePreviewClip.timeline_end).toFixed(3)));
-                        return;
-                      }
-                      setCurrentTime(e.currentTarget.currentTime);
-                    }}
-                  />
-                ) : (
-                  <div className="flex h-[640px] w-[360px] items-center justify-center text-sm text-muted-foreground">
-                    動画パスかURLを指定してください
-                  </div>
-                )}
+                <TimelinePreview
+                  sequence={editSequence}
+                  assets={sequenceAssets || []}
+                  currentTime={currentTime}
+                  playing={playing}
+                  format={editSequence?.format || initialSequence?.format || '9:16'}
+                  onTimeChange={(t) => setCurrentTime(t)}
+                  onEnded={() => setPlaying(false)}
+                  className="h-full w-full"
+                />
 
                 <div
                   className="absolute pointer-events-auto"
@@ -1504,6 +1456,15 @@ export function VideoReviewEditor({
                   onClick={() => setExtraLanes((s) => ({ ...s, audio: s.audio + 1 }))}
                 >
                   + 音声段
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 w-7 p-0"
+                  title={playing ? '一時停止 (Space)' : '再生 (Space)'}
+                  onClick={() => setPlaying((p) => !p)}
+                >
+                  {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
                 </Button>
                 <div className="text-sm tabular-nums text-muted-foreground">
                   {fmtTime(currentTime)} / {fmtTime(timelineDuration)}
