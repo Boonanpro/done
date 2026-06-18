@@ -263,6 +263,14 @@ export const usePreviewStore = create<PreviewStore>()(
         const next = partial
           ? applyInlineStyle(current, partial.start, partial.end, property, value)
           : applyBlockStyle(current, property, value);
+        // 初回編集なら「編集前の状態」を捕捉（Resetで戻すため）。block編集時は
+        // そのプロパティの元の computed 値を一度だけ記録する。
+        if (!next.orig) next.orig = { text: selectedElement?.text ?? null, blockStyle: {} };
+        if (!partial && next.orig.blockStyle[property] === undefined) {
+          const camel = property.replace(/-([a-z])/g, (_m, c) => c.toUpperCase());
+          const origVal = selectedElement?.computedStyles?.[camel];
+          if (typeof origVal === 'string') next.orig.blockStyle[property] = origVal;
+        }
         set({ models: { ...models, [key]: next }, styleVersion: styleVersion + 1 });
         sendToIframe({ type: 'inspector:apply', payload: { elementKey: key, model: next } });
         queueInspectorEdit({
@@ -280,6 +288,9 @@ export const usePreviewStore = create<PreviewStore>()(
         const slug = get().iframeSlug || artifact?.slug || '';
         const current = getOrInitModel(elementKey, text, models);
         const next = applyText(current, text);
+        // 初回編集なら「編集前テキスト」を捕捉（Resetで戻すため）。selectedElement.text は
+        // 選択時スナップショット=このタイプ前の状態。一度捕捉したら上書きしない。
+        if (!next.orig) next.orig = { text: selectedElement?.text ?? null, blockStyle: {} };
         set({ models: { ...models, [elementKey]: next }, styleVersion: styleVersion + 1 });
         sendToIframe({ type: 'inspector:apply', payload: { elementKey, model: next } });
         queueInspectorEdit({
@@ -382,6 +393,25 @@ export const usePreviewStore = create<PreviewStore>()(
         const key = selectedElement?.elementKey;
         if (!key) return;
         const slug = get().iframeSlug || artifact?.slug || '';
+        const orig = models[key]?.orig;
+
+        if (orig && slug) {
+          // 編集前へ戻す: 初回編集時に捕捉した元の状態を再適用する。queueInspectorEdit が
+          // 保存→自動公開を回すので、ライブプレビューも本番(〜1〜2分)も元へ戻る。
+          const origModel: EditModel = {
+            v: 2, text: orig.text, blockStyle: { ...orig.blockStyle }, spans: [], attrs: {}, orig,
+          };
+          set({ models: { ...models, [key]: origModel }, styleVersion: styleVersion + 1 });
+          sendToIframe({ type: 'inspector:apply', payload: { elementKey: key, model: origModel } });
+          queueInspectorEdit({
+            slug, elementKey: key, model: origModel,
+            historyMeta: { summary: makeEditSummary({ kind: 'style', prop: 'reset', value: '', elementHint: selectedElement?.tagName }) },
+          });
+          try { toast.success('編集前に戻しました', { description: '本番にも〜1〜2分で反映されます' }); } catch { /* ignore */ }
+          return;
+        }
+
+        // orig が無い(古いデータ等): override を削除（少なくともプレビュー上の上書きは消える）。
         const nextModels = { ...models };
         delete nextModels[key];
         set({ models: nextModels, styleVersion: styleVersion + 1 });
@@ -393,7 +423,6 @@ export const usePreviewStore = create<PreviewStore>()(
             try { toast.error('編集のリセットに失敗しました', { description: String(err).slice(0, 200) }); } catch { /* ignore */ }
           })
           .finally(() => {
-            // iframe に最新を取り直させる（contentVersion bump で再ロード）。
             usePreviewStore.getState().bumpContentVersion();
           });
       },
@@ -401,7 +430,13 @@ export const usePreviewStore = create<PreviewStore>()(
       seedModels: (rows) => {
         const models = { ...get().models };
         for (const r of rows) {
-          const m = readModelFromAttrs((r.attrs as Record<string, unknown>) || {});
+          const attrs = (r.attrs as Record<string, unknown>) || {};
+          let m: EditModel | null = null;
+          // 保存形式は attrs.model_v2 = JSON文字列(model全体, orig含む)。まずそれを優先。
+          if (typeof attrs['model_v2'] === 'string') {
+            try { m = JSON.parse(attrs['model_v2'] as string) as EditModel; } catch { m = null; }
+          }
+          if (!m) m = readModelFromAttrs(attrs); // v2直書き(古い形式)フォールバック
           if (m) {
             if (r.styles) for (const [k, v] of Object.entries(r.styles)) if (typeof v === 'string') m.blockStyle[k] = v;
             models[r.element_key] = m;
