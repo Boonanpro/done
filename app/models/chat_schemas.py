@@ -341,6 +341,7 @@ class ProposalType(str, Enum):
     SCHEDULE = "schedule"        # スケジュール登録
     REMINDER = "reminder"        # リマインダー
     OBSERVATION = "observation"  # 観察者の事後報告
+    NOTIFY = "notify"            # 返信不要だが知らせるべき重要情報(FYI通知)
 
 
 class ProposalCreateRequest(BaseModel):
