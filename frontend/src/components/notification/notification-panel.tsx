@@ -251,7 +251,7 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
               </div>
 
               {/* Actions */}
-              {(selectedProposal.type as string) === 'observation' ? (
+              {(['observation', 'notify'].includes(selectedProposal.type as string)) ? (
                 <div className="flex gap-2">
                   <Button
                     size="sm"
@@ -436,7 +436,13 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
                                   {proposal.title}
                                 </p>
                                 <p className="text-xs text-muted-foreground truncate">
-                                  {proposal.content || proposal.type}
+                                  {(() => {
+                                    const summary = (proposal.action_data as { summary?: string } | null)?.summary;
+                                    if (summary) {
+                                      return proposal.type === 'reply' ? `${summary} 返信しますか？` : summary;
+                                    }
+                                    return proposal.content || proposal.type;
+                                  })()}
                                 </p>
                                 <p className="text-xs text-muted-foreground/70 mt-0.5">
                                   {proposal.created_at
