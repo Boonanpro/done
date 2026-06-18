@@ -90,7 +90,7 @@ class InquiryService:
             has_email = bool(sender_email)
             if has_email and draft:
                 ptype = "reply"
-                title = f"【{label}】{name} 様への返信案"
+                title = "返信しますか？"
                 content = draft
                 action_data = {
                     "action": "send_inquiry_reply",
@@ -107,7 +107,7 @@ class InquiryService:
             else:
                 # 返信先メール無し or 草案生成失敗 → 通知のみ(action)。承認=確認済み扱い。
                 ptype = "action"
-                title = f"【{label}】{name} 様から（要対応）"
+                title = "対応してください"
                 body = inquiry.get("message") or "(本文なし)"
                 reason = "返信先メールが未記入のため自動送信不可" if not has_email else "返信草案の生成に失敗"
                 content = (

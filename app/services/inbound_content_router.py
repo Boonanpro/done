@@ -154,7 +154,7 @@ async def classify_and_route(
     if decision == "notify":
         # 返信不要だが知らせるべき重要情報 → 通知のみ（返信案なし）
         logger.info("[content-route] notify: %s", data.get("reason"))
-        title = f"メール: {sender}"
+        title = "確認してください"
         content = summary or f"{sender} から「{subject}」のメールが届いています。"
         action_data = {
             "action": "inbound_notify",
@@ -167,7 +167,7 @@ async def classify_and_route(
         ptype = "notify"
     elif not sender_email or not draft:
         logger.info("[content-route] 返信先メール無し or 草案失敗 → 通知のみ")
-        title = "新規メール（要対応）" if decision == "new" else "メール（要対応）"
+        title = "対応してください"
         content = f"差出人: {sender}\n件名: {subject}\n\n{body[:1200]}"
         action_data = {
             "action": "inbound_email_no_reply",
@@ -178,7 +178,7 @@ async def classify_and_route(
         ptype = "action"
     else:
         reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
-        title = (f"新規メール返信案: {sender}" if decision == "new" else f"メール返信案: {sender}")
+        title = "返信しますか？"
         content = draft
         action_data = {
             "action": "send_email_reply",
