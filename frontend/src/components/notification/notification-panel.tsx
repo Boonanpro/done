@@ -438,10 +438,7 @@ export function NotificationPanel({ inline = false }: NotificationPanelProps) {
                                 <p className="text-xs text-muted-foreground truncate">
                                   {(() => {
                                     const summary = (proposal.action_data as { summary?: string } | null)?.summary;
-                                    if (summary) {
-                                      return proposal.type === 'reply' ? `${summary} 返信しますか？` : summary;
-                                    }
-                                    return proposal.content || proposal.type;
+                                    return summary || proposal.content || proposal.type;
                                   })()}
                                 </p>
                                 <p className="text-xs text-muted-foreground/70 mt-0.5">

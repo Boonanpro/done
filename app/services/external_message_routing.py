@@ -283,7 +283,7 @@ class ExternalMessageRoutingService:
                 result = self.supabase.table("dan_proposals").insert({
                     "user_id": detected_message["user_id"],
                     "type": "reply",
-                    "title": f"メール返信案: {sender}",
+                    "title": "返信しますか？",
                     "content": draft,
                     "source_room_id": match.route["origin_room_id"],
                     "source_message_id": match.route.get("origin_message_id"),
@@ -315,7 +315,7 @@ class ExternalMessageRoutingService:
         result = self.supabase.table("dan_proposals").insert({
             "user_id": detected_message["user_id"],
             "type": "action",
-            "title": "外部返信を検知しました",
+            "title": "確認してください",
             "content": content,
             "source_room_id": match.route["origin_room_id"],
             "source_message_id": match.route.get("origin_message_id"),
