@@ -516,6 +516,10 @@ export function VideoReviewEditor({
     const [a, b] = (editSequence?.format || initialSequence?.format || '9:16').split(':');
     return `${Number(a) || 9} / ${Number(b) || 16}`;
   }, [editSequence?.format, initialSequence?.format]);
+  // Stable callbacks: passing inline arrows would change every render and re-run the
+  // preview's playback effect each frame, resetting its master clock (stutter/rewind).
+  const handlePreviewTime = useCallback((t: number) => setCurrentTime(t), []);
+  const handlePreviewEnded = useCallback(() => setPlaying(false), []);
   const seekTimeline = useCallback(
     (time: number) => {
       const maxDuration = timelineDuration || duration || 0;
@@ -1291,8 +1295,8 @@ export function VideoReviewEditor({
                   currentTime={currentTime}
                   playing={playing}
                   format={editSequence?.format || initialSequence?.format || '9:16'}
-                  onTimeChange={(t) => setCurrentTime(t)}
-                  onEnded={() => setPlaying(false)}
+                  onTimeChange={handlePreviewTime}
+                  onEnded={handlePreviewEnded}
                   className="h-full w-full"
                 />
 
