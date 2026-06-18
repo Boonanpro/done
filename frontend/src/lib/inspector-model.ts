@@ -32,6 +32,12 @@ export interface EditModel {
   spans: InlineSpan[];
   /** リンク要素の href 等、特殊属性。 */
   attrs: CSSStyle;
+  /**
+   * 初回編集時に捕捉した「編集前の状態」。Reset（編集前に戻す）で元へ復元するために保持。
+   * text=元テキスト, blockStyle=ユーザーが編集した各プロパティの元の computed 値。
+   * 一度だけ捕捉し以後上書きしない（真の原状を保つため）。
+   */
+  orig?: { text: string | null; blockStyle: CSSStyle };
 }
 
 /** 旧形式（v1）。後方互換のため読み取り専用で扱う。 */
