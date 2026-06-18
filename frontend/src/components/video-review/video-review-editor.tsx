@@ -688,6 +688,23 @@ export function VideoReviewEditor({
     }
   }, [onSaveTimeline, payload, videoPath, videoUrl]);
 
+  // Auto-save manual edits (debounced) so a page refresh keeps them. The parent
+  // re-creates onSaveTimeline/payload on every poll-driven re-render, so we hold them
+  // in a ref and re-arm the debounce ONLY when the edited sequence changes — otherwise
+  // the timer would be cleared every couple seconds and never fire. Advancing
+  // lastSyncedSeqSig keeps the prop down-sync from treating our own save as a change.
+  const autoSaveRef = useRef<{ save?: typeof onSaveTimeline; payload: SessionPayload }>({ save: onSaveTimeline, payload });
+  autoSaveRef.current = { save: onSaveTimeline, payload };
+  useEffect(() => {
+    const sig = JSON.stringify(editSequence ?? null);
+    if (sig === lastSyncedSeqSig.current) return;
+    const timer = window.setTimeout(() => {
+      lastSyncedSeqSig.current = sig;
+      void autoSaveRef.current.save?.(autoSaveRef.current.payload);
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [editSequence]);
+
   const makeDraftAnnotation = useCallback(
     (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>): DraftAnnotation => {
       const fallbackStart = effectiveDrawStart;
