@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -61,6 +62,30 @@ def _split_summary_reply(raw: Optional[str]) -> tuple[Optional[str], Optional[st
         summary = head.replace("【概要】", "").strip()
         return (summary or None), (body.strip() or None)
     return None, (text or None)
+
+
+def _split_summary_reply_schedule(raw: Optional[str]):
+    """run_oneshot_cli 出力を (概要, 返信本文, 予定dict|None) に分解する。
+
+    形式: 【概要】... 【返信案】... 【予定】(JSON or なし)
+    """
+    if not raw:
+        return None, None, None
+    text = raw.strip()
+    schedule = None
+    main = text
+    if "【予定】" in text:
+        main, _, sched_part = text.partition("【予定】")
+        sched_part = sched_part.strip()
+        if sched_part and "なし" not in sched_part[:6] and "null" not in sched_part[:6].lower():
+            m = re.search(r"\{.*\}", sched_part, re.DOTALL)
+            if m:
+                try:
+                    schedule = json.loads(m.group(0))
+                except Exception:
+                    schedule = None
+    summary, reply = _split_summary_reply(main)
+    return summary, reply, schedule
 
 
 def _with_signature(reply: Optional[str]) -> Optional[str]:
@@ -277,7 +302,7 @@ class ExternalMessageRoutingService:
         # メール返信なら、ダンが返信草案を作って「要対応の返信案(reply)」として提案する。
         # 承認すると chat_service._execute_reply_proposal が SMTP で送信する。
         if channel in ("gmail", "email", "icloud") and sender_email:
-            summary, draft = await self._draft_email_reply(sender, subject, body)
+            summary, draft = await self._draft_email_reply(sender, subject, body, detected_message.get("user_id"))
             if draft:
                 reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}"
                 result = self.supabase.table("dan_proposals").insert({
@@ -331,39 +356,101 @@ class ExternalMessageRoutingService:
         }).execute()
         return result.data[0] if result.data else None
 
-    async def _draft_email_reply(self, sender: str, subject: str, body: str) -> tuple[Optional[str], Optional[str]]:
+    async def _draft_email_reply(
+        self, sender: str, subject: str, body: str, user_id: Optional[str] = None
+    ) -> tuple[Optional[str], Optional[str]]:
         """受信メールの「自然な概要」と「返信本文」を run_oneshot_cli で生成する。
 
-        Returns: (summary, reply)。概要=誰から何の件かを自然な日本語で1〜2文。
-        reply=送信用の返信本文のみ。失敗時は (None, None)。
-        重い CLI 呼び出しはスレッドに逃がし、core のイベントループを塞がない。
+        カレンダー連携:
+          - 返信で日程提案するなら、運用者の空き時間を渡し空いている時間だけ提案させる。
+          - 受信メールで日時が確定していれば、その予定を抽出してカレンダーに登録し
+            （重複は登録しない）、概要に「📅 登録しました」と添える。
+
+        Returns: (summary, reply)。失敗時 (None, None)。
         """
+        import asyncio as _asyncio
         try:
             from app.agent.cli_runner import run_oneshot_cli
             from app.config import settings
             from_name = settings.DAN_DEFAULT_FROM_NAME
         except Exception:
             return None, None
+
+        if not user_id:
+            try:
+                from app.services.owner import resolve_owner_user_id
+                user_id = resolve_owner_user_id()
+            except Exception:
+                user_id = None
+
+        # 空き時間を取得（カレンダー未連携なら空文字で続行）
+        free_text = "(カレンダー未連携)"
+        try:
+            from app.services.calendar_service import get_calendar_service
+            cal = get_calendar_service()
+            slots = await _asyncio.to_thread(cal.find_free_slots, user_id, 10)
+            if slots and not (isinstance(slots[0], dict) and slots[0].get("error")):
+                free_text = "\n".join(f"- {s['date']} {s['start']}〜{s['end']}" for s in slots[:25])
+        except Exception:
+            cal = None
+
         prompt = (
             f"あなたは「{from_name}」の担当者として、以下の受信メールに返信します。\n"
-            "(1)状況の自然な要約 と (2)返信メール本文 を作ってください。\n"
-            "出力は次の形式を厳守し、他の文字を足さないこと:\n"
-            "【概要】<1〜2文の自然な日本語。誰から何の件で、何を求めているか。"
-            "例: 本田さんからホームページ制作の件で、料金と納期についての問い合わせです。>\n"
-            "【返信案】\n<丁寧で簡潔な返信メール本文のみ。件名・マークダウンは不要。>\n\n"
-            f"重要な制約:\n"
-            f"- 本文末尾に署名・会社名・個人名・連絡先を書かないこと（署名はシステムが自動で付ける）。\n"
-            f"- メール本文に書かれていない予定・日時・約束・事実を創作しないこと。"
-            f"相手が日時を提示していればそれに沿って答え、こちらから架空の候補日時を作らない。\n\n"
+            "次の3つを作り、形式を厳守してください（他の文字を足さない）:\n"
+            "【概要】<1〜2文の自然な日本語。誰から何の件で何を求めているか>\n"
+            "【返信案】\n<丁寧で簡潔な返信本文のみ。署名・会社名・連絡先は書かない（自動付与）>\n"
+            "【予定】<相手と日時が『確定』した場合のみJSON {\"title\":\"...\",\"start\":\"YYYY-MM-DDTHH:MM:00\",\"end\":\"...\"} を出す。"
+            "単に候補を提示・打診しているだけ、未確定、日時が無い場合は「なし」と書く。創作しない>\n\n"
+            "重要:\n"
+            "- 本文に無い日時・約束・事実を創作しない。\n"
+            "- こちらから日程を提案する場合は、下記『空き時間』の中からのみ提案する（埋まっている時間は出さない）。\n\n"
+            f"--- 運用者の空き時間(今後10日, 9-18時) ---\n{free_text}\n\n"
             f"--- 受信メール ---\n差出人: {sender}\n件名: {subject}\n本文:\n{body[:2000]}\n"
         )
         try:
-            import asyncio as _asyncio
             raw = await _asyncio.to_thread(run_oneshot_cli, prompt, "sonnet", 90)
         except Exception:
             return None, None
-        summary, reply = _split_summary_reply(raw)
-        return summary, _with_signature(reply)
+
+        summary, reply, schedule = _split_summary_reply_schedule(raw)
+        reply = _with_signature(reply)
+
+        # 確定予定があればカレンダー登録（重複は避ける）
+        if schedule and schedule.get("start") and user_id:
+            try:
+                note = await _asyncio.to_thread(
+                    self._register_calendar_event, user_id, sender, subject, schedule
+                )
+                if note and summary:
+                    summary = f"{summary}\n{note}"
+                elif note:
+                    summary = note
+            except Exception:
+                logger.exception("calendar register failed")
+
+        return summary, reply
+
+    def _register_calendar_event(self, user_id: str, sender: str, subject: str, schedule: dict) -> Optional[str]:
+        """確定予定をカレンダー登録。同時間帯に既存予定があれば登録せず注記のみ。"""
+        from app.services.calendar_service import get_calendar_service
+        cal = get_calendar_service()
+        start = schedule.get("start")
+        end = schedule.get("end") or start
+        title = schedule.get("title") or f"{_extract_email(sender) or sender} 打ち合わせ"
+
+        # 重複チェック: 同日の既存予定と開始時刻が一致/近接なら登録しない
+        try:
+            events = cal.get_events(user_id, days=30, max_results=50)
+            for ev in events or []:
+                if isinstance(ev, dict) and ev.get("start") and str(ev["start"])[:16] == str(start)[:16]:
+                    return f"📅 既にカレンダーに同時刻の予定あり（{start}）"
+        except Exception:
+            pass
+
+        r = cal.create_event(user_id, title=title, start=start, end=end, description=f"自動登録: {subject}")
+        if r and not r.get("error"):
+            return f"📅 カレンダーに登録しました（{start} {title}）"
+        return None
 
 
 _routing_service: Optional[ExternalMessageRoutingService] = None
