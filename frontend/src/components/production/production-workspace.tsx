@@ -623,6 +623,7 @@ export function ProductionWorkspace({
         initialAnnotations={(selectedContent.timeline?.annotations as ReviewAnnotation[] | undefined) || undefined}
         initialSequence={(selectedContent.timeline?.sequence as EditSequence | undefined) || undefined}
         sequenceAssets={selectedSourceAssets.filter((asset) => asset.kind === 'video').map(sequenceAssetForEditor)}
+        renderedUrl={typeof selectedContent.outputs?.[0]?.url === 'string' ? (selectedContent.outputs[0].url as string) : undefined}
         sidePanelTop={
           <div className="mb-3 space-y-3">
             <div className="rounded-md border border-border p-3">
@@ -655,117 +656,51 @@ export function ProductionWorkspace({
                   ? selectedContent.timeline.brief
                   : 'ブリーフ未設定'}
               </div>
-              <Button className="mt-3 w-full" size="sm" onClick={() => void requestDanEdit()}>
-                Danに制作を依頼
-              </Button>
             </div>
             {selectedContent.outputs.length > 0 ? (
               <div className="rounded-md border border-border p-3">
-                <div className="mb-2 text-sm font-medium">最新出力</div>
-                {typeof selectedContent.outputs[0]?.url === 'string' ? (
-                  <video
-                    key={String(selectedContent.outputs[0].asset_id || selectedContent.outputs[0].path)}
-                    controls
-                    playsInline
-                    src={String(selectedContent.outputs[0].url)}
-                    className="mb-2 w-full rounded bg-black"
-                  />
-                ) : null}
-                <div className="space-y-2">
-                  {selectedContent.outputs.slice(0, 3).map((output, index) => (
-                    <div key={`${String(output.asset_id || output.path || index)}`} className="rounded border border-border bg-muted/30 p-2 text-xs">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium">{index === 0 ? '最新' : String(output.kind || 'video')}</span>
-                        {typeof output.created_at === 'string' ? (
-                          <span className="text-muted-foreground">{new Date(output.created_at).toLocaleTimeString()}</span>
-                        ) : null}
-                      </div>
-                      {typeof output.url === 'string' ? (
-                        <a
-                          href={output.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="mt-1 block truncate text-primary underline-offset-2 hover:underline"
-                        >
-                          新しいタブで開く
-                        </a>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-3 border-t border-border pt-3">
-                  <div className="mb-1 text-sm font-medium">この出力を直す</div>
-                  <p className="mb-2 text-xs text-muted-foreground">
-                    気になった点を書いて作り直すと、前回の編集に対する修正としてDanが反映します。
-                  </p>
-                  <Textarea
-                    value={revisionNote}
-                    onChange={(event) => setRevisionNote(event.target.value)}
-                    placeholder="例: 言い直しだけ切って。語尾を切らないで。テロップの黒背景をやめてフチ+影で。小窓パートはテロップ無し。"
-                    className="min-h-20 text-xs"
-                  />
-                  <Button
-                    className="mt-2 w-full"
-                    size="sm"
-                    disabled={!revisionNote.trim()}
-                    onClick={() => void requestDanEdit(revisionNote)}
-                  >
-                    この指示で作り直す
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-            <div className="rounded-md border border-border p-3">
-              <div className="mb-2 flex items-center justify-between">
-                <div className="text-sm font-medium">処理状況</div>
-                <Button variant="ghost" size="sm" onClick={() => void loadJobs()}>
-                  <RefreshCw className="h-4 w-4" />
+                <div className="mb-1 text-sm font-medium">この出力を直す</div>
+                <p className="mb-2 text-xs text-muted-foreground">
+                  最新の動画はタイムラインで再生できます。気になった点を書いて作り直すと、前回の編集に対する修正としてDanが反映します。
+                </p>
+                <Textarea
+                  value={revisionNote}
+                  onChange={(event) => setRevisionNote(event.target.value)}
+                  placeholder="例: 言い直しだけ切って。語尾を切らないで。テロップの黒背景をやめてフチ+影で。小窓パートはテロップ無し。"
+                  className="min-h-20 text-xs"
+                />
+                <Button
+                  className="mt-2 w-full"
+                  size="sm"
+                  disabled={!revisionNote.trim()}
+                  onClick={() => void requestDanEdit(revisionNote)}
+                >
+                  この指示で作り直す
                 </Button>
               </div>
-              {jobs.length === 0 ? (
-                <p className="text-xs text-muted-foreground">まだ処理はありません。</p>
-              ) : (
-                <div className="space-y-2">
-                  {jobEvents.length > 0 ? (
-                    <div className="rounded border border-border bg-muted/30 p-2 text-xs">
-                      <div className="mb-1 font-medium">Dan作業ログ</div>
-                      <div className="max-h-40 space-y-1 overflow-y-auto">
-                        {jobEvents.slice(-8).map((event, index) => (
-                          <div key={`${event.created_at || index}-${index}`} className="text-muted-foreground">
-                            <span className="mr-1 text-[10px] uppercase">{event.type || 'event'}</span>
-                            <span>{event.name ? `${event.name}: ` : ''}{event.text || ''}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                  {jobs.slice(0, 4).map((job) => (
-                    <div key={job.id} className="rounded border border-border bg-muted/30 p-2 text-xs">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium">{job.status}</span>
-                        <span className="text-muted-foreground">{new Date(job.created_at).toLocaleTimeString()}</span>
-                      </div>
-                      {typeof job.result?.task_path === 'string' ? (
-                        <div className="mt-1 truncate text-muted-foreground" title={job.result.task_path}>
-                          {job.result.task_path}
-                        </div>
-                      ) : null}
-                      {typeof job.result?.output_url === 'string' ? (
-                        <a
-                          href={job.result.output_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="mt-1 block truncate text-primary underline-offset-2 hover:underline"
-                        >
-                          出力動画を開く
-                        </a>
-                      ) : null}
-                      {job.error ? <div className="mt-1 text-destructive">{job.error}</div> : null}
-                    </div>
-                  ))}
+            ) : null}
+            {latestJob && (latestJob.status === 'queued' || latestJob.status === 'running') ? (
+              <div className="rounded-md border border-border p-3">
+                <div className="mb-2 flex items-center gap-2 text-sm font-medium">
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                  Danが制作中…
                 </div>
-              )}
-            </div>
+                {jobEvents.length > 0 ? (
+                  <div className="max-h-40 space-y-1 overflow-y-auto rounded border border-border bg-muted/30 p-2 text-xs">
+                    {jobEvents.slice(-8).map((event, index) => (
+                      <div key={`${event.created_at || index}-${index}`} className="text-muted-foreground">
+                        <span className="mr-1 text-[10px] uppercase">{event.type || 'event'}</span>
+                        <span>{event.name ? `${event.name}: ` : ''}{event.text || ''}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : latestJob?.status === 'failed' ? (
+              <div className="rounded-md border border-destructive/40 p-3 text-xs text-destructive">
+                前回の制作が失敗しました。{latestJob.error || ''}
+              </div>
+            ) : null}
           </div>
         }
         onBack={() => {
