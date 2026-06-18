@@ -161,6 +161,7 @@ function buildSnapshot(target: Element): SelectionSnapshot {
       objectFit: computedStyles.objectFit, objectPosition: computedStyles.objectPosition };
   }
   return {
+    slug,
     elementKey: computeElementKey(target),
     tagName,
     rect: toRect(target),
