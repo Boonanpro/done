@@ -554,29 +554,48 @@ class DanNotionService:
             if (b.get("properties") or {}).get("kind") == f"asset_{asset_type}":
                 return b
 
-        # 新方針 (2026-04-29~): まず inbox に投入、AI が後で仕分け。
-        inbox = self.get_or_create_inbox(user_id)
         url = asset.get("url") or asset.get("preview_url") or ""
         prompt = asset.get("prompt") or ""
         label = (prompt[:40] if prompt else asset_type) or asset_type
-        order_key = self._compute_order_key(user_id, inbox["id"], after_block_id=None)
 
+        # project_id が分かっていれば、その案件ページの種類別フォルダへ直接整理。
+        # 不明なら inbox（後で手動/AI仕分け）。
+        _ASSET_FOLDER = {
+            "image": "folder_image", "video": "folder_video",
+            "pdf": "folder_document", "file": "folder_document",
+        }
+        target = None
+        needs_sorting = True
+        if project_id:
+            try:
+                root = self.get_or_create_project_page(user_id, str(project_id), project_title)
+                folder_kind = _ASSET_FOLDER.get(asset_type, "folder_document")
+                folder = self.get_or_create_subfolder(user_id, root["id"], str(project_id), folder_kind)
+                if folder:
+                    target = folder
+                    needs_sorting = False
+            except Exception:
+                logger.exception("asset folder resolve failed; fallback to inbox")
+        if target is None:
+            target = self.get_or_create_inbox(user_id)
+
+        order_key = self._compute_order_key(user_id, target["id"], after_block_id=None)
         row = {
             "user_id": user_id,
-            "parent_id": inbox["id"],
+            "parent_id": target["id"],
             "type": asset_type if asset_type in ("image", "video", "pdf", "file") else "file",
             "order_key": order_key,
             "properties": {
                 "kind": f"asset_{asset_type}",
                 "url": url,
                 "prompt": prompt,
-                "needs_sorting": True,
+                "needs_sorting": needs_sorting,
                 "project_id": str(project_id) if project_id else None,
                 "title": label,
                 "original_name": label,
             },
             "content": [{"type": "text", "text": label}],
-            "tags": [asset_type, "inbox"] + ([str(project_id)] if project_id else []),
+            "tags": [asset_type] + (["inbox"] if needs_sorting else ["sorted"]) + ([str(project_id)] if project_id else []),
             "source": "chat",
             "source_id": str(source_id),
             "created_by": "system",
