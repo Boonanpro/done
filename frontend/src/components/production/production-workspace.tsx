@@ -373,7 +373,9 @@ export function ProductionWorkspace({
       if (!res.ok) throw new Error(await res.text());
       const content = await res.json();
       const instruction = {
-        mode: 'dan_edit',
+        // Timeline-first: Dan emits editing decisions, code assembles the timeline,
+        // no MP4 is rendered until the user approves and exports.
+        mode: 'dan_plan',
         content_id: content.id,
         content_title: content.title,
         asset_ids: selectedAssetIds,
