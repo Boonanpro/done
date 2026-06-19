@@ -1765,6 +1765,10 @@ def _run_cli_process(
     _last_activity = [time.time()]
     _watchdog_fired = [False]
     _task_active = [False]  # Task tool が走ってる間 True
+    # プロセス終了後、stdout が EOF に達するまでの猶予。これを超えても EOF が来ない
+    # 場合、孫プロセスが書き込み端を握って EOF が来ないと判断し、ブロック中の
+    # reader スレッドを見捨ててメインループを抜ける。
+    STDOUT_EOF_GRACE = 20   # seconds
 
     def _current_timeout() -> int:
         return WATCHDOG_TIMEOUT_TASK_ACTIVE if _task_active[0] else WATCHDOG_TIMEOUT_NORMAL
@@ -1798,7 +1802,53 @@ def _run_cli_process(
     watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
     watchdog_thread.start()
 
-    for line in process.stdout:
+    # stdout は専用 daemon スレッドで読み、行をキューに流す。プロセスが終了しても
+    # 孫プロセス (ffmpeg / MCP / ツールのヘルパー) が stdout の書き込み端を継承した
+    # まま生き残ると EOF が来ず readline() が永久ブロックする。Windows ではこの
+    # 同期 read を別スレッドからキャンセルできない (fd を閉じても保留中の ReadFile は
+    # 解除されない) ため、読み取り自体を隔離する。メインはキューから timeout 付きで
+    # 取り出し、プロセス終了後 STDOUT_EOF_GRACE 秒新着が無ければ、ブロック中の reader を
+    # 見捨てて先へ進む (reader は daemon なのでプロセス終了時に道連れで消える)。
+    # これにより、本番で観測した「動画は完成したのにジョブが running のままハングする」
+    # 事象を根絶する。
+    _stdout_queue: "thread_queue.Queue" = thread_queue.Queue()
+
+    def _stdout_reader():
+        try:
+            while True:
+                raw = process.stdout.readline()
+                if not raw:
+                    break  # EOF
+                _stdout_queue.put(raw)
+        except (ValueError, OSError):
+            pass
+        finally:
+            _stdout_queue.put(None)  # 番兵: ストリーム終了 or reader 死亡
+
+    stdout_thread = threading.Thread(target=_stdout_reader, daemon=True)
+    stdout_thread.start()
+
+    _proc_exited_at: list = [None]
+    while True:
+        try:
+            line = _stdout_queue.get(timeout=1.0)
+        except thread_queue.Empty:
+            # 新着なし。プロセスが生きている間は既存の idle watchdog が長時間ハングを
+            # 監視するのでここでは抜けない。プロセスが終了済みで、終了後
+            # STDOUT_EOF_GRACE 秒経っても新たな行が来ない場合のみ、孫がパイプを握って
+            # EOF が来ないと判断し、ブロック中の reader を見捨ててループを抜ける。
+            if process.poll() is not None:
+                if _proc_exited_at[0] is None:
+                    _proc_exited_at[0] = time.time()
+                elif time.time() - _proc_exited_at[0] > STDOUT_EOF_GRACE:
+                    _cli_debug(
+                        f"stdout: PID={process.pid} exited (code={process.returncode}) but no "
+                        f"EOF within {STDOUT_EOF_GRACE}s; abandoning blocked reader thread."
+                    )
+                    break
+            continue
+        if line is None:
+            break  # EOF 番兵 — ストリーム正常終了
         _last_activity[0] = time.time()
         line = line.strip()
         if not line:
