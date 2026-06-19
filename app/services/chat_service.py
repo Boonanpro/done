@@ -595,10 +595,66 @@ class ChatService:
                     content=content,
                     sender_name=sender_name,
                 )
-            
+                # チャットで送られたファイル(画像/動画/PDF等)を dan-notion の案件フォルダへ保存
+                try:
+                    await self._archive_chat_attachments(room_id, sender_id, msg["id"], content)
+                except Exception:
+                    import logging
+                    logging.getLogger(__name__).warning("archive chat attachments failed", exc_info=True)
+
             return msg
         raise ValueError("Failed to send message")
     
+    async def _archive_chat_attachments(self, room_id: str, user_id: str, message_id: str, content: str) -> None:
+        """チャットで送られたファイル(/api/v1/files/<name>)を dan-notion の案件フォルダへ保存。
+
+        部屋に紐づく project が分かれば その案件の種類別フォルダ(画像素材/動画素材/資料)へ、
+        不明なら inbox へ。拡張子で種類判定。ベストエフォート。
+        """
+        import asyncio as _asyncio
+        import re as _re
+
+        files = _re.findall(r"/api/v1/files/([A-Za-z0-9._%\-]+)", content or "")
+        if not files:
+            return
+        seen = set()
+        files = [f for f in files if not (f in seen or seen.add(f))]
+
+        # 部屋→project 解決
+        def _project():
+            r = self.supabase.table("projects").select("id,title").eq("room_id", room_id).limit(1).execute()
+            return (r.data[0] if r.data else None)
+        proj = await _asyncio.to_thread(_project)
+        project_id = proj["id"] if proj else None
+        project_title = proj.get("title") if proj else None
+
+        def _ext_type(name: str) -> str:
+            n = name.lower()
+            if n.rsplit(".", 1)[-1] in ("png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "heic"):
+                return "image"
+            if n.rsplit(".", 1)[-1] in ("mp4", "mov", "webm", "avi", "mkv", "m4v"):
+                return "video"
+            if n.endswith(".pdf"):
+                return "pdf"
+            return "file"
+
+        from app.services.dan_notion_service import get_dan_notion_service
+        svc = get_dan_notion_service()
+
+        def _file_one(fname: str):
+            asset = {"url": f"/api/v1/files/{fname}", "prompt": "", "original_name": fname}
+            svc.add_asset_block_to_project(
+                user_id=user_id, project_id=str(project_id) if project_id else None,
+                project_title=project_title, asset=asset,
+                asset_type=_ext_type(fname), source_id=f"{message_id}:{fname}",
+            )
+
+        for fname in files:
+            try:
+                await _asyncio.to_thread(_file_one, fname)
+            except Exception:
+                pass
+
     async def _trigger_message_detection(
         self,
         room_id: str,
