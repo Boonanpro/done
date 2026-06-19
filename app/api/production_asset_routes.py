@@ -1221,6 +1221,434 @@ The finished video is the priority: if you can only finish one thing, finish the
     return None
 
 
+# --- Timeline-first "dan_plan" mode -------------------------------------------
+# Instead of Dan rendering an MP4 (its best effort) and then writing a degraded JSON
+# description (the old dan_edit), Dan outputs only editing DECISIONS in natural language
+# (which speech segments to keep, where the screen demo overlays as a PiP wipe, what to
+# blur) and deterministic code assembles the exact timeline from Whisper word/segment
+# timestamps. No timeline math is asked of Dan (LLMs degrade when forced to emit
+# structured numbers), and no MP4 is rendered — the timeline IS the deliverable; the
+# user reviews/edits it and exports to MP4 only on approval.
+
+def _segment_id(asset_index: int, seg_index: int) -> str:
+    return f"a{asset_index}_s{seg_index:02d}"
+
+
+def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str, Any]]) -> dict[str, Any]:
+    """Give Dan 'ears' as STRUCTURED data: run dan_audio_check.py on each video asset up
+    front (not via Dan's own tool call) so we hold a segment-timestamped transcript with
+    stable ids (e.g. 'a1_s03') to drive deterministic assembly. Cached on asset metadata.
+    Returns {asset_id: {asset_index, duration, segments[], dead_air[], restatements[]}}."""
+    import sys, os
+    assets = _read_assets(room_id)
+    by_id = {str(a.get("id")): a for a in assets if a.get("id")}
+    script = PROJECT_ROOT / "scripts" / "dan_audio_check.py"
+    # dan_audio_check.py defaults to large-v3 which is far too slow for an interactive
+    # pipeline (minutes/asset on CPU). Use a fast model here; quality can be tuned later
+    # via DAN_PLAN_WHISPER_MODEL (and the user can clean captions on the timeline).
+    whisper_model = os.environ.get("DAN_PLAN_WHISPER_MODEL", "base")
+    results: dict[str, Any] = {}
+    dirty = False
+    asset_index = 0
+    for asset in source_assets:
+        if not isinstance(asset, dict) or asset.get("kind") != "video":
+            continue
+        asset_index += 1
+        aid = str(asset.get("id") or "")
+        if not aid:
+            continue
+        src = asset.get("proxy_path") or asset.get("local_path")
+        if not src or not Path(src).exists():
+            continue
+        live = by_id.get(aid)
+        meta = (live.get("metadata") if live and isinstance(live.get("metadata"), dict) else {}) or {}
+        cached = meta.get("audio_analysis")
+        if isinstance(cached, dict) and meta.get("audio_analysis_src") == str(src):
+            cached = dict(cached)
+            cached["asset_index"] = asset_index
+            for j, s in enumerate(cached.get("segments") or [], start=1):
+                s["id"] = _segment_id(asset_index, j)
+                s["asset_id"] = aid
+            results[aid] = cached
+            continue
+        out_json = Path(src).with_name(Path(src).stem + "_audiocheck.json")
+        try:
+            subprocess.run(
+                [sys.executable, str(script), str(src), "--words", "--json-only", "--model", whisper_model],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=900, check=False,
+            )
+            data = json.loads(out_json.read_text(encoding="utf-8")) if out_json.exists() else {}
+        except Exception:
+            data = {}
+        segs = data.get("segments") or []
+        for j, s in enumerate(segs, start=1):
+            s["id"] = _segment_id(asset_index, j)
+            s["asset_id"] = aid
+        entry = {
+            "asset_id": aid,
+            "asset_index": asset_index,
+            "duration": data.get("duration"),
+            "segments": segs,
+            "dead_air": data.get("dead_air") or [],
+            "restatements": data.get("restatements") or [],
+        }
+        results[aid] = entry
+        if live is not None:
+            meta = dict(meta)
+            meta["audio_analysis"] = entry
+            meta["audio_analysis_src"] = str(src)
+            live["metadata"] = meta
+            dirty = True
+    if dirty:
+        _write_assets(room_id, assets)
+    if results:
+        n = sum(len(v.get("segments") or []) for v in results.values())
+        _append_job_event(room_id, job_id, {"type": "status", "text": f"音声解析(Whisper)完了: {len(results)}本 / {n}セグメント"})
+    return results
+
+
+def _build_dan_plan(
+    room_id: str,
+    user_id: str,
+    job_id: str,
+    instruction: dict[str, Any],
+    instruction_path: Path,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Run Dan in DECISION-ONLY mode (no render, no timeline JSON math). Returns
+    (decisions, transcripts). Dan reasons freely then emits a small DECISIONS object
+    that references transcript segment ids; _assemble_sequence_from_decisions turns it
+    into the exact timeline."""
+    source_assets = [
+        {
+            "id": asset.get("id"),
+            "kind": asset.get("kind"),
+            "filename": asset.get("filename"),
+            "local_path": asset.get("local_path"),
+            "proxy_path": asset.get("proxy_path"),
+            "source_type": asset.get("source_type"),
+            "metadata": asset.get("metadata"),
+        }
+        for asset in (instruction.get("source_assets") or [])
+        if isinstance(asset, dict)
+    ]
+    timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
+
+    analyses: dict[str, str] = {}
+    try:
+        analyses = asyncio.run(_analyze_assets_for_edit(room_id, source_assets))
+    except Exception:
+        analyses = {}
+    if analyses:
+        _append_job_event(room_id, job_id, {"type": "status", "text": f"映像分析(Gemini)完了: {len(analyses)}本"})
+    transcripts = _run_audio_analysis(room_id, job_id, source_assets)
+
+    analysis_parts = []
+    for asset in source_assets:
+        aid = str(asset.get("id") or "")
+        if aid in analyses:
+            text = analyses[aid]
+            if len(text) > _EDIT_ANALYSIS_INJECT_LIMIT:
+                text = text[:_EDIT_ANALYSIS_INJECT_LIMIT] + "\n...(以下略)"
+            analysis_parts.append(f"### asset {aid} ({asset.get('filename') or ''})\n{text}")
+    analysis_block = "\n\n".join(analysis_parts) if analysis_parts else "(映像分析なし)"
+
+    transcript_parts = []
+    for asset in source_assets:
+        aid = str(asset.get("id") or "")
+        t = transcripts.get(aid)
+        if not t:
+            continue
+        lines = [f"### asset {aid} ({asset.get('filename') or ''}) — segments:"]
+        for s in t.get("segments") or []:
+            lines.append(f"  {s['id']}  [{float(s.get('start') or 0):.2f}-{float(s.get('end') or 0):.2f}]  {s.get('text') or ''}")
+        for r in t.get("restatements") or []:
+            f0, s0 = r.get("first") or {}, r.get("second") or {}
+            lines.append(f"  ↳言い直し: 前を捨てる [{float(f0.get('start') or 0):.2f}-{float(f0.get('end') or 0):.2f}] '{f0.get('text') or ''}'  / 後を残す '{s0.get('text') or ''}'")
+        transcript_parts.append("\n".join(lines))
+    transcript_block = "\n\n".join(transcript_parts) if transcript_parts else "(音声なし)"
+
+    try:
+        edit_policy = (PROJECT_ROOT / ".claude" / "skills" / "post-production" / "edit_policy.md").read_text(encoding="utf-8")
+    except Exception:
+        edit_policy = ""
+
+    prompt = f"""
+You are DAN, a video editor. Your deliverable is EDITING DECISIONS for a timeline — NOT a rendered video, and NOT a timeline JSON with exact numbers. Do NOT run ffmpeg. Do NOT render anything. A program will assemble the exact timeline from your decisions and the word-level transcript below, and the user will fine-tune it and export to MP4 later.
+
+Work in TWO steps, in this order:
+
+STEP 1 — Reason out loud (free-form Japanese). Like a skilled human editor: decide which spoken segments to KEEP and in what order, which 言い直し (restatement) take to DROP, where the screen-recording should take over as the background with the main camera shown as a small wipe (PiP), what on screen must be blurred, and how tight the pacing should be. Explain WHY. Follow the EDITING POLICY below.
+
+STEP 2 — AFTER your reasoning, output ONE json object (and nothing after it) with your DECISIONS. Reference segments by their id (e.g. a1_s03). Do NOT compute timeline seconds yourself — the assembler derives them from the transcript timestamps.
+
+DECISIONS schema:
+{{
+  "spine": [ {{"segment_id": "a1_s03", "caption": "整えたテロップ文字列 or null=発話そのまま"}} ],
+  "screen_overlays": [ {{"screen_asset_id": "<asset id>", "screen_source_start": <sec>, "screen_source_end": <sec>, "from_segment": "a1_s06", "to_segment": "a1_s12", "main_as_pip": true}} ],
+  "blur": [ {{"asset_id": "<asset id>", "region": {{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}}, "source_start": <sec>, "source_end": <sec>, "style": "soft"}} ],
+  "pacing_gap": 0.3
+}}
+
+Rules:
+- spine = the kept talking segments in final order. Anything not listed is cut. Drop the earlier take of each restatement by simply omitting it.
+- Keep full sentences; never cut a sentence end; keep filler (えー/あの). Cut ONLY restatements; the assembler compresses between-sentence dead air to pacing_gap.
+- During screen_overlays the screen recording is the background and the main camera is the small wipe; captions are auto-suppressed there (do not add captions to those segments).
+- All audio comes from the main-camera spine segments automatically.
+- region/source coords for blur are 0..1 normalized and in the screen asset's own seconds.
+- Output the json LAST, after the reasoning. It must be valid JSON.
+
+EDITING POLICY (必読):
+{edit_policy}
+
+映像分析(Gemini):
+{analysis_block}
+
+文字起こし(セグメントid付き — これを使って spine を組む):
+{transcript_block}
+
+Selected assets:
+{json.dumps(source_assets, ensure_ascii=False, indent=2)}
+
+Brief / existing timeline:
+{json.dumps(timeline, ensure_ascii=False, indent=2)}
+""".strip()
+
+    async def run_dan(prompt_text: str) -> str:
+        from app.agent.cli_runner import process_message_cli
+        chunks: list[str] = []
+        async for event in process_message_cli(
+            room_id=room_id,
+            user_id=user_id,
+            content=prompt_text,
+            project_title=str(instruction.get("content_title") or "Production"),
+            project_description=str(timeline.get("brief") or instruction.get("brief") or ""),
+            project_status="in_progress",
+            skip_save=True,
+            skip_resume=True,
+            cwd="D:/dan-workspace",
+        ):
+            et = str(event.get("type") or "")
+            if et in {"text", "reasoning", "tool_use", "result", "error"}:
+                _append_job_event(room_id, job_id, {
+                    "type": et,
+                    "text": str(event.get("text") or event.get("message") or "")[:4000],
+                    "name": event.get("name") or event.get("tool_name"),
+                })
+            if et in {"text", "result"} and event.get("text"):
+                chunks.append(str(event.get("text")))
+        return "\n".join(chunks).strip()
+
+    output = asyncio.run(run_dan(prompt))
+    decisions = _extract_json_object(output)
+    if not isinstance(decisions, dict) or not decisions.get("spine"):
+        decisions = None
+    return decisions, transcripts
+
+
+def _assemble_sequence_from_decisions(
+    decisions: dict[str, Any],
+    transcripts: dict[str, Any],
+    room_id: str,
+    fmt: str,
+) -> dict[str, Any] | None:
+    """Deterministically build the exact timeline sequence from Dan's DECISIONS plus the
+    Whisper segment timestamps. Dan never computes timeline seconds — this does."""
+    BREATH = 0.35      # keep a breath after each sentence end (policy §1)
+    PREROLL = 0.08     # small lead-in before each segment
+    PIP_POS = {"x": 0.30, "y": 0.655, "width": 0.40, "height": 0.30}
+
+    seg_by_id: dict[str, Any] = {}
+    for _aid, t in transcripts.items():
+        for s in (t.get("segments") or []):
+            seg_by_id[str(s.get("id"))] = s
+
+    # Restatement safety net: if audio_check flagged a 言い直し pair and BOTH takes ended
+    # up in the spine, deterministically drop the earlier take (policy: keep the later,
+    # complete one) even when Dan failed to. Maps the detector's time ranges to seg ids.
+    spine = decisions.get("spine") or []
+    spine_ids = {str(it.get("segment_id") if isinstance(it, dict) else it) for it in spine}
+
+    def _seg_at(aid: str, start: float, end: float) -> str | None:
+        for sid, s in seg_by_id.items():
+            if str(s.get("asset_id")) != aid:
+                continue
+            ss, se = float(s.get("start") or 0), float(s.get("end") or 0)
+            if min(end, se) - max(start, ss) > 0.2:  # meaningful overlap
+                return sid
+        return None
+
+    drop_earlier: set[str] = set()
+    for _aid, t in transcripts.items():
+        for r in (t.get("restatements") or []):
+            f0, s0 = r.get("first") or {}, r.get("second") or {}
+            fid = _seg_at(str(t.get("asset_id")), float(f0.get("start") or 0), float(f0.get("end") or 0))
+            sid2 = _seg_at(str(t.get("asset_id")), float(s0.get("start") or 0), float(s0.get("end") or 0))
+            if fid and sid2 and fid in spine_ids and sid2 in spine_ids and fid != sid2:
+                drop_earlier.add(fid)
+
+    assets = _read_assets(room_id)
+    dur_by_id: dict[str, float] = {}
+    for a in assets:
+        m = a.get("metadata") if isinstance(a.get("metadata"), dict) else {}
+        try:
+            dur_by_id[str(a.get("id"))] = float(m.get("duration") or 0)
+        except Exception:
+            pass
+
+    n = {"v": 0, "o": 0, "c": 0, "a": 0, "e": 0}
+    def _cid(kind: str) -> str:
+        n[kind] += 1
+        return f"clip_{kind}{n[kind]:03d}"
+
+    # Pass 1: lay out the spine timeline (positions only). Clips are placed CONTIGUOUSLY
+    # (no inter-clip gaps): the natural pause comes from the breath kept at each sentence
+    # end, and contiguous placement keeps audio+video frame-aligned (no drift) and tightens
+    # the dead air between sentences (per policy §3).
+    seg_spans: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    cursor = 0.0
+    for item in spine:
+        sid = item.get("segment_id") if isinstance(item, dict) else item
+        if str(sid) in drop_earlier:
+            continue  # earlier take of a detected restatement — drop it
+        s = seg_by_id.get(str(sid))
+        if not s:
+            continue
+        aid = str(s.get("asset_id") or "")
+        src_start = max(0.0, float(s.get("start") or 0) - PREROLL)
+        src_end = float(s.get("end") or 0) + BREATH
+        ad = dur_by_id.get(aid) or 0.0
+        if ad:
+            src_end = min(src_end, ad)
+        out_dur = max(0.05, round(src_end - src_start, 3))
+        ts = round(cursor, 3)
+        te = round(cursor + out_dur, 3)
+        caption = (item.get("caption") if isinstance(item, dict) else None)
+        caption = caption if isinstance(caption, str) else None
+        seg_spans[str(sid)] = {
+            "asset_id": aid, "source_start": round(src_start, 3), "source_end": round(src_end, 3),
+            "timeline_start": ts, "timeline_end": te,
+            "caption": (caption.strip() if caption else (str(s.get("text") or "").strip())),
+        }
+        order.append(str(sid))
+        cursor = te  # contiguous: no inter-clip gap (breath provides the pause)
+    if not order:
+        return None
+    total = round(seg_spans[order[-1]]["timeline_end"], 3)
+
+    # Determine which spine segments are covered by a screen overlay.
+    overlays = []
+    covered: set[str] = set()
+    for ov in (decisions.get("screen_overlays") or []):
+        frm, to = str(ov.get("from_segment") or ""), str(ov.get("to_segment") or "")
+        if frm not in seg_spans or to not in seg_spans:
+            continue
+        i0 = order.index(frm) if frm in order else None
+        i1 = order.index(to) if to in order else None
+        if i0 is None or i1 is None or i1 < i0:
+            continue
+        span_ids = order[i0:i1 + 1]
+        span_start = seg_spans[frm]["timeline_start"]
+        span_end = seg_spans[to]["timeline_end"]
+        overlays.append({
+            "screen_asset_id": str(ov.get("screen_asset_id") or ""),
+            "screen_source_start": float(ov.get("screen_source_start") or 0),
+            "screen_source_end": float(ov.get("screen_source_end") or 0),
+            "span_start": span_start, "span_end": span_end,
+            "main_as_pip": bool(ov.get("main_as_pip", True)),
+        })
+        for sid in span_ids:
+            covered.add(sid)
+
+    video_clips: list[dict[str, Any]] = []
+    overlay_clips: list[dict[str, Any]] = []
+    caption_clips: list[dict[str, Any]] = []
+    audio_clips: list[dict[str, Any]] = []
+    effect_clips: list[dict[str, Any]] = []
+
+    # Pass 2: per spine segment, build visual + audio (+ caption if not under overlay).
+    for sid in order:
+        sp = seg_spans[sid]
+        base = {
+            "asset_id": sp["asset_id"],
+            "source_start": sp["source_start"], "source_end": sp["source_end"],
+            "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"],
+            "muted": True, "locked": False, "role": "main", "auto_edit_reason": "spine",
+        }
+        if sid in covered:
+            overlay_clips.append({**base, "id": _cid("o"), "track": "overlay",
+                                  "composition": "pip", "position": dict(PIP_POS), "layer": 1})
+        else:
+            video_clips.append({**base, "id": _cid("v"), "track": "video",
+                                "composition": "fullscreen", "layer": 0})
+            if sp["caption"]:
+                caption_clips.append({"id": _cid("c"), "text": sp["caption"], "track": "caption",
+                                      "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"]})
+        # audio: always the main-camera segment (continuous dialogue)
+        audio_clips.append({
+            "id": _cid("a"), "asset_id": sp["asset_id"], "track": "audio", "role": "dialogue",
+            "source_start": sp["source_start"], "source_end": sp["source_end"],
+            "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"],
+        })
+
+    # Pass 3: screen background clips (fullscreen base) under each overlay span.
+    for ov in overlays:
+        ss = ov["screen_source_start"]
+        se = ov["screen_source_end"]
+        if se <= ss:
+            se = ss + (ov["span_end"] - ov["span_start"])
+        ad = dur_by_id.get(ov["screen_asset_id"]) or 0.0
+        if ad:
+            se = min(se, ad)
+        video_clips.append({
+            "id": _cid("v"), "asset_id": ov["screen_asset_id"], "track": "video",
+            "source_start": round(ss, 3), "source_end": round(se, 3),
+            "timeline_start": ov["span_start"], "timeline_end": ov["span_end"],
+            "muted": True, "locked": False, "role": "screen",
+            "composition": "background", "layer": 0, "auto_edit_reason": "screen_overlay",
+        })
+
+    # Pass 4: blur regions → effect clips, mapping screen source time → timeline time.
+    for b in (decisions.get("blur") or []):
+        region = b.get("region") if isinstance(b.get("region"), dict) else None
+        if not region:
+            continue
+        baid = str(b.get("asset_id") or "")
+        bs = float(b.get("source_start") or 0)
+        be = float(b.get("source_end") or 0)
+        ov = next((o for o in overlays if o["screen_asset_id"] == baid and o["screen_source_end"] > o["screen_source_start"]), None)
+        if ov:
+            ss, se = ov["screen_source_start"], ov["screen_source_end"]
+            span = ov["span_end"] - ov["span_start"]
+            def _map(x: float) -> float:
+                return ov["span_start"] + (max(ss, min(se, x)) - ss) / (se - ss) * span
+            ts, te = round(_map(bs), 3), round(_map(be if be > bs else se), 3)
+        else:
+            ts, te = 0.0, total
+        if te <= ts:
+            te = round(ts + 0.5, 3)
+        effect_clips.append({
+            "id": _cid("e"), "track": "effect", "region": region,
+            "style": str(b.get("style") or "soft"),
+            "timeline_start": ts, "timeline_end": te,
+        })
+
+    return {
+        "version": 1,
+        "format": fmt,
+        "duration": total,
+        "generated_by": "dan_plan",
+        "tracks": [
+            {"id": "video_1", "type": "video", "label": "Main video", "clips": video_clips},
+            {"id": "overlay_1", "type": "overlay", "label": "Overlay/PiP", "clips": overlay_clips},
+            {"id": "caption_1", "type": "caption", "label": "Captions", "clips": caption_clips},
+            {"id": "audio_1", "type": "audio", "label": "Audio", "clips": audio_clips},
+            {"id": "effects_1", "type": "effect", "label": "Blur/Effects", "clips": effect_clips},
+        ],
+    }
+
+
 def _run_production_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], user_id: str) -> None:
     _update_job(room_id, job_id, {"status": "running"})
     _update_content(room_id, content_id, {"status": "running", "timeline": instruction.get("timeline") or {}})
@@ -1309,6 +1737,22 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
                 _append_job_event(room_id, job_id, {"type": "status", "text": "Dan rendered and registered the finished video."})
             if not render_result and not sequence_result:
                 raise RuntimeError("Dan did not produce a rendered video or an editable timeline")
+        elif mode == "dan_plan":
+            # Timeline-first: Dan emits editing DECISIONS, code assembles the exact
+            # sequence. No MP4 is rendered (the timeline is the deliverable).
+            decisions, transcripts = _build_dan_plan(room_id, user_id, job_id, instruction, instruction_path)
+            if not decisions:
+                raise RuntimeError("Dan did not produce usable editing decisions")
+            fmt = str((instruction.get("timeline") or {}).get("format") or instruction.get("format") or "9:16")
+            sequence_result = _assemble_sequence_from_decisions(decisions, transcripts, room_id, fmt)
+            if not sequence_result:
+                raise RuntimeError("Could not assemble a timeline from the decisions")
+            timeline_result = {"sequence": sequence_result}
+            dan_timeline_path.write_text(
+                json.dumps({"decisions": decisions, "sequence": sequence_result}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            _append_job_event(room_id, job_id, {"type": "status", "text": "編集判断からタイムラインを組み立てました（MP4は未生成）。"})
         if timeline_result and sequence_result:
             timeline = dict(instruction.get("timeline") or {})
             timeline.update(timeline_result)
