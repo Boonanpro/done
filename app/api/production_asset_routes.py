@@ -9,7 +9,6 @@ import subprocess
 import uuid
 import asyncio
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Literal
 
@@ -397,16 +396,6 @@ def _write_caption_ass(path: Path, captions: list[dict[str, Any]], width: int, h
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _caption_similarity(left: str | None, right: str | None) -> float:
-    lval = re.sub(r"\s+", "", left or "")
-    rval = re.sub(r"\s+", "", right or "")
-    if not lval or not rval:
-        return 0.0
-    if lval in rval or rval in lval:
-        return 1.0
-    return SequenceMatcher(None, lval, rval).ratio()
-
-
 def _asset_source_path(asset: dict[str, Any]) -> Path:
     source_value = asset.get("proxy_path") or asset.get("local_path")
     if not source_value:
@@ -415,129 +404,6 @@ def _asset_source_path(asset: dict[str, Any]) -> Path:
     if not path.exists():
         raise RuntimeError(f"Video file not found: {path}")
     return path
-
-
-def _detect_nonsilent_ranges(path: Path, duration: float, *, limit_seconds: float = 75.0) -> list[tuple[float, float]]:
-    if duration <= 0:
-        return []
-    analyze_until = min(duration, limit_seconds)
-    try:
-        result = subprocess.run(
-            [
-                _ffmpeg(),
-                "-hide_banner",
-                "-t",
-                f"{analyze_until:.3f}",
-                "-i",
-                str(path),
-                "-af",
-                "silencedetect=n=-34dB:d=0.45",
-                "-f",
-                "null",
-                "-",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=90,
-            check=False,
-        )
-    except Exception:
-        return []
-
-    silence_starts: list[float] = []
-    silences: list[tuple[float, float]] = []
-    for line in (result.stderr or "").splitlines():
-        start_match = re.search(r"silence_start:\s*([0-9.]+)", line)
-        if start_match:
-            silence_starts.append(float(start_match.group(1)))
-            continue
-        end_match = re.search(r"silence_end:\s*([0-9.]+)", line)
-        if end_match and silence_starts:
-            silences.append((silence_starts.pop(0), float(end_match.group(1))))
-    for start in silence_starts:
-        silences.append((start, analyze_until))
-
-    ranges: list[tuple[float, float]] = []
-    cursor = 0.0
-    for silence_start, silence_end in silences:
-        if silence_start - cursor >= 0.65:
-            ranges.append((max(0.0, cursor - 0.08), min(analyze_until, silence_start + 0.08)))
-        cursor = max(cursor, silence_end)
-    if analyze_until - cursor >= 0.65:
-        ranges.append((max(0.0, cursor - 0.08), analyze_until))
-
-    merged: list[tuple[float, float]] = []
-    for start, end in ranges:
-        if not merged or start - merged[-1][1] > 0.25:
-            merged.append((start, end))
-        else:
-            merged[-1] = (merged[-1][0], end)
-    return [(round(start, 3), round(end, 3)) for start, end in merged if end - start >= 0.65]
-
-
-def _transcribe_video_segments(path: Path, duration: float, *, limit_seconds: float = 90.0) -> list[dict[str, Any]]:
-    analyze_until = min(max(duration, 0.0), limit_seconds)
-    if analyze_until <= 0:
-        return []
-    model_name = os.environ.get("DAN_WHISPER_MODEL", "base")
-    safe_model_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", model_name)
-    cache_path = path.with_name(f"{path.stem}_whisper_v2_{safe_model_name}_{int(analyze_until)}s.json")
-    if cache_path.exists():
-        try:
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if isinstance(cached, list):
-                return [item for item in cached if isinstance(item, dict)]
-        except Exception:
-            pass
-
-    audio_path = path.with_name(f"{path.stem}_whisper_{int(analyze_until)}s.wav")
-    try:
-        creationflags = 0
-        if hasattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS"):
-            creationflags = subprocess.BELOW_NORMAL_PRIORITY_CLASS  # type: ignore[attr-defined]
-        subprocess.run(
-            [
-                _ffmpeg(),
-                "-y",
-                "-t",
-                f"{analyze_until:.3f}",
-                "-i",
-                str(path),
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-c:a",
-                "pcm_s16le",
-                str(audio_path),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-            timeout=120,
-            check=True,
-        )
-        import whisper  # type: ignore
-
-        ffmpeg_dir = str(Path(_ffmpeg()).parent)
-        os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
-        model = whisper.load_model(model_name)
-        result = model.transcribe(str(audio_path), language="ja", fp16=False, verbose=False)
-        segments: list[dict[str, Any]] = []
-        for segment in result.get("segments") or []:
-            text = str(segment.get("text") or "").strip()
-            meaningful = re.sub(r"[\s?？!！。.,、…]+", "", text)
-            start = max(0.0, float(segment.get("start") or 0))
-            end = min(analyze_until, float(segment.get("end") or 0))
-            if not text or len(meaningful) <= 2 or end - start < 0.35:
-                continue
-            segments.append({"start": round(start, 3), "end": round(end, 3), "text": text})
-        cache_path.write_text(json.dumps(segments, ensure_ascii=False, indent=2), encoding="utf-8")
-        return segments
-    except Exception:
-        return []
 
 
 def _attach_output_asset(
@@ -1477,108 +1343,6 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
         _append_job_event(room_id, job_id, {"type": "error", "text": str(exc)})
         _update_job(room_id, job_id, {"status": "failed", "error": str(exc)})
         _update_content(room_id, content_id, {"status": "failed"})
-
-
-def _build_initial_sequence(instruction: dict[str, Any]) -> dict[str, Any]:
-    source_assets = [asset for asset in (instruction.get("source_assets") or []) if isinstance(asset, dict)]
-    format_value = ((instruction.get("timeline") or {}).get("format") if isinstance(instruction.get("timeline"), dict) else None) or "9:16"
-    video_clips: list[dict[str, Any]] = []
-    caption_clips: list[dict[str, Any]] = []
-    timeline_cursor = 0.0
-    max_total = 75.0
-    first_asset_budget = 45.0
-
-    for index, asset in enumerate(source_assets):
-        if asset.get("kind") != "video":
-            continue
-        metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
-        source_duration = float(metadata.get("duration") or 0) if metadata else 0.0
-        if source_duration <= 0:
-            source_duration = 12.0
-
-        ranges: list[tuple[float, float, str | None]] = []
-        if metadata.get("audio_codec"):
-            segments: list[dict[str, Any]] = []
-            try:
-                source_path = _asset_source_path(asset)
-                segments = _transcribe_video_segments(source_path, source_duration)
-                if segments:
-                    ranges = [
-                        (
-                            max(0.0, float(segment.get("start") or 0) - 0.12),
-                            min(source_duration, float(segment.get("end") or 0) + 0.08),
-                            str(segment.get("text") or "").strip() or None,
-                        )
-                        for segment in segments
-                    ]
-                else:
-                    ranges = [(start, end, None) for start, end in _detect_nonsilent_ranges(source_path, source_duration)]
-            except Exception:
-                ranges = []
-
-        if not ranges:
-            if index == 0:
-                ranges = [(0.0, min(18.0, source_duration), None)]
-            else:
-                ranges = [(0.0, min(12.0, source_duration), None)]
-
-        previous_caption_text: str | None = None
-        for range_index, (source_start, source_end, caption_text) in enumerate(ranges):
-            if timeline_cursor >= max_total:
-                break
-            if index == 0 and timeline_cursor >= first_asset_budget and len(source_assets) > 1:
-                break
-            if caption_text and _caption_similarity(previous_caption_text, caption_text) >= 0.86:
-                previous_caption_text = caption_text
-                continue
-            clip_duration = max(0.05, source_end - source_start)
-            if index == 0 and len(source_assets) > 1 and timeline_cursor + clip_duration > first_asset_budget:
-                break
-            if timeline_cursor + clip_duration > max_total:
-                break
-            video_clips.append(
-                {
-                    "id": f"clip_{index + 1}_{range_index + 1}",
-                    "asset_id": asset.get("id"),
-                    "label": asset.get("filename") or asset.get("local_path") or f"素材 {index + 1}",
-                    "source_start": round(source_start, 3),
-                    "source_end": round(source_end, 3),
-                    "source_duration": source_duration,
-                    "timeline_start": round(timeline_cursor, 3),
-                    "timeline_end": round(timeline_cursor + clip_duration, 3),
-                    "track": "video",
-                    "muted": False,
-                    "locked": False,
-                    "auto_edit_reason": "speech_detected" if metadata.get("audio_codec") else "demo_sample",
-                }
-            )
-            if caption_text:
-                previous_caption_text = caption_text
-            if caption_text:
-                caption_clips.append(
-                    {
-                        "id": f"caption_{index + 1}_{range_index + 1}",
-                        "text": caption_text,
-                        "timeline_start": round(timeline_cursor, 3),
-                        "timeline_end": round(timeline_cursor + clip_duration, 3),
-                        "track": "caption",
-                    }
-                )
-            timeline_cursor += clip_duration
-        if timeline_cursor >= max_total:
-            break
-
-    return {
-        "version": 1,
-        "format": format_value,
-        "duration": round(timeline_cursor, 3),
-        "tracks": [
-            {"id": "video_1", "type": "video", "label": "映像", "clips": video_clips},
-            {"id": "overlay_1", "type": "overlay", "label": "重ね素材", "clips": []},
-            {"id": "caption_1", "type": "caption", "label": "テロップ", "clips": caption_clips},
-            {"id": "audio_1", "type": "audio", "label": "音声", "clips": []},
-        ],
-    }
 
 
 def _kind_for(uri: str) -> Literal["video", "image", "audio", "file"]:
