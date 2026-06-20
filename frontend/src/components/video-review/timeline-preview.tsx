@@ -45,6 +45,42 @@ function isOverlayClip(clip: SequenceClip, trackType: string | undefined): boole
   return trackType === 'overlay' || clip.composition === 'pip' || clip.composition === 'overlay';
 }
 
+// Wrap caption text so each line fits maxWidth. Keeps ASCII words intact; wraps CJK
+// per-character. Respects explicit newlines. Mirrors backend _wrap_caption_ass so the
+// preview matches the export.
+function wrapCaption(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
+  const out: string[] = [];
+  for (const hard of text.split('\n')) {
+    let line = '';
+    let i = 0;
+    while (i < hard.length) {
+      const ch = hard[i];
+      const isAscii = ch.charCodeAt(0) < 128;
+      if (isAscii && ch.trim()) {
+        // take the whole ASCII word
+        let word = '';
+        while (i < hard.length && hard[i].charCodeAt(0) < 128 && hard[i].trim()) {
+          word += hard[i]; i++;
+        }
+        if (line && ctx.measureText(line + word).width > maxWidth) {
+          out.push(line); line = word;
+        } else {
+          line += word;
+        }
+        continue;
+      }
+      if (line.trim() && ctx.measureText(line + ch).width > maxWidth) {
+        out.push(line); line = ch.trim() ? ch : '';
+      } else {
+        line += ch;
+      }
+      i++;
+    }
+    out.push(line.replace(/\s+$/, ''));
+  }
+  return out.length ? out : [text];
+}
+
 // cover-draw a video frame into a destination rect (object-fit: cover)
 function drawCover(
   ctx: CanvasRenderingContext2D,
@@ -237,22 +273,37 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         ctx.restore();
       }
 
-      // captions
+      // captions — style-aware, with line-wrapping so long text fits the frame width.
       const caps = captionClips.filter((c) => t >= c.timeline_start && t <= c.timeline_end && typeof c.text === 'string' && c.text.trim());
       const cap = caps[caps.length - 1];
       if (cap?.text) {
-        const fontSize = Math.round(h * 0.038);
-        ctx.font = `bold ${fontSize}px "Yu Gothic UI", "Meiryo", sans-serif`;
+        const st = cap.style || {};
+        const baseFont = h * 0.038;
+        const fontSize = Math.round(baseFont * (st.fontSize ? Number(st.fontSize) : 1));
+        const weight = st.bold === false ? 'normal' : 'bold';
+        ctx.font = `${weight} ${fontSize}px "Yu Gothic UI", "Meiryo", sans-serif`;
         ctx.textAlign = 'center';
-        ctx.textBaseline = 'bottom';
+        ctx.textBaseline = 'middle';
         ctx.lineJoin = 'round';
-        ctx.lineWidth = Math.max(3, fontSize * 0.18);
-        ctx.strokeStyle = '#000';
-        ctx.fillStyle = '#fff';
+        ctx.lineWidth = Math.max(3, fontSize * 0.18 * (st.outlineWidth != null ? Number(st.outlineWidth) : 1));
+        ctx.strokeStyle = st.outlineColor || '#000';
+        ctx.fillStyle = st.color || '#fff';
+        const maxWidth = w * 0.92;
+        const lines = wrapCaption(ctx, cap.text, maxWidth);
+        const lineH = fontSize * 1.2;
+        const block = lineH * lines.length;
         const cx = w / 2;
-        const cy = h - Math.round(h * 0.06);
-        ctx.strokeText(cap.text, cx, cy, w * 0.92);
-        ctx.fillText(cap.text, cx, cy, w * 0.92);
+        // vertical anchor by position preset
+        const pos = st.position || 'bottom';
+        let firstCy: number;
+        if (pos === 'top') firstCy = Math.round(h * 0.06) + lineH / 2;
+        else if (pos === 'center') firstCy = h / 2 - block / 2 + lineH / 2;
+        else firstCy = h - Math.round(h * 0.06) - block + lineH / 2;
+        lines.forEach((ln, i) => {
+          const cy = firstCy + i * lineH;
+          ctx.strokeText(ln, cx, cy);
+          ctx.fillText(ln, cx, cy);
+        });
       }
     },
     [dims, visualClips, captionClips, effectClips],

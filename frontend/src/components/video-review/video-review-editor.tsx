@@ -70,6 +70,18 @@ export type SequenceClip = {
   link_id?: string | null;   // A/V link: clips sharing a link_id move/trim together
   muted?: boolean | null;
   locked?: boolean | null;
+  style?: CaptionStyle | null;  // per-caption styling (color/size/position/outline)
+};
+
+// Per-caption style. All optional; absence renders as today (white fill, black outline,
+// bold, bottom-center). fontSize/outlineWidth are multipliers of the current defaults.
+export type CaptionStyle = {
+  color?: string;
+  fontSize?: number;
+  bold?: boolean;
+  position?: 'bottom' | 'center' | 'top';
+  outlineColor?: string;
+  outlineWidth?: number;
 };
 
 type LaneItem = {
@@ -1839,12 +1851,97 @@ export function VideoReviewEditor({
                   </div>
                 ) : null}
                 {selectedSequenceClip.track === 'caption' || typeof selectedSequenceClip.text === 'string' ? (
-                  <Textarea
-                    value={selectedSequenceClip.text || ''}
-                    onChange={(e) => updateSelectedSequenceClip({ text: e.target.value })}
-                    rows={3}
-                    placeholder="テロップ本文"
-                  />
+                  <>
+                    <Textarea
+                      value={selectedSequenceClip.text || ''}
+                      onChange={(e) => updateSelectedSequenceClip({ text: e.target.value })}
+                      rows={3}
+                      placeholder="テロップ本文"
+                    />
+                    {(() => {
+                      const st = selectedSequenceClip.style || {};
+                      const setStyle = (patch: Partial<CaptionStyle>) =>
+                        updateSelectedSequenceClip({ style: { ...st, ...patch } });
+                      return (
+                        <div className="space-y-2 rounded-md border border-border p-2">
+                          <div className="text-xs font-medium text-muted-foreground">テロップのデザイン</div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="flex items-center gap-2 text-xs">
+                              文字色
+                              <input
+                                type="color"
+                                value={st.color || '#ffffff'}
+                                onChange={(e) => setStyle({ color: e.target.value })}
+                                className="h-6 w-8 rounded border border-input bg-background"
+                              />
+                            </label>
+                            <label className="flex items-center gap-2 text-xs">
+                              フチ色
+                              <input
+                                type="color"
+                                value={st.outlineColor || '#000000'}
+                                onChange={(e) => setStyle({ outlineColor: e.target.value })}
+                                className="h-6 w-8 rounded border border-input bg-background"
+                              />
+                            </label>
+                          </div>
+                          <label className="block text-xs">
+                            大きさ {Math.round((st.fontSize ?? 1) * 100)}%
+                            <input
+                              type="range"
+                              min="0.5"
+                              max="2.5"
+                              step="0.1"
+                              value={st.fontSize ?? 1}
+                              onChange={(e) => setStyle({ fontSize: Number(e.target.value) })}
+                              className="w-full"
+                            />
+                          </label>
+                          <label className="block text-xs">
+                            フチの太さ {Math.round((st.outlineWidth ?? 1) * 100)}%
+                            <input
+                              type="range"
+                              min="0"
+                              max="3"
+                              step="0.25"
+                              value={st.outlineWidth ?? 1}
+                              onChange={(e) => setStyle({ outlineWidth: Number(e.target.value) })}
+                              className="w-full"
+                            />
+                          </label>
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={st.position || 'bottom'}
+                              onChange={(e) => setStyle({ position: e.target.value as CaptionStyle['position'] })}
+                              className="h-8 flex-1 rounded-md border border-input bg-background px-2 text-xs"
+                            >
+                              <option value="bottom">下</option>
+                              <option value="center">中央</option>
+                              <option value="top">上</option>
+                            </select>
+                            <label className="flex items-center gap-1 text-xs">
+                              <input
+                                type="checkbox"
+                                checked={st.bold !== false}
+                                onChange={(e) => setStyle({ bold: e.target.checked })}
+                              />
+                              太字
+                            </label>
+                          </div>
+                          {selectedSequenceClip.style ? (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 w-full text-[10px]"
+                              onClick={() => updateSelectedSequenceClip({ style: null })}
+                            >
+                              デザインをリセット
+                            </Button>
+                          ) : null}
+                        </div>
+                      );
+                    })()}
+                  </>
                 ) : null}
                 <p className="pt-1 text-[10px] text-muted-foreground">
                   クリップを掴んで左右で移動、端でトリミング、上下の段へドラッグで重ね順（レイヤー）を変更。Deleteで削除。
