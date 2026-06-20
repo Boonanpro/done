@@ -369,9 +369,101 @@ def _ass_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}").replace("\n", "\\N")
 
 
+def _hex_to_ass_color(hex_color: str) -> str:
+    """#RRGGBB -> ASS &HAABBGGRR (alpha 00 = opaque, byte order reversed)."""
+    h = str(hex_color or "").lstrip("#")
+    if len(h) != 6:
+        return "&H00FFFFFF"
+    try:
+        r, g, b = h[0:2], h[2:4], h[4:6]
+        return f"&H00{b}{g}{r}".upper()
+    except Exception:
+        return "&H00FFFFFF"
+
+
+def _char_width(ch: str) -> float:
+    """Rough advance width in em: full-width CJK ~1.0, half-width ~0.5."""
+    o = ord(ch)
+    if (0x3000 <= o <= 0x9FFF) or (0xFF00 <= o <= 0xFFEF) or (0x3040 <= o <= 0x30FF):
+        return 1.0
+    return 0.5
+
+
+def _wrap_caption_ass(text: str, font_px: float, max_px: float) -> str:
+    """Insert ASS \\N line breaks so each line fits max_px. CJK-aware (wraps per char;
+    keeps ASCII words intact). Input may already be ASS-escaped; existing \\N are treated
+    as hard breaks. Returns text with \\N between lines."""
+    if font_px <= 0 or max_px <= 0:
+        return text
+    hard_text = text.replace("\\N", "\n")  # treat existing \N as hard breaks
+    out_lines: list[str] = []
+    for hard in hard_text.split("\n"):
+        line = ""
+        line_w = 0.0
+        i = 0
+        while i < len(hard):
+            ch = hard[i]
+            # keep an ASCII word together
+            if ch.isascii() and not ch.isspace():
+                j = i
+                word = ""
+                while j < len(hard) and hard[j].isascii() and not hard[j].isspace():
+                    word += hard[j]; j += 1
+                ww = sum(_char_width(c) for c in word) * font_px
+                if line_w + ww > max_px and line:
+                    out_lines.append(line); line = word; line_w = ww
+                else:
+                    line += word; line_w += ww
+                i = j
+                continue
+            cw = _char_width(ch) * font_px
+            if line_w + cw > max_px and line.strip():
+                out_lines.append(line); line = ch if not ch.isspace() else ""; line_w = cw if not ch.isspace() else 0.0
+            else:
+                line += ch; line_w += cw
+            i += 1
+        out_lines.append(line)
+    return "\\N".join(s.rstrip() for s in out_lines)
+
+
+def _caption_style_override(style: dict[str, Any] | None, base_font: int) -> tuple[str, int]:
+    """Return (inline ASS override prefix, effective font px) for a styled caption.
+    Empty override + base_font when style is None/empty (keeps unstyled output identical)."""
+    if not isinstance(style, dict) or not style:
+        return "", base_font
+    parts: list[str] = []
+    font_px = base_font
+    try:
+        if style.get("fontSize"):
+            font_px = max(10, round(base_font * float(style["fontSize"])))
+            parts.append(f"\\fs{font_px}")
+    except Exception:
+        pass
+    if style.get("color"):
+        parts.append(f"\\c{_hex_to_ass_color(style['color'])}")
+    if style.get("outlineColor"):
+        parts.append(f"\\3c{_hex_to_ass_color(style['outlineColor'])}")
+    try:
+        if style.get("outlineWidth") is not None:
+            parts.append(f"\\bord{max(0, round(4 * float(style['outlineWidth'])))}")
+    except Exception:
+        pass
+    if style.get("bold") is False:
+        parts.append("\\b0")
+    pos = style.get("position")
+    if pos == "top":
+        parts.append("\\an8")
+    elif pos == "center":
+        parts.append("\\an5")
+    elif pos == "bottom":
+        parts.append("\\an2")
+    return ("{" + "".join(parts) + "}" if parts else ""), font_px
+
+
 def _write_caption_ass(path: Path, captions: list[dict[str, Any]], width: int, height: int) -> None:
     font_size = max(28, round(height * 0.04))
     margin_v = max(54, round(height * 0.08))
+    max_px = width * 0.92
     lines = [
         "[Script Info]",
         "ScriptType: v4.00+",
@@ -391,7 +483,12 @@ def _write_caption_ass(path: Path, captions: list[dict[str, Any]], width: int, h
     for caption in captions:
         start = float(caption.get("timeline_start") or 0)
         end = max(start + 0.2, float(caption.get("timeline_end") or start + 2))
-        text = _ass_escape(str(caption.get("text") or "").strip())
+        override, font_px = _caption_style_override(caption.get("style"), font_size)
+        # escape first (turns literal newlines into \N and protects braces), THEN wrap —
+        # _wrap_caption_ass only inserts additional \N which must survive as-is.
+        escaped = _ass_escape(str(caption.get("text") or "").strip())
+        wrapped = _wrap_caption_ass(escaped, font_px, max_px)
+        text = override + wrapped if override else wrapped
         lines.append(f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{text}")
     path.write_text("\n".join(lines), encoding="utf-8")
 
