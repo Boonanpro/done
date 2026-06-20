@@ -67,6 +67,9 @@ export type SequenceClip = {
   role?: 'dialogue' | 'music' | 'sfx' | string | null;
   layer?: number | null;
   type?: string | null;
+  link_id?: string | null;   // A/V link: clips sharing a link_id move/trim together
+  muted?: boolean | null;
+  locked?: boolean | null;
 };
 
 type LaneItem = {
@@ -303,6 +306,8 @@ export function VideoReviewEditor({
   // Snapshot of the sequence at the moment a clip drag starts, so overwrite/trim of
   // neighbours is computed from the ORIGINAL state each move (non-cumulative).
   const dragSnapshotRef = useRef<EditSequence | null>(null);
+  // A/V link: when on, dragging/trimming a clip also moves its linked partner (same link_id).
+  const [linkAV, setLinkAV] = useState(true);
   const [extraLanes, setExtraLanes] = useState<{ visual: number; audio: number }>({ visual: 0, audio: 0 });
   const [openNoteKey, setOpenNoteKey] = useState<string | null>(null);
   const laneGeomRef = useRef<Array<{ zone: 'visual' | 'audio'; layer: number; top: number; bottom: number }>>([]);
@@ -439,6 +444,20 @@ export function VideoReviewEditor({
 
   const selected = annotations.find((a) => a.id === selectedId) || null;
   const selectedSequenceClip = allSequenceClips.find((clip) => clip.id === selectedSequenceClipId) || null;
+  // Clips that should appear selected: the explicitly selected ones, PLUS their A/V-linked
+  // partners (so clicking audio also highlights its video and vice versa) when link is on.
+  const highlightedClipIds = useMemo(() => {
+    const ids = new Set(selectedSequenceClipIds);
+    if (linkAV) {
+      const linkIds = new Set(
+        allSequenceClips.filter((c) => ids.has(c.id) && c.link_id).map((c) => c.link_id)
+      );
+      allSequenceClips.forEach((c) => {
+        if (c.link_id && linkIds.has(c.link_id)) ids.add(c.id);
+      });
+    }
+    return ids;
+  }, [allSequenceClips, linkAV, selectedSequenceClipIds]);
   // Sync the working copy from the prop ONLY when its content genuinely changes
   // (e.g. a fresh Dan render), NOT on every parent re-render / poll. The parent
   // re-creates an equal-value sequence object on each poll; without this guard the
@@ -710,6 +729,12 @@ export function VideoReviewEditor({
       const selectedSet = new Set(clipIds);
       setEditSequence((current) => {
         if (!current) return current;
+        const allClips = (current.tracks || []).flatMap((t) => t.clips || []);
+        // With A/V link on, deleting a clip also deletes its linked partner.
+        if (linkAV) {
+          const linkIds = new Set(allClips.filter((c) => selectedSet.has(c.id) && c.link_id).map((c) => c.link_id));
+          allClips.forEach((c) => { if (c.link_id && linkIds.has(c.link_id)) selectedSet.add(c.id); });
+        }
         const tracks = (current.tracks || []).map((track) => ({
           ...track,
           clips: (track.clips || []).filter((clip) => !selectedSet.has(clip.id)),
@@ -719,7 +744,7 @@ export function VideoReviewEditor({
       });
     }
     clearSelection();
-  }, [clearSelection, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds]);
+  }, [clearSelection, linkAV, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds]);
 
   const undoAnnotations = useCallback(() => {
     const previous = historyPastRef.current.pop();
@@ -1045,59 +1070,86 @@ export function VideoReviewEditor({
   }, [selectedSequenceClipId, updateSequenceClip]);
 
   // DaVinci/Premiere-style overwrite: place the dragged clip at its new range and trim,
-  // delete, or split any same-lane (same-track) neighbour it now overlaps. Computed from the
-  // drag-start snapshot so it is NOT cumulative as the pointer moves.
+  // delete, or split any same-lane (same-track+layer) neighbour it now overlaps. With A/V
+  // link on, the dragged clip's linked partner (same link_id) gets the SAME shift and
+  // overwrites its own lane too. Computed from the drag-start snapshot (non-cumulative).
   const applyDragOverwrite = useCallback((draggedId: string, fields: Partial<SequenceClip>) => {
     const snap = dragSnapshotRef.current;
     if (!snap) return;
-    const original = (snap.tracks || []).flatMap((t) => t.clips || []).find((c) => c.id === draggedId);
+    const allOrig = (snap.tracks || []).flatMap((t) => (t.clips || []).map((c) => ({ ...c, track: c.track || t.type })));
+    const original = allOrig.find((c) => c.id === draggedId);
     if (!original) return;
-    const laneKey = `${original.track || ''}#${fields.layer ?? original.layer ?? 0}`;
-    const as = Number(fields.timeline_start ?? original.timeline_start);
-    const ae = Number(fields.timeline_end ?? original.timeline_end);
     const r = (v: number) => Number(v.toFixed(2));
+
+    // Build the set of clips being moved (dragged + its linked partner) with their new fields.
+    const moved = new Map<string, Partial<SequenceClip>>();
+    moved.set(draggedId, fields);
+    const partner = linkAV && original.link_id
+      ? allOrig.find((c) => c.id !== draggedId && c.link_id === original.link_id)
+      : null;
+    if (partner) {
+      // Apply the same timeline delta + matching source trim to the partner.
+      const dStart = Number(fields.timeline_start ?? original.timeline_start) - original.timeline_start;
+      const dEnd = Number(fields.timeline_end ?? original.timeline_end) - original.timeline_end;
+      const pf: Partial<SequenceClip> = {};
+      if (fields.timeline_start !== undefined) {
+        pf.timeline_start = r(partner.timeline_start + dStart);
+        if (Number.isFinite(partner.source_start as number)) pf.source_start = r(Number(partner.source_start || 0) + dStart);
+      }
+      if (fields.timeline_end !== undefined) {
+        pf.timeline_end = r(partner.timeline_end + dEnd);
+        if (Number.isFinite(partner.source_end as number)) pf.source_end = r(Number(partner.source_end || 0) + dEnd);
+      }
+      moved.set(partner.id, pf);
+    }
+
+    // Lanes that a moved clip now occupies become overwrite targets.
+    const targets = Array.from(moved.entries()).map(([id, f]) => {
+      const o = allOrig.find((c) => c.id === id)!;
+      return {
+        id,
+        lane: `${o.track || ''}#${f.layer ?? o.layer ?? 0}`,
+        as: Number(f.timeline_start ?? o.timeline_start),
+        ae: Number(f.timeline_end ?? o.timeline_end),
+      };
+    });
+
     const tracks = (snap.tracks || []).map((track) => {
       const out: SequenceClip[] = [];
       for (const c of track.clips || []) {
-        if (c.id === draggedId) {
-          out.push({ ...c, ...fields });
+        const mv = moved.get(c.id);
+        if (mv) {
+          out.push({ ...c, ...mv });
           continue;
         }
-        if (`${c.track || track.type || ''}#${c.layer ?? 0}` !== laneKey) {
-          out.push(c);
+        const lane = `${c.track || track.type || ''}#${c.layer ?? 0}`;
+        const t = targets.find((x) => x.lane === lane && x.id !== c.id);
+        if (!t || t.ae <= c.timeline_start + 0.001 || t.as >= c.timeline_end - 0.001) {
+          out.push(c); // not in an overwritten lane, or no overlap
           continue;
         }
-        const bs = c.timeline_start;
-        const be = c.timeline_end;
-        if (ae <= bs + 0.001 || as >= be - 0.001) {
-          out.push(c); // no overlap
-          continue;
-        }
+        const bs = c.timeline_start, be = c.timeline_end;
         const isAV = Number.isFinite(c.source_end as number);
-        if (as <= bs + 0.001 && ae >= be - 0.001) {
-          continue; // fully covered -> delete the neighbour
+        if (t.as <= bs + 0.001 && t.ae >= be - 0.001) {
+          continue; // fully covered -> delete
         }
-        if (as <= bs + 0.001) {
-          // overlaps the neighbour's head -> push its start to ae
-          const d = ae - bs;
-          out.push({ ...c, timeline_start: r(ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + d) } : {}) });
-        } else if (ae >= be - 0.001) {
-          // overlaps the neighbour's tail -> pull its end back to as
-          const d = be - as;
-          out.push({ ...c, timeline_end: r(as), ...(isAV ? { source_end: r(Number(c.source_end || 0) - d) } : {}) });
+        if (t.as <= bs + 0.001) {
+          const d = t.ae - bs;
+          out.push({ ...c, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + d) } : {}) });
+        } else if (t.ae >= be - 0.001) {
+          const d = be - t.as;
+          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_end || 0) - d) } : {}) });
         } else {
-          // lands inside the neighbour -> split it into a left and a right part
-          const dl = as - bs;
-          const dr = ae - bs;
-          out.push({ ...c, timeline_end: r(as), ...(isAV ? { source_end: r(Number(c.source_start || 0) + dl) } : {}) });
-          out.push({ ...c, id: `${c.id}__r`, timeline_start: r(ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + dr) } : {}) });
+          const dl = t.as - bs, dr = t.ae - bs;
+          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_start || 0) + dl) } : {}) });
+          out.push({ ...c, id: `${c.id}__r`, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + dr) } : {}) });
         }
       }
       return { ...track, clips: out };
     });
     const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
     setEditSequence({ ...snap, duration: Number(nextDuration.toFixed(3)), tracks });
-  }, []);
+  }, [linkAV]);
 
   const startSequenceClipDrag = useCallback(
     (event: React.PointerEvent, clip: SequenceClip, mode: SequenceClipDrag['mode']) => {
@@ -1382,9 +1434,18 @@ export function VideoReviewEditor({
                   ))}
                 </select>
                 <Button
-                  variant="ghost"
+                  variant={linkAV ? 'default' : 'outline'}
                   size="sm"
                   className="ml-auto h-7 px-2 text-xs"
+                  title={linkAV ? '映像と音声をリンク中（クリップを一緒に動かす）。クリックで解除' : '映像と音声のリンクは解除中。クリックでリンク'}
+                  onClick={() => setLinkAV((v) => !v)}
+                >
+                  {linkAV ? '🔗 A/Vリンク' : '🔓 A/V個別'}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs"
                   title="映像の段を追加"
                   onClick={() => setExtraLanes((s) => ({ ...s, visual: s.visual + 1 }))}
                 >
@@ -1507,6 +1568,7 @@ export function VideoReviewEditor({
                               if (!clip) return null;
                               const clipAsset = clip.asset_id ? sequenceAssetMap.get(clip.asset_id) : null;
                               const selected = selectedSequenceClipIds.includes(clip.id);
+                              const linkedSelected = !selected && highlightedClipIds.has(clip.id);
                               const isVideo = item.itemType === 'video';
                               const labelText =
                                 item.itemType === 'caption'
@@ -1518,7 +1580,11 @@ export function VideoReviewEditor({
                                 <div
                                   key={item.key}
                                   className={`absolute flex items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm ${clipItemColor(item.itemType)} ${
-                                    selected ? 'border-yellow-300 ring-2 ring-yellow-300/70' : 'border-white/30'
+                                    selected
+                                      ? 'border-yellow-300 ring-2 ring-yellow-300/70'
+                                      : linkedSelected
+                                        ? 'border-yellow-300/70 ring-2 ring-yellow-300/40 ring-dashed'
+                                        : 'border-white/30'
                                   }`}
                                   style={{
                                     left: `${left}%`,
