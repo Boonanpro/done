@@ -1243,10 +1243,12 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
     assets = _read_assets(room_id)
     by_id = {str(a.get("id")): a for a in assets if a.get("id")}
     script = PROJECT_ROOT / "scripts" / "dan_audio_check.py"
-    # dan_audio_check.py defaults to large-v3 which is far too slow for an interactive
-    # pipeline (minutes/asset on CPU). Use a fast model here; quality can be tuned later
-    # via DAN_PLAN_WHISPER_MODEL (and the user can clean captions on the timeline).
-    whisper_model = os.environ.get("DAN_PLAN_WHISPER_MODEL", "base")
+    # Model choice: large-v3 (the script default) needs ~10GB VRAM and overflows an 8GB
+    # GPU -> CPU fallback -> minutes/asset. 'medium' (~2.7GB) fits the GPU, runs fast, and
+    # segments finely enough that 言い直し land in SEPARATE segments (so the restatement
+    # safety net in _assemble_sequence_from_decisions can drop the earlier take) — and it
+    # transcribes captions far more accurately than 'base'. Override via DAN_PLAN_WHISPER_MODEL.
+    whisper_model = os.environ.get("DAN_PLAN_WHISPER_MODEL", "medium")
     results: dict[str, Any] = {}
     dirty = False
     asset_index = 0
@@ -1263,7 +1265,7 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
         live = by_id.get(aid)
         meta = (live.get("metadata") if live and isinstance(live.get("metadata"), dict) else {}) or {}
         cached = meta.get("audio_analysis")
-        if isinstance(cached, dict) and meta.get("audio_analysis_src") == str(src):
+        if isinstance(cached, dict) and meta.get("audio_analysis_src") == str(src) and meta.get("audio_analysis_model") == whisper_model:
             cached = dict(cached)
             cached["asset_index"] = asset_index
             for j, s in enumerate(cached.get("segments") or [], start=1):
@@ -1298,6 +1300,7 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
             meta = dict(meta)
             meta["audio_analysis"] = entry
             meta["audio_analysis_src"] = str(src)
+            meta["audio_analysis_model"] = whisper_model
             live["metadata"] = meta
             dirty = True
     if dirty:
@@ -1385,14 +1388,16 @@ STEP 2 — AFTER your reasoning, output ONE json object (and nothing after it) w
 DECISIONS schema:
 {{
   "spine": [ {{"segment_id": "a1_s03", "caption": "整えたテロップ文字列 or null=発話そのまま"}} ],
+  "cuts": [ {{"asset_id": "<asset id>", "start": <sec>, "end": <sec>, "reason": "restatement|filler"}} ],
   "screen_overlays": [ {{"screen_asset_id": "<asset id>", "screen_source_start": <sec>, "screen_source_end": <sec>, "from_segment": "a1_s06", "to_segment": "a1_s12", "main_as_pip": true}} ],
   "blur": [ {{"asset_id": "<asset id>", "region": {{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}}, "source_start": <sec>, "source_end": <sec>, "style": "soft"}} ],
-  "pacing_gap": 0.3
+  "silence_threshold": 0.45
 }}
 
 Rules:
-- spine = the kept talking segments in final order. Anything not listed is cut. Drop the earlier take of each restatement by simply omitting it.
-- Keep full sentences; never cut a sentence end; keep filler (えー/あの). Cut ONLY restatements; the assembler compresses between-sentence dead air to pacing_gap.
+- spine = the kept talking segments in final order. Anything not listed is cut. Drop the earlier take of a CROSS-segment restatement by omitting that segment.
+- cuts = WORD-LEVEL removals WITHIN kept segments. The transcript below has word-level timestamps; use cuts (in the asset's own seconds) to remove a 言い直し/stutter that happens INSIDE a single segment (e.g. the segment says "スタイル名や…スタイル名や…" — cut the first occurrence) or an obvious repeated filler run. The assembler trims exactly those spans. This is how you remove duplicates that survive the spine — listen via the transcript and cut them.
+- Never cut a sentence end. The assembler AUTO-compresses internal silence longer than silence_threshold seconds, so do NOT list silence in cuts. Set silence_threshold lower (e.g. 0.3) for tighter pacing or higher for relaxed, following the user's request; omit it to use the default (0.45).
 - During screen_overlays the screen recording is the background and the main camera is the small wipe; captions are auto-suppressed there (do not add captions to those segments).
 - All audio comes from the main-camera spine segments automatically.
 - region/source coords for blur are 0..1 normalized and in the screen asset's own seconds.
@@ -1454,8 +1459,7 @@ def _assemble_sequence_from_decisions(
 ) -> dict[str, Any] | None:
     """Deterministically build the exact timeline sequence from Dan's DECISIONS plus the
     Whisper segment timestamps. Dan never computes timeline seconds — this does."""
-    BREATH = 0.35      # keep a breath after each sentence end (policy §1)
-    PREROLL = 0.08     # small lead-in before each segment
+    import os
     PIP_POS = {"x": 0.30, "y": 0.655, "width": 0.40, "height": 0.30}
 
     seg_by_id: dict[str, Any] = {}
@@ -1501,61 +1505,136 @@ def _assemble_sequence_from_decisions(
         n[kind] += 1
         return f"clip_{kind}{n[kind]:03d}"
 
-    # Pass 1: lay out the spine timeline (positions only). Clips are placed CONTIGUOUSLY
-    # (no inter-clip gaps): the natural pause comes from the breath kept at each sentence
-    # end, and contiguous placement keeps audio+video frame-aligned (no drift) and tightens
-    # the dead air between sentences (per policy §3).
-    seg_spans: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
-    cursor = 0.0
+    # Word-level editing (Descript-style). Internal pauses longer than SIL are dropped
+    # (silence compression); Dan's `cuts` (restatement/filler spans it chose to remove) are
+    # honored too. SIL default lives in code; Dan may override via decisions.silence_threshold
+    # when the user asks for tighter/looser pacing. Each kept segment yields 1+ word-runs,
+    # each a clip; runs are placed contiguously (no drift, no boundary replay).
+    try:
+        SIL = float(decisions.get("silence_threshold") or os.environ.get("DAN_PLAN_SILENCE_GAP", "0.45"))
+    except Exception:
+        SIL = 0.45
+    SIL = max(0.2, SIL)
+    LEAD, TAIL = 0.06, 0.10  # tiny pads around each kept word-run
+
+    cuts_by_asset: dict[str, list[tuple[float, float]]] = {}
+    for c in (decisions.get("cuts") or []):
+        if not isinstance(c, dict):
+            continue
+        caid = str(c.get("asset_id") or "")
+        try:
+            cstart, cend = float(c.get("start")), float(c.get("end"))
+        except Exception:
+            continue
+        if cend > cstart:
+            cuts_by_asset.setdefault(caid, []).append((cstart, cend))
+
+    def _in_cut(aid: str, t: float) -> bool:
+        return any(cs <= t <= ce for cs, ce in cuts_by_asset.get(aid, []))
+
+    def _runs_for_segment(s: dict[str, Any]) -> list[tuple[float, float]]:
+        """Contiguous kept-word runs in source time: split at internal silences > SIL and
+        drop words inside Dan's cut spans. Falls back to the whole segment if no word data."""
+        aid = str(s.get("asset_id") or "")
+        words = s.get("words") or []
+        if not words:
+            a, b = float(s.get("start") or 0), float(s.get("end") or 0)
+            return [] if _in_cut(aid, (a + b) / 2) else [(a, b)]
+        runs: list[tuple[float, float]] = []
+        cs = ce = None
+        for w in words:
+            ws, we = float(w.get("start") or 0), float(w.get("end") or 0)
+            if _in_cut(aid, (ws + we) / 2):
+                if cs is not None:
+                    runs.append((cs, ce)); cs = ce = None
+                continue
+            if cs is None:
+                cs, ce = ws, we
+            elif ws - ce > SIL:           # internal silence -> split (drop the gap)
+                runs.append((cs, ce)); cs, ce = ws, we
+            else:
+                ce = we
+        if cs is not None:
+            runs.append((cs, ce))
+        return runs
+
+    # Resolve kept spine items (after the restatement drop).
+    kept: list[tuple[str, dict[str, Any], str | None]] = []
     for item in spine:
-        sid = item.get("segment_id") if isinstance(item, dict) else item
-        if str(sid) in drop_earlier:
-            continue  # earlier take of a detected restatement — drop it
-        s = seg_by_id.get(str(sid))
+        sid = str(item.get("segment_id") if isinstance(item, dict) else item)
+        if sid in drop_earlier:
+            continue
+        s = seg_by_id.get(sid)
         if not s:
             continue
+        cap = item.get("caption") if isinstance(item, dict) else None
+        kept.append((sid, s, cap if isinstance(cap, str) else None))
+
+    # Pass 1: lay out word-level pieces contiguously. seg_span tracks each segment's overall
+    # timeline span (first piece -> last piece) for captions + overlay coverage.
+    pieces: list[dict[str, Any]] = []
+    seg_span: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    cursor = 0.0
+    prev_end_by_asset: dict[str, float] = {}
+    for sid, s, cap in kept:
         aid = str(s.get("asset_id") or "")
-        src_start = max(0.0, float(s.get("start") or 0) - PREROLL)
-        src_end = float(s.get("end") or 0) + BREATH
+        runs = _runs_for_segment(s)
+        if not runs:
+            continue
         ad = dur_by_id.get(aid) or 0.0
-        if ad:
-            src_end = min(src_end, ad)
-        out_dur = max(0.05, round(src_end - src_start, 3))
-        ts = round(cursor, 3)
-        te = round(cursor + out_dur, 3)
-        caption = (item.get("caption") if isinstance(item, dict) else None)
-        caption = caption if isinstance(caption, str) else None
-        seg_spans[str(sid)] = {
-            "asset_id": aid, "source_start": round(src_start, 3), "source_end": round(src_end, 3),
-            "timeline_start": ts, "timeline_end": te,
-            "caption": (caption.strip() if caption else (str(s.get("text") or "").strip())),
+        seg_ts = seg_te = None
+        for rs, re in runs:
+            src_start = max(0.0, rs - LEAD)
+            src_end = re + TAIL
+            pe = prev_end_by_asset.get(aid)
+            if pe is not None and src_start < pe:
+                src_start = pe
+            if ad:
+                src_end = min(src_end, ad)
+            if src_end <= src_start:
+                src_end = src_start + 0.05
+            out_dur = max(0.05, round(src_end - src_start, 3))
+            ts = round(cursor, 3)
+            te = round(cursor + out_dur, 3)
+            pieces.append({
+                "sid": sid, "asset_id": aid,
+                "source_start": round(src_start, 3), "source_end": round(src_end, 3),
+                "timeline_start": ts, "timeline_end": te,
+            })
+            prev_end_by_asset[aid] = src_end
+            cursor = te
+            if seg_ts is None:
+                seg_ts = ts
+            seg_te = te
+        if seg_ts is None:
+            continue
+        seg_span[sid] = {
+            "timeline_start": seg_ts, "timeline_end": seg_te,
+            "caption": (cap.strip() if cap else str(s.get("text") or "").strip()),
         }
-        order.append(str(sid))
-        cursor = te  # contiguous: no inter-clip gap (breath provides the pause)
-    if not order:
+        order.append(sid)
+    if not pieces:
         return None
-    total = round(seg_spans[order[-1]]["timeline_end"], 3)
+    total = round(pieces[-1]["timeline_end"], 3)
 
     # Determine which spine segments are covered by a screen overlay.
     overlays = []
     covered: set[str] = set()
     for ov in (decisions.get("screen_overlays") or []):
         frm, to = str(ov.get("from_segment") or ""), str(ov.get("to_segment") or "")
-        if frm not in seg_spans or to not in seg_spans:
+        if frm not in seg_span or to not in seg_span:
             continue
         i0 = order.index(frm) if frm in order else None
         i1 = order.index(to) if to in order else None
         if i0 is None or i1 is None or i1 < i0:
             continue
         span_ids = order[i0:i1 + 1]
-        span_start = seg_spans[frm]["timeline_start"]
-        span_end = seg_spans[to]["timeline_end"]
         overlays.append({
             "screen_asset_id": str(ov.get("screen_asset_id") or ""),
             "screen_source_start": float(ov.get("screen_source_start") or 0),
             "screen_source_end": float(ov.get("screen_source_end") or 0),
-            "span_start": span_start, "span_end": span_end,
+            "span_start": seg_span[frm]["timeline_start"], "span_end": seg_span[to]["timeline_end"],
             "main_as_pip": bool(ov.get("main_as_pip", True)),
         })
         for sid in span_ids:
@@ -1567,30 +1646,33 @@ def _assemble_sequence_from_decisions(
     audio_clips: list[dict[str, Any]] = []
     effect_clips: list[dict[str, Any]] = []
 
-    # Pass 2: per spine segment, build visual + audio (+ caption if not under overlay).
-    for sid in order:
-        sp = seg_spans[sid]
+    # Pass 2: each word-piece -> visual (fullscreen or PiP) + audio.
+    for p in pieces:
         base = {
-            "asset_id": sp["asset_id"],
-            "source_start": sp["source_start"], "source_end": sp["source_end"],
-            "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"],
+            "asset_id": p["asset_id"],
+            "source_start": p["source_start"], "source_end": p["source_end"],
+            "timeline_start": p["timeline_start"], "timeline_end": p["timeline_end"],
             "muted": True, "locked": False, "role": "main", "auto_edit_reason": "spine",
         }
-        if sid in covered:
+        if p["sid"] in covered:
             overlay_clips.append({**base, "id": _cid("o"), "track": "overlay",
                                   "composition": "pip", "position": dict(PIP_POS), "layer": 1})
         else:
             video_clips.append({**base, "id": _cid("v"), "track": "video",
                                 "composition": "fullscreen", "layer": 0})
-            if sp["caption"]:
-                caption_clips.append({"id": _cid("c"), "text": sp["caption"], "track": "caption",
-                                      "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"]})
-        # audio: always the main-camera segment (continuous dialogue)
         audio_clips.append({
-            "id": _cid("a"), "asset_id": sp["asset_id"], "track": "audio", "role": "dialogue",
-            "source_start": sp["source_start"], "source_end": sp["source_end"],
-            "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"],
+            "id": _cid("a"), "asset_id": p["asset_id"], "track": "audio", "role": "dialogue",
+            "source_start": p["source_start"], "source_end": p["source_end"],
+            "timeline_start": p["timeline_start"], "timeline_end": p["timeline_end"],
         })
+    # Captions: one per kept (non-overlay) segment, spanning its full timeline range.
+    for sid in order:
+        if sid in covered:
+            continue
+        sp = seg_span[sid]
+        if sp["caption"]:
+            caption_clips.append({"id": _cid("c"), "text": sp["caption"], "track": "caption",
+                                  "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"]})
 
     # Pass 3: screen background clips (fullscreen base) under each overlay span.
     for ov in overlays:
