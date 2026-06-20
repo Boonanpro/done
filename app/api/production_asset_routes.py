@@ -1646,13 +1646,18 @@ def _assemble_sequence_from_decisions(
     audio_clips: list[dict[str, Any]] = []
     effect_clips: list[dict[str, Any]] = []
 
-    # Pass 2: each word-piece -> visual (fullscreen or PiP) + audio.
+    # Pass 2: each word-piece -> visual (fullscreen or PiP) + audio. The visual and its
+    # audio share a link_id so the editor can move/trim them together (A/V link).
+    n["lnk"] = 0
     for p in pieces:
+        n["lnk"] += 1
+        link_id = f"lnk{n['lnk']:03d}"
         base = {
             "asset_id": p["asset_id"],
             "source_start": p["source_start"], "source_end": p["source_end"],
             "timeline_start": p["timeline_start"], "timeline_end": p["timeline_end"],
             "muted": True, "locked": False, "role": "main", "auto_edit_reason": "spine",
+            "link_id": link_id,
         }
         if p["sid"] in covered:
             overlay_clips.append({**base, "id": _cid("o"), "track": "overlay",
@@ -1664,6 +1669,7 @@ def _assemble_sequence_from_decisions(
             "id": _cid("a"), "asset_id": p["asset_id"], "track": "audio", "role": "dialogue",
             "source_start": p["source_start"], "source_end": p["source_end"],
             "timeline_start": p["timeline_start"], "timeline_end": p["timeline_end"],
+            "link_id": link_id,
         })
     # Captions: one per kept (non-overlay) segment, spanning its full timeline range.
     for sid in order:
