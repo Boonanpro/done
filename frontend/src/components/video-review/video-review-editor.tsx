@@ -300,6 +300,9 @@ export function VideoReviewEditor({
   const [timelineDrag, setTimelineDrag] = useState<TimelineDrag | null>(null);
   const [pendingTimelineDrag, setPendingTimelineDrag] = useState<PendingTimelineDrag | null>(null);
   const [sequenceClipDrag, setSequenceClipDrag] = useState<SequenceClipDrag | null>(null);
+  // Snapshot of the sequence at the moment a clip drag starts, so overwrite/trim of
+  // neighbours is computed from the ORIGINAL state each move (non-cumulative).
+  const dragSnapshotRef = useRef<EditSequence | null>(null);
   const [extraLanes, setExtraLanes] = useState<{ visual: number; audio: number }>({ visual: 0, audio: 0 });
   const [openNoteKey, setOpenNoteKey] = useState<string | null>(null);
   const laneGeomRef = useRef<Array<{ zone: 'visual' | 'audio'; layer: number; top: number; bottom: number }>>([]);
@@ -524,19 +527,26 @@ export function VideoReviewEditor({
 
   const loadSession = useCallback(async () => {
     if (!sessionQuery) return;
-    const res = await fetch(`/api/v1/video-review/sessions?${sessionQuery}`, { credentials: 'include' });
-    if (!res.ok) {
-      toast.error('レビュー情報を読み込めませんでした');
-      return;
+    try {
+      const res = await fetch(`/api/v1/video-review/sessions?${sessionQuery}`, { credentials: 'include' });
+      if (!res.ok) {
+        // Non-fatal: keep editing with the current state rather than blocking the UI.
+        console.warn('review session load failed', res.status);
+        return;
+      }
+      const data = (await res.json()) as SessionPayload;
+      const loadedAnnotations = data.annotations || [];
+      const nextAnnotations = loadedAnnotations.length > 0 ? loadedAnnotations : initialAnnotations || [];
+      isHistoryJumpRef.current = true;
+      historyPastRef.current = [];
+      historyFutureRef.current = [];
+      historySnapshotRef.current = JSON.stringify(nextAnnotations);
+      setAnnotations(nextAnnotations);
+    } catch (err) {
+      // Network blip (e.g. the sandbox restarting mid-edit) must NOT crash the editor —
+      // a thrown fetch() here previously surfaced as a "Failed to fetch" runtime overlay.
+      console.warn('review session fetch failed (keeping current edits)', err);
     }
-    const data = (await res.json()) as SessionPayload;
-    const loadedAnnotations = data.annotations || [];
-    const nextAnnotations = loadedAnnotations.length > 0 ? loadedAnnotations : initialAnnotations || [];
-    isHistoryJumpRef.current = true;
-    historyPastRef.current = [];
-    historyFutureRef.current = [];
-    historySnapshotRef.current = JSON.stringify(nextAnnotations);
-    setAnnotations(nextAnnotations);
   }, [initialAnnotations, sessionQuery]);
 
   useEffect(() => {
@@ -1034,12 +1044,68 @@ export function VideoReviewEditor({
     updateSequenceClip(selectedSequenceClipId, patch);
   }, [selectedSequenceClipId, updateSequenceClip]);
 
+  // DaVinci/Premiere-style overwrite: place the dragged clip at its new range and trim,
+  // delete, or split any same-lane (same-track) neighbour it now overlaps. Computed from the
+  // drag-start snapshot so it is NOT cumulative as the pointer moves.
+  const applyDragOverwrite = useCallback((draggedId: string, fields: Partial<SequenceClip>) => {
+    const snap = dragSnapshotRef.current;
+    if (!snap) return;
+    const original = (snap.tracks || []).flatMap((t) => t.clips || []).find((c) => c.id === draggedId);
+    if (!original) return;
+    const laneKey = `${original.track || ''}#${fields.layer ?? original.layer ?? 0}`;
+    const as = Number(fields.timeline_start ?? original.timeline_start);
+    const ae = Number(fields.timeline_end ?? original.timeline_end);
+    const r = (v: number) => Number(v.toFixed(2));
+    const tracks = (snap.tracks || []).map((track) => {
+      const out: SequenceClip[] = [];
+      for (const c of track.clips || []) {
+        if (c.id === draggedId) {
+          out.push({ ...c, ...fields });
+          continue;
+        }
+        if (`${c.track || track.type || ''}#${c.layer ?? 0}` !== laneKey) {
+          out.push(c);
+          continue;
+        }
+        const bs = c.timeline_start;
+        const be = c.timeline_end;
+        if (ae <= bs + 0.001 || as >= be - 0.001) {
+          out.push(c); // no overlap
+          continue;
+        }
+        const isAV = Number.isFinite(c.source_end as number);
+        if (as <= bs + 0.001 && ae >= be - 0.001) {
+          continue; // fully covered -> delete the neighbour
+        }
+        if (as <= bs + 0.001) {
+          // overlaps the neighbour's head -> push its start to ae
+          const d = ae - bs;
+          out.push({ ...c, timeline_start: r(ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + d) } : {}) });
+        } else if (ae >= be - 0.001) {
+          // overlaps the neighbour's tail -> pull its end back to as
+          const d = be - as;
+          out.push({ ...c, timeline_end: r(as), ...(isAV ? { source_end: r(Number(c.source_end || 0) - d) } : {}) });
+        } else {
+          // lands inside the neighbour -> split it into a left and a right part
+          const dl = as - bs;
+          const dr = ae - bs;
+          out.push({ ...c, timeline_end: r(as), ...(isAV ? { source_end: r(Number(c.source_start || 0) + dl) } : {}) });
+          out.push({ ...c, id: `${c.id}__r`, timeline_start: r(ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + dr) } : {}) });
+        }
+      }
+      return { ...track, clips: out };
+    });
+    const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
+    setEditSequence({ ...snap, duration: Number(nextDuration.toFixed(3)), tracks });
+  }, []);
+
   const startSequenceClipDrag = useCallback(
     (event: React.PointerEvent, clip: SequenceClip, mode: SequenceClipDrag['mode']) => {
       event.preventDefault();
       event.stopPropagation();
       selectSequenceClip(clip.id, event.shiftKey || event.ctrlKey || event.metaKey);
       seekTimeline(getTimelineTime(event));
+      dragSnapshotRef.current = editSequence;
       setSequenceClipDrag({
         id: clip.id,
         mode,
@@ -1060,7 +1126,7 @@ export function VideoReviewEditor({
         /* ignore */
       }
     },
-    [getTimelineTime, seekTimeline, selectSequenceClip]
+    [editSequence, getTimelineTime, seekTimeline, selectSequenceClip]
   );
 
   useEffect(() => {
@@ -1073,46 +1139,44 @@ export function VideoReviewEditor({
       if (!clip) return;
       const isVideoClip = clip.track === 'video' || Number.isFinite(clip.source_end);
       const sourceDuration = clip.source_duration || Math.max(Number(clip.source_end || 0), sequenceClipDrag.originalSourceEnd);
+      // The dragged clip moves/resizes freely; applyDragOverwrite then trims, deletes, or
+      // splits any same-lane neighbour it now overlaps (DaVinci/Premiere overwrite).
       if (sequenceClipDrag.mode === 'start') {
         const nextTimelineStart = clamp(sequenceClipDrag.originalTimelineStart + delta, 0, sequenceClipDrag.originalTimelineEnd - 0.1);
-        const patch: Partial<SequenceClip> = {
-          timeline_start: Number(nextTimelineStart.toFixed(2)),
-        };
+        const fields: Partial<SequenceClip> = { timeline_start: Number(nextTimelineStart.toFixed(2)) };
         if (isVideoClip) {
-          const nextSourceStart = clamp(sequenceClipDrag.originalSourceStart + delta, 0, sequenceClipDrag.originalSourceEnd - 0.1);
-          patch.source_start = Number(nextSourceStart.toFixed(2));
+          fields.source_start = Number(clamp(sequenceClipDrag.originalSourceStart + delta, 0, sequenceClipDrag.originalSourceEnd - 0.1).toFixed(2));
         }
-        updateSequenceClip(sequenceClipDrag.id, patch);
+        applyDragOverwrite(sequenceClipDrag.id, fields);
       } else if (sequenceClipDrag.mode === 'end') {
-        const nextTimelineEnd = Math.max(sequenceClipDrag.originalTimelineStart + 0.1, sequenceClipDrag.originalTimelineEnd + delta);
-        const patch: Partial<SequenceClip> = {
-          timeline_end: Number(nextTimelineEnd.toFixed(2)),
-        };
+        const nextTimelineEnd = clamp(sequenceClipDrag.originalTimelineEnd + delta, sequenceClipDrag.originalTimelineStart + 0.1, timelineDuration);
+        const fields: Partial<SequenceClip> = { timeline_end: Number(nextTimelineEnd.toFixed(2)) };
         if (isVideoClip) {
-          const nextSourceEnd = clamp(sequenceClipDrag.originalSourceEnd + delta, sequenceClipDrag.originalSourceStart + 0.1, sourceDuration);
-          patch.source_end = Number(nextSourceEnd.toFixed(2));
+          fields.source_end = Number(clamp(sequenceClipDrag.originalSourceEnd + delta, sequenceClipDrag.originalSourceStart + 0.1, sourceDuration).toFixed(2));
         }
-        updateSequenceClip(sequenceClipDrag.id, patch);
+        applyDragOverwrite(sequenceClipDrag.id, fields);
       } else {
         const length = sequenceClipDrag.originalTimelineEnd - sequenceClipDrag.originalTimelineStart;
-        const nextStart = Math.max(0, sequenceClipDrag.originalTimelineStart + delta);
-        const patch: Partial<SequenceClip> = {
+        const nextStart = clamp(sequenceClipDrag.originalTimelineStart + delta, 0, Math.max(0, timelineDuration - length));
+        const fields: Partial<SequenceClip> = {
           timeline_start: Number(nextStart.toFixed(2)),
           timeline_end: Number((nextStart + length).toFixed(2)),
         };
-        // Vertical: dropping onto another lane in the same zone changes the
-        // clip's layer (z-order). Cross-zone (visual<->audio) moves are ignored.
+        // Vertical: dropping onto another lane in the same zone changes the clip's layer.
         const yWithin = event.clientY - rect.top;
         const target = laneGeomRef.current.find(
           (g) => g.zone === sequenceClipDrag.zone && yWithin >= g.top && yWithin < g.bottom
         );
         if (target && target.layer !== (clip.layer ?? sequenceClipDrag.originalLayer)) {
-          patch.layer = target.layer;
+          fields.layer = target.layer;
         }
-        updateSequenceClip(sequenceClipDrag.id, patch);
+        applyDragOverwrite(sequenceClipDrag.id, fields);
       }
     };
-    const clearDrag = () => setSequenceClipDrag(null);
+    const clearDrag = () => {
+      setSequenceClipDrag(null);
+      dragSnapshotRef.current = null;
+    };
     window.addEventListener('pointermove', moveDrag);
     window.addEventListener('pointerup', clearDrag);
     window.addEventListener('pointercancel', clearDrag);
@@ -1121,7 +1185,7 @@ export function VideoReviewEditor({
       window.removeEventListener('pointerup', clearDrag);
       window.removeEventListener('pointercancel', clearDrag);
     };
-  }, [allSequenceClips, sequenceClipDrag, timelineDuration, updateSequenceClip]);
+  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite]);
 
   return (
     <div className={`flex h-full bg-background text-foreground ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
