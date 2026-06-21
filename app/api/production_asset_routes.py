@@ -1834,6 +1834,181 @@ def _assemble_sequence_from_decisions(
     }
 
 
+def _clips_in_scope(sequence: dict[str, Any], regions: list[dict[str, Any]]) -> set[str]:
+    """Clip ids that a revision is allowed to touch. If regions is empty, the instruction is
+    global -> every clip is in scope. Otherwise only clips overlapping a region's time range
+    (and matching track if the region names one)."""
+    all_ids: list[tuple[str, dict[str, Any], str]] = []
+    for track in sequence.get("tracks") or []:
+        ttype = track.get("type")
+        for clip in track.get("clips") or []:
+            cid = str(clip.get("id") or "")
+            if cid:
+                all_ids.append((cid, clip, str(ttype or clip.get("track") or "")))
+    if not regions:
+        return {cid for cid, _c, _t in all_ids}
+    scope: set[str] = set()
+    for cid, clip, ttype in all_ids:
+        cs, ce = float(clip.get("timeline_start") or 0), float(clip.get("timeline_end") or 0)
+        for r in regions:
+            rs, re = float(r.get("start") or 0), float(r.get("end") if r.get("end") is not None else 1e9)
+            rtrack = r.get("track")
+            if rtrack and str(rtrack) != ttype:
+                continue
+            if min(ce, re) - max(cs, rs) > 0.01:  # time overlap
+                scope.add(cid)
+                break
+    return scope
+
+
+def _merge_revision_patch(sequence: dict[str, Any], patch: dict[str, Any], allowed_ids: set[str]) -> dict[str, Any]:
+    """Apply Dan's per-clip revision patch to the sequence, preserving every clip outside the
+    allowed scope verbatim. Edits/removes targeting ids NOT in allowed_ids are ignored (this is
+    the guard that stops Dan from silently mutating the rest of the timeline)."""
+    edits_by_id: dict[str, dict[str, Any]] = {}
+    removes: set[str] = set()
+    for e in (patch.get("edits") or []):
+        if not isinstance(e, dict):
+            continue
+        cid = str(e.get("id") or "")
+        if not cid or cid not in allowed_ids:
+            continue  # out-of-scope guard
+        if e.get("remove"):
+            removes.add(cid)
+        else:
+            edits_by_id[cid] = e
+
+    EDITABLE = {"text", "style", "timeline_start", "timeline_end", "source_start", "source_end"}
+    new_tracks = []
+    for track in sequence.get("tracks") or []:
+        out_clips = []
+        for clip in track.get("clips") or []:
+            cid = str(clip.get("id") or "")
+            if cid in removes:
+                continue
+            e = edits_by_id.get(cid)
+            if e:
+                nc = dict(clip)
+                for k in EDITABLE:
+                    if k in e and e[k] is not None:
+                        nc[k] = e[k]
+                out_clips.append(nc)
+            else:
+                out_clips.append(clip)  # untouched, verbatim
+        new_tracks.append({**track, "clips": out_clips})
+
+    # New caption clips (text additions) — only accepted when their range is in an allowed region.
+    seq2 = {**sequence, "tracks": new_tracks}
+    new_caps = patch.get("new_captions") or []
+    if new_caps:
+        cap_track = next((t for t in new_tracks if t.get("type") == "caption"), None)
+        if cap_track is not None:
+            n = len(cap_track.get("clips") or [])
+            for nc in new_caps:
+                if not isinstance(nc, dict) or not str(nc.get("text") or "").strip():
+                    continue
+                n += 1
+                cap_track.setdefault("clips", []).append({
+                    "id": f"clip_rev_c{n:03d}", "track": "caption",
+                    "text": str(nc.get("text")).strip(),
+                    "timeline_start": round(float(nc.get("timeline_start") or 0), 3),
+                    "timeline_end": round(float(nc.get("timeline_end") or 0), 3),
+                    "style": nc.get("style"),
+                })
+            cap_track["clips"].sort(key=lambda c: float(c.get("timeline_start") or 0))
+
+    dur = 0.0
+    for t in new_tracks:
+        for c in t.get("clips") or []:
+            dur = max(dur, float(c.get("timeline_end") or 0))
+    seq2["duration"] = round(dur, 3)
+    return seq2
+
+
+def _build_dan_revision(
+    room_id: str, user_id: str, job_id: str, instruction: dict[str, Any], instruction_path: Path,
+) -> dict[str, Any] | None:
+    """Region-scoped partial edit. Dan sees ONLY the in-scope clips + the instruction and
+    returns a per-clip patch. Code merges it, preserving everything out of scope."""
+    timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
+    sequence = timeline.get("sequence") if isinstance(timeline.get("sequence"), dict) else None
+    if not sequence:
+        return None
+    regions = instruction.get("revision_regions") or []
+    text = str(instruction.get("revision_text") or instruction.get("brief") or "").strip()
+    allowed = _clips_in_scope(sequence, regions)
+
+    # Compact view of the in-scope clips for Dan (id + what's editable).
+    scope_view = []
+    for track in sequence.get("tracks") or []:
+        for clip in track.get("clips") or []:
+            cid = str(clip.get("id") or "")
+            if cid not in allowed:
+                continue
+            scope_view.append({
+                "id": cid, "track": track.get("type"),
+                "timeline_start": clip.get("timeline_start"), "timeline_end": clip.get("timeline_end"),
+                **({"text": clip.get("text")} if clip.get("text") is not None else {}),
+                **({"style": clip.get("style")} if clip.get("style") is not None else {}),
+            })
+    region_desc = "\n".join(
+        f"- {r.get('intent') or 'edit'} {r.get('start')}s〜{r.get('end')}s: {r.get('note') or ''}"
+        for r in regions
+    ) or "(範囲指定なし＝指示は全体に適用)"
+
+    prompt = f"""
+You are DAN, doing a PARTIAL, non-destructive edit of an existing video timeline. You may ONLY
+edit the clips listed below (they are the ones the user's instruction/regions touch). Everything
+else in the timeline is preserved automatically — do NOT try to change anything not listed.
+
+USER INSTRUCTION (text):
+{text or '(なし)'}
+
+INSTRUCTION REGIONS (timeline seconds):
+{region_desc}
+
+EDITABLE CLIPS (only these ids may be changed):
+{json.dumps(scope_view, ensure_ascii=False, indent=2)}
+
+Return ONE json object with your edits (and nothing after it). Only reference ids from the list.
+{{
+  "edits": [
+    {{"id": "<clip id>", "text": "新しいテロップ or 省略", "style": {{"color":"#RRGGBB","fontSize":1.2,"position":"top|center|bottom","bold":true,"outlineColor":"#RRGGBB","outlineWidth":1.0}}, "timeline_start": <sec or 省略>, "timeline_end": <sec or 省略>, "remove": true/false}}
+  ],
+  "new_captions": [ {{"text": "...", "timeline_start": <sec>, "timeline_end": <sec>}} ]
+}}
+Rules:
+- Caption text/style/position/size: edit the caption clip's fields.
+- "この部分を消して/カット": set remove:true on the clips in that range.
+- Trim timing with timeline_start/timeline_end (seconds on the timeline).
+- Only output ids from EDITABLE CLIPS. Output valid JSON, json LAST.
+""".strip()
+
+    async def run_dan(prompt_text: str) -> str:
+        from app.agent.cli_runner import process_message_cli
+        chunks: list[str] = []
+        async for event in process_message_cli(
+            room_id=room_id, user_id=user_id, content=prompt_text,
+            project_title=str(instruction.get("content_title") or "Revision"),
+            project_description=text, project_status="in_progress",
+            skip_save=True, skip_resume=True, cwd="D:/dan-workspace",
+        ):
+            et = str(event.get("type") or "")
+            if et in {"text", "reasoning", "tool_use", "result", "error"}:
+                _append_job_event(room_id, job_id, {"type": et, "text": str(event.get("text") or event.get("message") or "")[:4000], "name": event.get("name") or event.get("tool_name")})
+            if et in {"text", "result"} and event.get("text"):
+                chunks.append(str(event.get("text")))
+        return "\n".join(chunks).strip()
+
+    output = asyncio.run(run_dan(prompt))
+    patch = _extract_json_object(output)
+    if not isinstance(patch, dict):
+        return None
+    merged = _merge_revision_patch(sequence, patch, allowed)
+    _append_job_event(room_id, job_id, {"type": "status", "text": f"部分編集を適用（対象クリップ {len(allowed)}個・範囲外は保持）。"})
+    return merged
+
+
 def _run_production_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], user_id: str) -> None:
     _update_job(room_id, job_id, {"status": "running"})
     _update_content(room_id, content_id, {"status": "running", "timeline": instruction.get("timeline") or {}})
@@ -1938,6 +2113,14 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
                 encoding="utf-8",
             )
             _append_job_event(room_id, job_id, {"type": "status", "text": "編集判断からタイムラインを組み立てました（MP4は未生成）。"})
+        elif mode == "dan_revise":
+            # Partial, non-destructive edit: Dan patches only the in-scope clips; everything
+            # else is preserved. Merged timeline is then rendered deterministically.
+            merged = _build_dan_revision(room_id, user_id, job_id, instruction, instruction_path)
+            if not merged:
+                raise RuntimeError("部分編集の適用に失敗しました（対象クリップなし or 差分なし）")
+            sequence_result = merged
+            timeline_result = {"sequence": merged}
         if timeline_result and sequence_result:
             timeline = dict(instruction.get("timeline") or {})
             timeline.update(timeline_result)
@@ -1945,7 +2128,7 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             instruction["timeline"] = timeline
             instruction_path.write_text(json.dumps(instruction, ensure_ascii=False, indent=2), encoding="utf-8")
             _update_content(room_id, content_id, {"timeline": timeline})
-        if mode in {"render_timeline", "export", "blur_render"}:
+        if mode in {"render_timeline", "export", "blur_render", "dan_revise"}:
             render_result = _render_sequence_job(room_id, job_id, content_id, instruction, job_dir)
             if not render_result:
                 render_result = _render_blur_job(room_id, job_id, content_id, instruction, job_dir)
