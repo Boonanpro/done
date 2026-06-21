@@ -1638,7 +1638,7 @@ export function VideoReviewEditor({
                                     aria-label="Resize clip start"
                                   />
                                   <div
-                                    className="flex min-w-0 flex-1 cursor-grab items-center gap-1 truncate px-1 active:cursor-grabbing"
+                                    className="flex h-full min-w-0 flex-1 cursor-grab items-center gap-1 truncate px-1 active:cursor-grabbing"
                                     onPointerDown={(event) => startSequenceClipDrag(event, clip, 'move')}
                                     onDoubleClick={(event) => {
                                       event.stopPropagation();
