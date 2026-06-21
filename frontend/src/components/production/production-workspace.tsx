@@ -488,37 +488,22 @@ export function ProductionWorkspace({
     }
   };
 
-  // Annotation intents that require Dan's creative judgement (vs. mechanical, code-applied).
+  // Manual/mechanical edits (clip trims, caption style, etc.) already autosave and reflect
+  // live — they need NO button. The button is ONLY for asking Dan to re-edit, driven by a
+  // text instruction and/or creative instruction-clips on the timeline.
   const CREATIVE_INTENTS = new Set(['replace', 'generate', 'motion', 'audio', 'comment']);
-  // What's currently pending on the timeline (read from the latest saved content timeline).
-  const currentTimeline = (selectedContent?.timeline || {}) as { annotations?: Array<{ intent?: string }>; sequence?: { tracks?: Array<{ type?: string; clips?: Array<{ style?: unknown }> }> } };
+  const currentTimeline = (selectedContent?.timeline || {}) as { annotations?: Array<{ intent?: string; start?: number; end?: number; note?: string }> };
   const pendingAnnotations = Array.isArray(currentTimeline.annotations) ? currentTimeline.annotations : [];
   const creativeAnnotations = pendingAnnotations.filter((a) => CREATIVE_INTENTS.has(String(a?.intent || 'comment')));
   const hasText = revisionNote.trim().length > 0;
   const hasCreativeAnnotations = creativeAnnotations.length > 0;
-  // Mechanical edits already live in the timeline (caption style edits, blur rects, etc.) —
-  // detect at least one styled caption clip so the button can re-render them.
-  const hasStyledCaptions = (currentTimeline.sequence?.tracks || []).some(
-    (t) => t?.type === 'caption' && (t.clips || []).some((c) => c?.style),
-  );
-  const hasMechanicalEdits = hasStyledCaptions || pendingAnnotations.some((a) => String(a?.intent) === 'blur');
-  const canApplyEdits = hasText || hasCreativeAnnotations || hasMechanicalEdits;
+  const canApplyEdits = hasText || hasCreativeAnnotations;
 
-  // Unified entry point for the "適用 / 作り直す" button. Mechanical edits apply
-  // deterministically (no Dan) via a render_timeline job; creative edits/text go to Dan.
-  // If both exist, mechanical runs first so Dan sees the corrected timeline.
+  // Ask Dan to re-edit using the text instruction and/or creative instruction-clips.
   const applyEdits = async () => {
     if (!selectedContent) return;
-    const ranMechanical = hasMechanicalEdits;
-    if (ranMechanical) {
-      // The current (edited) timeline already carries style/blur; re-render it deterministically.
-      await createProductionJob((selectedContent.timeline || {}) as SessionPayload);
-    }
-    if (hasText || hasCreativeAnnotations) {
-      await requestDanEdit(revisionNote, creativeAnnotations);
-    } else if (!ranMechanical) {
-      toast.info('適用する編集や指示がありません');
-    }
+    if (!hasText && !hasCreativeAnnotations) return;
+    await requestDanEdit(revisionNote, creativeAnnotations);
   };
 
   const requestDanEdit = async (revision?: string, creativeAnns?: Array<{ intent?: string; start?: number; end?: number; note?: string }>) => {
@@ -696,9 +681,9 @@ export function ProductionWorkspace({
               </div>
             </div>
             <div className="rounded-md border border-border p-3">
-              <div className="mb-1 text-sm font-medium">編集を適用 / Danに直してもらう</div>
+              <div className="mb-1 text-sm font-medium">Danに直してもらう</div>
               <p className="mb-2 text-xs text-muted-foreground">
-                テロップのデザインや手編集はそのまま反映。文章で指示するか、タイムラインに指示クリップを置くと、Danがその箇所だけ直します。
+                手編集（クリップ調整やテロップのデザイン）は自動で反映されます。ここは、文章で指示するか、タイムラインに指示クリップを置いてDanに直してもらう時だけ使います。
               </p>
               <Textarea
                 value={revisionNote}
@@ -706,18 +691,13 @@ export function ProductionWorkspace({
                 placeholder="例: 言い直しだけ切って。語尾を切らないで。小窓パートはテロップ無し。"
                 className="min-h-20 text-xs"
               />
-              <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-muted-foreground">
-                {hasMechanicalEdits ? <span className="rounded bg-emerald-500/15 px-1.5 py-0.5">手編集を反映</span> : null}
-                {hasText ? <span className="rounded bg-sky-500/15 px-1.5 py-0.5">文章で指示</span> : null}
-                {hasCreativeAnnotations ? <span className="rounded bg-amber-500/15 px-1.5 py-0.5">指示クリップ {creativeAnnotations.length}</span> : null}
-              </div>
               <Button
                 className="mt-2 w-full"
                 size="sm"
                 disabled={!canApplyEdits}
                 onClick={() => void applyEdits()}
               >
-                適用 / 作り直す
+                この指示で直す
               </Button>
             </div>
             {latestJob && (latestJob.status === 'queued' || latestJob.status === 'running') ? (
