@@ -2127,12 +2127,14 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             _append_job_event(room_id, job_id, {"type": "status", "text": "編集判断からタイムラインを組み立てました（MP4は未生成）。"})
         elif mode == "dan_revise":
             # Partial, non-destructive edit: Dan patches only the in-scope clips; everything
-            # else is preserved. Merged timeline is then rendered deterministically.
+            # else is preserved. The deliverable is the updated TIMELINE — no MP4 is rendered
+            # (the user sees the change in the live preview; export to MP4 is a separate step).
             merged = _build_dan_revision(room_id, user_id, job_id, instruction, instruction_path)
             if not merged:
                 raise RuntimeError("部分編集の適用に失敗しました（対象クリップなし or 差分なし）")
             sequence_result = merged
             timeline_result = {"sequence": merged}
+            _append_job_event(room_id, job_id, {"type": "status", "text": "指示した箇所だけ反映しました（MP4は未生成・プレビューで確認できます）。"})
         if timeline_result and sequence_result:
             timeline = dict(instruction.get("timeline") or {})
             timeline.update(timeline_result)
@@ -2140,7 +2142,7 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             instruction["timeline"] = timeline
             instruction_path.write_text(json.dumps(instruction, ensure_ascii=False, indent=2), encoding="utf-8")
             _update_content(room_id, content_id, {"timeline": timeline})
-        if mode in {"render_timeline", "export", "blur_render", "dan_revise"}:
+        if mode in {"render_timeline", "export", "blur_render"}:
             render_result = _render_sequence_job(room_id, job_id, content_id, instruction, job_dir)
             if not render_result:
                 render_result = _render_blur_job(room_id, job_id, content_id, instruction, job_dir)
