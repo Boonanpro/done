@@ -120,29 +120,35 @@ function drawSource(
   const vw = video.videoWidth;
   const vh = video.videoHeight;
   if (!vw || !vh) return;
-  // crop: take a sub-rect of the SOURCE (edges trimmed). The cropped region then fills the
-  // box like before (cover + transform), so what remains after the crop is placed.
-  const cl = Math.max(0, Math.min(0.9, crop?.left ?? 0));
-  const cr = Math.max(0, Math.min(0.9, crop?.right ?? 0));
-  const ctp = Math.max(0, Math.min(0.9, crop?.top ?? 0));
-  const cb = Math.max(0, Math.min(0.9, crop?.bottom ?? 0));
+  // Placement (transform) uses the FULL source — crop does NOT change size/position.
+  const s = transform?.scale ?? 1;
+  const tx = transform?.x ?? 0;
+  const ty = transform?.y ?? 0;
+  const cover = Math.max(dw / vw, dh / vh);
+  const destW = vw * cover * s;
+  const destH = vh * cover * s;
+  const destX = dx + (dw - destW) / 2 + tx * outW;
+  const destY = dy + (dh - destH) / 2 + ty * outH;
+  // crop = a MASK: keep only the inner region of the placed frame; the trimmed edges are
+  // simply not painted, so whatever is underneath (lower clip / black) shows there. The
+  // visible content stays at the exact same place and size — no zoom.
+  const cl = Math.max(0, Math.min(0.95, crop?.left ?? 0));
+  const cr = Math.max(0, Math.min(0.95, crop?.right ?? 0));
+  const ctp = Math.max(0, Math.min(0.95, crop?.top ?? 0));
+  const cb = Math.max(0, Math.min(0.95, crop?.bottom ?? 0));
   const sx = vw * cl;
   const sy = vh * ctp;
   const sw = Math.max(1, vw * (1 - cl - cr));
   const sh = Math.max(1, vh * (1 - ctp - cb));
-  const s = transform?.scale ?? 1;
-  const tx = transform?.x ?? 0;
-  const ty = transform?.y ?? 0;
-  const cover = Math.max(dw / sw, dh / sh);
-  const destW = sw * cover * s;
-  const destH = sh * cover * s;
-  const destX = dx + (dw - destW) / 2 + tx * outW;
-  const destY = dy + (dh - destH) / 2 + ty * outH;
+  const dkX = destX + destW * cl;
+  const dkY = destY + destH * ctp;
+  const dkW = destW * (1 - cl - cr);
+  const dkH = destH * (1 - ctp - cb);
   ctx.save();
   ctx.beginPath();
   ctx.rect(dx, dy, dw, dh);
   ctx.clip();
-  ctx.drawImage(video, sx, sy, sw, sh, destX, destY, destW, destH);
+  ctx.drawImage(video, sx, sy, sw, sh, dkX, dkY, dkW, dkH);
   ctx.restore();
 }
 

@@ -1868,58 +1868,59 @@ export function VideoReviewEditor({
                     />
                   </div>
                 ) : null}
-                {selectedSequenceClip.asset_id && selectedSequenceClip.position
-                  && !(selectedSequenceClip.position.x <= 0.001 && selectedSequenceClip.position.y <= 0.001
-                       && selectedSequenceClip.position.width >= 0.999 && selectedSequenceClip.position.height >= 0.999) ? (
-                  // PiP/overlay (wipe): a free-aspect window placed on the frame.
+                {selectedSequenceClip.asset_id && (selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') ? (
+                  // Unified サイズ/左右/上下 for EVERY video/overlay clip (no clip-specific
+                  // panel). A PiP/wipe (position box) and a base clip (transform) both expose
+                  // the same three controls; we map them to whichever field the clip uses.
                   (() => {
-                    const pos = selectedSequenceClip.position as { x: number; y: number; width: number; height: number };
-                    const setPos = (p: typeof pos) => updateSelectedSequenceClip({ position: p });
+                    const pos = selectedSequenceClip.position;
+                    const isPip = !!pos && !(pos.x <= 0.001 && pos.y <= 0.001 && pos.width >= 0.999 && pos.height >= 0.999);
+                    let size: number, lr: number, ud: number;
+                    if (isPip && pos) {
+                      size = (pos.width + pos.height) / 2;
+                      lr = pos.x + pos.width / 2 - 0.5;
+                      ud = pos.y + pos.height / 2 - 0.5;
+                    } else {
+                      const tf = selectedSequenceClip.transform || { scale: 1, x: 0, y: 0 };
+                      size = tf.scale; lr = tf.x; ud = tf.y;
+                    }
+                    const apply = (nextSize: number, nextLr: number, nextUd: number) => {
+                      if (isPip && pos) {
+                        const aspect = pos.height > 0 ? pos.width / pos.height : 1;
+                        const h = Math.max(0.05, Math.min(1, nextSize * 2 / (1 + aspect)));
+                        const w = Math.max(0.05, Math.min(1, h * aspect));
+                        const cx = 0.5 + nextLr, cy = 0.5 + nextUd;
+                        updateSelectedSequenceClip({ position: {
+                          x: Number(Math.max(0, Math.min(1 - w, cx - w / 2)).toFixed(4)),
+                          y: Number(Math.max(0, Math.min(1 - h, cy - h / 2)).toFixed(4)),
+                          width: Number(w.toFixed(4)), height: Number(h.toFixed(4)) } });
+                      } else {
+                        updateSelectedSequenceClip({ transform: { scale: Number(nextSize.toFixed(4)), x: Number(nextLr.toFixed(4)), y: Number(nextUd.toFixed(4)) } });
+                      }
+                    };
                     return (
                       <div className="space-y-2 rounded-md border border-border p-2">
-                        <div className="text-xs font-medium text-muted-foreground">ワイプ位置・サイズ（プレビュー上でドラッグも可）</div>
-                        <div className="grid grid-cols-2 gap-2">
-                          {([['x', '位置X'], ['y', '位置Y'], ['width', '幅'], ['height', '高さ']] as const).map(([key, label]) => (
-                            <label key={key} className="flex flex-col gap-1 text-[10px] text-muted-foreground">
-                              {label} {Math.round((pos[key] ?? 0) * 100)}%
-                              <input type="range" min="0" max="1" step="0.01" value={pos[key] ?? 0}
-                                onChange={(e) => setPos({ ...pos, [key]: Number(e.target.value) })} />
-                            </label>
-                          ))}
-                        </div>
-                      </div>
-                    );
-                  })()
-                ) : (selectedSequenceClip.track === 'video' || selectedSequenceClip.composition === 'fullscreen' || selectedSequenceClip.composition === 'background') && selectedSequenceClip.asset_id ? (
-                  // Base clip: the box on the preview IS the source (locked to the footage's
-                  // aspect). Resize/drag it (or this slider) to scale the WHOLE source — no crop.
-                  (() => {
-                    const tf = selectedSequenceClip.transform || { scale: 1, x: 0, y: 0 };
-                    const setTf = (p: Partial<{ scale: number; x: number; y: number }>) =>
-                      updateSelectedSequenceClip({ transform: { ...tf, ...p } });
-                    return (
-                      <div className="space-y-2 rounded-md border border-border p-2">
-                        <div className="text-xs font-medium text-muted-foreground">映像のサイズ・位置（プレビュー上の枠をドラッグも可）</div>
+                        <div className="text-xs font-medium text-muted-foreground">映像のサイズ・位置（プレビュー上でドラッグも可）</div>
                         <label className="block text-[10px] text-muted-foreground">
-                          サイズ {Math.round(tf.scale * 100)}%（縮小すると枠外の部分が見えます）
-                          <input type="range" min="0.2" max="3" step="0.01" value={tf.scale}
-                            onChange={(e) => setTf({ scale: Number(e.target.value) })} className="w-full" />
+                          サイズ {Math.round(size * 100)}%
+                          <input type="range" min={isPip ? '0.05' : '0.2'} max={isPip ? '1' : '3'} step="0.01" value={size}
+                            onChange={(e) => apply(Number(e.target.value), lr, ud)} className="w-full" />
                         </label>
                         <div className="grid grid-cols-2 gap-2">
                           <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
-                            左右 {Math.round(tf.x * 100)}%
-                            <input type="range" min="-1" max="1" step="0.01" value={tf.x}
-                              onChange={(e) => setTf({ x: Number(e.target.value) })} />
+                            左右 {Math.round(lr * 100)}%
+                            <input type="range" min="-1" max="1" step="0.01" value={lr}
+                              onChange={(e) => apply(size, Number(e.target.value), ud)} />
                           </label>
                           <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
-                            上下 {Math.round(tf.y * 100)}%
-                            <input type="range" min="-1" max="1" step="0.01" value={tf.y}
-                              onChange={(e) => setTf({ y: Number(e.target.value) })} />
+                            上下 {Math.round(ud * 100)}%
+                            <input type="range" min="-1" max="1" step="0.01" value={ud}
+                              onChange={(e) => apply(size, lr, Number(e.target.value))} />
                           </label>
                         </div>
-                        {selectedSequenceClip.transform ? (
+                        {(selectedSequenceClip.transform || isPip) ? (
                           <Button variant="ghost" size="sm" className="h-6 w-full text-[10px]"
-                            onClick={() => updateSelectedSequenceClip({ transform: null })}>
+                            onClick={() => updateSelectedSequenceClip(isPip ? { position: null } : { transform: null })}>
                             サイズ・位置をリセット
                           </Button>
                         ) : null}
