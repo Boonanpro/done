@@ -259,7 +259,11 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
       // same-origin (Next proxy) — do NOT set crossOrigin (would break the load).
       v.muted = true;
       v.playsInline = true;
-      v.preload = 'auto';
+      // Default to 'metadata' (header only): with one <video> per clip there can be dozens
+      // of elements, and 'auto' makes them ALL fully buffer on mount — that was the ~10s
+      // black/no-audio stall on refresh. The proximity effect below upgrades clips near the
+      // playhead to 'auto' so the visible ones load fast and the rest stay lightweight.
+      v.preload = 'metadata';
       v.style.display = 'none';
       document.body.appendChild(v);
       map.set(cid, v);
@@ -269,6 +273,21 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
       for (const el of list) el.remove();
     }
   }, [visualClips, assetById]);
+
+  // Eagerly buffer only the clips near the playhead; keep far clips at 'metadata'. This makes
+  // refresh fast (a few elements load, not all of them) while playback stays smooth because
+  // upcoming clips are upgraded before the cut.
+  useEffect(() => {
+    const WINDOW_AHEAD = 4;
+    const WINDOW_BEHIND = 1.5;
+    for (const vc of visualClips) {
+      const v = videosRef.current.get(String(vc.clip.id));
+      if (!v) continue;
+      const near = vc.clip.timeline_end >= currentTime - WINDOW_BEHIND && vc.clip.timeline_start <= currentTime + WINDOW_AHEAD;
+      const want = near ? 'auto' : 'metadata';
+      if (v.preload !== want) v.preload = want;
+    }
+  }, [currentTime, visualClips]);
 
   // hidden audio elements for assets referenced by audio clips
   useEffect(() => {
