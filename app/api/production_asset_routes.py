@@ -724,22 +724,26 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             # NON-DESTRUCTIVE placement: scale the FULL source aspect-preserved to cover the
             # box × transform.scale, overlay onto a black W×H canvas at a (possibly negative)
             # offset so the frame windows it — no crop, overflow pixels preserved.
-            # effective (cropped) source dims drive the cover math
-            csw = sw * (1 - c_l - c_r)
-            csh = sh * (1 - c_t - c_b)
+            # Placement (transform) uses the FULL source — crop does NOT change cover/scale.
             bw = output_width if is_full_pos else max(2, round(float(bpos.get("width") or 1) * output_width))
             bh = output_height if is_full_pos else max(2, round(float(bpos.get("height") or 1) * output_height))
             bx = 0 if is_full_pos else round(float(bpos.get("x") or 0) * output_width)
             by = 0 if is_full_pos else round(float(bpos.get("y") or 0) * output_height)
-            cover = max(bw / csw, bh / csh)
-            cw = max(2, round(csw * cover * b_scale))
-            ch = max(2, round(csh * cover * b_scale))
+            cover = max(bw / sw, bh / sh)
+            cw = max(2, round(sw * cover * b_scale))
+            ch = max(2, round(sh * cover * b_scale))
             ox = round(bx + (bw - cw) / 2 + b_tx * output_width)
             oy = round(by + (bh - ch) / 2 + b_ty * output_height)
-            crop_filt = (
-                f"crop=iw*{(1 - c_l - c_r):.4f}:ih*{(1 - c_t - c_b):.4f}:iw*{c_l:.4f}:ih*{c_t:.4f},"
-                if has_crop else ""
-            )
+            # crop = MASK: after scaling the full source to its placed size, keep only the
+            # inner region and overlay it at the offset shifted by the crop — the trimmed
+            # edges are left as the black canvas (no zoom, position/size unchanged).
+            crop_filt = ""
+            if has_crop:
+                kw = max(2, round(cw * (1 - c_l - c_r)))
+                kh = max(2, round(ch * (1 - c_t - c_b)))
+                crop_filt = f"crop={kw}:{kh}:{round(cw * c_l)}:{round(ch * c_t)},"
+                ox = ox + round(cw * c_l)
+                oy = oy + round(ch * c_t)
             tpad = ""
             if is_freeze:
                 tpad = f",tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
@@ -748,7 +752,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             filters.append(
                 f"[{input_index}:v]"
                 f"trim=start={source_start:.3f}:end={source_end:.3f},"
-                f"setpts=PTS-STARTPTS,{crop_filt}scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps=30{tpad},format=yuv420p"
+                f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps=30,{crop_filt}setsar=1{tpad},format=yuv420p"
                 f"[src{rendered_count}]"
             )
             filters.append(f"color=c=black:s={output_width}x{output_height}:r=30:d={out_dur:.3f}[bg{rendered_count}]")
