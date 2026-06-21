@@ -488,7 +488,40 @@ export function ProductionWorkspace({
     }
   };
 
-  const requestDanEdit = async (revision?: string) => {
+  // Annotation intents that require Dan's creative judgement (vs. mechanical, code-applied).
+  const CREATIVE_INTENTS = new Set(['replace', 'generate', 'motion', 'audio', 'comment']);
+  // What's currently pending on the timeline (read from the latest saved content timeline).
+  const currentTimeline = (selectedContent?.timeline || {}) as { annotations?: Array<{ intent?: string }>; sequence?: { tracks?: Array<{ type?: string; clips?: Array<{ style?: unknown }> }> } };
+  const pendingAnnotations = Array.isArray(currentTimeline.annotations) ? currentTimeline.annotations : [];
+  const creativeAnnotations = pendingAnnotations.filter((a) => CREATIVE_INTENTS.has(String(a?.intent || 'comment')));
+  const hasText = revisionNote.trim().length > 0;
+  const hasCreativeAnnotations = creativeAnnotations.length > 0;
+  // Mechanical edits already live in the timeline (caption style edits, blur rects, etc.) —
+  // detect at least one styled caption clip so the button can re-render them.
+  const hasStyledCaptions = (currentTimeline.sequence?.tracks || []).some(
+    (t) => t?.type === 'caption' && (t.clips || []).some((c) => c?.style),
+  );
+  const hasMechanicalEdits = hasStyledCaptions || pendingAnnotations.some((a) => String(a?.intent) === 'blur');
+  const canApplyEdits = hasText || hasCreativeAnnotations || hasMechanicalEdits;
+
+  // Unified entry point for the "適用 / 作り直す" button. Mechanical edits apply
+  // deterministically (no Dan) via a render_timeline job; creative edits/text go to Dan.
+  // If both exist, mechanical runs first so Dan sees the corrected timeline.
+  const applyEdits = async () => {
+    if (!selectedContent) return;
+    const ranMechanical = hasMechanicalEdits;
+    if (ranMechanical) {
+      // The current (edited) timeline already carries style/blur; re-render it deterministically.
+      await createProductionJob((selectedContent.timeline || {}) as SessionPayload);
+    }
+    if (hasText || hasCreativeAnnotations) {
+      await requestDanEdit(revisionNote, creativeAnnotations);
+    } else if (!ranMechanical) {
+      toast.info('適用する編集や指示がありません');
+    }
+  };
+
+  const requestDanEdit = async (revision?: string, creativeAnns?: Array<{ intent?: string; start?: number; end?: number; note?: string }>) => {
     if (!selectedContent) return;
     const selectedAssets = selectedSourceAssets;
     if (selectedAssets.length === 0) {
@@ -521,7 +554,9 @@ export function ProductionWorkspace({
         ...timeline,
         format: selectedContent.format,
         source_asset_ids: selectedAssets.map((asset) => asset.id),
-        annotations: [],
+        // NOTE: Stage 2 still regenerates (sequence cleared). The region-scoped PARTIAL
+        // edit that preserves the existing sequence lands in Stage 3 (backend diff/merge).
+        annotations: creativeAnns || [],
         sequence: undefined,
       },
     };
@@ -660,28 +695,31 @@ export function ProductionWorkspace({
                   : 'ブリーフ未設定'}
               </div>
             </div>
-            {selectedContent.outputs.length > 0 ? (
-              <div className="rounded-md border border-border p-3">
-                <div className="mb-1 text-sm font-medium">この出力を直す</div>
-                <p className="mb-2 text-xs text-muted-foreground">
-                  最新の動画はタイムラインで再生できます。気になった点を書いて作り直すと、前回の編集に対する修正としてDanが反映します。
-                </p>
-                <Textarea
-                  value={revisionNote}
-                  onChange={(event) => setRevisionNote(event.target.value)}
-                  placeholder="例: 言い直しだけ切って。語尾を切らないで。テロップの黒背景をやめてフチ+影で。小窓パートはテロップ無し。"
-                  className="min-h-20 text-xs"
-                />
-                <Button
-                  className="mt-2 w-full"
-                  size="sm"
-                  disabled={!revisionNote.trim()}
-                  onClick={() => void requestDanEdit(revisionNote)}
-                >
-                  この指示で作り直す
-                </Button>
+            <div className="rounded-md border border-border p-3">
+              <div className="mb-1 text-sm font-medium">編集を適用 / Danに直してもらう</div>
+              <p className="mb-2 text-xs text-muted-foreground">
+                テロップのデザインや手編集はそのまま反映。文章で指示するか、タイムラインに指示クリップを置くと、Danがその箇所だけ直します。
+              </p>
+              <Textarea
+                value={revisionNote}
+                onChange={(event) => setRevisionNote(event.target.value)}
+                placeholder="例: 言い直しだけ切って。語尾を切らないで。小窓パートはテロップ無し。"
+                className="min-h-20 text-xs"
+              />
+              <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-muted-foreground">
+                {hasMechanicalEdits ? <span className="rounded bg-emerald-500/15 px-1.5 py-0.5">手編集を反映</span> : null}
+                {hasText ? <span className="rounded bg-sky-500/15 px-1.5 py-0.5">文章で指示</span> : null}
+                {hasCreativeAnnotations ? <span className="rounded bg-amber-500/15 px-1.5 py-0.5">指示クリップ {creativeAnnotations.length}</span> : null}
               </div>
-            ) : null}
+              <Button
+                className="mt-2 w-full"
+                size="sm"
+                disabled={!canApplyEdits}
+                onClick={() => void applyEdits()}
+              >
+                適用 / 作り直す
+              </Button>
+            </div>
             {latestJob && (latestJob.status === 'queued' || latestJob.status === 'running') ? (
               <div className="rounded-md border border-border p-3">
                 <div className="mb-2 flex items-center gap-2 text-sm font-medium">
