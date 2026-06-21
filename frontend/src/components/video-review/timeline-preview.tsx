@@ -104,6 +104,36 @@ function drawCover(
   ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh);
 }
 
+// Non-destructive placement: draw the FULL source frame (no crop) into the box, scaled to
+// cover the box by default (identical look to drawCover when transform is identity), then
+// zoomed/panned by `transform`. Overflow is CLIPPED by the box window, so the source pixels
+// outside the frame are preserved and revealed when scale<1 or when panned.
+function drawSource(
+  ctx: CanvasRenderingContext2D,
+  video: HTMLVideoElement,
+  dx: number, dy: number, dw: number, dh: number,
+  transform: { scale: number; x: number; y: number } | null | undefined,
+  outW: number, outH: number,
+) {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return;
+  const s = transform?.scale ?? 1;
+  const tx = transform?.x ?? 0;
+  const ty = transform?.y ?? 0;
+  const cover = Math.max(dw / vw, dh / vh);
+  const destW = vw * cover * s;
+  const destH = vh * cover * s;
+  const destX = dx + (dw - destW) / 2 + tx * outW;
+  const destY = dy + (dh - destH) / 2 + ty * outH;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(dx, dy, dw, dh);
+  ctx.clip();
+  ctx.drawImage(video, 0, 0, vw, vh, destX, destY, destW, destH);
+  ctx.restore();
+}
+
 export function TimelinePreview({ sequence, assets, currentTime, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -272,11 +302,13 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         const v = videosRef.current.get(String(vc.clip.id));
         if (!v || !v.videoWidth) continue;
         // Any clip (base or overlay) with a position renders into that box; otherwise
-        // fullscreen. This lets the background fullscreen video be resized/positioned too.
+        // fullscreen. The source is placed non-destructively (full frame preserved, clipped
+        // by the box) so zoom/pan reveals overflow instead of cropping it.
+        const tf = vc.clip.transform;
         if (vc.position) {
-          drawCover(ctx, v, vc.position.x * w, vc.position.y * h, vc.position.width * w, vc.position.height * h);
+          drawSource(ctx, v, vc.position.x * w, vc.position.y * h, vc.position.width * w, vc.position.height * h, tf, w, h);
         } else {
-          drawCover(ctx, v, 0, 0, w, h);
+          drawSource(ctx, v, 0, 0, w, h, tf, w, h);
         }
       }
 
