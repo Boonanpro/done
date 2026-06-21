@@ -516,11 +516,13 @@ export function ProductionWorkspace({
     const timeline = selectedContent.timeline || {};
     const baseBrief = typeof timeline.brief === 'string' ? timeline.brief : '';
     const trimmedRevision = (revision || '').trim();
-    const briefForJob = trimmedRevision
-      ? `${baseBrief}\n\n# 修正指示（前回の出力からの直し。ここを最優先で反映する）\n${trimmedRevision}`
-      : baseBrief;
+    const hasSequence = !!(timeline as { sequence?: unknown }).sequence;
+    // Stage 3: partial, non-destructive edit. Keep the CURRENT sequence and pass the
+    // instruction text + creative instruction-clip regions; the backend patches only the
+    // in-scope clips and preserves the rest. (Fallback to a full dan_edit only if there is
+    // no sequence yet — i.e. nothing to patch.)
     const instruction = {
-      mode: 'dan_edit',
+      mode: hasSequence ? 'dan_revise' : 'dan_edit',
       content_id: selectedContent.id,
       content_title: selectedContent.title,
       asset_ids: selectedAssets.map((asset) => asset.id),
@@ -533,16 +535,18 @@ export function ProductionWorkspace({
         source_type: asset.source_type,
         metadata: asset.metadata,
       })),
-      brief: briefForJob,
+      brief: baseBrief,
+      revision_text: trimmedRevision,
+      revision_regions: (creativeAnns || []).map((a) => ({
+        intent: a.intent, start: a.start, end: a.end, note: a.note,
+      })),
       workflow_preset: typeof timeline.workflow_preset === 'string' ? timeline.workflow_preset : 'video_ugc',
       timeline: {
         ...timeline,
         format: selectedContent.format,
         source_asset_ids: selectedAssets.map((asset) => asset.id),
-        // NOTE: Stage 2 still regenerates (sequence cleared). The region-scoped PARTIAL
-        // edit that preserves the existing sequence lands in Stage 3 (backend diff/merge).
+        // Keep the existing sequence so the edit is applied ON it (non-destructive).
         annotations: creativeAnns || [],
-        sequence: undefined,
       },
     };
     try {
@@ -553,7 +557,7 @@ export function ProductionWorkspace({
         body: JSON.stringify({ room_id: roomId, content_id: selectedContent.id, instruction }),
       });
       if (!res.ok) throw new Error(await res.text());
-      toast.success(trimmedRevision ? '修正指示でDanに作り直しを依頼しました' : 'Danに制作を依頼しました');
+      toast.success('Danに修正を依頼しました（指示した箇所だけ直します）');
       if (trimmedRevision) setRevisionNote('');
       await loadJobs();
       window.setTimeout(() => {
