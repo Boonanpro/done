@@ -271,12 +271,10 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
       for (const vc of active) {
         const v = videosRef.current.get(String(vc.clip.id));
         if (!v || !v.videoWidth) continue;
-        if (vc.kind === 'overlay' && vc.position) {
-          const px = vc.position.x * w;
-          const py = vc.position.y * h;
-          const pw = vc.position.width * w;
-          const ph = vc.position.height * h;
-          drawCover(ctx, v, px, py, pw, ph);
+        // Any clip (base or overlay) with a position renders into that box; otherwise
+        // fullscreen. This lets the background fullscreen video be resized/positioned too.
+        if (vc.position) {
+          drawCover(ctx, v, vc.position.x * w, vc.position.y * h, vc.position.width * w, vc.position.height * h);
         } else {
           drawCover(ctx, v, 0, 0, w, h);
         }
@@ -448,27 +446,29 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, visualClips, audioClips, sequenceDuration, drawFrame, onTimeChange, onEnded]);
 
-  // Stage 2: the selected overlay/PiP clip, if it's active at the current time, gets a
-  // draggable/resizable box drawn over the preview.
-  const selectedOverlay = useMemo(() => {
+  // Stage 2/3a: the selected visual clip (base OR overlay), if active at the current time,
+  // gets a draggable/resizable box. Base clips with no explicit position default to the full
+  // frame so they can be shrunk/moved like a wipe.
+  const FULL = { x: 0, y: 0, width: 1, height: 1 };
+  const selectedBox = useMemo(() => {
     if (!selectedClipId) return null;
     const vc = visualClips.find((x) => String(x.clip.id) === String(selectedClipId));
-    if (!vc || vc.kind !== 'overlay' || !vc.position) return null;
+    if (!vc) return null;
     if (!(currentTime >= vc.clip.timeline_start && currentTime < vc.clip.timeline_end)) return null;
-    return vc;
+    return { vc, position: vc.position || FULL };
   }, [selectedClipId, visualClips, currentTime]);
 
   const startBoxDrag = useCallback(
     (e: React.PointerEvent, mode: 'move' | 'nw' | 'ne' | 'sw' | 'se') => {
-      if (!selectedOverlay || !onPositionChange) return;
+      if (!selectedBox || !onPositionChange) return;
       e.preventDefault();
       e.stopPropagation();
       const wrap = wrapRef.current;
       if (!wrap) return;
       const rect = wrap.getBoundingClientRect();
       const start = { x: e.clientX, y: e.clientY };
-      const p0 = { ...(selectedOverlay.position as { x: number; y: number; width: number; height: number }) };
-      const clipId = String(selectedOverlay.clip.id);
+      const p0 = { ...selectedBox.position };
+      const clipId = String(selectedBox.vc.clip.id);
       const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
       const move = (ev: PointerEvent) => {
         const dx = (ev.clientX - start.x) / rect.width;
@@ -500,10 +500,10 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
     },
-    [selectedOverlay, onPositionChange],
+    [selectedBox, onPositionChange],
   );
 
-  const box = selectedOverlay?.position;
+  const box = selectedBox?.position;
   const handle = 'absolute h-3 w-3 rounded-sm border border-white bg-sky-400';
 
   return (

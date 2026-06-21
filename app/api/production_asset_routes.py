@@ -674,7 +674,25 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         source_start, source_end, out_dur, src_dur, is_freeze = _clip_source_range(clip, metadata)
         command.extend(["-i", str(source_path)])
         pad_needed = 0.0 if is_freeze else max(0.0, out_dur - src_dur)
-        _scale = f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30"
+        # Base clips fill the frame by default (cover-crop). If a clip carries a non-full
+        # position (the user shrank/moved the fullscreen video in the preview), scale it to
+        # that box and pad to the full frame with black so export matches the preview.
+        bpos = clip.get("position") if isinstance(clip.get("position"), dict) else None
+        is_full = (not bpos) or (
+            float(bpos.get("x") or 0) <= 0.001 and float(bpos.get("y") or 0) <= 0.001
+            and float(bpos.get("width") or 1) >= 0.999 and float(bpos.get("height") or 1) >= 0.999
+        )
+        if is_full:
+            _scale = f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30"
+        else:
+            bw = max(2, round(float(bpos.get("width") or 1) * output_width))
+            bh = max(2, round(float(bpos.get("height") or 1) * output_height))
+            bx = max(0, min(output_width - 2, round(float(bpos.get("x") or 0) * output_width)))
+            by = max(0, min(output_height - 2, round(float(bpos.get("y") or 0) * output_height)))
+            _scale = (
+                f"scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
+                f"pad={output_width}:{output_height}:{bx}:{by}:black,setsar=1,fps=30"
+            )
         if is_freeze:
             setpts = f"setpts=PTS-STARTPTS,{_scale},tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
         else:
