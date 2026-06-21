@@ -71,6 +71,9 @@ export type SequenceClip = {
   muted?: boolean | null;
   locked?: boolean | null;
   style?: CaptionStyle | null;  // per-caption styling (color/size/position/outline)
+  // Non-destructive source placement inside the clip's box: zoom + pan. null/absent =
+  // today's cover look. scale<1 reveals the full source frame (no pixels cropped).
+  transform?: { scale: number; x: number; y: number } | null;
 };
 
 // Per-caption style. All optional; absence renders as today (white fill, black outline,
@@ -1882,6 +1885,19 @@ export function VideoReviewEditor({
                             className="w-full"
                           />
                         </label>
+                        {(() => {
+                          const tf = selectedSequenceClip.transform || { scale: 1, x: 0, y: 0 };
+                          return (
+                            <label className="block text-[10px] text-muted-foreground">
+                              映像ズーム {Math.round(tf.scale * 100)}%（縮小すると見切れた部分が出ます）
+                              <input
+                                type="range" min="0.2" max="3" step="0.01" value={tf.scale}
+                                onChange={(e) => updateSelectedSequenceClip({ transform: { ...tf, scale: Number(e.target.value) } })}
+                                className="w-full"
+                              />
+                            </label>
+                          );
+                        })()}
                         <div className="grid grid-cols-2 gap-2">
                           {([['x', '位置X'], ['y', '位置Y'], ['width', '幅'], ['height', '高さ']] as const).map(([key, label]) => (
                             <label key={key} className="flex flex-col gap-1 text-[10px] text-muted-foreground">

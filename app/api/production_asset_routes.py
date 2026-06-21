@@ -331,6 +331,22 @@ def _output_size(format_value: str | None) -> tuple[int, int]:
     return 720, 1280
 
 
+def _clip_transform(clip: dict[str, Any]) -> tuple[float, float, float]:
+    """Non-destructive source placement (scale, pan x, pan y). Default (1,0,0) = identity:
+    the renderer takes the exact current cover path so unstyled output is byte-identical."""
+    t = clip.get("transform") if isinstance(clip.get("transform"), dict) else None
+    if not t:
+        return 1.0, 0.0, 0.0
+    try:
+        return float(t.get("scale") or 1.0), float(t.get("x") or 0.0), float(t.get("y") or 0.0)
+    except Exception:
+        return 1.0, 0.0, 0.0
+
+
+def _is_identity_transform(scale: float, tx: float, ty: float) -> bool:
+    return abs(scale - 1.0) < 1e-4 and abs(tx) < 1e-4 and abs(ty) < 1e-4
+
+
 def _sequence_video_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(sequence, dict):
         return []
@@ -674,36 +690,57 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         source_start, source_end, out_dur, src_dur, is_freeze = _clip_source_range(clip, metadata)
         command.extend(["-i", str(source_path)])
         pad_needed = 0.0 if is_freeze else max(0.0, out_dur - src_dur)
-        # Base clips fill the frame by default (cover-crop). If a clip carries a non-full
-        # position (the user shrank/moved the fullscreen video in the preview), scale it to
-        # that box and pad to the full frame with black so export matches the preview.
         bpos = clip.get("position") if isinstance(clip.get("position"), dict) else None
-        is_full = (not bpos) or (
+        is_full_pos = (not bpos) or (
             float(bpos.get("x") or 0) <= 0.001 and float(bpos.get("y") or 0) <= 0.001
             and float(bpos.get("width") or 1) >= 0.999 and float(bpos.get("height") or 1) >= 0.999
         )
-        if is_full:
+        b_scale, b_tx, b_ty = _clip_transform(clip)
+        sw = float(metadata.get("width") or 0)
+        sh = float(metadata.get("height") or 0)
+        identity = is_full_pos and _is_identity_transform(b_scale, b_tx, b_ty)
+        if identity or sw <= 0 or sh <= 0:
+            # IDENTITY (or unknown source dims): exact current cover-crop string (byte-identical).
             _scale = f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30"
-        else:
-            bw = max(2, round(float(bpos.get("width") or 1) * output_width))
-            bh = max(2, round(float(bpos.get("height") or 1) * output_height))
-            bx = max(0, min(output_width - 2, round(float(bpos.get("x") or 0) * output_width)))
-            by = max(0, min(output_height - 2, round(float(bpos.get("y") or 0) * output_height)))
-            _scale = (
-                f"scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
-                f"pad={output_width}:{output_height}:{bx}:{by}:black,setsar=1,fps=30"
+            if is_freeze:
+                setpts = f"setpts=PTS-STARTPTS,{_scale},tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
+            else:
+                _pad = f",tpad=stop_mode=clone:stop_duration={pad_needed:.3f}" if pad_needed > 0.02 else ""
+                setpts = f"setpts=PTS-STARTPTS,{_scale}{_pad}"
+            filters.append(
+                f"[{input_index}:v]"
+                f"trim=start={source_start:.3f}:end={source_end:.3f},"
+                f"{setpts},format=yuv420p"
+                f"[v{rendered_count}]"
             )
-        if is_freeze:
-            setpts = f"setpts=PTS-STARTPTS,{_scale},tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
         else:
-            _pad = f",tpad=stop_mode=clone:stop_duration={pad_needed:.3f}" if pad_needed > 0.02 else ""
-            setpts = f"setpts=PTS-STARTPTS,{_scale}{_pad}"
-        filters.append(
-            f"[{input_index}:v]"
-            f"trim=start={source_start:.3f}:end={source_end:.3f},"
-            f"{setpts},format=yuv420p"
-            f"[v{rendered_count}]"
-        )
+            # NON-DESTRUCTIVE placement: scale the FULL source aspect-preserved to cover the
+            # box × transform.scale, overlay onto a black W×H canvas at a (possibly negative)
+            # offset so the frame windows it — no crop, overflow pixels preserved.
+            bw = output_width if is_full_pos else max(2, round(float(bpos.get("width") or 1) * output_width))
+            bh = output_height if is_full_pos else max(2, round(float(bpos.get("height") or 1) * output_height))
+            bx = 0 if is_full_pos else round(float(bpos.get("x") or 0) * output_width)
+            by = 0 if is_full_pos else round(float(bpos.get("y") or 0) * output_height)
+            cover = max(bw / sw, bh / sh)
+            cw = max(2, round(sw * cover * b_scale))
+            ch = max(2, round(sh * cover * b_scale))
+            ox = round(bx + (bw - cw) / 2 + b_tx * output_width)
+            oy = round(by + (bh - ch) / 2 + b_ty * output_height)
+            tpad = ""
+            if is_freeze:
+                tpad = f",tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
+            elif pad_needed > 0.02:
+                tpad = f",tpad=stop_mode=clone:stop_duration={pad_needed:.3f}"
+            filters.append(
+                f"[{input_index}:v]"
+                f"trim=start={source_start:.3f}:end={source_end:.3f},"
+                f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps=30{tpad},format=yuv420p"
+                f"[src{rendered_count}]"
+            )
+            filters.append(f"color=c=black:s={output_width}x{output_height}:r=30:d={out_dur:.3f}[bg{rendered_count}]")
+            filters.append(
+                f"[bg{rendered_count}][src{rendered_count}]overlay={ox}:{oy}:shortest=1,format=yuv420p[v{rendered_count}]"
+            )
         if not has_audio_track:
             if metadata.get("audio_codec") and not clip.get("muted") and not is_freeze:
                 filters.append(
