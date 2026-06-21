@@ -442,7 +442,7 @@ def _wrap_caption_ass(text: str, font_px: float, max_px: float) -> str:
     return "\\N".join(s.rstrip() for s in out_lines)
 
 
-def _caption_style_override(style: dict[str, Any] | None, base_font: int) -> tuple[str, int]:
+def _caption_style_override(style: dict[str, Any] | None, base_font: int, width: int = 0, height: int = 0) -> tuple[str, int]:
     """Return (inline ASS override prefix, effective font px) for a styled caption.
     Empty override + base_font when style is None/empty (keeps unstyled output identical)."""
     if not isinstance(style, dict) or not style:
@@ -466,13 +466,23 @@ def _caption_style_override(style: dict[str, Any] | None, base_font: int) -> tup
         pass
     if style.get("bold") is False:
         parts.append("\\b0")
-    pos = style.get("position")
-    if pos == "top":
-        parts.append("\\an8")
-    elif pos == "center":
-        parts.append("\\an5")
-    elif pos == "bottom":
-        parts.append("\\an2")
+    pos = style.get("position") or "bottom"
+    an = 8 if pos == "top" else 5 if pos == "center" else 2
+    # free x/y offset via absolute \pos (clamp x so the caption stays on screen).
+    try:
+        ox = float(style.get("x") or 0)
+        oy = float(style.get("y") or 0)
+    except Exception:
+        ox = oy = 0.0
+    if (abs(ox) > 1e-4 or abs(oy) > 1e-4) and width and height:
+        ox = max(-0.3, min(0.3, ox))
+        margin_v = max(54, round(height * 0.08))
+        anchor_y = margin_v if pos == "top" else (height // 2 if pos == "center" else height - margin_v)
+        px = round(width / 2 + ox * width)
+        py = round(anchor_y + oy * height)
+        parts.append(f"\\an{an}\\pos({px},{py})")
+    else:
+        parts.append(f"\\an{an}")
     return ("{" + "".join(parts) + "}" if parts else ""), font_px
 
 
@@ -499,7 +509,7 @@ def _write_caption_ass(path: Path, captions: list[dict[str, Any]], width: int, h
     for caption in captions:
         start = float(caption.get("timeline_start") or 0)
         end = max(start + 0.2, float(caption.get("timeline_end") or start + 2))
-        override, font_px = _caption_style_override(caption.get("style"), font_size)
+        override, font_px = _caption_style_override(caption.get("style"), font_size, width, height)
         # escape first (turns literal newlines into \N and protects braces), THEN wrap —
         # _wrap_caption_ass only inserts additional \N which must survive as-is.
         escaped = _ass_escape(str(caption.get("text") or "").strip())
