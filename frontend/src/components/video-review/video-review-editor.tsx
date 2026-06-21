@@ -89,6 +89,10 @@ export type CaptionStyle = {
   position?: 'bottom' | 'center' | 'top';
   outlineColor?: string;
   outlineWidth?: number;
+  // Free position offsets (normalized output units). x is clamped so the caption stays on
+  // screen horizontally; y can move it up/down freely. Layered on top of `position`.
+  x?: number;
+  y?: number;
 };
 
 type LaneItem = {
@@ -1537,7 +1541,7 @@ export function VideoReviewEditor({
                             key={lane.key}
                             className={`relative w-full overflow-hidden rounded border ${
                               lane.zone === 'audio' ? 'border-border/60 bg-background' : 'border-white/10 bg-neutral-900'
-                            } ${isTimelineScrubbing ? 'cursor-grabbing' : 'cursor-ew-resize'}`}
+                            } ${isTimelineScrubbing ? 'cursor-grabbing' : 'cursor-default'}`}
                             style={{ height: lane.height, marginTop: laneIndex === 0 ? 0 : zoneChanged ? 14 : 4 }}
                             onPointerDown={(event) => {
                               if (event.target === event.currentTarget) handleTimelinePointerDown(event);
@@ -2041,6 +2045,18 @@ export function VideoReviewEditor({
                                 onChange={(e) => setStyle({ bold: e.target.checked })}
                               />
                               太字
+                            </label>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+                              左右 {Math.round((st.x ?? 0) * 100)}%
+                              <input type="range" min="-0.3" max="0.3" step="0.01" value={st.x ?? 0}
+                                onChange={(e) => setStyle({ x: Number(e.target.value) })} />
+                            </label>
+                            <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+                              上下 {Math.round((st.y ?? 0) * 100)}%
+                              <input type="range" min="-0.5" max="0.5" step="0.01" value={st.y ?? 0}
+                                onChange={(e) => setStyle({ y: Number(e.target.value) })} />
                             </label>
                           </div>
                           {selectedSequenceClip.style ? (

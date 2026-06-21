@@ -375,13 +375,17 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         const lines = wrapCaption(ctx, cap.text, maxWidth);
         const lineH = fontSize * 1.2;
         const block = lineH * lines.length;
-        const cx = w / 2;
-        // vertical anchor by position preset
+        // horizontal offset (x), clamped so the longest line stays fully on screen
+        const widest = Math.max(0, ...lines.map((ln) => ctx.measureText(ln).width));
+        const maxOff = Math.max(0, (w - widest) / 2 - w * 0.02);
+        const cx = w / 2 + Math.max(-maxOff, Math.min(maxOff, (st.x ?? 0) * w));
+        // vertical anchor by position preset + free y offset
         const pos = st.position || 'bottom';
         let firstCy: number;
         if (pos === 'top') firstCy = Math.round(h * 0.06) + lineH / 2;
         else if (pos === 'center') firstCy = h / 2 - block / 2 + lineH / 2;
         else firstCy = h - Math.round(h * 0.06) - block + lineH / 2;
+        firstCy += (st.y ?? 0) * h;
         lines.forEach((ln, i) => {
           const cy = firstCy + i * lineH;
           ctx.strokeText(ln, cx, cy);
@@ -467,6 +471,23 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         if (v.paused) void v.play().catch(() => {});
       }
       for (const [id, v] of videosRef.current) if (!activeIds.has(id) && !v.paused) v.pause();
+
+      // PRE-ROLL: a clip about to become active within PREROLL seconds gets pre-seeked to its
+      // start now, so its frame is decoded and ready at the join — kills the flicker/black
+      // flash that appeared when the next clip wasn't seeked yet at the cut.
+      const PREROLL = 0.5;
+      for (const vc of visualClips) {
+        const id = String(vc.clip.id);
+        if (activeIds.has(id)) continue;
+        const startsSoon = vc.clip.timeline_start > t && vc.clip.timeline_start <= t + PREROLL;
+        if (!startsSoon) continue;
+        const v = videosRef.current.get(id);
+        if (!v) continue;
+        const startSrc = Number(vc.clip.source_start || 0);
+        if (Math.abs(v.currentTime - startSrc) > 0.1) {
+          try { v.currentTime = startSrc; } catch { /* not ready yet */ }
+        }
+      }
 
       // audio: play each active audio clip's source (dedicated elements); pause the rest
       const activeAudioAssets = new Set<string>();
