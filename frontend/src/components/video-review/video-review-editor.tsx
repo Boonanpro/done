@@ -74,6 +74,10 @@ export type SequenceClip = {
   // Non-destructive source placement inside the clip's box: zoom + pan. null/absent =
   // today's cover look. scale<1 reveals the full source frame (no pixels cropped).
   transform?: { scale: number; x: number; y: number } | null;
+  // Trim the source frame's edges (0-1 fraction of the source). Applied before placement.
+  crop?: { top: number; bottom: number; left: number; right: number } | null;
+  // Per-clip audio volume multiplier (1 = unchanged).
+  volume?: number | null;
 };
 
 // Per-caption style. All optional; absence renders as today (white fill, black outline,
@@ -1067,22 +1071,29 @@ export function VideoReviewEditor({
     [pendingAnnotation]
   );
 
-  const updateSequenceClip = useCallback((clipId: string, patch: Partial<SequenceClip>) => {
+  const updateSequenceClips = useCallback((clipIds: Set<string>, patch: Partial<SequenceClip>) => {
+    if (clipIds.size === 0) return;
     setEditSequence((current) => {
       if (!current) return current;
       const tracks = (current.tracks || []).map((track) => ({
         ...track,
-        clips: (track.clips || []).map((clip) => (clip.id === clipId ? { ...clip, ...patch } : clip)),
+        clips: (track.clips || []).map((clip) => (clipIds.has(String(clip.id)) ? { ...clip, ...patch } : clip)),
       }));
       const nextDuration = Math.max(0, ...tracks.flatMap((track) => (track.clips || []).map((clip) => clip.timeline_end || 0)));
       return { ...current, duration: Number(nextDuration.toFixed(3)), tracks };
     });
   }, []);
 
+  const updateSequenceClip = useCallback((clipId: string, patch: Partial<SequenceClip>) => {
+    updateSequenceClips(new Set([clipId]), patch);
+  }, [updateSequenceClips]);
+
+  // Edits from the side panel apply to ALL selected clips (absolute values), so resize /
+  // crop / position / volume can be set on many clips at once.
   const updateSelectedSequenceClip = useCallback((patch: Partial<SequenceClip>) => {
-    if (!selectedSequenceClipId) return;
-    updateSequenceClip(selectedSequenceClipId, patch);
-  }, [selectedSequenceClipId, updateSequenceClip]);
+    const ids = new Set(selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
+    updateSequenceClips(ids, patch);
+  }, [selectedSequenceClipId, selectedSequenceClipIds, updateSequenceClips]);
 
   // DaVinci/Premiere-style overwrite: place the dragged clip at its new range and trim,
   // delete, or split any same-lane (same-track+layer) neighbour it now overlaps. With A/V
@@ -1913,6 +1924,42 @@ export function VideoReviewEditor({
                           </Button>
                         ) : null}
                       </div>
+                    );
+                  })()
+                ) : null}
+                {(selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
+                  (() => {
+                    const cr = selectedSequenceClip.crop || { top: 0, bottom: 0, left: 0, right: 0 };
+                    const setCrop = (p: Partial<typeof cr>) => updateSelectedSequenceClip({ crop: { ...cr, ...p } });
+                    return (
+                      <div className="space-y-2 rounded-md border border-border p-2">
+                        <div className="text-xs font-medium text-muted-foreground">クロップ（端を切り取る）</div>
+                        <div className="grid grid-cols-2 gap-2">
+                          {([['top', '上'], ['bottom', '下'], ['left', '左'], ['right', '右']] as const).map(([key, label]) => (
+                            <label key={key} className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+                              {label} {Math.round((cr[key] ?? 0) * 100)}%
+                              <input type="range" min="0" max="0.9" step="0.01" value={cr[key] ?? 0}
+                                onChange={(e) => setCrop({ [key]: Number(e.target.value) })} />
+                            </label>
+                          ))}
+                        </div>
+                        {selectedSequenceClip.crop ? (
+                          <Button variant="ghost" size="sm" className="h-6 w-full text-[10px]"
+                            onClick={() => updateSelectedSequenceClip({ crop: null })}>クロップをリセット</Button>
+                        ) : null}
+                      </div>
+                    );
+                  })()
+                ) : null}
+                {(selectedSequenceClip.track === 'audio' || selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
+                  (() => {
+                    const vol = selectedSequenceClip.volume ?? 1;
+                    return (
+                      <label className="block rounded-md border border-border p-2 text-[10px] text-muted-foreground">
+                        音量 {Math.round(vol * 100)}%
+                        <input type="range" min="0" max="2" step="0.05" value={vol}
+                          onChange={(e) => updateSelectedSequenceClip({ volume: Number(e.target.value) })} className="w-full" />
+                      </label>
                     );
                   })()
                 ) : null}
