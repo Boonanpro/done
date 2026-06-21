@@ -566,17 +566,16 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         return;
       }
 
-      // PiP/overlay: free-aspect position window (unchanged).
+      // PiP/overlay: free-aspect position window. Allow off-screen placement (the frame is
+      // just a window) — no [0,1] clamp on position, only a minimum size.
       if (!onPositionChange) return;
       const p0 = { ...selectedBox.rect };
-      const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
       const move = (ev: PointerEvent) => {
         const dx = (ev.clientX - start.x) / rect.width;
         const dy = (ev.clientY - start.y) / rect.height;
         let { x, y, width, height } = p0;
         if (mode === 'move') {
-          x = clamp01(p0.x + dx); y = clamp01(p0.y + dy);
-          x = Math.min(x, 1 - width); y = Math.min(y, 1 - height);
+          x = p0.x + dx; y = p0.y + dy;
         } else {
           if (mode === 'nw') { x = p0.x + dx; y = p0.y + dy; width = p0.width - dx; height = p0.height - dy; }
           if (mode === 'ne') { y = p0.y + dy; width = p0.width + dx; height = p0.height - dy; }
@@ -584,8 +583,6 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
           if (mode === 'se') { width = p0.width + dx; height = p0.height + dy; }
           const MIN = 0.05;
           width = Math.max(MIN, width); height = Math.max(MIN, height);
-          x = clamp01(x); y = clamp01(y);
-          width = Math.min(width, 1 - x); height = Math.min(height, 1 - y);
         }
         onPositionChange(clipId, { x: Number(x.toFixed(4)), y: Number(y.toFixed(4)), width: Number(width.toFixed(4)), height: Number(height.toFixed(4)) });
       };

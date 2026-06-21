@@ -1890,9 +1890,10 @@ export function VideoReviewEditor({
                         const h = Math.max(0.05, Math.min(1, nextSize * 2 / (1 + aspect)));
                         const w = Math.max(0.05, Math.min(1, h * aspect));
                         const cx = 0.5 + nextLr, cy = 0.5 + nextUd;
+                        // allow off-screen placement (no [0,1-w] clamp): the frame just windows it
                         updateSelectedSequenceClip({ position: {
-                          x: Number(Math.max(0, Math.min(1 - w, cx - w / 2)).toFixed(4)),
-                          y: Number(Math.max(0, Math.min(1 - h, cy - h / 2)).toFixed(4)),
+                          x: Number((cx - w / 2).toFixed(4)),
+                          y: Number((cy - h / 2).toFixed(4)),
                           width: Number(w.toFixed(4)), height: Number(h.toFixed(4)) } });
                       } else {
                         updateSelectedSequenceClip({ transform: { scale: Number(nextSize.toFixed(4)), x: Number(nextLr.toFixed(4)), y: Number(nextUd.toFixed(4)) } });
@@ -1909,12 +1910,12 @@ export function VideoReviewEditor({
                         <div className="grid grid-cols-2 gap-2">
                           <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
                             左右 {Math.round(lr * 100)}%
-                            <input type="range" min="-1" max="1" step="0.01" value={lr}
+                            <input type="range" min="-2" max="2" step="0.01" value={lr}
                               onChange={(e) => apply(size, Number(e.target.value), ud)} />
                           </label>
                           <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
                             上下 {Math.round(ud * 100)}%
-                            <input type="range" min="-1" max="1" step="0.01" value={ud}
+                            <input type="range" min="-2" max="2" step="0.01" value={ud}
                               onChange={(e) => apply(size, lr, Number(e.target.value))} />
                           </label>
                         </div>
