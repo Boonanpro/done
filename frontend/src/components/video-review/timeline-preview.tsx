@@ -170,27 +170,40 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
   // SAME asset at DIFFERENT source times (e.g. a fullscreen background + a PiP wipe of the
   // same footage) must each own a separate element — sharing one made them fight over
   // currentTime, so the background jumped to the wipe's time (flicker / wrong frame).
+  //
+  // During a drag the sequence updates every pointer move, so this reconcile runs often and
+  // clip ids can churn (an overwritten neighbour splits into `<id>` + `<id>__r`). We must NOT
+  // reload elements on every tick: (1) compare by a stored assetId (NOT el.src — the browser
+  // normalises src to an absolute URL so a string compare is always "different" and would
+  // reload every element every move = full black screen); (2) RECYCLE orphan elements of the
+  // same asset for newly-appearing clip ids so a split reuses an already-decoded element.
   useEffect(() => {
     const map = videosRef.current;
-    const wanted = new Map<string, string>(); // clipId -> src
+    const wanted = new Map<string, string>(); // clipId -> assetId
     for (const vc of visualClips) {
-      const a = vc.clip.asset_id ? assetById.get(String(vc.clip.asset_id)) : null;
-      if (a) wanted.set(String(vc.clip.id), assetSrc(a));
+      const aid = String(vc.clip.asset_id || '');
+      if (aid && assetById.has(aid)) wanted.set(String(vc.clip.id), aid);
     }
+    // Orphans = elements whose clip id is gone, grouped by assetId for recycling.
+    const orphansByAsset = new Map<string, HTMLVideoElement[]>();
     for (const [cid, el] of map) {
       if (!wanted.has(cid)) {
-        el.remove();
+        const aid = el.dataset.assetId || '';
+        (orphansByAsset.get(aid) || orphansByAsset.set(aid, []).get(aid)!).push(el);
         map.delete(cid);
       }
     }
-    for (const [cid, src] of wanted) {
-      const existing = map.get(cid);
-      if (existing) {
-        if (existing.src !== src && src) existing.src = src; // asset of this clip changed
+    for (const [cid, aid] of wanted) {
+      if (map.has(cid)) continue; // unchanged clip keeps its element (no reload)
+      const recycled = orphansByAsset.get(aid)?.pop();
+      if (recycled) {
+        map.set(cid, recycled); // same asset already decoded — reuse, no reload, no black
         continue;
       }
+      const a = assetById.get(aid)!;
       const v = document.createElement('video');
-      v.src = src;
+      v.src = assetSrc(a);
+      v.dataset.assetId = aid;
       // same-origin (Next proxy) — do NOT set crossOrigin (would break the load).
       v.muted = true;
       v.playsInline = true;
@@ -198,6 +211,10 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
       v.style.display = 'none';
       document.body.appendChild(v);
       map.set(cid, v);
+    }
+    // Truly leftover orphans (asset no longer used anywhere) get removed.
+    for (const list of orphansByAsset.values()) {
+      for (const el of list) el.remove();
     }
   }, [visualClips, assetById]);
 
