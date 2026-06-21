@@ -115,23 +115,34 @@ function drawSource(
   dx: number, dy: number, dw: number, dh: number,
   transform: { scale: number; x: number; y: number } | null | undefined,
   outW: number, outH: number,
+  crop?: { top: number; bottom: number; left: number; right: number } | null,
 ) {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
   if (!vw || !vh) return;
+  // crop: take a sub-rect of the SOURCE (edges trimmed). The cropped region then fills the
+  // box like before (cover + transform), so what remains after the crop is placed.
+  const cl = Math.max(0, Math.min(0.9, crop?.left ?? 0));
+  const cr = Math.max(0, Math.min(0.9, crop?.right ?? 0));
+  const ctp = Math.max(0, Math.min(0.9, crop?.top ?? 0));
+  const cb = Math.max(0, Math.min(0.9, crop?.bottom ?? 0));
+  const sx = vw * cl;
+  const sy = vh * ctp;
+  const sw = Math.max(1, vw * (1 - cl - cr));
+  const sh = Math.max(1, vh * (1 - ctp - cb));
   const s = transform?.scale ?? 1;
   const tx = transform?.x ?? 0;
   const ty = transform?.y ?? 0;
-  const cover = Math.max(dw / vw, dh / vh);
-  const destW = vw * cover * s;
-  const destH = vh * cover * s;
+  const cover = Math.max(dw / sw, dh / sh);
+  const destW = sw * cover * s;
+  const destH = sh * cover * s;
   const destX = dx + (dw - destW) / 2 + tx * outW;
   const destY = dy + (dh - destH) / 2 + ty * outH;
   ctx.save();
   ctx.beginPath();
   ctx.rect(dx, dy, dw, dh);
   ctx.clip();
-  ctx.drawImage(video, 0, 0, vw, vh, destX, destY, destW, destH);
+  ctx.drawImage(video, sx, sy, sw, sh, destX, destY, destW, destH);
   ctx.restore();
 }
 
@@ -306,10 +317,11 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         // fullscreen. The source is placed non-destructively (full frame preserved, clipped
         // by the box) so zoom/pan reveals overflow instead of cropping it.
         const tf = vc.clip.transform;
+        const cr = vc.clip.crop;
         if (vc.position) {
-          drawSource(ctx, v, vc.position.x * w, vc.position.y * h, vc.position.width * w, vc.position.height * h, tf, w, h);
+          drawSource(ctx, v, vc.position.x * w, vc.position.y * h, vc.position.width * w, vc.position.height * h, tf, w, h, cr);
         } else {
-          drawSource(ctx, v, 0, 0, w, h, tf, w, h);
+          drawSource(ctx, v, 0, 0, w, h, tf, w, h, cr);
         }
       }
 

@@ -698,7 +698,14 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         b_scale, b_tx, b_ty = _clip_transform(clip)
         sw = float(metadata.get("width") or 0)
         sh = float(metadata.get("height") or 0)
-        identity = is_full_pos and _is_identity_transform(b_scale, b_tx, b_ty)
+        # crop: trim edges of the source (0-1). Non-zero crop forces the non-identity path.
+        bcrop = clip.get("crop") if isinstance(clip.get("crop"), dict) else None
+        c_l = max(0.0, min(0.9, float(bcrop.get("left") or 0))) if bcrop else 0.0
+        c_r = max(0.0, min(0.9, float(bcrop.get("right") or 0))) if bcrop else 0.0
+        c_t = max(0.0, min(0.9, float(bcrop.get("top") or 0))) if bcrop else 0.0
+        c_b = max(0.0, min(0.9, float(bcrop.get("bottom") or 0))) if bcrop else 0.0
+        has_crop = (c_l + c_r + c_t + c_b) > 0.001
+        identity = is_full_pos and _is_identity_transform(b_scale, b_tx, b_ty) and not has_crop
         if identity or sw <= 0 or sh <= 0:
             # IDENTITY (or unknown source dims): exact current cover-crop string (byte-identical).
             _scale = f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30"
@@ -717,15 +724,22 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             # NON-DESTRUCTIVE placement: scale the FULL source aspect-preserved to cover the
             # box × transform.scale, overlay onto a black W×H canvas at a (possibly negative)
             # offset so the frame windows it — no crop, overflow pixels preserved.
+            # effective (cropped) source dims drive the cover math
+            csw = sw * (1 - c_l - c_r)
+            csh = sh * (1 - c_t - c_b)
             bw = output_width if is_full_pos else max(2, round(float(bpos.get("width") or 1) * output_width))
             bh = output_height if is_full_pos else max(2, round(float(bpos.get("height") or 1) * output_height))
             bx = 0 if is_full_pos else round(float(bpos.get("x") or 0) * output_width)
             by = 0 if is_full_pos else round(float(bpos.get("y") or 0) * output_height)
-            cover = max(bw / sw, bh / sh)
-            cw = max(2, round(sw * cover * b_scale))
-            ch = max(2, round(sh * cover * b_scale))
+            cover = max(bw / csw, bh / csh)
+            cw = max(2, round(csw * cover * b_scale))
+            ch = max(2, round(csh * cover * b_scale))
             ox = round(bx + (bw - cw) / 2 + b_tx * output_width)
             oy = round(by + (bh - ch) / 2 + b_ty * output_height)
+            crop_filt = (
+                f"crop=iw*{(1 - c_l - c_r):.4f}:ih*{(1 - c_t - c_b):.4f}:iw*{c_l:.4f}:ih*{c_t:.4f},"
+                if has_crop else ""
+            )
             tpad = ""
             if is_freeze:
                 tpad = f",tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
@@ -734,7 +748,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             filters.append(
                 f"[{input_index}:v]"
                 f"trim=start={source_start:.3f}:end={source_end:.3f},"
-                f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps=30{tpad},format=yuv420p"
+                f"setpts=PTS-STARTPTS,{crop_filt}scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps=30{tpad},format=yuv420p"
                 f"[src{rendered_count}]"
             )
             filters.append(f"color=c=black:s={output_width}x{output_height}:r=30:d={out_dur:.3f}[bg{rendered_count}]")
@@ -743,10 +757,15 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             )
         if not has_audio_track:
             if metadata.get("audio_codec") and not clip.get("muted") and not is_freeze:
+                try:
+                    vol = float(clip.get("volume")) if clip.get("volume") is not None else 1.0
+                except Exception:
+                    vol = 1.0
+                vol_filt = f",volume={vol:.3f}" if abs(vol - 1.0) > 1e-3 else ""
                 filters.append(
                     f"[{input_index}:a]"
                     f"atrim=start={source_start:.3f}:end={source_end:.3f},"
-                    f"asetpts=PTS-STARTPTS,apad,atrim=duration={out_dur:.3f},aresample=48000,aformat=channel_layouts=stereo"
+                    f"asetpts=PTS-STARTPTS,apad,atrim=duration={out_dur:.3f},aresample=48000,aformat=channel_layouts=stereo{vol_filt}"
                     f"[a{rendered_count}]"
                 )
             else:
@@ -856,10 +875,15 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             ts_ms = max(0, round(float(clip.get("timeline_start") or 0) * 1000))
             label = f"au{len(audio_labels)}"
             command.extend(["-i", str(source_path)])
+            try:
+                avol = float(clip.get("volume")) if clip.get("volume") is not None else 1.0
+            except Exception:
+                avol = 1.0
+            avol_filt = f",volume={avol:.3f}" if abs(avol - 1.0) > 1e-3 else ""
             filters.append(
                 f"[{input_index}:a]"
                 f"atrim=start={source_start:.3f}:end={source_end:.3f},"
-                f"asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo,adelay={ts_ms}|{ts_ms}"
+                f"asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo{avol_filt},adelay={ts_ms}|{ts_ms}"
                 f"[{label}]"
             )
             audio_labels.append(label)
