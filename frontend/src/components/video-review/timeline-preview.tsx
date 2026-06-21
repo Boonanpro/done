@@ -19,6 +19,9 @@ type Props = {
   onTimeChange: (t: number) => void;
   onEnded: () => void;
   className?: string;
+  // Stage 2: direct-manipulation of a PiP/overlay clip's position in the preview.
+  selectedClipId?: string | null;
+  onPositionChange?: (clipId: string, position: { x: number; y: number; width: number; height: number }) => void;
 };
 
 type VisualClip = {
@@ -101,8 +104,9 @@ function drawCover(
   ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh);
 }
 
-export function TimelinePreview({ sequence, assets, currentTime, playing, format, onTimeChange, onEnded, className }: Props) {
+export function TimelinePreview({ sequence, assets, currentTime, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
   const videosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   // Separate elements for audio: the same asset may be used as a video layer (at one
   // source time) AND as an audio clip (at a different source time), so they can't
@@ -444,13 +448,88 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, visualClips, audioClips, sequenceDuration, drawFrame, onTimeChange, onEnded]);
 
+  // Stage 2: the selected overlay/PiP clip, if it's active at the current time, gets a
+  // draggable/resizable box drawn over the preview.
+  const selectedOverlay = useMemo(() => {
+    if (!selectedClipId) return null;
+    const vc = visualClips.find((x) => String(x.clip.id) === String(selectedClipId));
+    if (!vc || vc.kind !== 'overlay' || !vc.position) return null;
+    if (!(currentTime >= vc.clip.timeline_start && currentTime < vc.clip.timeline_end)) return null;
+    return vc;
+  }, [selectedClipId, visualClips, currentTime]);
+
+  const startBoxDrag = useCallback(
+    (e: React.PointerEvent, mode: 'move' | 'nw' | 'ne' | 'sw' | 'se') => {
+      if (!selectedOverlay || !onPositionChange) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const wrap = wrapRef.current;
+      if (!wrap) return;
+      const rect = wrap.getBoundingClientRect();
+      const start = { x: e.clientX, y: e.clientY };
+      const p0 = { ...(selectedOverlay.position as { x: number; y: number; width: number; height: number }) };
+      const clipId = String(selectedOverlay.clip.id);
+      const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+      const move = (ev: PointerEvent) => {
+        const dx = (ev.clientX - start.x) / rect.width;
+        const dy = (ev.clientY - start.y) / rect.height;
+        let { x, y, width, height } = p0;
+        if (mode === 'move') {
+          x = clamp01(p0.x + dx); y = clamp01(p0.y + dy);
+          x = Math.min(x, 1 - width); y = Math.min(y, 1 - height);
+        } else {
+          // resize from a corner; keep a minimum size
+          if (mode === 'nw') { x = p0.x + dx; y = p0.y + dy; width = p0.width - dx; height = p0.height - dy; }
+          if (mode === 'ne') { y = p0.y + dy; width = p0.width + dx; height = p0.height - dy; }
+          if (mode === 'sw') { x = p0.x + dx; width = p0.width - dx; height = p0.height + dy; }
+          if (mode === 'se') { width = p0.width + dx; height = p0.height + dy; }
+          const MIN = 0.05;
+          width = Math.max(MIN, width); height = Math.max(MIN, height);
+          x = clamp01(x); y = clamp01(y);
+          width = Math.min(width, 1 - x); height = Math.min(height, 1 - y);
+        }
+        onPositionChange(clipId, {
+          x: Number(x.toFixed(4)), y: Number(y.toFixed(4)),
+          width: Number(width.toFixed(4)), height: Number(height.toFixed(4)),
+        });
+      };
+      const up = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    },
+    [selectedOverlay, onPositionChange],
+  );
+
+  const box = selectedOverlay?.position;
+  const handle = 'absolute h-3 w-3 rounded-sm border border-white bg-sky-400';
+
   return (
-    <canvas
-      ref={canvasRef}
-      width={dims.w}
-      height={dims.h}
-      className={className}
-      style={{ display: 'block', width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
-    />
+    <div ref={wrapRef} className={`relative ${className || ''}`} style={{ width: '100%', height: '100%' }}>
+      <canvas
+        ref={canvasRef}
+        width={dims.w}
+        height={dims.h}
+        style={{ display: 'block', width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
+      />
+      {box ? (
+        <div
+          className="absolute cursor-move border-2 border-sky-400"
+          style={{
+            left: `${box.x * 100}%`, top: `${box.y * 100}%`,
+            width: `${box.width * 100}%`, height: `${box.height * 100}%`,
+            touchAction: 'none',
+          }}
+          onPointerDown={(e) => startBoxDrag(e, 'move')}
+        >
+          <div className={`${handle} -left-1.5 -top-1.5 cursor-nwse-resize`} onPointerDown={(e) => startBoxDrag(e, 'nw')} />
+          <div className={`${handle} -right-1.5 -top-1.5 cursor-nesw-resize`} onPointerDown={(e) => startBoxDrag(e, 'ne')} />
+          <div className={`${handle} -bottom-1.5 -left-1.5 cursor-nesw-resize`} onPointerDown={(e) => startBoxDrag(e, 'sw')} />
+          <div className={`${handle} -bottom-1.5 -right-1.5 cursor-nwse-resize`} onPointerDown={(e) => startBoxDrag(e, 'se')} />
+        </div>
+      ) : null}
+    </div>
   );
 }
