@@ -1306,10 +1306,12 @@ export function VideoReviewEditor({
                   onTimeChange={handlePreviewTime}
                   onEnded={handlePreviewEnded}
                   className="h-full w-full"
+                  selectedClipId={selectedSequenceClipId}
+                  onPositionChange={(clipId, position) => updateSequenceClip(clipId, { position })}
                 />
 
                 <div
-                  className="absolute pointer-events-auto"
+                  className={`absolute ${tool === 'select' ? 'pointer-events-none' : 'pointer-events-auto'}`}
                   style={videoContentStyle}
                   onPointerDown={handlePointerDown}
                   onPointerMove={handlePointerMove}
@@ -1849,6 +1851,30 @@ export function VideoReviewEditor({
                       value={selectedSequenceClip.source_end || 0}
                       onChange={(e) => updateSelectedSequenceClip({ source_end: Number(e.target.value) })}
                     />
+                  </div>
+                ) : null}
+                {(selectedSequenceClip.composition === 'pip' || selectedSequenceClip.composition === 'overlay' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.position ? (
+                  <div className="space-y-2 rounded-md border border-border p-2">
+                    <div className="text-xs font-medium text-muted-foreground">ワイプ位置・サイズ（プレビュー上でドラッグも可）</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {([['x', '位置X'], ['y', '位置Y'], ['width', '幅'], ['height', '高さ']] as const).map(([key, label]) => (
+                        <label key={key} className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+                          {label} {Math.round((selectedSequenceClip.position?.[key] ?? 0) * 100)}%
+                          <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value={selectedSequenceClip.position?.[key] ?? 0}
+                            onChange={(e) =>
+                              updateSelectedSequenceClip({
+                                position: { ...(selectedSequenceClip.position as { x: number; y: number; width: number; height: number }), [key]: Number(e.target.value) },
+                              })
+                            }
+                          />
+                        </label>
+                      ))}
+                    </div>
                   </div>
                 ) : null}
                 {selectedSequenceClip.track === 'caption' || typeof selectedSequenceClip.text === 'string' ? (
