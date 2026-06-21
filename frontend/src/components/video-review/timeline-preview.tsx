@@ -22,6 +22,7 @@ type Props = {
   // Stage 2: direct-manipulation of a PiP/overlay clip's position in the preview.
   selectedClipId?: string | null;
   onPositionChange?: (clipId: string, position: { x: number; y: number; width: number; height: number }) => void;
+  onTransformChange?: (clipId: string, transform: { scale: number; x: number; y: number }) => void;
 };
 
 type VisualClip = {
@@ -134,7 +135,7 @@ function drawSource(
   ctx.restore();
 }
 
-export function TimelinePreview({ sequence, assets, currentTime, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange }: Props) {
+export function TimelinePreview({ sequence, assets, currentTime, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const videosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
@@ -478,29 +479,78 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, visualClips, audioClips, sequenceDuration, drawFrame, onTimeChange, onEnded]);
 
-  // Stage 2/3a: the selected visual clip (base OR overlay), if active at the current time,
-  // gets a draggable/resizable box. Base clips with no explicit position default to the full
-  // frame so they can be shrunk/moved like a wipe.
-  const FULL = { x: 0, y: 0, width: 1, height: 1 };
-  const selectedBox = useMemo(() => {
+  // Selection box for the active selected clip. A PiP/overlay clip uses its `position`
+  // window (free-aspect box). A base clip uses its SOURCE rectangle (locked to the video's
+  // real aspect ratio, derived from `transform`) so the box matches the actual footage shape
+  // (e.g. tall for a phone screen recording) and shrinking it reveals the WHOLE source — no
+  // 9:16 crop. The box may overflow the frame; the frame is just a window.
+  const selectedBox = (() => {
     if (!selectedClipId) return null;
     const vc = visualClips.find((x) => String(x.clip.id) === String(selectedClipId));
     if (!vc) return null;
     if (!(currentTime >= vc.clip.timeline_start && currentTime < vc.clip.timeline_end)) return null;
-    return { vc, position: vc.position || FULL };
-  }, [selectedClipId, visualClips, currentTime]);
+    // A position that is (effectively) the full frame is NOT a real PiP window — treat the
+    // clip as a base clip so its box is locked to the source aspect (not 9:16).
+    const p = vc.position;
+    const isFullPos = !!p && p.x <= 0.001 && p.y <= 0.001 && p.width >= 0.999 && p.height >= 0.999;
+    if (p && !isFullPos) {
+      return { vc, kind: 'position' as const, rect: p };
+    }
+    const v = videosRef.current.get(String(vc.clip.id));
+    const vw = v?.videoWidth || 0;
+    const vh = v?.videoHeight || 0;
+    if (!vw || !vh) return null;
+    const tf = vc.clip.transform || { scale: 1, x: 0, y: 0 };
+    const { w, h } = dims;
+    const cover = Math.max(w / vw, h / vh);
+    const destW = vw * cover * tf.scale;
+    const destH = vh * cover * tf.scale;
+    const destX = (w - destW) / 2 + tf.x * w;
+    const destY = (h - destH) / 2 + tf.y * h;
+    return {
+      vc, kind: 'transform' as const, tf,
+      rect: { x: destX / w, y: destY / h, width: destW / w, height: destH / h },
+    };
+  })();
 
   const startBoxDrag = useCallback(
     (e: React.PointerEvent, mode: 'move' | 'nw' | 'ne' | 'sw' | 'se') => {
-      if (!selectedBox || !onPositionChange) return;
+      if (!selectedBox) return;
       e.preventDefault();
       e.stopPropagation();
       const wrap = wrapRef.current;
       if (!wrap) return;
       const rect = wrap.getBoundingClientRect();
       const start = { x: e.clientX, y: e.clientY };
-      const p0 = { ...selectedBox.position };
       const clipId = String(selectedBox.vc.clip.id);
+
+      if (selectedBox.kind === 'transform') {
+        // Base clip: move = pan (transform.x/y); corner = uniform aspect-locked scale around center.
+        if (!onTransformChange) return;
+        const tf0 = { ...selectedBox.tf };
+        const boxCx = selectedBox.rect.x + selectedBox.rect.width / 2;
+        const boxCy = selectedBox.rect.y + selectedBox.rect.height / 2;
+        const startDist = Math.hypot((start.x - rect.left) / rect.width - boxCx, (start.y - rect.top) / rect.height - boxCy) || 0.0001;
+        const move = (ev: PointerEvent) => {
+          if (mode === 'move') {
+            const dx = (ev.clientX - start.x) / rect.width;
+            const dy = (ev.clientY - start.y) / rect.height;
+            onTransformChange(clipId, { scale: tf0.scale, x: Number((tf0.x + dx).toFixed(4)), y: Number((tf0.y + dy).toFixed(4)) });
+          } else {
+            const dist = Math.hypot((ev.clientX - rect.left) / rect.width - boxCx, (ev.clientY - rect.top) / rect.height - boxCy);
+            const factor = Math.max(0.1, dist / startDist);
+            onTransformChange(clipId, { scale: Number(Math.max(0.1, Math.min(5, tf0.scale * factor)).toFixed(4)), x: tf0.x, y: tf0.y });
+          }
+        };
+        const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+        return;
+      }
+
+      // PiP/overlay: free-aspect position window (unchanged).
+      if (!onPositionChange) return;
+      const p0 = { ...selectedBox.rect };
       const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
       const move = (ev: PointerEvent) => {
         const dx = (ev.clientX - start.x) / rect.width;
@@ -510,7 +560,6 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
           x = clamp01(p0.x + dx); y = clamp01(p0.y + dy);
           x = Math.min(x, 1 - width); y = Math.min(y, 1 - height);
         } else {
-          // resize from a corner; keep a minimum size
           if (mode === 'nw') { x = p0.x + dx; y = p0.y + dy; width = p0.width - dx; height = p0.height - dy; }
           if (mode === 'ne') { y = p0.y + dy; width = p0.width + dx; height = p0.height - dy; }
           if (mode === 'sw') { x = p0.x + dx; width = p0.width - dx; height = p0.height + dy; }
@@ -520,22 +569,16 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
           x = clamp01(x); y = clamp01(y);
           width = Math.min(width, 1 - x); height = Math.min(height, 1 - y);
         }
-        onPositionChange(clipId, {
-          x: Number(x.toFixed(4)), y: Number(y.toFixed(4)),
-          width: Number(width.toFixed(4)), height: Number(height.toFixed(4)),
-        });
+        onPositionChange(clipId, { x: Number(x.toFixed(4)), y: Number(y.toFixed(4)), width: Number(width.toFixed(4)), height: Number(height.toFixed(4)) });
       };
-      const up = () => {
-        window.removeEventListener('pointermove', move);
-        window.removeEventListener('pointerup', up);
-      };
+      const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
     },
-    [selectedBox, onPositionChange],
+    [selectedBox, onPositionChange, onTransformChange],
   );
 
-  const box = selectedBox?.position;
+  const box = selectedBox?.rect;
   const handle = 'absolute h-3 w-3 rounded-sm border border-white bg-sky-400';
 
   return (
