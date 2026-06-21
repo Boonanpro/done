@@ -160,33 +160,46 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
     return videoAssets.filter((a) => ids.has(a.id));
   }, [audioClips, videoAssets]);
 
-  // ensure one hidden <video> per asset, mounted once
+  const assetById = useMemo(() => {
+    const m = new Map<string, SequenceAsset>();
+    for (const a of videoAssets) m.set(a.id, a);
+    return m;
+  }, [videoAssets]);
+
+  // One hidden <video> PER CLIP (keyed by clip id), not per asset. Two clips that use the
+  // SAME asset at DIFFERENT source times (e.g. a fullscreen background + a PiP wipe of the
+  // same footage) must each own a separate element — sharing one made them fight over
+  // currentTime, so the background jumped to the wipe's time (flicker / wrong frame).
   useEffect(() => {
     const map = videosRef.current;
-    const wanted = new Set(videoAssets.map((a) => a.id));
-    for (const [id, el] of map) {
-      if (!wanted.has(id)) {
+    const wanted = new Map<string, string>(); // clipId -> src
+    for (const vc of visualClips) {
+      const a = vc.clip.asset_id ? assetById.get(String(vc.clip.asset_id)) : null;
+      if (a) wanted.set(String(vc.clip.id), assetSrc(a));
+    }
+    for (const [cid, el] of map) {
+      if (!wanted.has(cid)) {
         el.remove();
-        map.delete(id);
+        map.delete(cid);
       }
     }
-    for (const a of videoAssets) {
-      if (map.has(a.id)) continue;
+    for (const [cid, src] of wanted) {
+      const existing = map.get(cid);
+      if (existing) {
+        if (existing.src !== src && src) existing.src = src; // asset of this clip changed
+        continue;
+      }
       const v = document.createElement('video');
-      v.src = assetSrc(a);
-      // same-origin (Next proxy) — do NOT set crossOrigin: it would force a CORS
-      // check the media endpoint doesn't answer, breaking the load (black canvas).
-      v.muted = true; // audio handled separately in a later stage
+      v.src = src;
+      // same-origin (Next proxy) — do NOT set crossOrigin (would break the load).
+      v.muted = true;
       v.playsInline = true;
       v.preload = 'auto';
       v.style.display = 'none';
       document.body.appendChild(v);
-      map.set(a.id, v);
+      map.set(cid, v);
     }
-    return () => {
-      // keep elements across renders; cleanup only on unmount handled below
-    };
-  }, [videoAssets]);
+  }, [visualClips, assetById]);
 
   // hidden audio elements for assets referenced by audio clips
   useEffect(() => {
@@ -235,7 +248,7 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
 
       const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
       for (const vc of active) {
-        const v = vc.clip.asset_id ? videosRef.current.get(String(vc.clip.asset_id)) : null;
+        const v = videosRef.current.get(String(vc.clip.id));
         if (!v || !v.videoWidth) continue;
         if (vc.kind === 'overlay' && vc.position) {
           const px = vc.position.x * w;
@@ -268,7 +281,7 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         ctx.filter = style.includes('mosaic') ? 'blur(8px)' : 'blur(14px)';
         // redraw the active base layer within the clipped region
         const base = active.find((vc) => vc.kind === 'base');
-        const bv = base?.clip.asset_id ? videosRef.current.get(String(base.clip.asset_id)) : null;
+        const bv = base ? videosRef.current.get(String(base.clip.id)) : null;
         if (bv && bv.videoWidth) drawCover(ctx, bv, 0, 0, w, h);
         ctx.restore();
       }
@@ -335,7 +348,7 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
     let cancelled = false;
     const active = visualClips.filter((vc) => currentTime >= vc.clip.timeline_start && currentTime < vc.clip.timeline_end);
     const seeks = active.map((vc) => {
-      const v = vc.clip.asset_id ? videosRef.current.get(String(vc.clip.asset_id)) : null;
+      const v = videosRef.current.get(String(vc.clip.id));
       if (!v) return Promise.resolve();
       const srcTime = Number(vc.clip.source_start || 0) + (currentTime - vc.clip.timeline_start);
       return seekVideo(v, srcTime);
@@ -375,7 +388,7 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
       const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
       const activeIds = new Set<string>();
       for (const vc of active) {
-        const id = String(vc.clip.asset_id || '');
+        const id = String(vc.clip.id);
         const v = videosRef.current.get(id);
         if (!v) continue;
         activeIds.add(id);
