@@ -1613,7 +1613,7 @@ export function VideoReviewEditor({
                               return (
                                 <div
                                   key={item.key}
-                                  className={`absolute flex items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm ${clipItemColor(item.itemType)} ${
+                                  className={`absolute flex cursor-grab items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm active:cursor-grabbing ${clipItemColor(item.itemType)} ${
                                     selected
                                       ? 'border-yellow-300 ring-2 ring-yellow-300/70'
                                       : linkedSelected
