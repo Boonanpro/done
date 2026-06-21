@@ -830,8 +830,10 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         pos = clip.get("position") if isinstance(clip.get("position"), dict) else {}
         ow = max(2, round(float(pos.get("width") or 0.46) * output_width))
         oh = max(2, round(float(pos.get("height") or 0.145) * output_height))
-        px = max(0, min(output_width - 2, round(float(pos.get("x") or 0.27) * output_width)))
-        py = max(0, min(output_height - 2, round(float(pos.get("y") or 0.835) * output_height)))
+        # No clamp: a wipe may sit partly/fully off-screen; ffmpeg overlay accepts negative
+        # offsets and windows the overflow against the frame.
+        px = round(float(pos.get("x") or 0.27) * output_width)
+        py = round(float(pos.get("y") or 0.835) * output_height)
         ts = max(0.0, float(clip.get("timeline_start") or 0))
         te = max(ts + 0.05, float(clip.get("timeline_end") or (ts + ov_dur)))
         ov_pad = 0.0 if ov_freeze else max(0.0, ov_dur - ov_src)
