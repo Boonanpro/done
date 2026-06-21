@@ -1890,7 +1890,15 @@ def _merge_revision_patch(sequence: dict[str, Any], patch: dict[str, Any], allow
             if e:
                 nc = dict(clip)
                 for k in EDITABLE:
-                    if k in e and e[k] is not None:
+                    if k not in e or e[k] is None:
+                        continue
+                    if k == "style" and isinstance(e[k], dict):
+                        # MERGE style fields onto the existing style so an edit that only
+                        # changes e.g. position keeps the clip's existing color/size.
+                        merged_style = dict(nc.get("style") or {})
+                        merged_style.update(e[k])
+                        nc[k] = merged_style
+                    else:
                         nc[k] = e[k]
                 out_clips.append(nc)
             else:
@@ -1979,6 +1987,10 @@ Return ONE json object with your edits (and nothing after it). Only reference id
 }}
 Rules:
 - Caption text/style/position/size: edit the caption clip's fields.
+- IMPORTANT — style is MERGED, not replaced: only include the style fields you are CHANGING.
+  The clip's other existing style fields (shown above) are kept automatically. e.g. to move a
+  red, large caption to the center, return only {{"style": {{"position": "center"}}}} — do NOT
+  re-send color/fontSize; they are preserved. Never blank out a field the user didn't mention.
 - "この部分を消して/カット": set remove:true on the clips in that range.
 - Trim timing with timeline_start/timeline_end (seconds on the timeline).
 - Only output ids from EDITABLE CLIPS. Output valid JSON, json LAST.
