@@ -1278,12 +1278,13 @@ export function VideoReviewEditor({
             <Button
               size="sm"
               disabled={isSaving}
+              title="今のタイムラインをMP4に書き出します（投稿・共有用）"
               onClick={async () => {
                 await saveSession();
                 await onExecute(payload);
               }}
             >
-              この編集で作り直す
+              MP4で書き出す
             </Button>
           ) : null}
         </div>
