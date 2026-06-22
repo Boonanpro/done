@@ -62,11 +62,18 @@ try:
               setter.call(s, '0.25'); s.dispatchEvent(new Event('input', {bubbles:true})); s.dispatchEvent(new Event('change', {bubbles:true}));
             }""")
             page.wait_for_timeout(300)
+        def bars():
+            return page.evaluate("""() => Array.from(document.querySelectorAll('div[style*="left:"][style*="width:"]'))
+                .filter(b => (parseFloat(b.style.width)||0) > 0).length""")
+        bars_before = bars()
         btn = page.query_selector("button:has-text('この設定で再カット')")
         check("re-cut button present", bool(btn))
         if btn:
             btn.click()
-            page.wait_for_timeout(4000)  # recut runs (cached analysis) + loadAll
+            page.wait_for_timeout(4500)  # recut runs (cached analysis) + in-place refresh
+        bars_after = bars()
+        print(f"timeline bars before re-cut={bars_before}  after={bars_after}")
+        check("clips still visible after re-cut (did NOT vanish)", bars_after > 0, f"bars after={bars_after}")
         b.close()
 
     ct = next(c for c in requests.get(f"{APIB}/contents?room_id={ROOM}", headers=H, cookies=C, timeout=30).json() if c["id"] == cid)
