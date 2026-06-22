@@ -204,6 +204,121 @@ async def verify_and_submit(domain: str, sitemap_url: str) -> dict[str, Any]:
     return await asyncio.to_thread(_work)
 
 
+async def fetch_search_performance(
+    domain: str,
+    *,
+    days: int = 28,
+    row_limit: int = 25,
+) -> dict[str, Any]:
+    """Search Console の検索パフォーマンスを引き戻す（改善ループの土台）。
+
+    「どの検索語で表示/クリックされているか」(impressions/clicks/CTR/掲載順位) を返す。
+    申請するだけだった Search Console から実データを取り戻し、後段の自動改善
+    （弱い検索語のページを直す）の入力にする。
+
+    Returns:
+        ``{
+            "configured": bool, "domain": str,
+            "range": {"start","end","days"},
+            "summary": {"clicks","impressions","ctr","position"},
+            "top_queries": [{"query","clicks","impressions","ctr","position"}, ...],
+            "top_pages": [{"page","clicks","impressions","ctr","position"}, ...],
+            "detail": str,
+        }``
+        サービスアカウント未設定なら ``configured=False``。所有権未確認や
+        データ未蓄積（公開直後）の場合は summary が空で detail に理由が入る。
+    """
+    sa_info = await _load_service_account()
+    if sa_info is None:
+        return {
+            "configured": False,
+            "domain": domain,
+            "summary": None,
+            "top_queries": [],
+            "top_pages": [],
+            "detail": "Search Console のサービスアカウントが未設定です",
+        }
+
+    def _work() -> dict[str, Any]:
+        from datetime import date, timedelta
+
+        _, sc = _build_clients(sa_info)
+        site_url = f"sc-domain:{domain}"
+
+        # Search Console のデータは 2〜3 日遅れて確定するため終端を 3 日前に寄せる
+        end_eff = date.today() - timedelta(days=3)
+        start = end_eff - timedelta(days=days)
+        start_s, end_s = start.isoformat(), end_eff.isoformat()
+
+        def _query(dimensions: list[str]) -> list[dict[str, Any]]:
+            body = {
+                "startDate": start_s,
+                "endDate": end_s,
+                "dimensions": dimensions,
+                "rowLimit": row_limit,
+            }
+            resp = sc.searchanalytics().query(siteUrl=site_url, body=body).execute()
+            return resp.get("rows", [])
+
+        def _fmt(r: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "clicks": int(r.get("clicks", 0)),
+                "impressions": int(r.get("impressions", 0)),
+                "ctr": round(float(r.get("ctr", 0.0)), 4),
+                "position": round(float(r.get("position", 0.0)), 1),
+            }
+
+        # まず合計（dimension なし＝1行に集計）を取得。ここで失敗するのは
+        # 所有権未確認・プロパティ未登録・データ未蓄積のいずれか。
+        try:
+            total_rows = _query([])
+        except Exception as e:  # googleapiclient.errors.HttpError 等
+            return {
+                "configured": True,
+                "domain": domain,
+                "range": {"start": start_s, "end": end_s, "days": days},
+                "summary": None,
+                "top_queries": [],
+                "top_pages": [],
+                "detail": f"検索データ取得に失敗（未検証/データ未蓄積の可能性）: {str(e)[:200]}",
+            }
+
+        summary = (
+            _fmt(total_rows[0])
+            if total_rows
+            else {"clicks": 0, "impressions": 0, "ctr": 0.0, "position": 0.0}
+        )
+
+        def _safe(dimensions: list[str]) -> list[dict[str, Any]]:
+            try:
+                return _query(dimensions)
+            except Exception:  # noqa: BLE001
+                return []
+
+        top_queries = [
+            {"query": r["keys"][0], **_fmt(r)}
+            for r in _safe(["query"])
+            if r.get("keys")
+        ]
+        top_pages = [
+            {"page": r["keys"][0], **_fmt(r)}
+            for r in _safe(["page"])
+            if r.get("keys")
+        ]
+
+        return {
+            "configured": True,
+            "domain": domain,
+            "range": {"start": start_s, "end": end_s, "days": days},
+            "summary": summary,
+            "top_queries": top_queries,
+            "top_pages": top_pages,
+            "detail": "ok",
+        }
+
+    return await asyncio.to_thread(_work)
+
+
 async def auto_submit(
     domain: str,
     sitemap_url: str,
