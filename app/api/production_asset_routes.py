@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -1707,7 +1707,18 @@ def _assemble_sequence_from_decisions(
     except Exception:
         SIL = 0.45
     SIL = max(0.2, SIL)
-    LEAD, TAIL = 0.06, 0.10  # tiny pads around each kept word-run
+    # Tiny pads kept around each word-run. Overridable so the cut-adjust UI can loosen/tighten
+    # the breathing room around cuts (decisions.lead / decisions.tail, in seconds).
+    try:
+        LEAD = float(decisions.get("lead")) if decisions.get("lead") is not None else 0.06
+        TAIL = float(decisions.get("tail")) if decisions.get("tail") is not None else 0.10
+    except Exception:
+        LEAD, TAIL = 0.06, 0.10
+    LEAD = max(0.0, min(1.0, LEAD))
+    TAIL = max(0.0, min(1.5, TAIL))
+    # cut_meta records how much source time was removed (and where, in final-timeline seconds)
+    # so the UI can animate the silence/dead-air being cut out FireCut-style.
+    cut_meta: list[dict[str, Any]] = []
 
     cuts_by_asset: dict[str, list[tuple[float, float]]] = {}
     for c in (decisions.get("cuts") or []):
@@ -1780,8 +1791,12 @@ def _assemble_sequence_from_decisions(
             src_start = max(0.0, rs - LEAD)
             src_end = re + TAIL
             pe = prev_end_by_asset.get(aid)
-            if pe is not None and src_start < pe:
-                src_start = pe
+            removed_here = 0.0
+            if pe is not None:
+                if src_start < pe:
+                    src_start = pe
+                else:
+                    removed_here = src_start - pe  # silence/dead-air skipped before this run
             if ad:
                 src_end = min(src_end, ad)
             if src_end <= src_start:
@@ -1794,6 +1809,8 @@ def _assemble_sequence_from_decisions(
                 "source_start": round(src_start, 3), "source_end": round(src_end, 3),
                 "timeline_start": ts, "timeline_end": te,
             })
+            if removed_here > 0.02:
+                cut_meta.append({"at": ts, "removed": round(removed_here, 3), "type": "silence"})
             prev_end_by_asset[aid] = src_end
             cursor = te
             if seg_ts is None:
@@ -1919,6 +1936,11 @@ def _assemble_sequence_from_decisions(
         "format": fmt,
         "duration": total,
         "generated_by": "dan_plan",
+        # cut parameters used for THIS assembly, so the UI can show the current slider state.
+        "cut_params": {"silence_threshold": round(SIL, 3), "lead": round(LEAD, 3), "tail": round(TAIL, 3)},
+        # where source time was removed (final-timeline seconds), for the FireCut-style animation.
+        "cut_meta": cut_meta,
+        "removed_total": round(sum(c["removed"] for c in cut_meta), 3),
         "tracks": [
             {"id": "video_1", "type": "video", "label": "Main video", "clips": video_clips},
             {"id": "overlay_1", "type": "overlay", "label": "Overlay/PiP", "clips": overlay_clips},
@@ -2214,7 +2236,9 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             sequence_result = _assemble_sequence_from_decisions(decisions, transcripts, room_id, fmt)
             if not sequence_result:
                 raise RuntimeError("Could not assemble a timeline from the decisions")
-            timeline_result = {"sequence": sequence_result}
+            # Keep the decisions on the content so the cut-adjust UI can re-assemble with a new
+            # silence threshold / pads later (no re-running Dan or Whisper).
+            timeline_result = {"sequence": sequence_result, "decisions": decisions}
             dan_timeline_path.write_text(
                 json.dumps({"decisions": decisions, "sequence": sequence_result}, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -2678,6 +2702,100 @@ async def delete_content(
             kept_assets.append(asset)
         _write_assets(room_id, kept_assets)
     return {"ok": True}
+
+
+def _load_content_decisions(room_id: str, content_id: str, timeline: dict[str, Any]) -> dict[str, Any] | None:
+    """The editing decisions for a content: prefer the copy stored on the timeline; fall back to
+    the latest dan_plan job's dan_timeline.json (for contents generated before we stored it)."""
+    d = timeline.get("decisions")
+    if isinstance(d, dict) and d.get("spine"):
+        return d
+    jobs = [j for j in _read_jobs(room_id) if j.get("content_id") == content_id]
+    jobs.sort(key=lambda j: str(j.get("created_at") or ""), reverse=True)
+    for j in jobs:
+        jid = str(j.get("id") or "")
+        if not jid:
+            continue
+        p = _room_dir(room_id) / "jobs" / jid / "dan_timeline.json"
+        if p.exists():
+            try:
+                saved = json.loads(p.read_text(encoding="utf-8"))
+                dd = saved.get("decisions") if isinstance(saved, dict) else None
+                if isinstance(dd, dict) and dd.get("spine"):
+                    return dd
+            except Exception:
+                continue
+    return None
+
+
+def _recut_assemble(room_id: str, content_id: str, decisions: dict[str, Any], asset_ids: list[str], fmt: str) -> dict[str, Any] | None:
+    """Re-assemble a content's timeline from stored decisions with (possibly) new cut params.
+    Whisper analysis is cached on asset metadata, so this is fast and uses no LLM."""
+    assets = _read_assets(room_id)
+    wanted = {str(a) for a in asset_ids}
+    src_assets = [
+        {"id": a.get("id"), "kind": a.get("kind"), "filename": a.get("filename"),
+         "local_path": a.get("local_path"), "proxy_path": a.get("proxy_path"), "metadata": a.get("metadata")}
+        for a in assets if str(a.get("id")) in wanted
+    ]
+    transcripts = _run_audio_analysis(room_id, f"recut_{content_id}", src_assets)
+    return _assemble_sequence_from_decisions(decisions, transcripts, room_id, fmt)
+
+
+@router.post("/contents/{content_id}/recut")
+async def recut_content(
+    content_id: str,
+    payload: dict[str, Any] = Body(default={}),
+    room_id: str = Query(...),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Re-cut (re-assemble) the timeline with adjusted silence threshold / pads, FireCut-style.
+    Rebuilds from the stored editing decisions + cached transcript — Dan's semantic decisions
+    (what to keep/drop) are unchanged; only the silence/dead-air tightness is re-applied."""
+    contents = _read_contents(room_id)
+    content = next((c for c in contents if c.get("id") == content_id), None)
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+    timeline = dict(content.get("timeline") or {})
+    decisions = _load_content_decisions(room_id, content_id, timeline)
+    if not decisions:
+        raise HTTPException(status_code=400, detail="この素材は自動カット情報が無いため再カットできません（ダンで作り直してください）")
+    d = dict(decisions)
+    if payload.get("silence_threshold") is not None:
+        try:
+            d["silence_threshold"] = max(0.2, min(3.0, float(payload["silence_threshold"])))
+        except Exception:
+            pass
+    if payload.get("lead") is not None:
+        try:
+            d["lead"] = max(0.0, min(1.0, float(payload["lead"])))
+        except Exception:
+            pass
+    if payload.get("tail") is not None:
+        try:
+            d["tail"] = max(0.0, min(1.5, float(payload["tail"])))
+        except Exception:
+            pass
+    fmt = str(timeline.get("format") or content.get("format") or "9:16")
+    asset_ids = content.get("asset_ids") or []
+    try:
+        sequence = await asyncio.to_thread(_recut_assemble, room_id, content_id, d, asset_ids, fmt)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"再カットに失敗しました: {exc}")
+    if not sequence:
+        raise HTTPException(status_code=500, detail="再カットの組み立てに失敗しました（解析データが無い可能性）")
+    timeline["sequence"] = sequence
+    timeline["decisions"] = d
+    _update_content(room_id, content_id, {"timeline": timeline})
+    return {
+        "ok": True,
+        "cut_params": sequence.get("cut_params"),
+        "removed_total": sequence.get("removed_total"),
+        "cut_count": len(sequence.get("cut_meta") or []),
+        "clip_count": sum(len(t.get("clips") or []) for t in sequence.get("tracks", [])),
+        "duration": sequence.get("duration"),
+        "sequence": sequence,
+    }
 
 
 @router.post("/jobs", response_model=ProductionJob)
