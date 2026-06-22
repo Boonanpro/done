@@ -370,6 +370,11 @@ export function VideoReviewEditor({
   // The lane (layer) a single-clip vertical drag is currently committed to. Hysteresis: only
   // changes when the cursor is clearly inside another lane, so it doesn't flicker at borders.
   const dragLayerRef = useRef<number | null>(null);
+  // Lane geometry FROZEN at drag start. Hit-testing a vertical drag against the live geometry
+  // is unstable: moving the clip to another layer resizes lanes (a lane with a clip is taller),
+  // which shifts borders under the cursor and makes the lane flip back and forth. Freezing the
+  // geometry for the duration of the drag gives a fixed, predictable target for each Y.
+  const dragLaneGeomRef = useRef<Array<{ zone: 'visual' | 'audio'; layer: number; top: number; bottom: number }> | null>(null);
   // A/V link: when on, dragging/trimming a clip also moves its linked partner (same link_id).
   const [linkAV, setLinkAV] = useState(true);
   const [extraLanes, setExtraLanes] = useState<{ visual: number; audio: number }>({ visual: 0, audio: 0 });
@@ -1490,6 +1495,7 @@ export function VideoReviewEditor({
       if (!inMulti) selectSequenceClip(clip.id, additive);
       dragSelectionRef.current = inMulti ? [...selectedSequenceClipIds] : [clip.id];
       dragLayerRef.current = clip.layer ?? clipDefaultLayer(clip);
+      dragLaneGeomRef.current = laneGeomRef.current.map((g) => ({ ...g })); // freeze for stable hit-testing
       seekTimeline(getTimelineTime(event));
       dragSnapshotRef.current = editSequence;
       setSequenceClipDrag({
@@ -1556,15 +1562,17 @@ export function VideoReviewEditor({
         // around each border), so jitter near a boundary doesn't flip the lane back and forth
         // (which would also reflow the lanes and fight the cursor).
         const yWithin = event.clientY - rect.top;
-        const MARGIN = 10;
-        const cand = laneGeomRef.current.find(
+        const MARGIN = 8;
+        const geom = dragLaneGeomRef.current || laneGeomRef.current; // frozen geometry
+        const cand = geom.find(
           (g) => g.zone === sequenceClipDrag.zone && yWithin >= g.top + MARGIN && yWithin < g.bottom - MARGIN
         );
         if (cand) dragLayerRef.current = cand.layer;
-        const committedLayer = dragLayerRef.current;
-        if (committedLayer !== null && committedLayer !== (clip.layer ?? sequenceClipDrag.originalLayer)) {
-          fields.layer = committedLayer;
-        }
+        // ALWAYS carry the committed layer: applyDragOverwrite rebuilds the clip from the
+        // drag-start snapshot, so omitting it (when the live layer already matches) would let
+        // the overwrite revert the clip to its original layer — that was the frame-by-frame
+        // lane oscillation. The frozen geometry + hysteresis keep the committed layer stable.
+        if (dragLayerRef.current !== null) fields.layer = dragLayerRef.current;
         applyDragOverwrite(sequenceClipDrag.id, fields);
       }
     };
@@ -1573,6 +1581,7 @@ export function VideoReviewEditor({
       dragSnapshotRef.current = null;
       dragSelectionRef.current = [];
       dragLayerRef.current = null;
+      dragLaneGeomRef.current = null;
     };
     window.addEventListener('pointermove', moveDrag);
     window.addEventListener('pointerup', clearDrag);
