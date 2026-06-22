@@ -296,6 +296,26 @@ async def custom_domains_map():
     return {"map": mapping}
 
 
+@router.get("/search-performance")
+async def search_performance(
+    domain: str,
+    days: int = 28,
+    user: TokenData = Depends(get_current_user),
+):
+    """独自ドメイン(domain) の検索パフォーマンスを Search Console から引き戻す。
+
+    どの検索語で表示/クリックされているか（impressions/clicks/CTR/掲載順位）を返す。
+    集客改善ループの土台。運営者の検索データが含まれるため認証必須。
+    """
+    from app.tools.publish_site.search_console import fetch_search_performance
+
+    try:
+        return await fetch_search_performance(domain, days=days)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("search_performance failed")
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @router.get("/site-meta")
 async def site_meta(host: str = ""):
     """独自ドメイン(host) のSEO用メタ {slug,name,type,url} を返す（公開・認証なし）。
