@@ -843,13 +843,12 @@ export function VideoReviewEditor({
     clearSelection();
   }, [clearSelection, linkAV, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds]);
 
-  // Ripple delete: remove the selected clip(s) (+ A/V-link partners) AND close the gap by
-  // excising their time span [delStart, delEnd] from the WHOLE timeline, so captions/audio
-  // after the cut stay in sync (talking-head content is timed to the audio). Clips fully
-  // inside the span are dropped; clips after it shift left by the gap; clips straddling a
-  // boundary are trimmed (and a clip spanning the whole span is split into the surviving
-  // head + tail). Span = union of the deleted set, so multi-select collapses everything
-  // between the first and last selected clip — the intuitive "close this region" semantics.
+  // Ripple delete: remove the selected clip(s) (+ A/V-link partners) and close the gap ONLY on
+  // each affected lane (same track+layer) — later clips on that lane slide left to fill the
+  // hole. Clips on OTHER lanes are left exactly where they are (a clip that merely overlaps in
+  // time is NOT touched). Each remaining clip shifts left by the total duration of deleted
+  // clips that ended before it on its own lane, so multiple deletions and clips between them
+  // are handled correctly.
   const rippleDelete = useCallback(() => {
     const clipIds = selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : [];
     if (clipIds.length === 0) { deleteSelected(); return; }
@@ -858,44 +857,30 @@ export function VideoReviewEditor({
       const r = (v: number) => Number(v.toFixed(2));
       const eps = 0.01;
       const del = new Set(clipIds);
-      const allClips = (current.tracks || []).flatMap((t) => t.clips || []);
+      const laneKey = (c: SequenceClip, fallbackTrack?: string) => `${c.track || fallbackTrack || ''}#${c.layer ?? 0}`;
+      const allClips = (current.tracks || []).flatMap((t) => (t.clips || []).map((c) => ({ ...c, track: c.track || t.type })));
       if (linkAV) {
         const linkIds = new Set(allClips.filter((c) => del.has(c.id) && c.link_id).map((c) => c.link_id));
         allClips.forEach((c) => { if (c.link_id && linkIds.has(c.link_id)) del.add(c.id); });
       }
       const delClips = allClips.filter((c) => del.has(c.id));
       if (delClips.length === 0) return current;
-      const delStart = Math.min(...delClips.map((c) => c.timeline_start));
-      const delEnd = Math.max(...delClips.map((c) => c.timeline_end));
-      const gap = delEnd - delStart;
-      if (gap <= eps) return current;
+      // group the deleted clips' durations by lane
+      const delByLane = new Map<string, Array<{ end: number; dur: number }>>();
+      for (const c of delClips) {
+        const k = laneKey(c);
+        if (!delByLane.has(k)) delByLane.set(k, []);
+        delByLane.get(k)!.push({ end: c.timeline_end, dur: c.timeline_end - c.timeline_start });
+      }
       const tracks = (current.tracks || []).map((track) => {
         const out: SequenceClip[] = [];
         for (const c of track.clips || []) {
-          const ts = c.timeline_start, te = c.timeline_end;
-          const isAV = Number.isFinite(c.source_end as number);
-          if (te <= delStart + eps) { out.push(c); continue; }              // entirely before the hole
-          if (ts >= delEnd - eps) {                                          // entirely after -> slide left
-            out.push({ ...c, timeline_start: r(ts - gap), timeline_end: r(te - gap) });
-            continue;
-          }
-          // overlaps the hole: keep surviving head [ts, delStart] and tail [delEnd, te] (shifted)
-          const leftDur = delStart - ts;
-          const rightDur = te - delEnd;
-          if (leftDur > eps) {
-            out.push({ ...c, timeline_end: r(delStart), ...(isAV ? { source_end: r(Number(c.source_start || 0) + leftDur) } : {}) });
-          }
-          if (rightDur > eps) {
-            const srcOff = delEnd - ts; // source consumed up to the hole's end
-            out.push({
-              ...c,
-              id: leftDur > eps ? `${c.id}__rp_${makeId()}` : c.id,
-              timeline_start: r(delStart),
-              timeline_end: r(te - gap),
-              ...(isAV ? { source_start: r(Number(c.source_start || 0) + srcOff) } : {}),
-            });
-          }
-          // neither head nor tail survives -> fully inside the hole -> dropped
+          if (del.has(c.id)) continue; // removed
+          const dels = delByLane.get(laneKey(c, track.type));
+          if (!dels) { out.push(c); continue; } // lane untouched
+          // shift left by the total deleted duration that sat before this clip on the same lane
+          const shift = dels.reduce((s, d) => s + (d.end <= c.timeline_start + eps ? d.dur : 0), 0);
+          out.push(shift > eps ? { ...c, timeline_start: r(c.timeline_start - shift), timeline_end: r(c.timeline_end - shift) } : c);
         }
         return { ...track, clips: out };
       });

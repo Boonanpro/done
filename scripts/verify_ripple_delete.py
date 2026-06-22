@@ -23,8 +23,12 @@ def vclip(i, s, e):
             "timeline_start": s, "timeline_end": e, "source_start": s, "source_end": e,
             "composition": "fullscreen", "label": f"clip{i}"}
 
+# a caption on a DIFFERENT lane overlapping clip B's time — must survive a per-lane ripple
+cap = {"id": "cap_X", "track": "caption", "layer": 2, "timeline_start": 2.5, "timeline_end": 3.5,
+       "text": "overlap caption", "source_start": 0, "source_end": 0}
 seq = {"format": "9:16", "duration": 6.0, "tracks": [
-    {"type": "video", "clips": [vclip("A", 0, 2), vclip("B", 2, 4), vclip("C", 4, 6)]}]}
+    {"type": "video", "clips": [vclip("A", 0, 2), vclip("B", 2, 4), vclip("C", 4, 6)]},
+    {"type": "caption", "clips": [cap]}]}
 
 # create throwaway content, inject the deterministic sequence
 content = requests.post(f"{APIB}/contents", headers=H, cookies=C, timeout=30, data=json.dumps(
@@ -37,7 +41,9 @@ print("throwaway content:", cid[:8])
 def read_video_clips():
     ct = next(c for c in requests.get(f"{APIB}/contents?room_id={ROOM}", headers=H, cookies=C, timeout=30).json() if c["id"] == cid)
     s = (ct.get("timeline") or {}).get("sequence") or {}
-    return [c for t in s.get("tracks", []) if t["type"] == "video" for c in t.get("clips", [])], s.get("duration")
+    vids = [c for t in s.get("tracks", []) if t["type"] == "video" for c in t.get("clips", [])]
+    caps = [c for t in s.get("tracks", []) if t["type"] == "caption" for c in t.get("clips", [])]
+    return vids, caps, s.get("duration")
 
 ok = True
 try:
@@ -67,20 +73,25 @@ try:
         page.wait_for_timeout(1500)
         b.close()
 
-    clips, dur = read_video_clips()
+    clips, caps, dur = read_video_clips()
     clips.sort(key=lambda c: c["timeline_start"])
-    print("after ripple: clips=", [(c.get("label"), c["timeline_start"], c["timeline_end"]) for c in clips], "dur=", dur)
+    print("after ripple: video=", [(c.get("label"), c["timeline_start"], c["timeline_end"]) for c in clips],
+          "caption=", [(c.get("id"), c["timeline_start"], c["timeline_end"]) for c in caps], "dur=", dur)
     def check(name, cond):
         global ok
         print(f"[{'PASS' if cond else 'FAIL'}] {name}")
         ok = ok and cond
-    check("clip B removed (2 clips remain)", len(clips) == 2)
+    check("clip B removed (2 video clips remain)", len(clips) == 2)
     if len(clips) == 2:
         a, c = clips
         check("clip A unchanged (0->2)", abs(a["timeline_start"]-0) < 0.05 and abs(a["timeline_end"]-2) < 0.05)
         check("clip C slid left to fill gap (2->4)", abs(c["timeline_start"]-2) < 0.05 and abs(c["timeline_end"]-4) < 0.05)
         check("clip C source unchanged (4->6)", abs(c.get("source_start",0)-4) < 0.05 and abs(c.get("source_end",0)-6) < 0.05)
-    check("total duration shrank 6 -> 4", dur is not None and abs(dur-4) < 0.1)
+    # the overlapping caption on the OTHER lane must NOT be deleted or shifted
+    check("overlapping caption on other lane SURVIVED (not deleted)", len(caps) == 1)
+    if len(caps) == 1:
+        check("caption left where it was (2.5-3.5, other lane untouched)",
+              abs(caps[0]["timeline_start"]-2.5) < 0.05 and abs(caps[0]["timeline_end"]-3.5) < 0.05)
 finally:
     # delete the throwaway content so the user's room stays clean
     cpath = P._room_dir(ROOM) / "contents.json"
