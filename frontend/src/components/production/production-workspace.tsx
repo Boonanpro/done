@@ -137,6 +137,11 @@ export function ProductionWorkspace({
   const [jobEvents, setJobEvents] = useState<ProductionJobEvent[]>([]);
   const [activeVideoAssetId, setActiveVideoAssetId] = useState<string | null>(null);
   const [revisionNote, setRevisionNote] = useState('');
+  // Cut-adjust (FireCut-style): silence threshold + pads, re-applied via /recut.
+  const [silenceThreshold, setSilenceThreshold] = useState(0.45);
+  const [leadPad, setLeadPad] = useState(0.06);
+  const [tailPad, setTailPad] = useState(0.1);
+  const [isRecutting, setIsRecutting] = useState(false);
 
   const hasProcessing = useMemo(() => assets.some((a) => a.status === 'processing'), [assets]);
   const selectedContentAssets = useMemo(
@@ -586,6 +591,43 @@ export function ProductionWorkspace({
     setContents((prev) => prev.map((content) => (content.id === updated.id ? updated : content)));
   };
 
+  // Reflect the selected content's current cut params onto the sliders when it changes.
+  const selectedCutParams = (selectedContent?.timeline as { sequence?: { cut_params?: { silence_threshold?: number; lead?: number; tail?: number }; removed_total?: number } } | undefined)?.sequence?.cut_params;
+  useEffect(() => {
+    if (selectedCutParams) {
+      if (typeof selectedCutParams.silence_threshold === 'number') setSilenceThreshold(selectedCutParams.silence_threshold);
+      if (typeof selectedCutParams.lead === 'number') setLeadPad(selectedCutParams.lead);
+      if (typeof selectedCutParams.tail === 'number') setTailPad(selectedCutParams.tail);
+    }
+    // only when switching to a different content
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedContent?.id]);
+
+  const recut = async () => {
+    if (!selectedContent) return;
+    if (!window.confirm('無音の詰め具合を変えてタイムラインを組み直します。\n手動でのクリップ編集はリセットされます（FireCutと同じく、まず自動カット→その後で手調整の順）。実行しますか？')) return;
+    setIsRecutting(true);
+    try {
+      const res = await fetch(
+        `/api/v1/production-assets/contents/${selectedContent.id}/recut?room_id=${encodeURIComponent(roomId)}`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ silence_threshold: silenceThreshold, lead: leadPad, tail: tailPad }),
+        }
+      );
+      if (!res.ok) throw new Error(await res.text());
+      const body = await res.json();
+      toast.success(`再カットしました（無音>${silenceThreshold.toFixed(2)}秒を詰め・${body.cut_count ?? 0}箇所・約${Math.round(body.removed_total ?? 0)}秒短縮）`);
+      await loadAll();
+    } catch (error) {
+      toast.error('再カットに失敗しました', { description: String(error).slice(0, 200) });
+    } finally {
+      setIsRecutting(false);
+    }
+  };
+
   const deleteContent = async (content: ProductionContent) => {
     const res = await fetch(
       `/api/v1/production-assets/contents/${content.id}?room_id=${encodeURIComponent(roomId)}`,
@@ -653,6 +695,52 @@ export function ProductionWorkspace({
         sequenceAssets={selectedSourceAssets.filter((asset) => asset.kind === 'video').map(sequenceAssetForEditor)}
         sidePanelTop={
           <div className="mb-3 space-y-3">
+            <div className="rounded-md border border-sky-400/60 bg-sky-50/40 p-3">
+              <div className="mb-1 text-sm font-medium">✂ カット調整（無音・間）</div>
+              <p className="mb-2 text-[11px] text-muted-foreground">
+                無音をどれくらい詰めるかを後から調整できます。ダンの「どこを残すか」の判断は変えず、間の詰め具合だけ作り直します。
+              </p>
+              <div className="space-y-2">
+                <div>
+                  <div className="mb-0.5 flex items-center justify-between text-[11px]">
+                    <span>無音しきい値</span>
+                    <span className="tabular-nums text-muted-foreground">{silenceThreshold.toFixed(2)}秒 より長い無音を詰める</span>
+                  </div>
+                  <input
+                    type="range" min={0.2} max={1.5} step={0.05} value={silenceThreshold}
+                    onChange={(e) => setSilenceThreshold(Number(e.target.value))}
+                    className="h-1.5 w-full cursor-pointer accent-sky-500"
+                  />
+                  <div className="flex justify-between text-[9px] text-muted-foreground"><span>テンポ速く</span><span>間を残す</span></div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <div className="mb-0.5 text-[10px] text-muted-foreground">カット前の余白 {leadPad.toFixed(2)}秒</div>
+                    <input type="range" min={0} max={0.4} step={0.02} value={leadPad}
+                      onChange={(e) => setLeadPad(Number(e.target.value))} className="h-1 w-full cursor-pointer accent-sky-500" />
+                  </div>
+                  <div>
+                    <div className="mb-0.5 text-[10px] text-muted-foreground">カット後の余白 {tailPad.toFixed(2)}秒</div>
+                    <input type="range" min={0} max={0.6} step={0.02} value={tailPad}
+                      onChange={(e) => setTailPad(Number(e.target.value))} className="h-1 w-full cursor-pointer accent-sky-500" />
+                  </div>
+                </div>
+                {selectedCutParams ? (
+                  <div className="text-[10px] text-muted-foreground">
+                    現在: 無音&gt;{(selectedCutParams.silence_threshold ?? 0.45).toFixed(2)}秒で詰め済
+                    {typeof (selectedContent.timeline as { sequence?: { removed_total?: number } } | undefined)?.sequence?.removed_total === 'number'
+                      ? `・約${Math.round((selectedContent.timeline as { sequence?: { removed_total?: number } }).sequence!.removed_total!)}秒短縮`
+                      : ''}
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-amber-600">この素材はまだ自動カット情報がありません（ダンで作った素材で使えます）。</div>
+                )}
+                <Button className="w-full" size="sm" disabled={isRecutting} onClick={() => void recut()}>
+                  {isRecutting ? '再カット中…' : 'この設定で再カット'}
+                </Button>
+                <p className="text-[9px] text-muted-foreground">※再カットすると手動のクリップ編集はリセットされます（まず自動カット→その後で手調整の順）。</p>
+              </div>
+            </div>
             <div className="rounded-md border border-border p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <div className="text-sm font-medium">使用素材</div>
