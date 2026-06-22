@@ -37,18 +37,27 @@ def _pascal(slug: str) -> str:
     return "".join(part.capitalize() for part in re.split(r"[-_]", slug) if part) or "Artifact"
 
 
-def _icons_block(slug: str) -> str:
+def _icons_block(slug: str, *, include_icons: bool = True, include_manifest: bool = True) -> str:
+    """metadata に差し込む icons / manifest ブロック。
+
+    既存の metadata に同名キーがあると `next build` の型チェックが
+    「重複プロパティ」で失敗するため、欠けているキーだけを生成する。
+    """
     base = f"/artifacts/{slug}"
-    return (
-        "  icons: {\n"
-        "    icon: [\n"
-        f"      {{ url: '{base}/icon-192.png', sizes: '192x192', type: 'image/png' }},\n"
-        f"      {{ url: '{base}/icon-512.png', sizes: '512x512', type: 'image/png' }},\n"
-        "    ],\n"
-        f"    apple: '{base}/apple-touch-icon.png',\n"
-        "  },\n"
-        f"  manifest: '{base}/manifest.webmanifest',\n"
-    )
+    out = ""
+    if include_icons:
+        out += (
+            "  icons: {\n"
+            "    icon: [\n"
+            f"      {{ url: '{base}/icon-192.png', sizes: '192x192', type: 'image/png' }},\n"
+            f"      {{ url: '{base}/icon-512.png', sizes: '512x512', type: 'image/png' }},\n"
+            "    ],\n"
+            f"    apple: '{base}/apple-touch-icon.png',\n"
+            "  },\n"
+        )
+    if include_manifest:
+        out += f"  manifest: '{base}/manifest.webmanifest',\n"
+    return out
 
 
 def _new_layout(slug: str) -> str:
@@ -83,7 +92,14 @@ def _ensure_metadata_type_import(text: str) -> str:
 
 
 def _patch_existing(text: str, slug: str) -> str | None:
-    block = _icons_block(slug)
+    # 既存キーは再生成しない（重複プロパティで next build が失敗するため）
+    block = _icons_block(
+        slug,
+        include_icons="icons:" not in text,
+        include_manifest="manifest:" not in text,
+    )
+    if not block:
+        return text  # 追加するものが無い（呼び出し側で no-op 扱い）
     m = re.search(r"export\s+const\s+metadata(?:\s*:\s*[\w.]+)?\s*=\s*\{", text)
     if m:
         insert_pos = m.end()
