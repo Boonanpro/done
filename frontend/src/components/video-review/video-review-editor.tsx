@@ -1506,7 +1506,10 @@ export function VideoReviewEditor({
         mode,
         startClientX: event.clientX,
         startClientY: event.clientY,
-        zone: clip.track === 'audio' || clip.role ? 'audio' : 'visual',
+        // Zone is the clip's TRACK only — NOT its role. dan_plan video clips carry a role too,
+        // and keying off role wrongly put video clips in the audio zone, so the lane hit-test
+        // never matched the visual lanes and video clips couldn't move up/down at all.
+        zone: clip.track === 'audio' ? 'audio' : 'visual',
         originalLayer: clip.layer ?? clipDefaultLayer(clip),
         originalTimelineStart: clip.timeline_start,
         originalTimelineEnd: clip.timeline_end,
