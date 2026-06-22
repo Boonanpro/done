@@ -476,7 +476,12 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
       for (const [, a] of audiosRef.current) a.pause();
       return;
     }
-    playClockRef.current = { wall: performance.now(), t: currentTime };
+    // Initialize the wall clock ONLY when playback actually starts. This effect also re-runs
+    // when the clip list changes mid-play (a clip added, or the parent passes a new sequence
+    // object on a poll); resetting the clock then would snap playback back to the LAGGED
+    // `currentTime` prop, jumping every source backward each time — heard as a warbling
+    // "play + rewind at once" / underwater voice. Preserving the running clock avoids that.
+    if (!playClockRef.current) playClockRef.current = { wall: performance.now(), t: currentTime };
     const step = () => {
       const clock = playClockRef.current;
       if (!clock) return;
