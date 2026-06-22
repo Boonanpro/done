@@ -508,9 +508,11 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         if (!v) continue;
         activeIds.add(id);
         const expected = Number(vc.clip.source_start || 0) + (t - vc.clip.timeline_start);
-        // Seek only when the clip JUST became active (align it once) or it drifted a lot.
-        // Seeking a playing element every frame stutters it; left alone it plays at rate 1.
-        if (!prevActiveVideoRef.current.has(id) || Math.abs(v.currentTime - expected) > 0.3) v.currentTime = expected;
+        // Keep VIDEO tightly aligned: seek on activation or as soon as it drifts >0.12s. Video
+        // re-seeks aren't audible, and a loose tolerance showed the WRONG frame (a later/other
+        // clip's footage) — very visible with the short, source-jumping clips after a tight
+        // re-cut. (Audio stays seek-on-activation only, below, to avoid the warble.)
+        if (!prevActiveVideoRef.current.has(id) || Math.abs(v.currentTime - expected) > 0.12) v.currentTime = expected;
         if (v.paused) void v.play().catch(() => {});
       }
       for (const [id, v] of videosRef.current) if (!activeIds.has(id) && !v.paused) v.pause();

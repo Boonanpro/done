@@ -468,9 +468,12 @@ export function VideoReviewEditor({
     const buildZone = (zone: 'visual' | 'audio'): TimelineLane[] => {
       const zoneAggs = aggs.filter((g) => g.zone === zone);
       const layers = new Set(zoneAggs.map((g) => g.layer));
-      // Always offer empty lanes (added via "+段") so clips can be dragged onto them.
+      // ALWAYS keep one spare empty lane (plus any added via "+段") so a clip can always be
+      // dragged up/down to a new lane — moving it there effectively creates the lane, and a
+      // fresh spare appears. This is why video/audio clips couldn't move before: with only one
+      // used lane there was no target.
       const maxUsed = layers.size ? Math.max(...layers) : 0;
-      for (let k = 1; k <= extraLanes[zone]; k += 1) layers.add(maxUsed + k);
+      for (let k = 1; k <= extraLanes[zone] + 1; k += 1) layers.add(maxUsed + k);
       if (layers.size === 0) layers.add(0);
       const ordered = Array.from(layers).sort((x, y) => (zone === 'visual' ? y - x : x - y));
       return ordered.map((layer, i) => {
