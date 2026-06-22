@@ -1284,38 +1284,42 @@ export function VideoReviewEditor({
   }, [selectedSequenceClipId, selectedSequenceClipIds, updateSequenceClips]);
 
   // Insert a new clip from a dragged source asset at the drop time/lane. Video assets only for
-  // now (the dominant case; the material list is video-content). The clip lands on the 'video'
-  // track at the dropped lane's layer — layer 0 = fullscreen, higher = overlay/PiP — and the
-  // source window starts at 0 for the asset's length (capped) so it plays from the top.
+  // now (the dominant case; the material list is video-content). The video lands on the 'video'
+  // track at the dropped lane's layer (0 = fullscreen, higher = overlay/PiP) and its AUDIO lands
+  // on the 'audio' track, A/V-linked (shared link_id) so they move/trim/delete together. Source
+  // windows start at 0 for the asset's length (capped) so it plays from the top.
   const insertSequenceClip = useCallback(
     (payload: { id: string; kind?: string; duration?: number | string | null; label?: string | null }, dropTime: number, zone: 'visual' | 'audio', layer: number) => {
       if (zone !== 'visual' || payload.kind !== 'video') return; // video onto a visual lane
       const rawLen = Number(payload.duration);
       const len = Number.isFinite(rawLen) && rawLen > 0 ? Math.min(rawLen, 30) : DROP_DEFAULT_LEN;
       const start = Math.max(0, Number(dropTime) || 0);
-      const newId = `clip_${makeId()}`;
-      const clip: SequenceClip = {
-        id: newId,
-        asset_id: payload.id,
-        label: payload.label || '素材',
-        source_start: 0,
-        source_end: Number(len.toFixed(2)),
-        timeline_start: Number(start.toFixed(2)),
-        timeline_end: Number((start + len).toFixed(2)),
-        track: 'video',
-        layer,
-        composition: layer > 0 ? 'overlay' : 'fullscreen',
+      const ts = Number(start.toFixed(2)), te = Number((start + len).toFixed(2)), se = Number(len.toFixed(2));
+      const linkId = `lk_${makeId()}`;
+      const videoId = `clip_${makeId()}`;
+      const videoClip: SequenceClip = {
+        id: videoId, asset_id: payload.id, label: payload.label || '素材',
+        source_start: 0, source_end: se, timeline_start: ts, timeline_end: te,
+        track: 'video', layer, composition: layer > 0 ? 'overlay' : 'fullscreen', link_id: linkId,
+      };
+      const audioClip: SequenceClip = {
+        id: `clip_${makeId()}`, asset_id: payload.id, label: payload.label || '素材',
+        source_start: 0, source_end: se, timeline_start: ts, timeline_end: te,
+        track: 'audio', layer: 0, role: 'dialogue', link_id: linkId,
       };
       setEditSequence((current) => {
         const base = current || { tracks: [] };
         const tracks = (base.tracks || []).map((t) => ({ ...t, clips: [...(t.clips || [])] }));
         let vt = tracks.find((t) => t.type === 'video');
         if (!vt) { vt = { id: `tk_${makeId()}`, type: 'video', clips: [] }; tracks.push(vt); }
-        vt.clips = [...(vt.clips || []), clip];
+        vt.clips = [...(vt.clips || []), videoClip];
+        let at = tracks.find((t) => t.type === 'audio');
+        if (!at) { at = { id: `tk_${makeId()}`, type: 'audio', clips: [] }; tracks.push(at); }
+        at.clips = [...(at.clips || []), audioClip];
         const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
         return { ...base, tracks, duration: Number(nextDuration.toFixed(3)) };
       });
-      selectSequenceClip(newId);
+      selectSequenceClip(videoId);
     },
     [selectSequenceClip]
   );

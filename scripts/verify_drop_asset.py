@@ -36,7 +36,9 @@ print("throwaway content:", cid[:8])
 def read_video_clips():
     ct = next(c for c in requests.get(f"{APIB}/contents?room_id={ROOM}", headers=H, cookies=C, timeout=30).json() if c["id"] == cid)
     s = (ct.get("timeline") or {}).get("sequence") or {}
-    return [c for t in s.get("tracks", []) if t["type"] == "video" for c in t.get("clips", [])], s.get("duration")
+    vids = [c for t in s.get("tracks", []) if t["type"] == "video" for c in t.get("clips", [])]
+    auds = [c for t in s.get("tracks", []) if t["type"] == "audio" for c in t.get("clips", [])]
+    return vids, auds, s.get("duration")
 
 ok = True
 def check(name, cond, detail=""):
@@ -80,8 +82,9 @@ try:
         page.wait_for_timeout(1500)
         b.close()
 
-    clips, dur = read_video_clips()
+    clips, auds, dur = read_video_clips()
     print("video clips after drop:", [(c.get("id"), c.get("timeline_start"), c.get("timeline_end"), str(c.get("asset_id"))[:8]) for c in clips])
+    print("audio clips after drop:", [(c.get("id"), c.get("timeline_start"), c.get("timeline_end"), c.get("link_id")) for c in auds])
     new = [c for c in clips if not str(c.get("id", "")).startswith("seed_")]
     check("a new clip was inserted (2 -> 3)", len(clips) == 3 and len(new) == 1)
     if new:
@@ -92,6 +95,15 @@ try:
         check("new clip has positive length", nc["timeline_end"] > nc["timeline_start"])
         check("new clip is on the video track / fullscreen-or-overlay",
               nc.get("track") == "video" and nc.get("composition") in ("fullscreen", "overlay"))
+        # the dropped video must bring its AUDIO too, A/V-linked
+        check("an audio clip was also added", len(auds) == 1)
+        if auds:
+            ac = auds[0]
+            check("audio clip is A/V-linked to the video (shared link_id)",
+                  bool(ac.get("link_id")) and ac.get("link_id") == nc.get("link_id"),
+                  f"v={nc.get('link_id')} a={ac.get('link_id')}")
+            check("audio clip time-aligned with the video",
+                  abs(ac["timeline_start"] - nc["timeline_start"]) < 0.05 and abs(ac["timeline_end"] - nc["timeline_end"]) < 0.05)
 finally:
     cpath = P._room_dir(ROOM) / "contents.json"
     data = json.loads(cpath.read_text(encoding="utf-8"))
