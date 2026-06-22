@@ -1426,6 +1426,43 @@ def _segment_id(asset_index: int, seg_index: int) -> str:
     return f"a{asset_index}_s{seg_index:02d}"
 
 
+SILENCE_DB = float(os.environ.get("DAN_SILENCE_DB", "-30"))   # noise floor for silence
+SILENCE_MIN = float(os.environ.get("DAN_SILENCE_MIN", "0.04"))  # detect spans this short (assembly filters by the user's threshold)
+
+
+def _detect_silence(src: str, noise_db: float = SILENCE_DB, min_dur: float = SILENCE_MIN) -> list[list[float]]:
+    """Audio-level (waveform) silence regions in SOURCE seconds via ffmpeg silencedetect: spans
+    where the audio stays below noise_db for >= min_dur. This is FireCut-style detection — far
+    tighter than Whisper word gaps — so dead air can be cut right up to the waveform."""
+    try:
+        proc = subprocess.run(
+            [_ffmpeg(), "-hide_banner", "-nostats", "-i", src, "-af",
+             f"silencedetect=noise={noise_db}dB:d={min_dur}", "-f", "null", "-"],
+            capture_output=True, timeout=900, check=False,
+        )
+        err = (proc.stderr or b"").decode("utf-8", "ignore")
+    except Exception:
+        return []
+    out: list[list[float]] = []
+    cur_start: float | None = None
+    for line in err.splitlines():
+        line = line.strip()
+        if "silence_start:" in line:
+            try:
+                cur_start = float(line.split("silence_start:")[1].strip().split()[0])
+            except Exception:
+                cur_start = None
+        elif "silence_end:" in line and cur_start is not None:
+            try:
+                end = float(line.split("silence_end:")[1].split("|")[0].strip().split()[0])
+                if end > cur_start:
+                    out.append([round(cur_start, 3), round(end, 3)])
+            except Exception:
+                pass
+            cur_start = None
+    return out
+
+
 def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str, Any]]) -> dict[str, Any]:
     """Give Dan 'ears' as STRUCTURED data: run dan_audio_check.py on each video asset up
     front (not via Dan's own tool call) so we hold a segment-timestamped transcript with
@@ -1456,10 +1493,22 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
             continue
         live = by_id.get(aid)
         meta = (live.get("metadata") if live and isinstance(live.get("metadata"), dict) else {}) or {}
+        # Waveform silence regions (model-independent), cached separately so a Whisper-model
+        # change doesn't force re-detection. Computed once per source, reused everywhere.
+        sil = meta.get("silence_regions") if meta.get("silence_src") == str(src) else None
+        if sil is None:
+            sil = _detect_silence(str(src))
+            if live is not None:
+                meta = dict(meta)
+                meta["silence_regions"] = sil
+                meta["silence_src"] = str(src)
+                live["metadata"] = meta
+                dirty = True
         cached = meta.get("audio_analysis")
         if isinstance(cached, dict) and meta.get("audio_analysis_src") == str(src) and meta.get("audio_analysis_model") == whisper_model:
             cached = dict(cached)
             cached["asset_index"] = asset_index
+            cached["silence_regions"] = sil
             for j, s in enumerate(cached.get("segments") or [], start=1):
                 s["id"] = _segment_id(asset_index, j)
                 s["asset_id"] = aid
@@ -1486,6 +1535,7 @@ def _run_audio_analysis(room_id: str, job_id: str, source_assets: list[dict[str,
             "segments": segs,
             "dead_air": data.get("dead_air") or [],
             "restatements": data.get("restatements") or [],
+            "silence_regions": sil,
         }
         results[aid] = entry
         if live is not None:
@@ -1735,13 +1785,47 @@ def _assemble_sequence_from_decisions(
     def _in_cut(aid: str, t: float) -> bool:
         return any(cs <= t <= ce for cs, ce in cuts_by_asset.get(aid, []))
 
+    # Waveform silence regions per asset (from ffmpeg silencedetect, cached in the analysis).
+    silence_by_asset: dict[str, list[tuple[float, float]]] = {}
+    for _aid, t in transcripts.items():
+        regs = t.get("silence_regions") or []
+        silence_by_asset[str(t.get("asset_id") or _aid)] = [
+            (float(r[0]), float(r[1])) for r in regs if isinstance(r, (list, tuple)) and len(r) >= 2
+        ]
+
+    def _subtract(a: float, b: float, removes: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        """[a,b] minus the (clipped, merged) removal spans -> the kept spans."""
+        clipped = sorted((max(a, x), min(b, y)) for x, y in removes if min(b, y) > max(a, x) + 0.001)
+        merged: list[list[float]] = []
+        for x, y in clipped:
+            if merged and x <= merged[-1][1] + 0.001:
+                merged[-1][1] = max(merged[-1][1], y)
+            else:
+                merged.append([x, y])
+        out: list[tuple[float, float]] = []
+        cur = a
+        for x, y in merged:
+            if x > cur + 0.02:
+                out.append((cur, x))
+            cur = max(cur, y)
+        if b > cur + 0.02:
+            out.append((cur, b))
+        return out
+
     def _runs_for_segment(s: dict[str, Any]) -> list[tuple[float, float]]:
-        """Contiguous kept-word runs in source time: split at internal silences > SIL and
-        drop words inside Dan's cut spans. Falls back to the whole segment if no word data."""
+        """Kept speech runs (source seconds) for a segment. Prefer WAVEFORM silence: subtract
+        silence regions >= SIL and Dan's cut spans from the segment span — this cuts dead air
+        right up to the audio, tighter than Whisper word gaps. Falls back to word gaps (then the
+        whole segment) when silence data is unavailable."""
         aid = str(s.get("asset_id") or "")
+        a, b = float(s.get("start") or 0), float(s.get("end") or 0)
+        sils = silence_by_asset.get(aid)
+        if sils:
+            removes = list(cuts_by_asset.get(aid, []))
+            removes += [(rs, re) for rs, re in sils if re - rs >= SIL]
+            return [(rs, re) for rs, re in _subtract(a, b, removes) if re - rs > 0.05]
         words = s.get("words") or []
         if not words:
-            a, b = float(s.get("start") or 0), float(s.get("end") or 0)
             return [] if _in_cut(aid, (a + b) / 2) else [(a, b)]
         runs: list[tuple[float, float]] = []
         cs = ce = None
