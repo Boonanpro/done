@@ -336,6 +336,9 @@ export function VideoReviewEditor({
   const histPrevRef = useRef<HistEntry | null>(null);   // last observed state (baseline for the next diff)
   const histCheckpointRef = useRef<HistEntry | null>(null); // pre-burst state pending a coalesced push
   const histTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Right-drag rubber-band selection over the timeline (left-drag is reserved for scrub/move).
+  const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
   const [videoPath, setVideoPath] = useState(initialPath || '');
   const [videoUrl, setVideoUrl] = useState(initialUrl || '');
   const [duration] = useState(0);
@@ -1187,6 +1190,7 @@ export function VideoReviewEditor({
 
   const handleTimelinePointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) return; // right-drag is rubber-band select, not scrub
       event.preventDefault();
       clearSelection();
       const nextTime = getTimelineTime(event);
@@ -1455,6 +1459,7 @@ export function VideoReviewEditor({
 
   const startSequenceClipDrag = useCallback(
     (event: React.PointerEvent, clip: SequenceClip, mode: SequenceClipDrag['mode']) => {
+      if (event.button !== 0) return; // let right-drag fall through to rubber-band select
       event.preventDefault();
       event.stopPropagation();
       // If the grabbed clip is already part of a multi-selection, keep the whole selection and
@@ -1550,8 +1555,61 @@ export function VideoReviewEditor({
     };
   }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove]);
 
+  // Rubber-band (marquee) select: while a right-drag is active, draw the rectangle and on
+  // release select every clip bar (data-clip-id) whose on-screen box intersects it. A tiny
+  // drag (< 5px) is treated as a no-op so a plain right-click doesn't change the selection.
+  const marqueeActive = marquee !== null;
+  useEffect(() => {
+    if (!marqueeActive) return;
+    const move = (event: PointerEvent) => {
+      setMarquee((m) => (m ? { ...m, x1: event.clientX, y1: event.clientY } : m));
+    };
+    const up = (event: PointerEvent) => {
+      const start = marqueeStartRef.current;
+      marqueeStartRef.current = null;
+      setMarquee(null);
+      if (!start) return;
+      const left = Math.min(start.x, event.clientX), right = Math.max(start.x, event.clientX);
+      const top = Math.min(start.y, event.clientY), bottom = Math.max(start.y, event.clientY);
+      if (right - left < 5 && bottom - top < 5) return; // plain right-click, not a drag
+      const ids: string[] = [];
+      document.querySelectorAll('[data-clip-id]').forEach((el) => {
+        const r = el.getBoundingClientRect();
+        if (r.right >= left && r.left <= right && r.bottom >= top && r.top <= bottom) {
+          const id = el.getAttribute('data-clip-id');
+          if (id) ids.push(id);
+        }
+      });
+      if (ids.length > 0) {
+        setSelectedId(null);
+        setSelectedIds([]);
+        setSelectedSequenceClipIds(ids);
+        setSelectedSequenceClipId(ids[ids.length - 1]);
+      }
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+  }, [marqueeActive]);
+
   return (
     <div className={`flex h-full bg-background text-foreground ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
+      {marquee ? (
+        <div
+          className="pointer-events-none fixed z-50 border border-sky-400 bg-sky-400/15"
+          style={{
+            left: Math.min(marquee.x0, marquee.x1),
+            top: Math.min(marquee.y0, marquee.y1),
+            width: Math.abs(marquee.x1 - marquee.x0),
+            height: Math.abs(marquee.y1 - marquee.y0),
+          }}
+        />
+      ) : null}
       <main className="flex min-w-0 flex-1 flex-col">
         <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
           {onBack ? (
@@ -1834,7 +1892,19 @@ export function VideoReviewEditor({
                     ))}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div ref={timelineRef} className="relative" style={timelineTrackStyle}>
+                    <div
+                      ref={timelineRef}
+                      className="relative"
+                      style={timelineTrackStyle}
+                      onPointerDownCapture={(event) => {
+                        if (event.button !== 2) return; // right button starts a rubber-band select
+                        event.preventDefault();
+                        event.stopPropagation();
+                        marqueeStartRef.current = { x: event.clientX, y: event.clientY };
+                        setMarquee({ x0: event.clientX, y0: event.clientY, x1: event.clientX, y1: event.clientY });
+                      }}
+                      onContextMenu={(event) => event.preventDefault()}
+                    >
                       {timelineLanes.map((lane, laneIndex) => {
                         const zoneChanged = laneIndex > 0 && timelineLanes[laneIndex - 1].zone !== lane.zone;
                         const showPending =
@@ -1920,6 +1990,7 @@ export function VideoReviewEditor({
                               return (
                                 <div
                                   key={item.key}
+                                  data-clip-id={clip.id}
                                   className={`absolute flex cursor-grab items-center overflow-hidden rounded border bg-cover bg-center text-[10px] text-white shadow-sm active:cursor-grabbing ${clipItemColor(item.itemType)} ${
                                     selected
                                       ? 'border-yellow-300 ring-2 ring-yellow-300/70'
