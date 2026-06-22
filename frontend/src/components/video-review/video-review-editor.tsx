@@ -367,6 +367,9 @@ export function VideoReviewEditor({
   // The set of clip ids that move together for the current drag (>1 = block move of the
   // whole selection; 1 = ordinary single-clip move). Captured at drag start.
   const dragSelectionRef = useRef<string[]>([]);
+  // The lane (layer) a single-clip vertical drag is currently committed to. Hysteresis: only
+  // changes when the cursor is clearly inside another lane, so it doesn't flicker at borders.
+  const dragLayerRef = useRef<number | null>(null);
   // A/V link: when on, dragging/trimming a clip also moves its linked partner (same link_id).
   const [linkAV, setLinkAV] = useState(true);
   const [extraLanes, setExtraLanes] = useState<{ visual: number; audio: number }>({ visual: 0, audio: 0 });
@@ -1486,6 +1489,7 @@ export function VideoReviewEditor({
       const inMulti = !additive && selectedSequenceClipIds.length > 1 && selectedSequenceClipIds.includes(clip.id);
       if (!inMulti) selectSequenceClip(clip.id, additive);
       dragSelectionRef.current = inMulti ? [...selectedSequenceClipIds] : [clip.id];
+      dragLayerRef.current = clip.layer ?? clipDefaultLayer(clip);
       seekTimeline(getTimelineTime(event));
       dragSnapshotRef.current = editSequence;
       setSequenceClipDrag({
@@ -1548,12 +1552,18 @@ export function VideoReviewEditor({
           timeline_end: Number((nextStart + length).toFixed(2)),
         };
         // Vertical: dropping onto another lane in the same zone changes the clip's layer.
+        // Hysteresis — only switch when the cursor is well INSIDE another lane (a deadband
+        // around each border), so jitter near a boundary doesn't flip the lane back and forth
+        // (which would also reflow the lanes and fight the cursor).
         const yWithin = event.clientY - rect.top;
-        const target = laneGeomRef.current.find(
-          (g) => g.zone === sequenceClipDrag.zone && yWithin >= g.top && yWithin < g.bottom
+        const MARGIN = 10;
+        const cand = laneGeomRef.current.find(
+          (g) => g.zone === sequenceClipDrag.zone && yWithin >= g.top + MARGIN && yWithin < g.bottom - MARGIN
         );
-        if (target && target.layer !== (clip.layer ?? sequenceClipDrag.originalLayer)) {
-          fields.layer = target.layer;
+        if (cand) dragLayerRef.current = cand.layer;
+        const committedLayer = dragLayerRef.current;
+        if (committedLayer !== null && committedLayer !== (clip.layer ?? sequenceClipDrag.originalLayer)) {
+          fields.layer = committedLayer;
         }
         applyDragOverwrite(sequenceClipDrag.id, fields);
       }
@@ -1562,6 +1572,7 @@ export function VideoReviewEditor({
       setSequenceClipDrag(null);
       dragSnapshotRef.current = null;
       dragSelectionRef.current = [];
+      dragLayerRef.current = null;
     };
     window.addEventListener('pointermove', moveDrag);
     window.addEventListener('pointerup', clearDrag);
