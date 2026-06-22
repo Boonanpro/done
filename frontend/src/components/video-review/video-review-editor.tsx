@@ -775,6 +775,68 @@ export function VideoReviewEditor({
     clearSelection();
   }, [clearSelection, linkAV, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds]);
 
+  // Ripple delete: remove the selected clip(s) (+ A/V-link partners) AND close the gap by
+  // excising their time span [delStart, delEnd] from the WHOLE timeline, so captions/audio
+  // after the cut stay in sync (talking-head content is timed to the audio). Clips fully
+  // inside the span are dropped; clips after it shift left by the gap; clips straddling a
+  // boundary are trimmed (and a clip spanning the whole span is split into the surviving
+  // head + tail). Span = union of the deleted set, so multi-select collapses everything
+  // between the first and last selected clip — the intuitive "close this region" semantics.
+  const rippleDelete = useCallback(() => {
+    const clipIds = selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : [];
+    if (clipIds.length === 0) { deleteSelected(); return; }
+    setEditSequence((current) => {
+      if (!current) return current;
+      const r = (v: number) => Number(v.toFixed(2));
+      const eps = 0.01;
+      const del = new Set(clipIds);
+      const allClips = (current.tracks || []).flatMap((t) => t.clips || []);
+      if (linkAV) {
+        const linkIds = new Set(allClips.filter((c) => del.has(c.id) && c.link_id).map((c) => c.link_id));
+        allClips.forEach((c) => { if (c.link_id && linkIds.has(c.link_id)) del.add(c.id); });
+      }
+      const delClips = allClips.filter((c) => del.has(c.id));
+      if (delClips.length === 0) return current;
+      const delStart = Math.min(...delClips.map((c) => c.timeline_start));
+      const delEnd = Math.max(...delClips.map((c) => c.timeline_end));
+      const gap = delEnd - delStart;
+      if (gap <= eps) return current;
+      const tracks = (current.tracks || []).map((track) => {
+        const out: SequenceClip[] = [];
+        for (const c of track.clips || []) {
+          const ts = c.timeline_start, te = c.timeline_end;
+          const isAV = Number.isFinite(c.source_end as number);
+          if (te <= delStart + eps) { out.push(c); continue; }              // entirely before the hole
+          if (ts >= delEnd - eps) {                                          // entirely after -> slide left
+            out.push({ ...c, timeline_start: r(ts - gap), timeline_end: r(te - gap) });
+            continue;
+          }
+          // overlaps the hole: keep surviving head [ts, delStart] and tail [delEnd, te] (shifted)
+          const leftDur = delStart - ts;
+          const rightDur = te - delEnd;
+          if (leftDur > eps) {
+            out.push({ ...c, timeline_end: r(delStart), ...(isAV ? { source_end: r(Number(c.source_start || 0) + leftDur) } : {}) });
+          }
+          if (rightDur > eps) {
+            const srcOff = delEnd - ts; // source consumed up to the hole's end
+            out.push({
+              ...c,
+              id: leftDur > eps ? `${c.id}__rp_${makeId()}` : c.id,
+              timeline_start: r(delStart),
+              timeline_end: r(te - gap),
+              ...(isAV ? { source_start: r(Number(c.source_start || 0) + srcOff) } : {}),
+            });
+          }
+          // neither head nor tail survives -> fully inside the hole -> dropped
+        }
+        return { ...track, clips: out };
+      });
+      const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
+      return { ...current, duration: Number(nextDuration.toFixed(3)), tracks };
+    });
+    clearSelection();
+  }, [clearSelection, deleteSelected, linkAV, selectedSequenceClipId, selectedSequenceClipIds]);
+
   // Cut at the playhead: every targeted clip the playhead crosses becomes two clips that
   // join exactly at `t` with continuous source ranges (no frame gained/lost). With a
   // selection we cut only those clips (+ their A/V-link partner); with no selection we cut
@@ -872,7 +934,8 @@ export function VideoReviewEditor({
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault();
-        deleteSelected();
+        if (event.shiftKey) rippleDelete(); // close the gap
+        else deleteSelected();              // leave a gap
         return;
       }
       // Cut at the playhead — S (Premiere C/B style) or Ctrl/Cmd+B.
@@ -892,7 +955,7 @@ export function VideoReviewEditor({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentTime, deleteSelected, duration, fps, redoAnnotations, seekTimeline, splitAtPlayhead, timelineDuration, undoAnnotations]);
+  }, [currentTime, deleteSelected, duration, fps, redoAnnotations, rippleDelete, seekTimeline, splitAtPlayhead, timelineDuration, undoAnnotations]);
 
   const handlePointerDown = useCallback(
     (event: React.PointerEvent) => {
@@ -1915,9 +1978,14 @@ export function VideoReviewEditor({
               <div className="space-y-2 border-t border-border p-3">
                 <div className="flex items-center justify-between">
                   <div className="text-sm font-medium">選択中クリップ</div>
-                  <Button variant="ghost" size="sm" onClick={deleteSelected}>
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
+                  <div className="flex items-center gap-1">
+                    <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" title="詰めて削除（後続を前へ・Shift+Delete）" onClick={rippleDelete}>
+                      詰めて削除
+                    </Button>
+                    <Button variant="ghost" size="sm" className="h-7 w-7 p-0" title="削除（穴あき・Delete）" onClick={deleteSelected}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
                 </div>
                 <Input
                   value={selectedSequenceClip.label || ''}
