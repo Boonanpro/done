@@ -330,6 +330,9 @@ export function VideoReviewEditor({
   // Snapshot of the sequence at the moment a clip drag starts, so overwrite/trim of
   // neighbours is computed from the ORIGINAL state each move (non-cumulative).
   const dragSnapshotRef = useRef<EditSequence | null>(null);
+  // The set of clip ids that move together for the current drag (>1 = block move of the
+  // whole selection; 1 = ordinary single-clip move). Captured at drag start.
+  const dragSelectionRef = useRef<string[]>([]);
   // A/V link: when on, dragging/trimming a clip also moves its linked partner (same link_id).
   const [linkAV, setLinkAV] = useState(true);
   const [extraLanes, setExtraLanes] = useState<{ visual: number; audio: number }>({ visual: 0, audio: 0 });
@@ -1309,11 +1312,44 @@ export function VideoReviewEditor({
     setEditSequence({ ...snap, duration: Number(nextDuration.toFixed(3)), tracks });
   }, [linkAV]);
 
+  // Block move: shift every selected clip (+ A/V-link partners) by the SAME timeline delta,
+  // preserving their relative spacing and source ranges (a move, not a trim). No neighbour
+  // overwrite — a multi-clip move just repositions the block. Computed from the drag-start
+  // snapshot so it's non-cumulative, and clamped so the earliest clip never crosses 0.
+  const applyBlockMove = useCallback((delta: number, ids: string[]) => {
+    const snap = dragSnapshotRef.current;
+    if (!snap) return;
+    const r = (v: number) => Number(v.toFixed(2));
+    const allOrig = (snap.tracks || []).flatMap((t) => t.clips || []);
+    const set = new Set(ids);
+    if (linkAV) {
+      const linkIds = new Set(allOrig.filter((c) => set.has(c.id) && c.link_id).map((c) => c.link_id));
+      allOrig.forEach((c) => { if (c.link_id && linkIds.has(c.link_id)) set.add(c.id); });
+    }
+    const inSet = allOrig.filter((c) => set.has(c.id));
+    if (inSet.length === 0) return;
+    const minStart = Math.min(...inSet.map((c) => c.timeline_start));
+    const eff = Math.max(delta, -minStart); // keep the block at/after t=0
+    const tracks = (snap.tracks || []).map((track) => ({
+      ...track,
+      clips: (track.clips || []).map((c) =>
+        set.has(c.id) ? { ...c, timeline_start: r(c.timeline_start + eff), timeline_end: r(c.timeline_end + eff) } : c
+      ),
+    }));
+    const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
+    setEditSequence({ ...snap, duration: Number(nextDuration.toFixed(3)), tracks });
+  }, [linkAV]);
+
   const startSequenceClipDrag = useCallback(
     (event: React.PointerEvent, clip: SequenceClip, mode: SequenceClipDrag['mode']) => {
       event.preventDefault();
       event.stopPropagation();
-      selectSequenceClip(clip.id, event.shiftKey || event.ctrlKey || event.metaKey);
+      // If the grabbed clip is already part of a multi-selection, keep the whole selection and
+      // move it as a block. Otherwise (re)select just this clip (shift/ctrl toggles into a set).
+      const additive = event.shiftKey || event.ctrlKey || event.metaKey;
+      const inMulti = !additive && selectedSequenceClipIds.length > 1 && selectedSequenceClipIds.includes(clip.id);
+      if (!inMulti) selectSequenceClip(clip.id, additive);
+      dragSelectionRef.current = inMulti ? [...selectedSequenceClipIds] : [clip.id];
       seekTimeline(getTimelineTime(event));
       dragSnapshotRef.current = editSequence;
       setSequenceClipDrag({
@@ -1336,7 +1372,7 @@ export function VideoReviewEditor({
         /* ignore */
       }
     },
-    [editSequence, getTimelineTime, seekTimeline, selectSequenceClip]
+    [editSequence, getTimelineTime, seekTimeline, selectSequenceClip, selectedSequenceClipIds]
   );
 
   useEffect(() => {
@@ -1365,6 +1401,9 @@ export function VideoReviewEditor({
           fields.source_end = Number(clamp(sequenceClipDrag.originalSourceEnd + delta, sequenceClipDrag.originalSourceStart + 0.1, sourceDuration).toFixed(2));
         }
         applyDragOverwrite(sequenceClipDrag.id, fields);
+      } else if (dragSelectionRef.current.length > 1) {
+        // Block move: shift the whole selection together (no lane change, no overwrite).
+        applyBlockMove(delta, dragSelectionRef.current);
       } else {
         const length = sequenceClipDrag.originalTimelineEnd - sequenceClipDrag.originalTimelineStart;
         const nextStart = clamp(sequenceClipDrag.originalTimelineStart + delta, 0, Math.max(0, timelineDuration - length));
@@ -1386,6 +1425,7 @@ export function VideoReviewEditor({
     const clearDrag = () => {
       setSequenceClipDrag(null);
       dragSnapshotRef.current = null;
+      dragSelectionRef.current = [];
     };
     window.addEventListener('pointermove', moveDrag);
     window.addEventListener('pointerup', clearDrag);
@@ -1395,7 +1435,7 @@ export function VideoReviewEditor({
       window.removeEventListener('pointerup', clearDrag);
       window.removeEventListener('pointercancel', clearDrag);
     };
-  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite]);
+  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove]);
 
   return (
     <div className={`flex h-full bg-background text-foreground ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
