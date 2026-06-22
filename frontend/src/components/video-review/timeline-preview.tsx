@@ -480,6 +480,9 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
       }
       const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
       const activeIds = new Set<string>();
+      // active video elements indexed by A/V link, so a linked audio clip can lock to the exact
+      // frame its video is showing (perfect lip-sync) instead of drifting on the wall clock.
+      const activeVidByLink = new Map<string, { el: HTMLVideoElement; srcStart: number }>();
       for (const vc of active) {
         const id = String(vc.clip.id);
         const v = videosRef.current.get(id);
@@ -488,6 +491,7 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         const expected = Number(vc.clip.source_start || 0) + (t - vc.clip.timeline_start);
         if (Math.abs(v.currentTime - expected) > 0.18) v.currentTime = expected;
         if (v.paused) void v.play().catch(() => {});
+        if (vc.clip.link_id) activeVidByLink.set(String(vc.clip.link_id), { el: v, srcStart: Number(vc.clip.source_start || 0) });
       }
       for (const [id, v] of videosRef.current) if (!activeIds.has(id) && !v.paused) v.pause();
 
@@ -516,8 +520,15 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         const a = audiosRef.current.get(id);
         if (!a) continue;
         activeAudioAssets.add(id);
-        const expected = Number(c.source_start || 0) + (t - c.timeline_start);
-        if (Math.abs(a.currentTime - expected) > 0.2) a.currentTime = expected;
+        // Lip-sync: if this audio clip is A/V-linked to a video clip that's playing right now,
+        // lock it to that video element's actual position (tight threshold) so the mouth and
+        // voice stay together even on a long continuous clip. Otherwise track the wall clock.
+        const linkedVid = c.link_id ? activeVidByLink.get(String(c.link_id)) : undefined;
+        const expected = linkedVid
+          ? linkedVid.el.currentTime + (Number(c.source_start || 0) - linkedVid.srcStart)
+          : Number(c.source_start || 0) + (t - c.timeline_start);
+        const threshold = linkedVid ? 0.05 : 0.2;
+        if (Math.abs(a.currentTime - expected) > threshold) a.currentTime = expected;
         a.muted = false;
         a.volume = c.role === 'music' ? 0.5 : c.role === 'sfx' ? 0.8 : 1;
         if (a.paused) void a.play().catch(() => {});
