@@ -1347,6 +1347,52 @@ export function VideoReviewEditor({
   // delete, or split any same-lane (same-track+layer) neighbour it now overlaps. With A/V
   // link on, the dragged clip's linked partner (same link_id) gets the SAME shift and
   // overwrites its own lane too. Computed from the drag-start snapshot (non-cumulative).
+  // Shared commit for any set of "moved" clips (single drag or multi-clip block): place each
+  // moved clip at its new fields and overwrite same-lane (track+layer) NON-moved neighbours it
+  // now overlaps — trim the overhang, delete if fully covered, or split if covered in the
+  // middle (DaVinci/Premiere overwrite). The overlap-aware target lookup lets several moved
+  // clips on one lane each overwrite their own neighbour.
+  const commitMovedSet = useCallback((snap: EditSequence, moved: Map<string, Partial<SequenceClip>>) => {
+    const r = (v: number) => Number(v.toFixed(2));
+    const allOrig = (snap.tracks || []).flatMap((t) => (t.clips || []).map((c) => ({ ...c, track: c.track || t.type })));
+    const targets = Array.from(moved.entries()).map(([id, f]) => {
+      const o = allOrig.find((c) => c.id === id)!;
+      return {
+        id,
+        lane: `${o.track || ''}#${f.layer ?? o.layer ?? 0}`,
+        as: Number(f.timeline_start ?? o.timeline_start),
+        ae: Number(f.timeline_end ?? o.timeline_end),
+      };
+    });
+    const tracks = (snap.tracks || []).map((track) => {
+      const out: SequenceClip[] = [];
+      for (const c of track.clips || []) {
+        const mv = moved.get(c.id);
+        if (mv) { out.push({ ...c, ...mv }); continue; }
+        const lane = `${c.track || track.type || ''}#${c.layer ?? 0}`;
+        const t = targets.find((x) => x.lane === lane && x.id !== c.id && x.ae > c.timeline_start + 0.001 && x.as < c.timeline_end - 0.001);
+        if (!t) { out.push(c); continue; } // not overlapped by any moved clip on this lane
+        const bs = c.timeline_start, be = c.timeline_end;
+        const isAV = Number.isFinite(c.source_end as number);
+        if (t.as <= bs + 0.001 && t.ae >= be - 0.001) continue; // fully covered -> delete
+        if (t.as <= bs + 0.001) {
+          const d = t.ae - bs;
+          out.push({ ...c, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + d) } : {}) });
+        } else if (t.ae >= be - 0.001) {
+          const d = be - t.as;
+          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_end || 0) - d) } : {}) });
+        } else {
+          const dl = t.as - bs, dr = t.ae - bs;
+          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_start || 0) + dl) } : {}) });
+          out.push({ ...c, id: `${c.id}__r`, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + dr) } : {}) });
+        }
+      }
+      return { ...track, clips: out };
+    });
+    const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
+    setEditSequence({ ...snap, duration: Number(nextDuration.toFixed(3)), tracks });
+  }, []);
+
   const applyDragOverwrite = useCallback((draggedId: string, fields: Partial<SequenceClip>) => {
     const snap = dragSnapshotRef.current;
     if (!snap) return;
@@ -1376,59 +1422,14 @@ export function VideoReviewEditor({
       }
       moved.set(partner.id, pf);
     }
-
-    // Lanes that a moved clip now occupies become overwrite targets.
-    const targets = Array.from(moved.entries()).map(([id, f]) => {
-      const o = allOrig.find((c) => c.id === id)!;
-      return {
-        id,
-        lane: `${o.track || ''}#${f.layer ?? o.layer ?? 0}`,
-        as: Number(f.timeline_start ?? o.timeline_start),
-        ae: Number(f.timeline_end ?? o.timeline_end),
-      };
-    });
-
-    const tracks = (snap.tracks || []).map((track) => {
-      const out: SequenceClip[] = [];
-      for (const c of track.clips || []) {
-        const mv = moved.get(c.id);
-        if (mv) {
-          out.push({ ...c, ...mv });
-          continue;
-        }
-        const lane = `${c.track || track.type || ''}#${c.layer ?? 0}`;
-        const t = targets.find((x) => x.lane === lane && x.id !== c.id);
-        if (!t || t.ae <= c.timeline_start + 0.001 || t.as >= c.timeline_end - 0.001) {
-          out.push(c); // not in an overwritten lane, or no overlap
-          continue;
-        }
-        const bs = c.timeline_start, be = c.timeline_end;
-        const isAV = Number.isFinite(c.source_end as number);
-        if (t.as <= bs + 0.001 && t.ae >= be - 0.001) {
-          continue; // fully covered -> delete
-        }
-        if (t.as <= bs + 0.001) {
-          const d = t.ae - bs;
-          out.push({ ...c, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + d) } : {}) });
-        } else if (t.ae >= be - 0.001) {
-          const d = be - t.as;
-          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_end || 0) - d) } : {}) });
-        } else {
-          const dl = t.as - bs, dr = t.ae - bs;
-          out.push({ ...c, timeline_end: r(t.as), ...(isAV ? { source_end: r(Number(c.source_start || 0) + dl) } : {}) });
-          out.push({ ...c, id: `${c.id}__r`, timeline_start: r(t.ae), ...(isAV ? { source_start: r(Number(c.source_start || 0) + dr) } : {}) });
-        }
-      }
-      return { ...track, clips: out };
-    });
-    const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
-    setEditSequence({ ...snap, duration: Number(nextDuration.toFixed(3)), tracks });
-  }, [linkAV]);
+    commitMovedSet(snap, moved);
+  }, [linkAV, commitMovedSet]);
 
   // Block move: shift every selected clip (+ A/V-link partners) by the SAME timeline delta,
-  // preserving their relative spacing and source ranges (a move, not a trim). No neighbour
-  // overwrite — a multi-clip move just repositions the block. Computed from the drag-start
-  // snapshot so it's non-cumulative, and clamped so the earliest clip never crosses 0.
+  // preserving their relative spacing and source ranges (a move, not a trim). Non-moved
+  // neighbours the block now overlaps get trimmed/deleted/split just like a single-clip move.
+  // Computed from the drag-start snapshot (non-cumulative); clamped so the earliest clip
+  // never crosses 0.
   const applyBlockMove = useCallback((delta: number, ids: string[]) => {
     const snap = dragSnapshotRef.current;
     if (!snap) return;
@@ -1443,15 +1444,10 @@ export function VideoReviewEditor({
     if (inSet.length === 0) return;
     const minStart = Math.min(...inSet.map((c) => c.timeline_start));
     const eff = Math.max(delta, -minStart); // keep the block at/after t=0
-    const tracks = (snap.tracks || []).map((track) => ({
-      ...track,
-      clips: (track.clips || []).map((c) =>
-        set.has(c.id) ? { ...c, timeline_start: r(c.timeline_start + eff), timeline_end: r(c.timeline_end + eff) } : c
-      ),
-    }));
-    const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
-    setEditSequence({ ...snap, duration: Number(nextDuration.toFixed(3)), tracks });
-  }, [linkAV]);
+    const moved = new Map<string, Partial<SequenceClip>>();
+    for (const c of inSet) moved.set(c.id, { timeline_start: r(c.timeline_start + eff), timeline_end: r(c.timeline_end + eff) });
+    commitMovedSet(snap, moved);
+  }, [linkAV, commitMovedSet]);
 
   const startSequenceClipDrag = useCallback(
     (event: React.PointerEvent, clip: SequenceClip, mode: SequenceClipDrag['mode']) => {
