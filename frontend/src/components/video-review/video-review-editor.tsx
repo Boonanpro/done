@@ -339,6 +339,8 @@ export function VideoReviewEditor({
   // Right-drag rubber-band selection over the timeline (left-drag is reserved for scrub/move).
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
+  // Live ghost of a material being dragged over the timeline (before it's dropped).
+  const [dropPreview, setDropPreview] = useState<{ zone: 'visual' | 'audio'; layer: number; start: number; len: number } | null>(null);
   const [videoPath, setVideoPath] = useState(initialPath || '');
   const [videoUrl, setVideoUrl] = useState(initialUrl || '');
   const [duration] = useState(0);
@@ -1290,13 +1292,13 @@ export function VideoReviewEditor({
   // Insert a new clip from a dragged source asset at the drop time/lane. Video assets only for
   // now (the dominant case; the material list is video-content). The video lands on the 'video'
   // track at the dropped lane's layer (0 = fullscreen, higher = overlay/PiP) and its AUDIO lands
-  // on the 'audio' track, A/V-linked (shared link_id) so they move/trim/delete together. Source
-  // windows start at 0 for the asset's length (capped) so it plays from the top.
+  // on the 'audio' track, A/V-linked (shared link_id) so they move/trim/delete together. The
+  // clip spans the asset's FULL length (no cap) from source 0, so the whole material is placed.
   const insertSequenceClip = useCallback(
     (payload: { id: string; kind?: string; duration?: number | string | null; label?: string | null }, dropTime: number, zone: 'visual' | 'audio', layer: number) => {
       if (zone !== 'visual' || payload.kind !== 'video') return; // video onto a visual lane
       const rawLen = Number(payload.duration);
-      const len = Number.isFinite(rawLen) && rawLen > 0 ? Math.min(rawLen, 30) : DROP_DEFAULT_LEN;
+      const len = Number.isFinite(rawLen) && rawLen > 0 ? rawLen : DROP_DEFAULT_LEN;
       const start = Math.max(0, Number(dropTime) || 0);
       const ts = Number(start.toFixed(2)), te = Number((start + len).toFixed(2)), se = Number(len.toFixed(2));
       const linkId = `lk_${makeId()}`;
@@ -1328,27 +1330,43 @@ export function VideoReviewEditor({
     [selectSequenceClip]
   );
 
-  const handleLaneDragOver = useCallback((event: React.DragEvent) => {
-    if (Array.from(event.dataTransfer.types).includes(ASSET_DND_TYPE)) {
-      event.preventDefault();
-      event.dataTransfer.dropEffect = 'copy';
-    }
-  }, []);
+  // While a material is dragged over the timeline, show a live ghost of where it will land
+  // (and how long it is) so it's visually clear it entered — even before the button is
+  // released. The drag payload isn't readable during dragover (HTML5), so the source side
+  // stashes the asset on window at dragstart; we read its duration for the ghost width.
+  const dropTimeFromEvent = useCallback((clientX: number) => {
+    const rect = timelineRef.current?.getBoundingClientRect();
+    if (!rect || !timelineDuration) return null;
+    const frac = (clientX - rect.left) / rect.width;
+    return clamp(frac * timelineDuration, 0, timelineDuration);
+  }, [timelineDuration]);
+
+  const handleLaneDragOver = useCallback((event: React.DragEvent, lane: TimelineLane) => {
+    if (!Array.from(event.dataTransfer.types).includes(ASSET_DND_TYPE)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    if (lane.zone !== 'visual') { setDropPreview(null); return; } // video lands on a visual lane
+    const start = dropTimeFromEvent(event.clientX);
+    if (start === null) return;
+    const dragged = (typeof window !== 'undefined' ? (window as unknown as { __danDragAsset?: { duration?: number | string | null } }).__danDragAsset : null) || null;
+    const rawLen = Number(dragged?.duration);
+    const len = Number.isFinite(rawLen) && rawLen > 0 ? rawLen : DROP_DEFAULT_LEN;
+    setDropPreview({ zone: lane.zone, layer: lane.layer, start, len });
+  }, [dropTimeFromEvent]);
 
   const handleLaneDrop = useCallback(
     (event: React.DragEvent, lane: TimelineLane) => {
+      setDropPreview(null);
       const raw = event.dataTransfer.getData(ASSET_DND_TYPE);
       if (!raw) return;
       event.preventDefault();
       let payload: { id: string; kind?: string; duration?: number | string | null; label?: string | null };
       try { payload = JSON.parse(raw); } catch { return; }
-      const rect = timelineRef.current?.getBoundingClientRect();
-      if (!rect || !timelineDuration) return;
-      const frac = (event.clientX - rect.left) / rect.width;
-      const dropTime = clamp(frac * timelineDuration, 0, timelineDuration);
+      const dropTime = dropTimeFromEvent(event.clientX);
+      if (dropTime === null) return;
       insertSequenceClip(payload, dropTime, lane.zone, lane.layer);
     },
-    [insertSequenceClip, timelineDuration]
+    [insertSequenceClip, dropTimeFromEvent]
   );
 
   // DaVinci/Premiere-style overwrite: place the dragged clip at its new range and trim,
@@ -1558,6 +1576,17 @@ export function VideoReviewEditor({
   // Rubber-band (marquee) select: while a right-drag is active, draw the rectangle and on
   // release select every clip bar (data-clip-id) whose on-screen box intersects it. A tiny
   // drag (< 5px) is treated as a no-op so a plain right-click doesn't change the selection.
+  // Clear the drag ghost when the drag operation ends anywhere (drop, cancel, or leaving).
+  useEffect(() => {
+    const clear = () => setDropPreview(null);
+    window.addEventListener('dragend', clear);
+    window.addEventListener('drop', clear);
+    return () => {
+      window.removeEventListener('dragend', clear);
+      window.removeEventListener('drop', clear);
+    };
+  }, []);
+
   const marqueeActive = marquee !== null;
   useEffect(() => {
     if (!marqueeActive) return;
@@ -1923,10 +1952,21 @@ export function VideoReviewEditor({
                             }}
                             onPointerUp={() => setTimelineDrag(null)}
                             onPointerCancel={() => setTimelineDrag(null)}
-                            onDragOver={handleLaneDragOver}
+                            onDragOver={(event) => handleLaneDragOver(event, lane)}
                             onDrop={(event) => handleLaneDrop(event, lane)}
                           >
                             <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
+                            {dropPreview && dropPreview.zone === lane.zone && dropPreview.layer === lane.layer && timelineDuration ? (
+                              <div
+                                className="pointer-events-none absolute top-0.5 bottom-0.5 z-10 rounded border-2 border-dashed border-sky-300 bg-sky-400/25"
+                                style={{
+                                  left: `${(dropPreview.start / timelineDuration) * 100}%`,
+                                  width: `${Math.max(0.8, (dropPreview.len / timelineDuration) * 100)}%`,
+                                }}
+                              >
+                                <span className="px-1 text-[9px] text-sky-100">ここに追加</span>
+                              </div>
+                            ) : null}
                             {lane.items.map((item) => {
                               const left = timelineDuration ? (item.start / timelineDuration) * 100 : 0;
                               const width = timelineDuration ? Math.max(0.8, ((item.end - item.start) / timelineDuration) * 100) : 1;
