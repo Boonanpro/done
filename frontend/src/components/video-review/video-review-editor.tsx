@@ -11,6 +11,7 @@ import {
   Pencil,
   Play,
   Save,
+  Scissors,
   Square,
   Trash2,
   Redo2,
@@ -774,6 +775,59 @@ export function VideoReviewEditor({
     clearSelection();
   }, [clearSelection, linkAV, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds]);
 
+  // Cut at the playhead: every targeted clip the playhead crosses becomes two clips that
+  // join exactly at `t` with continuous source ranges (no frame gained/lost). With a
+  // selection we cut only those clips (+ their A/V-link partner); with no selection we cut
+  // every clip under the playhead. Each pair of right-halves gets a fresh shared link_id so
+  // A/V partners stay paired on both sides of the cut. Total duration is unchanged.
+  const splitClipAtTime = useCallback((t: number, clipIds?: Set<string>) => {
+    setEditSequence((current) => {
+      if (!current) return current;
+      const r = (v: number) => Number(v.toFixed(2));
+      const inside = (c: SequenceClip) => t > c.timeline_start + 0.05 && t < c.timeline_end - 0.05;
+      const allClips = (current.tracks || []).flatMap((tr) => tr.clips || []);
+      let targets: Set<string>;
+      if (clipIds && clipIds.size > 0) {
+        targets = new Set(clipIds);
+        if (linkAV) {
+          const linkIds = new Set(allClips.filter((c) => targets.has(c.id) && c.link_id).map((c) => c.link_id));
+          allClips.forEach((c) => { if (c.link_id && linkIds.has(c.link_id)) targets.add(c.id); });
+        }
+      } else {
+        targets = new Set(allClips.filter(inside).map((c) => c.id));
+      }
+      if (targets.size === 0) return current;
+      const rightLink = new Map<string, string>(); // original link_id -> new link_id for right halves
+      let cut = 0;
+      const tracks = (current.tracks || []).map((track) => {
+        const out: SequenceClip[] = [];
+        for (const c of track.clips || []) {
+          if (!(targets.has(c.id) && inside(c))) { out.push(c); continue; }
+          cut += 1;
+          const d = t - c.timeline_start;
+          const isAV = Number.isFinite(c.source_end as number);
+          let newLink: string | undefined;
+          if (c.link_id) {
+            newLink = rightLink.get(c.link_id);
+            if (!newLink) { newLink = `lk_${makeId()}`; rightLink.set(c.link_id, newLink); }
+          }
+          out.push({ ...c, timeline_end: r(t), ...(isAV ? { source_end: r(Number(c.source_start || 0) + d) } : {}) });
+          out.push({ ...c, id: `${c.id}__s_${makeId()}`, timeline_start: r(t),
+            ...(isAV ? { source_start: r(Number(c.source_start || 0) + d) } : {}),
+            ...(newLink ? { link_id: newLink } : {}) });
+        }
+        return { ...track, clips: out };
+      });
+      if (cut === 0) return current;
+      return { ...current, tracks };
+    });
+  }, [linkAV]);
+
+  const splitAtPlayhead = useCallback(() => {
+    const ids = new Set(selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
+    splitClipAtTime(currentTime, ids);
+  }, [currentTime, selectedSequenceClipId, selectedSequenceClipIds, splitClipAtTime]);
+
   const undoAnnotations = useCallback(() => {
     const previous = historyPastRef.current.pop();
     if (!previous) return;
@@ -821,6 +875,12 @@ export function VideoReviewEditor({
         deleteSelected();
         return;
       }
+      // Cut at the playhead — S (Premiere C/B style) or Ctrl/Cmd+B.
+      if ((!modKey && (event.key === 's' || event.key === 'S')) || (modKey && event.key.toLowerCase() === 'b')) {
+        event.preventDefault();
+        splitAtPlayhead();
+        return;
+      }
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
         event.preventDefault();
         setPlaying(false);
@@ -832,7 +892,7 @@ export function VideoReviewEditor({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentTime, deleteSelected, duration, fps, redoAnnotations, seekTimeline, timelineDuration, undoAnnotations]);
+  }, [currentTime, deleteSelected, duration, fps, redoAnnotations, seekTimeline, splitAtPlayhead, timelineDuration, undoAnnotations]);
 
   const handlePointerDown = useCallback(
     (event: React.PointerEvent) => {
@@ -1507,6 +1567,15 @@ export function VideoReviewEditor({
                   onClick={() => setPlaying((p) => !p)}
                 >
                   {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 w-7 p-0"
+                  title="再生ヘッドで分割 (S)"
+                  onClick={splitAtPlayhead}
+                >
+                  <Scissors className="h-4 w-4" />
                 </Button>
                 <div className="flex items-center gap-1">
                   <Button variant="outline" size="sm" className="h-7 w-7 p-0" title="ズームアウト"
