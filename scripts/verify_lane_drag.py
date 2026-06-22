@@ -76,11 +76,23 @@ try:
         page.mouse.move(gx, v1cy); page.mouse.down()
         for k in range(1, 11):
             page.mouse.move(gx, v1cy + (other['cy'] - v1cy) * k / 10); page.wait_for_timeout(25)
+        # NOW jitter +/-4px around the target lane center and sample which row V1 sits in — it
+        # must stay put (no flicker between lanes). Read V1 bar's center Y each jitter step.
+        ys = []
+        for dy in (0, 4, -4, 3, -3, 2, -2, 0):
+            page.mouse.move(gx, other['cy'] + dy); page.wait_for_timeout(60)
+            box = page.evaluate("""() => { const el = document.querySelector("[data-clip-id='V1']");
+                if (!el) return null; const r = el.getBoundingClientRect(); return Math.round(r.top + r.height/2); }""")
+            if box is not None:
+                ys.append(box)
         page.mouse.up()
         page.wait_for_timeout(1500)
         layer_after, track_after = v1_layer()
-        print("V1 layer after:", (layer_after, track_after))
+        print("V1 layer after:", (layer_after, track_after), "| jitter Ys:", ys)
         check("dragging into another lane changed V1's layer", layer_after != 0, f"layer={layer_after}")
+        # stability: V1's row should not bounce during jitter (spread of its center Y stays small)
+        spread = (max(ys) - min(ys)) if ys else 999
+        check("no lane flicker during jitter (V1 row stable)", spread <= 12, f"Y spread={spread}px")
         b.close()
 finally:
     cpath = P._room_dir(ROOM) / "contents.json"
