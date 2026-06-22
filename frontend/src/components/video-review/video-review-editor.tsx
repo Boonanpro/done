@@ -498,7 +498,12 @@ export function VideoReviewEditor({
     () => Number(editSequence?.duration || Math.max(0, ...sequenceVideoClips.map((clip) => clip.timeline_end || 0))),
     [editSequence, sequenceVideoClips]
   );
-  const timelineDuration = sequenceDuration > 0 ? sequenceDuration : duration;
+  // Real content end (used for the time readout and playback).
+  const contentDuration = sequenceDuration > 0 ? sequenceDuration : duration;
+  // The timeline VIEW spans a bit past the content so there's breathing room at the end to
+  // drop/move clips (otherwise the last clip is flush against the right edge = cramped).
+  // Every px<->sec mapping uses this, so clips, drags and scrub all stay consistent.
+  const timelineDuration = contentDuration > 0 ? contentDuration + Math.max(3, contentDuration * 0.08) : contentDuration;
   const previewAspect = useMemo(() => {
     const [a, b] = (editSequence?.format || initialSequence?.format || '9:16').split(':');
     return `${Number(a) || 9} / ${Number(b) || 16}`;
@@ -1016,7 +1021,7 @@ export function VideoReviewEditor({
     if (!event.shiftKey) return;
     event.preventDefault();
     const direction = event.deltaY > 0 ? -1 : 1;
-    setTimelineZoom((value) => Number(clamp(value + direction * 0.2, 1, 6).toFixed(2)));
+    setTimelineZoom((value) => Number(clamp(value + direction * 0.2, 1, 8).toFixed(2)));
     window.requestAnimationFrame(() => {
       const scroller = timelineScrollRef.current;
       const track = timelineRef.current;
@@ -1503,8 +1508,16 @@ export function VideoReviewEditor({
                 >
                   {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
                 </Button>
+                <div className="flex items-center gap-1">
+                  <Button variant="outline" size="sm" className="h-7 w-7 p-0" title="ズームアウト"
+                    onClick={() => setTimelineZoom((v) => Number(clamp(v - 0.5, 1, 8).toFixed(2)))}>−</Button>
+                  <Button variant="outline" size="sm" className="h-7 px-2 text-[10px]" title="全体にフィット"
+                    onClick={() => setTimelineZoom(1)}>{Math.round(timelineZoom * 100)}%</Button>
+                  <Button variant="outline" size="sm" className="h-7 w-7 p-0" title="ズームイン"
+                    onClick={() => setTimelineZoom((v) => Number(clamp(v + 0.5, 1, 8).toFixed(2)))}>＋</Button>
+                </div>
                 <div className="text-sm tabular-nums text-muted-foreground">
-                  {fmtTime(currentTime)} / {fmtTime(timelineDuration)}
+                  {fmtTime(currentTime)} / {fmtTime(contentDuration)}
                 </div>
               </div>
               {openNoteKey ? (
