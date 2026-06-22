@@ -50,6 +50,18 @@ def main() -> int:
     slug = root_slug if not rest else f"{root_slug}-{'-'.join(part for part in rest.split('/') if part)}"
     preview_path = f"/{folder}/{root_slug}" + (f"/{rest}" if rest else "")
 
+    # 成果物 (artifacts のみ。demo は除外) は favicon を自前アイコンに配線する。
+    # ルート slug 単位 (例 kittoku-careers でも kittoku の layout/icon を整える)。
+    if folder == "artifacts":
+        try:
+            sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+            from wire_artifact_icons import wire_slug
+
+            status = wire_slug(root_slug)
+            sys.stderr.write(f"[artifact icon] {root_slug} -> {status}\n")
+        except Exception as e:
+            sys.stderr.write(f"[artifact icon] failed: {e}\n")
+
     room_id = os.environ.get("DAN_ROOM_ID") or os.environ.get("DAN_SESSION_ID")
     project_id = os.environ.get("DAN_PROJECT_ID")
     if not room_id or not project_id:

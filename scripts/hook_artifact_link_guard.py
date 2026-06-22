@@ -38,7 +38,19 @@ def _is_allowed_file(path: Path) -> bool:
     )
 
 
+# アイコン / manifest / 画像などの静的アセットは、preview / 独自ドメインでも
+# 同じ /artifacts/<slug>/... から配信される（ナビゲーションではない）。
+# これらは metadata.icons 等で絶対パス指定が必要なので誤検知しないよう除外する。
+_ASSET_URL = re.compile(
+    r"['\"]\/artifacts\/[\w-]+\/[^'\"]*"
+    r"\.(?:png|jpe?g|svg|ico|webmanifest|webp|gif|avif|mp4|webm|json|css|woff2?)"
+    r"(?:[?#][^'\"]*)?['\"]"
+)
+
+
 def _violations(text: str, slug: str) -> list[str]:
+    # 静的アセット参照を先に取り除いてから navigation を判定する。
+    scrubbed = _ASSET_URL.sub("''", text)
     patterns = [
         (r"href\s*=\s*['\"]\/artifacts\/", "hard-coded Link href"),
         (r"href\s*=\s*\{`\/artifacts\/", "hard-coded template Link href"),
@@ -46,7 +58,7 @@ def _violations(text: str, slug: str) -> list[str]:
     ]
     found: list[str] = []
     for pattern, label in patterns:
-        if re.search(pattern, text):
+        if re.search(pattern, scrubbed):
             found.append(label)
     return found
 

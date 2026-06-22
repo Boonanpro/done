@@ -206,6 +206,28 @@ return <MainApp />;          // gate.isPreview が true のときは常にここ
 
 ---
 
+### 8. favicon（ブラウザタブ・検索結果のアイコン）
+
+成果物の favicon は **自動で配線される**（何もしなくてよい）。
+`page.tsx` を書くと PostToolUse hook (`hook_register_artifact.py`) が
+`scripts/wire_artifact_icons.py` を呼び、そのページ用のアイコンを生成して
+`layout.tsx` の `metadata.icons` に焼き込む。これをやらないとタブも検索結果も
+ルートのデフォルト favicon（バーセル）に落ちる。
+
+- **デフォルト**: テーマ色 + 屋号の頭文字（ロゴ画像 `public/artifacts/<slug>/logo.png`
+  があればそれを優先）。
+- **アイコンを変えたいと言われたら**: 画像を用意して
+  `python scripts/set_artifact_icon.py --slug <slug> --image <path>` を実行する。
+  （AI生成が必要なら先に `media-gen` で作ってからこのコマンドに渡す。画像生成は
+  自分でやる ─ ユーザーに丸投げしない）。
+- **client component の `layout.tsx` には `metadata` を書けない**。その場合は
+  layout を server component にし、`"use client"` の中身を `theme-shell.tsx` 等に
+  分離してから配線する（実例: `artifacts/kittoku`, `artifacts/yonago-gojo`）。
+- アイコンのパス (`/artifacts/<slug>/icon-*.png`) は静的アセットなので
+  `metadata.icons` に絶対パスで直書きしてよい（link guard の対象外）。
+
+---
+
 ## 用途別ルール
 
 ---
