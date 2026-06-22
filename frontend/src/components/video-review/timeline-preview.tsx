@@ -162,6 +162,10 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
   const audiosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const rafRef = useRef<number | null>(null);
   const playClockRef = useRef<{ wall: number; t: number } | null>(null);
+  // Clip ids that were active LAST frame, so we seek a media element only when it first
+  // becomes active (or drifts a lot) — not every frame, which warbles a playing element.
+  const prevActiveVideoRef = useRef<Set<string>>(new Set());
+  const prevActiveAudioRef = useRef<Set<string>>(new Set());
 
   const dims = useMemo(() => canvasDims(format), [format]);
 
@@ -472,6 +476,8 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
       playClockRef.current = null;
+      prevActiveVideoRef.current = new Set();
+      prevActiveAudioRef.current = new Set();
       for (const [, v] of videosRef.current) v.pause();
       for (const [, a] of audiosRef.current) a.pause();
       return;
@@ -496,18 +502,16 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
       }
       const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
       const activeIds = new Set<string>();
-      // active video elements indexed by A/V link, so a linked audio clip can lock to the exact
-      // frame its video is showing (perfect lip-sync) instead of drifting on the wall clock.
-      const activeVidByLink = new Map<string, { el: HTMLVideoElement; srcStart: number }>();
       for (const vc of active) {
         const id = String(vc.clip.id);
         const v = videosRef.current.get(id);
         if (!v) continue;
         activeIds.add(id);
         const expected = Number(vc.clip.source_start || 0) + (t - vc.clip.timeline_start);
-        if (Math.abs(v.currentTime - expected) > 0.18) v.currentTime = expected;
+        // Seek only when the clip JUST became active (align it once) or it drifted a lot.
+        // Seeking a playing element every frame stutters it; left alone it plays at rate 1.
+        if (!prevActiveVideoRef.current.has(id) || Math.abs(v.currentTime - expected) > 0.3) v.currentTime = expected;
         if (v.paused) void v.play().catch(() => {});
-        if (vc.clip.link_id) activeVidByLink.set(String(vc.clip.link_id), { el: v, srcStart: Number(vc.clip.source_start || 0) });
       }
       for (const [id, v] of videosRef.current) if (!activeIds.has(id) && !v.paused) v.pause();
 
@@ -536,20 +540,20 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         const a = audiosRef.current.get(id);
         if (!a) continue;
         activeAudioClips.add(id);
-        // Lip-sync: if this audio clip is A/V-linked to a video clip that's playing right now,
-        // lock it to that video element's actual position (tight threshold) so the mouth and
-        // voice stay together even on a long continuous clip. Otherwise track the wall clock.
-        const linkedVid = c.link_id ? activeVidByLink.get(String(c.link_id)) : undefined;
-        const expected = linkedVid
-          ? linkedVid.el.currentTime + (Number(c.source_start || 0) - linkedVid.srcStart)
-          : Number(c.source_start || 0) + (t - c.timeline_start);
-        const threshold = linkedVid ? 0.05 : 0.2;
-        if (Math.abs(a.currentTime - expected) > threshold) a.currentTime = expected;
+        // Seek the audio element ONLY when its clip just became active (align it once to the
+        // wall clock) or it drifted a lot (>0.3s). Re-seeking a PLAYING audio element every
+        // frame is exactly what made the voice warble / sound underwater. Video & audio are
+        // both aligned to the same wall-clock time at onset, so they stay lip-synced as they
+        // play at rate 1 — without chasing each other frame by frame.
+        const expected = Number(c.source_start || 0) + (t - c.timeline_start);
+        if (!prevActiveAudioRef.current.has(id) || Math.abs(a.currentTime - expected) > 0.3) a.currentTime = expected;
         a.muted = false;
         a.volume = c.role === 'music' ? 0.5 : c.role === 'sfx' ? 0.8 : 1;
         if (a.paused) void a.play().catch(() => {});
       }
       for (const [id, a] of audiosRef.current) if (!activeAudioClips.has(id) && !a.paused) a.pause();
+      prevActiveVideoRef.current = activeIds;
+      prevActiveAudioRef.current = activeAudioClips;
 
       drawFrame(t);
       onTimeChange(Number(t.toFixed(3)));

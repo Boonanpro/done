@@ -704,8 +704,8 @@ export function ProductionWorkspace({
         sequenceAssets={selectedSourceAssets.filter((asset) => asset.kind === 'video').map(sequenceAssetForEditor)}
         sidePanelTop={
           <div className="mb-3 space-y-3">
-            <div className="rounded-md border border-sky-400/60 bg-sky-50/40 p-3">
-              <div className="mb-1 text-sm font-medium">✂ カット調整（無音・間）</div>
+            <div className="rounded-md border border-sky-500/50 bg-sky-500/10 p-3">
+              <div className="mb-1 text-sm font-medium text-foreground">✂ カット調整（無音・間）</div>
               <p className="mb-2 text-[11px] text-muted-foreground">
                 無音をどれくらい詰めるかを後から調整できます。ダンの「どこを残すか」の判断は変えず、間の詰め具合だけ作り直します。
               </p>
