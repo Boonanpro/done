@@ -619,8 +619,17 @@ export function ProductionWorkspace({
       );
       if (!res.ok) throw new Error(await res.text());
       const body = await res.json();
-      toast.success(`再カットしました（無音>${silenceThreshold.toFixed(2)}秒を詰め・${body.cut_count ?? 0}箇所・約${Math.round(body.removed_total ?? 0)}秒短縮）`);
-      await loadAll();
+      toast.success(`再カット完了 ✓ 無音>${silenceThreshold.toFixed(2)}秒を詰め・${body.cut_count ?? 0}箇所・約${Math.round(body.removed_total ?? 0)}秒短縮（クリップ${body.clip_count ?? '?'}個）`);
+      // Update the open content IN PLACE from the response so the timeline just refreshes —
+      // a full loadAll() momentarily blanks the editor and looked like "all clips vanished".
+      if (body.sequence) {
+        const updatedTimeline = { ...(selectedContent.timeline as Record<string, unknown>), sequence: body.sequence };
+        const updated = { ...selectedContent, timeline: updatedTimeline };
+        setSelectedContent(updated);
+        setContents((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+      } else {
+        await loadAll();
+      }
     } catch (error) {
       toast.error('再カットに失敗しました', { description: String(error).slice(0, 200) });
     } finally {
@@ -733,7 +742,7 @@ export function ProductionWorkspace({
                       : ''}
                   </div>
                 ) : (
-                  <div className="text-[10px] text-amber-600">この素材はまだ自動カット情報がありません（ダンで作った素材で使えます）。</div>
+                  <div className="text-[10px] text-muted-foreground">まだ無音調整していません。スライダーを設定して「再カット」を押すと適用されます（ダンが作った素材で動きます）。</div>
                 )}
                 <Button className="w-full" size="sm" disabled={isRecutting} onClick={() => void recut()}>
                   {isRecutting ? '再カット中…' : 'この設定で再カット'}
