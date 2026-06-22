@@ -63,22 +63,34 @@ try:
         check("material thumbnail is draggable", bool(drag_src))
 
         # simulate HTML5 DnD with a shared DataTransfer so onDragStart's setData reaches onDrop
-        res = page.evaluate("""() => {
+        # phase 1: dragstart + dragover, then check the live ghost (drop preview) appeared
+        over = page.evaluate("""() => {
           const src = document.querySelector("[title='ドラッグでタイムラインに追加']");
           const lanes = Array.from(document.querySelectorAll('div')).filter(e => {
             const c=(e.className||'').toString();
             return c.includes('bg-neutral-900') && e.getBoundingClientRect().width > 300; });
           const lane = lanes[0];
           if (!src || !lane) return {ok:false};
-          const dt = new DataTransfer();
+          window.__mqLane = lane;
+          const dt = new DataTransfer(); window.__mqDT = dt;
           src.dispatchEvent(new DragEvent('dragstart', {bubbles:true, cancelable:true, dataTransfer:dt}));
           const r = lane.getBoundingClientRect();
           const clientX = r.left + r.width*0.5, clientY = r.top + r.height/2;
+          window.__mqXY = {clientX, clientY};
           lane.dispatchEvent(new DragEvent('dragover', {bubbles:true, cancelable:true, dataTransfer:dt, clientX, clientY}));
-          lane.dispatchEvent(new DragEvent('drop', {bubbles:true, cancelable:true, dataTransfer:dt, clientX, clientY}));
-          return {ok:true, payload: dt.getData('application/x-dan-asset'), dropFracApprox: 0.5};
+          return {ok:true, stashed: !!window.__danDragAsset};
         }""")
-        print("dispatch result:", res)
+        page.wait_for_timeout(300)
+        ghost = page.evaluate("""() => { const g = Array.from(document.querySelectorAll('div'))
+            .find(e => (e.className||'').includes('border-sky-300') && e.textContent && e.textContent.includes('ここに追加'));
+            if (!g) return null; const r = g.getBoundingClientRect(); return {w: Math.round(r.width)}; }""")
+        print("dragover stashed asset:", over, "| ghost:", ghost)
+        check("live drop-preview ghost shown during dragover", bool(ghost))
+        # phase 2: drop
+        page.evaluate("""() => {
+          const dt = window.__mqDT, lane = window.__mqLane, xy = window.__mqXY;
+          lane.dispatchEvent(new DragEvent('drop', {bubbles:true, cancelable:true, dataTransfer:dt, clientX:xy.clientX, clientY:xy.clientY}));
+        }""")
         page.wait_for_timeout(1500)
         b.close()
 
@@ -92,7 +104,8 @@ try:
         check("new clip references the dropped asset (MAIN)", nc.get("asset_id") == MAIN)
         check("new clip placed at the drop time (mid-timeline, not 0)", nc["timeline_start"] > 1.0,
               f"start={nc['timeline_start']}")
-        check("new clip has positive length", nc["timeline_end"] > nc["timeline_start"])
+        clen = nc["timeline_end"] - nc["timeline_start"]
+        check("new clip uses the FULL asset length (no 30s cap)", clen > 100, f"len={clen:.1f}s (asset ~715s)")
         check("new clip is on the video track / fullscreen-or-overlay",
               nc.get("track") == "video" and nc.get("composition") in ("fullscreen", "overlay"))
         # the dropped video must bring its AUDIO too, A/V-linked

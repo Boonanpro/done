@@ -666,16 +666,20 @@ export function ProductionWorkspace({
                     onDragStart={(event) => {
                       if (asset.kind !== 'video') return;
                       // payload shape matches the editor's ASSET_DND_TYPE consumer
-                      event.dataTransfer.setData(
-                        'application/x-dan-asset',
-                        JSON.stringify({
-                          id: asset.id,
-                          kind: asset.kind,
-                          duration: asset.metadata?.duration,
-                          label: asset.filename || asset.original_uri,
-                        })
-                      );
+                      const payload = {
+                        id: asset.id,
+                        kind: asset.kind,
+                        duration: asset.metadata?.duration,
+                        label: asset.filename || asset.original_uri,
+                      };
+                      event.dataTransfer.setData('application/x-dan-asset', JSON.stringify(payload));
                       event.dataTransfer.effectAllowed = 'copy';
+                      // dataTransfer.getData is unreadable during dragover, so expose the asset
+                      // (for the timeline's live drop-preview ghost) via window until dragend.
+                      (window as unknown as { __danDragAsset?: typeof payload }).__danDragAsset = payload;
+                    }}
+                    onDragEnd={() => {
+                      delete (window as unknown as { __danDragAsset?: unknown }).__danDragAsset;
                     }}
                     title={asset.kind === 'video' ? 'ドラッグでタイムラインに追加' : undefined}
                     className={`overflow-hidden rounded border border-border bg-muted/30 ${asset.kind === 'video' ? 'cursor-grab active:cursor-grabbing' : ''}`}
