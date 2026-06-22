@@ -163,6 +163,12 @@ function makeId(): string {
   return `ann_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+// dataTransfer key for dragging a source asset from the material list onto the timeline.
+// Keep in sync with the producer (production-workspace.tsx).
+const ASSET_DND_TYPE = 'application/x-dan-asset';
+// Fallback clip length (s) when a dropped asset has no known duration.
+const DROP_DEFAULT_LEN = 5;
+
 type TimelineDrag = {
   id: string;
   mode: 'move' | 'start' | 'end';
@@ -1230,6 +1236,66 @@ export function VideoReviewEditor({
     updateSequenceClips(ids, patch);
   }, [selectedSequenceClipId, selectedSequenceClipIds, updateSequenceClips]);
 
+  // Insert a new clip from a dragged source asset at the drop time/lane. Video assets only for
+  // now (the dominant case; the material list is video-content). The clip lands on the 'video'
+  // track at the dropped lane's layer — layer 0 = fullscreen, higher = overlay/PiP — and the
+  // source window starts at 0 for the asset's length (capped) so it plays from the top.
+  const insertSequenceClip = useCallback(
+    (payload: { id: string; kind?: string; duration?: number | string | null; label?: string | null }, dropTime: number, zone: 'visual' | 'audio', layer: number) => {
+      if (zone !== 'visual' || payload.kind !== 'video') return; // video onto a visual lane
+      const rawLen = Number(payload.duration);
+      const len = Number.isFinite(rawLen) && rawLen > 0 ? Math.min(rawLen, 30) : DROP_DEFAULT_LEN;
+      const start = Math.max(0, Number(dropTime) || 0);
+      const newId = `clip_${makeId()}`;
+      const clip: SequenceClip = {
+        id: newId,
+        asset_id: payload.id,
+        label: payload.label || '素材',
+        source_start: 0,
+        source_end: Number(len.toFixed(2)),
+        timeline_start: Number(start.toFixed(2)),
+        timeline_end: Number((start + len).toFixed(2)),
+        track: 'video',
+        layer,
+        composition: layer > 0 ? 'overlay' : 'fullscreen',
+      };
+      setEditSequence((current) => {
+        const base = current || { tracks: [] };
+        const tracks = (base.tracks || []).map((t) => ({ ...t, clips: [...(t.clips || [])] }));
+        let vt = tracks.find((t) => t.type === 'video');
+        if (!vt) { vt = { id: `tk_${makeId()}`, type: 'video', clips: [] }; tracks.push(vt); }
+        vt.clips = [...(vt.clips || []), clip];
+        const nextDuration = Math.max(0, ...tracks.flatMap((t) => (t.clips || []).map((c) => c.timeline_end || 0)));
+        return { ...base, tracks, duration: Number(nextDuration.toFixed(3)) };
+      });
+      selectSequenceClip(newId);
+    },
+    [selectSequenceClip]
+  );
+
+  const handleLaneDragOver = useCallback((event: React.DragEvent) => {
+    if (Array.from(event.dataTransfer.types).includes(ASSET_DND_TYPE)) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+    }
+  }, []);
+
+  const handleLaneDrop = useCallback(
+    (event: React.DragEvent, lane: TimelineLane) => {
+      const raw = event.dataTransfer.getData(ASSET_DND_TYPE);
+      if (!raw) return;
+      event.preventDefault();
+      let payload: { id: string; kind?: string; duration?: number | string | null; label?: string | null };
+      try { payload = JSON.parse(raw); } catch { return; }
+      const rect = timelineRef.current?.getBoundingClientRect();
+      if (!rect || !timelineDuration) return;
+      const frac = (event.clientX - rect.left) / rect.width;
+      const dropTime = clamp(frac * timelineDuration, 0, timelineDuration);
+      insertSequenceClip(payload, dropTime, lane.zone, lane.layer);
+    },
+    [insertSequenceClip, timelineDuration]
+  );
+
   // DaVinci/Premiere-style overwrite: place the dragged clip at its new range and trim,
   // delete, or split any same-lane (same-track+layer) neighbour it now overlaps. With A/V
   // link on, the dragged clip's linked partner (same link_id) gets the SAME shift and
@@ -1733,6 +1799,8 @@ export function VideoReviewEditor({
                             }}
                             onPointerUp={() => setTimelineDrag(null)}
                             onPointerCancel={() => setTimelineDrag(null)}
+                            onDragOver={handleLaneDragOver}
+                            onDrop={(event) => handleLaneDrop(event, lane)}
                           >
                             <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(90deg,rgba(127,127,127,0.12)_0,rgba(127,127,127,0.12)_1px,transparent_1px,transparent_48px)]" />
                             {lane.items.map((item) => {

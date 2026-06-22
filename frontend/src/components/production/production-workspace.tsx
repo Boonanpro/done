@@ -660,10 +660,29 @@ export function ProductionWorkspace({
               </div>
               <div className="grid grid-cols-2 gap-2">
                 {selectedSourceAssets.map((asset) => (
-                  <div key={asset.id} className="overflow-hidden rounded border border-border bg-muted/30">
+                  <div
+                    key={asset.id}
+                    draggable={asset.kind === 'video'}
+                    onDragStart={(event) => {
+                      if (asset.kind !== 'video') return;
+                      // payload shape matches the editor's ASSET_DND_TYPE consumer
+                      event.dataTransfer.setData(
+                        'application/x-dan-asset',
+                        JSON.stringify({
+                          id: asset.id,
+                          kind: asset.kind,
+                          duration: asset.metadata?.duration,
+                          label: asset.filename || asset.original_uri,
+                        })
+                      );
+                      event.dataTransfer.effectAllowed = 'copy';
+                    }}
+                    title={asset.kind === 'video' ? 'ドラッグでタイムラインに追加' : undefined}
+                    className={`overflow-hidden rounded border border-border bg-muted/30 ${asset.kind === 'video' ? 'cursor-grab active:cursor-grabbing' : ''}`}
+                  >
                     <div className="flex aspect-video items-center justify-center bg-muted">
                       {asset.thumbnail_url ? (
-                        <img src={asset.thumbnail_url} alt="" className="h-full w-full object-cover" />
+                        <img src={asset.thumbnail_url} alt="" className="pointer-events-none h-full w-full object-cover" />
                       ) : (
                         <Film className="h-5 w-5 text-muted-foreground" />
                       )}
