@@ -207,11 +207,6 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
     () => (sequence?.tracks || []).filter((t) => t.type === 'audio').flatMap((t) => t.clips || []),
     [sequence],
   );
-  const audioAssets = useMemo(() => {
-    const ids = new Set(audioClips.map((c) => String(c.asset_id || '')).filter(Boolean));
-    return videoAssets.filter((a) => ids.has(a.id));
-  }, [audioClips, videoAssets]);
-
   const assetById = useMemo(() => {
     const m = new Map<string, SequenceAsset>();
     for (const a of videoAssets) m.set(a.id, a);
@@ -289,28 +284,44 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
     }
   }, [currentTime, visualClips]);
 
-  // hidden audio elements for assets referenced by audio clips
+  // Hidden audio elements — ONE PER AUDIO CLIP (keyed by clip id), like the video layers. The
+  // same asset can back several audio clips at once (e.g. a dropped full-length clip overlapping
+  // existing clips); a single shared element would be yanked to conflicting source times each
+  // frame, causing the audio to jump / drift. Per-clip elements (recycled by asset to avoid
+  // reloads) give each active clip its own, collision-free playhead.
   useEffect(() => {
     const map = audiosRef.current;
-    const wanted = new Set(audioAssets.map((a) => a.id));
-    for (const [id, el] of map) {
-      if (!wanted.has(id)) {
-        el.remove();
-        map.delete(id);
+    const wanted = new Map<string, string>(); // clipId -> assetId
+    for (const c of audioClips) {
+      const aid = String(c.asset_id || '');
+      if (aid) wanted.set(String(c.id), aid);
+    }
+    const orphansByAsset = new Map<string, HTMLVideoElement[]>();
+    for (const [cid, el] of map) {
+      if (!wanted.has(cid)) {
+        const aid = el.dataset.assetId || '';
+        (orphansByAsset.get(aid) || orphansByAsset.set(aid, []).get(aid)!).push(el);
+        map.delete(cid);
       }
     }
-    for (const a of audioAssets) {
-      if (map.has(a.id)) continue;
+    for (const [cid, aid] of wanted) {
+      if (map.has(cid)) continue;
+      const recycled = orphansByAsset.get(aid)?.pop();
+      if (recycled) { map.set(cid, recycled); continue; }
+      const a = assetById.get(aid);
+      if (!a) continue;
       const v = document.createElement('video');
       v.src = assetSrc(a);
+      v.dataset.assetId = aid;
       v.muted = true; // unmuted only while its clip is active during playback
       v.playsInline = true;
       v.preload = 'auto';
       v.style.display = 'none';
       document.body.appendChild(v);
-      map.set(a.id, v);
+      map.set(cid, v);
     }
-  }, [audioAssets]);
+    for (const list of orphansByAsset.values()) for (const el of list) el.remove();
+  }, [audioClips, assetById]);
 
   // full unmount cleanup
   useEffect(() => {
@@ -512,14 +523,14 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         }
       }
 
-      // audio: play each active audio clip's source (dedicated elements); pause the rest
-      const activeAudioAssets = new Set<string>();
+      // audio: play each active audio clip's source (one dedicated element per clip); pause rest
+      const activeAudioClips = new Set<string>();
       for (const c of audioClips) {
         if (!(t >= c.timeline_start && t < c.timeline_end)) continue;
-        const id = String(c.asset_id || '');
+        const id = String(c.id);
         const a = audiosRef.current.get(id);
         if (!a) continue;
-        activeAudioAssets.add(id);
+        activeAudioClips.add(id);
         // Lip-sync: if this audio clip is A/V-linked to a video clip that's playing right now,
         // lock it to that video element's actual position (tight threshold) so the mouth and
         // voice stay together even on a long continuous clip. Otherwise track the wall clock.
@@ -533,7 +544,7 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         a.volume = c.role === 'music' ? 0.5 : c.role === 'sfx' ? 0.8 : 1;
         if (a.paused) void a.play().catch(() => {});
       }
-      for (const [id, a] of audiosRef.current) if (!activeAudioAssets.has(id) && !a.paused) a.pause();
+      for (const [id, a] of audiosRef.current) if (!activeAudioClips.has(id) && !a.paused) a.pause();
 
       drawFrame(t);
       onTimeChange(Number(t.toFixed(3)));
