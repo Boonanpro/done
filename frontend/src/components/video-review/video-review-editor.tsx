@@ -159,6 +159,24 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+// Serialization-stable signature of a value: sorts object keys and rounds numbers so the
+// SAME logical sequence compares equal even after a backend round-trip reorders keys or
+// reformats numbers (2 -> 2.0). Used to tell an autosave echo (skip) from a genuine new
+// baseline (load + reset undo history).
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(value as Record<string, unknown>).sort()) out[k] = canonicalize((value as Record<string, unknown>)[k]);
+    return out;
+  }
+  if (typeof value === 'number') return Math.round(value * 1000) / 1000;
+  return value;
+}
+function seqSig(seq: unknown): string {
+  return JSON.stringify(canonicalize(seq ?? null));
+}
+
 function makeId(): string {
   return `ann_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -309,10 +327,15 @@ export function VideoReviewEditor({
   const stageRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
-  const historyPastRef = useRef<ReviewAnnotation[][]>([]);
-  const historyFutureRef = useRef<ReviewAnnotation[][]>([]);
-  const historySnapshotRef = useRef('[]');
-  const isHistoryJumpRef = useRef(false);
+  // Unified undo/redo: one stack of combined {annotations, sequence} snapshots so Ctrl+Z
+  // steps back through ALL edits (clip moves/cuts/deletes AND annotation changes) in the
+  // order they happened. Rapid bursts (a drag, a slider sweep) coalesce into one entry.
+  type HistEntry = { annotations: ReviewAnnotation[]; sequence: EditSequence | null };
+  const histPastRef = useRef<HistEntry[]>([]);
+  const histFutureRef = useRef<HistEntry[]>([]);
+  const histPrevRef = useRef<HistEntry | null>(null);   // last observed state (baseline for the next diff)
+  const histCheckpointRef = useRef<HistEntry | null>(null); // pre-burst state pending a coalesced push
+  const histTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [videoPath, setVideoPath] = useState(initialPath || '');
   const [videoUrl, setVideoUrl] = useState(initialUrl || '');
   const [duration] = useState(0);
@@ -496,13 +519,27 @@ export function VideoReviewEditor({
   // re-creates an equal-value sequence object on each poll; without this guard the
   // effect would reset editSequence every few seconds and wipe in-progress manual
   // edits (drag/trim/delete appeared to "do nothing").
-  const lastSyncedSeqSig = useRef<string>('__init__');
+  // The single source of truth for "what value is in sync with the backend". Advanced when we
+  // adopt a parent value AND when we autosave. The parent polls and can lag (serve a value the
+  // backend had a moment ago); comparing the INCOMING value against this — not against the live
+  // edit — means a stale echo (== lastSynced) is skipped, so local edits/undo aren't reverted
+  // during the save lag. Only an incoming value that differs from lastSynced is a genuine new
+  // baseline (Dan render / external change) → adopt it and reset the undo history. Canonical
+  // compare ignores key order / number reformat from the round-trip.
+  const lastSyncedSig = useRef<string>(seqSig(initialSequence));
   useEffect(() => {
-    const sig = JSON.stringify(initialSequence ?? null);
-    if (sig === lastSyncedSeqSig.current) return;
-    lastSyncedSeqSig.current = sig;
+    const sig = seqSig(initialSequence);
+    if (sig === lastSyncedSig.current) return;
+    lastSyncedSig.current = sig;
+    // genuine new baseline: reset undo history and pre-sync histPrevRef so the resulting
+    // setEditSequence isn't itself recorded as an undoable step.
+    histPastRef.current = [];
+    histFutureRef.current = [];
+    histCheckpointRef.current = null;
+    if (histTimerRef.current) { clearTimeout(histTimerRef.current); histTimerRef.current = null; }
+    histPrevRef.current = { annotations, sequence: initialSequence || null };
     setEditSequence(initialSequence || null);
-  }, [initialSequence]);
+  }, [annotations, initialSequence]);
 
   const sequenceDuration = useMemo(
     () => Number(editSequence?.duration || Math.max(0, ...sequenceVideoClips.map((clip) => clip.timeline_end || 0))),
@@ -552,21 +589,38 @@ export function VideoReviewEditor({
     [annotations, duration, editSequence, videoPath, videoUrl]
   );
 
-  useEffect(() => {
-    const snapshot = JSON.stringify(annotations);
-    if (snapshot === historySnapshotRef.current) return;
-    if (isHistoryJumpRef.current) {
-      historySnapshotRef.current = snapshot;
-      isHistoryJumpRef.current = false;
-      return;
+  // Push the pending pre-burst checkpoint into the undo stack (called when the coalesce
+  // window closes, or eagerly right before an undo/redo so nothing in-flight is lost).
+  const flushHistory = useCallback(() => {
+    if (histTimerRef.current) { clearTimeout(histTimerRef.current); histTimerRef.current = null; }
+    if (histCheckpointRef.current) {
+      histPastRef.current = [...histPastRef.current.slice(-79), histCheckpointRef.current];
+      histFutureRef.current = [];
+      histCheckpointRef.current = null;
     }
-    historyPastRef.current = [
-      ...historyPastRef.current.slice(-79),
-      JSON.parse(historySnapshotRef.current) as ReviewAnnotation[],
-    ];
-    historyFutureRef.current = [];
-    historySnapshotRef.current = snapshot;
-  }, [annotations]);
+  }, []);
+
+  useEffect(() => {
+    const cur: HistEntry = { annotations, sequence: editSequence };
+    if (histPrevRef.current === null) { histPrevRef.current = cur; return; }
+    const prev = histPrevRef.current;
+    // Programmatic restores (undo/redo/baseline/load) pre-set histPrevRef to the value they
+    // apply, so this comparison sees "no change" and records nothing — no fragile flag needed.
+    if (prev.annotations === annotations && prev.sequence === editSequence) return;
+    // Open a coalesce window capturing the state BEFORE this burst; reset the timer on each
+    // change so a continuous gesture lands as a single undo step.
+    if (histCheckpointRef.current === null) histCheckpointRef.current = prev;
+    histPrevRef.current = cur;
+    if (histTimerRef.current) clearTimeout(histTimerRef.current);
+    histTimerRef.current = setTimeout(() => {
+      histTimerRef.current = null;
+      if (histCheckpointRef.current) {
+        histPastRef.current = [...histPastRef.current.slice(-79), histCheckpointRef.current];
+        histFutureRef.current = [];
+        histCheckpointRef.current = null;
+      }
+    }, 300);
+  }, [annotations, editSequence]);
 
   const getPoint = useCallback((event: React.PointerEvent): Point | null => {
     const stage = stageRef.current;
@@ -594,10 +648,15 @@ export function VideoReviewEditor({
       const data = (await res.json()) as SessionPayload;
       const loadedAnnotations = data.annotations || [];
       const nextAnnotations = loadedAnnotations.length > 0 ? loadedAnnotations : initialAnnotations || [];
-      isHistoryJumpRef.current = true;
-      historyPastRef.current = [];
-      historyFutureRef.current = [];
-      historySnapshotRef.current = JSON.stringify(nextAnnotations);
+      // This effect re-runs on every parent poll (new prop refs); only actually load — and
+      // reset the undo history — when the fetched annotations differ from what we show, else
+      // a poll would wipe the undo stack of in-progress sequence edits.
+      if (JSON.stringify(nextAnnotations) === JSON.stringify(histPrevRef.current?.annotations ?? [])) return;
+      histPastRef.current = [];
+      histFutureRef.current = [];
+      histCheckpointRef.current = null;
+      // pre-sync the baseline so this load isn't recorded as an undoable edit
+      histPrevRef.current = { annotations: nextAnnotations, sequence: histPrevRef.current?.sequence ?? null };
       setAnnotations(nextAnnotations);
     } catch (err) {
       // Network blip (e.g. the sandbox restarting mid-edit) must NOT crash the editor —
@@ -635,16 +694,16 @@ export function VideoReviewEditor({
 
   // Auto-save manual edits (debounced) so a page refresh keeps them. The parent
   // re-creates onSaveTimeline/payload on every poll-driven re-render, so we hold them
-  // in a ref and re-arm the debounce ONLY when the edited sequence changes — otherwise
-  // the timer would be cleared every couple seconds and never fire. Advancing
-  // lastSyncedSeqSig keeps the prop down-sync from treating our own save as a change.
+  // in a ref and re-arm the debounce ONLY when the edited sequence actually changes
+  // (canonical compare) — otherwise the timer would be cleared every couple seconds and
+  // never fire, and we'd re-save echoes/undo round-trips in a loop.
   const autoSaveRef = useRef<{ save?: typeof onSaveTimeline; payload: SessionPayload }>({ save: onSaveTimeline, payload });
   autoSaveRef.current = { save: onSaveTimeline, payload };
   useEffect(() => {
-    const sig = JSON.stringify(editSequence ?? null);
-    if (sig === lastSyncedSeqSig.current) return;
+    const sig = seqSig(editSequence);
+    if (sig === lastSyncedSig.current) return; // unchanged since last sync/save -> nothing to save
     const timer = window.setTimeout(() => {
-      lastSyncedSeqSig.current = sig;
+      lastSyncedSig.current = sig; // our save is now the known in-sync value (parent echoes skip)
       void autoSaveRef.current.save?.(autoSaveRef.current.payload);
     }, 1200);
     return () => window.clearTimeout(timer);
@@ -899,23 +958,26 @@ export function VideoReviewEditor({
     splitClipAtTime(currentTime, ids);
   }, [currentTime, selectedSequenceClipId, selectedSequenceClipIds, splitClipAtTime]);
 
-  const undoAnnotations = useCallback(() => {
-    const previous = historyPastRef.current.pop();
+  const undo = useCallback(() => {
+    flushHistory();
+    const previous = histPastRef.current.pop();
     if (!previous) return;
-    historyFutureRef.current = [annotations, ...historyFutureRef.current].slice(0, 80);
-    isHistoryJumpRef.current = true;
-    setAnnotations(previous);
+    histFutureRef.current = [{ annotations, sequence: editSequence }, ...histFutureRef.current].slice(0, 80);
+    histPrevRef.current = previous; // pre-sync so restoring doesn't record a new entry
+    setAnnotations(previous.annotations);
+    setEditSequence(previous.sequence);
     clearSelection();
-  }, [annotations, clearSelection]);
+  }, [annotations, editSequence, flushHistory, clearSelection]);
 
-  const redoAnnotations = useCallback(() => {
-    const next = historyFutureRef.current.shift();
+  const redo = useCallback(() => {
+    const next = histFutureRef.current.shift();
     if (!next) return;
-    historyPastRef.current = [...historyPastRef.current.slice(-79), annotations];
-    isHistoryJumpRef.current = true;
-    setAnnotations(next);
+    histPastRef.current = [...histPastRef.current.slice(-79), { annotations, sequence: editSequence }];
+    histPrevRef.current = next;
+    setAnnotations(next.annotations);
+    setEditSequence(next.sequence);
     clearSelection();
-  }, [annotations, clearSelection]);
+  }, [annotations, editSequence, clearSelection]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -927,13 +989,13 @@ export function VideoReviewEditor({
       const modKey = event.ctrlKey || event.metaKey;
       if (modKey && event.key.toLowerCase() === 'z') {
         event.preventDefault();
-        if (event.shiftKey) redoAnnotations();
-        else undoAnnotations();
+        if (event.shiftKey) redo();
+        else undo();
         return;
       }
       if (modKey && event.key.toLowerCase() === 'y') {
         event.preventDefault();
-        redoAnnotations();
+        redo();
         return;
       }
       if (event.code === 'Space') {
@@ -964,7 +1026,7 @@ export function VideoReviewEditor({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentTime, deleteSelected, duration, fps, redoAnnotations, rippleDelete, seekTimeline, splitAtPlayhead, timelineDuration, undoAnnotations]);
+  }, [currentTime, deleteSelected, duration, fps, redo, rippleDelete, seekTimeline, splitAtPlayhead, timelineDuration, undo]);
 
   const handlePointerDown = useCallback(
     (event: React.PointerEvent) => {
@@ -1516,10 +1578,10 @@ export function VideoReviewEditor({
             <div className="text-sm font-semibold">Dan Review Editor</div>
             <div className="truncate text-xs text-muted-foreground">{videoPath || videoUrl || 'No video selected'}</div>
           </div>
-          <Button variant="ghost" size="sm" onClick={undoAnnotations} title="Undo">
+          <Button variant="ghost" size="sm" onClick={undo} title="元に戻す (Ctrl+Z)">
             <Undo2 className="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="sm" onClick={redoAnnotations} title="Redo">
+          <Button variant="ghost" size="sm" onClick={redo} title="やり直す (Ctrl+Shift+Z)">
             <Redo2 className="h-4 w-4" />
           </Button>
           <Button variant="outline" size="sm" onClick={() => void saveSession()} disabled={isSaving}>
