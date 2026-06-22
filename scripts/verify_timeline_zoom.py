@@ -36,15 +36,24 @@ with sync_playwright() as p:
         print(f"[PASS] trailing space present (max right {info['maxRightPct']}% < 96%)" if ok_space
               else f"[FAIL] no trailing space (max right {info['maxRightPct']}%)")
 
-    zin = page.query_selector("button[title='ズームイン']")
-    fit = page.query_selector("button[title='全体にフィット']")
-    print("zoom-in btn:", bool(zin), "| fit btn:", bool(fit))
-    if zin and fit:
-        before = fit.inner_text()
-        zin.click(); page.wait_for_timeout(300)
-        after = fit.inner_text()
-        print(f"[{'PASS' if after != before else 'FAIL'}] zoom-in changed level {before} -> {after}")
-        fit.click(); page.wait_for_timeout(300)
-        reset = fit.inner_text()
-        print(f"[{'PASS' if reset == '100%' else 'FAIL'}] fit reset to {reset}")
+    slider = page.query_selector("input[aria-label='タイムラインズーム']")
+    print("zoom slider present:", bool(slider))
+    if slider:
+        def pct():
+            return page.evaluate("""() => { const s = document.querySelector("input[aria-label='タイムラインズーム']");
+                const lbl = s && s.parentElement && s.parentElement.querySelector('span:last-child');
+                return lbl ? lbl.textContent : null; }""")
+        before = pct()
+        # drive the range input to 4x and fire React's onChange
+        page.evaluate("""() => {
+          const s = document.querySelector("input[aria-label='タイムラインズーム']");
+          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter.call(s, '4');
+          s.dispatchEvent(new Event('input', { bubbles: true }));
+          s.dispatchEvent(new Event('change', { bubbles: true }));
+        }""")
+        page.wait_for_timeout(300)
+        after = pct()
+        print(f"[{'PASS' if after != before and after else 'FAIL'}] slider changed zoom {before} -> {after}")
+        print(f"[{'PASS' if after == '400%' else 'FAIL'}] slider value applied (expected 400%): {after}")
     b.close()
