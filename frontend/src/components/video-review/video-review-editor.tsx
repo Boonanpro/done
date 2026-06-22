@@ -1793,13 +1793,20 @@ export function VideoReviewEditor({
                 >
                   <Scissors className="h-4 w-4" />
                 </Button>
-                <div className="flex items-center gap-1">
-                  <Button variant="outline" size="sm" className="h-7 w-7 p-0" title="ズームアウト"
-                    onClick={() => setTimelineZoom((v) => Number(clamp(v - 0.5, 1, 8).toFixed(2)))}>−</Button>
-                  <Button variant="outline" size="sm" className="h-7 px-2 text-[10px]" title="全体にフィット"
-                    onClick={() => setTimelineZoom(1)}>{Math.round(timelineZoom * 100)}%</Button>
-                  <Button variant="outline" size="sm" className="h-7 w-7 p-0" title="ズームイン"
-                    onClick={() => setTimelineZoom((v) => Number(clamp(v + 0.5, 1, 8).toFixed(2)))}>＋</Button>
+                <div className="flex items-center gap-2" title="タイムラインの拡大率（左端＝全体表示）">
+                  <span className="text-[10px] text-muted-foreground">ズーム</span>
+                  <input
+                    type="range"
+                    min={1}
+                    max={8}
+                    step={0.1}
+                    value={timelineZoom}
+                    aria-label="タイムラインズーム"
+                    onChange={(event) => setTimelineZoom(Number(clamp(Number(event.target.value), 1, 8).toFixed(2)))}
+                    onDoubleClick={() => setTimelineZoom(1)}
+                    className="h-1 w-28 cursor-pointer accent-sky-500"
+                  />
+                  <span className="w-9 text-right text-[10px] tabular-nums text-muted-foreground">{Math.round(timelineZoom * 100)}%</span>
                 </div>
                 <div className="text-sm tabular-nums text-muted-foreground">
                   {fmtTime(currentTime)} / {fmtTime(contentDuration)}
