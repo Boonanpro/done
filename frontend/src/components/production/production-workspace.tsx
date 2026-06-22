@@ -796,52 +796,6 @@ export function ProductionWorkspace({
               </div>
             </div>
             <div className="rounded-md border border-border p-3">
-              <div className="mb-1 text-sm font-medium">カット調整（無音・間）</div>
-              <p className="mb-2 text-[11px] text-muted-foreground">
-                無音をどれくらい詰めるかを後から調整できます。ダンの「どこを残すか」の判断は変えず、間の詰め具合だけ作り直します。
-              </p>
-              <div className="space-y-2">
-                <div>
-                  <div className="mb-0.5 flex items-center justify-between text-[11px]">
-                    <span>無音しきい値</span>
-                    <span className="tabular-nums text-muted-foreground">{silenceThreshold.toFixed(2)}秒 より長い無音を詰める</span>
-                  </div>
-                  <input
-                    type="range" min={0.2} max={1.5} step={0.05} value={silenceThreshold}
-                    onChange={(e) => setSilenceThreshold(Number(e.target.value))}
-                    className="h-1 w-full cursor-pointer accent-sky-500"
-                  />
-                  <div className="flex justify-between text-[9px] text-muted-foreground"><span>テンポ速く</span><span>間を残す</span></div>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <div className="mb-0.5 text-[10px] text-muted-foreground">カット前の余白 {leadPad.toFixed(2)}秒</div>
-                    <input type="range" min={0} max={0.4} step={0.02} value={leadPad}
-                      onChange={(e) => setLeadPad(Number(e.target.value))} className="h-1 w-full cursor-pointer accent-sky-500" />
-                  </div>
-                  <div>
-                    <div className="mb-0.5 text-[10px] text-muted-foreground">カット後の余白 {tailPad.toFixed(2)}秒</div>
-                    <input type="range" min={0} max={0.6} step={0.02} value={tailPad}
-                      onChange={(e) => setTailPad(Number(e.target.value))} className="h-1 w-full cursor-pointer accent-sky-500" />
-                  </div>
-                </div>
-                {selectedCutParams ? (
-                  <div className="text-[10px] text-muted-foreground">
-                    現在: 無音&gt;{(selectedCutParams.silence_threshold ?? 0.45).toFixed(2)}秒で詰め済
-                    {typeof (selectedContent.timeline as { sequence?: { removed_total?: number } } | undefined)?.sequence?.removed_total === 'number'
-                      ? `・約${Math.round((selectedContent.timeline as { sequence?: { removed_total?: number } }).sequence!.removed_total!)}秒短縮`
-                      : ''}
-                  </div>
-                ) : (
-                  <div className="text-[10px] text-amber-600">この素材はまだ自動カット情報がありません（ダンで作った素材で使えます）。</div>
-                )}
-                <Button className="w-full" size="sm" variant="outline" disabled={isRecutting} onClick={() => void recut()}>
-                  {isRecutting ? '再カット中…' : 'この設定で再カット'}
-                </Button>
-                <p className="text-[9px] text-muted-foreground">※再カットすると手動のクリップ編集はリセットされます（まず自動カット→その後で手調整の順）。</p>
-              </div>
-            </div>
-            <div className="rounded-md border border-border p-3">
               <div className="mb-1 text-sm font-medium">Danに直してもらう</div>
               <p className="mb-2 text-xs text-muted-foreground">
                 手編集（クリップ調整やテロップのデザイン）は自動で反映されます。ここは、文章で指示するか、タイムラインに指示クリップを置いてDanに直してもらう時だけ使います。
