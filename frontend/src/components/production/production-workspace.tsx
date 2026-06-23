@@ -147,6 +147,14 @@ export function ProductionWorkspace({
   const [leadPad, setLeadPad] = useState(0.06);
   const [tailPad, setTailPad] = useState(0.1);
   const [isRecutting, setIsRecutting] = useState(false);
+  // Screen-recording privacy blur (E1/E2): hide credentials / sensitive on-screen text on export.
+  const [sbEnabled, setSbEnabled] = useState(false);
+  const [sbPatterns, setSbPatterns] = useState<string[]>(['email', 'digits']);
+  const [sbTargets, setSbTargets] = useState('');
+  const [sbStyle, setSbStyle] = useState('mosaic');
+  const [sbProbing, setSbProbing] = useState(false);
+  const [sbSaving, setSbSaving] = useState(false);
+  const [sbMatched, setSbMatched] = useState<string[] | null>(null);
 
   const hasProcessing = useMemo(() => assets.some((a) => a.status === 'processing'), [assets]);
   const selectedContentAssets = useMemo(
@@ -648,6 +656,67 @@ export function ProductionWorkspace({
     }
   };
 
+  // Load the saved screen-blur spec when switching content.
+  useEffect(() => {
+    const sb = (selectedContent?.timeline as { screen_blur?: { enabled?: boolean; patterns?: string[]; targets?: string[]; style?: string } } | undefined)?.screen_blur;
+    setSbEnabled(!!sb?.enabled);
+    setSbPatterns(sb?.patterns ?? ['email', 'digits']);
+    setSbTargets((sb?.targets ?? []).join(', '));
+    setSbStyle(sb?.style ?? 'mosaic');
+    setSbMatched(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedContent?.id]);
+
+  const sbSpecBody = (enabled: boolean) => ({
+    room_id: roomId,
+    enabled,
+    patterns: sbPatterns,
+    targets: sbTargets.split(',').map((t) => t.trim()).filter(Boolean),
+    style: sbStyle,
+  });
+
+  const probeScreenBlur = async () => {
+    if (!selectedContent) return;
+    setSbProbing(true);
+    setSbMatched(null);
+    try {
+      const res = await fetch(`/api/v1/production-assets/contents/${selectedContent.id}/screen-blur/probe`, {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sbSpecBody(true)),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const body = await res.json();
+      setSbMatched(body.matched || []);
+    } catch (error) {
+      toast.error('検出に失敗しました', { description: String(error).slice(0, 160) });
+    } finally {
+      setSbProbing(false);
+    }
+  };
+
+  const saveScreenBlur = async (enabled: boolean) => {
+    if (!selectedContent) return;
+    setSbSaving(true);
+    try {
+      const res = await fetch(`/api/v1/production-assets/contents/${selectedContent.id}/screen-blur`, {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(sbSpecBody(enabled)),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const body = await res.json();
+      const updatedTimeline = { ...(selectedContent.timeline as Record<string, unknown>), screen_blur: body.screen_blur };
+      const updated = { ...selectedContent, timeline: updatedTimeline };
+      setSelectedContent(updated);
+      setContents((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+      setSbEnabled(enabled);
+      toast.success(enabled ? '秘匿ぼかしを有効化しました（書き出し時に適用）' : '秘匿ぼかしを解除しました');
+    } catch (error) {
+      toast.error('保存に失敗しました', { description: String(error).slice(0, 160) });
+    } finally {
+      setSbSaving(false);
+    }
+  };
+
   // Caption audio-sync: ask the backend for per-word timings under each caption (cached Whisper,
   // else runs it) so karaoke/typewriter follow the real voice. Returns {captionId: words[]} which
   // the editor merges into its own clips (so the user's just-picked design isn't clobbered).
@@ -791,6 +860,68 @@ export function ProductionWorkspace({
                   {isRecutting ? '再カット中…' : 'この設定で再カット'}
                 </Button>
                 <p className="text-[9px] text-muted-foreground">※再カットすると手動のクリップ編集はリセットされます（まず自動カット→その後で手調整の順）。</p>
+              </div>
+            </div>
+            <div className={`rounded-md border p-3 ${sbEnabled ? 'border-rose-500/60 bg-rose-500/10' : 'border-border'}`}>
+              <div className="mb-1 flex items-center justify-between">
+                <div className="text-sm font-medium text-foreground">🛡 秘匿ぼかし（画面録画）</div>
+                {sbEnabled ? <span className="text-[10px] text-rose-400">● 有効</span> : null}
+              </div>
+              <p className="mb-2 text-[11px] text-muted-foreground">
+                画面録画に映った認証情報・個人情報を、書き出し時に自動でぼかします（スクロールにも追従）。
+              </p>
+              <div className="space-y-2">
+                <div className="flex flex-wrap gap-1">
+                  {([['email', 'メール'], ['digits', '番号'], ['key', 'APIキー']] as const).map(([key, label]) => {
+                    const on = sbPatterns.includes(key);
+                    return (
+                      <button
+                        key={key} type="button"
+                        onClick={() => setSbPatterns((prev) => (on ? prev.filter((p) => p !== key) : [...prev, key]))}
+                        className={`rounded-full border px-2 py-0.5 text-[11px] transition ${on ? 'border-rose-500 bg-rose-500/20 text-foreground' : 'border-border text-muted-foreground hover:border-rose-400/60'}`}
+                      >
+                        {on ? '✓ ' : ''}{label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <input
+                  value={sbTargets}
+                  onChange={(e) => setSbTargets(e.target.value)}
+                  placeholder="隠したい文字（カンマ区切り）例: CD12425, 株式会社〇〇"
+                  className="h-7 w-full rounded-md border border-input bg-background px-2 text-xs"
+                />
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-muted-foreground">スタイル</span>
+                  <select value={sbStyle} onChange={(e) => setSbStyle(e.target.value)} className="h-7 flex-1 rounded-md border border-input bg-background px-1 text-xs">
+                    <option value="mosaic">モザイク</option>
+                    <option value="gaussian">ぼかし</option>
+                  </select>
+                </div>
+                <div className="flex gap-1">
+                  <Button variant="outline" size="sm" className="h-7 flex-1 text-[11px]" disabled={sbProbing} onClick={() => void probeScreenBlur()}>
+                    {sbProbing ? '検出中…' : '検出して確認'}
+                  </Button>
+                  <Button size="sm" className="h-7 flex-1 text-[11px]" disabled={sbSaving} onClick={() => void saveScreenBlur(true)}>
+                    {sbSaving ? '保存中…' : 'この設定で隠す'}
+                  </Button>
+                </div>
+                {sbMatched ? (
+                  sbMatched.length ? (
+                    <div className="rounded border border-rose-500/30 bg-rose-500/5 p-1.5 text-[10px]">
+                      <div className="mb-0.5 text-muted-foreground">隠れる文字（{sbMatched.length}件）:</div>
+                      <div className="max-h-20 overflow-y-auto font-mono text-foreground">{sbMatched.slice(0, 30).join(' / ')}</div>
+                    </div>
+                  ) : (
+                    <div className="text-[10px] text-amber-500">該当なし。隠したい文字を追加するか、種類を選んでください。</div>
+                  )
+                ) : null}
+                {sbEnabled ? (
+                  <Button variant="ghost" size="sm" className="h-6 w-full text-[10px] text-muted-foreground" disabled={sbSaving} onClick={() => void saveScreenBlur(false)}>
+                    秘匿ぼかしを解除
+                  </Button>
+                ) : null}
+                <p className="text-[9px] text-muted-foreground">※書き出し時にOCRで検出して焼き込みます（数十秒〜数分）。プレビューには出ません。</p>
               </div>
             </div>
             <div className="rounded-md border border-border p-3">
