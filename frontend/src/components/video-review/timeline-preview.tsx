@@ -187,6 +187,7 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
           start: Number(c.timeline_start || 0),
           end: Number(c.timeline_end || 0),
           design: (c.style || {}) as CaptionDesign,
+          words: c.words || undefined,
         })),
     [captionClips],
   );

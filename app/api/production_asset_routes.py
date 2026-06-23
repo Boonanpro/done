@@ -3006,6 +3006,136 @@ async def recut_content(
     }
 
 
+def _caption_sync_source_clips(sequence: dict[str, Any]) -> list[dict[str, Any]]:
+    """Clips carrying the speech + source mapping used to time a caption: prefer dialogue audio
+    clips; fall back to base (non-PiP) video clips. One set only, so words aren't double-counted."""
+    audio: list[dict[str, Any]] = []
+    video: list[dict[str, Any]] = []
+    for track in sequence.get("tracks") or []:
+        tt = track.get("type")
+        for cl in track.get("clips") or []:
+            if not isinstance(cl, dict):
+                continue
+            if tt == "audio" and cl.get("role") in (None, "dialogue", "main"):
+                audio.append(cl)
+            elif tt == "video" and str(cl.get("composition") or "") != "pip":
+                video.append(cl)
+    return audio or video
+
+
+def _words_for_caption(
+    sequence: dict[str, Any], caption: dict[str, Any], analysis_by_asset: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Per-word timeline timings for a caption, by reading the Whisper words of the speech clips
+    under it and mapping their asset-seconds to the timeline via each clip's source mapping."""
+    cts = float(caption.get("timeline_start") or 0)
+    cte = float(caption.get("timeline_end") or cts)
+    out: list[dict[str, Any]] = []
+    for cl in _caption_sync_source_clips(sequence):
+        ts = float(cl.get("timeline_start") or 0)
+        te = float(cl.get("timeline_end") or ts)
+        if te <= cts or ts >= cte:
+            continue
+        analysis = analysis_by_asset.get(str(cl.get("asset_id") or ""))
+        if not analysis:
+            continue
+        src0 = float(cl.get("source_start") or 0)
+        s_lo = src0 + (max(cts, ts) - ts)
+        s_hi = src0 + (min(cte, te) - ts)
+        for seg in analysis.get("segments") or []:
+            for w in seg.get("words") or []:
+                ws = float(w.get("start") or 0)
+                we = float(w.get("end") or ws)
+                if ws < s_hi and we > s_lo:
+                    txt = str(w.get("word") or "").strip()
+                    if not txt:
+                        continue
+                    t0 = ts + (max(ws, s_lo) - src0)
+                    t1 = ts + (min(we, s_hi) - src0)
+                    out.append({"text": txt, "start": round(t0, 3), "end": round(max(t1, t0 + 0.05), 3)})
+    out.sort(key=lambda x: x["start"])
+    return out
+
+
+def _ensure_audio_analysis(room_id: str, asset_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Return {asset_id: analysis(segments with words)} using cached metadata.audio_analysis when
+    present, else running dan_audio_check --words once and caching it on the asset."""
+    whisper_model = os.environ.get("DAN_PLAN_WHISPER_MODEL", "medium")
+    assets = _read_assets(room_id)
+    by_id = {a.get("id"): a for a in assets}
+    script = PROJECT_ROOT / "scripts" / "dan_audio_check.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    out: dict[str, dict[str, Any]] = {}
+    dirty = False
+    for aid in dict.fromkeys(asset_ids):
+        a = by_id.get(aid)
+        if not a or a.get("kind") != "video":
+            continue
+        meta = a.get("metadata") if isinstance(a.get("metadata"), dict) else {}
+        src = a.get("proxy_path") or a.get("local_path")
+        cached = meta.get("audio_analysis")
+        if (isinstance(cached, dict) and cached.get("segments")
+                and meta.get("audio_analysis_src") == str(src) and meta.get("audio_analysis_model") == whisper_model):
+            out[aid] = cached
+            continue
+        if not src or not Path(src).exists():
+            continue
+        out_json = Path(src).with_name(Path(src).stem + "_audiocheck.json")
+        try:
+            subprocess.run(
+                [sys.executable, str(script), str(src), "--words", "--json-only", "--model", whisper_model],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900, check=False, creationflags=cflags,
+            )
+            data = json.loads(out_json.read_text(encoding="utf-8")) if out_json.exists() else {}
+        except Exception:
+            data = {}
+        entry = {"asset_id": aid, "duration": data.get("duration"), "segments": data.get("segments") or []}
+        out[aid] = entry
+        meta = dict(meta)
+        meta["audio_analysis"] = entry
+        meta["audio_analysis_src"] = str(src)
+        meta["audio_analysis_model"] = whisper_model
+        a["metadata"] = meta
+        dirty = True
+    if dirty:
+        _write_assets(room_id, assets)
+    return out
+
+
+class CaptionSyncRequest(BaseModel):
+    room_id: str
+    caption_ids: list[str] | None = None  # None / empty = all captions
+
+
+@router.post("/contents/{content_id}/caption-sync")
+async def caption_sync(
+    content_id: str,
+    payload: CaptionSyncRequest,
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Attach per-word timings (from the speech under each caption) so karaoke / typewriter sync
+    to the actual voice. Uses cached Whisper analysis when available (instant), else runs it."""
+    contents = _read_contents(payload.room_id)
+    content = next((c for c in contents if c.get("id") == content_id), None)
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+    timeline = dict(content.get("timeline") or {})
+    sequence = timeline.get("sequence")
+    if not isinstance(sequence, dict):
+        raise HTTPException(status_code=400, detail="シーケンスがありません")
+    caps = _sequence_caption_clips(sequence)
+    want = set(payload.caption_ids or [])
+    targets = [c for c in caps if not want or str(c.get("id")) in want]
+    if not targets:
+        raise HTTPException(status_code=400, detail="対象のテロップがありません")
+    asset_ids = [str(c.get("asset_id")) for c in _caption_sync_source_clips(sequence) if c.get("asset_id")]
+    analysis = await asyncio.to_thread(_ensure_audio_analysis, payload.room_id, asset_ids)
+    words_by_caption: dict[str, list[dict[str, Any]]] = {}
+    for cap in targets:
+        words_by_caption[str(cap.get("id"))] = _words_for_caption(sequence, cap, analysis)
+    return {"words_by_caption": words_by_caption, "synced": sum(1 for v in words_by_caption.values() if v)}
+
+
 @router.post("/jobs", response_model=ProductionJob)
 async def create_job(
     data: CreateJobRequest,

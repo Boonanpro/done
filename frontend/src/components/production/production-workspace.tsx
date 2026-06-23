@@ -648,6 +648,38 @@ export function ProductionWorkspace({
     }
   };
 
+  // Caption audio-sync: ask the backend for per-word timings under each caption (cached Whisper,
+  // else runs it) so karaoke/typewriter follow the real voice. Returns {captionId: words[]} which
+  // the editor merges into its own clips (so the user's just-picked design isn't clobbered).
+  const syncCaptionAudio = async (
+    captionIds: string[],
+  ): Promise<Record<string, { text: string; start: number; end: number }[]>> => {
+    if (!selectedContent) return {};
+    try {
+      const res = await fetch(
+        `/api/v1/production-assets/contents/${selectedContent.id}/caption-sync`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ room_id: roomId, caption_ids: captionIds }),
+        },
+      );
+      if (!res.ok) {
+        toast.error('音声同期に失敗しました', { description: (await res.text()).slice(0, 160) });
+        return {};
+      }
+      const body = await res.json();
+      const map = (body.words_by_caption || {}) as Record<string, { text: string; start: number; end: number }[]>;
+      const n = Object.values(map).filter((w) => w && w.length).length;
+      toast[n ? 'success' : 'message'](n ? `音声に同期しました（${n}字幕）` : '同期できる音声が見つかりませんでした（この字幕の下に解析可能な発話がありません）');
+      return map;
+    } catch (error) {
+      toast.error('音声同期に失敗しました', { description: String(error).slice(0, 160) });
+      return {};
+    }
+  };
+
   const deleteContent = async (content: ProductionContent) => {
     const res = await fetch(
       `/api/v1/production-assets/contents/${content.id}?room_id=${encodeURIComponent(roomId)}`,
@@ -864,6 +896,7 @@ export function ProductionWorkspace({
           setUrlContentId(null);
         }}
         onSaveTimeline={saveContentTimeline}
+        onSyncCaptionAudio={syncCaptionAudio}
         onExecute={createProductionJob}
       />
     );
