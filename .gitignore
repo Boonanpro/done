@@ -138,7 +138,7 @@ test_*.txt
 # Runtime state
 .last_deploy_hash
 .owner_token
-.tunnel_url
+.tunnel_*
 data/email_sync_state.json
 .claude/mcp_*.json
 .claude/scheduled_tasks.lock
@@ -151,11 +151,12 @@ uploads/
 /config.yml
 frigate_config.yml
 
-# Rendered HTML inspection dumps at root
-/services*.html
+# Rendered HTML inspection dumps at root (services/cur/early/gojo/login/v1 etc. - none tracked)
+/*.html
 
 # Tmp debug files at root
 /tmp_*
+/test_message.json
 
 # Auto-start log
 dan_core_autostart.log
