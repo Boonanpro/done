@@ -102,6 +102,7 @@ _PUBLIC_DIR_TO_OWNER: dict[str, Scope] = {
 # frontend/public/<dir>/ defaults to artifact:<dir> (see classify step 5).
 _PUBLIC_SHARED_DIRS: frozenset[str] = frozenset({
     "models",  # shared 3D assets (e.g. garbage_truck) used by multiple artifacts
+    "fonts",   # bundled OFL caption fonts, used by the production-tab caption renderer
 })
 
 # Top-level public files (no directory) that belong to specific prototypes.

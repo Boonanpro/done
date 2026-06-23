@@ -1,8 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { EditSequence, SequenceAsset, SequenceClip } from './video-review-editor';
+import { CaptionLayer, type RenderCaption } from './caption-layer';
+import type { CaptionDesign } from './caption-design';
 
 // Live timeline compositor: draws the current state of the edit (base video +
 // overlay/PiP layers + captions + blur) onto a <canvas> for the given playhead
@@ -47,42 +49,6 @@ function canvasDims(format: string): { w: number; h: number } {
 
 function isOverlayClip(clip: SequenceClip, trackType: string | undefined): boolean {
   return trackType === 'overlay' || clip.composition === 'pip' || clip.composition === 'overlay';
-}
-
-// Wrap caption text so each line fits maxWidth. Keeps ASCII words intact; wraps CJK
-// per-character. Respects explicit newlines. Mirrors backend _wrap_caption_ass so the
-// preview matches the export.
-function wrapCaption(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
-  const out: string[] = [];
-  for (const hard of text.split('\n')) {
-    let line = '';
-    let i = 0;
-    while (i < hard.length) {
-      const ch = hard[i];
-      const isAscii = ch.charCodeAt(0) < 128;
-      if (isAscii && ch.trim()) {
-        // take the whole ASCII word
-        let word = '';
-        while (i < hard.length && hard[i].charCodeAt(0) < 128 && hard[i].trim()) {
-          word += hard[i]; i++;
-        }
-        if (line && ctx.measureText(line + word).width > maxWidth) {
-          out.push(line); line = word;
-        } else {
-          line += word;
-        }
-        continue;
-      }
-      if (line.trim() && ctx.measureText(line + ch).width > maxWidth) {
-        out.push(line); line = ch.trim() ? ch : '';
-      } else {
-        line += ch;
-      }
-      i++;
-    }
-    out.push(line.replace(/\s+$/, ''));
-  }
-  return out.length ? out : [text];
 }
 
 // cover-draw a video frame into a destination rect (object-fit: cover)
@@ -209,6 +175,47 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
     () => (sequence?.tracks || []).filter((t) => t.type === 'caption').flatMap((t) => t.clips || []),
     [sequence],
   );
+
+  // Captions for the HTML overlay (same shape the export route consumes).
+  const renderCaptions = useMemo<RenderCaption[]>(
+    () =>
+      captionClips
+        .filter((c) => typeof c.text === 'string' && c.text.trim())
+        .map((c) => ({
+          id: String(c.id),
+          text: String(c.text),
+          start: Number(c.timeline_start || 0),
+          end: Number(c.timeline_end || 0),
+          design: (c.style || {}) as CaptionDesign,
+        })),
+    [captionClips],
+  );
+
+  // The video fills the wrapper with object-fit:contain (letterboxed). The caption overlay is
+  // rendered at OUTPUT resolution and CSS-scaled to sit exactly over the contained video rect,
+  // so it lines up with both the canvas preview and the export. Measured via ResizeObserver.
+  const [contentRect, setContentRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const measure = () => {
+      const cw = el.clientWidth;
+      const ch = el.clientHeight;
+      if (!cw || !ch) return;
+      const aspect = dims.w / dims.h;
+      let w = cw;
+      let h = cw / aspect;
+      if (h > ch) {
+        h = ch;
+        w = ch * aspect;
+      }
+      setContentRect({ left: (cw - w) / 2, top: (ch - h) / 2, width: w, height: h });
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [dims.w, dims.h]);
 
   const effectClips = useMemo(
     () => (sequence?.tracks || []).filter((t) => t.type === 'effect').flatMap((t) => t.clips || []),
@@ -406,44 +413,11 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         ctx.restore();
       }
 
-      // captions — style-aware, with line-wrapping so long text fits the frame width.
-      const caps = captionClips.filter((c) => t >= c.timeline_start && t <= c.timeline_end && typeof c.text === 'string' && c.text.trim());
-      const cap = caps[caps.length - 1];
-      if (cap?.text) {
-        const st = cap.style || {};
-        const baseFont = h * 0.038;
-        const fontSize = Math.round(baseFont * (st.fontSize ? Number(st.fontSize) : 1));
-        const weight = st.bold === false ? 'normal' : 'bold';
-        ctx.font = `${weight} ${fontSize}px "Yu Gothic UI", "Meiryo", sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.lineJoin = 'round';
-        ctx.lineWidth = Math.max(3, fontSize * 0.18 * (st.outlineWidth != null ? Number(st.outlineWidth) : 1));
-        ctx.strokeStyle = st.outlineColor || '#000';
-        ctx.fillStyle = st.color || '#fff';
-        const maxWidth = w * 0.92;
-        const lines = wrapCaption(ctx, cap.text, maxWidth);
-        const lineH = fontSize * 1.2;
-        const block = lineH * lines.length;
-        // horizontal offset (x), clamped so the longest line stays fully on screen
-        const widest = Math.max(0, ...lines.map((ln) => ctx.measureText(ln).width));
-        const maxOff = Math.max(0, (w - widest) / 2 - w * 0.02);
-        const cx = w / 2 + Math.max(-maxOff, Math.min(maxOff, (st.x ?? 0) * w));
-        // vertical anchor by position preset + free y offset
-        const pos = st.position || 'bottom';
-        let firstCy: number;
-        if (pos === 'top') firstCy = Math.round(h * 0.06) + lineH / 2;
-        else if (pos === 'center') firstCy = h / 2 - block / 2 + lineH / 2;
-        else firstCy = h - Math.round(h * 0.06) - block + lineH / 2;
-        firstCy += (st.y ?? 0) * h;
-        lines.forEach((ln, i) => {
-          const cy = firstCy + i * lineH;
-          ctx.strokeText(ln, cx, cy);
-          ctx.fillText(ln, cx, cy);
-        });
-      }
+      // Captions are NOT drawn on the canvas anymore — they render as an HTML <CaptionLayer>
+      // overlay (same component the export screenshots) so the preview equals the burned video,
+      // with real fonts / boxes / shadows the canvas couldn't match.
     },
-    [dims, visualClips, captionClips, effectClips],
+    [dims, visualClips, effectClips],
   );
 
   const seekVideo = useCallback((video: HTMLVideoElement, time: number): Promise<void> => {
@@ -693,6 +667,16 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         height={dims.h}
         style={{ display: 'block', width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
       />
+      {contentRect && renderCaptions.length ? (
+        <div
+          className="pointer-events-none absolute overflow-hidden"
+          style={{ left: contentRect.left, top: contentRect.top, width: contentRect.width, height: contentRect.height }}
+        >
+          <div style={{ transformOrigin: 'top left', transform: `scale(${contentRect.width / dims.w})` }}>
+            <CaptionLayer outW={dims.w} outH={dims.h} captions={renderCaptions} time={currentTime} />
+          </div>
+        </div>
+      ) : null}
       {box ? (
         <div
           className="absolute cursor-move border-2 border-sky-400"
