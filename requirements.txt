@@ -65,3 +65,7 @@ beautifulsoup4>=4.12.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 
+# Screen-recording privacy blur (E1): OCR-driven on-screen text detection + region blur
+rapidocr-onnxruntime>=1.3.0
+opencv-python>=4.8.0
+
