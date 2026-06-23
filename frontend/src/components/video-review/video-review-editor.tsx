@@ -1465,6 +1465,19 @@ export function VideoReviewEditor({
           pf.source_end = r(Number(partner.source_end || 0) + dEnd);
         }
       }
+      // Collision avoidance: the partner follows the drag automatically (you didn't grab it), so
+      // it must NOT delete other clips it lands on. If its new range overlaps a clip on its lane,
+      // bump it down to the first free lane (auto-created — a clip on a new layer makes its lane).
+      const pStart = Number(pf.timeline_start ?? partner.timeline_start);
+      const pEnd = Number(pf.timeline_end ?? partner.timeline_end);
+      const pTrack = partner.track || '';
+      const overlapsAt = (L: number) => allOrig.some((c) =>
+        c.id !== partner.id && !moved.has(c.id) && (c.track || '') === pTrack && (c.layer ?? 0) === L &&
+        pEnd > c.timeline_start + 0.001 && pStart < c.timeline_end - 0.001);
+      let pLayer = partner.layer ?? 0;
+      let guard = 0;
+      while (overlapsAt(pLayer) && guard++ < 50) pLayer += 1;
+      if (pLayer !== (partner.layer ?? 0)) pf.layer = pLayer;
       moved.set(partner.id, pf);
     }
     commitMovedSet(snap, moved);
