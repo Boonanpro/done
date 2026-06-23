@@ -127,9 +127,48 @@ def render(src: str, out: str, boxes_by_t: dict, vfps: float, style: str, ff: st
     Path(tmp).unlink(missing_ok=True)
 
 
+def probe(src: str, targets, patterns, regex, n_frames: int = 24):
+    """Sample n_frames EVENLY across the whole clip (seek, not sequential) and report which texts
+    WOULD be blurred plus a sample of all on-screen text — so the editor can show the user what
+    will be hidden before exporting. Bounded time = responsive 'confirm' button."""
+    from rapidocr_onnxruntime import RapidOCR
+    ocr = RapidOCR()
+    cap = cv2.VideoCapture(src)
+    vfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    dur = (total / vfps) if (total and vfps) else 0.0
+    matched: dict[str, int] = {}
+    seen: dict[str, int] = {}
+    frames = 0
+    n = max(1, n_frames)
+    for i in range(n):
+        t = (dur * (i + 0.5) / n) if dur > 0 else 0.0
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        res, _ = ocr(frame)
+        frames += 1
+        for _poly, text, _score in (res or []):
+            tx = (text or "").strip()
+            if not tx:
+                continue
+            seen[tx] = seen.get(tx, 0) + 1
+            if _matches(tx, targets, patterns, regex):
+                matched[tx] = matched.get(tx, 0) + 1
+        if dur <= 0:
+            break
+    cap.release()
+    return {
+        "frames": frames,
+        "matched": sorted(matched.keys(), key=lambda k: -matched[k]),
+        "sample_texts": sorted(seen.keys(), key=lambda k: -seen[k])[:60],
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("src"); ap.add_argument("out")
+    ap.add_argument("src"); ap.add_argument("out", nargs="?", default="")
     ap.add_argument("--targets", default="")
     ap.add_argument("--patterns", default="")  # email,digits,key
     ap.add_argument("--regex", default="")
@@ -140,10 +179,17 @@ def main() -> int:
     ap.add_argument("--style", default="mosaic")
     ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--dump", default="")  # optional: write boxes json
+    ap.add_argument("--probe", action="store_true")  # detect-only: print matched texts as JSON
+    ap.add_argument("--probe-frames", type=int, default=24)
     a = ap.parse_args()
     targets = [t.strip() for t in a.targets.split(",") if t.strip()]
     patterns = {p.strip() for p in a.patterns.split(",") if p.strip()}
     regex = re.compile(a.regex) if a.regex else None
+    if a.probe:
+        # ensure_ascii so Japanese text can't crash print() on a cp932 (Windows) stdout; the
+        # caller json.loads() decodes the \uXXXX escapes back to proper characters.
+        print(json.dumps(probe(a.src, targets, patterns, regex, a.probe_frames), ensure_ascii=True))
+        return 0
     boxes_by_t, vfps, w, h, total = detect(a.src, targets, patterns, regex, a.fps, a.pad, a.start, a.end)
     nhits = sum(len(v) for v in boxes_by_t.values())
     print(f"sampled {len(boxes_by_t)} frames, {nhits} blur boxes total")

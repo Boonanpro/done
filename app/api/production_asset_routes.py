@@ -725,6 +725,39 @@ def _blur_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int, start: 
     return filt, out
 
 
+def _apply_screen_blur(out_path: Path, spec: dict[str, Any], job_dir: Path) -> bool:
+    """Post-pass: blur sensitive on-screen text (credentials etc.) in the FINAL rendered video by
+    OCR-detecting it per frame (scripts/screen_blur.py). Runs ON THE OUTPUT, so it follows whatever
+    is actually shown (scrolling, PiP, scaling) with no coordinate mapping. Replaces out_path."""
+    targets = [str(t).strip() for t in (spec.get("targets") or []) if str(t).strip()]
+    patterns = [str(p).strip() for p in (spec.get("patterns") or []) if str(p).strip()]
+    regex = str(spec.get("regex") or "").strip()
+    if not targets and not patterns and not regex:
+        return False
+    tmp = job_dir / "screenblur_out.mp4"
+    script = PROJECT_ROOT / "scripts" / "screen_blur.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    args = [sys.executable, str(script), str(out_path), str(tmp),
+            "--fps", str(spec.get("fps") or 4), "--pad", str(spec.get("pad") or 0.35),
+            "--style", str(spec.get("style") or "mosaic"), "--ffmpeg", _ffmpeg()]
+    if targets:
+        args += ["--targets", ",".join(targets)]
+    if patterns:
+        args += ["--patterns", ",".join(patterns)]
+    if regex:
+        args += ["--regex", regex]
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=1800, creationflags=cflags)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("screen blur post-pass crashed: %s", exc)
+        return False
+    if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+        shutil.move(str(tmp), str(out_path))
+        return True
+    logger.warning("screen blur post-pass failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
+    return False
+
+
 def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
@@ -1040,6 +1073,16 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         creationflags=creationflags,
         check=True,
     )
+
+    # Privacy: bake in screen-recording blur (credentials/sensitive text) as a post-pass on the
+    # final video, if the content has it enabled. Reads the authoritative stored spec.
+    try:
+        _content = next((c for c in _read_contents(room_id) if c.get("id") == content_id), None)
+        _sb = ((_content or {}).get("timeline") or {}).get("screen_blur")
+        if isinstance(_sb, dict) and _sb.get("enabled"):
+            _apply_screen_blur(out_path, _sb, job_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("screen blur post-pass skipped: %s", exc)
 
     output_asset = _add_generated_video_asset(
         room_id,
@@ -3134,6 +3177,84 @@ async def caption_sync(
     for cap in targets:
         words_by_caption[str(cap.get("id"))] = _words_for_caption(sequence, cap, analysis)
     return {"words_by_caption": words_by_caption, "synced": sum(1 for v in words_by_caption.values() if v)}
+
+
+class ScreenBlurRequest(BaseModel):
+    room_id: str
+    enabled: bool = True
+    targets: list[str] = Field(default_factory=list)   # exact strings to hide
+    patterns: list[str] = Field(default_factory=list)  # email / digits / key
+    regex: str | None = None
+    style: str = "mosaic"
+    pad: float = 0.35
+    fps: float = 4.0
+
+
+def _content_source_video(room_id: str, content: dict[str, Any]) -> str | None:
+    assets = _assets_by_id(room_id)
+    for aid in content.get("asset_ids") or []:
+        a = assets.get(str(aid))
+        if a and a.get("kind") == "video":
+            src = a.get("proxy_path") or a.get("local_path")
+            if src and Path(src).exists():
+                return str(src)
+    return None
+
+
+@router.post("/contents/{content_id}/screen-blur")
+async def set_screen_blur(
+    content_id: str, payload: ScreenBlurRequest, current_user: TokenData = Depends(get_current_user)
+):
+    """Save the screen-blur spec on the content; it is baked into the next export (post-pass)."""
+    contents = _read_contents(payload.room_id)
+    content = next((c for c in contents if c.get("id") == content_id), None)
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+    timeline = dict(content.get("timeline") or {})
+    timeline["screen_blur"] = {
+        "enabled": bool(payload.enabled), "targets": payload.targets, "patterns": payload.patterns,
+        "regex": payload.regex, "style": payload.style, "pad": payload.pad, "fps": payload.fps,
+    }
+    _update_content(payload.room_id, content_id, {"timeline": timeline})
+    return {"ok": True, "screen_blur": timeline["screen_blur"]}
+
+
+@router.post("/contents/{content_id}/screen-blur/probe")
+async def probe_screen_blur(
+    content_id: str, payload: ScreenBlurRequest, current_user: TokenData = Depends(get_current_user)
+):
+    """Detect-only: report which on-screen texts WOULD be blurred (+ a sample of all detected text)
+    so the editor can show the user what will be hidden before exporting."""
+    contents = _read_contents(payload.room_id)
+    content = next((c for c in contents if c.get("id") == content_id), None)
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+    src = _content_source_video(payload.room_id, content)
+    if not src:
+        raise HTTPException(status_code=400, detail="解析できる動画素材がありません")
+    script = PROJECT_ROOT / "scripts" / "screen_blur.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # 8 frames keeps the interactive probe under the dev proxy's ~30s timeout (OCR ~2.8s/frame on
+    # CPU). The probe is only a PREVIEW of what will be hidden; the export post-pass checks the
+    # whole video (no timeout) and is authoritative.
+    args = [sys.executable, str(script), str(src), "--probe", "--probe-frames", "8"]
+    if payload.targets:
+        args += ["--targets", ",".join(payload.targets)]
+    if payload.patterns:
+        args += ["--patterns", ",".join(payload.patterns)]
+    if payload.regex:
+        args += ["--regex", payload.regex]
+    r = await asyncio.to_thread(
+        subprocess.run, args, capture_output=True, text=True, timeout=300, creationflags=cflags
+    )
+    data: dict[str, Any] = {"matched": [], "sample_texts": [], "frames": 0}
+    try:
+        lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip().startswith("{")]
+        if lines:
+            data = json.loads(lines[-1])
+    except Exception:  # noqa: BLE001
+        pass
+    return data
 
 
 @router.post("/jobs", response_model=ProductionJob)
