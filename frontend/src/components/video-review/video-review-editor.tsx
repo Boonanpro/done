@@ -96,6 +96,30 @@ export type CaptionStyle = {
   y?: number;
 };
 
+// Curated one-click telop looks. Each maps ONLY to fields BOTH the live preview canvas and the
+// deterministic .ass renderer already honor (color / outlineColor / fontSize / outlineWidth /
+// bold / position), so what you see in the timeline equals the exported video — no renderer
+// changes required. Applying a preset replaces the caption's whole style (a full look).
+export const CAPTION_PRESETS: { id: string; label: string; style: CaptionStyle }[] = [
+  { id: 'standard', label: '標準',     style: { color: '#ffffff', outlineColor: '#000000', outlineWidth: 1,    bold: true,  position: 'bottom' } },
+  { id: 'yellow',   label: '黄ポップ', style: { color: '#ffd400', outlineColor: '#000000', outlineWidth: 1.75, bold: true,  fontSize: 1.1,  position: 'bottom' } },
+  { id: 'red',      label: '赤強調',   style: { color: '#ff3b30', outlineColor: '#ffffff', outlineWidth: 1.5,  bold: true,  fontSize: 1.1,  position: 'bottom' } },
+  { id: 'cyan',     label: 'シアン',   style: { color: '#19e0ff', outlineColor: '#00323b', outlineWidth: 1.5,  bold: true,  position: 'bottom' } },
+  { id: 'pink',     label: 'ピンク',   style: { color: '#ff4d9d', outlineColor: '#ffffff', outlineWidth: 1.5,  bold: true,  position: 'bottom' } },
+  { id: 'thick',    label: '極太フチ', style: { color: '#ffffff', outlineColor: '#000000', outlineWidth: 2.75, bold: true,  fontSize: 1.2,  position: 'bottom' } },
+  { id: 'subtitle', label: '字幕(小)', style: { color: '#ffffff', outlineColor: '#000000', outlineWidth: 0.75, bold: false, fontSize: 0.82, position: 'bottom' } },
+  { id: 'headline', label: '見出し上', style: { color: '#fff200', outlineColor: '#000000', outlineWidth: 1.75, bold: true,  fontSize: 1.15, position: 'top' } },
+];
+
+// True when the caption's current style matches a preset (for highlighting the active chip).
+// Compares only the fields presets set; treats absent bold as bold (the default).
+function captionStyleMatchesPreset(current: CaptionStyle | null | undefined, preset: CaptionStyle): boolean {
+  const s = current || {};
+  if ((s.bold !== false) !== (preset.bold !== false)) return false;
+  const keys: (keyof CaptionStyle)[] = ['color', 'outlineColor', 'fontSize', 'outlineWidth', 'position'];
+  return keys.every((k) => (s[k] ?? null) === (preset[k] ?? null));
+}
+
 type LaneItem = {
   key: string;
   kind: 'clip' | 'annotation';
@@ -2454,6 +2478,53 @@ export function VideoReviewEditor({
                       return (
                         <div className="space-y-2 rounded-md border border-border p-2">
                           <div className="text-xs font-medium text-muted-foreground">テロップのデザイン</div>
+                          <div className="space-y-1">
+                            <div className="text-[10px] text-muted-foreground">プリセット（クリックで適用・プレビュー＝書き出しと同じ見た目）</div>
+                            <div className="grid grid-cols-4 gap-1">
+                              {CAPTION_PRESETS.map((p) => {
+                                const active = captionStyleMatchesPreset(st, p.style);
+                                return (
+                                  <button
+                                    key={p.id}
+                                    type="button"
+                                    title={p.label}
+                                    onClick={() => updateSelectedSequenceClip({ style: { ...p.style } })}
+                                    className={`flex flex-col items-center gap-0.5 rounded-md border px-1 py-1 transition ${active ? 'border-sky-500 bg-sky-500/10' : 'border-border hover:border-sky-400/60'}`}
+                                  >
+                                    <span
+                                      className="leading-none"
+                                      style={{
+                                        fontSize: `${0.9 * (p.style.fontSize ?? 1)}rem`,
+                                        color: p.style.color || '#fff',
+                                        fontWeight: p.style.bold === false ? 400 : 800,
+                                        WebkitTextStroke: `${0.6 * (p.style.outlineWidth ?? 1)}px ${p.style.outlineColor || '#000'}`,
+                                        paintOrder: 'stroke fill',
+                                      }}
+                                    >
+                                      あA
+                                    </span>
+                                    <span className="text-[9px] text-muted-foreground">{p.label}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-6 w-full text-[10px]"
+                              disabled={!st || Object.keys(st).length === 0}
+                              onClick={() => {
+                                const capIds = new Set(
+                                  allSequenceClips
+                                    .filter((c) => c.track === 'caption' || typeof c.text === 'string')
+                                    .map((c) => String(c.id)),
+                                );
+                                if (st && Object.keys(st).length > 0) updateSequenceClips(capIds, { style: { ...st } });
+                              }}
+                            >
+                              この見た目を全テロップに適用
+                            </Button>
+                          </div>
                           <div className="grid grid-cols-2 gap-2">
                             <label className="flex items-center gap-2 text-xs">
                               文字色
