@@ -167,6 +167,14 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
   const prevActiveVideoRef = useRef<Set<string>>(new Set());
   const prevActiveAudioRef = useRef<Set<string>>(new Set());
 
+  // Only clips within this window of the playhead get a live <video>/<audio> element. This caps
+  // the element count (a 90-clip timeline spun up ~90 decoders all fighting one file = the black
+  // screen on load). The window re-centres in coarse steps so it isn't recomputed every frame.
+  const PRELOAD_BEHIND = 6;   // seconds kept behind the playhead
+  const PRELOAD_AHEAD = 16;   // seconds kept ahead (covers upcoming clips + pre-roll)
+  const WINDOW_STEP = 3;      // re-window granularity
+  const loadBucket = Math.floor((currentTime || 0) / WINDOW_STEP);
+
   const dims = useMemo(() => canvasDims(format), [format]);
 
   const videoAssets = useMemo(
@@ -230,10 +238,13 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
   // same asset for newly-appearing clip ids so a split reuses an already-decoded element.
   useEffect(() => {
     const map = videosRef.current;
-    const wanted = new Map<string, string>(); // clipId -> assetId
+    const lo = (currentTime || 0) - PRELOAD_BEHIND;
+    const hi = (currentTime || 0) + PRELOAD_AHEAD;
+    const wanted = new Map<string, string>(); // clipId -> assetId (only clips near the playhead)
     for (const vc of visualClips) {
       const aid = String(vc.clip.asset_id || '');
-      if (aid && assetById.has(aid)) wanted.set(String(vc.clip.id), aid);
+      if (!aid || !assetById.has(aid)) continue;
+      if (vc.clip.timeline_end >= lo && vc.clip.timeline_start <= hi) wanted.set(String(vc.clip.id), aid);
     }
     // Orphans = elements whose clip id is gone, grouped by assetId for recycling.
     const orphansByAsset = new Map<string, HTMLVideoElement[]>();
@@ -271,7 +282,8 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
     for (const list of orphansByAsset.values()) {
       for (const el of list) el.remove();
     }
-  }, [visualClips, assetById]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visualClips, assetById, loadBucket]);
 
   // Eagerly buffer only the clips near the playhead; keep far clips at 'metadata'. This makes
   // refresh fast (a few elements load, not all of them) while playback stays smooth because
@@ -295,10 +307,13 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
   // reloads) give each active clip its own, collision-free playhead.
   useEffect(() => {
     const map = audiosRef.current;
-    const wanted = new Map<string, string>(); // clipId -> assetId
+    const lo = (currentTime || 0) - PRELOAD_BEHIND;
+    const hi = (currentTime || 0) + PRELOAD_AHEAD;
+    const wanted = new Map<string, string>(); // clipId -> assetId (only clips near the playhead)
     for (const c of audioClips) {
       const aid = String(c.asset_id || '');
-      if (aid) wanted.set(String(c.id), aid);
+      if (!aid) continue;
+      if (c.timeline_end >= lo && c.timeline_start <= hi) wanted.set(String(c.id), aid);
     }
     const orphansByAsset = new Map<string, HTMLVideoElement[]>();
     for (const [cid, el] of map) {
@@ -325,7 +340,8 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
       map.set(cid, v);
     }
     for (const list of orphansByAsset.values()) for (const el of list) el.remove();
-  }, [audioClips, assetById]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioClips, assetById, loadBucket]);
 
   // full unmount cleanup
   useEffect(() => {
