@@ -137,6 +137,13 @@ class Settings(BaseSettings):
     # Deploy: external frontend/CORS
     ALLOWED_ORIGINS: str = ""  # comma-separated extra origins
     FRONTEND_URL: str = ""     # e.g. https://xxx.vercel.app
+
+    # Umami analytics (運営者所有・マルチテナント計測基盤)
+    # 1 つの運営者 admin で全テナントの公開ドメインを website 登録・集計する。
+    # DB/APP_SECRET 等の Umami 本体デプロイ用の値は .env のみに置き、アプリは使わない。
+    UMAMI_BASE_URL: str = ""        # 例: https://dan-analytics-ten.vercel.app
+    UMAMI_ADMIN_USER: str = ""
+    UMAMI_ADMIN_PASSWORD: str = ""
     
     # Properties for Gmail settings
     @property
@@ -156,6 +163,9 @@ class Settings(BaseSettings):
         # プロジェクトルート基準の絶対パスで固定する
         env_file = str(Path(__file__).resolve().parent.parent / ".env")
         env_file_encoding = "utf-8"
+        # .env は他サービス(umami 等)の変数も同居するので、Settings が知らないキーは無視する。
+        # これが無いと未知の env 変数で Settings() が起動時クラッシュする(extra_forbidden)。
+        extra = "ignore"
 
 
 @lru_cache()
