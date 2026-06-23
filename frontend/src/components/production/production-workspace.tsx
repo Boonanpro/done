@@ -130,6 +130,11 @@ export function ProductionWorkspace({
   const [workflowPreset, setWorkflowPreset] = useState<(typeof WORKFLOW_PRESETS)[number]['id']>('video_ugc');
   const [draftAssetIds, setDraftAssetIds] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  // If we deep-linked into a content (refresh while editing), show a loading state until the
+  // content loads — NOT the project/material list, which used to flash for a moment first.
+  // Starts true so the SERVER renders the loader (not the list) — the server can't read the URL,
+  // so a window-based initializer would SSR the list and flash it before the client corrects.
+  const [booting, setBooting] = useState(true);
   const [isRegistering, setIsRegistering] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -200,8 +205,14 @@ export function ProductionWorkspace({
       toast.error('Failed to load production workspace', { description: String(error).slice(0, 160) });
     } finally {
       setIsLoading(false);
+      setBooting(false);
     }
   }, [roomId]);
+
+  useEffect(() => {
+    // No deep-linked content -> drop the loader immediately so the list shows without waiting.
+    if (!new URLSearchParams(window.location.search).get('content_id')) setBooting(false);
+  }, []);
 
   useEffect(() => {
     void loadAll();
@@ -855,6 +866,17 @@ export function ProductionWorkspace({
         onSaveTimeline={saveContentTimeline}
         onExecute={createProductionJob}
       />
+    );
+  }
+
+  // Deep-linked into a content (refresh while editing): show a loader instead of flashing the
+  // project/material list while the content loads.
+  if (booting) {
+    return (
+      <div className="flex h-full min-h-0 items-center justify-center bg-background text-muted-foreground">
+        <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+        タイムラインを開いています…
+      </div>
     );
   }
 
