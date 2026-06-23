@@ -137,6 +137,13 @@ class Settings(BaseSettings):
     # Deploy: external frontend/CORS
     ALLOWED_ORIGINS: str = ""  # comma-separated extra origins
     FRONTEND_URL: str = ""     # e.g. https://xxx.vercel.app
+
+    # Umami analytics (運営者所有・マルチテナント計測基盤)
+    # 1 つの運営者 admin で全テナントの公開ドメインを website 登録・集計する。
+    # DB/APP_SECRET 等の Umami 本体デプロイ用の値は .env のみに置き、アプリは使わない。
+    UMAMI_BASE_URL: str = ""        # 例: https://dan-analytics-ten.vercel.app
+    UMAMI_ADMIN_USER: str = ""
+    UMAMI_ADMIN_PASSWORD: str = ""
     
     # Properties for Gmail settings
     @property

@@ -369,6 +369,26 @@ async def publish_with_custom_domain(
             except Exception as e:
                 rec.fail(s, f"Search Console 申請でエラー: {e}")
 
+        # 8.5 Umami 計測 website 登録 (公開ドメインの訪問数を計測できるようにする)
+        s = rec.start("register_analytics_website")
+        if dry_run:
+            rec.complete(s, "[DRY-RUN] skipped")
+        else:
+            try:
+                from app.services.umami_service import ensure_website, is_configured
+
+                if not is_configured():
+                    s.status = "skipped"
+                    s.detail = "Umami 未設定"
+                else:
+                    wid = await ensure_website(domain)
+                    if wid:
+                        rec.complete(s, f"umami website 登録 id={wid}")
+                    else:
+                        rec.fail(s, "umami website 登録に失敗（公開は成立）")
+            except Exception as e:
+                rec.fail(s, f"Umami 登録でエラー: {e}")
+
         # 9. DB 更新
         s = rec.start("update_artifact_db")
         if dry_run:
@@ -632,6 +652,23 @@ async def connect_existing_domain(
         else:
             s.status = "skipped"
             s.detail = "外部DNS or 未検証のためスキップ"
+
+        # 7.5 Umami 計測 website 登録（接続ドメインの訪問数を計測できるように）
+        s = rec.start("register_analytics_website")
+        try:
+            from app.services.umami_service import ensure_website, is_configured
+
+            if not is_configured():
+                s.status = "skipped"
+                s.detail = "Umami 未設定"
+            else:
+                wid = await ensure_website(domain)
+                if wid:
+                    rec.complete(s, f"umami website 登録 id={wid}")
+                else:
+                    rec.fail(s, "umami website 登録に失敗（公開は成立）")
+        except Exception as e:  # noqa: BLE001
+            rec.fail(s, f"Umami 登録でエラー: {e}")
 
         # 8. クリーンURL配信: 接続ドメインの host rewrite を再生成して main へ push
         #    （Vercel 再デプロイで /business 等がクリーンURLで配信される）。ベストエフォート。
