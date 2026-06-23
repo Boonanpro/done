@@ -1786,6 +1786,28 @@ Brief / existing timeline:
     return decisions, transcripts
 
 
+def _caption_words_timeline(segment: dict[str, Any], seg_pieces: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Map a segment's Whisper words (asset seconds) onto the TIMELINE using the segment's
+    assembled pieces (which carry source_start/end -> timeline_start/end). Words inside cut-out
+    gaps are dropped. Returns [{text, start, end}] for caption karaoke / typewriter sync."""
+    out: list[dict[str, Any]] = []
+    for w in (segment.get("words") or []):
+        txt = str(w.get("word") or "").strip()
+        if not txt:
+            continue
+        ws = float(w.get("start") or 0.0)
+        we = float(w.get("end") or ws)
+        for pc in seg_pieces:
+            ss = float(pc["source_start"])
+            se = float(pc["source_end"])
+            if ws < se and we > ss:  # word overlaps this kept piece
+                t0 = float(pc["timeline_start"]) + (max(ws, ss) - ss)
+                t1 = float(pc["timeline_start"]) + (min(we, se) - ss)
+                out.append({"text": txt, "start": round(t0, 3), "end": round(max(t1, t0 + 0.05), 3)})
+                break
+    return out
+
+
 def _assemble_sequence_from_decisions(
     decisions: dict[str, Any],
     transcripts: dict[str, Any],
@@ -2057,14 +2079,23 @@ def _assemble_sequence_from_decisions(
             "timeline_start": p["timeline_start"], "timeline_end": p["timeline_end"],
             "link_id": link_id,
         })
-    # Captions: one per kept (non-overlay) segment, spanning its full timeline range.
+    # Captions: one per kept (non-overlay) segment, spanning its full timeline range. Attach
+    # per-word timings (segment Whisper words mapped to the timeline) so a karaoke / typewriter
+    # caption syncs to the actual speech without any extra UI step.
+    pieces_by_sid: dict[str, list[dict[str, Any]]] = {}
+    for p in pieces:
+        pieces_by_sid.setdefault(p["sid"], []).append(p)
     for sid in order:
         if sid in covered:
             continue
         sp = seg_span[sid]
         if sp["caption"]:
-            caption_clips.append({"id": _cid("c"), "text": sp["caption"], "track": "caption",
-                                  "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"]})
+            clip: dict[str, Any] = {"id": _cid("c"), "text": sp["caption"], "track": "caption",
+                                    "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"]}
+            words = _caption_words_timeline(seg_by_id.get(sid) or {}, pieces_by_sid.get(sid, []))
+            if words:
+                clip["words"] = words
+            caption_clips.append(clip)
 
     # Pass 3: screen background clips (fullscreen base) under each overlay span.
     for ov in overlays:
