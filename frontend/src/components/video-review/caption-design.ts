@@ -11,7 +11,8 @@ export type CaptionFontId =
   | 'zen-maru'
   | 'reggae'
   | 'mplus-rounded'
-  | 'rocknroll';
+  | 'rocknroll'
+  | 'mincho';
 
 // Registry of the bundled OFL fonts (all commercial / video-burn-in OK). `css` is the
 // font-family value; `weight` is what we actually request (display faces are single-weight).
@@ -22,6 +23,7 @@ export const CAPTION_FONTS: Record<CaptionFontId, { label: string; css: string; 
   'reggae':        { label: 'レゲエ',   css: '"ReggaeOne"',     weight: 400 },
   'mplus-rounded': { label: '丸ポップ', css: '"MPLUSRounded"',  weight: 800 },
   'rocknroll':     { label: 'ロック',   css: '"RocknRollOne"',  weight: 400 },
+  'mincho':        { label: '明朝',     css: '"ShipporiMincho"',weight: 800 },
 };
 
 // [cssFamily, url, weight] for every bundled face. FULL .ttf files (not unicode-range subsets —
@@ -35,6 +37,7 @@ export const CAPTION_FONT_FILES: ReadonlyArray<[string, string, string]> = [
   ['ReggaeOne', '/fonts/ReggaeOne-Regular.ttf', '400'],
   ['MPLUSRounded', '/fonts/MPLUSRounded1c-ExtraBold.ttf', '800'],
   ['RocknRollOne', '/fonts/RocknRollOne-Regular.ttf', '400'],
+  ['ShipporiMincho', '/fonts/ShipporiMincho-ExtraBold.ttf', '800'],
 ];
 
 // @font-face for every bundled file. Emitted as a <style> by CaptionLayer so it works both
@@ -46,6 +49,7 @@ export const CAPTION_FONT_FACE_CSS = `
 @font-face{font-family:'ReggaeOne';src:url('/fonts/ReggaeOne-Regular.ttf') format('truetype');font-display:block;}
 @font-face{font-family:'MPLUSRounded';font-weight:800;src:url('/fonts/MPLUSRounded1c-ExtraBold.ttf') format('truetype');font-display:block;}
 @font-face{font-family:'RocknRollOne';src:url('/fonts/RocknRollOne-Regular.ttf') format('truetype');font-display:block;}
+@font-face{font-family:'ShipporiMincho';font-weight:800;src:url('/fonts/ShipporiMincho-ExtraBold.ttf') format('truetype');font-display:block;}
 `;
 
 // Designed caption look. All fields optional; an empty design renders as a clean white
@@ -63,7 +67,29 @@ export type CaptionDesign = {
   // Soft drop shadow on the whole caption block.
   shadow?: { color?: string; blur?: number; dx?: number; dy?: number };
   letterSpacing?: number;     // multiplier of fontSize (0.02 = subtle tracking)
+  // M2 — motion. Box-intro animations (pop/fade/slide) need only the caption's own clock;
+  // word-level effects (typewriter / karaoke) sync to per-word timings when present.
+  animation?: CaptionAnimation;
+  animationSpeed?: number;    // multiplier for the intro duration (default 1; bigger = faster)
+  highlightColor?: string;    // karaoke: fill of the word being spoken (default = a warm yellow)
+  highlightScale?: number;    // karaoke: scale bump on the active word (default 1.12)
 };
+
+// Caption motion presets. 'pop'/'fade'/'slide' are pure intro animations; 'typewriter' reveals
+// text progressively; 'karaoke' highlights each word as it is spoken (uses per-word timings).
+export type CaptionAnimation = 'none' | 'pop' | 'fade' | 'slide' | 'typewriter' | 'karaoke';
+
+// easeOutBack-ish overshoot for 'pop'. p in [0,1] -> scale around 1.
+export function popScale(p: number): number {
+  if (p >= 1) return 1;
+  const c = 1.70158;
+  const x = p - 1;
+  return 1 + (c + 1) * x * x * x + c * x * x;
+}
+
+export function easeOut(p: number): number {
+  return 1 - Math.pow(1 - Math.max(0, Math.min(1, p)), 3);
+}
 
 const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Number(v) : d);
 

@@ -4,6 +4,9 @@
 // headless Chromium at /caption-frame?p=<base64 json> and screenshots it with a transparent
 // background. Because it renders the SAME <CaptionLayer> as the live editor preview, the burned
 // caption matches the timeline pixel-for-pixel. Not linked from any UI.
+//
+// For ANIMATED captions the screenshotter loads the page ONCE then drives the playhead via
+// window.__renderCaptionAt(t) per frame (much faster than navigating per frame).
 
 import { Suspense, useEffect, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
@@ -11,6 +14,12 @@ import { CaptionLayer, type RenderCaption } from '@/components/video-review/capt
 import { CAPTION_FONT_FILES } from '@/components/video-review/caption-design';
 
 type Payload = { outW: number; outH: number; time: number; captions: RenderCaption[] };
+
+declare global {
+  interface Window {
+    __renderCaptionAt?: (t: number) => Promise<void>;
+  }
+}
 
 function decodePayload(raw: string | null): Payload | null {
   if (!raw) return null;
@@ -27,19 +36,30 @@ function decodePayload(raw: string | null): Payload | null {
 function Inner() {
   const sp = useSearchParams();
   const payload = decodePayload(sp.get('p'));
+  const [time, setTime] = useState<number>(payload?.time ?? 0);
   const [ready, setReady] = useState(false);
 
+  // Let the screenshotter set the playhead and await the next painted frame.
   useEffect(() => {
-    // Make the page itself transparent so omit_background screenshots are clean.
+    window.__renderCaptionAt = (t: number) =>
+      new Promise<void>((resolve) => {
+        setTime(t);
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      });
+    return () => {
+      delete window.__renderCaptionAt;
+    };
+  }, []);
+
+  useEffect(() => {
     document.documentElement.style.background = 'transparent';
     document.body.style.background = 'transparent';
     document.body.style.margin = '0';
     let cancelled = false;
     (async () => {
-      // IMPORTANT: the bundled faces use font-display:block (invisible until loaded), and
-      // @font-face declared in an injected <style> does NOT register in document.fonts in time
-      // for the screenshot. So load every face via the FontFace API and add it to document.fonts
-      // explicitly, then await — otherwise the screenshot catches blank (unpainted) text.
+      // The bundled faces use font-display:block (invisible until loaded), and @font-face in an
+      // injected <style> does NOT register in document.fonts in time for the screenshot. So load
+      // every face via the FontFace API and add it to document.fonts explicitly, then await.
       try {
         const fontSet = (document as unknown as { fonts?: FontFaceSet }).fonts;
         if (fontSet && typeof FontFace !== 'undefined') {
@@ -59,7 +79,6 @@ function Inner() {
       } catch {
         /* ignore */
       }
-      // Two RAFs so layout + paint settle before the screenshotter reads the readiness flag.
       requestAnimationFrame(() =>
         requestAnimationFrame(() => {
           if (cancelled) return;
@@ -76,7 +95,7 @@ function Inner() {
   if (!payload) return null;
   return (
     <div style={{ width: payload.outW, height: payload.outH }} data-ready={ready ? '1' : '0'}>
-      <CaptionLayer outW={payload.outW} outH={payload.outH} captions={payload.captions} time={payload.time} />
+      <CaptionLayer outW={payload.outW} outH={payload.outH} captions={payload.captions} time={time} />
     </div>
   );
 }
