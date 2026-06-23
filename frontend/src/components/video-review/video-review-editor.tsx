@@ -1445,17 +1445,25 @@ export function VideoReviewEditor({
       ? allOrig.find((c) => c.id !== draggedId && c.link_id === original.link_id)
       : null;
     if (partner) {
-      // Apply the same timeline delta + matching source trim to the partner.
+      // Mirror the drag to the linked partner. CRITICAL: only shift the partner's SOURCE when
+      // the dragged clip's source is also changing (a trim of the start/end handle). On a pure
+      // MOVE (timeline shifts, source stays) the partner's source must NOT shift — otherwise
+      // its timeline and source move by the same delta and cancel out, so the audio looks moved
+      // but plays the exact same content at the same instant (the "voice doesn't follow" bug).
       const dStart = Number(fields.timeline_start ?? original.timeline_start) - original.timeline_start;
       const dEnd = Number(fields.timeline_end ?? original.timeline_end) - original.timeline_end;
       const pf: Partial<SequenceClip> = {};
       if (fields.timeline_start !== undefined) {
         pf.timeline_start = r(partner.timeline_start + dStart);
-        if (Number.isFinite(partner.source_start as number)) pf.source_start = r(Number(partner.source_start || 0) + dStart);
+        if (fields.source_start !== undefined && Number.isFinite(partner.source_start as number)) {
+          pf.source_start = r(Number(partner.source_start || 0) + dStart);
+        }
       }
       if (fields.timeline_end !== undefined) {
         pf.timeline_end = r(partner.timeline_end + dEnd);
-        if (Number.isFinite(partner.source_end as number)) pf.source_end = r(Number(partner.source_end || 0) + dEnd);
+        if (fields.source_end !== undefined && Number.isFinite(partner.source_end as number)) {
+          pf.source_end = r(Number(partner.source_end || 0) + dEnd);
+        }
       }
       moved.set(partner.id, pf);
     }
