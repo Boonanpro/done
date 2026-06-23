@@ -523,24 +523,38 @@ def _write_caption_ass(path: Path, captions: list[dict[str, Any]], width: int, h
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+_ANIMATED_CAPTIONS = {"pop", "fade", "slide", "typewriter", "karaoke"}
+_CAPTION_ANIM_FPS = float(os.environ.get("DAN_CAPTION_ANIM_FPS", "20"))
+
+
 def _render_caption_overlays(
     captions: list[dict[str, Any]], output_width: int, output_height: int, job_dir: Path
-) -> list[tuple[Path, float, float]]:
-    """Render each designed caption to a transparent PNG by screenshotting the Next.js
-    /caption-frame route (same <CaptionLayer> as the live preview => pixel parity). Returns
-    [(png_path, start, end), ...]. Raises on any failure so the caller can fall back to .ass."""
+) -> list[dict[str, Any]]:
+    """Render designed captions by screenshotting the Next.js /caption-frame route (same
+    <CaptionLayer> as the live preview => pixel parity). A STATIC caption -> one transparent PNG;
+    an ANIMATED caption -> a PNG sequence sampled over its duration. Returns a list of overlay
+    specs ({kind:'static'|'anim', ...}). Raises on any failure so the caller can fall back to .ass."""
     web_base = os.environ.get("DAN_CAPTION_RENDER_BASE", "http://127.0.0.1:3000")
     items: list[dict[str, Any]] = []
-    specs: list[tuple[Path, float, float]] = []
+    specs: list[dict[str, Any]] = []
     for i, cap in enumerate(captions):
         text = str(cap.get("text") or "").strip()
         if not text:
             continue
         start = max(0.0, float(cap.get("timeline_start") or 0))
         end = max(start + 0.2, float(cap.get("timeline_end") or start + 2))
-        png = job_dir / f"caption_{i:03d}.png"
-        items.append({"png": str(png), "text": text, "time": 0.0, "design": cap.get("style") or {}})
-        specs.append((png, start, end))
+        style = cap.get("style") or {}
+        words = cap.get("words") if isinstance(cap.get("words"), list) else []
+        animated = str(style.get("animation") or "") in _ANIMATED_CAPTIONS
+        if animated:
+            seq_dir = job_dir / f"caption_{i:03d}_seq"
+            items.append({"seq_dir": str(seq_dir), "text": text, "start": start, "end": end,
+                          "fps": _CAPTION_ANIM_FPS, "design": style, "words": words})
+            specs.append({"kind": "anim", "seq_dir": seq_dir, "fps": _CAPTION_ANIM_FPS, "start": start, "end": end})
+        else:
+            png = job_dir / f"caption_{i:03d}.png"
+            items.append({"png": str(png), "text": text, "time": 0.0, "design": style, "words": words})
+            specs.append({"kind": "static", "png": png, "start": start, "end": end})
     if not items:
         return []
     spec_path = job_dir / "captions_spec.json"
@@ -553,13 +567,15 @@ def _render_caption_overlays(
     cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     result = subprocess.run(
         [sys.executable, str(script), str(spec_path)],
-        capture_output=True, text=True, timeout=240, creationflags=cflags,
+        capture_output=True, text=True, timeout=600, creationflags=cflags,
     )
     if result.returncode != 0:
         raise RuntimeError(f"caption png render failed: {(result.stdout or '')[-400:]} | {(result.stderr or '')[-300:]}")
-    missing = [str(p) for (p, _s, _e) in specs if not p.exists()]
-    if missing:
-        raise RuntimeError(f"caption PNGs missing: {missing}")
+    for spec in specs:
+        if spec["kind"] == "static" and not spec["png"].exists():
+            raise RuntimeError(f"caption PNG missing: {spec['png']}")
+        if spec["kind"] == "anim" and not any(spec["seq_dir"].glob("*.png")):
+            raise RuntimeError(f"caption sequence empty: {spec['seq_dir']}")
     return specs
 
 
@@ -921,9 +937,21 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             logger.warning("designed caption overlay failed, falling back to .ass: %s", exc)
             overlays = []
         if overlays:
-            for ci, (png, cs, ce) in enumerate(overlays):
-                command.extend(["-loop", "1", "-t", f"{ce:.3f}", "-i", str(png)])
-                filters.append(f"[{input_index}:v]format=rgba[capsrc{ci}]")
+            for ci, ov in enumerate(overlays):
+                cs = float(ov["start"])
+                ce = float(ov["end"])
+                if ov["kind"] == "anim":
+                    # PNG sequence -> a moving overlay. Read at the sampling fps, then shift its
+                    # PTS so frame 0 lands at the caption's start time.
+                    fps = float(ov["fps"])
+                    pattern = str(ov["seq_dir"] / "%05d.png")
+                    command.extend(["-framerate", f"{fps:g}", "-i", pattern])
+                    filters.append(
+                        f"[{input_index}:v]format=rgba,setpts=PTS-STARTPTS+{cs:.3f}/TB[capsrc{ci}]"
+                    )
+                else:
+                    command.extend(["-loop", "1", "-t", f"{ce:.3f}", "-i", str(ov["png"])])
+                    filters.append(f"[{input_index}:v]format=rgba[capsrc{ci}]")
                 filters.append(
                     f"[{video_out}][capsrc{ci}]overlay=0:0:enable='between(t\\,{cs:.3f}\\,{ce:.3f})'[vcap{ci}]"
                 )
