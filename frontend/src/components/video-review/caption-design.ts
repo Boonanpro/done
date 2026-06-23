@@ -93,6 +93,22 @@ export function easeOut(p: number): number {
 
 const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
+// Curated high-quality looks (font + outline + box/shadow/gradient + motion). One click sets a
+// caption's whole design. Position is intentionally NOT set (presets are design-only; the user
+// controls placement separately). A mix of static / animated / audio-synced styles.
+export const CAPTION_DESIGN_PRESETS: ReadonlyArray<{ id: string; label: string; design: CaptionDesign }> = [
+  { id: 'standard', label: '標準', design: { font: 'noto-sans', color: '#ffffff', outlineColor: '#000000', outlineWidth: 1 } },
+  { id: 'variety', label: 'バラエティ黄', design: { font: 'dela-gothic', color: '#ffe000', outlineColor: '#000000', outlineWidth: 1.4, animation: 'pop' } },
+  { id: 'red-pop', label: '赤ポップ', design: { font: 'dela-gothic', color: '#ff3b30', outlineColor: '#ffffff', outlineWidth: 1.4, animation: 'pop' } },
+  { id: 'bar', label: '字幕バー', design: { font: 'noto-sans', color: '#ffffff', outlineColor: '#000000', outlineWidth: 0.5, bg: { color: '#000000', opacity: 0.62, radius: 0.2, padX: 0.5, padY: 0.18 }, animation: 'fade' } },
+  { id: 'karaoke', label: 'カラオケ実況', design: { font: 'mplus-rounded', color: '#ffffff', outlineColor: '#1b1b1b', outlineWidth: 1.3, animation: 'karaoke', highlightColor: '#ff3b6b', highlightScale: 1.16 } },
+  { id: 'type', label: 'タイプ', design: { font: 'noto-sans', color: '#ffffff', outlineColor: '#000000', outlineWidth: 1, animation: 'typewriter' } },
+  { id: 'neon', label: 'ネオン', design: { font: 'dela-gothic', color: '#19e6ff', outlineColor: '#003b46', outlineWidth: 1.2, shadow: { color: '#19e6ff', blur: 24, dy: 0 }, animation: 'fade' } },
+  { id: 'mincho', label: '明朝・上品', design: { font: 'mincho', color: '#ffffff', outlineColor: '#000000', outlineWidth: 0.6, bg: { color: '#16213e', opacity: 0.52, radius: 0.1, padX: 0.5, padY: 0.2 }, animation: 'slide' } },
+  { id: 'cute', label: '丸かわいい', design: { font: 'zen-maru', color: '#ff7aa8', outlineColor: '#ffffff', outlineWidth: 1.6, animation: 'pop' } },
+  { id: 'rock', label: 'ロック', design: { font: 'rocknroll', gradient: ['#ffe600', '#ff8a00'], outlineColor: '#000000', outlineWidth: 1.4, animation: 'pop' } },
+];
+
 // Vertical placement of the caption block within the frame.
 export function captionAnchorStyle(design: CaptionDesign, outH: number): CSSProperties {
   const pos = design.position || 'bottom';

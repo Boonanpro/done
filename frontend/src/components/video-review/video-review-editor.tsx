@@ -2,6 +2,14 @@
 
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  CAPTION_DESIGN_PRESETS,
+  CAPTION_FONTS,
+  CAPTION_FONT_FACE_CSS,
+  type CaptionAnimation,
+  type CaptionDesign,
+  type CaptionFontId,
+} from './caption-design';
+import {
   ArrowLeft,
   Check,
   Eraser,
@@ -81,44 +89,30 @@ export type SequenceClip = {
   volume?: number | null;
 };
 
-// Per-caption style. All optional; absence renders as today (white fill, black outline,
-// bold, bottom-center). fontSize/outlineWidth are multipliers of the current defaults.
-export type CaptionStyle = {
-  color?: string;
-  fontSize?: number;
+// Per-caption style = the rich CaptionDesign (font / color / gradient / outline / box / shadow /
+// motion) shared with the renderer, plus a few legacy fields the old canvas used (bold / x / y).
+// The HTML caption renderer ignores the legacy fields; they remain only for back-compat.
+export type CaptionStyle = CaptionDesign & {
   bold?: boolean;
-  position?: 'bottom' | 'center' | 'top';
-  outlineColor?: string;
-  outlineWidth?: number;
-  // Free position offsets (normalized output units). x is clamped so the caption stays on
-  // screen horizontally; y can move it up/down freely. Layered on top of `position`.
   x?: number;
   y?: number;
 };
 
-// Curated one-click telop looks. Each maps ONLY to fields BOTH the live preview canvas and the
-// deterministic .ass renderer already honor (color / outlineColor / fontSize / outlineWidth /
-// bold / position), so what you see in the timeline equals the exported video — no renderer
-// changes required. Applying a preset replaces the caption's whole style (a full look).
-export const CAPTION_PRESETS: { id: string; label: string; style: CaptionStyle }[] = [
-  { id: 'standard', label: '標準',     style: { color: '#ffffff', outlineColor: '#000000', outlineWidth: 1,    bold: true,  position: 'bottom' } },
-  { id: 'yellow',   label: '黄ポップ', style: { color: '#ffd400', outlineColor: '#000000', outlineWidth: 1.75, bold: true,  fontSize: 1.1,  position: 'bottom' } },
-  { id: 'red',      label: '赤強調',   style: { color: '#ff3b30', outlineColor: '#ffffff', outlineWidth: 1.5,  bold: true,  fontSize: 1.1,  position: 'bottom' } },
-  { id: 'cyan',     label: 'シアン',   style: { color: '#19e0ff', outlineColor: '#00323b', outlineWidth: 1.5,  bold: true,  position: 'bottom' } },
-  { id: 'pink',     label: 'ピンク',   style: { color: '#ff4d9d', outlineColor: '#ffffff', outlineWidth: 1.5,  bold: true,  position: 'bottom' } },
-  { id: 'thick',    label: '極太フチ', style: { color: '#ffffff', outlineColor: '#000000', outlineWidth: 2.75, bold: true,  fontSize: 1.2,  position: 'bottom' } },
-  { id: 'subtitle', label: '字幕(小)', style: { color: '#ffffff', outlineColor: '#000000', outlineWidth: 0.75, bold: false, fontSize: 0.82, position: 'bottom' } },
-  { id: 'headline', label: '見出し上', style: { color: '#fff200', outlineColor: '#000000', outlineWidth: 1.75, bold: true,  fontSize: 1.15, position: 'top' } },
-];
-
-// True when the caption's current style matches a preset (for highlighting the active chip).
-// Compares only the fields presets set; treats absent bold as bold (the default).
-function captionStyleMatchesPreset(current: CaptionStyle | null | undefined, preset: CaptionStyle): boolean {
-  const s = current || {};
-  if ((s.bold !== false) !== (preset.bold !== false)) return false;
-  const keys: (keyof CaptionStyle)[] = ['color', 'outlineColor', 'fontSize', 'outlineWidth', 'position'];
-  return keys.every((k) => (s[k] ?? null) === (preset[k] ?? null));
+// True when the caption's current design matches a preset (for highlighting the active chip).
+function captionMatchesPreset(current: CaptionStyle | null | undefined, design: CaptionDesign): boolean {
+  const s = (current || {}) as CaptionDesign;
+  const keys: (keyof CaptionDesign)[] = ['font', 'color', 'outlineColor', 'outlineWidth', 'animation'];
+  return keys.every((k) => JSON.stringify(s[k] ?? null) === JSON.stringify(design[k] ?? null));
 }
+
+const CAPTION_ANIM_OPTIONS: { value: CaptionAnimation; label: string }[] = [
+  { value: 'none', label: 'なし' },
+  { value: 'pop', label: 'ポップ' },
+  { value: 'fade', label: 'フェード' },
+  { value: 'slide', label: 'スライド' },
+  { value: 'typewriter', label: 'タイプ' },
+  { value: 'karaoke', label: 'カラオケ' },
+];
 
 type LaneItem = {
   key: string;
@@ -2478,32 +2472,38 @@ export function VideoReviewEditor({
                       return (
                         <div className="space-y-2 rounded-md border border-border p-2">
                           <div className="text-xs font-medium text-muted-foreground">テロップのデザイン</div>
+                          <style>{CAPTION_FONT_FACE_CSS}</style>
                           <div className="space-y-1">
                             <div className="text-[10px] text-muted-foreground">プリセット（クリックで適用・プレビュー＝書き出しと同じ見た目）</div>
                             <div className="grid grid-cols-4 gap-1">
-                              {CAPTION_PRESETS.map((p) => {
-                                const active = captionStyleMatchesPreset(st, p.style);
+                              {CAPTION_DESIGN_PRESETS.map((p) => {
+                                const d = p.design;
+                                const fnt = CAPTION_FONTS[d.font ?? 'noto-sans'];
+                                const active = captionMatchesPreset(st, d);
                                 return (
                                   <button
                                     key={p.id}
                                     type="button"
-                                    title={p.label}
-                                    onClick={() => updateSelectedSequenceClip({ style: { ...p.style } })}
-                                    className={`flex flex-col items-center gap-0.5 rounded-md border px-1 py-1 transition ${active ? 'border-sky-500 bg-sky-500/10' : 'border-border hover:border-sky-400/60'}`}
+                                    title={`${p.label}${d.animation && d.animation !== 'none' ? '（動き）' : ''}`}
+                                    onClick={() => updateSelectedSequenceClip({ style: { ...d } })}
+                                    className={`flex flex-col items-center gap-0.5 rounded-md border px-1 py-1.5 transition ${active ? 'border-sky-500 bg-sky-500/10' : 'border-border hover:border-sky-400/60'}`}
                                   >
                                     <span
                                       className="leading-none"
                                       style={{
-                                        fontSize: `${0.9 * (p.style.fontSize ?? 1)}rem`,
-                                        color: p.style.color || '#fff',
-                                        fontWeight: p.style.bold === false ? 400 : 800,
-                                        WebkitTextStroke: `${0.6 * (p.style.outlineWidth ?? 1)}px ${p.style.outlineColor || '#000'}`,
+                                        fontFamily: `${fnt.css}, sans-serif`,
+                                        fontWeight: fnt.weight,
+                                        fontSize: '0.95rem',
+                                        WebkitTextStroke: `${0.5 * (d.outlineWidth ?? 1)}px ${d.outlineColor || '#000'}`,
                                         paintOrder: 'stroke fill',
+                                        ...(d.gradient
+                                          ? { backgroundImage: `linear-gradient(180deg, ${d.gradient[0]}, ${d.gradient[1]})`, WebkitBackgroundClip: 'text', backgroundClip: 'text', color: 'transparent' }
+                                          : { color: d.color || '#fff' }),
                                       }}
                                     >
                                       あA
                                     </span>
-                                    <span className="text-[9px] text-muted-foreground">{p.label}</span>
+                                    <span className="text-[8px] leading-tight text-muted-foreground">{p.label}</span>
                                   </button>
                                 );
                               })}
@@ -2524,6 +2524,69 @@ export function VideoReviewEditor({
                             >
                               この見た目を全テロップに適用
                             </Button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <label className="flex flex-col gap-0.5 text-[10px] text-muted-foreground">
+                              フォント
+                              <select
+                                value={(st.font as CaptionFontId) || 'noto-sans'}
+                                onChange={(e) => setStyle({ font: e.target.value as CaptionFontId })}
+                                className="h-7 rounded-md border border-input bg-background px-1 text-xs text-foreground"
+                              >
+                                {(Object.keys(CAPTION_FONTS) as CaptionFontId[]).map((id) => (
+                                  <option key={id} value={id}>{CAPTION_FONTS[id].label}</option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="flex flex-col gap-0.5 text-[10px] text-muted-foreground">
+                              動き
+                              <select
+                                value={st.animation || 'none'}
+                                onChange={(e) => setStyle({ animation: e.target.value as CaptionAnimation })}
+                                className="h-7 rounded-md border border-input bg-background px-1 text-xs text-foreground"
+                              >
+                                {CAPTION_ANIM_OPTIONS.map((o) => (
+                                  <option key={o.value} value={o.value}>{o.label}</option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                          {st.animation === 'karaoke' ? (
+                            <label className="flex items-center justify-between text-[10px] text-muted-foreground">
+                              ハイライト色（喋っている単語）
+                              <input
+                                type="color"
+                                value={st.highlightColor || '#ff3b6b'}
+                                onChange={(e) => setStyle({ highlightColor: e.target.value })}
+                                className="h-6 w-8 rounded border border-input bg-background"
+                              />
+                            </label>
+                          ) : null}
+                          <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+                            <label className="flex items-center gap-1">
+                              <input
+                                type="checkbox"
+                                checked={!!st.bg}
+                                onChange={(e) => setStyle({ bg: e.target.checked ? { color: st.bg?.color || '#000000', opacity: st.bg?.opacity ?? 0.6, radius: 0.18, padX: 0.45, padY: 0.16 } : undefined })}
+                              />
+                              背景箱
+                            </label>
+                            {st.bg ? (
+                              <input
+                                type="color"
+                                value={st.bg.color || '#000000'}
+                                onChange={(e) => setStyle({ bg: { ...st.bg, color: e.target.value } })}
+                                className="h-5 w-7 rounded border border-input bg-background"
+                              />
+                            ) : null}
+                            <label className="flex items-center gap-1">
+                              <input
+                                type="checkbox"
+                                checked={!!st.shadow}
+                                onChange={(e) => setStyle({ shadow: e.target.checked ? { color: 'rgba(0,0,0,0.55)', blur: 16, dy: 6 } : undefined })}
+                              />
+                              影
+                            </label>
                           </div>
                           <div className="grid grid-cols-2 gap-2">
                             <label className="flex items-center gap-2 text-xs">
