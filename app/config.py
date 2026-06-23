@@ -156,6 +156,9 @@ class Settings(BaseSettings):
         # プロジェクトルート基準の絶対パスで固定する
         env_file = str(Path(__file__).resolve().parent.parent / ".env")
         env_file_encoding = "utf-8"
+        # .env は他サービス(umami 等)の変数も同居するので、Settings が知らないキーは無視する。
+        # これが無いと未知の env 変数で Settings() が起動時クラッシュする(extra_forbidden)。
+        extra = "ignore"
 
 
 @lru_cache()
