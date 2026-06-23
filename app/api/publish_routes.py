@@ -316,6 +316,43 @@ async def search_performance(
         raise HTTPException(status_code=502, detail=str(e))
 
 
+@router.get("/analytics-stats")
+async def analytics_stats(
+    domain: str,
+    days: int = 28,
+    user: TokenData = Depends(get_current_user),
+):
+    """独自ドメイン(domain) の訪問数を Umami から引き戻す（認証必須）。
+
+    pageviews/visitors/visits/bounce_rate を返す。Search Console の検索データと並ぶ
+    集客改善ループの土台で、将来のクライアント別ダッシュボードにも使う。
+    """
+    from app.services.umami_service import fetch_stats
+
+    try:
+        return await fetch_stats(domain, days=days)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("analytics_stats failed")
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.get("/analytics-tag")
+async def analytics_tag(host: str = ""):
+    """独自ドメイン(host) の Umami 計測タグ情報 {website_id, src} を返す（公開・認証なし）。
+
+    成果物共通レイアウトが計測スクリプトを差し込むために使う。未登録なら meta=null。
+    website_id はページに埋め込まれる公開値なので認証不要。
+    """
+    try:
+        from app.services.umami_service import tracking_for_host
+
+        tag = await tracking_for_host(host)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("analytics-tag failed: %s", e)
+        tag = None
+    return {"tag": tag}
+
+
 @router.get("/site-meta")
 async def site_meta(host: str = ""):
     """独自ドメイン(host) のSEO用メタ {slug,name,type,url} を返す（公開・認証なし）。
