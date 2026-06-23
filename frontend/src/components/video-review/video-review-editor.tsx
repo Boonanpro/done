@@ -80,6 +80,7 @@ export type SequenceClip = {
   muted?: boolean | null;
   locked?: boolean | null;
   style?: CaptionStyle | null;  // per-caption styling (color/size/position/outline)
+  words?: { text: string; start: number; end: number }[] | null;  // per-word timings for karaoke/typewriter sync
   // Non-destructive source placement inside the clip's box: zoom + pan. null/absent =
   // today's cover look. scale<1 reveals the full source frame (no pixels cropped).
   transform?: { scale: number; x: number; y: number } | null;
@@ -326,6 +327,7 @@ export function VideoReviewEditor({
   embedded = false,
   onBack,
   onSaveTimeline,
+  onSyncCaptionAudio,
   onExecute,
   sidePanelTop,
 }: {
@@ -339,6 +341,7 @@ export function VideoReviewEditor({
   embedded?: boolean;
   onBack?: () => void;
   onSaveTimeline?: (payload: SessionPayload) => void | Promise<void>;
+  onSyncCaptionAudio?: (captionIds: string[]) => Promise<Record<string, { text: string; start: number; end: number }[]>>;
   onExecute?: (payload: SessionPayload) => void | Promise<void>;
   sidePanelTop?: ReactNode;
 }) {
@@ -372,6 +375,7 @@ export function VideoReviewEditor({
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedSequenceClipId, setSelectedSequenceClipId] = useState<string | null>(null);
   const [selectedSequenceClipIds, setSelectedSequenceClipIds] = useState<string[]>([]);
+  const [captionSyncing, setCaptionSyncing] = useState(false);
   const [draftRect, setDraftRect] = useState<{ start: Point; end: Point } | null>(null);
   const [draftPath, setDraftPath] = useState<Point[] | null>(null);
   const [isPointerDown, setIsPointerDown] = useState(false);
@@ -1317,6 +1321,23 @@ export function VideoReviewEditor({
     const ids = new Set(selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
     updateSequenceClips(ids, patch);
   }, [selectedSequenceClipId, selectedSequenceClipIds, updateSequenceClips]);
+
+  // Sync caption(s) to the actual voice: ask the backend for per-word timings (from the speech
+  // under each caption) and merge them into the clips, so karaoke/typewriter follow the audio.
+  const syncCaptionAudio = useCallback(async (captionIds: string[]) => {
+    if (!onSyncCaptionAudio || captionIds.length === 0) return;
+    setCaptionSyncing(true);
+    try {
+      const map = await onSyncCaptionAudio(captionIds);
+      Object.entries(map).forEach(([cid, words]) => {
+        updateSequenceClips(new Set([cid]), { words: words && words.length ? words : null });
+      });
+    } catch {
+      /* surfaced by the caller's toast */
+    } finally {
+      setCaptionSyncing(false);
+    }
+  }, [onSyncCaptionAudio, updateSequenceClips]);
 
   // Insert a new clip from a dragged source asset at the drop time/lane. Video assets only for
   // now (the dominant case; the material list is video-content). The video lands on the 'video'
@@ -2561,6 +2582,42 @@ export function VideoReviewEditor({
                                 className="h-6 w-8 rounded border border-input bg-background"
                               />
                             </label>
+                          ) : null}
+                          {onSyncCaptionAudio && (st.animation === 'karaoke' || st.animation === 'typewriter') ? (
+                            <div className="space-y-1 rounded-md border border-violet-500/40 bg-violet-500/10 p-1.5">
+                              <div className="flex items-center justify-between text-[10px]">
+                                <span className="text-muted-foreground">
+                                  {selectedSequenceClip.words?.length
+                                    ? `音声同期済み（${selectedSequenceClip.words.length}語）`
+                                    : '今は等速。実際の声に合わせます'}
+                                </span>
+                                <span className="text-[9px] text-muted-foreground">{selectedSequenceClip.words?.length ? '🔊✓' : '🔊'}</span>
+                              </div>
+                              <div className="flex gap-1">
+                                <Button
+                                  variant="outline" size="sm" className="h-6 flex-1 text-[10px]"
+                                  disabled={captionSyncing || !selectedSequenceClipId}
+                                  onClick={() => void syncCaptionAudio(selectedSequenceClipId ? [selectedSequenceClipId] : [])}
+                                >
+                                  {captionSyncing ? '解析中…' : '音声に合わせる'}
+                                </Button>
+                                <Button
+                                  variant="outline" size="sm" className="h-6 flex-1 text-[10px]"
+                                  disabled={captionSyncing}
+                                  onClick={() => void syncCaptionAudio(allSequenceClips.filter((c) => c.track === 'caption' || typeof c.text === 'string').map((c) => String(c.id)))}
+                                >
+                                  全字幕
+                                </Button>
+                              </div>
+                              {selectedSequenceClip.words?.length ? (
+                                <Button
+                                  variant="ghost" size="sm" className="h-5 w-full text-[9px] text-muted-foreground"
+                                  onClick={() => updateSelectedSequenceClip({ words: null })}
+                                >
+                                  等速に戻す
+                                </Button>
+                              ) : null}
+                            </div>
                           ) : null}
                           <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
                             <label className="flex items-center gap-1">
