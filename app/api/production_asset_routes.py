@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import mimetypes
 import os
 import re
 import shutil
 import subprocess
+import sys
 import uuid
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -519,6 +523,46 @@ def _write_caption_ass(path: Path, captions: list[dict[str, Any]], width: int, h
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _render_caption_overlays(
+    captions: list[dict[str, Any]], output_width: int, output_height: int, job_dir: Path
+) -> list[tuple[Path, float, float]]:
+    """Render each designed caption to a transparent PNG by screenshotting the Next.js
+    /caption-frame route (same <CaptionLayer> as the live preview => pixel parity). Returns
+    [(png_path, start, end), ...]. Raises on any failure so the caller can fall back to .ass."""
+    web_base = os.environ.get("DAN_CAPTION_RENDER_BASE", "http://127.0.0.1:3000")
+    items: list[dict[str, Any]] = []
+    specs: list[tuple[Path, float, float]] = []
+    for i, cap in enumerate(captions):
+        text = str(cap.get("text") or "").strip()
+        if not text:
+            continue
+        start = max(0.0, float(cap.get("timeline_start") or 0))
+        end = max(start + 0.2, float(cap.get("timeline_end") or start + 2))
+        png = job_dir / f"caption_{i:03d}.png"
+        items.append({"png": str(png), "text": text, "time": 0.0, "design": cap.get("style") or {}})
+        specs.append((png, start, end))
+    if not items:
+        return []
+    spec_path = job_dir / "captions_spec.json"
+    spec_path.write_text(
+        json.dumps({"outW": output_width, "outH": output_height, "web_base": web_base, "items": items},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    script = PROJECT_ROOT / "scripts" / "render_caption_pngs.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run(
+        [sys.executable, str(script), str(spec_path)],
+        capture_output=True, text=True, timeout=240, creationflags=cflags,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"caption png render failed: {(result.stdout or '')[-400:]} | {(result.stderr or '')[-300:]}")
+    missing = [str(p) for (p, _s, _e) in specs if not p.exists()]
+    if missing:
+        raise RuntimeError(f"caption PNGs missing: {missing}")
+    return specs
+
+
 def _asset_source_path(asset: dict[str, Any]) -> Path:
     source_value = asset.get("proxy_path") or asset.get("local_path")
     if not source_value:
@@ -867,11 +911,32 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
 
     captions = _sequence_caption_clips(sequence)
     if captions:
-        ass_path = job_dir / f"{job_id}_captions.ass"
-        _write_caption_ass(ass_path, captions, output_width, output_height)
-        escaped_ass = str(ass_path).replace("\\", "/").replace(":", "\\:")
-        filters.append(f"[{video_out}]subtitles='{escaped_ass}'[vcap]")
-        video_out = "vcap"
+        # Designed captions: burn the SAME HTML/CSS render the editor preview shows (via the
+        # /caption-frame route, screenshotted to transparent PNGs) so preview == export. Falls
+        # back to the libass .ass path if the caption renderer is unavailable.
+        overlays: list[tuple[Path, float, float]] = []
+        try:
+            overlays = _render_caption_overlays(captions, output_width, output_height, job_dir)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("designed caption overlay failed, falling back to .ass: %s", exc)
+            overlays = []
+        if overlays:
+            for ci, (png, cs, ce) in enumerate(overlays):
+                command.extend(["-loop", "1", "-t", f"{ce:.3f}", "-i", str(png)])
+                filters.append(f"[{input_index}:v]format=rgba[capsrc{ci}]")
+                filters.append(
+                    f"[{video_out}][capsrc{ci}]overlay=0:0:enable='between(t\\,{cs:.3f}\\,{ce:.3f})'[vcap{ci}]"
+                )
+                video_out = f"vcap{ci}"
+                input_index += 1
+            filters.append(f"[{video_out}]format=yuv420p[vcapf]")
+            video_out = "vcapf"
+        else:
+            ass_path = job_dir / f"{job_id}_captions.ass"
+            _write_caption_ass(ass_path, captions, output_width, output_height)
+            escaped_ass = str(ass_path).replace("\\", "/").replace(":", "\\:")
+            filters.append(f"[{video_out}]subtitles='{escaped_ass}'[vcap]")
+            video_out = "vcap"
 
     # --- audio: when an audio track exists, mix its clips (replaces base clip audio) ---
     audio_out = base_audio_out
