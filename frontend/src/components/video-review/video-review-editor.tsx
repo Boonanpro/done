@@ -174,6 +174,26 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+// The tracked-blur box position at time t = the nearest sampled frame from track_boxes
+// ({"t": [x,y,w,h] normalized}). Lets the preview animate the blur along the moving object.
+function trackedBoxAt(
+  boxes: Record<string, number[]> | undefined,
+  t: number,
+): { x: number; y: number; width: number; height: number } | null {
+  if (!boxes) return null;
+  const keys = Object.keys(boxes);
+  if (keys.length === 0) return null;
+  let bestK = keys[0];
+  let bestD = Infinity;
+  for (const k of keys) {
+    const d = Math.abs(Number(k) - t);
+    if (d < bestD) { bestD = d; bestK = k; }
+  }
+  const b = boxes[bestK];
+  if (!b || b.length < 4) return null;
+  return { x: b[0], y: b[1], width: b[2], height: b[3] };
+}
+
 // Serialization-stable signature of a value: sorts object keys and rounds numbers so the
 // SAME logical sequence compares equal even after a backend round-trip reorders keys or
 // reformats numbers (2 -> 2.0). Used to tell an autosave echo (skip) from a genuine new
@@ -324,6 +344,7 @@ export function VideoReviewEditor({
   onBack,
   onSaveTimeline,
   onSyncCaptionAudio,
+  onTrackBlur,
   onExecute,
   sidePanelTop,
 }: {
@@ -338,6 +359,7 @@ export function VideoReviewEditor({
   onBack?: () => void;
   onSaveTimeline?: (payload: SessionPayload) => void | Promise<void>;
   onSyncCaptionAudio?: (captionIds: string[]) => Promise<Record<string, { text: string; start: number; end: number }[]>>;
+  onTrackBlur?: (box: { x: number; y: number; width: number; height: number }, start: number, end: number) => Promise<Record<string, number[]>>;
   onExecute?: (payload: SessionPayload) => void | Promise<void>;
   sidePanelTop?: ReactNode;
 }) {
@@ -866,6 +888,27 @@ export function VideoReviewEditor({
     if (!selectedId) return;
     setAnnotations((prev) => prev.map((a) => (a.id === selectedId ? { ...a, ...patch } : a)));
   }, [selectedId]);
+
+  // 追従ぼかし: run the tracker on a drawn box; store its per-frame path (track_boxes) on the
+  // annotation so the preview animates the blur box along the moving object (real tracking).
+  const [trackingId, setTrackingId] = useState<string | null>(null);
+  const runTrackBlur = useCallback(async (ann: ReviewAnnotation) => {
+    if (!onTrackBlur || ann.kind !== 'rect') return;
+    const d = (ann.data || {}) as { x?: number; y?: number; width?: number; height?: number };
+    setTrackingId(ann.id);
+    try {
+      const boxes = await onTrackBlur(
+        { x: Number(d.x || 0), y: Number(d.y || 0), width: Number(d.width || 0), height: Number(d.height || 0) },
+        Number(ann.start || 0),
+        Number(ann.end || 0),
+      );
+      setAnnotations((prev) => prev.map((a) => (a.id === ann.id
+        ? { ...a, data: { ...(a.data as object), track: true, track_boxes: boxes } }
+        : a)));
+    } finally {
+      setTrackingId(null);
+    }
+  }, [onTrackBlur]);
 
   const updatePending = useCallback((patch: Partial<DraftAnnotation>) => {
     setPendingAnnotation((current) => (current ? { ...current, ...patch } : current));
@@ -1853,6 +1896,11 @@ export function VideoReviewEditor({
                 <div className="pointer-events-none absolute" style={videoContentStyle}>
                   {annotations.filter(isActiveAnnotation).map((a) => {
                     if (a.kind === 'rect') {
+                      // For a tracked blur, follow the analysed path (track_boxes) at the current
+                      // time so the box moves with the object — real tracking, not a static box.
+                      const tracked = a.intent === 'blur' && (a.data as { track?: boolean } | undefined)?.track
+                        ? trackedBoxAt((a.data as { track_boxes?: Record<string, number[]> } | undefined)?.track_boxes, currentTime)
+                        : null;
                       return (
                         <button
                           key={a.id}
@@ -1865,9 +1913,9 @@ export function VideoReviewEditor({
                             selectedIds.includes(a.id) ? 'border-yellow-300' : a.intent === 'blur' ? 'border-sky-300/70' : 'border-sky-400'
                           } ${a.intent === 'blur' ? '' : 'bg-red-500/15'}`}
                           style={{
-                            ...rectStyle(a.data),
-                            // Live preview of the blur (the export bakes a real gaussian). Tracked
-                            // boxes show the start position here; the follow happens on export.
+                            ...rectStyle(tracked || a.data),
+                            // Live preview of the blur (the export bakes a real gaussian). With a
+                            // tracked path the box animates here too.
                             ...(a.intent === 'blur'
                               ? { backdropFilter: 'blur(7px)', WebkitBackdropFilter: 'blur(7px)' } as CSSProperties
                               : {}),
@@ -2434,23 +2482,45 @@ export function VideoReviewEditor({
                     <option key={it.value} value={it.value}>{it.label}</option>
                   ))}
                 </select>
-                {selected.intent === 'blur' && selected.kind === 'rect' ? (
-                  <div className="space-y-1 rounded-md border border-sky-500/40 bg-sky-500/10 p-2">
-                    <label className="flex items-center gap-2 text-xs">
-                      <input
-                        type="checkbox"
-                        checked={!!(selected.data as { track?: boolean } | undefined)?.track}
-                        onChange={(e) => updateSelected({ data: { ...((selected.data as object) || {}), track: e.target.checked } })}
-                      />
-                      追従ぼかし（動く対象を追いかける）
-                    </label>
-                    <p className="text-[10px] text-muted-foreground">
-                      {(selected.data as { track?: boolean } | undefined)?.track
-                        ? '書き出し時に枠の中身を追跡し、動いてもぼかし続けます。'
-                        : 'OFF＝この枠で静止ぼかし（機械処理・即時）。ONで対象を追従。'}
-                    </p>
-                  </div>
-                ) : null}
+                {selected.intent === 'blur' && selected.kind === 'rect' ? (() => {
+                  const sd = (selected.data || {}) as { track?: boolean; track_boxes?: Record<string, number[]> };
+                  const nPts = sd.track_boxes ? Object.keys(sd.track_boxes).length : 0;
+                  const isTracking = trackingId === selected.id;
+                  return (
+                    <div className="space-y-2 rounded-md border border-sky-500/40 bg-sky-500/10 p-2">
+                      <div className="flex gap-1">
+                        <button
+                          type="button"
+                          className={`flex-1 rounded px-2 py-1 text-xs ${!sd.track ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground'}`}
+                          onClick={() => updateSelected({ data: { ...sd, track: false } })}
+                        >
+                          静止
+                        </button>
+                        <button
+                          type="button"
+                          className={`flex-1 rounded px-2 py-1 text-xs ${sd.track ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground'}`}
+                          onClick={() => updateSelected({ data: { ...sd, track: true } })}
+                        >
+                          追従
+                        </button>
+                      </div>
+                      {sd.track ? (
+                        <div className="space-y-1">
+                          <Button size="sm" className="w-full" disabled={isTracking || !onTrackBlur} onClick={() => runTrackBlur(selected)}>
+                            {isTracking ? '解析中…' : nPts ? '再解析' : '▶ 解析（対象を追跡）'}
+                          </Button>
+                          <p className="text-[10px] text-muted-foreground">
+                            {nPts
+                              ? `✓ 追跡済み（${nPts}点）。再生すると枠が対象を追います。`
+                              : '枠を対象に合わせて「解析」を押すと、動く対象を追ってぼかします。'}
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="text-[10px] text-muted-foreground">この枠で静止ぼかし（機械処理・即時）。</p>
+                      )}
+                    </div>
+                  );
+                })() : null}
                 <Textarea
                   value={selected.note || ''}
                   onChange={(e) => updateSelected({ note: e.target.value })}
