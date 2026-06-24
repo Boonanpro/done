@@ -15,6 +15,9 @@ import type { CaptionDesign } from './caption-design';
 type Props = {
   sequence: EditSequence | null;
   assets: SequenceAsset[];
+  // Manual blur boxes active NOW (normalized output coords, tracked position already resolved).
+  // Painted on the canvas so the preview matches the export and never flickers (no backdrop-filter).
+  blurRegions?: Array<{ x: number; y: number; width: number; height: number }>;
   currentTime: number;
   playing: boolean;
   format: string;
@@ -118,7 +121,7 @@ function drawSource(
   ctx.restore();
 }
 
-export function TimelinePreview({ sequence, assets, currentTime, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange }: Props) {
+export function TimelinePreview({ sequence, assets, blurRegions, currentTime, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const videosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
@@ -414,11 +417,30 @@ export function TimelinePreview({ sequence, assets, currentTime, playing, format
         ctx.restore();
       }
 
+      // Manual blur boxes (drawn by the user, tracked position already resolved). Painted here on
+      // the canvas — NOT via CSS backdrop-filter — so they never flicker and the preview matches
+      // the gaussian baked into the export.
+      for (const r of blurRegions || []) {
+        const rx = r.x * w;
+        const ry = r.y * h;
+        const rw = Math.max(2, r.width * w);
+        const rh = Math.max(2, r.height * h);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(rx, ry, rw, rh);
+        ctx.clip();
+        ctx.filter = 'blur(14px)';
+        const base = active.find((vc) => vc.kind === 'base') || active[0];
+        const bv = base ? videosRef.current.get(String(base.clip.id)) : null;
+        if (bv && bv.videoWidth) drawCover(ctx, bv, 0, 0, w, h);
+        ctx.restore();
+      }
+
       // Captions are NOT drawn on the canvas anymore — they render as an HTML <CaptionLayer>
       // overlay (same component the export screenshots) so the preview equals the burned video,
       // with real fonts / boxes / shadows the canvas couldn't match.
     },
-    [dims, visualClips, effectClips],
+    [dims, visualClips, effectClips, blurRegions],
   );
 
   const seekVideo = useCallback((video: HTMLVideoElement, time: number): Promise<void> => {
