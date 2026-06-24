@@ -1078,7 +1078,9 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     # final video, if the content has it enabled. Reads the authoritative stored spec.
     try:
         _content = next((c for c in _read_contents(room_id) if c.get("id") == content_id), None)
-        _sb = ((_content or {}).get("timeline") or {}).get("screen_blur")
+        _tl = (_content or {}).get("timeline") or {}
+        # spec can live on the timeline (set directly) OR on the assembled sequence (Dan-driven).
+        _sb = _tl.get("screen_blur") or (_tl.get("sequence") or {}).get("screen_blur")
         if isinstance(_sb, dict) and _sb.get("enabled"):
             _apply_screen_blur(out_path, _sb, job_dir)
     except Exception as exc:  # noqa: BLE001
@@ -1768,7 +1770,7 @@ DECISIONS schema:
   "spine": [ {{"segment_id": "a1_s03", "caption": "整えたテロップ文字列 or null=発話そのまま"}} ],
   "cuts": [ {{"asset_id": "<asset id>", "start": <sec>, "end": <sec>, "reason": "restatement|filler"}} ],
   "screen_overlays": [ {{"screen_asset_id": "<asset id>", "screen_source_start": <sec>, "screen_source_end": <sec>, "from_segment": "a1_s06", "to_segment": "a1_s12", "main_as_pip": true}} ],
-  "blur": [ {{"asset_id": "<asset id>", "region": {{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}}, "source_start": <sec>, "source_end": <sec>, "style": "soft"}} ],
+  "blur": [ {{"target_text": "<exact on-screen text to hide; follows it as it moves>", "pattern": "email|phone|key", "asset_id": "<id>", "region": {{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}}, "source_start": <sec>, "source_end": <sec>, "style": "mosaic|soft"}} ],
   "silence_threshold": 0.45
 }}
 
@@ -1778,7 +1780,12 @@ Rules:
 - Never cut a sentence end. The assembler AUTO-compresses internal silence longer than silence_threshold seconds, so do NOT list silence in cuts. Set silence_threshold lower (e.g. 0.3) for tighter pacing or higher for relaxed, following the user's request; omit it to use the default (0.45).
 - During screen_overlays the screen recording is the background and the main camera is the small wipe; captions are auto-suppressed there (do not add captions to those segments).
 - All audio comes from the main-camera spine segments automatically.
-- region/source coords for blur are 0..1 normalized and in the screen asset's own seconds.
+- blur = hide something on screen. If the user asks to hide specific info (認証情報/メール/電話/
+  ID/口座/氏名/個人情報 など) — ESPECIALLY in a screen recording where it scrolls or moves — emit a
+  blur entry with "target_text" (the exact text you see) and/or "pattern" ("email"/"phone"/"key").
+  Those are detected per-frame at export and FOLLOW the text so it never leaks. Use a static
+  "region" ONLY for a fixed visual object that does not move. region/source coords are 0..1
+  normalized in the screen asset's own seconds. Do NOT blur unless the user asked to hide something.
 - Output the json LAST, after the reasoning. It must be valid JSON.
 
 EDITING POLICY (必読):
@@ -2157,8 +2164,21 @@ def _assemble_sequence_from_decisions(
             "composition": "background", "layer": 0, "auto_edit_reason": "screen_overlay",
         })
 
-    # Pass 4: blur regions → effect clips, mapping screen source time → timeline time.
+    # Pass 4: blur → effect clips (fixed region) OR an OCR-follow screen-blur spec (text/pattern
+    # that may move/scroll). Dan emits target_text/pattern when the user asks to hide specific
+    # info ("○○を隠して"); those are detected per-frame at export so they never leak.
+    _PAT = {"phone": "digits", "number": "digits", "tel": "digits", "数字": "digits", "メール": "email"}
+    sb_targets: list[str] = []
+    sb_patterns: list[str] = []
     for b in (decisions.get("blur") or []):
+        tt = str(b.get("target_text") or "").strip()
+        pat = str(b.get("pattern") or "").strip().lower()
+        if tt or pat:
+            if tt:
+                sb_targets.append(tt)
+            if pat:
+                sb_patterns.append(_PAT.get(pat, pat))
+            continue
         region = b.get("region") if isinstance(b.get("region"), dict) else None
         if not region:
             continue
@@ -2182,7 +2202,7 @@ def _assemble_sequence_from_decisions(
             "timeline_start": ts, "timeline_end": te,
         })
 
-    return {
+    seq_out: dict[str, Any] = {
         "version": 1,
         "format": fmt,
         "duration": total,
@@ -2200,6 +2220,15 @@ def _assemble_sequence_from_decisions(
             {"id": "effects_1", "type": "effect", "label": "Blur/Effects", "clips": effect_clips},
         ],
     }
+    if sb_targets or sb_patterns:
+        # OCR-follow blur Dan was asked to apply ("○○を隠して"); baked at export (post-pass).
+        seq_out["screen_blur"] = {
+            "enabled": True,
+            "targets": sorted(set(sb_targets)),
+            "patterns": sorted(set(sb_patterns)),
+            "style": "mosaic",
+        }
+    return seq_out
 
 
 def _clips_in_scope(sequence: dict[str, Any], regions: list[dict[str, Any]]) -> set[str]:
