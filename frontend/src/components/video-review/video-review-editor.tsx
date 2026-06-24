@@ -1837,9 +1837,16 @@ export function VideoReviewEditor({
                             selectAnnotation(a.id, e.shiftKey || e.ctrlKey || e.metaKey);
                           }}
                           className={`pointer-events-auto absolute border-2 ${
-                            selectedIds.includes(a.id) ? 'border-yellow-300' : 'border-sky-400'
-                          } bg-red-500/15`}
-                          style={rectStyle(a.data)}
+                            selectedIds.includes(a.id) ? 'border-yellow-300' : a.intent === 'blur' ? 'border-sky-300/70' : 'border-sky-400'
+                          } ${a.intent === 'blur' ? '' : 'bg-red-500/15'}`}
+                          style={{
+                            ...rectStyle(a.data),
+                            // Live preview of the blur (the export bakes a real gaussian). Tracked
+                            // boxes show the start position here; the follow happens on export.
+                            ...(a.intent === 'blur'
+                              ? { backdropFilter: 'blur(7px)', WebkitBackdropFilter: 'blur(7px)' } as CSSProperties
+                              : {}),
+                          }}
                           title={a.note || a.intent}
                         />
                       );
