@@ -586,6 +586,12 @@ export function ProductionWorkspace({
     }
   };
 
+  // Per-clip 実行: run Dan scoped to a SINGLE instruction clip (生成/ダンに指示) so the result is
+  // visible without re-editing the whole content. Reuses the non-destructive dan_revise path.
+  const executeInstructionClip = async (ann: ReviewAnnotation): Promise<void> => {
+    await requestDanEdit(ann.note || '', [{ intent: ann.intent, start: ann.start, end: ann.end ?? undefined, note: ann.note ?? undefined }]);
+  };
+
   const saveContentTimeline = async (timeline: SessionPayload) => {
     if (!selectedContent) return;
     // Merge into the existing timeline so format / source_asset_ids / screen_blur (Dan-driven
@@ -941,6 +947,7 @@ export function ProductionWorkspace({
         onSaveTimeline={saveContentTimeline}
         onSyncCaptionAudio={syncCaptionAudio}
         onTrackBlur={trackBlurRegion}
+        onExecuteClip={executeInstructionClip}
         onExecute={createProductionJob}
       />
     );

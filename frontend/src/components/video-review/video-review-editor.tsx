@@ -345,6 +345,7 @@ export function VideoReviewEditor({
   onSaveTimeline,
   onSyncCaptionAudio,
   onTrackBlur,
+  onExecuteClip,
   onExecute,
   sidePanelTop,
 }: {
@@ -360,6 +361,7 @@ export function VideoReviewEditor({
   onSaveTimeline?: (payload: SessionPayload) => void | Promise<void>;
   onSyncCaptionAudio?: (captionIds: string[]) => Promise<Record<string, { text: string; start: number; end: number }[]>>;
   onTrackBlur?: (box: { x: number; y: number; width: number; height: number }, start: number, end: number) => Promise<Record<string, number[]>>;
+  onExecuteClip?: (annotation: ReviewAnnotation) => void | Promise<void>;
   onExecute?: (payload: SessionPayload) => void | Promise<void>;
   sidePanelTop?: ReactNode;
 }) {
@@ -888,6 +890,18 @@ export function VideoReviewEditor({
     if (!selectedId) return;
     setAnnotations((prev) => prev.map((a) => (a.id === selectedId ? { ...a, ...patch } : a)));
   }, [selectedId]);
+
+  // Per-clip 実行 (生成/ダンに指示): dispatch this one instruction clip to Dan and reflect it.
+  const [executingId, setExecutingId] = useState<string | null>(null);
+  const runExecuteClip = useCallback(async (ann: ReviewAnnotation) => {
+    if (!onExecuteClip) return;
+    setExecutingId(ann.id);
+    try {
+      await onExecuteClip(ann);
+    } finally {
+      setExecutingId(null);
+    }
+  }, [onExecuteClip]);
 
   // 追従ぼかし: run the tracker on a drawn box; store its per-frame path (track_boxes) on the
   // annotation so the preview animates the blur box along the moving object (real tracking).
@@ -2525,7 +2539,18 @@ export function VideoReviewEditor({
                   value={selected.note || ''}
                   onChange={(e) => updateSelected({ note: e.target.value })}
                   rows={3}
+                  placeholder={selected.intent === 'blur' ? 'メモ（任意）' : 'この範囲でDanにやってほしいこと（例: ここに商品のアップ映像を生成して）'}
                 />
+                {(selected.intent === 'generate' || selected.intent === 'comment') && onExecuteClip ? (
+                  <Button
+                    size="sm"
+                    className="w-full"
+                    disabled={executingId === selected.id}
+                    onClick={() => runExecuteClip(selected)}
+                  >
+                    {executingId === selected.id ? '実行中…' : '▶ 実行（Danに反映）'}
+                  </Button>
+                ) : null}
               </div>
             )}
 
