@@ -62,12 +62,15 @@ def _blur_region(frame, x, y, w, h, style: str):
     roi = frame[y:y + h, x:x + w]
     if roi.size == 0:
         return
-    if style == "gaussian":
-        k = max(9, (min(w, h) // 2) | 1)
-        frame[y:y + h, x:x + w] = cv2.GaussianBlur(roi, (k, k), 0)
-    else:  # mosaic
+    if style == "mosaic":
         small = cv2.resize(roi, (max(2, w // 12), max(2, h // 12)), interpolation=cv2.INTER_NEAREST)
         frame[y:y + h, x:x + w] = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+    else:  # gaussian (default) — a soft, content-obscuring blur. Downscale-then-blur fully hides
+        # text/faces while staying smooth (a giant kernel alone is slow and can look boxy).
+        small = cv2.resize(roi, (max(2, w // 8), max(2, h // 8)), interpolation=cv2.INTER_AREA)
+        up = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+        k = min(75, max(7, (min(w, h) // 4) | 1))
+        frame[y:y + h, x:x + w] = cv2.GaussianBlur(up, (k, k), 0)
 
 
 def detect(src: str, targets, patterns, regex, fps: float, pad: float, start: float, end: float):
@@ -176,7 +179,7 @@ def main() -> int:
     ap.add_argument("--pad", type=float, default=0.3)
     ap.add_argument("--start", type=float, default=0.0)
     ap.add_argument("--end", type=float, default=0.0)
-    ap.add_argument("--style", default="mosaic")
+    ap.add_argument("--style", default="gaussian")
     ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--dump", default="")  # optional: write boxes json
     ap.add_argument("--probe", action="store_true")  # detect-only: print matched texts as JSON
