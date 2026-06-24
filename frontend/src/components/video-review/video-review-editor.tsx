@@ -593,9 +593,26 @@ export function VideoReviewEditor({
   // Annotations (blur boxes etc.) autosave separately — the sequence sig doesn't cover them, so
   // without this a drawn blur never reaches the backend/export. Echo-safe via seqSig.
   const lastSyncedAnnSig = useRef<string>(seqSig(initialAnnotations || []));
+  // Every value the editor itself has held (current + recent past). The parent POLLS the server
+  // (loadAll every few seconds) and can hand back a value that LAGS our latest edit — e.g. right
+  // after we save a resize, an in-flight poll returns the pre-save length. Comparing only against
+  // the single lastSynced sig, that lagging echo looks like an external change and gets adopted
+  // for one frame ("revert to old length, then back"). A value we've ALREADY produced locally is
+  // never a genuine external change, so down-sync skips it. Only a sig we've never held (a real
+  // Dan render /外部更新) is adopted. Bounded so it can't grow without limit.
+  const localSeqSigs = useRef<Set<string>>(new Set([seqSig(initialSequence)]));
+  const localAnnSigs = useRef<Set<string>>(new Set([seqSig(initialAnnotations || [])]));
+  const rememberLocalSig = (set: React.MutableRefObject<Set<string>>, sig: string) => {
+    const s = set.current;
+    s.add(sig);
+    if (s.size > 80) s.delete(s.values().next().value as string);
+  };
+  useEffect(() => { rememberLocalSig(localSeqSigs, seqSig(editSequence)); }, [editSequence]);
+  useEffect(() => { rememberLocalSig(localAnnSigs, seqSig(annotations)); }, [annotations]);
   useEffect(() => {
     const sig = seqSig(initialSequence);
-    if (sig === lastSyncedSig.current) return;
+    // Skip if this is the current sync point OR any state we've held locally (a lagging poll echo).
+    if (sig === lastSyncedSig.current || localSeqSigs.current.has(sig)) return;
     lastSyncedSig.current = sig;
     // genuine new baseline: reset undo history and pre-sync histPrevRef so the resulting
     // setEditSequence isn't itself recorded as an undoable step.
@@ -726,11 +743,13 @@ export function VideoReviewEditor({
       const data = (await res.json()) as SessionPayload;
       const loadedAnnotations = data.annotations || [];
       const nextAnnotations = loadedAnnotations.length > 0 ? loadedAnnotations : initialAnnotations || [];
-      // Only adopt when the parent's annotations differ from what we LAST SAVED — i.e. a genuine
-      // external change. If they match our last save, a local unsaved edit (a just-drawn blur) is
-      // in flight; adopting here would wipe it before autosave persists it (the "vanishes after
-      // 0.3s" bug). Compared via the echo-safe sig, same as the sequence path.
-      if (seqSig(nextAnnotations) === lastSyncedAnnSig.current) return;
+      // Only adopt a GENUINELY external change. Skip the current sync point AND any annotation
+      // state we've held locally — a lagging poll echo (parent returns the pre-save annotations
+      // right after we save a new blur) is a past local value, not external, so adopting it would
+      // make the just-created blur "disappear then reappear". (Also covers the "vanishes after
+      // 0.3s" in-flight case.)
+      const nextSig = seqSig(nextAnnotations);
+      if (nextSig === lastSyncedAnnSig.current || localAnnSigs.current.has(nextSig)) return;
       histPastRef.current = [];
       histFutureRef.current = [];
       histCheckpointRef.current = null;
