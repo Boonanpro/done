@@ -155,10 +155,12 @@ export type SequenceAsset = {
   fps?: number | string | null;
 };
 
-// Manual annotations are only for ぼかし now — everything else is better expressed to Dan in text.
-// (生成 may come back when the G plan needs it.)
+// A drawn region is given a TYPE after you draw it (popover on the shape) — not pre-selected.
+// ぼかし = hide it; 生成 = let Dan generate something there; ダンに指示 = free-text instruction.
 const INTENTS: Array<{ value: Intent; label: string }> = [
   { value: 'blur', label: 'ぼかし' },
+  { value: 'generate', label: '生成' },
+  { value: 'comment', label: 'ダンに指示' },
 ];
 
 function fmtTime(value: number | null | undefined): string {
@@ -361,10 +363,12 @@ export function VideoReviewEditor({
   const [duration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [tool, setTool] = useState<Tool>('rect');
-  const intent: Intent = 'blur'; // manual annotations are ぼかし only now
   const [annotations, setAnnotations] = useState<ReviewAnnotation[]>(initialAnnotations || []);
   const [editSequence, setEditSequence] = useState<EditSequence | null>(initialSequence || null);
   const [pendingAnnotation, setPendingAnnotation] = useState<DraftAnnotation | null>(null);
+  // A freshly-drawn shape waiting for the user to pick its type (ぼかし/生成/ダンに指示) from a
+  // popover anchored at the shape. Nothing is committed until a type is chosen.
+  const [typePicker, setTypePicker] = useState<{ kind: 'rect' | 'freehand'; data: Record<string, unknown>; cx: number; cy: number } | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedSequenceClipId, setSelectedSequenceClipId] = useState<string | null>(null);
@@ -757,20 +761,20 @@ export function VideoReviewEditor({
   }, [annotations]);
 
   const makeDraftAnnotation = useCallback(
-    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>): DraftAnnotation => {
+    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>, intentArg: Intent = 'blur'): DraftAnnotation => {
       const fallbackStart = effectiveDrawStart;
       const fallbackEnd = Number(Math.min(duration || fallbackStart + 1, fallbackStart + 1).toFixed(2));
       const start = Math.min(fallbackStart, fallbackEnd);
       const end = Math.max(fallbackStart, fallbackEnd);
       return {
         ...annotation,
-        intent,
+        intent: intentArg,
         note: null,
         start,
         end: end > start ? end : start + 0.5,
       };
     },
-    [duration, effectiveDrawStart, intent]
+    [duration, effectiveDrawStart]
   );
 
   useEffect(() => {
@@ -840,8 +844,8 @@ export function VideoReviewEditor({
   // ぼかし options (静止/追従) show right away; deletable with Delete. A blur defaults to the
   // WHOLE clip (not a 1s window) so it doesn't vanish when the playhead moves; trim on the timeline.
   const commitAnnotation = useCallback(
-    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>) => {
-      const draft = makeDraftAnnotation(annotation);
+    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>, intentArg: Intent = 'blur') => {
+      const draft = makeDraftAnnotation(annotation, intentArg);
       const fullEnd = Number((duration || draft.end || 1).toFixed(2));
       const next: ReviewAnnotation = {
         ...draft,
@@ -1085,15 +1089,17 @@ export function VideoReviewEditor({
       setDraftRect(null);
       setDraftPath(null);
       setPendingAnnotation(null);
+      setTypePicker(null);
       if (tool === 'rect') {
         setDraftRect({ start: point, end: point });
       } else if (tool === 'freehand') {
         setDraftPath([point]);
       } else if (tool === 'marker') {
-        commitAnnotation({ kind: 'marker', label: intent, data: { point } });
+        // A marker is a point note → always a "ダンに指示" pin (no type choice needed).
+        commitAnnotation({ kind: 'marker', label: 'comment', data: { point } }, 'comment');
       }
     },
-    [clearSelection, commitAnnotation, getPoint, intent, tool]
+    [clearSelection, commitAnnotation, getPoint, tool]
   );
 
   const handlePointerMove = useCallback(
@@ -1109,23 +1115,29 @@ export function VideoReviewEditor({
 
   const handlePointerUp = useCallback(() => {
     setIsPointerDown(false);
+    // On release we DON'T commit — we open a type picker at the shape so the user chooses
+    // ぼかし / 生成 / ダンに指示. Drawing a shape no longer implies "ぼかし".
     if (draftRect) {
       const x = Math.min(draftRect.start.x, draftRect.end.x);
       const y = Math.min(draftRect.start.y, draftRect.end.y);
       const width = Math.abs(draftRect.end.x - draftRect.start.x);
       const height = Math.abs(draftRect.end.y - draftRect.start.y);
       if (width > 0.008 && height > 0.008) {
-        commitAnnotation({ kind: 'rect', label: intent, data: { x, y, width, height } });
+        setTypePicker({ kind: 'rect', data: { x, y, width, height }, cx: x + width / 2, cy: y + height / 2 });
       }
       setDraftRect(null);
     }
     if (draftPath) {
       if (draftPath.length > 1) {
-        commitAnnotation({ kind: 'freehand', label: intent, data: { points: draftPath } });
+        const xs = draftPath.map((p) => p.x);
+        const ys = draftPath.map((p) => p.y);
+        const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+        const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+        setTypePicker({ kind: 'freehand', data: { points: draftPath }, cx, cy });
       }
       setDraftPath(null);
     }
-  }, [draftPath, draftRect, intent, commitAnnotation]);
+  }, [draftPath, draftRect]);
 
   const rectStyle = (data: Record<string, unknown>) => {
     const x = Number(data.x || 0);
@@ -1933,10 +1945,49 @@ export function VideoReviewEditor({
                         vectorEffect="non-scaling-stroke"
                       />
                     )}
+                    {typePicker?.kind === 'freehand' && (
+                      <path
+                        d={((typePicker.data.points as Point[] | undefined) || []).map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x * 100} ${p.y * 100}`).join(' ')}
+                        fill="none"
+                        stroke="#fb923c"
+                        strokeWidth="0.9"
+                        strokeDasharray="2 1.5"
+                        vectorEffect="non-scaling-stroke"
+                      />
+                    )}
                   </svg>
                   {draftRectStyle && (
                     <div className="absolute border-2 border-orange-400 bg-orange-500/15" style={draftRectStyle} />
                   )}
+                  {typePicker ? (
+                    <>
+                      {typePicker.kind === 'rect' ? (
+                        <div className="absolute border-2 border-dashed border-orange-300 bg-orange-500/15" style={rectStyle(typePicker.data)} />
+                      ) : null}
+                      <div
+                        className="pointer-events-auto absolute z-30 flex -translate-x-1/2 items-center gap-0.5 rounded-md border border-white/15 bg-neutral-900/95 p-1 shadow-xl"
+                        style={{ left: `${clamp(typePicker.cx, 0.08, 0.92) * 100}%`, top: `${clamp(typePicker.cy, 0.04, 0.96) * 100}%` }}
+                        onPointerDown={(e) => e.stopPropagation()}
+                      >
+                        {INTENTS.map((it) => (
+                          <button
+                            key={it.value}
+                            type="button"
+                            className="rounded px-2 py-1 text-xs font-medium text-white hover:bg-white/20"
+                            onClick={() => {
+                              commitAnnotation({ kind: typePicker.kind, label: it.value, data: typePicker.data }, it.value);
+                              setTypePicker(null);
+                            }}
+                          >
+                            {it.label}
+                          </button>
+                        ))}
+                        <button type="button" className="px-1 text-white/50 hover:text-white" title="取消" onClick={() => setTypePicker(null)}>
+                          ✕
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
                   {/* Captions are composited by TimelinePreview onto the canvas (matches the
                       final render); no separate HTML overlay needed here. */}
                 </div>
@@ -1966,7 +2017,7 @@ export function VideoReviewEditor({
                 <Button variant={tool === 'marker' ? 'default' : 'outline'} size="sm" onClick={() => setTool('marker')}>
                   <MessageSquare className="h-4 w-4" />
                 </Button>
-                <span className="text-xs text-muted-foreground">ぼかし</span>
+                <span className="text-xs text-muted-foreground">描いて種類を選ぶ</span>
                 <Button
                   variant={linkAV ? 'default' : 'outline'}
                   size="sm"
