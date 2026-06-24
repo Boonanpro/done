@@ -861,10 +861,7 @@ export function ProductionWorkspace({
               </div>
             </div>
             <div className="rounded-md border border-border p-3">
-              <div className="mb-1 text-sm font-medium">Danに直してもらう</div>
-              <p className="mb-2 text-xs text-muted-foreground">
-                手編集（クリップ調整やテロップのデザイン）は自動で反映されます。ここは、文章で指示するか、タイムラインに指示クリップを置いてDanに直してもらう時だけ使います。
-              </p>
+              <div className="mb-2 text-sm font-medium">ダンに指示</div>
               <Textarea
                 value={revisionNote}
                 onChange={(event) => setRevisionNote(event.target.value)}
