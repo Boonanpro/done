@@ -362,7 +362,7 @@ export function VideoReviewEditor({
   const [currentTime, setCurrentTime] = useState(0);
   const [tool, setTool] = useState<Tool>('rect');
   const intent: Intent = 'blur'; // manual annotations are ぼかし only now
-  const [annotations, setAnnotations] = useState<ReviewAnnotation[]>([]);
+  const [annotations, setAnnotations] = useState<ReviewAnnotation[]>(initialAnnotations || []);
   const [editSequence, setEditSequence] = useState<EditSequence | null>(initialSequence || null);
   const [pendingAnnotation, setPendingAnnotation] = useState<DraftAnnotation | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -682,10 +682,11 @@ export function VideoReviewEditor({
       const data = (await res.json()) as SessionPayload;
       const loadedAnnotations = data.annotations || [];
       const nextAnnotations = loadedAnnotations.length > 0 ? loadedAnnotations : initialAnnotations || [];
-      // This effect re-runs on every parent poll (new prop refs); only actually load — and
-      // reset the undo history — when the fetched annotations differ from what we show, else
-      // a poll would wipe the undo stack of in-progress sequence edits.
-      if (JSON.stringify(nextAnnotations) === JSON.stringify(histPrevRef.current?.annotations ?? [])) return;
+      // Only adopt when the parent's annotations differ from what we LAST SAVED — i.e. a genuine
+      // external change. If they match our last save, a local unsaved edit (a just-drawn blur) is
+      // in flight; adopting here would wipe it before autosave persists it (the "vanishes after
+      // 0.3s" bug). Compared via the echo-safe sig, same as the sequence path.
+      if (seqSig(nextAnnotations) === lastSyncedAnnSig.current) return;
       histPastRef.current = [];
       histFutureRef.current = [];
       histCheckpointRef.current = null;
