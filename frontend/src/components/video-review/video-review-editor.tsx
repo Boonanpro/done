@@ -836,17 +836,25 @@ export function VideoReviewEditor({
   }, [pendingAnnotation]);
 
   // Commit an annotation immediately on draw — no "タイムラインに追加" step. Selected so the
-  // ぼかし options (静止/追従) show right away; deletable with Delete.
+  // ぼかし options (静止/追従) show right away; deletable with Delete. A blur defaults to the
+  // WHOLE clip (not a 1s window) so it doesn't vanish when the playhead moves; trim on the timeline.
   const commitAnnotation = useCallback(
     (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>) => {
       const draft = makeDraftAnnotation(annotation);
-      const next: ReviewAnnotation = { ...draft, id: makeId(), created_at: new Date().toISOString() };
+      const fullEnd = Number((duration || draft.end || 1).toFixed(2));
+      const next: ReviewAnnotation = {
+        ...draft,
+        id: makeId(),
+        created_at: new Date().toISOString(),
+        start: 0,
+        end: fullEnd > 0 ? fullEnd : draft.end,
+      };
       setAnnotations((prev) => [...prev, next]);
       setSelectedId(next.id);
       setSelectedIds([next.id]);
       setPendingAnnotation(null);
     },
-    [makeDraftAnnotation]
+    [duration, makeDraftAnnotation]
   );
 
   const updateSelected = useCallback((patch: Partial<ReviewAnnotation>) => {
