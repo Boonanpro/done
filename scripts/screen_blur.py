@@ -180,6 +180,35 @@ def render(src: str, out: str, boxes_by_t: dict, vfps: float, style: str, ff: st
     Path(tmp).unlink(missing_ok=True)
 
 
+def render_tracks(src: str, out: str, tracks: list[dict], vfps: float, ff: str):
+    """Apply MULTIPLE independent blur tracks in one pass. Each track = {boxes_by_t, style}; per
+    frame, each track contributes its nearest box (within tol). Used for manual tracked blur."""
+    prepared = [(sorted(t["boxes_by_t"].keys()), t["boxes_by_t"], t.get("style", "gaussian")) for t in tracks]
+    cap = cv2.VideoCapture(src)
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    tmp = str(Path(out).with_suffix(".noaudio.mp4"))
+    vw = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), vfps, (w, h))
+    tol = 0.4
+    while True:
+        t = (cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0
+        ok, frame = cap.read()
+        if not ok:
+            break
+        for sample_ts, boxes_by_t, style in prepared:
+            if not sample_ts:
+                continue
+            nearest = min(sample_ts, key=lambda s: abs(s - t))
+            if abs(nearest - t) <= tol:
+                for (x, y, bw, bh) in boxes_by_t.get(nearest, []):
+                    _blur_region(frame, x, y, bw, bh, style)
+        vw.write(frame)
+    cap.release(); vw.release()
+    subprocess.run([ff, "-y", "-i", tmp, "-i", src, "-map", "0:v", "-map", "1:a?",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-shortest", out],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    Path(tmp).unlink(missing_ok=True)
+
+
 def probe(src: str, targets, patterns, regex, n_frames: int = 24):
     """Sample n_frames EVENLY across the whole clip (seek, not sequential) and report which texts
     WOULD be blurred plus a sample of all on-screen text — so the editor can show the user what
@@ -234,10 +263,26 @@ def main() -> int:
     ap.add_argument("--dump", default="")  # optional: write boxes json
     ap.add_argument("--probe", action="store_true")  # detect-only: print matched texts as JSON
     ap.add_argument("--probe-frames", type=int, default=24)
+    ap.add_argument("--track-spec", default="")  # json: manual tracked blur(s)
     a = ap.parse_args()
     targets = [t.strip() for t in a.targets.split(",") if t.strip()]
     patterns = {p.strip() for p in a.patterns.split(",") if p.strip()}
     regex = re.compile(a.regex) if a.regex else None
+    if a.track_spec:
+        # Manual tracked blur: each spec track = a user-drawn box (normalized) + time range; follow
+        # it on this (final) video and gaussian-blur the moving region.
+        spec = json.loads(Path(a.track_spec).read_text(encoding="utf-8"))
+        fps = float(spec.get("fps") or 8)
+        tracks = []
+        vfps = 30.0
+        for tr in spec.get("tracks") or []:
+            box01 = (float(tr["x"]), float(tr["y"]), float(tr["w"]), float(tr["h"]))
+            boxes_by_t, vfps = track(a.src, box01, float(tr.get("start") or 0), float(tr.get("end") or 0), fps)
+            tracks.append({"boxes_by_t": boxes_by_t, "style": str(tr.get("style") or "gaussian")})
+        if tracks:
+            render_tracks(a.src, a.out, tracks, vfps, a.ffmpeg)
+        print("tracked-rendered:", a.out)
+        return 0
     if a.probe:
         # ensure_ascii so Japanese text can't crash print() on a cp932 (Windows) stdout; the
         # caller json.loads() decodes the \uXXXX escapes back to proper characters.

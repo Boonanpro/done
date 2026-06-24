@@ -2344,6 +2344,23 @@ export function VideoReviewEditor({
                     <option key={it.value} value={it.value}>{it.label}</option>
                   ))}
                 </select>
+                {selected.intent === 'blur' && selected.kind === 'rect' ? (
+                  <div className="space-y-1 rounded-md border border-sky-500/40 bg-sky-500/10 p-2">
+                    <label className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={!!(selected.data as { track?: boolean } | undefined)?.track}
+                        onChange={(e) => updateSelected({ data: { ...((selected.data as object) || {}), track: e.target.checked } })}
+                      />
+                      追従ぼかし（動く対象を追いかける）
+                    </label>
+                    <p className="text-[10px] text-muted-foreground">
+                      {(selected.data as { track?: boolean } | undefined)?.track
+                        ? '書き出し時に枠の中身を追跡し、動いてもぼかし続けます。'
+                        : 'OFF＝この枠で静止ぼかし（機械処理・即時）。ONで対象を追従。'}
+                    </p>
+                  </div>
+                ) : null}
                 <Textarea
                   value={selected.note || ''}
                   onChange={(e) => updateSelected({ note: e.target.value })}

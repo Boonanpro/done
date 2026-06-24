@@ -620,11 +620,14 @@ def _attach_output_asset(
 
 
 def _blur_annotations(instruction: dict[str, Any]) -> list[dict[str, Any]]:
+    """Manual STATIC blur rectangles (ffmpeg/_blur_chain). Tracked ones (data.track) are excluded
+    here — they're followed per-frame in a post-pass instead (see _apply_tracked_blur)."""
     annotations = ((instruction.get("timeline") or {}).get("annotations") or [])
     return [
         annotation
         for annotation in annotations
-        if annotation.get("intent") == "blur" and annotation.get("kind") == "rect" and isinstance(annotation.get("data"), dict)
+        if annotation.get("intent") == "blur" and annotation.get("kind") == "rect"
+        and isinstance(annotation.get("data"), dict) and not annotation["data"].get("track")
     ]
 
 
@@ -754,6 +757,45 @@ def _apply_screen_blur(out_path: Path, spec: dict[str, Any], job_dir: Path) -> b
         shutil.move(str(tmp), str(out_path))
         return True
     logger.warning("screen blur post-pass failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
+    return False
+
+
+def _apply_tracked_blur(out_path: Path, annotations: list[dict[str, Any]], job_dir: Path) -> bool:
+    """Post-pass: human-drawn TRACKED blur boxes (data.track) follow their region across the FINAL
+    video via lightweight template tracking (scripts/screen_blur.py --track-spec), gaussian-blurred.
+    The box was drawn on the preview (= output coords) so it's valid on the final video directly."""
+    tracks: list[dict[str, Any]] = []
+    for ann in annotations:
+        if ann.get("intent") != "blur" or ann.get("kind") != "rect":
+            continue
+        data = ann.get("data") if isinstance(ann.get("data"), dict) else {}
+        if not data.get("track"):
+            continue
+        tracks.append({
+            "x": float(data.get("x") or 0), "y": float(data.get("y") or 0),
+            "w": float(data.get("width") or 0), "h": float(data.get("height") or 0),
+            "start": float(ann.get("start") or 0), "end": float(ann.get("end") or 0),
+            "style": str(data.get("blur_style") or data.get("style") or "gaussian"),
+        })
+    if not tracks:
+        return False
+    spec_path = job_dir / "trackblur_spec.json"
+    spec_path.write_text(json.dumps({"fps": 8, "tracks": tracks}), encoding="utf-8")
+    tmp = job_dir / "trackblur_out.mp4"
+    script = PROJECT_ROOT / "scripts" / "screen_blur.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        r = subprocess.run(
+            [sys.executable, str(script), str(out_path), str(tmp), "--track-spec", str(spec_path), "--ffmpeg", _ffmpeg()],
+            capture_output=True, text=True, timeout=1800, creationflags=cflags,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tracked blur post-pass crashed: %s", exc)
+        return False
+    if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+        shutil.move(str(tmp), str(out_path))
+        return True
+    logger.warning("tracked blur post-pass failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
     return False
 
 
@@ -1082,6 +1124,10 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         _sb = _tl.get("screen_blur") or (_tl.get("sequence") or {}).get("screen_blur")
         if isinstance(_sb, dict) and _sb.get("enabled"):
             _apply_screen_blur(out_path, _sb, job_dir)
+        # manual TRACKED blur boxes the human drew on the timeline (follow the region per-frame).
+        _anns = _tl.get("annotations") or []
+        if any(isinstance(a, dict) and a.get("intent") == "blur" and (a.get("data") or {}).get("track") for a in _anns):
+            _apply_tracked_blur(out_path, _anns, job_dir)
     except Exception as exc:  # noqa: BLE001
         logger.warning("screen blur post-pass skipped: %s", exc)
 
