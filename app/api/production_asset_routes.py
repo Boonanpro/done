@@ -713,10 +713,9 @@ def _blur_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int, start: 
         down_w = max(2, w // 12)
         down_h = max(2, h // 12)
         proc = f"crop={w}:{h}:{x}:{y},scale={down_w}:{down_h}:flags=neighbor,scale={w}:{h}:flags=neighbor"
-    elif "gaussian" in style or "gblur" in style or "soft" in style:
-        proc = f"crop={w}:{h}:{x}:{y},gblur=sigma=18"
     else:
-        proc = f"crop={w}:{h}:{x}:{y},boxblur=18:2"
+        # gaussian is the default look (was a boxy boxblur) — soft, content-obscuring.
+        proc = f"crop={w}:{h}:{x}:{y},gblur=sigma=20"
     filt = (
         f"[{video_in}]split[{base}][{crop}];"
         f"[{crop}]{proc}[{blurred}];"
@@ -739,7 +738,7 @@ def _apply_screen_blur(out_path: Path, spec: dict[str, Any], job_dir: Path) -> b
     cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     args = [sys.executable, str(script), str(out_path), str(tmp),
             "--fps", str(spec.get("fps") or 4), "--pad", str(spec.get("pad") or 0.35),
-            "--style", str(spec.get("style") or "mosaic"), "--ffmpeg", _ffmpeg()]
+            "--style", str(spec.get("style") or "gaussian"), "--ffmpeg", _ffmpeg()]
     if targets:
         args += ["--targets", ",".join(targets)]
     if patterns:
@@ -2226,7 +2225,7 @@ def _assemble_sequence_from_decisions(
             "enabled": True,
             "targets": sorted(set(sb_targets)),
             "patterns": sorted(set(sb_patterns)),
-            "style": "mosaic",
+            "style": "gaussian",
         }
     return seq_out
 
