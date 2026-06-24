@@ -174,6 +174,10 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+// Default span of a freshly-drawn clip, anchored AT the playhead (seconds). Short on purpose —
+// the user trims from the panel / timeline rather than starting from the whole clip.
+const DEFAULT_ANN_SPAN = 3;
+
 // The tracked-blur box position at time t = the nearest sampled frame from track_boxes
 // ({"t": [x,y,w,h] normalized}). Lets the preview animate the blur along the moving object.
 function trackedBoxAt(
@@ -865,25 +869,28 @@ export function VideoReviewEditor({
   }, [pendingAnnotation]);
 
   // Commit an annotation immediately on draw — no "タイムラインに追加" step. Selected so the
-  // ぼかし options (静止/追従) show right away; deletable with Delete. A blur defaults to the
-  // WHOLE clip (not a 1s window) so it doesn't vanish when the playhead moves; trim on the timeline.
+  // options show right away; deletable with Delete. The clip is ANCHORED AT THE PLAYHEAD (red
+  // line) with a short default span (NOT the whole clip / not [0,playhead]). Trim start/end on
+  // the timeline, or with the "開始/終了＝再生位置" buttons.
   const commitAnnotation = useCallback(
     (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>, intentArg: Intent = 'blur') => {
       const draft = makeDraftAnnotation(annotation, intentArg);
-      const fullEnd = Number((duration || draft.end || 1).toFixed(2));
+      const maxDur = contentDuration > 0 ? contentDuration : effectiveDrawStart + DEFAULT_ANN_SPAN;
+      const start = Number(clamp(effectiveDrawStart, 0, Math.max(0, maxDur - 0.1)).toFixed(2));
+      const end = Number(clamp(start + DEFAULT_ANN_SPAN, start + 0.1, maxDur).toFixed(2));
       const next: ReviewAnnotation = {
         ...draft,
         id: makeId(),
         created_at: new Date().toISOString(),
-        start: 0,
-        end: fullEnd > 0 ? fullEnd : draft.end,
+        start,
+        end,
       };
       setAnnotations((prev) => [...prev, next]);
       setSelectedId(next.id);
       setSelectedIds([next.id]);
       setPendingAnnotation(null);
     },
-    [duration, makeDraftAnnotation]
+    [contentDuration, effectiveDrawStart, makeDraftAnnotation]
   );
 
   const updateSelected = useCallback((patch: Partial<ReviewAnnotation>) => {
@@ -2473,18 +2480,34 @@ export function VideoReviewEditor({
                   </Button>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <Input
-                    type="number"
-                    step="0.1"
-                    value={selected.start}
-                    onChange={(e) => updateSelected({ start: Number(e.target.value) })}
-                  />
-                  <Input
-                    type="number"
-                    step="0.1"
-                    value={selected.end ?? selected.start}
-                    onChange={(e) => updateSelected({ end: Number(e.target.value) })}
-                  />
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                      <span>開始（秒）</span>
+                      <button type="button" className="rounded bg-muted px-1.5 py-0.5 hover:bg-muted/70" title="開始を再生位置（赤線）に" onClick={() => updateSelected({ start: Number(currentTime.toFixed(2)) })}>
+                        ＝再生位置
+                      </button>
+                    </div>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={selected.start}
+                      onChange={(e) => updateSelected({ start: Number(e.target.value) })}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                      <span>終了（秒）</span>
+                      <button type="button" className="rounded bg-muted px-1.5 py-0.5 hover:bg-muted/70" title="終了を再生位置（赤線）に" onClick={() => updateSelected({ end: Number(currentTime.toFixed(2)) })}>
+                        ＝再生位置
+                      </button>
+                    </div>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      value={selected.end ?? selected.start}
+                      onChange={(e) => updateSelected({ end: Number(e.target.value) })}
+                    />
+                  </div>
                 </div>
                 <select
                   value={selected.intent}
