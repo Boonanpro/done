@@ -155,16 +155,10 @@ export type SequenceAsset = {
   fps?: number | string | null;
 };
 
+// Manual annotations are only for ぼかし now — everything else is better expressed to Dan in text.
+// (生成 may come back when the G plan needs it.)
 const INTENTS: Array<{ value: Intent; label: string }> = [
   { value: 'blur', label: 'ぼかし' },
-  { value: 'cut_keep', label: '残す' },
-  { value: 'cut_remove', label: '削る' },
-  { value: 'caption', label: 'テロップ' },
-  { value: 'replace', label: '差し替え' },
-  { value: 'generate', label: '生成' },
-  { value: 'motion', label: '動き' },
-  { value: 'audio', label: '音' },
-  { value: 'comment', label: 'メモ' },
 ];
 
 function fmtTime(value: number | null | undefined): string {
@@ -367,7 +361,7 @@ export function VideoReviewEditor({
   const [duration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [tool, setTool] = useState<Tool>('rect');
-  const [intent, setIntent] = useState<Intent>('blur');
+  const intent: Intent = 'blur'; // manual annotations are ぼかし only now
   const [annotations, setAnnotations] = useState<ReviewAnnotation[]>([]);
   const [editSequence, setEditSequence] = useState<EditSequence | null>(initialSequence || null);
   const [pendingAnnotation, setPendingAnnotation] = useState<DraftAnnotation | null>(null);
@@ -828,15 +822,6 @@ export function VideoReviewEditor({
     setSelectedSequenceClipIds([]);
   }, []);
 
-  const stageDraftAnnotation = useCallback(
-    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>) => {
-      const draft = makeDraftAnnotation(annotation);
-      setPendingAnnotation(draft);
-      clearSelection();
-    },
-    [clearSelection, makeDraftAnnotation]
-  );
-
   const confirmPendingAnnotation = useCallback(() => {
     if (!pendingAnnotation) return;
     const next: ReviewAnnotation = {
@@ -849,6 +834,20 @@ export function VideoReviewEditor({
     setSelectedIds([next.id]);
     setPendingAnnotation(null);
   }, [pendingAnnotation]);
+
+  // Commit an annotation immediately on draw — no "タイムラインに追加" step. Selected so the
+  // ぼかし options (静止/追従) show right away; deletable with Delete.
+  const commitAnnotation = useCallback(
+    (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>) => {
+      const draft = makeDraftAnnotation(annotation);
+      const next: ReviewAnnotation = { ...draft, id: makeId(), created_at: new Date().toISOString() };
+      setAnnotations((prev) => [...prev, next]);
+      setSelectedId(next.id);
+      setSelectedIds([next.id]);
+      setPendingAnnotation(null);
+    },
+    [makeDraftAnnotation]
+  );
 
   const updateSelected = useCallback((patch: Partial<ReviewAnnotation>) => {
     if (!selectedId) return;
@@ -1072,15 +1071,20 @@ export function VideoReviewEditor({
       if (!point) return;
       setIsPointerDown(true);
       if (tool === 'select') return;
+      // Starting a new drawing clears any in-progress draft/pending immediately (on the FIRST
+      // click), so the old rectangle disappears the moment you start redrawing — not on release.
+      setDraftRect(null);
+      setDraftPath(null);
+      setPendingAnnotation(null);
       if (tool === 'rect') {
         setDraftRect({ start: point, end: point });
       } else if (tool === 'freehand') {
         setDraftPath([point]);
       } else if (tool === 'marker') {
-        stageDraftAnnotation({ kind: 'marker', label: intent, data: { point } });
+        commitAnnotation({ kind: 'marker', label: intent, data: { point } });
       }
     },
-    [clearSelection, getPoint, intent, stageDraftAnnotation, tool]
+    [clearSelection, commitAnnotation, getPoint, intent, tool]
   );
 
   const handlePointerMove = useCallback(
@@ -1102,17 +1106,17 @@ export function VideoReviewEditor({
       const width = Math.abs(draftRect.end.x - draftRect.start.x);
       const height = Math.abs(draftRect.end.y - draftRect.start.y);
       if (width > 0.008 && height > 0.008) {
-        stageDraftAnnotation({ kind: 'rect', label: intent, data: { x, y, width, height } });
+        commitAnnotation({ kind: 'rect', label: intent, data: { x, y, width, height } });
       }
       setDraftRect(null);
     }
     if (draftPath) {
       if (draftPath.length > 1) {
-        stageDraftAnnotation({ kind: 'freehand', label: intent, data: { points: draftPath } });
+        commitAnnotation({ kind: 'freehand', label: intent, data: { points: draftPath } });
       }
       setDraftPath(null);
     }
-  }, [draftPath, draftRect, intent, stageDraftAnnotation]);
+  }, [draftPath, draftRect, intent, commitAnnotation]);
 
   const rectStyle = (data: Record<string, unknown>) => {
     const x = Number(data.x || 0);
@@ -1953,15 +1957,7 @@ export function VideoReviewEditor({
                 <Button variant={tool === 'marker' ? 'default' : 'outline'} size="sm" onClick={() => setTool('marker')}>
                   <MessageSquare className="h-4 w-4" />
                 </Button>
-                <select
-                  value={intent}
-                  onChange={(e) => setIntent(e.target.value as Intent)}
-                  className="h-9 rounded-md border border-input bg-background px-2 text-sm"
-                >
-                  {INTENTS.map((it) => (
-                    <option key={it.value} value={it.value}>{it.label}</option>
-                  ))}
-                </select>
+                <span className="text-xs text-muted-foreground">ぼかし</span>
                 <Button
                   variant={linkAV ? 'default' : 'outline'}
                   size="sm"

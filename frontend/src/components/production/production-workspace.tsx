@@ -147,6 +147,7 @@ export function ProductionWorkspace({
   const [leadPad, setLeadPad] = useState(0.06);
   const [tailPad, setTailPad] = useState(0.1);
   const [isRecutting, setIsRecutting] = useState(false);
+  const [cutOpen, setCutOpen] = useState(false); // カット調整パネルは折りたたみ既定
 
   const hasProcessing = useMemo(() => assets.some((a) => a.status === 'processing'), [assets]);
   const selectedContentAssets = useMemo(
@@ -750,12 +751,20 @@ export function ProductionWorkspace({
         sequenceAssets={selectedSourceAssets.filter((asset) => asset.kind === 'video').map(sequenceAssetForEditor)}
         sidePanelTop={
           <div className="mb-3 space-y-3">
-            <div className="rounded-md border border-sky-500/50 bg-sky-500/10 p-3">
-              <div className="mb-1 text-sm font-medium text-foreground">✂ カット調整（無音・間）</div>
-              <p className="mb-2 text-[11px] text-muted-foreground">
-                無音をどれくらい詰めるかを後から調整できます。ダンの「どこを残すか」の判断は変えず、間の詰め具合だけ作り直します。
-              </p>
-              <div className="space-y-2">
+            <div className={`rounded-md border ${cutOpen ? 'border-sky-500/50 bg-sky-500/10 p-3' : 'border-border p-2'}`}>
+              <button
+                type="button"
+                onClick={() => setCutOpen((v) => !v)}
+                className="flex w-full items-center justify-between text-sm font-medium text-foreground"
+              >
+                <span>✂ カット調整（無音・間）</span>
+                <span className="text-xs text-muted-foreground">{cutOpen ? '▲' : '▼'}</span>
+              </button>
+              {cutOpen ? (
+              <div className="mt-2 space-y-2">
+                <p className="text-[11px] text-muted-foreground">
+                  無音をどれくらい詰めるかを後から調整できます。ダンの「どこを残すか」の判断は変えず、間の詰め具合だけ作り直します。
+                </p>
                 <div>
                   <div className="mb-0.5 flex items-center justify-between text-[11px]">
                     <span>無音しきい値</span>
@@ -795,6 +804,7 @@ export function ProductionWorkspace({
                 </Button>
                 <p className="text-[9px] text-muted-foreground">※再カットすると手動のクリップ編集はリセットされます（まず自動カット→その後で手調整の順）。</p>
               </div>
+              ) : null}
             </div>
             <div className="rounded-md border border-border p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
