@@ -564,6 +564,9 @@ export function VideoReviewEditor({
   // baseline (Dan render / external change) → adopt it and reset the undo history. Canonical
   // compare ignores key order / number reformat from the round-trip.
   const lastSyncedSig = useRef<string>(seqSig(initialSequence));
+  // Annotations (blur boxes etc.) autosave separately — the sequence sig doesn't cover them, so
+  // without this a drawn blur never reaches the backend/export. Echo-safe via seqSig.
+  const lastSyncedAnnSig = useRef<string>(seqSig(initialAnnotations || []));
   useEffect(() => {
     const sig = seqSig(initialSequence);
     if (sig === lastSyncedSig.current) return;
@@ -694,6 +697,7 @@ export function VideoReviewEditor({
       histCheckpointRef.current = null;
       // pre-sync the baseline so this load isn't recorded as an undoable edit
       histPrevRef.current = { annotations: nextAnnotations, sequence: histPrevRef.current?.sequence ?? null };
+      lastSyncedAnnSig.current = seqSig(nextAnnotations); // adopted from parent -> not our edit to re-save
       setAnnotations(nextAnnotations);
     } catch (err) {
       // Network blip (e.g. the sandbox restarting mid-edit) must NOT crash the editor —
@@ -745,6 +749,17 @@ export function VideoReviewEditor({
     }, 1200);
     return () => window.clearTimeout(timer);
   }, [editSequence]);
+
+  // Autosave annotation edits (blur boxes etc.) — separate from the sequence save above.
+  useEffect(() => {
+    const sig = seqSig(annotations);
+    if (sig === lastSyncedAnnSig.current) return;
+    const timer = window.setTimeout(() => {
+      lastSyncedAnnSig.current = sig;
+      void autoSaveRef.current.save?.(autoSaveRef.current.payload);
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [annotations]);
 
   const makeDraftAnnotation = useCallback(
     (annotation: Omit<ReviewAnnotation, 'id' | 'intent' | 'note' | 'start' | 'end' | 'created_at'>): DraftAnnotation => {
@@ -2259,16 +2274,28 @@ export function VideoReviewEditor({
                       <option key={it.value} value={it.value}>{it.label}</option>
                     ))}
                   </select>
-                  <Textarea
-                    className="mt-2 bg-white"
-                    value={pendingAnnotation.note || ''}
-                    onChange={(e) => updatePending({ note: e.target.value })}
-                    rows={3}
-                    placeholder="この範囲でDanにやってほしいこと"
-                  />
+                  {pendingAnnotation.intent === 'blur' && pendingAnnotation.kind === 'rect' ? (
+                    <label className="mt-2 flex items-center gap-2 rounded-md border border-orange-200 bg-white p-2 text-xs text-orange-950">
+                      <input
+                        type="checkbox"
+                        checked={!!(pendingAnnotation.data as { track?: boolean } | undefined)?.track}
+                        onChange={(e) => updatePending({ data: { ...((pendingAnnotation.data as object) || {}), track: e.target.checked } })}
+                      />
+                      追従ぼかし（動く対象を追いかける／OFF＝静止のまま）
+                    </label>
+                  ) : null}
+                  {pendingAnnotation.intent === 'blur' ? null : (
+                    <Textarea
+                      className="mt-2 bg-white"
+                      value={pendingAnnotation.note || ''}
+                      onChange={(e) => updatePending({ note: e.target.value })}
+                      rows={3}
+                      placeholder="この範囲でDanにやってほしいこと"
+                    />
+                  )}
                   <Button className="mt-2 w-full" size="sm" onClick={confirmPendingAnnotation}>
                     <Check className="mr-1 h-4 w-4" />
-                    タイムラインに追加
+                    {pendingAnnotation.intent === 'blur' ? 'ぼかしを追加' : 'タイムラインに追加'}
                   </Button>
                 </div>
               ) : null}
