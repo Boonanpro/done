@@ -2079,7 +2079,6 @@ export function VideoReviewEditor({
                 <Button variant={tool === 'marker' ? 'default' : 'outline'} size="sm" onClick={() => setTool('marker')}>
                   <MessageSquare className="h-4 w-4" />
                 </Button>
-                <span className="text-xs text-muted-foreground">描いて種類を選ぶ</span>
                 <Button
                   variant={linkAV ? 'default' : 'outline'}
                   size="sm"
