@@ -684,6 +684,39 @@ export function ProductionWorkspace({
     }
   };
 
+  // 追従ぼかし: follow a drawn box across [start,end] and return its NORMALIZED position over
+  // time, so the editor animates the blur box on the preview (real tracking, not approximation).
+  const trackBlurRegion = async (
+    box: { x: number; y: number; width: number; height: number },
+    start: number,
+    end: number,
+  ): Promise<Record<string, number[]>> => {
+    if (!selectedContent) return {};
+    try {
+      const res = await fetch(
+        `/api/v1/production-assets/contents/${selectedContent.id}/blur/track`,
+        {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ room_id: roomId, x: box.x, y: box.y, width: box.width, height: box.height, start, end }),
+        },
+      );
+      if (!res.ok) {
+        toast.error('追跡解析に失敗しました', { description: (await res.text()).slice(0, 160) });
+        return {};
+      }
+      const body = await res.json();
+      const boxes = (body.boxes || {}) as Record<string, number[]>;
+      const n = Object.keys(boxes).length;
+      toast[n ? 'success' : 'message'](n ? `対象を追跡しました（${n}点）` : '追跡できませんでした（対象が検出できません）');
+      return boxes;
+    } catch (error) {
+      toast.error('追跡解析に失敗しました', { description: String(error).slice(0, 160) });
+      return {};
+    }
+  };
+
   const deleteContent = async (content: ProductionContent) => {
     const res = await fetch(
       `/api/v1/production-assets/contents/${content.id}?room_id=${encodeURIComponent(roomId)}`,
@@ -907,6 +940,7 @@ export function ProductionWorkspace({
         }}
         onSaveTimeline={saveContentTimeline}
         onSyncCaptionAudio={syncCaptionAudio}
+        onTrackBlur={trackBlurRegion}
         onExecute={createProductionJob}
       />
     );

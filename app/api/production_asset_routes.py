@@ -3249,7 +3249,9 @@ async def caption_sync(
     analysis = await asyncio.to_thread(_ensure_audio_analysis, payload.room_id, asset_ids)
     words_by_caption: dict[str, list[dict[str, Any]]] = {}
     for cap in targets:
-        words_by_caption[str(cap.get("id"))] = _words_for_caption(sequence, cap, analysis)
+        cid = str(cap.get("id"))
+        words = _words_for_caption(sequence, cap, analysis)
+        words_by_caption[cid] = words
     return {"words_by_caption": words_by_caption, "synced": sum(1 for v in words_by_caption.values() if v)}
 
 
@@ -3262,6 +3264,17 @@ class ScreenBlurRequest(BaseModel):
     style: str = "mosaic"
     pad: float = 0.35
     fps: float = 4.0
+
+
+class TrackBlurRequest(BaseModel):
+    room_id: str
+    x: float           # normalized 0-1 box at `start`
+    y: float
+    width: float
+    height: float
+    start: float = 0.0
+    end: float = 0.0
+    fps: float = 6.0
 
 
 def _content_source_video(room_id: str, content: dict[str, Any]) -> str | None:
@@ -3328,6 +3341,40 @@ async def probe_screen_blur(
             data = json.loads(lines[-1])
     except Exception:  # noqa: BLE001
         pass
+    return data
+
+
+@router.post("/contents/{content_id}/blur/track")
+async def track_blur_region(
+    content_id: str, payload: TrackBlurRequest, current_user: TokenData = Depends(get_current_user)
+):
+    """Follow a single drawn box across [start,end] and return its NORMALIZED position over time,
+    so the editor animates the blur box on the preview (real tracking, not an approximation). The
+    same lightweight tracker bakes the moving blur on export."""
+    contents = _read_contents(payload.room_id)
+    content = next((c for c in contents if c.get("id") == content_id), None)
+    if not content:
+        raise HTTPException(status_code=404, detail="Content not found")
+    src = _content_source_video(payload.room_id, content)
+    if not src:
+        raise HTTPException(status_code=400, detail="解析できる動画素材がありません")
+    script = PROJECT_ROOT / "scripts" / "screen_blur.py"
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    args = [
+        sys.executable, str(script), str(src), "--track-probe",
+        "--box", f"{payload.x},{payload.y},{payload.width},{payload.height}",
+        "--start", str(payload.start), "--end", str(payload.end), "--fps", str(payload.fps),
+    ]
+    r = await asyncio.to_thread(
+        subprocess.run, args, capture_output=True, text=True, timeout=180, creationflags=cflags
+    )
+    data: dict[str, Any] = {"boxes": {}}
+    try:
+        lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip().startswith("{")]
+        if lines:
+            data = json.loads(lines[-1])
+    except Exception:  # noqa: BLE001
+        logger.warning("track-probe parse failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
     return data
 
 

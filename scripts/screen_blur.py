@@ -264,6 +264,8 @@ def main() -> int:
     ap.add_argument("--probe", action="store_true")  # detect-only: print matched texts as JSON
     ap.add_argument("--probe-frames", type=int, default=24)
     ap.add_argument("--track-spec", default="")  # json: manual tracked blur(s)
+    ap.add_argument("--track-probe", action="store_true")  # follow ONE box, print normalized boxes JSON (for preview)
+    ap.add_argument("--box", default="")  # x,y,w,h normalized (for --track-probe)
     a = ap.parse_args()
     targets = [t.strip() for t in a.targets.split(",") if t.strip()]
     patterns = {p.strip() for p in a.patterns.split(",") if p.strip()}
@@ -282,6 +284,26 @@ def main() -> int:
         if tracks:
             render_tracks(a.src, a.out, tracks, vfps, a.ffmpeg)
         print("tracked-rendered:", a.out)
+        return 0
+    if a.track_probe:
+        # Run the tracker on a SINGLE drawn box and return its position over time, NORMALIZED
+        # (0-1), so the editor can animate the blur box on the preview = real tracking, not an
+        # approximation. Same lightweight template tracking the export post-pass uses.
+        bx = [float(v) for v in a.box.split(",") if v.strip() != ""]
+        if len(bx) < 4:
+            print(json.dumps({"boxes": {}, "error": "bad box"}))
+            return 0
+        cap = cv2.VideoCapture(a.src)
+        W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1
+        H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1
+        cap.release()
+        boxes_by_t, vfps = track(a.src, (bx[0], bx[1], bx[2], bx[3]), a.start, a.end, a.fps if a.fps > 0 else 6.0)
+        norm: dict[str, list] = {}
+        for t, boxes in boxes_by_t.items():
+            if boxes:
+                x, y, w, h = boxes[0]
+                norm[f"{float(t):.3f}"] = [round(x / W, 5), round(y / H, 5), round(w / W, 5), round(h / H, 5)]
+        print(json.dumps({"boxes": norm, "w": W, "h": H, "fps": vfps}, ensure_ascii=True))
         return 0
     if a.probe:
         # ensure_ascii so Japanese text can't crash print() on a cp932 (Windows) stdout; the
