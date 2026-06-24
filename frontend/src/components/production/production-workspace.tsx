@@ -587,13 +587,16 @@ export function ProductionWorkspace({
 
   const saveContentTimeline = async (timeline: SessionPayload) => {
     if (!selectedContent) return;
+    // Merge into the existing timeline so format / source_asset_ids / screen_blur (Dan-driven
+    // blur) aren't dropped when only the sequence or annotations change.
+    const merged = { ...(selectedContent.timeline as Record<string, unknown>), ...timeline };
     const res = await fetch(
       `/api/v1/production-assets/contents/${selectedContent.id}?room_id=${encodeURIComponent(roomId)}`,
       {
         method: 'PATCH',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ timeline }),
+        body: JSON.stringify({ timeline: merged }),
       }
     );
     if (!res.ok) throw new Error(await res.text());
