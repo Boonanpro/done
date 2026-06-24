@@ -104,6 +104,56 @@ def detect(src: str, targets, patterns, regex, fps: float, pad: float, start: fl
     return boxes_by_t, vfps, w, h, total
 
 
+def track(src: str, box01: tuple[float, float, float, float], start: float, end: float, fps: float):
+    """Follow a user-drawn region across [start,end] with lightweight template matching (base
+    OpenCV, no extra deps). box01 = (x,y,w,h) normalized at `start`. Returns boxes_by_t {t:[(x,y,w,h)px]}
+    that render() can consume directly. Drift is expected on hard motion — the editor lets the
+    human fix keyframes; this is the auto first pass."""
+    cap = cv2.VideoCapture(src)
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    vfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    bx = int(box01[0] * W); by = int(box01[1] * H)
+    bw = max(8, int(box01[2] * W)); bh = max(8, int(box01[3] * H))
+    interval = 1.0 / max(0.5, fps)
+    boxes_by_t: dict[float, list] = {}
+    template = None
+    last = (bx, by, bw, bh)
+    next_s = start
+    while True:
+        t = (cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if end > 0 and t > end:
+            break
+        if t + 1e-6 < (start if start > 0 else 0.0) or t + 1e-6 < next_s:
+            continue
+        x, y, w, h = last
+        if template is None:
+            template = frame[max(0, y):y + h, max(0, x):x + w].copy()
+            boxes_by_t[round(t, 3)] = [(x, y, w, h)]
+            next_s = t + interval
+            continue
+        # search a window around the last position (±h, ±w) for the template
+        pad_x, pad_y = w, h
+        sx0 = max(0, x - pad_x); sy0 = max(0, y - pad_y)
+        sx1 = min(W, x + w + pad_x); sy1 = min(H, y + h + pad_y)
+        roi = frame[sy0:sy1, sx0:sx1]
+        if roi.shape[0] >= h and roi.shape[1] >= w and template.shape[0] == h and template.shape[1] == w:
+            res = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
+            _minv, maxv, _minl, maxl = cv2.minMaxLoc(res)
+            nx, ny = sx0 + maxl[0], sy0 + maxl[1]
+            if maxv > 0.4:  # confident enough -> move; else keep last (occlusion)
+                last = (nx, ny, w, h)
+                # slowly adapt the template to appearance changes
+                template = cv2.addWeighted(template, 0.8,
+                                           frame[ny:ny + h, nx:nx + w], 0.2, 0) if frame[ny:ny + h, nx:nx + w].shape == template.shape else template
+        boxes_by_t[round(t, 3)] = [last]
+        next_s = t + interval
+    cap.release()
+    return boxes_by_t, vfps
+
+
 def render(src: str, out: str, boxes_by_t: dict, vfps: float, style: str, ff: str):
     sample_ts = sorted(boxes_by_t.keys())
     cap = cv2.VideoCapture(src)
