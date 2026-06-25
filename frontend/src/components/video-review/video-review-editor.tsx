@@ -198,6 +198,35 @@ function trackedBoxAt(
   return { x: b[0], y: b[1], width: b[2], height: b[3] };
 }
 
+type Keyframe = { t: number; x: number; y: number; width: number; height: number };
+
+// The blur box at time t, LINEARLY interpolated between the surrounding manual keyframes (DaVinci
+// style — the user sets a few, the box glides between them). Before the first / after the last
+// keyframe the box holds that end value.
+function keyframeBoxAt(
+  keyframes: Keyframe[] | undefined,
+  t: number,
+): { x: number; y: number; width: number; height: number } | null {
+  if (!keyframes || keyframes.length === 0) return null;
+  const ks = [...keyframes].sort((a, b) => a.t - b.t);
+  if (t <= ks[0].t) return { x: ks[0].x, y: ks[0].y, width: ks[0].width, height: ks[0].height };
+  const last = ks[ks.length - 1];
+  if (t >= last.t) return { x: last.x, y: last.y, width: last.width, height: last.height };
+  let k0 = ks[0];
+  let k1 = ks[ks.length - 1];
+  for (let i = 0; i < ks.length - 1; i += 1) {
+    if (t >= ks[i].t && t <= ks[i + 1].t) { k0 = ks[i]; k1 = ks[i + 1]; break; }
+  }
+  const span = k1.t - k0.t || 1;
+  const f = (t - k0.t) / span;
+  return {
+    x: k0.x + (k1.x - k0.x) * f,
+    y: k0.y + (k1.y - k0.y) * f,
+    width: k0.width + (k1.width - k0.width) * f,
+    height: k0.height + (k1.height - k0.height) * f,
+  };
+}
+
 // Serialization-stable signature of a value: sorts object keys and rounds numbers so the
 // SAME logical sequence compares equal even after a backend round-trip reorders keys or
 // reformats numbers (2 -> 2.0). Used to tell an autosave echo (skip) from a genuine new
@@ -670,9 +699,11 @@ export function VideoReviewEditor({
     return annotations
       .filter((a) => a.intent === 'blur' && a.kind === 'rect' && isActiveAnnotation(a))
       .map((a) => {
-        const d = (a.data || {}) as { x?: number; y?: number; width?: number; height?: number; track?: boolean; track_boxes?: Record<string, number[]> };
-        const tracked = d.track ? trackedBoxAt(d.track_boxes, currentTime) : null;
-        return tracked || { x: Number(d.x || 0), y: Number(d.y || 0), width: Number(d.width || 0), height: Number(d.height || 0) };
+        const d = (a.data || {}) as { x?: number; y?: number; width?: number; height?: number; track?: boolean; track_boxes?: Record<string, number[]>; keyframes?: Keyframe[] };
+        // priority: manual keyframes (interpolated) > OCR track path > static box
+        const kf = d.keyframes && d.keyframes.length ? keyframeBoxAt(d.keyframes, currentTime) : null;
+        const tracked = !kf && d.track ? trackedBoxAt(d.track_boxes, currentTime) : null;
+        return kf || tracked || { x: Number(d.x || 0), y: Number(d.y || 0), width: Number(d.width || 0), height: Number(d.height || 0) };
       });
   }, [annotations, currentTime, isActiveAnnotation]);
 
@@ -931,6 +962,62 @@ export function VideoReviewEditor({
     if (!selectedId) return;
     setAnnotations((prev) => prev.map((a) => (a.id === selectedId ? { ...a, ...patch } : a)));
   }, [selectedId]);
+
+  // Manual keyframe blur: add/replace the keyframe at the current playhead with `box`. Dragging the
+  // box on the preview writes a keyframe at the red line; the box interpolates between keyframes.
+  const upsertKeyframe = useCallback((annId: string, box: { x: number; y: number; width: number; height: number }) => {
+    const tt = Number(currentTime.toFixed(2));
+    setAnnotations((prev) => prev.map((a) => {
+      if (a.id !== annId) return a;
+      const d = (a.data || {}) as { keyframes?: Keyframe[] };
+      const kfs: Keyframe[] = Array.isArray(d.keyframes) ? [...d.keyframes] : [];
+      const nk: Keyframe = { t: tt, x: box.x, y: box.y, width: box.width, height: box.height };
+      const idx = kfs.findIndex((k) => Math.abs(k.t - tt) < 0.05);
+      if (idx >= 0) kfs[idx] = nk; else kfs.push(nk);
+      kfs.sort((p, q) => p.t - q.t);
+      return { ...a, data: { ...(a.data as object), keyframes: kfs, kfMode: true, track: false } };
+    }));
+  }, [currentTime]);
+
+  const removeKeyframe = useCallback((annId: string, t: number) => {
+    setAnnotations((prev) => prev.map((a) => {
+      if (a.id !== annId) return a;
+      const d = (a.data || {}) as { keyframes?: Keyframe[] };
+      const kfs = (Array.isArray(d.keyframes) ? d.keyframes : []).filter((k) => Math.abs(k.t - t) > 0.001);
+      return { ...a, data: { ...(a.data as object), keyframes: kfs } };
+    }));
+  }, []);
+
+  // Drag the blur box on the preview (move / resize). Each pointer move writes the keyframe at the
+  // current playhead, so the box follows the cursor and the keyframe is set on release.
+  const startBlurBoxDrag = useCallback((event: React.PointerEvent, a: ReviewAnnotation, mode: 'move' | 'resize') => {
+    event.stopPropagation();
+    event.preventDefault();
+    selectAnnotation(a.id);
+    const stage = stageRef.current?.getBoundingClientRect();
+    if (!stage || !stage.width || !stage.height) return;
+    const d = (a.data || {}) as { x?: number; y?: number; width?: number; height?: number; keyframes?: Keyframe[] };
+    const cur = (d.keyframes && d.keyframes.length ? keyframeBoxAt(d.keyframes, currentTime) : null)
+      || { x: Number(d.x || 0), y: Number(d.y || 0), width: Number(d.width || 0.1), height: Number(d.height || 0.1) };
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - startX) / stage.width;
+      const dy = (ev.clientY - startY) / stage.height;
+      const nb = mode === 'move'
+        ? { x: clamp(cur.x + dx, 0, 1 - cur.width), y: clamp(cur.y + dy, 0, 1 - cur.height), width: cur.width, height: cur.height }
+        : { x: cur.x, y: cur.y, width: clamp(cur.width + dx, 0.02, 1 - cur.x), height: clamp(cur.height + dy, 0.02, 1 - cur.y) };
+      upsertKeyframe(a.id, nb);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+  }, [currentTime, selectAnnotation, upsertKeyframe]);
 
   // Per-clip 実行 (生成/ダンに指示): dispatch this one instruction clip to Dan and reflect it.
   const [executingId, setExecutingId] = useState<string | null>(null);
@@ -1986,11 +2073,13 @@ export function VideoReviewEditor({
                 <div className="pointer-events-none absolute" style={videoContentStyle}>
                   {annotations.filter(isActiveAnnotation).map((a) => {
                     if (a.kind === 'rect') {
-                      // For a tracked blur, follow the analysed path (track_boxes) at the current
-                      // time so the box moves with the object — real tracking, not a static box.
-                      const tracked = a.intent === 'blur' && (a.data as { track?: boolean } | undefined)?.track
-                        ? trackedBoxAt((a.data as { track_boxes?: Record<string, number[]> } | undefined)?.track_boxes, currentTime)
-                        : null;
+                      const bd = (a.data || {}) as { track?: boolean; track_boxes?: Record<string, number[]>; keyframes?: Keyframe[]; kfMode?: boolean };
+                      // box position priority: manual keyframes > OCR track path > static box.
+                      const kf = a.intent === 'blur' && bd.keyframes && bd.keyframes.length ? keyframeBoxAt(bd.keyframes, currentTime) : null;
+                      const tracked = !kf && a.intent === 'blur' && bd.track ? trackedBoxAt(bd.track_boxes, currentTime) : null;
+                      const isKf = a.intent === 'blur' && !!bd.kfMode;
+                      const selectedThis = selectedIds.includes(a.id);
+                      const editable = isKf && selectedThis;
                       return (
                         <button
                           key={a.id}
@@ -1999,17 +2088,25 @@ export function VideoReviewEditor({
                             e.stopPropagation();
                             selectAnnotation(a.id, e.shiftKey || e.ctrlKey || e.metaKey);
                           }}
+                          onPointerDown={editable ? (e) => startBlurBoxDrag(e, a, 'move') : undefined}
                           className={`pointer-events-auto absolute border-2 ${
                             selectedIds.includes(a.id) ? 'border-yellow-300' : a.intent === 'blur' ? 'border-sky-300/70' : 'border-sky-400'
-                          } ${a.intent === 'blur' ? '' : 'bg-red-500/15'}`}
+                          } ${a.intent === 'blur' ? '' : 'bg-red-500/15'} ${editable ? 'cursor-move' : ''}`}
                           style={{
                             // The blur itself is painted on the canvas (TimelinePreview blurRegions),
                             // so this is just a thin selectable outline — NO backdrop-filter (which
                             // flickered when the canvas repainted).
-                            ...rectStyle(tracked || a.data),
+                            ...rectStyle(kf || tracked || a.data),
                           }}
                           title={a.note || a.intent}
-                        />
+                        >
+                          {editable ? (
+                            <span
+                              onPointerDown={(e) => startBlurBoxDrag(e, a, 'resize')}
+                              className="absolute -bottom-1 -right-1 h-3 w-3 cursor-nwse-resize rounded-sm border border-yellow-300 bg-yellow-300/80"
+                            />
+                          ) : null}
+                        </button>
                       );
                     }
                     if (a.kind === 'marker') {
@@ -2587,29 +2684,37 @@ export function VideoReviewEditor({
                   ))}
                 </select>
                 {selected.intent === 'blur' && selected.kind === 'rect' ? (() => {
-                  const sd = (selected.data || {}) as { track?: boolean; track_boxes?: Record<string, number[]>; track_text?: string };
+                  const sd = (selected.data || {}) as { track?: boolean; track_text?: string; kfMode?: boolean; keyframes?: Keyframe[]; x?: number; y?: number; width?: number; height?: number };
                   const analyzed = typeof sd.track_text === 'string';
                   const tracked = !!sd.track_text;
                   const isTracking = trackingId === selected.id;
+                  const kfs = Array.isArray(sd.keyframes) ? sd.keyframes : [];
+                  const mode = sd.kfMode ? 'kf' : sd.track ? 'track' : 'static';
+                  const curBox = () => (kfs.length ? (keyframeBoxAt(kfs, currentTime) || { x: Number(sd.x || 0), y: Number(sd.y || 0), width: Number(sd.width || 0.1), height: Number(sd.height || 0.1) }) : { x: Number(sd.x || 0), y: Number(sd.y || 0), width: Number(sd.width || 0.1), height: Number(sd.height || 0.1) });
+                  const tab = (active: boolean) => `flex-1 rounded px-2 py-1 text-xs ${active ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground'}`;
                   return (
                     <div className="space-y-2 rounded-md border border-sky-500/40 bg-sky-500/10 p-2">
                       <div className="flex gap-1">
-                        <button
-                          type="button"
-                          className={`flex-1 rounded px-2 py-1 text-xs ${!sd.track ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground'}`}
-                          onClick={() => updateSelected({ data: { ...sd, track: false } })}
-                        >
-                          静止
-                        </button>
-                        <button
-                          type="button"
-                          className={`flex-1 rounded px-2 py-1 text-xs ${sd.track ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground'}`}
-                          onClick={() => updateSelected({ data: { ...sd, track: true } })}
-                        >
-                          追従
-                        </button>
+                        <button type="button" className={tab(mode === 'static')} onClick={() => updateSelected({ data: { ...sd, track: false, kfMode: false } })}>静止</button>
+                        <button type="button" className={tab(mode === 'track')} onClick={() => updateSelected({ data: { ...sd, track: true, kfMode: false } })}>追従</button>
+                        <button type="button" className={tab(mode === 'kf')} onClick={() => updateSelected({ data: kfs.length ? { ...sd, kfMode: true, track: false } : { ...sd, kfMode: true, track: false, keyframes: [{ t: Number(currentTime.toFixed(2)), ...curBox() }] } })}>キーフレーム</button>
                       </div>
-                      {sd.track ? (
+                      {mode === 'kf' ? (
+                        <div className="space-y-1">
+                          <Button size="sm" className="w-full" onClick={() => upsertKeyframe(selected.id, curBox())}>◆ 赤線にキーフレームを打つ</Button>
+                          <p className="text-[10px] text-muted-foreground">プレビューの枠をドラッグ（右下角でサイズ変更）すると、赤線の位置にキーフレームが打たれます。2点以上で間は自動補間。</p>
+                          {kfs.length ? (
+                            <div className="max-h-24 space-y-0.5 overflow-y-auto rounded border border-border bg-background/60 p-1">
+                              {kfs.map((k) => (
+                                <div key={k.t} className="flex items-center justify-between px-1 text-[10px]">
+                                  <button type="button" className="tabular-nums hover:underline" onClick={() => seekTimeline(k.t)}>◆ {fmtTime(k.t)}</button>
+                                  <button type="button" className="text-red-400 hover:text-red-300" onClick={() => removeKeyframe(selected.id, k.t)}>削除</button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : <p className="text-[10px] text-muted-foreground">まだキーフレームがありません。</p>}
+                        </div>
+                      ) : mode === 'track' ? (
                         <div className="space-y-1">
                           <Button size="sm" className="w-full" disabled={isTracking || !onTrackBlur} onClick={() => runTrackBlur(selected)}>
                             {isTracking ? '解析中…' : analyzed ? '再解析' : '▶ 解析（文字を追跡）'}
