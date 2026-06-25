@@ -450,6 +450,9 @@ export function VideoReviewEditor({
   const dragLaneGeomRef = useRef<Array<{ zone: 'visual' | 'audio'; layer: number; top: number; bottom: number }> | null>(null);
   // A/V link: when on, dragging/trimming a clip also moves its linked partner (same link_id).
   const [linkAV, setLinkAV] = useState(true);
+  // Magnet: snap dragged clip edges to nearby clip edges / the playhead / ends. ON = stable,
+  // gap-free editing; OFF = fully free movement (hold for fine adjustments).
+  const [snapEnabled, setSnapEnabled] = useState(true);
   const [extraLanes, setExtraLanes] = useState<{ visual: number; audio: number }>({ visual: 0, audio: 0 });
   const [openNoteKey, setOpenNoteKey] = useState<string | null>(null);
   const laneGeomRef = useRef<Array<{ zone: 'visual' | 'audio'; layer: number; top: number; bottom: number }>>([]);
@@ -1904,20 +1907,35 @@ export function VideoReviewEditor({
       if (!clip) return;
       const isVideoClip = clip.track === 'video' || Number.isFinite(clip.source_end);
       const sourceDuration = clip.source_duration || Math.max(Number(clip.source_end || 0), sequenceClipDrag.originalSourceEnd);
+      // Magnet: snap a time to the nearest neighbour edge / playhead / ends within ~8px. Returns the
+      // time unchanged when snapping is off or nothing is close (so free movement still works).
+      const exclude = new Set(dragSelectionRef.current.length > 1 ? dragSelectionRef.current : [sequenceClipDrag.id]);
+      const snapTargets: number[] = snapEnabled ? [0, sequenceDuration, Number(currentTime.toFixed(3))] : [];
+      if (snapEnabled) for (const c of allSequenceClips) { if (exclude.has(c.id)) continue; snapTargets.push(c.timeline_start, c.timeline_end); }
+      const snapTol = (8 / rect.width) * timelineDuration;
+      const snap = (t: number) => {
+        let best = t; let bd = snapTol;
+        for (const g of snapTargets) { const d = Math.abs(t - g); if (d < bd) { bd = d; best = g; } }
+        return best;
+      };
       // The dragged clip moves/resizes freely; applyDragOverwrite then trims, deletes, or
       // splits any same-lane neighbour it now overlaps (DaVinci/Premiere overwrite).
       if (sequenceClipDrag.mode === 'start') {
-        const nextTimelineStart = clamp(sequenceClipDrag.originalTimelineStart + delta, 0, sequenceClipDrag.originalTimelineEnd - 0.1);
+        const snappedStart = snap(sequenceClipDrag.originalTimelineStart + delta);
+        const nextTimelineStart = clamp(snappedStart, 0, sequenceClipDrag.originalTimelineEnd - 0.1);
+        const effDelta = nextTimelineStart - sequenceClipDrag.originalTimelineStart;
         const fields: Partial<SequenceClip> = { timeline_start: Number(nextTimelineStart.toFixed(2)) };
         if (isVideoClip) {
-          fields.source_start = Number(clamp(sequenceClipDrag.originalSourceStart + delta, 0, sequenceClipDrag.originalSourceEnd - 0.1).toFixed(2));
+          fields.source_start = Number(clamp(sequenceClipDrag.originalSourceStart + effDelta, 0, sequenceClipDrag.originalSourceEnd - 0.1).toFixed(2));
         }
         applyDragOverwrite(sequenceClipDrag.id, fields);
       } else if (sequenceClipDrag.mode === 'end') {
-        const nextTimelineEnd = clamp(sequenceClipDrag.originalTimelineEnd + delta, sequenceClipDrag.originalTimelineStart + 0.1, timelineDuration);
+        const snappedEnd = snap(sequenceClipDrag.originalTimelineEnd + delta);
+        const nextTimelineEnd = clamp(snappedEnd, sequenceClipDrag.originalTimelineStart + 0.1, timelineDuration);
+        const effDelta = nextTimelineEnd - sequenceClipDrag.originalTimelineEnd;
         const fields: Partial<SequenceClip> = { timeline_end: Number(nextTimelineEnd.toFixed(2)) };
         if (isVideoClip) {
-          fields.source_end = Number(clamp(sequenceClipDrag.originalSourceEnd + delta, sequenceClipDrag.originalSourceStart + 0.1, sourceDuration).toFixed(2));
+          fields.source_end = Number(clamp(sequenceClipDrag.originalSourceEnd + effDelta, sequenceClipDrag.originalSourceStart + 0.1, sourceDuration).toFixed(2));
         }
         applyDragOverwrite(sequenceClipDrag.id, fields);
       } else if (dragSelectionRef.current.length > 1) {
@@ -1925,7 +1943,13 @@ export function VideoReviewEditor({
         applyBlockMove(delta, dragSelectionRef.current);
       } else {
         const length = sequenceClipDrag.originalTimelineEnd - sequenceClipDrag.originalTimelineStart;
-        const nextStart = clamp(sequenceClipDrag.originalTimelineStart + delta, 0, Math.max(0, timelineDuration - length));
+        const rawStart = sequenceClipDrag.originalTimelineStart + delta;
+        // Snap whichever EDGE (leading or trailing) is closest to a target, so a clip clicks into
+        // place against its neighbour on either side.
+        const sStart = snap(rawStart);
+        const sEnd = snap(rawStart + length);
+        const snappedStart = Math.abs(sStart - rawStart) <= Math.abs(sEnd - (rawStart + length)) ? sStart : sEnd - length;
+        const nextStart = clamp(snappedStart, 0, Math.max(0, timelineDuration - length));
         const fields: Partial<SequenceClip> = {
           timeline_start: Number(nextStart.toFixed(2)),
           timeline_end: Number((nextStart + length).toFixed(2)),
@@ -1964,7 +1988,7 @@ export function VideoReviewEditor({
       window.removeEventListener('pointerup', clearDrag);
       window.removeEventListener('pointercancel', clearDrag);
     };
-  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove]);
+  }, [allSequenceClips, sequenceClipDrag, timelineDuration, applyDragOverwrite, applyBlockMove, snapEnabled, sequenceDuration, currentTime]);
 
   // Rubber-band (marquee) select: while a right-drag is active, draw the rectangle and on
   // release select every clip bar (data-clip-id) whose on-screen box intersects it. A tiny
@@ -2290,9 +2314,18 @@ export function VideoReviewEditor({
                   <MessageSquare className="h-4 w-4" />
                 </Button>
                 <Button
-                  variant={linkAV ? 'default' : 'outline'}
+                  variant={snapEnabled ? 'default' : 'outline'}
                   size="sm"
                   className="ml-auto h-7 px-2 text-xs"
+                  title={snapEnabled ? 'マグネット ON：隣のクリップ端・赤線に吸着。クリックでOFF（自由移動）' : 'マグネット OFF：自由に動かせます。クリックでON（吸着）'}
+                  onClick={() => setSnapEnabled((v) => !v)}
+                >
+                  {snapEnabled ? '🧲 マグネット' : '🧲 OFF'}
+                </Button>
+                <Button
+                  variant={linkAV ? 'default' : 'outline'}
+                  size="sm"
+                  className="h-7 px-2 text-xs"
                   title={linkAV ? '映像と音声をリンク中（クリップを一緒に動かす）。クリックで解除' : '映像と音声のリンクは解除中。クリックでリンク'}
                   onClick={() => setLinkAV((v) => !v)}
                 >
