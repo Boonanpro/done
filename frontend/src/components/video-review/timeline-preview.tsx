@@ -17,7 +17,9 @@ type Props = {
   assets: SequenceAsset[];
   // Manual blur boxes active NOW (normalized output coords, tracked position already resolved).
   // Painted on the canvas so the preview matches the export and never flickers (no backdrop-filter).
-  blurRegions?: Array<{ x: number; y: number; width: number; height: number }>;
+  // Resolve the active blur boxes AT a given time. Called inside drawFrame with the playback
+  // clock so the box is evaluated at the same instant as the video frame (no lag = no peeking).
+  blurRegionsAt?: (t: number) => Array<{ x: number; y: number; width: number; height: number }>;
   currentTime: number;
   playing: boolean;
   format: string;
@@ -121,7 +123,7 @@ function drawSource(
   ctx.restore();
 }
 
-export function TimelinePreview({ sequence, assets, blurRegions, currentTime, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange }: Props) {
+export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const videosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
@@ -417,10 +419,9 @@ export function TimelinePreview({ sequence, assets, blurRegions, currentTime, pl
         ctx.restore();
       }
 
-      // Manual blur boxes (drawn by the user, tracked position already resolved). Painted here on
-      // the canvas — NOT via CSS backdrop-filter — so they never flicker and the preview matches
-      // the gaussian baked into the export.
-      for (const r of blurRegions || []) {
+      // Manual blur boxes. Resolved at THIS frame's time t (not a lagging prop) so the box tracks
+      // the moving target exactly — painted on the canvas (no flicker, matches the baked gaussian).
+      for (const r of (blurRegionsAt ? blurRegionsAt(t) : [])) {
         const rx = r.x * w;
         const ry = r.y * h;
         const rw = Math.max(2, r.width * w);
@@ -440,7 +441,7 @@ export function TimelinePreview({ sequence, assets, blurRegions, currentTime, pl
       // overlay (same component the export screenshots) so the preview equals the burned video,
       // with real fonts / boxes / shadows the canvas couldn't match.
     },
-    [dims, visualClips, effectClips, blurRegions],
+    [dims, visualClips, effectClips, blurRegionsAt],
   );
 
   const seekVideo = useCallback((video: HTMLVideoElement, time: number): Promise<void> => {

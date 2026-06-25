@@ -790,7 +790,7 @@ def _apply_tracked_blur(out_path: Path, annotations: list[dict[str, Any]], job_d
                     boxes[f"{p['t']:.3f}"] = [p["x"], p["y"], p["w"], p["h"]]
                 else:
                     t = pts[0]["t"]
-                    step = 1.0 / 10.0  # 10 fps sampling of the interpolated path
+                    step = 1.0 / 30.0  # 30 fps sampling so the baked box tracks per-frame (no peeking)
                     while t <= pts[-1]["t"] + 1e-6:
                         k0, k1 = pts[0], pts[-1]
                         for i in range(len(pts) - 1):
