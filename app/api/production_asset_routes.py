@@ -620,14 +620,17 @@ def _attach_output_asset(
 
 
 def _blur_annotations(instruction: dict[str, Any]) -> list[dict[str, Any]]:
-    """Manual STATIC blur rectangles (ffmpeg/_blur_chain). Tracked ones (data.track) are excluded
-    here — they're followed per-frame in a post-pass instead (see _apply_tracked_blur)."""
+    """Manual STATIC blur rectangles (ffmpeg/_blur_chain). Tracked (data.track) and KEYFRAMED
+    (data.keyframes) ones are excluded here — they're followed per-frame in a post-pass instead
+    (see _apply_tracked_blur)."""
     annotations = ((instruction.get("timeline") or {}).get("annotations") or [])
     return [
         annotation
         for annotation in annotations
         if annotation.get("intent") == "blur" and annotation.get("kind") == "rect"
-        and isinstance(annotation.get("data"), dict) and not annotation["data"].get("track")
+        and isinstance(annotation.get("data"), dict)
+        and not annotation["data"].get("track")
+        and not (isinstance(annotation["data"].get("keyframes"), list) and annotation["data"]["keyframes"])
     ]
 
 
@@ -770,14 +773,44 @@ def _apply_tracked_blur(out_path: Path, annotations: list[dict[str, Any]], job_d
         if ann.get("intent") != "blur" or ann.get("kind") != "rect":
             continue
         data = ann.get("data") if isinstance(ann.get("data"), dict) else {}
+        style = str(data.get("blur_style") or data.get("style") or "gaussian")
+        # Manual keyframes win: densely sample the linear interpolation between them (output coords,
+        # timeline time) so the box glides exactly as the editor previewed it.
+        kfs = data.get("keyframes")
+        if isinstance(kfs, list) and len(kfs) >= 1:
+            pts = sorted(
+                [{"t": float(k.get("t") or 0), "x": float(k.get("x") or 0), "y": float(k.get("y") or 0),
+                  "w": float(k.get("width") or 0), "h": float(k.get("height") or 0)} for k in kfs if isinstance(k, dict)],
+                key=lambda p: p["t"],
+            )
+            if pts:
+                boxes: dict[str, list] = {}
+                if len(pts) == 1:
+                    p = pts[0]
+                    boxes[f"{p['t']:.3f}"] = [p["x"], p["y"], p["w"], p["h"]]
+                else:
+                    t = pts[0]["t"]
+                    step = 1.0 / 10.0  # 10 fps sampling of the interpolated path
+                    while t <= pts[-1]["t"] + 1e-6:
+                        k0, k1 = pts[0], pts[-1]
+                        for i in range(len(pts) - 1):
+                            if pts[i]["t"] <= t <= pts[i + 1]["t"]:
+                                k0, k1 = pts[i], pts[i + 1]
+                                break
+                        span = (k1["t"] - k0["t"]) or 1.0
+                        f = (t - k0["t"]) / span
+                        boxes[f"{t:.3f}"] = [
+                            k0["x"] + (k1["x"] - k0["x"]) * f, k0["y"] + (k1["y"] - k0["y"]) * f,
+                            k0["w"] + (k1["w"] - k0["w"]) * f, k0["h"] + (k1["h"] - k0["h"]) * f,
+                        ]
+                        t += step
+                tracks.append({"boxes": boxes, "style": style})
+            continue
         if not data.get("track"):
             continue
         boxes = data.get("track_boxes")
         if isinstance(boxes, dict) and boxes:
-            tracks.append({
-                "boxes": boxes,
-                "style": str(data.get("blur_style") or data.get("style") or "gaussian"),
-            })
+            tracks.append({"boxes": boxes, "style": style})
     if not tracks:
         return False
     spec_path = job_dir / "trackblur_spec.json"
