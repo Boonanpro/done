@@ -692,20 +692,21 @@ export function VideoReviewEditor({
   const effectiveDrawStart = useMemo(() => {
     return Number(currentTime.toFixed(2));
   }, [currentTime]);
-  // Blur regions active at the current time, resolved to their tracked position. Drawn ON the
-  // canvas (in TimelinePreview) — NOT via CSS backdrop-filter, which flickers when the canvas
-  // under it repaints / the component re-renders.
-  const activeBlurRegions = useMemo(() => {
+  // Blur regions active at a GIVEN time t, resolved to their position. Drawn ON the canvas (in
+  // TimelinePreview) — NOT via CSS backdrop-filter, which flickers. This is a function of t (not a
+  // value at currentTime) so the playback loop can evaluate it at the SAME clock the video frame
+  // uses — otherwise the box lags the frame by a React cycle and a moving target peeks out.
+  const blurRegionsAt = useCallback((t: number) => {
     return annotations
-      .filter((a) => a.intent === 'blur' && a.kind === 'rect' && isActiveAnnotation(a))
+      .filter((a) => a.intent === 'blur' && a.kind === 'rect' && t >= a.start && t <= (a.end ?? a.start + 0.2))
       .map((a) => {
         const d = (a.data || {}) as { x?: number; y?: number; width?: number; height?: number; track?: boolean; track_boxes?: Record<string, number[]>; keyframes?: Keyframe[] };
         // priority: manual keyframes (interpolated) > OCR track path > static box
-        const kf = d.keyframes && d.keyframes.length ? keyframeBoxAt(d.keyframes, currentTime) : null;
-        const tracked = !kf && d.track ? trackedBoxAt(d.track_boxes, currentTime) : null;
+        const kf = d.keyframes && d.keyframes.length ? keyframeBoxAt(d.keyframes, t) : null;
+        const tracked = !kf && d.track ? trackedBoxAt(d.track_boxes, t) : null;
         return kf || tracked || { x: Number(d.x || 0), y: Number(d.y || 0), width: Number(d.width || 0), height: Number(d.height || 0) };
       });
-  }, [annotations, currentTime, isActiveAnnotation]);
+  }, [annotations]);
 
   const payload: SessionPayload = useMemo(
     () => ({
@@ -2082,7 +2083,7 @@ export function VideoReviewEditor({
                 <TimelinePreview
                   sequence={editSequence}
                   assets={sequenceAssets || []}
-                  blurRegions={activeBlurRegions}
+                  blurRegionsAt={blurRegionsAt}
                   currentTime={currentTime}
                   playing={playing}
                   format={editSequence?.format || initialSequence?.format || '9:16'}
