@@ -713,45 +713,63 @@ export function VideoReviewEditor({
       });
   }, [annotations]);
 
-  // Freeze-frame: right-click the preview to insert a ~5s still of the active clip's current frame
-  // ON A LAYER ABOVE the base (an overlay), so the rest of the timeline/layout is untouched. A clip
-  // with source_end <= source_start is a freeze (held frame) in both the preview and the export.
+  // Freeze-frame (DaVinci-style ripple insert): right-click a CLIP to freeze ITS frame at the
+  // playhead. The clip is CUT at the playhead, a 5s still that looks IDENTICAL (inherits transform /
+  // position / crop / shape) is inserted in the gap, and the continuation + EVERYTHING after (all
+  // tracks + annotations) ripples +5s — like pausing the video for 5s.
   const FREEZE_DUR = 5;
-  const insertFreezeFrame = useCallback(() => {
+  const insertFreezeRipple = useCallback((clicked: SequenceClip) => {
+    if (!clicked.asset_id) return;
+    const t = Number(Math.max(clicked.timeline_start + 0.05, Math.min(currentTime, clicked.timeline_end - 0.05)).toFixed(2));
+    const srcT = Number((Number(clicked.source_start || 0) + (t - clicked.timeline_start)).toFixed(3));
+    const r = (v: number) => Number(v.toFixed(2));
+    const F = FREEZE_DUR;
     setEditSequence((current) => {
       if (!current) return current;
       const tracks = current.tracks || [];
-      let base: SequenceClip | null = null;
-      for (const tr of tracks) {
-        if (tr.type !== 'video') continue;
-        for (const c of tr.clips || []) {
-          const ov = c.composition === 'pip' || c.composition === 'overlay';
-          if (!ov && c.timeline_start <= currentTime && currentTime < c.timeline_end) base = c;
-        }
-      }
-      if (!base || !base.asset_id) return current;
-      const srcT = Number((Number(base.source_start || 0) + (currentTime - base.timeline_start)).toFixed(3));
-      const maxLayer = Math.max(0, ...tracks.flatMap((tr) => (tr.clips || []).map((c) => c.layer ?? 0)));
+      const tIdx = tracks.findIndex((tr) => (tr.clips || []).some((c) => c.id === clicked.id));
       const freeze: SequenceClip = {
-        id: makeId(),
-        asset_id: base.asset_id,
-        track: 'video',
-        layer: maxLayer + 1,
-        composition: 'overlay',
-        // Fullscreen position so the overlay render covers the frame (no position => small PiP box).
-        position: { x: 0, y: 0, width: 1, height: 1 },
-        timeline_start: Number(currentTime.toFixed(2)),
-        timeline_end: Number((currentTime + FREEZE_DUR).toFixed(2)),
-        source_start: srcT,
-        source_end: srcT, // == source_start => freeze
-        role: 'freeze',
-        label: '静止画',
+        id: makeId(), asset_id: clicked.asset_id, track: clicked.track, layer: clicked.layer ?? 0,
+        composition: clicked.composition, position: clicked.position ?? null, transform: clicked.transform ?? null,
+        crop: clicked.crop ?? null, shape: clicked.shape ?? null,
+        timeline_start: r(t), timeline_end: r(t + F), source_start: srcT, source_end: srcT, // freeze
+        role: 'freeze', label: '静止画',
       };
-      const vtIdx = tracks.findIndex((tr) => tr.type === 'video');
-      const nextTracks = tracks.map((tr, i) => (i === vtIdx ? { ...tr, clips: [...(tr.clips || []), freeze] } : tr));
+      const nextTracks = tracks.map((tr, i) => {
+        const out: SequenceClip[] = [];
+        for (const c of tr.clips || []) {
+          const cs = c.timeline_start, ce = c.timeline_end;
+          const isVid = Number.isFinite(c.source_end as number);
+          if (cs < t - 1e-3 && ce > t + 1e-3) {
+            out.push({ ...c, timeline_end: r(t), ...(isVid ? { source_end: r(Number(c.source_start || 0) + (t - cs)) } : {}) });
+            out.push({ ...c, id: makeId(), timeline_start: r(t + F), timeline_end: r(ce + F), ...(isVid ? { source_start: r(Number(c.source_start || 0) + (t - cs)) } : {}) });
+          } else if (cs >= t - 1e-3) {
+            out.push({ ...c, timeline_start: r(cs + F), timeline_end: r(ce + F) });
+          } else {
+            out.push(c);
+          }
+        }
+        if (i === tIdx) out.push(freeze);
+        return { ...tr, clips: out };
+      });
       setSelectedSequenceClipId(freeze.id);
       setSelectedSequenceClipIds([freeze.id]);
       return { ...current, tracks: nextTracks };
+    });
+    setAnnotations((prev) => {
+      const out: ReviewAnnotation[] = [];
+      for (const a of prev) {
+        const cs = a.start, ce = a.end ?? a.start;
+        if (cs < t - 1e-3 && ce > t + 1e-3) {
+          out.push({ ...a, end: r(t) });
+          out.push({ ...a, id: makeId(), created_at: new Date().toISOString(), start: r(t + F), end: r(ce + F) });
+        } else if (cs >= t - 1e-3) {
+          out.push({ ...a, start: r(cs + F), end: r(ce + F) });
+        } else {
+          out.push(a);
+        }
+      }
+      return out;
     });
   }, [currentTime]);
 
@@ -2147,8 +2165,7 @@ export function VideoReviewEditor({
                 ref={stageRef}
                 className="relative h-full max-h-full max-w-full overflow-hidden bg-black"
                 style={{ aspectRatio: previewAspect }}
-                onContextMenu={(event) => { event.preventDefault(); insertFreezeFrame(); }}
-                title="右クリックでこの位置を静止画クリップに（約5秒）"
+                onContextMenu={(event) => event.preventDefault()}
               >
                 <TimelinePreview
                   sequence={editSequence}
@@ -2571,6 +2588,7 @@ export function VideoReviewEditor({
                                         ? 'border-yellow-300/70 ring-2 ring-yellow-300/40 ring-dashed'
                                         : 'border-white/30'
                                   }`}
+                                  onContextMenu={isVideo && clip.asset_id ? (event) => { event.preventDefault(); insertFreezeRipple(clip); } : (event) => event.preventDefault()}
                                   style={{
                                     left: `${left}%`,
                                     width: `${width}%`,
@@ -2580,7 +2598,7 @@ export function VideoReviewEditor({
                                       ? { backgroundImage: `linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.4)), url(${clipAsset.thumbnail_url})` }
                                       : {}),
                                   }}
-                                  title={`${itemTypeBadge(item.itemType)}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}`}
+                                  title={`${itemTypeBadge(item.itemType)}: ${labelText} / ${fmtTime(clip.timeline_start)}-${fmtTime(clip.timeline_end)}${isVideo && clip.asset_id ? ' ／ 右クリックで再生位置を静止画に' : ''}`}
                                 >
                                   <button
                                     type="button"
