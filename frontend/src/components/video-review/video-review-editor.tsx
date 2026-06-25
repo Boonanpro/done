@@ -91,12 +91,9 @@ export type SequenceClip = {
 };
 
 // Per-caption style = the rich CaptionDesign (font / color / gradient / outline / box / shadow /
-// motion) shared with the renderer, plus a few legacy fields the old canvas used (bold / x / y).
-// The HTML caption renderer ignores the legacy fields; they remain only for back-compat.
+// motion / position incl. x/y nudge) shared with the renderer, plus `bold` (legacy).
 export type CaptionStyle = CaptionDesign & {
   bold?: boolean;
-  x?: number;
-  y?: number;
 };
 
 // True when the caption's current design matches a preset (for highlighting the active chip).
@@ -2969,7 +2966,18 @@ export function VideoReviewEditor({
                                     key={p.id}
                                     type="button"
                                     title={`${p.label}${d.animation && d.animation !== 'none' ? '（動き）' : ''}`}
-                                    onClick={() => updateSelectedSequenceClip({ style: { ...d } })}
+                                    onClick={() => updateSelectedSequenceClip({
+                                      // Apply the preset's LOOK but keep the user's manual LAYOUT
+                                      // (size / position / nudge) — changing the design shouldn't
+                                      // reset where/how big the caption is.
+                                      style: {
+                                        ...d,
+                                        ...(st.fontSize !== undefined ? { fontSize: st.fontSize } : {}),
+                                        ...(st.position !== undefined ? { position: st.position } : {}),
+                                        ...(st.x !== undefined ? { x: st.x } : {}),
+                                        ...(st.y !== undefined ? { y: st.y } : {}),
+                                      },
+                                    })}
                                     className={`flex flex-col items-center gap-0.5 rounded-md border px-1 py-1.5 transition ${active ? 'border-sky-500 bg-sky-500/10' : 'border-border hover:border-sky-400/60'}`}
                                   >
                                     <span

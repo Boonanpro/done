@@ -62,6 +62,8 @@ export type CaptionDesign = {
   outlineWidth?: number;      // multiplier of the default stroke (1 = default, 0 = none)
   fontSize?: number;          // multiplier of the base size (base = outH * 0.052)
   position?: 'bottom' | 'center' | 'top';
+  x?: number;                 // fine horizontal nudge, fraction of frame width  (+ = right)
+  y?: number;                 // fine vertical nudge,   fraction of frame height (+ = down)
   // Background box behind the text (the modern "telop bar" look). Absent = no box.
   bg?: { color?: string; opacity?: number; radius?: number; padX?: number; padY?: number };
   // Soft drop shadow on the whole caption block.
@@ -113,12 +115,19 @@ export const CAPTION_DESIGN_PRESETS: ReadonlyArray<{ id: string; label: string; 
 export function captionAnchorStyle(design: CaptionDesign, outH: number): CSSProperties {
   const pos = design.position || 'bottom';
   const margin = Math.round(outH * 0.07);
+  // Fine nudge: x is a fraction of width (the box is full-width, so translateX % = fraction of
+  // width), y is a fraction of height (px of outH). Lets the user move the caption freely up/down/
+  // left/right on top of the bottom/center/top anchor.
+  const dx = design.x || 0;
+  const dy = design.y || 0;
+  const nudge = dx || dy ? { transform: `translate(${(dx * 100).toFixed(3)}%, ${Math.round(dy * outH)}px)` } : {};
   return {
     position: 'absolute',
     left: 0,
     right: 0,
     display: 'flex',
     justifyContent: 'center',
+    ...nudge,
     ...(pos === 'top'
       ? { top: margin, alignItems: 'flex-start' }
       : pos === 'center'
