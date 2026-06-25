@@ -712,6 +712,48 @@ export function VideoReviewEditor({
       });
   }, [annotations]);
 
+  // Freeze-frame: right-click the preview to insert a ~5s still of the active clip's current frame
+  // ON A LAYER ABOVE the base (an overlay), so the rest of the timeline/layout is untouched. A clip
+  // with source_end <= source_start is a freeze (held frame) in both the preview and the export.
+  const FREEZE_DUR = 5;
+  const insertFreezeFrame = useCallback(() => {
+    setEditSequence((current) => {
+      if (!current) return current;
+      const tracks = current.tracks || [];
+      let base: SequenceClip | null = null;
+      for (const tr of tracks) {
+        if (tr.type !== 'video') continue;
+        for (const c of tr.clips || []) {
+          const ov = c.composition === 'pip' || c.composition === 'overlay';
+          if (!ov && c.timeline_start <= currentTime && currentTime < c.timeline_end) base = c;
+        }
+      }
+      if (!base || !base.asset_id) return current;
+      const srcT = Number((Number(base.source_start || 0) + (currentTime - base.timeline_start)).toFixed(3));
+      const maxLayer = Math.max(0, ...tracks.flatMap((tr) => (tr.clips || []).map((c) => c.layer ?? 0)));
+      const freeze: SequenceClip = {
+        id: makeId(),
+        asset_id: base.asset_id,
+        track: 'video',
+        layer: maxLayer + 1,
+        composition: 'overlay',
+        // Fullscreen position so the overlay render covers the frame (no position => small PiP box).
+        position: { x: 0, y: 0, width: 1, height: 1 },
+        timeline_start: Number(currentTime.toFixed(2)),
+        timeline_end: Number((currentTime + FREEZE_DUR).toFixed(2)),
+        source_start: srcT,
+        source_end: srcT, // == source_start => freeze
+        role: 'freeze',
+        label: '静止画',
+      };
+      const vtIdx = tracks.findIndex((tr) => tr.type === 'video');
+      const nextTracks = tracks.map((tr, i) => (i === vtIdx ? { ...tr, clips: [...(tr.clips || []), freeze] } : tr));
+      setSelectedSequenceClipId(freeze.id);
+      setSelectedSequenceClipIds([freeze.id]);
+      return { ...current, tracks: nextTracks };
+    });
+  }, [currentTime]);
+
   const payload: SessionPayload = useMemo(
     () => ({
       video_path: videoPath || null,
@@ -2104,6 +2146,8 @@ export function VideoReviewEditor({
                 ref={stageRef}
                 className="relative h-full max-h-full max-w-full overflow-hidden bg-black"
                 style={{ aspectRatio: previewAspect }}
+                onContextMenu={(event) => { event.preventDefault(); insertFreezeFrame(); }}
+                title="右クリックでこの位置を静止画クリップに（約5秒）"
               >
                 <TimelinePreview
                   sequence={editSequence}

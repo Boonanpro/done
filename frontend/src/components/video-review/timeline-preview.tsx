@@ -472,7 +472,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const seeks = active.map((vc) => {
       const v = videosRef.current.get(String(vc.clip.id));
       if (!v) return Promise.resolve();
-      const srcTime = Number(vc.clip.source_start || 0) + (currentTime - vc.clip.timeline_start);
+      // Freeze-frame clip (source_end <= source_start): hold the single source frame, don't advance.
+      const frozen = vc.clip.source_end != null && Number(vc.clip.source_end) <= Number(vc.clip.source_start || 0);
+      const srcTime = Number(vc.clip.source_start || 0) + (frozen ? 0 : currentTime - vc.clip.timeline_start);
       return seekVideo(v, srcTime);
     });
     void Promise.all(seeks).then(() => {
@@ -521,13 +523,20 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const v = videosRef.current.get(id);
         if (!v) continue;
         activeIds.add(id);
-        const expected = Number(vc.clip.source_start || 0) + (t - vc.clip.timeline_start);
+        const frozen = vc.clip.source_end != null && Number(vc.clip.source_end) <= Number(vc.clip.source_start || 0);
+        const expected = Number(vc.clip.source_start || 0) + (frozen ? 0 : t - vc.clip.timeline_start);
         // Keep VIDEO tightly aligned: seek on activation or as soon as it drifts >0.12s. Video
         // re-seeks aren't audible, and a loose tolerance showed the WRONG frame (a later/other
         // clip's footage) — very visible with the short, source-jumping clips after a tight
         // re-cut. (Audio stays seek-on-activation only, below, to avoid the warble.)
-        if (!prevActiveVideoRef.current.has(id) || Math.abs(v.currentTime - expected) > 0.12) v.currentTime = expected;
-        if (v.paused) void v.play().catch(() => {});
+        if (frozen) {
+          // Hold the frozen frame: keep it parked at the source frame and paused (no playback).
+          if (Math.abs(v.currentTime - expected) > 0.04) { try { v.currentTime = expected; } catch { /* not ready */ } }
+          if (!v.paused) v.pause();
+        } else {
+          if (!prevActiveVideoRef.current.has(id) || Math.abs(v.currentTime - expected) > 0.12) v.currentTime = expected;
+          if (v.paused) void v.play().catch(() => {});
+        }
       }
       for (const [id, v] of videosRef.current) if (!activeIds.has(id) && !v.paused) v.pause();
 
