@@ -505,9 +505,12 @@ export function VideoReviewEditor({
 
     for (const a of annotations) {
       const zone = trackForIntent(a.intent);
+      // Annotations carry their own lane via data.layer (default 5 = a lane above the clips), so
+      // they can be dragged up/down between lanes like clips. Falls back to 5 for legacy ones.
+      const annLayer = Number((a.data as { layer?: number } | undefined)?.layer);
       aggs.push({
         zone,
-        layer: 5,
+        layer: Number.isFinite(annLayer) ? annLayer : 5,
         item: { key: a.id, kind: 'annotation', itemType: a.intent, start: a.start, end: a.end ?? a.start + 0.2, annotation: a },
       });
     }
@@ -1289,11 +1292,13 @@ export function VideoReviewEditor({
   );
 
   const updateAnnotationTime = useCallback(
-    (id: string, start: number, end: number) => {
+    (id: string, start: number, end: number, layer?: number) => {
       const maxDuration = duration || Math.max(end, start + 0.1);
       const nextStart = Number(clamp(start, 0, maxDuration).toFixed(2));
       const nextEnd = Number(clamp(end, nextStart + 0.1, maxDuration).toFixed(2));
-      setAnnotations((prev) => prev.map((a) => (a.id === id ? { ...a, start: nextStart, end: nextEnd } : a)));
+      setAnnotations((prev) => prev.map((a) => (a.id === id
+        ? { ...a, start: nextStart, end: nextEnd, ...(typeof layer === 'number' ? { data: { ...(a.data as object), layer } } : {}) }
+        : a)));
     },
     [duration]
   );
@@ -1308,14 +1313,25 @@ export function VideoReviewEditor({
       const length = Math.max(0.1, timelineDrag.originalEnd - timelineDrag.originalStart);
       if (timelineDrag.mode === 'move') {
         const nextStart = clamp(timelineDrag.originalStart + delta, 0, Math.max(0, timelineDuration - length));
-        updateAnnotationTime(timelineDrag.id, nextStart, nextStart + length);
+        // Vertical: dragging into another lane (same zone) changes the annotation's layer = up/down
+        // lane move, like sequence clips. Frozen geometry + 8px deadband keep it from oscillating.
+        let layer: number | undefined;
+        const ann = annotations.find((a) => a.id === timelineDrag.id);
+        if (ann) {
+          const zone = trackForIntent(ann.intent);
+          const yWithin = event.clientY - rect.top;
+          const geom = dragLaneGeomRef.current || laneGeomRef.current;
+          const cand = geom.find((g) => g.zone === zone && yWithin >= g.top + 8 && yWithin < g.bottom - 8);
+          if (cand) layer = cand.layer;
+        }
+        updateAnnotationTime(timelineDrag.id, nextStart, nextStart + length, layer);
       } else if (timelineDrag.mode === 'start') {
         updateAnnotationTime(timelineDrag.id, timelineDrag.originalStart + delta, timelineDrag.originalEnd);
       } else {
         updateAnnotationTime(timelineDrag.id, timelineDrag.originalStart, timelineDrag.originalEnd + delta);
       }
     };
-    const clearDrag = () => setTimelineDrag(null);
+    const clearDrag = () => { setTimelineDrag(null); dragLaneGeomRef.current = null; };
     window.addEventListener('pointermove', moveDrag);
     window.addEventListener('pointerup', clearDrag);
     window.addEventListener('pointercancel', clearDrag);
@@ -1324,7 +1340,7 @@ export function VideoReviewEditor({
       window.removeEventListener('pointerup', clearDrag);
       window.removeEventListener('pointercancel', clearDrag);
     };
-  }, [timelineDuration, timelineDrag, updateAnnotationTime]);
+  }, [timelineDuration, timelineDrag, updateAnnotationTime, annotations]);
 
   useEffect(() => {
     if (!pendingTimelineDrag || !pendingAnnotation) return;
@@ -1410,6 +1426,8 @@ export function VideoReviewEditor({
       event.preventDefault();
       event.stopPropagation();
       selectAnnotation(annotation.id, event.shiftKey || event.ctrlKey || event.metaKey);
+      // Freeze lane geometry for stable vertical hit-testing (no reflow oscillation while dragging).
+      dragLaneGeomRef.current = laneGeomRef.current.map((g) => ({ ...g }));
       setTimelineDrag({
         id: annotation.id,
         mode,
@@ -1855,19 +1873,24 @@ export function VideoReviewEditor({
       const left = Math.min(start.x, event.clientX), right = Math.max(start.x, event.clientX);
       const top = Math.min(start.y, event.clientY), bottom = Math.max(start.y, event.clientY);
       if (right - left < 5 && bottom - top < 5) return; // plain right-click, not a drag
-      const ids: string[] = [];
-      document.querySelectorAll('[data-clip-id]').forEach((el) => {
+      const intersects = (el: Element) => {
         const r = el.getBoundingClientRect();
-        if (r.right >= left && r.left <= right && r.bottom >= top && r.top <= bottom) {
-          const id = el.getAttribute('data-clip-id');
-          if (id) ids.push(id);
-        }
+        return r.right >= left && r.left <= right && r.bottom >= top && r.top <= bottom;
+      };
+      const clipIds: string[] = [];
+      const annIds: string[] = [];
+      // Marquee selects EVERY clip kind it covers — sequence clips AND annotation/blur clips.
+      document.querySelectorAll('[data-clip-id]').forEach((el) => {
+        if (intersects(el)) { const id = el.getAttribute('data-clip-id'); if (id) clipIds.push(id); }
       });
-      if (ids.length > 0) {
-        setSelectedId(null);
-        setSelectedIds([]);
-        setSelectedSequenceClipIds(ids);
-        setSelectedSequenceClipId(ids[ids.length - 1]);
+      document.querySelectorAll('[data-annotation-id]').forEach((el) => {
+        if (intersects(el)) { const id = el.getAttribute('data-annotation-id'); if (id) annIds.push(id); }
+      });
+      if (clipIds.length > 0 || annIds.length > 0) {
+        setSelectedSequenceClipIds(clipIds);
+        setSelectedSequenceClipId(clipIds.length ? clipIds[clipIds.length - 1] : null);
+        setSelectedIds(annIds);
+        setSelectedId(annIds.length ? annIds[annIds.length - 1] : null);
       }
     };
     window.addEventListener('pointermove', move);
@@ -2270,6 +2293,7 @@ export function VideoReviewEditor({
                                 return (
                                   <div
                                     key={item.key}
+                                    data-annotation-id={a.id}
                                     className={`absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${laneColor(a.intent, selectedIds.includes(a.id))}`}
                                     style={{ left: `${left}%`, width: `${width}%` }}
                                     onPointerDown={(event) => startTimelineDrag(event, a, 'move')}
