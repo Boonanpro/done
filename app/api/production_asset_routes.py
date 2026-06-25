@@ -470,9 +470,7 @@ def _caption_style_override(style: dict[str, Any] | None, base_font: int, width:
         pass
     if style.get("bold") is False:
         parts.append("\\b0")
-    pos = style.get("position") or "bottom"
-    an = 8 if pos == "top" else 5 if pos == "center" else 2
-    # free x/y offset via absolute \pos (clamp x so the caption stays on screen).
+    # Anchored bottom-centre (\an2); the user moves it freely with x/y (no top/center/bottom preset).
     try:
         ox = float(style.get("x") or 0)
         oy = float(style.get("y") or 0)
@@ -481,12 +479,12 @@ def _caption_style_override(style: dict[str, Any] | None, base_font: int, width:
     if (abs(ox) > 1e-4 or abs(oy) > 1e-4) and width and height:
         ox = max(-0.3, min(0.3, ox))
         margin_v = max(54, round(height * 0.08))
-        anchor_y = margin_v if pos == "top" else (height // 2 if pos == "center" else height - margin_v)
+        anchor_y = height - margin_v
         px = round(width / 2 + ox * width)
         py = round(anchor_y + oy * height)
-        parts.append(f"\\an{an}\\pos({px},{py})")
+        parts.append(f"\\an2\\pos({px},{py})")
     else:
-        parts.append(f"\\an{an}")
+        parts.append("\\an2")
     return ("{" + "".join(parts) + "}" if parts else ""), font_px
 
 
@@ -833,6 +831,27 @@ def _apply_tracked_blur(out_path: Path, annotations: list[dict[str, Any]], job_d
     return False
 
 
+def _shape_cut_filter(shape: str | None, w: int, h: int, alpha: bool) -> str:
+    """ffmpeg filter that cuts a clip to a circle / rounded 'photo' frame. alpha=True -> transparent
+    outside (overlays); alpha=False -> BLACK outside (base layer, keeps yuv420p for the concat).
+    Matches the canvas clip in the preview. '' for rect/None."""
+    s = str(shape or "rect")
+    if s == "circle":
+        cond = f"lte(((X-{w}/2)/({w}/2))^2+((Y-{h}/2)/({h}/2))^2\\,1)"
+    elif s == "rounded":
+        rr = max(2, round(min(w, h) * 0.12))
+        cond = (
+            f"clip(gte(X\\,{rr})*lte(X\\,{w - 1 - rr})+gte(Y\\,{rr})*lte(Y\\,{h - 1 - rr})"
+            f"+lte(hypot(X-{rr}\\,Y-{rr})\\,{rr})+lte(hypot(X-{w - 1 - rr}\\,Y-{rr})\\,{rr})"
+            f"+lte(hypot(X-{rr}\\,Y-{h - 1 - rr})\\,{rr})+lte(hypot(X-{w - 1 - rr}\\,Y-{h - 1 - rr})\\,{rr})\\,0\\,1)"
+        )
+    else:
+        return ""
+    if alpha:
+        return f",format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='255*{cond}'"
+    return f",geq=lum='if({cond}\\,lum(X,Y)\\,16)':cb='if({cond}\\,cb(X,Y)\\,128)':cr='if({cond}\\,cr(X,Y)\\,128)'"
+
+
 def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
@@ -884,6 +903,8 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         c_b = max(0.0, min(0.9, float(bcrop.get("bottom") or 0))) if bcrop else 0.0
         has_crop = (c_l + c_r + c_t + c_b) > 0.001
         identity = is_full_pos and _is_identity_transform(b_scale, b_tx, b_ty) and not has_crop
+        # Wipe shape on a BASE clip: black outside the cutout (this layer has no alpha).
+        base_shape = _shape_cut_filter(clip.get("shape"), output_width, output_height, alpha=False)
         if identity or sw <= 0 or sh <= 0:
             # IDENTITY (or unknown source dims): exact current cover-crop string (byte-identical).
             _scale = f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30"
@@ -895,7 +916,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             filters.append(
                 f"[{input_index}:v]"
                 f"trim=start={source_start:.3f}:end={source_end:.3f},"
-                f"{setpts},format=yuv420p"
+                f"{setpts},format=yuv420p{base_shape}"
                 f"[v{rendered_count}]"
             )
         else:
@@ -935,7 +956,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             )
             filters.append(f"color=c=black:s={output_width}x{output_height}:r=30:d={out_dur:.3f}[bg{rendered_count}]")
             filters.append(
-                f"[bg{rendered_count}][src{rendered_count}]overlay={ox}:{oy}:shortest=1,format=yuv420p[v{rendered_count}]"
+                f"[bg{rendered_count}][src{rendered_count}]overlay={ox}:{oy}:shortest=1,format=yuv420p{base_shape}[v{rendered_count}]"
             )
         if not has_audio_track:
             if metadata.get("audio_codec") and not clip.get("muted") and not is_freeze:
@@ -1020,24 +1041,8 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         else:
             ov_pre = "setpts=PTS-STARTPTS," + (f"tpad=stop_mode=clone:stop_duration={ov_pad:.3f}," if ov_pad > 0.02 else "")
         command.extend(["-i", str(source_path)])
-        # Wipe shape: clip the PiP to a circle / rounded "photo" frame via a per-pixel alpha mask
-        # (yuva420p). 'rect' (default) keeps the full box. Matches the canvas clip in the preview.
-        shape = str(clip.get("shape") or "rect")
-        if shape == "circle":
-            shape_filt = (
-                f",format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':"
-                f"a='if(lte(((X-{ow}/2)/({ow}/2))^2+((Y-{oh}/2)/({oh}/2))^2\\,1)\\,255\\,0)'"
-            )
-        elif shape == "rounded":
-            rr = max(2, round(min(ow, oh) * 0.12))
-            shape_filt = (
-                f",format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':"
-                f"a='255*clip(gte(X\\,{rr})*lte(X\\,{ow - 1 - rr})+gte(Y\\,{rr})*lte(Y\\,{oh - 1 - rr})"
-                f"+lte(hypot(X-{rr}\\,Y-{rr})\\,{rr})+lte(hypot(X-{ow - 1 - rr}\\,Y-{rr})\\,{rr})"
-                f"+lte(hypot(X-{rr}\\,Y-{oh - 1 - rr})\\,{rr})+lte(hypot(X-{ow - 1 - rr}\\,Y-{oh - 1 - rr})\\,{rr})\\,0\\,1)'"
-            )
-        else:
-            shape_filt = ""
+        # Wipe shape: clip the PiP to a circle / rounded frame via a transparent alpha mask.
+        shape_filt = _shape_cut_filter(clip.get("shape"), ow, oh, alpha=True)
         filters.append(
             f"[{input_index}:v]"
             f"trim=start={source_start:.3f}:end={source_end:.3f},"
