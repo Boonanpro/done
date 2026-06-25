@@ -2772,14 +2772,20 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
                 "-y",
                 "-i",
                 str(src),
+                # fps=30 forces a CONSTANT frame rate. Source phone screen recordings are often
+                # variable-frame-rate (VFR), and VFR breaks seek-by-time everywhere: the editor's
+                # preview seeks to the wrong frame / freezes, and our OCR/ffmpeg trackers land on the
+                # wrong timestamp. A CFR proxy makes seeking reliable across the board.
                 "-vf",
-                "scale=-2:720",
+                "scale=-2:720,fps=30",
                 "-c:v",
                 "libx264",
                 "-preset",
                 "veryfast",
                 "-crf",
                 "28",
+                "-vsync",
+                "cfr",
                 "-c:a",
                 "aac",
                 "-b:a",
