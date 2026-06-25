@@ -3346,28 +3346,86 @@ async def probe_screen_blur(
     return data
 
 
+def _active_video_clip_at(sequence: dict[str, Any], anchor: float, box_cx: float, box_cy: float) -> dict[str, Any] | None:
+    """The video clip the user is actually looking at: among clips active at the anchor timeline
+    time, prefer an overlay/PiP whose output rect contains the box centre (higher layer wins),
+    else the fullscreen base clip. Returns None if there's no usable sequence."""
+    active = [c for c in _sequence_video_clips(sequence)
+              if float(c.get("timeline_start") or 0) <= anchor < float(c.get("timeline_end") or 0)]
+    if not active:
+        return None
+    def rect(c: dict[str, Any]) -> tuple[float, float, float, float]:
+        p = c.get("position") if isinstance(c.get("position"), dict) else None
+        if p:
+            return float(p.get("x") or 0), float(p.get("y") or 0), float(p.get("width") or 1), float(p.get("height") or 1)
+        return 0.0, 0.0, 1.0, 1.0
+    overlays = sorted([c for c in active if _is_overlay_clip(c)], key=lambda c: -(c.get("layer") or 0))
+    for c in overlays:
+        rx, ry, rw, rh = rect(c)
+        if rx <= box_cx <= rx + rw and ry <= box_cy <= ry + rh:
+            return c
+    base = [c for c in active if not _is_overlay_clip(c)]
+    return base[0] if base else active[0]
+
+
 @router.post("/contents/{content_id}/blur/track")
 async def track_blur_region(
     content_id: str, payload: TrackBlurRequest, current_user: TokenData = Depends(get_current_user)
 ):
-    """OCR-track the TEXT inside the drawn box: identify the target text at the anchor frame, then
-    follow it across the clip. Returns the normalized path (for preview + export) AND the time range
-    where the text is actually visible, so tracking DEFINES the clip length. Robust for screen
-    recordings (the old template tracker chased look-alike UI and drifted on static text)."""
+    """OCR-track the TEXT inside the drawn box, ACROSS the composition. Finds the clip shown at the
+    playhead, uses THAT asset, maps playhead-time -> that clip's source-time, and maps the drawn box
+    (output coords) -> source coords via the clip's cover-fit — so we read the right asset, the right
+    frame, the right region even when clips have source offsets or a different aspect. Returns the
+    output-normalized path keyed by TIMELINE time + the visible time range (which DEFINES the clip)."""
     contents = _read_contents(payload.room_id)
     content = next((c for c in contents if c.get("id") == content_id), None)
     if not content:
         raise HTTPException(status_code=404, detail="Content not found")
-    src = _content_source_video(payload.room_id, content)
-    if not src:
-        raise HTTPException(status_code=400, detail="解析できる動画素材がありません")
+    timeline = content.get("timeline") if isinstance(content.get("timeline"), dict) else {}
+    sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
+    out_w, out_h = _output_size(str((sequence or {}).get("format") or timeline.get("format") or content.get("format") or "9:16"))
+
+    box_cx = payload.x + payload.width / 2.0
+    box_cy = payload.y + payload.height / 2.0
+    clip = _active_video_clip_at(sequence, payload.anchor, box_cx, box_cy) if isinstance(sequence, dict) else None
+
+    if clip:
+        assets = _assets_by_id(payload.room_id)
+        asset = assets.get(str(clip.get("asset_id") or ""))
+        if not asset:
+            raise HTTPException(status_code=400, detail="クリップの素材が見つかりません")
+        try:
+            src = str(_asset_source_path(asset))
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="解析できる動画素材がありません")
+        tl_start = float(clip.get("timeline_start") or 0)
+        tl_end = float(clip.get("timeline_end") or 0)
+        src_start = float(clip.get("source_start") or 0)
+        # The renderer trims a long source to the SLOT length at 1x speed (see _clip_source_range),
+        # so source time maps 1:1 and the effective source range is just the timeline span.
+        src_end = src_start + max(0.05, tl_end - tl_start)
+        src_anchor = src_start + max(0.0, payload.anchor - tl_start)
+        t_offset = tl_start - src_start
+        pos = clip.get("position") if isinstance(clip.get("position"), dict) else None
+        clip_rect = (
+            f"{float(pos.get('x') or 0)},{float(pos.get('y') or 0)},{float(pos.get('width') or 1)},{float(pos.get('height') or 1)}"
+            if pos else "0,0,1,1"
+        )
+    else:
+        # No sequence (single raw clip) — fall back to the first source, anchor as source time.
+        src = _content_source_video(payload.room_id, content)
+        if not src:
+            raise HTTPException(status_code=400, detail="解析できる動画素材がありません")
+        src_anchor, src_start, src_end, t_offset, clip_rect = payload.anchor, payload.start, payload.end, 0.0, "0,0,1,1"
+
     script = PROJECT_ROOT / "scripts" / "screen_blur.py"
     cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     args = [
         sys.executable, str(script), str(src), "--ocr-track",
         "--box", f"{payload.x},{payload.y},{payload.width},{payload.height}",
-        "--anchor", str(payload.anchor),
-        "--start", str(payload.start), "--end", str(payload.end), "--fps", str(payload.fps),
+        "--anchor", str(src_anchor), "--start", str(src_start), "--end", str(src_end),
+        "--out-w", str(out_w), "--out-h", str(out_h), "--clip-rect", clip_rect,
+        "--t-offset", str(t_offset), "--fps", str(payload.fps), "--ffmpeg", _ffmpeg(),
     ]
     r = await asyncio.to_thread(
         subprocess.run, args, capture_output=True, text=True, timeout=300, creationflags=cflags
