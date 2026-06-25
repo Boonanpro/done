@@ -464,7 +464,11 @@ export function VideoReviewEditor({
   // the annotation overlay always maps to the full stage rect — no per-frame measuring.
   const videoContentStyle: CSSProperties = { inset: 0 };
   const [playing, setPlaying] = useState(false);
-  const fps = useMemo(() => parseFps(initialFps) || 30, [initialFps]);
+  // Frame-step rate for ←/→ = the TIMELINE/output frame rate, NOT the source clip's declared fps.
+  // Proxies are CFR 30 and the export renders at 30fps, so the timeline is effectively 30fps; one
+  // arrow press should advance exactly one displayed/output frame. (Stepping at the source rate —
+  // e.g. 59.94 — meant ~2-3 presses per visible frame and let keyframes land between frames.)
+  const fps = 30; // 30 = timeline/output rate (see above)
 
   const sequenceAssetMap = useMemo(
     () => new Map((sequenceAssets || []).map((asset) => [asset.id, asset])),
