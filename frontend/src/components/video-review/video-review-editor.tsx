@@ -2121,9 +2121,14 @@ export function VideoReviewEditor({
                             selectAnnotation(a.id, e.shiftKey || e.ctrlKey || e.metaKey);
                           }}
                           onPointerDown={editable ? (e) => startBlurBoxDrag(e, a, 'move') : undefined}
-                          className={`pointer-events-auto absolute border-2 ${
-                            selectedIds.includes(a.id) ? 'border-yellow-300' : a.intent === 'blur' ? 'border-sky-300/70' : 'border-sky-400'
-                          } ${a.intent === 'blur' ? '' : 'bg-red-500/15'} ${editable ? 'cursor-move' : ''}`}
+                          className={`pointer-events-auto absolute ${
+                            // Only show the outline when SELECTED — an unselected region needs no
+                            // chrome (the blur itself is already painted on the canvas). Still
+                            // clickable (transparent) so it can be picked.
+                            selectedThis
+                              ? `border-2 border-yellow-300 ${a.intent === 'blur' ? '' : 'bg-red-500/15'}`
+                              : 'border-0 bg-transparent'
+                          } ${editable ? 'cursor-move' : ''}`}
                           style={{
                             // The blur itself is painted on the canvas (TimelinePreview blurRegions),
                             // so this is just a thin selectable outline — NO backdrop-filter (which
