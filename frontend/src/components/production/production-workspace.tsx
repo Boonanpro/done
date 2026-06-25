@@ -690,14 +690,15 @@ export function ProductionWorkspace({
     }
   };
 
-  // 追従ぼかし: follow a drawn box across [start,end] and return its NORMALIZED position over
-  // time, so the editor animates the blur box on the preview (real tracking, not approximation).
+  // 追従ぼかし: OCR-track the TEXT in the drawn box. anchor = time the box was drawn; scan window
+  // = the whole clip. Returns the path + the visible time range (which DEFINES the clip length).
   const trackBlurRegion = async (
     box: { x: number; y: number; width: number; height: number },
-    start: number,
-    end: number,
-  ): Promise<Record<string, number[]>> => {
-    if (!selectedContent) return {};
+    anchor: number,
+    scanStart: number,
+    scanEnd: number,
+  ): Promise<{ boxes: Record<string, number[]>; text?: string; t_start?: number | null; t_end?: number | null; found?: boolean }> => {
+    if (!selectedContent) return { boxes: {} };
     try {
       const res = await fetch(
         `/api/v1/production-assets/contents/${selectedContent.id}/blur/track`,
@@ -705,21 +706,26 @@ export function ProductionWorkspace({
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ room_id: roomId, x: box.x, y: box.y, width: box.width, height: box.height, start, end }),
+          body: JSON.stringify({ room_id: roomId, x: box.x, y: box.y, width: box.width, height: box.height, anchor, start: scanStart, end: scanEnd }),
         },
       );
       if (!res.ok) {
         toast.error('追跡解析に失敗しました', { description: (await res.text()).slice(0, 160) });
-        return {};
+        return { boxes: {} };
       }
       const body = await res.json();
       const boxes = (body.boxes || {}) as Record<string, number[]>;
-      const n = Object.keys(boxes).length;
-      toast[n ? 'success' : 'message'](n ? `対象を追跡しました（${n}点）` : '追跡できませんでした（対象が検出できません）');
-      return boxes;
+      if (body.found && body.text) {
+        const s = typeof body.t_start === 'number' ? body.t_start.toFixed(1) : '?';
+        const e = typeof body.t_end === 'number' ? body.t_end.toFixed(1) : '?';
+        toast.success(`「${body.text}」を追跡しました（${s}〜${e}秒）`);
+      } else {
+        toast.message('文字が見つかりませんでした（枠を文字に合わせてください／任意物体の追従は近日対応）');
+      }
+      return { boxes, text: body.text, t_start: body.t_start, t_end: body.t_end, found: !!body.found };
     } catch (error) {
       toast.error('追跡解析に失敗しました', { description: String(error).slice(0, 160) });
-      return {};
+      return { boxes: {} };
     }
   };
 

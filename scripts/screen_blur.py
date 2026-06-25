@@ -59,6 +59,11 @@ def _box_xywh(poly, w: int, h: int, pad: float) -> tuple[int, int, int, int]:
 
 
 def _blur_region(frame, x, y, w, h, style: str):
+    # Clamp to the frame so a box running past the edge doesn't desync roi vs the resized blur
+    # (shape-broadcast error). All downscale/upscale below uses the CLAMPED w/h.
+    fh, fw = frame.shape[:2]
+    x = max(0, min(int(x), fw - 1)); y = max(0, min(int(y), fh - 1))
+    w = max(1, min(int(w), fw - x)); h = max(1, min(int(h), fh - y))
     roi = frame[y:y + h, x:x + w]
     if roi.size == 0:
         return
@@ -152,6 +157,81 @@ def track(src: str, box01: tuple[float, float, float, float], start: float, end:
         next_s = t + interval
     cap.release()
     return boxes_by_t, vfps
+
+
+def _rect_overlap(a, b) -> float:
+    """Intersection area of two (x,y,w,h) rects in pixels."""
+    ax0, ay0, ax1, ay1 = a[0], a[1], a[0] + a[2], a[1] + a[3]
+    bx0, by0, bx1, by1 = b[0], b[1], b[0] + b[2], b[1] + b[3]
+    ix = max(0, min(ax1, bx1) - max(ax0, bx0))
+    iy = max(0, min(ay1, by1) - max(ay0, by0))
+    return ix * iy
+
+
+def ocr_track(src: str, box01, anchor: float, scan_start: float, scan_end: float, fps: float):
+    """Follow a TEXT region the user drew. Robust for screen recordings (the matchTemplate tracker
+    chased look-alike UI and drifted). 1) OCR the anchor frame, pick the text most overlapping the
+    drawn box = the target string. 2) Across [scan_start,scan_end], OCR each sampled frame, find
+    that string, keep the user's box SIZE but recentre it on the match. Returns the path + the time
+    range where the text is actually visible (so tracking can DEFINE the clip length)."""
+    from rapidocr_onnxruntime import RapidOCR
+    ocr = RapidOCR()
+    cap = cv2.VideoCapture(src)
+    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1
+    H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1
+    vfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    bx, by = box01[0] * W, box01[1] * H
+    bw, bh = max(8.0, box01[2] * W), max(8.0, box01[3] * H)
+    drawn = (bx, by, bw, bh)
+    # 1) target text = OCR token most overlapping the drawn box at the anchor frame
+    cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, anchor) * 1000.0)
+    ok, frame = cap.read()
+    target = ""
+    if ok:
+        res, _ = ocr(frame)
+        best_ov = 0.0
+        for poly, text, _score in (res or []):
+            ov = _rect_overlap(drawn, _box_xywh(poly, W, H, 0.0))
+            if ov > best_ov:
+                best_ov, target = ov, str(text).strip()
+    if not target:
+        cap.release()
+        return {"found": False, "text": "", "boxes": {}, "t_start": None, "t_end": None, "w": W, "h": H}
+    tgt = target.lower()
+    # 2) scan window: find the target string each sampled frame; keep the drawn SIZE, recentre on match
+    interval = 1.0 / max(0.5, fps)
+    cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, scan_start) * 1000.0)
+    boxes: dict[str, list] = {}
+    last_c = (bx + bw / 2, by + bh / 2)
+    next_s = scan_start
+    while True:
+        t = (cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if scan_end > 0 and t > scan_end:
+            break
+        if t + 1e-6 < next_s:
+            continue
+        res, _ = ocr(frame)
+        cands = []
+        for poly, text, _score in (res or []):
+            tl = str(text).lower().strip()
+            if not tl:
+                continue
+            if tgt in tl or tl in tgt:  # exact / substring either direction
+                x0, y0, w0, h0 = _box_xywh(poly, W, H, 0.0)
+                cands.append((x0 + w0 / 2, y0 + h0 / 2))
+        if cands:
+            cx, cy = min(cands, key=lambda c: (c[0] - last_c[0]) ** 2 + (c[1] - last_c[1]) ** 2)
+            last_c = (cx, cy)
+            x = max(0.0, cx - bw / 2); y = max(0.0, cy - bh / 2)
+            boxes[f"{t:.3f}"] = [round(x / W, 5), round(y / H, 5), round(bw / W, 5), round(bh / H, 5)]
+        next_s = t + interval
+    cap.release()
+    ts = sorted(float(k) for k in boxes)
+    return {"found": len(boxes) > 0, "text": target, "boxes": boxes,
+            "t_start": ts[0] if ts else None, "t_end": ts[-1] if ts else None, "w": W, "h": H}
 
 
 def render(src: str, out: str, boxes_by_t: dict, vfps: float, style: str, ff: str):
@@ -265,7 +345,10 @@ def main() -> int:
     ap.add_argument("--probe-frames", type=int, default=24)
     ap.add_argument("--track-spec", default="")  # json: manual tracked blur(s)
     ap.add_argument("--track-probe", action="store_true")  # follow ONE box, print normalized boxes JSON (for preview)
-    ap.add_argument("--box", default="")  # x,y,w,h normalized (for --track-probe)
+    ap.add_argument("--ocr-track", action="store_true")  # follow the TEXT in a box (OCR); print path + time range
+    ap.add_argument("--render-spec", default="")  # json {tracks:[{boxes:{t:[x,y,w,h] norm}, style}]} -> bake blur
+    ap.add_argument("--box", default="")  # x,y,w,h normalized (for --track-probe / --ocr-track)
+    ap.add_argument("--anchor", type=float, default=0.0)  # time (s) the box was drawn (for --ocr-track)
     a = ap.parse_args()
     targets = [t.strip() for t in a.targets.split(",") if t.strip()]
     patterns = {p.strip() for p in a.patterns.split(",") if p.strip()}
@@ -284,6 +367,36 @@ def main() -> int:
         if tracks:
             render_tracks(a.src, a.out, tracks, vfps, a.ffmpeg)
         print("tracked-rendered:", a.out)
+        return 0
+    if a.render_spec:
+        # Bake blur along PRE-COMPUTED normalized paths (from OCR tracking) — no re-tracking. The
+        # nearest-sample gating in render_tracks (±0.4s) naturally limits blur to the tracked range.
+        spec = json.loads(Path(a.render_spec).read_text(encoding="utf-8"))
+        cap = cv2.VideoCapture(a.src)
+        W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1
+        H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1
+        vfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        cap.release()
+        tracks = []
+        for tr in spec.get("tracks") or []:
+            bb = {}
+            for t, box in (tr.get("boxes") or {}).items():
+                if not box or len(box) < 4:
+                    continue
+                bb[round(float(t), 3)] = [(int(box[0] * W), int(box[1] * H), max(2, int(box[2] * W)), max(2, int(box[3] * H)))]
+            if bb:
+                tracks.append({"boxes_by_t": bb, "style": str(tr.get("style") or "gaussian")})
+        if tracks:
+            render_tracks(a.src, a.out, tracks, vfps, a.ffmpeg)
+        print("render-spec-done:", a.out)
+        return 0
+    if a.ocr_track:
+        bx = [float(v) for v in a.box.split(",") if v.strip() != ""]
+        if len(bx) < 4:
+            print(json.dumps({"found": False, "boxes": {}, "error": "bad box"}))
+            return 0
+        out = ocr_track(a.src, (bx[0], bx[1], bx[2], bx[3]), a.anchor, a.start, a.end, a.fps if a.fps > 0 else 4.0)
+        print(json.dumps(out, ensure_ascii=True))
         return 0
     if a.track_probe:
         # Run the tracker on a SINGLE drawn box and return its position over time, NORMALIZED
