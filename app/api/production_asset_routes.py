@@ -3403,9 +3403,15 @@ async def track_blur_region(
         src_start = float(clip.get("source_start") or 0)
         # The renderer trims a long source to the SLOT length at 1x speed (see _clip_source_range),
         # so source time maps 1:1 and the effective source range is just the timeline span.
-        src_end = src_start + max(0.05, tl_end - tl_start)
+        clip_src_end = src_start + max(0.05, tl_end - tl_start)
         src_anchor = src_start + max(0.0, payload.anchor - tl_start)
         t_offset = tl_start - src_start
+        # Scan a BOUNDED window around the anchor (not the whole clip) so the interactive call stays
+        # responsive — OCR costs ~1s PER FRAME (fixed model cost), so a full-clip scan timed out
+        # (300s). Keep the frame count small; the user re-analyses elsewhere if the text spans more.
+        scan_lead, scan_window = 1.0, 9.0
+        src_scan_start = max(src_start, src_anchor - scan_lead)
+        src_end = min(clip_src_end, src_anchor + scan_window)
         pos = clip.get("position") if isinstance(clip.get("position"), dict) else None
         clip_rect = (
             f"{float(pos.get('x') or 0)},{float(pos.get('y') or 0)},{float(pos.get('width') or 1)},{float(pos.get('height') or 1)}"
@@ -3416,20 +3422,26 @@ async def track_blur_region(
         src = _content_source_video(payload.room_id, content)
         if not src:
             raise HTTPException(status_code=400, detail="解析できる動画素材がありません")
-        src_anchor, src_start, src_end, t_offset, clip_rect = payload.anchor, payload.start, payload.end, 0.0, "0,0,1,1"
+        src_anchor, t_offset, clip_rect = payload.anchor, 0.0, "0,0,1,1"
+        src_scan_start = max(0.0, payload.anchor - 1.5)
+        src_end = (payload.anchor + 18.0) if payload.end <= 0 else min(payload.end, payload.anchor + 18.0)
 
     script = PROJECT_ROOT / "scripts" / "screen_blur.py"
     cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    scan_fps = min(max(0.5, payload.fps), 1.5)  # cap: OCR is ~1s/frame, so keep the sample count low
     args = [
         sys.executable, str(script), str(src), "--ocr-track",
         "--box", f"{payload.x},{payload.y},{payload.width},{payload.height}",
-        "--anchor", str(src_anchor), "--start", str(src_start), "--end", str(src_end),
+        "--anchor", str(src_anchor), "--start", str(src_scan_start), "--end", str(src_end),
         "--out-w", str(out_w), "--out-h", str(out_h), "--clip-rect", clip_rect,
-        "--t-offset", str(t_offset), "--fps", str(payload.fps), "--ffmpeg", _ffmpeg(),
+        "--t-offset", str(t_offset), "--fps", str(scan_fps), "--ffmpeg", _ffmpeg(),
     ]
-    r = await asyncio.to_thread(
-        subprocess.run, args, capture_output=True, text=True, timeout=300, creationflags=cflags
-    )
+    try:
+        r = await asyncio.to_thread(
+            subprocess.run, args, capture_output=True, text=True, timeout=90, creationflags=cflags
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="解析がタイムアウトしました（範囲を狭めて再試行してください）")
     data: dict[str, Any] = {"found": False, "boxes": {}}
     try:
         lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip().startswith("{")]

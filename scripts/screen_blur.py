@@ -251,20 +251,30 @@ def ocr_track(src: str, box01, anchor: float, scan_start: float, scan_end: float
         files = sorted(tmpd.glob("s_*.jpg"))
         boxes: dict[str, list] = {}
         last_c = (bx + bw / 2, by + bh / 2)
+        # Search only a GENEROUS region around the last position (text moves little between samples).
+        # OCR-ing a small crop instead of the whole frame is ~10x faster — the full-frame scan timed
+        # out (300s) on long clips. Margin = the box plus ~1.5x slack so slow drift stays in view.
+        mx = max(bw * 1.5, 90.0)
+        my = max(bh * 1.5, 70.0)
         for i, fpath in enumerate(files):
             frame = cv2.imread(str(fpath))
             if frame is None:
                 continue
             t = scan_start + i / fps  # source time of this sample
-            res, _ = ocr(frame)
+            cx0 = int(max(0, last_c[0] - mx)); cy0 = int(max(0, last_c[1] - my))
+            cx1 = int(min(W, last_c[0] + mx)); cy1 = int(min(H, last_c[1] + my))
+            crop = frame[cy0:cy1, cx0:cx1]
+            if crop.size == 0:
+                continue
+            res, _ = ocr(crop)
             cands = []
             for poly, text, _score in (res or []):
                 tl = str(text).lower().strip()
                 if not tl:
                     continue
                 if tgt in tl or tl in tgt:  # exact / substring either direction
-                    x0, y0, w0, h0 = _box_xywh(poly, W, H, 0.0)
-                    cands.append((x0 + w0 / 2, y0 + h0 / 2))
+                    x0, y0, w0, h0 = _box_xywh(poly, crop.shape[1], crop.shape[0], 0.0)
+                    cands.append((cx0 + x0 + w0 / 2, cy0 + y0 + h0 / 2))  # crop -> full-frame coords
             if cands:
                 cx, cy = min(cands, key=lambda c: (c[0] - last_c[0]) ** 2 + (c[1] - last_c[1]) ** 2)
                 last_c = (cx, cy)
