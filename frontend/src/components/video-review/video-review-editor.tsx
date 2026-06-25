@@ -364,7 +364,7 @@ export function VideoReviewEditor({
   onBack?: () => void;
   onSaveTimeline?: (payload: SessionPayload) => void | Promise<void>;
   onSyncCaptionAudio?: (captionIds: string[]) => Promise<Record<string, { text: string; start: number; end: number }[]>>;
-  onTrackBlur?: (box: { x: number; y: number; width: number; height: number }, start: number, end: number) => Promise<Record<string, number[]>>;
+  onTrackBlur?: (box: { x: number; y: number; width: number; height: number }, anchor: number, scanStart: number, scanEnd: number) => Promise<{ boxes: Record<string, number[]>; text?: string; t_start?: number | null; t_end?: number | null; found?: boolean }>;
   onExecuteClip?: (annotation: ReviewAnnotation) => void | Promise<void>;
   onExecute?: (payload: SessionPayload) => void | Promise<void>;
   sidePanelTop?: ReactNode;
@@ -949,18 +949,32 @@ export function VideoReviewEditor({
     const d = (ann.data || {}) as { x?: number; y?: number; width?: number; height?: number };
     setTrackingId(ann.id);
     try {
-      const boxes = await onTrackBlur(
+      // anchor = the playhead frame the box was drawn on; scan the WHOLE clip so tracking can
+      // discover the time range the text is visible (track-first: that range becomes the clip).
+      const scanEnd = contentDuration > 0 ? contentDuration : 0;
+      const r = await onTrackBlur(
         { x: Number(d.x || 0), y: Number(d.y || 0), width: Number(d.width || 0), height: Number(d.height || 0) },
-        Number(ann.start || 0),
-        Number(ann.end || 0),
+        Number(currentTime || 0),
+        0,
+        scanEnd,
       );
-      setAnnotations((prev) => prev.map((a) => (a.id === ann.id
-        ? { ...a, data: { ...(a.data as object), track: true, track_boxes: boxes } }
-        : a)));
+      const hasPath = r.found && r.boxes && Object.keys(r.boxes).length > 0;
+      setAnnotations((prev) => prev.map((a) => {
+        if (a.id !== ann.id) return a;
+        const nextStart = hasPath && typeof r.t_start === 'number' ? Number(r.t_start.toFixed(2)) : a.start;
+        const nextEnd = hasPath && typeof r.t_end === 'number' ? Number(r.t_end.toFixed(2)) : a.end;
+        return {
+          ...a,
+          // track-first: the tracked range DEFINES the clip span.
+          start: nextStart,
+          end: nextEnd,
+          data: { ...(a.data as object), track: true, track_boxes: r.boxes || {}, track_text: r.text || '' },
+        };
+      }));
     } finally {
       setTrackingId(null);
     }
-  }, [onTrackBlur]);
+  }, [onTrackBlur, currentTime, contentDuration]);
 
   const updatePending = useCallback((patch: Partial<DraftAnnotation>) => {
     setPendingAnnotation((current) => (current ? { ...current, ...patch } : current));
@@ -2549,8 +2563,9 @@ export function VideoReviewEditor({
                   ))}
                 </select>
                 {selected.intent === 'blur' && selected.kind === 'rect' ? (() => {
-                  const sd = (selected.data || {}) as { track?: boolean; track_boxes?: Record<string, number[]> };
-                  const nPts = sd.track_boxes ? Object.keys(sd.track_boxes).length : 0;
+                  const sd = (selected.data || {}) as { track?: boolean; track_boxes?: Record<string, number[]>; track_text?: string };
+                  const analyzed = typeof sd.track_text === 'string';
+                  const tracked = !!sd.track_text;
                   const isTracking = trackingId === selected.id;
                   return (
                     <div className="space-y-2 rounded-md border border-sky-500/40 bg-sky-500/10 p-2">
@@ -2573,12 +2588,16 @@ export function VideoReviewEditor({
                       {sd.track ? (
                         <div className="space-y-1">
                           <Button size="sm" className="w-full" disabled={isTracking || !onTrackBlur} onClick={() => runTrackBlur(selected)}>
-                            {isTracking ? '解析中…' : nPts ? '再解析' : '▶ 解析（対象を追跡）'}
+                            {isTracking ? '解析中…' : analyzed ? '再解析' : '▶ 解析（文字を追跡）'}
                           </Button>
                           <p className="text-[10px] text-muted-foreground">
-                            {nPts
-                              ? `✓ 追跡済み（${nPts}点）。再生すると枠が対象を追います。`
-                              : '枠を対象に合わせて「解析」を押すと、動く対象を追ってぼかします。'}
+                            {isTracking
+                              ? '解析中…文字を探して追跡しています。'
+                              : tracked
+                                ? `✓「${sd.track_text}」を追跡（${fmtTime(selected.start)}〜${fmtTime(selected.end)}）。クリップ尺はこの範囲に自動調整。`
+                                : analyzed
+                                  ? '文字が見つかりませんでした。枠を文字に合わせて再解析（任意物体の追従は近日対応）。'
+                                  : '隠したい文字を枠で囲んで「解析」を押すと、その文字を追ってぼかし、クリップ尺も自動で決まります。'}
                           </p>
                         </div>
                       ) : (

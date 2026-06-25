@@ -761,9 +761,10 @@ def _apply_screen_blur(out_path: Path, spec: dict[str, Any], job_dir: Path) -> b
 
 
 def _apply_tracked_blur(out_path: Path, annotations: list[dict[str, Any]], job_dir: Path) -> bool:
-    """Post-pass: human-drawn TRACKED blur boxes (data.track) follow their region across the FINAL
-    video via lightweight template tracking (scripts/screen_blur.py --track-spec), gaussian-blurred.
-    The box was drawn on the preview (= output coords) so it's valid on the final video directly."""
+    """Post-pass: human-drawn TRACKED blur boxes (data.track) bake their PRE-COMPUTED OCR path
+    (data.track_boxes, set when the user pressed 解析) onto the FINAL video, gaussian-blurred. The
+    boxes are normalized output coords (drawn on the preview) so they map to the final video
+    directly. No re-tracking here — the editor already tracked and the user confirmed the range."""
     tracks: list[dict[str, Any]] = []
     for ann in annotations:
         if ann.get("intent") != "blur" or ann.get("kind") != "rect":
@@ -771,22 +772,22 @@ def _apply_tracked_blur(out_path: Path, annotations: list[dict[str, Any]], job_d
         data = ann.get("data") if isinstance(ann.get("data"), dict) else {}
         if not data.get("track"):
             continue
-        tracks.append({
-            "x": float(data.get("x") or 0), "y": float(data.get("y") or 0),
-            "w": float(data.get("width") or 0), "h": float(data.get("height") or 0),
-            "start": float(ann.get("start") or 0), "end": float(ann.get("end") or 0),
-            "style": str(data.get("blur_style") or data.get("style") or "gaussian"),
-        })
+        boxes = data.get("track_boxes")
+        if isinstance(boxes, dict) and boxes:
+            tracks.append({
+                "boxes": boxes,
+                "style": str(data.get("blur_style") or data.get("style") or "gaussian"),
+            })
     if not tracks:
         return False
     spec_path = job_dir / "trackblur_spec.json"
-    spec_path.write_text(json.dumps({"fps": 8, "tracks": tracks}), encoding="utf-8")
+    spec_path.write_text(json.dumps({"tracks": tracks}), encoding="utf-8")
     tmp = job_dir / "trackblur_out.mp4"
     script = PROJECT_ROOT / "scripts" / "screen_blur.py"
     cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         r = subprocess.run(
-            [sys.executable, str(script), str(out_path), str(tmp), "--track-spec", str(spec_path), "--ffmpeg", _ffmpeg()],
+            [sys.executable, str(script), str(out_path), str(tmp), "--render-spec", str(spec_path), "--ffmpeg", _ffmpeg()],
             capture_output=True, text=True, timeout=1800, creationflags=cflags,
         )
     except Exception as exc:  # noqa: BLE001
@@ -3268,13 +3269,14 @@ class ScreenBlurRequest(BaseModel):
 
 class TrackBlurRequest(BaseModel):
     room_id: str
-    x: float           # normalized 0-1 box at `start`
+    x: float           # normalized 0-1 box the user drew
     y: float
     width: float
     height: float
-    start: float = 0.0
-    end: float = 0.0
-    fps: float = 6.0
+    anchor: float = 0.0  # time (s) the box was drawn = the frame to read the target text from
+    start: float = 0.0   # scan window start (0 = whole clip)
+    end: float = 0.0     # scan window end (0 = to the end)
+    fps: float = 4.0
 
 
 def _content_source_video(room_id: str, content: dict[str, Any]) -> str | None:
@@ -3348,9 +3350,10 @@ async def probe_screen_blur(
 async def track_blur_region(
     content_id: str, payload: TrackBlurRequest, current_user: TokenData = Depends(get_current_user)
 ):
-    """Follow a single drawn box across [start,end] and return its NORMALIZED position over time,
-    so the editor animates the blur box on the preview (real tracking, not an approximation). The
-    same lightweight tracker bakes the moving blur on export."""
+    """OCR-track the TEXT inside the drawn box: identify the target text at the anchor frame, then
+    follow it across the clip. Returns the normalized path (for preview + export) AND the time range
+    where the text is actually visible, so tracking DEFINES the clip length. Robust for screen
+    recordings (the old template tracker chased look-alike UI and drifted on static text)."""
     contents = _read_contents(payload.room_id)
     content = next((c for c in contents if c.get("id") == content_id), None)
     if not content:
@@ -3361,20 +3364,21 @@ async def track_blur_region(
     script = PROJECT_ROOT / "scripts" / "screen_blur.py"
     cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     args = [
-        sys.executable, str(script), str(src), "--track-probe",
+        sys.executable, str(script), str(src), "--ocr-track",
         "--box", f"{payload.x},{payload.y},{payload.width},{payload.height}",
+        "--anchor", str(payload.anchor),
         "--start", str(payload.start), "--end", str(payload.end), "--fps", str(payload.fps),
     ]
     r = await asyncio.to_thread(
-        subprocess.run, args, capture_output=True, text=True, timeout=180, creationflags=cflags
+        subprocess.run, args, capture_output=True, text=True, timeout=300, creationflags=cflags
     )
-    data: dict[str, Any] = {"boxes": {}}
+    data: dict[str, Any] = {"found": False, "boxes": {}}
     try:
         lines = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip().startswith("{")]
         if lines:
             data = json.loads(lines[-1])
     except Exception:  # noqa: BLE001
-        logger.warning("track-probe parse failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
+        logger.warning("ocr-track parse failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
     return data
 
 
