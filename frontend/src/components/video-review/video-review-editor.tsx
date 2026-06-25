@@ -73,6 +73,7 @@ export type SequenceClip = {
   track?: string | null;
   composition?: 'fullscreen' | 'pip' | 'background' | 'overlay' | string | null;
   position?: { x: number; y: number; width: number; height: number } | null;
+  shape?: 'rect' | 'circle' | 'rounded' | string | null;  // wipe cutout shape (PiP/overlay)
   role?: 'dialogue' | 'music' | 'sfx' | string | null;
   layer?: number | null;
   type?: string | null;
@@ -2969,6 +2970,24 @@ export function VideoReviewEditor({
                               onChange={(e) => apply(size, lr, Number(e.target.value))} />
                           </label>
                         </div>
+                        {isPip ? (
+                          <div className="space-y-1">
+                            <div className="text-[10px] text-muted-foreground">ワイプの形</div>
+                            <div className="grid grid-cols-3 gap-1">
+                              {([['rect', '四角'], ['circle', '丸'], ['rounded', '写真風']] as const).map(([val, label]) => {
+                                const cur = (selectedSequenceClip.shape as string) || 'rect';
+                                return (
+                                  <button key={val} type="button"
+                                    className={`rounded px-1 py-1 text-[10px] ${cur === val ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
+                                    onClick={() => updateSelectedSequenceClip({ shape: val })}>
+                                    {label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            <p className="text-[9px] text-muted-foreground">人型のくり抜きは近日対応（人物の自動切り抜きにはAIが要るため）。</p>
+                          </div>
+                        ) : null}
                         {(selectedSequenceClip.transform || isPip) ? (
                           <Button variant="ghost" size="sm" className="h-6 w-full text-[10px]"
                             onClick={() => updateSelectedSequenceClip(isPip ? { position: null } : { transform: null })}>

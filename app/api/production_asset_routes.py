@@ -1020,11 +1020,30 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         else:
             ov_pre = "setpts=PTS-STARTPTS," + (f"tpad=stop_mode=clone:stop_duration={ov_pad:.3f}," if ov_pad > 0.02 else "")
         command.extend(["-i", str(source_path)])
+        # Wipe shape: clip the PiP to a circle / rounded "photo" frame via a per-pixel alpha mask
+        # (yuva420p). 'rect' (default) keeps the full box. Matches the canvas clip in the preview.
+        shape = str(clip.get("shape") or "rect")
+        if shape == "circle":
+            shape_filt = (
+                f",format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':"
+                f"a='if(lte(((X-{ow}/2)/({ow}/2))^2+((Y-{oh}/2)/({oh}/2))^2\\,1)\\,255\\,0)'"
+            )
+        elif shape == "rounded":
+            rr = max(2, round(min(ow, oh) * 0.12))
+            shape_filt = (
+                f",format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':"
+                f"a='255*clip(gte(X\\,{rr})*lte(X\\,{ow - 1 - rr})+gte(Y\\,{rr})*lte(Y\\,{oh - 1 - rr})"
+                f"+lte(hypot(X-{rr}\\,Y-{rr})\\,{rr})+lte(hypot(X-{ow - 1 - rr}\\,Y-{rr})\\,{rr})"
+                f"+lte(hypot(X-{rr}\\,Y-{oh - 1 - rr})\\,{rr})+lte(hypot(X-{ow - 1 - rr}\\,Y-{oh - 1 - rr})\\,{rr})\\,0\\,1)'"
+            )
+        else:
+            shape_filt = ""
         filters.append(
             f"[{input_index}:v]"
             f"trim=start={source_start:.3f}:end={source_end:.3f},"
             f"{ov_pre}"
             f"scale={ow}:{oh},setsar=1,setpts=PTS-STARTPTS+{ts:.3f}/TB,format=yuv420p"
+            f"{shape_filt}"
             f"[ov{oi}]"
         )
         filters.append(

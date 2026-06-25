@@ -388,7 +388,24 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const tf = vc.clip.transform;
         const cr = vc.clip.crop;
         if (vc.position) {
-          drawSource(ctx, v, vc.position.x * w, vc.position.y * h, vc.position.width * w, vc.position.height * h, tf, w, h, cr);
+          const px = vc.position.x * w, py = vc.position.y * h, pw = vc.position.width * w, ph = vc.position.height * h;
+          // Wipe shape: clip the PiP to a circle / rounded "photo" frame (geometric — no AI).
+          const shape = (vc.clip as { shape?: string }).shape;
+          if (shape === 'circle' || shape === 'rounded') {
+            ctx.save();
+            ctx.beginPath();
+            if (shape === 'circle') {
+              ctx.ellipse(px + pw / 2, py + ph / 2, pw / 2, ph / 2, 0, 0, Math.PI * 2);
+            } else {
+              const rr = Math.min(pw, ph) * 0.12;
+              ctx.roundRect(px, py, pw, ph, rr);
+            }
+            ctx.clip();
+            drawSource(ctx, v, px, py, pw, ph, tf, w, h, cr);
+            ctx.restore();
+          } else {
+            drawSource(ctx, v, px, py, pw, ph, tf, w, h, cr);
+          }
         } else {
           drawSource(ctx, v, 0, 0, w, h, tf, w, h, cr);
         }
