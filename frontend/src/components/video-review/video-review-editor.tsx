@@ -1201,10 +1201,42 @@ export function VideoReviewEditor({
     });
   }, [linkAV]);
 
+  // Split a blur/instruction annotation at time t into two, partitioning its keyframes / tracked
+  // path so each half keeps the right boxes (so ぼかしクリップ can be cut like any other clip).
+  const splitAnnotationAtTime = useCallback((t: number, annIds: Set<string>) => {
+    const rr = (v: number) => Number(v.toFixed(2));
+    setAnnotations((prev) => {
+      const out: ReviewAnnotation[] = [];
+      for (const a of prev) {
+        const en = a.end ?? a.start + 0.5;
+        if (!annIds.has(a.id) || !(t > a.start + 0.05 && t < en - 0.05)) { out.push(a); continue; }
+        const d = (a.data || {}) as { keyframes?: Keyframe[]; track_boxes?: Record<string, number[]> };
+        const atT = d.keyframes && d.keyframes.length ? keyframeBoxAt(d.keyframes, t) : null;
+        const dedupSort = (ks: Keyframe[]) => ks
+          .filter((k, i, arr) => arr.findIndex((x) => Math.abs(x.t - k.t) < 0.01) === i)
+          .sort((p, q) => p.t - q.t);
+        const leftKf = d.keyframes ? dedupSort([...d.keyframes.filter((k) => k.t <= t), ...(atT ? [{ t: rr(t), ...atT }] : [])]) : undefined;
+        const rightKf = d.keyframes ? dedupSort([...(atT ? [{ t: rr(t), ...atT }] : []), ...d.keyframes.filter((k) => k.t >= t)]) : undefined;
+        const partBoxes = (keep: (n: number) => boolean) => {
+          if (!d.track_boxes) return undefined;
+          const o: Record<string, number[]> = {};
+          for (const k of Object.keys(d.track_boxes)) if (keep(Number(k))) o[k] = d.track_boxes[k];
+          return o;
+        };
+        out.push({ ...a, end: rr(t), data: { ...d, ...(leftKf ? { keyframes: leftKf } : {}), ...(d.track_boxes ? { track_boxes: partBoxes((n) => n <= t) } : {}) } });
+        out.push({ ...a, id: makeId(), created_at: new Date().toISOString(), start: rr(t), data: { ...d, ...(rightKf ? { keyframes: rightKf } : {}), ...(d.track_boxes ? { track_boxes: partBoxes((n) => n >= t) } : {}) } });
+      }
+      return out;
+    });
+  }, []);
+
   const splitAtPlayhead = useCallback(() => {
-    const ids = new Set(selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
-    splitClipAtTime(currentTime, ids);
-  }, [currentTime, selectedSequenceClipId, selectedSequenceClipIds, splitClipAtTime]);
+    const annIds = new Set(selectedIds.length > 0 ? selectedIds : selectedId ? [selectedId] : []);
+    const clipIds = new Set(selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : []);
+    if (annIds.size > 0) splitAnnotationAtTime(currentTime, annIds);
+    // Split clips when clips are selected, or (default) when nothing at all is selected.
+    if (clipIds.size > 0 || annIds.size === 0) splitClipAtTime(currentTime, clipIds);
+  }, [currentTime, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds, splitAnnotationAtTime, splitClipAtTime]);
 
   const undo = useCallback(() => {
     flushHistory();
