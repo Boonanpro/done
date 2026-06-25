@@ -113,11 +113,9 @@ export const CAPTION_DESIGN_PRESETS: ReadonlyArray<{ id: string; label: string; 
 
 // Vertical placement of the caption block within the frame.
 export function captionAnchorStyle(design: CaptionDesign, outH: number): CSSProperties {
-  const pos = design.position || 'bottom';
+  // Anchored at the bottom; the user moves it freely with x/y (up/down/left/right). No top/center/
+  // bottom preset — x is a fraction of width (full-width box → translateX %), y a fraction of height.
   const margin = Math.round(outH * 0.07);
-  // Fine nudge: x is a fraction of width (the box is full-width, so translateX % = fraction of
-  // width), y is a fraction of height (px of outH). Lets the user move the caption freely up/down/
-  // left/right on top of the bottom/center/top anchor.
   const dx = design.x || 0;
   const dy = design.y || 0;
   const nudge = dx || dy ? { transform: `translate(${(dx * 100).toFixed(3)}%, ${Math.round(dy * outH)}px)` } : {};
@@ -128,11 +126,8 @@ export function captionAnchorStyle(design: CaptionDesign, outH: number): CSSProp
     display: 'flex',
     justifyContent: 'center',
     ...nudge,
-    ...(pos === 'top'
-      ? { top: margin, alignItems: 'flex-start' }
-      : pos === 'center'
-        ? { top: 0, bottom: 0, alignItems: 'center' }
-        : { bottom: margin, alignItems: 'flex-end' }),
+    bottom: margin,
+    alignItems: 'flex-end',
   };
 }
 

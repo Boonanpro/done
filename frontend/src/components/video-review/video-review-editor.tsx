@@ -2970,9 +2970,9 @@ export function VideoReviewEditor({
                               onChange={(e) => apply(size, lr, Number(e.target.value))} />
                           </label>
                         </div>
-                        {isPip ? (
+                        {(
                           <div className="space-y-1">
-                            <div className="text-[10px] text-muted-foreground">ワイプの形</div>
+                            <div className="text-[10px] text-muted-foreground">くり抜きの形</div>
                             <div className="grid grid-cols-3 gap-1">
                               {([['rect', '四角'], ['circle', '丸'], ['rounded', '写真風']] as const).map(([val, label]) => {
                                 const cur = (selectedSequenceClip.shape as string) || 'rect';
@@ -2987,7 +2987,7 @@ export function VideoReviewEditor({
                             </div>
                             <p className="text-[9px] text-muted-foreground">人型のくり抜きは近日対応（人物の自動切り抜きにはAIが要るため）。</p>
                           </div>
-                        ) : null}
+                        )}
                         {(selectedSequenceClip.transform || isPip) ? (
                           <Button variant="ghost" size="sm" className="h-6 w-full text-[10px]"
                             onClick={() => updateSelectedSequenceClip(isPip ? { position: null } : { transform: null })}>
@@ -3224,15 +3224,6 @@ export function VideoReviewEditor({
                             />
                           </label>
                           <div className="flex items-center gap-2">
-                            <select
-                              value={st.position || 'bottom'}
-                              onChange={(e) => setStyle({ position: e.target.value as CaptionStyle['position'] })}
-                              className="h-8 flex-1 rounded-md border border-input bg-background px-2 text-xs"
-                            >
-                              <option value="bottom">下</option>
-                              <option value="center">中央</option>
-                              <option value="top">上</option>
-                            </select>
                             <label className="flex items-center gap-1 text-xs">
                               <input
                                 type="checkbox"
