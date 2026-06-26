@@ -242,6 +242,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   }, [dims.w, dims.h]);
 
   // Keep a decoder alive for each asset URL currently used by a visual clip; drop the rest.
+  // readyTick must bump ONCE per source (when it first decodes), NOT on every render — the chat
+  // panel re-renders constantly, and re-attaching .ready.then() each time (it resolves instantly
+  // for an already-loaded source) would fire readyTick on every render and re-seek the paused
+  // preview forever (= juddering). attachedReadyRef tracks which sources we've already hooked.
+  const attachedReadyRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const wanted = new Set<string>();
     for (const vc of visualClips) {
@@ -251,8 +256,12 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     framesRef.current.retain(wanted);
     for (const src of wanted) {
       const fs = framesRef.current.get(src); // kick off decoder init
-      if (fs) fs.ready.then(() => setReadyTick((v) => v + 1)).catch(() => {});
+      if (fs && !attachedReadyRef.current.has(src)) {
+        attachedReadyRef.current.add(src);
+        fs.ready.then(() => setReadyTick((v) => v + 1)).catch(() => {});
+      }
     }
+    for (const u of [...attachedReadyRef.current]) if (!wanted.has(u)) attachedReadyRef.current.delete(u);
   }, [visualClips, srcByAssetId]);
 
   // Audio elements — ONE PER AUDIO CLIP (keyed by clip id), recycled by asset to avoid reloads.
@@ -439,7 +448,43 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const step = () => {
       const clock = playClockRef.current;
       if (!clock) return;
-      const t = clock.t + (performance.now() - clock.wall) / 1000;
+      // Provisional time from the wall clock; corrected below to the audio element so the two
+      // never drift apart (the old engine kept video on <video> too, so they were inherently
+      // synced — here video is canvas/rAF and audio is <video>, so we slave video to audio).
+      let t = clock.t + (performance.now() - clock.wall) / 1000;
+
+      // AUDIO: play each active clip's source (one dedicated element per clip), and pick a
+      // master element (voice preferred) to use as the clock.
+      const activeAudioClips = new Set<string>();
+      let masterEl: HTMLVideoElement | null = null;
+      let masterClip: SequenceClip | null = null;
+      for (const c of audioClips) {
+        if (!(t >= c.timeline_start && t < c.timeline_end)) continue;
+        const id = String(c.id);
+        const a = audiosRef.current.get(id);
+        if (!a) continue;
+        activeAudioClips.add(id);
+        const expected = Number(c.source_start || 0) + (t - c.timeline_start);
+        if (!prevActiveAudioRef.current.has(id) || Math.abs(a.currentTime - expected) > 0.3) a.currentTime = expected;
+        a.muted = false;
+        a.volume = c.role === 'music' ? 0.5 : c.role === 'sfx' ? 0.8 : 1;
+        if (a.paused) void a.play().catch(() => {});
+        if (!masterClip || (c.role === 'voice' && masterClip.role !== 'voice')) { masterEl = a; masterClip = c; }
+      }
+      for (const [id, a] of audiosRef.current) if (!activeAudioClips.has(id) && !a.paused) a.pause();
+      prevActiveAudioRef.current = activeAudioClips;
+
+      // Audio-master clock: once the master audio element is actually playing, lock the timeline
+      // time to ITS currentTime so the video frame we draw matches what's being heard.
+      if (masterEl && masterClip && !masterEl.paused && masterEl.readyState >= 2) {
+        const tAudio = Number(masterClip.timeline_start) + (masterEl.currentTime - Number(masterClip.source_start || 0));
+        if (Number.isFinite(tAudio) && tAudio >= 0) {
+          t = tAudio;
+          clock.t = t;                      // mirror into the wall clock so playback stays
+          clock.wall = performance.now();   // smooth across audio gaps (no master => wall clock)
+        }
+      }
+
       if (t >= sequenceDuration) {
         for (const [, a] of audiosRef.current) a.pause();
         onEnded();
@@ -448,7 +493,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         return;
       }
 
-      // VIDEO: keep decoded frames flowing ahead of the playhead.
+      // VIDEO: keep decoded frames flowing ahead of the (audio-locked) playhead, then draw.
       const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
       for (const vc of active) {
         const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
@@ -465,23 +510,6 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         const fs = url ? framesRef.current.get(url) : null;
         if (fs) fs.prefetch(Number(vc.clip.source_start || 0), 0.1);
       }
-
-      // AUDIO: play each active audio clip's source (one dedicated element per clip).
-      const activeAudioClips = new Set<string>();
-      for (const c of audioClips) {
-        if (!(t >= c.timeline_start && t < c.timeline_end)) continue;
-        const id = String(c.id);
-        const a = audiosRef.current.get(id);
-        if (!a) continue;
-        activeAudioClips.add(id);
-        const expected = Number(c.source_start || 0) + (t - c.timeline_start);
-        if (!prevActiveAudioRef.current.has(id) || Math.abs(a.currentTime - expected) > 0.3) a.currentTime = expected;
-        a.muted = false;
-        a.volume = c.role === 'music' ? 0.5 : c.role === 'sfx' ? 0.8 : 1;
-        if (a.paused) void a.play().catch(() => {});
-      }
-      for (const [id, a] of audiosRef.current) if (!activeAudioClips.has(id) && !a.paused) a.pause();
-      prevActiveAudioRef.current = activeAudioClips;
 
       drawFrame(t);
       onTimeChange(Number(t.toFixed(3)));
