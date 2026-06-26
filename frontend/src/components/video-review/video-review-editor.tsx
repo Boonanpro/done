@@ -1603,9 +1603,9 @@ export function VideoReviewEditor({
     });
   }, [currentTime, timelineDuration]);
 
-  // Edge-scroll, NOT center-follow: the timeline only scrolls when the playhead reaches the
-  // viewport edge — staying put for fine adjustments in the middle (centering on every move made
-  // the whole timeline shift under the cursor and was impossible to scrub precisely).
+  // Edge-scroll on playhead MOVEMENT: only scroll when the playhead reaches the viewport edge —
+  // staying put for fine adjustments in the middle (centering on every move made the whole timeline
+  // shift under the cursor and was impossible to scrub precisely).
   useEffect(() => {
     const scroller = timelineScrollRef.current;
     const track = timelineRef.current;
@@ -1616,7 +1616,17 @@ export function VideoReviewEditor({
     const right = left + scroller.clientWidth;
     if (playX < left + margin) scroller.scrollLeft = Math.max(0, playX - margin);
     else if (playX > right - margin) scroller.scrollLeft = playX - scroller.clientWidth + margin;
-  }, [currentTime, timelineDuration, timelineZoom]);
+  }, [currentTime, timelineDuration]);
+
+  // On ZOOM, centre the playhead (zoom is an explicit action that zooms AROUND the red line).
+  useEffect(() => {
+    const scroller = timelineScrollRef.current;
+    const track = timelineRef.current;
+    if (!scroller || !track || !timelineDuration) return;
+    const redlineX = (currentTime / timelineDuration) * track.offsetWidth;
+    scroller.scrollLeft = track.offsetLeft + redlineX - scroller.clientWidth / 2;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timelineZoom]);
 
   const startTimelineDrag = useCallback(
     (event: React.PointerEvent, annotation: ReviewAnnotation, mode: TimelineDrag['mode']) => {
