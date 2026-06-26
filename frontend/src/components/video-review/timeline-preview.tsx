@@ -439,7 +439,12 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const hasBase = active.some((vc) => vc.kind === 'base');
       const baseReady = layers.some((l) => l.vc.kind === 'base');
       if (active.length > 0 && ((hasBase && !baseReady) || (!hasBase && layers.length === 0))) {
-        if (showDiag && diagRef.current) diagRef.current.textContent = `t=${t.toFixed(2)}  HOLD (decoding…)`;
+        if (showDiag && diagRef.current) {
+          const baseClip = active.find((vc) => vc.kind === 'base') || active[0];
+          const url = baseClip ? srcByAssetId.get(String(baseClip.clip.asset_id || '')) : null;
+          const fs = url ? framesRef.current.get(url) : null;
+          diagRef.current.textContent = `t=${t.toFixed(2)}  HOLD  want-src=${baseClip ? clipSourceTime(baseClip.clip, t).toFixed(2) : '-'}  wc[${fs ? fs.status() : 'none'}]`;
+        }
         return; // keep the last good frame on screen
       }
 
@@ -509,7 +514,8 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (showDiag && diagRef.current) {
         const baseLayer = layers.find((l) => l.vc.kind === 'base') || layers[0];
         const srcShown = baseLayer ? clipSourceTime(baseLayer.vc.clip, t).toFixed(2) : '—';
-        diagRef.current.textContent = `t=${t.toFixed(2)}  LIVE  src=${srcShown}  ${playingRef.current ? 'PLAY' : 'PAUSE'}`;
+        const usingVideoEl = baseLayer && (baseLayer.got.src as HTMLVideoElement).tagName === 'VIDEO';
+        diagRef.current.textContent = `t=${t.toFixed(2)}  LIVE  src=${srcShown}  via=${usingVideoEl ? 'video' : 'webcodecs'}  ${playingRef.current ? 'PLAY' : 'PAUSE'}`;
       }
     },
     [dims, visualClips, effectClips, blurRegionsAt, frameFor, showDiag],

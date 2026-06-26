@@ -316,6 +316,13 @@ export class AssetFrameSource {
     this.protectedIndex = target;
   }
 
+  /** Lightweight status for the on-screen diagnostic (why a frame might not be showing). */
+  status(): string {
+    if (this.failed) return 'FAILED';
+    if (!this.samples.length) return 'loading';
+    return `cache=${this.cache.size} q=${this.decoder?.decodeQueueSize ?? '?'} dec=${this.decoder?.state ?? '?'}${this.draining ? ' drain' : ''}`;
+  }
+
   /** Keep decoding forward from the playhead so upcoming frames are ready during playback.
    *  Non-blocking; feeds a window ahead without flushing (frames emit as refs arrive). */
   prefetch(timeSec: number, aheadSec: number): void {
