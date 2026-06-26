@@ -136,14 +136,24 @@ function clipSourceTime(clip: SequenceClip, t: number): number {
 export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, playing, format, onTimeChange, onEnded, className, selectedClipId, onPositionChange, onTransformChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
-  // WebCodecs frame decoders, one per asset URL (shared across all clips of that asset).
+  // WebCodecs frame decoders, one per asset URL (shared across all clips of that asset). Used
+  // for the PAUSED / SCRUB / EDIT state — frame-accurate, never reloads on edit (no black).
   const framesRef = useRef<FrameSourceManager>(null as unknown as FrameSourceManager);
   if (!framesRef.current) framesRef.current = new FrameSourceManager();
-  // Hidden <video> elements for AUDIO only — one per audio clip (recycled by asset).
+  // Muted <video> elements for VIDEO clips — drawn to the canvas ONLY during PLAYBACK. Hardware
+  // decode + real-time playback keeps them naturally in sync with the audio <video> elements,
+  // exactly like a native NLE's playback pipeline. They're never drawn while paused, so their
+  // reconcile churn on edits is invisible (the paused canvas draws from WebCodecs).
+  const videosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
+  // Hidden <video> elements for AUDIO — one per audio clip (recycled by asset).
   const audiosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
   const rafRef = useRef<number | null>(null);
   const playClockRef = useRef<{ wall: number; t: number } | null>(null);
   const prevActiveAudioRef = useRef<Set<string>>(new Set());
+  const prevActiveVideoRef = useRef<Set<string>>(new Set());
+  // drawFrame reads this to pick its source: <video> elements during playback, WebCodecs when paused.
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
 
   const supported = useMemo(() => webCodecsSupported(), []);
   const dims = useMemo(() => canvasDims(format), [format]);
@@ -307,22 +317,84 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [audioClips, assetById, loadBucket]);
 
+  // Muted VIDEO <video> elements — one per visual clip near the playhead, recycled by asset so a
+  // split/ripple reuses an already-decoded element (no reload). These are only drawn during
+  // playback; while paused the canvas comes from WebCodecs, so this reconcile is never visible.
+  useEffect(() => {
+    const map = videosRef.current;
+    const lo = (currentTime || 0) - PRELOAD_BEHIND;
+    const hi = (currentTime || 0) + PRELOAD_AHEAD;
+    const wanted = new Map<string, string>();
+    for (const vc of visualClips) {
+      const aid = String(vc.clip.asset_id || '');
+      if (!aid || !assetById.has(aid)) continue;
+      if (vc.clip.timeline_end >= lo && vc.clip.timeline_start <= hi) wanted.set(String(vc.clip.id), aid);
+    }
+    const orphansByAsset = new Map<string, HTMLVideoElement[]>();
+    for (const [cid, el] of map) {
+      if (!wanted.has(cid)) {
+        const aid = el.dataset.assetId || '';
+        (orphansByAsset.get(aid) || orphansByAsset.set(aid, []).get(aid)!).push(el);
+        map.delete(cid);
+      }
+    }
+    for (const [cid, aid] of wanted) {
+      if (map.has(cid)) continue;
+      const recycled = orphansByAsset.get(aid)?.pop();
+      if (recycled) { map.set(cid, recycled); continue; }
+      const a = assetById.get(aid);
+      if (!a) continue;
+      const v = document.createElement('video');
+      v.src = assetSrc(a);
+      v.dataset.assetId = aid;
+      v.muted = true; // audio comes from the dedicated audio elements
+      v.playsInline = true;
+      v.preload = 'auto';
+      v.style.display = 'none';
+      document.body.appendChild(v);
+      map.set(cid, v);
+    }
+    for (const list of orphansByAsset.values()) for (const el of list) el.remove();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visualClips, assetById, loadBucket]);
+
   // full unmount cleanup
   useEffect(() => {
     const amap = audiosRef.current;
+    const vmap = videosRef.current;
     const frames = framesRef.current;
     return () => {
       for (const [, el] of amap) el.remove();
+      for (const [, el] of vmap) el.remove();
       amap.clear();
+      vmap.clear();
       frames.closeAll();
     };
   }, []);
 
-  // Resolve a clip's decoded frame at time t (or null if not decoded yet).
+  // Resolve a clip's frame at time t. During playback we draw the hardware <video> element
+  // (real-time, synced to audio); when paused/scrubbing we draw the WebCodecs cache (frame-
+  // accurate). The <video> path falls through to WebCodecs while the element is still loading
+  // (play-start transition) and for frozen clips (a single held frame is cheap to cache).
   const frameFor = useCallback(
     (clip: SequenceClip, t: number): { src: CanvasImageSource; vw: number; vh: number } | null => {
       const url = srcByAssetId.get(String(clip.asset_id || ''));
       if (!url) return null;
+      // Prefer the hardware <video> element when it's available AND already sitting on the
+      // requested source time: that covers playback (the element tracks the clock) and the
+      // play→pause handoff (the element is parked on the last frame), so neither flashes black
+      // waiting for WebCodecs to re-decode. Once scrubbing moves the playhead away from where the
+      // element is parked, the |currentTime - expected| check fails and we use WebCodecs, which
+      // seeks frame-accurately. When WebCodecs is unavailable the element is the only source.
+      if (!isFrozen(clip)) {
+        const vel = videosRef.current.get(String(clip.id));
+        if (vel && vel.readyState >= 2 && vel.videoWidth) {
+          const expected = clipSourceTime(clip, t);
+          if (playingRef.current || !supported || Math.abs(vel.currentTime - expected) < 0.12) {
+            return { src: vel, vw: vel.videoWidth, vh: vel.videoHeight };
+          }
+        }
+      }
       const fs = framesRef.current.get(url);
       if (!fs) return null;
       // Clip's source bounds: the fallback frame must stay within these (cut-frame guard). For a
@@ -335,7 +407,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (!frame) return null;
       return { src: frame, vw: frame.width || fs.width, vh: frame.height || fs.height };
     },
-    [srcByAssetId],
+    [srcByAssetId, supported],
   );
 
   const drawFrame = useCallback(
@@ -418,52 +490,107 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     [dims, visualClips, effectClips, blurRegionsAt, frameFor],
   );
 
-  // SCRUB: when not playing, decode the exact frame for currentTime then draw. The decoder
-  // seek is frame-accurate (no <video> seek latency); we redraw once each active clip's
-  // frame is cached.
+  // SCRUB: when not playing, paint the exact frame for currentTime. With WebCodecs we decode it
+  // frame-accurately (no <video> seek latency); without it we seek the <video> elements instead.
   useEffect(() => {
-    if (playing || !supported) return;
+    if (playing) return;
     let cancelled = false;
     const active = visualClips.filter((vc) => currentTime >= vc.clip.timeline_start && currentTime < vc.clip.timeline_end);
     drawFrame(currentTime); // paint best-available immediately (previous frame, no black flash)
-    const seeks = active.map((vc) => {
-      const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
-      if (!url) return Promise.resolve();
-      const fs = framesRef.current.get(url);
-      if (!fs) return Promise.resolve();
-      return fs.ready.then(() => fs.seekTo(clipSourceTime(vc.clip, currentTime)));
-    });
-    void Promise.all(seeks).then(() => { if (!cancelled) drawFrame(currentTime); });
-    return () => { cancelled = true; };
+    if (supported) {
+      const seeks = active.map((vc) => {
+        const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
+        if (!url) return Promise.resolve();
+        const fs = framesRef.current.get(url);
+        if (!fs) return Promise.resolve();
+        return fs.ready.then(() => fs.seekTo(clipSourceTime(vc.clip, currentTime)));
+      });
+      void Promise.all(seeks).then(() => { if (!cancelled) drawFrame(currentTime); });
+      return () => { cancelled = true; };
+    }
+    // Fallback (no WebCodecs): seek the muted <video> elements and redraw once they land.
+    for (const vc of active) {
+      if (isFrozen(vc.clip)) continue;
+      const v = videosRef.current.get(String(vc.clip.id));
+      if (v) { if (!v.paused) v.pause(); try { v.currentTime = clipSourceTime(vc.clip, currentTime); } catch { /* not ready */ } }
+    }
+    const timer = window.setTimeout(() => { if (!cancelled) drawFrame(currentTime); }, 140);
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [currentTime, playing, supported, visualClips, drawFrame, srcByAssetId, readyTick]);
 
-  // PLAYBACK: wall-clock timeline; prefetch each active source ahead so frames are decoded
-  // before the playhead reaches them; draw every frame from the cache; audio via <video>.
+  // PLAYBACK: a wall-clock timeline drives muted VIDEO <video> elements and unmuted AUDIO <video>
+  // elements, all playing in real time at rate 1, each seeked to its source offset when its clip
+  // becomes active (and re-synced only on large drift). Because video and audio are BOTH hardware
+  // <video> elements on the same clock, they stay in sync without per-frame correction — this is
+  // the proven native-NLE playback path. drawFrame() composites the video elements onto the canvas.
   useEffect(() => {
     if (!playing) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
       playClockRef.current = null;
       prevActiveAudioRef.current = new Set();
+      prevActiveVideoRef.current = new Set();
+      for (const [, v] of videosRef.current) v.pause();
       for (const [, a] of audiosRef.current) a.pause();
       return;
     }
     if (!playClockRef.current) playClockRef.current = { wall: performance.now(), t: currentTime };
-    const PREFETCH_AHEAD = 1.0;  // seconds of frames to keep decoded ahead of the playhead
-    const PREROLL = 0.5;         // pre-decode a clip about to start
+    const PREROLL = 1.5; // pre-seek a clip about to start so its first frame is ready at the cut
     const step = () => {
       const clock = playClockRef.current;
       if (!clock) return;
-      // Provisional time from the wall clock; corrected below to the audio element so the two
-      // never drift apart (the old engine kept video on <video> too, so they were inherently
-      // synced — here video is canvas/rAF and audio is <video>, so we slave video to audio).
-      let t = clock.t + (performance.now() - clock.wall) / 1000;
+      const t = clock.t + (performance.now() - clock.wall) / 1000;
+      if (t >= sequenceDuration) {
+        for (const [, v] of videosRef.current) v.pause();
+        for (const [, a] of audiosRef.current) a.pause();
+        onEnded();
+        drawFrame(sequenceDuration);
+        onTimeChange(sequenceDuration);
+        return;
+      }
 
-      // AUDIO: play each active clip's source (one dedicated element per clip), and pick a
-      // master element (voice preferred) to use as the clock.
+      // VIDEO: align + play each active clip's muted element (frozen clips draw from WebCodecs,
+      // so just make sure their single frame is decoded).
+      const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
+      const activeVids = new Set<string>();
+      for (const vc of active) {
+        const id = String(vc.clip.id);
+        if (isFrozen(vc.clip)) {
+          const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
+          const fs = url ? framesRef.current.get(url) : null;
+          if (fs) void fs.ready.then(() => fs.seekTo(Number(vc.clip.source_start || 0)));
+          continue;
+        }
+        const v = videosRef.current.get(id);
+        if (!v) continue;
+        activeVids.add(id);
+        const expected = clipSourceTime(vc.clip, t);
+        // Seek on activation or on big drift only; re-seeking a playing element every frame is
+        // what made audio warble in the old code. Video re-seeks aren't audible.
+        if (!prevActiveVideoRef.current.has(id) || Math.abs(v.currentTime - expected) > 0.15) {
+          try { v.currentTime = expected; } catch { /* not ready */ }
+        }
+        if (v.paused) void v.play().catch(() => {});
+      }
+      for (const [id, v] of videosRef.current) if (!activeVids.has(id) && !v.paused) v.pause();
+
+      // PRE-ROLL: pre-seek a clip about to become active so its frame is ready at the join — both
+      // its <video> element AND a WebCodecs frame as a safety net (if the element is still seeking
+      // at the cut, drawFrame falls back to the decoded frame instead of flashing black).
+      for (const vc of visualClips) {
+        const id = String(vc.clip.id);
+        if (activeVids.has(id) || isFrozen(vc.clip)) continue;
+        if (!(vc.clip.timeline_start > t && vc.clip.timeline_start <= t + PREROLL)) continue;
+        const startSrc = Number(vc.clip.source_start || 0);
+        const v = videosRef.current.get(id);
+        if (v && Math.abs(v.currentTime - startSrc) > 0.1) { try { v.currentTime = startSrc; } catch { /* not ready */ } }
+        const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
+        const fs = url ? framesRef.current.get(url) : null;
+        if (fs) void fs.ready.then(() => fs.seekTo(startSrc));
+      }
+
+      // AUDIO: align + play each active audio clip's element (one per clip).
       const activeAudioClips = new Set<string>();
-      let masterEl: HTMLVideoElement | null = null;
-      let masterClip: SequenceClip | null = null;
       for (const c of audioClips) {
         if (!(t >= c.timeline_start && t < c.timeline_end)) continue;
         const id = String(c.id);
@@ -475,47 +602,10 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         a.muted = false;
         a.volume = c.role === 'music' ? 0.5 : c.role === 'sfx' ? 0.8 : 1;
         if (a.paused) void a.play().catch(() => {});
-        if (!masterClip || (c.role === 'voice' && masterClip.role !== 'voice')) { masterEl = a; masterClip = c; }
       }
       for (const [id, a] of audiosRef.current) if (!activeAudioClips.has(id) && !a.paused) a.pause();
       prevActiveAudioRef.current = activeAudioClips;
-
-      // Audio-master clock: once the master audio element is actually playing, lock the timeline
-      // time to ITS currentTime so the video frame we draw matches what's being heard.
-      if (masterEl && masterClip && !masterEl.paused && masterEl.readyState >= 2) {
-        const tAudio = Number(masterClip.timeline_start) + (masterEl.currentTime - Number(masterClip.source_start || 0));
-        if (Number.isFinite(tAudio) && tAudio >= 0) {
-          t = tAudio;
-          clock.t = t;                      // mirror into the wall clock so playback stays
-          clock.wall = performance.now();   // smooth across audio gaps (no master => wall clock)
-        }
-      }
-
-      if (t >= sequenceDuration) {
-        for (const [, a] of audiosRef.current) a.pause();
-        onEnded();
-        drawFrame(sequenceDuration);
-        onTimeChange(sequenceDuration);
-        return;
-      }
-
-      // VIDEO: keep decoded frames flowing ahead of the (audio-locked) playhead, then draw.
-      const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
-      for (const vc of active) {
-        const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
-        if (!url) continue;
-        const fs = framesRef.current.get(url);
-        if (!fs || isFrozen(vc.clip)) continue; // frozen clip needs only its single cached frame
-        fs.prefetch(clipSourceTime(vc.clip, t), PREFETCH_AHEAD);
-      }
-      for (const vc of visualClips) {
-        if (active.includes(vc)) continue;
-        const startsSoon = vc.clip.timeline_start > t && vc.clip.timeline_start <= t + PREROLL;
-        if (!startsSoon) continue;
-        const url = srcByAssetId.get(String(vc.clip.asset_id || ''));
-        const fs = url ? framesRef.current.get(url) : null;
-        if (fs) fs.prefetch(Number(vc.clip.source_start || 0), 0.1);
-      }
+      prevActiveVideoRef.current = activeVids;
 
       drawFrame(t);
       onTimeChange(Number(t.toFixed(3)));
@@ -631,11 +721,6 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         height={dims.h}
         style={{ display: 'block', width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
       />
-      {!supported ? (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-4 text-center text-xs text-white/70">
-          このブラウザはWebCodecsプレビューに未対応です（Chrome/Edge最新版でご利用ください）。
-        </div>
-      ) : null}
       {contentRect && renderCaptions.length ? (
         <div
           className="pointer-events-none absolute overflow-hidden"
