@@ -156,10 +156,15 @@ export class AssetFrameSource {
   private onFrame(frame: VideoFrame) {
     const idx = this.ctsToIndex.get(frame.timestamp);
     if (idx == null) { frame.close(); return; }
-    // CRITICAL: copy into a GPU ImageBitmap and close the VideoFrame immediately. A decoder has
-    // a SMALL pool of output buffers; holding decoded VideoFrames in the cache exhausts it and
-    // the decoder STALLS (it stops emitting after ~16-20 frames). ImageBitmaps are detached from
-    // that pool, so the decoder keeps flowing while we cache as many frames as we like.
+    // Decoding a GOP to reach one seek target emits ~all of its frames, but we only WANT the ones
+    // near the playhead. Turning every emitted frame into an ImageBitmap is async, and each frame
+    // stays alive (holding a decoder output buffer) until its bitmap resolves — on a hardware
+    // (GPU) decoder that backlog EXHAUSTS the small output-buffer pool and the decoder STALLS
+    // mid-scrub (the headed-Chrome repro: cache full, q=0, frame never emitted). So we only
+    // bitmap-copy frames that are wanted (a waiter is parked on them, or they're near the current
+    // target); every other frame is closed IMMEDIATELY, freeing its buffer so decode keeps flowing.
+    const wanted = this.frameWaiters.has(idx) || Math.abs(idx - this.protectedIndex) <= 6;
+    if (!wanted) { frame.close(); return; }
     createImageBitmap(frame).then((bmp) => {
       frame.close();
       if (this.closed) { bmp.close(); return; }
@@ -236,28 +241,38 @@ export class AssetFrameSource {
    *  region's footage, but it also won't go black as long as any of its own frames are cached
    *  (showing a slightly stale frame of the SAME clip while the exact one decodes). */
   peek(timeSec: number, rangeLo: number, rangeHi: number): ImageBitmap | null {
+    this.lastShownTime = -1;
     if (this.failed || !this.samples.length) return null;
     const pos = this.presPosAtTime(timeSec);
     if (pos < 0) return null;
     const idx = this.presOrder[pos];
     const f = this.cache.get(idx);
-    if (f) { this.protectedIndex = idx; this.touch(idx); return f; }
-    // Nearest cached frame within [rangeLo, rangeHi] — walk outward from `pos`, preferring the
-    // previous frame, then a slightly-later one, never crossing the clip's source bounds.
+    if (f) { this.protectedIndex = idx; this.touch(idx); this.lastShownTime = this.samples[idx].cts; return f; }
+    // Fallback: nearest cached frame, but ONLY within a tiny staleness window AND within the
+    // clip's source bounds. The tiny window is the key fix — a wide fallback returned a frame far
+    // from the playhead (showing a frozen, stale frame while the head moved on, especially when
+    // GPU decode lagged behind a scrub). Beyond the window we return null so the compositor HOLDS
+    // the last good frame instead — never a wrong/old frame masquerading as the current one.
+    const MAX_STALE = 0.18; // seconds
     for (let back = pos - 1; back >= 0; back--) {
       const di = this.presOrder[back];
-      if (this.samples[di].cts < rangeLo - 1e-6) break;
+      const cts = this.samples[di].cts;
+      if (cts < rangeLo - 1e-6 || timeSec - cts > MAX_STALE) break;
       const cf = this.cache.get(di);
-      if (cf) return cf;
+      if (cf) { this.lastShownTime = cts; return cf; }
     }
     for (let fwd = pos + 1; fwd < this.presOrder.length; fwd++) {
       const di = this.presOrder[fwd];
-      if (this.samples[di].cts > rangeHi + 1e-6) break;
+      const cts = this.samples[di].cts;
+      if (cts > rangeHi + 1e-6 || cts - timeSec > MAX_STALE) break;
       const cf = this.cache.get(di);
-      if (cf) return cf;
+      if (cf) { this.lastShownTime = cts; return cf; }
     }
     return null;
   }
+
+  /** Source time (seconds) of the frame the LAST peek() returned (-1 if none) — for diagnostics. */
+  lastShownTime = -1;
 
   /** Decode the exact frame for `timeSec` (frame-accurate scrub). Resolves once it's cached.
    *  Single-flight: repeat calls for the same target share one decode; different targets queue. */
@@ -291,9 +306,13 @@ export class AssetFrameSource {
     if (this.failed || target < 0 || this.cache.has(target)) { if (target >= 0) this.protectedIndex = target; return; }
     const dec = this.decoder;
     if (!dec || !this.configured) return;
+    this.protectedIndex = target; // mark the target NOW so onFrame keeps it (and its neighbours)
 
     const key = this.keyframeFor(target);
-    const REORDER = 3; // feed a few frames past the target so B-frames can be reordered out
+    // Feed several frames PAST the target so it falls out of the decoder's reorder buffer without a
+    // flush(). This is generous because, with the bitmap-throttle in onFrame, the extra frames are
+    // decode-only (closed immediately) — cheap.
+    const REORDER = 12;
     const end = Math.min(this.samples.length - 1, target + REORDER);
     // Decide the feed range without ever re-feeding chunks already in the current run (duplicate
     // timestamps stall the decoder). Three cases:
@@ -308,11 +327,23 @@ export class AssetFrameSource {
     } else {
       start = key; this.fedFrom = key; // new run
     }
-    const wait = this.waitForFrame(target);
     for (let i = start; i <= end; i++) this.feed(i);
     this.fedThrough = Math.max(this.fedThrough, end);
-    // The waiter resolves the instant onFrame() caches the target. The timeout is a safety cap.
-    await Promise.race([wait, delay(4000)]);
+    // The waiter resolves the instant onFrame() caches the target.
+    await Promise.race([this.waitForFrame(target), delay(450)]);
+    // STALL RECOVERY: hardware (GPU) decoders sometimes wedge mid-scrub — input drained but the
+    // frame never emitted (the headed-Chrome repro). If the target still isn't cached, rebuild the
+    // decoder and re-feed once from the keyframe; a fresh decoder reliably emits.
+    if (!this.cache.has(target) && !this.closed) {
+      this.recover();
+      const dec2 = this.decoder;
+      if (dec2 && this.configured) {
+        this.fedFrom = key;
+        for (let i = key; i <= end; i++) this.feed(i);
+        this.fedThrough = end;
+        await Promise.race([this.waitForFrame(target), delay(900)]);
+      }
+    }
     this.protectedIndex = target;
   }
 
@@ -320,7 +351,7 @@ export class AssetFrameSource {
   status(): string {
     if (this.failed) return 'FAILED';
     if (!this.samples.length) return 'loading';
-    return `cache=${this.cache.size} q=${this.decoder?.decodeQueueSize ?? '?'} dec=${this.decoder?.state ?? '?'}${this.draining ? ' drain' : ''}`;
+    return `cache=${this.cache.size} q=${this.decoder?.decodeQueueSize ?? '?'} dec=${this.decoder?.state ?? '?'}${this.draining ? ' drain' : ''} shown=${this.lastShownTime >= 0 ? this.lastShownTime.toFixed(2) : '—'}`;
   }
 
   /** Keep decoding forward from the playhead so upcoming frames are ready during playback.
