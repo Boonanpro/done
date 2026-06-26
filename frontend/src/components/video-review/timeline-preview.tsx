@@ -539,7 +539,9 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
     const step = () => {
       const clock = playClockRef.current;
       if (!clock) return;
-      const t = clock.t + (performance.now() - clock.wall) / 1000;
+      // Provisional time from the wall clock; refined below to the MASTER video element's actual
+      // position so the playhead and the displayed frame are the same quantity (zero drift).
+      let t = clock.t + (performance.now() - clock.wall) / 1000;
       if (t >= sequenceDuration) {
         for (const [, v] of videosRef.current) v.pause();
         for (const [, a] of audiosRef.current) a.pause();
@@ -573,6 +575,24 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         if (v.paused) void v.play().catch(() => {});
       }
       for (const [id, v] of videosRef.current) if (!activeVids.has(id) && !v.paused) v.pause();
+
+      // MASTER CLOCK: drive the timeline time from the actual position of the displayed base
+      // <video> element. The playhead and the on-screen frame are then the SAME number, so they
+      // can't diverge (the old wall clock let the element drift up to 0.15s behind the playhead).
+      // At a cut/gap the active base element isn't playing yet → keep the wall clock (mirrored),
+      // and drawFrame paints the frame-accurate WebCodecs frame for `t` until the element syncs.
+      let masterT: number | null = null;
+      for (const vc of active) {
+        if (vc.kind !== 'base' || isFrozen(vc.clip)) continue;
+        const v = videosRef.current.get(String(vc.clip.id));
+        if (v && v.readyState >= 2 && v.videoWidth && !v.paused) {
+          masterT = Number(vc.clip.timeline_start) + (v.currentTime - Number(vc.clip.source_start || 0));
+          break;
+        }
+      }
+      if (masterT != null && Number.isFinite(masterT) && masterT >= 0 && masterT < sequenceDuration) t = masterT;
+      clock.t = t;                     // mirror so the wall clock continues smoothly from the
+      clock.wall = performance.now();  // master when the master drops out at a cut/gap
 
       // PRE-ROLL: pre-seek a clip about to become active so its frame is ready at the join — both
       // its <video> element AND a WebCodecs frame as a safety net (if the element is still seeking
