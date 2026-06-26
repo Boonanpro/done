@@ -513,9 +513,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       // Captions render as an HTML <CaptionLayer> overlay (below), not on the canvas.
       if (showDiag && diagRef.current) {
         const baseLayer = layers.find((l) => l.vc.kind === 'base') || layers[0];
-        const srcShown = baseLayer ? clipSourceTime(baseLayer.vc.clip, t).toFixed(2) : '—';
+        const wantSrc = baseLayer ? clipSourceTime(baseLayer.vc.clip, t).toFixed(2) : '—';
         const usingVideoEl = baseLayer && (baseLayer.got.src as HTMLVideoElement).tagName === 'VIDEO';
-        diagRef.current.textContent = `t=${t.toFixed(2)}  LIVE  src=${srcShown}  via=${usingVideoEl ? 'video' : 'webcodecs'}  ${playingRef.current ? 'PLAY' : 'PAUSE'}`;
+        const url = baseLayer ? srcByAssetId.get(String(baseLayer.vc.clip.asset_id || '')) : null;
+        const fs = !usingVideoEl && url ? framesRef.current.get(url) : null;
+        diagRef.current.textContent = `t=${t.toFixed(2)}  LIVE  want=${wantSrc}  via=${usingVideoEl ? 'video' : 'webcodecs'}${fs ? ` [${fs.status()}]` : ''}  ${playingRef.current ? 'PLAY' : 'PAUSE'}`;
       }
     },
     [dims, visualClips, effectClips, blurRegionsAt, frameFor, showDiag],
