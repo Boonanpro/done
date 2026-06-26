@@ -157,6 +157,12 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
 
   const supported = useMemo(() => webCodecsSupported(), []);
   const dims = useMemo(() => canvasDims(format), [format]);
+  // Opt-in on-screen diagnostic (append ?previewdiag=1 to the URL). Shows the playhead time, whether
+  // the last paint was LIVE (drew a fresh frame) or HOLD (kept the previous frame because the new one
+  // wasn't decoded yet), and the source time on screen — so playback/scrub can be judged on real
+  // hardware via a screenshot instead of relying on headless tests.
+  const showDiag = useMemo(() => typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('previewdiag') === '1', []);
+  const diagRef = useRef<HTMLDivElement | null>(null);
   // Bumped when an asset's decoder finishes loading, so the scrub effect re-runs and paints the
   // first frame the moment it's decodable (the initial decode resolves async after the canvas
   // has already mounted — without this, the opening frame stayed black until you scrubbed).
@@ -417,13 +423,30 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       const { w, h } = dims;
+
+      const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
+      // Resolve every active clip's frame up front (null = not decoded yet).
+      const layers: Array<{ vc: VisualClip; got: { src: CanvasImageSource; vw: number; vh: number } }> = [];
+      for (const vc of active) {
+        const got = frameFor(vc.clip, t);
+        if (got) layers.push({ vc, got });
+      }
+      // NEVER-BLACK: if the timeline HAS content here but its primary layer isn't decoded yet,
+      // HOLD the current canvas (don't blank) — like a native NLE, the picture stays up and
+      // snaps to the head the instant the frame is ready. We only clear+repaint when we actually
+      // have something to draw. A genuine empty gap (no active clips) still paints black, which
+      // is correct (the sequence really is empty there).
+      const hasBase = active.some((vc) => vc.kind === 'base');
+      const baseReady = layers.some((l) => l.vc.kind === 'base');
+      if (active.length > 0 && ((hasBase && !baseReady) || (!hasBase && layers.length === 0))) {
+        if (showDiag && diagRef.current) diagRef.current.textContent = `t=${t.toFixed(2)}  HOLD (decoding…)`;
+        return; // keep the last good frame on screen
+      }
+
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, w, h);
 
-      const active = visualClips.filter((vc) => t >= vc.clip.timeline_start && t < vc.clip.timeline_end);
-      for (const vc of active) {
-        const got = frameFor(vc.clip, t);
-        if (!got) continue;
+      for (const { vc, got } of layers) {
         const tf = vc.clip.transform;
         const cr = vc.clip.crop;
         const px = vc.position ? vc.position.x * w : 0;
@@ -446,10 +469,7 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       }
 
       // blur / mosaic regions (effect clips active now)
-      const baseGot = (() => {
-        const base = active.find((vc) => vc.kind === 'base') || active[0];
-        return base ? frameFor(base.clip, t) : null;
-      })();
+      const baseGot = (layers.find((l) => l.vc.kind === 'base') || layers[0])?.got || null;
       for (const e of effectClips) {
         const start = Number(e.timeline_start || 0);
         const end = Number(e.timeline_end || 0);
@@ -486,8 +506,13 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         ctx.restore();
       }
       // Captions render as an HTML <CaptionLayer> overlay (below), not on the canvas.
+      if (showDiag && diagRef.current) {
+        const baseLayer = layers.find((l) => l.vc.kind === 'base') || layers[0];
+        const srcShown = baseLayer ? clipSourceTime(baseLayer.vc.clip, t).toFixed(2) : '—';
+        diagRef.current.textContent = `t=${t.toFixed(2)}  LIVE  src=${srcShown}  ${playingRef.current ? 'PLAY' : 'PAUSE'}`;
+      }
     },
-    [dims, visualClips, effectClips, blurRegionsAt, frameFor],
+    [dims, visualClips, effectClips, blurRegionsAt, frameFor, showDiag],
   );
 
   // SCRUB: when not playing, paint the exact frame for currentTime. With WebCodecs we decode it
@@ -741,6 +766,14 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
         height={dims.h}
         style={{ display: 'block', width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
       />
+      {showDiag ? (
+        <div
+          ref={diagRef}
+          className="pointer-events-none absolute left-1 top-1 rounded bg-black/70 px-2 py-1 font-mono text-[11px] text-lime-300"
+        >
+          t=0.00
+        </div>
+      ) : null}
       {contentRect && renderCaptions.length ? (
         <div
           className="pointer-events-none absolute overflow-hidden"
