@@ -19,6 +19,7 @@ export function webCodecsSupported(): boolean {
   return typeof window !== 'undefined' && typeof window.VideoDecoder !== 'undefined';
 }
 
+
 type Sample = {
   cts: number;        // presentation time, seconds
   dur: number;        // seconds
@@ -204,8 +205,8 @@ export class AssetFrameSource {
 
   // --- time <-> frame index -------------------------------------------------
 
-  private indexAtTime(timeSec: number): number {
-    // last presentation-ordered sample whose cts <= timeSec
+  // Presentation-order POSITION of the last sample whose cts <= timeSec (-1 if none).
+  private presPosAtTime(timeSec: number): number {
     const po = this.presOrder;
     if (!po.length) return -1;
     let lo = 0, hi = po.length - 1, ans = 0;
@@ -213,7 +214,12 @@ export class AssetFrameSource {
       const mid = (lo + hi) >> 1;
       if (this.samples[po[mid]].cts <= timeSec + 1e-6) { ans = mid; lo = mid + 1; } else hi = mid - 1;
     }
-    return po[ans];
+    return ans;
+  }
+
+  private indexAtTime(timeSec: number): number {
+    const pos = this.presPosAtTime(timeSec);
+    return pos < 0 ? -1 : this.presOrder[pos];
   }
 
   private keyframeFor(decodeIndex: number): number {
@@ -223,18 +229,30 @@ export class AssetFrameSource {
 
   // --- public draw/seek API -------------------------------------------------
 
-  /** Best cached frame to display at `timeSec`, or null if not decoded yet. Synchronous —
-   *  safe to call inside the rAF draw loop. Marks the frame as the protected on-screen one. */
-  peek(timeSec: number): ImageBitmap | null {
+  /** Best cached frame to display at `timeSec`, or null if not decoded yet. Synchronous — safe
+   *  to call inside the rAF draw loop. `rangeLo`/`rangeHi` are the CLIP's source-time bounds:
+   *  the fallback (when the exact frame isn't decoded yet) only returns a frame WITHIN that
+   *  range. This is the cut-frame fix — a clip can never display another clip's / a trimmed-out
+   *  region's footage, but it also won't go black as long as any of its own frames are cached
+   *  (showing a slightly stale frame of the SAME clip while the exact one decodes). */
+  peek(timeSec: number, rangeLo: number, rangeHi: number): ImageBitmap | null {
     if (this.failed || !this.samples.length) return null;
-    const idx = this.indexAtTime(timeSec);
-    if (idx < 0) return null;
+    const pos = this.presPosAtTime(timeSec);
+    if (pos < 0) return null;
+    const idx = this.presOrder[pos];
     const f = this.cache.get(idx);
     if (f) { this.protectedIndex = idx; this.touch(idx); return f; }
-    // Fall back to the nearest earlier cached frame so a brief decode gap shows the previous
-    // frame instead of black (the same forgiving behaviour a native engine has).
-    for (let p = this.presOrder.indexOf(idx) - 1; p >= 0; p--) {
-      const di = this.presOrder[p];
+    // Nearest cached frame within [rangeLo, rangeHi] — walk outward from `pos`, preferring the
+    // previous frame, then a slightly-later one, never crossing the clip's source bounds.
+    for (let back = pos - 1; back >= 0; back--) {
+      const di = this.presOrder[back];
+      if (this.samples[di].cts < rangeLo - 1e-6) break;
+      const cf = this.cache.get(di);
+      if (cf) return cf;
+    }
+    for (let fwd = pos + 1; fwd < this.presOrder.length; fwd++) {
+      const di = this.presOrder[fwd];
+      if (this.samples[di].cts > rangeHi + 1e-6) break;
       const cf = this.cache.get(di);
       if (cf) return cf;
     }

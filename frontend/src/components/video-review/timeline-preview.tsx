@@ -325,7 +325,13 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (!url) return null;
       const fs = framesRef.current.get(url);
       if (!fs) return null;
-      const frame = fs.peek(clipSourceTime(clip, t));
+      // Clip's source bounds: the fallback frame must stay within these (cut-frame guard). For a
+      // frozen clip the bound is the single held source frame.
+      const ss = Number(clip.source_start || 0);
+      const frozen = isFrozen(clip);
+      const lo = ss;
+      const hi = frozen ? ss : Number(clip.source_end ?? ss);
+      const frame = fs.peek(clipSourceTime(clip, t), lo, hi);
       if (!frame) return null;
       return { src: frame, vw: frame.width || fs.width, vh: frame.height || fs.height };
     },
