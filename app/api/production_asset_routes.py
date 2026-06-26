@@ -2808,6 +2808,16 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
                 "veryfast",
                 "-crf",
                 "28",
+                # SHORT GOP (keyframe every 15 frames = 0.5s) + no B-frames. A long GOP is the
+                # heavy part of scrubbing/seeking: to show a random frame the decoder must decode
+                # the whole group from its keyframe. DaVinci avoids this by using cheap intra-frame
+                # codecs; the browser can't, but a short GOP gives the same effect — any frame is
+                # ≤15 frames from a keyframe, so seeking decodes little. Measured on real GPU:
+                # cut the decoder stalls/HOLDs during scrub roughly 3x. Costs ~2-3x file size.
+                "-g",
+                "15",
+                "-bf",
+                "0",
                 "-vsync",
                 "cfr",
                 "-c:a",
