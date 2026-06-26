@@ -411,6 +411,11 @@ export function VideoReviewEditor({
   // Right-drag rubber-band selection over the timeline (left-drag is reserved for scrub/move).
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
+  // True when the current right-press became a DRAG (marquee select) — used to suppress the
+  // right-click context menu so a right-drag over a clip range-selects instead of opening the menu.
+  const rightDragRef = useRef(false);
+  // Right-click context menu for a video clip (静止画生成 etc). null = closed.
+  const [clipMenu, setClipMenu] = useState<{ x: number; y: number; clip: SequenceClip } | null>(null);
   // Live ghost of a material being dragged over the timeline (before it's dropped).
   const [dropPreview, setDropPreview] = useState<{ zone: 'visual' | 'audio'; layer: number; start: number; len: number } | null>(null);
   const [videoPath, setVideoPath] = useState(initialPath || '');
@@ -1598,12 +1603,19 @@ export function VideoReviewEditor({
     });
   }, [currentTime, timelineDuration]);
 
+  // Edge-scroll, NOT center-follow: the timeline only scrolls when the playhead reaches the
+  // viewport edge — staying put for fine adjustments in the middle (centering on every move made
+  // the whole timeline shift under the cursor and was impossible to scrub precisely).
   useEffect(() => {
     const scroller = timelineScrollRef.current;
     const track = timelineRef.current;
     if (!scroller || !track || !timelineDuration) return;
-    const redlineX = (currentTime / timelineDuration) * track.offsetWidth;
-    scroller.scrollLeft = track.offsetLeft + redlineX - scroller.clientWidth / 2;
+    const playX = track.offsetLeft + (currentTime / timelineDuration) * track.offsetWidth;
+    const margin = 40;
+    const left = scroller.scrollLeft;
+    const right = left + scroller.clientWidth;
+    if (playX < left + margin) scroller.scrollLeft = Math.max(0, playX - margin);
+    else if (playX > right - margin) scroller.scrollLeft = playX - scroller.clientWidth + margin;
   }, [currentTime, timelineDuration, timelineZoom]);
 
   const startTimelineDrag = useCallback(
@@ -2069,6 +2081,8 @@ export function VideoReviewEditor({
   useEffect(() => {
     if (!marqueeActive) return;
     const move = (event: PointerEvent) => {
+      const start = marqueeStartRef.current;
+      if (start && (Math.abs(event.clientX - start.x) > 5 || Math.abs(event.clientY - start.y) > 5)) rightDragRef.current = true;
       setMarquee((m) => (m ? { ...m, x1: event.clientX, y1: event.clientY } : m));
     };
     const up = (event: PointerEvent) => {
@@ -2121,6 +2135,18 @@ export function VideoReviewEditor({
             height: Math.abs(marquee.y1 - marquee.y0),
           }}
         />
+      ) : null}
+      {clipMenu ? (
+        <>
+          <div className="fixed inset-0 z-50" onClick={() => setClipMenu(null)} onContextMenu={(e) => { e.preventDefault(); setClipMenu(null); }} />
+          <div className="fixed z-[51] min-w-[180px] rounded-md border border-border bg-popover py-1 text-sm shadow-lg"
+            style={{ left: Math.min(clipMenu.x, window.innerWidth - 200), top: Math.min(clipMenu.y, window.innerHeight - 80) }}>
+            <button type="button" className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-muted"
+              onClick={() => { const c = clipMenu.clip; setClipMenu(null); insertFreezeRipple(c); }}>
+              ⏸ ここを静止画にする（5秒・以降をずらす）
+            </button>
+          </div>
+        </>
       ) : null}
       <main className="flex min-w-0 flex-1 flex-col">
         <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
@@ -2440,6 +2466,10 @@ export function VideoReviewEditor({
                     aria-label="タイムラインズーム"
                     onChange={(event) => setTimelineZoom(Number(clamp(Number(event.target.value), 1, 8).toFixed(2)))}
                     onDoubleClick={() => setTimelineZoom(1)}
+                    // Drop focus after dragging so a following Space goes to play/pause, not the
+                    // slider (a focused range input eats Space/arrow keys).
+                    onPointerUp={(event) => event.currentTarget.blur()}
+                    onMouseUp={(event) => event.currentTarget.blur()}
                     className="h-1 w-28 cursor-pointer accent-sky-500"
                   />
                   <span className="w-9 text-right text-[10px] tabular-nums text-muted-foreground">{Math.round(timelineZoom * 100)}%</span>
@@ -2478,6 +2508,7 @@ export function VideoReviewEditor({
                         if (event.button !== 2) return; // right button starts a rubber-band select
                         event.preventDefault();
                         event.stopPropagation();
+                        rightDragRef.current = false; // becomes true only once it moves >5px
                         marqueeStartRef.current = { x: event.clientX, y: event.clientY };
                         setMarquee({ x0: event.clientX, y0: event.clientY, x1: event.clientX, y1: event.clientY });
                       }}
@@ -2588,7 +2619,12 @@ export function VideoReviewEditor({
                                         ? 'border-yellow-300/70 ring-2 ring-yellow-300/40 ring-dashed'
                                         : 'border-white/30'
                                   }`}
-                                  onContextMenu={isVideo && clip.asset_id ? (event) => { event.preventDefault(); insertFreezeRipple(clip); } : (event) => event.preventDefault()}
+                                  onContextMenu={(event) => {
+                                    event.preventDefault();
+                                    // A right-DRAG is a range-select (marquee) — don't open the menu.
+                                    if (rightDragRef.current) return;
+                                    if (isVideo && clip.asset_id) setClipMenu({ x: event.clientX, y: event.clientY, clip });
+                                  }}
                                   style={{
                                     left: `${left}%`,
                                     width: `${width}%`,
