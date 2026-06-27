@@ -2944,6 +2944,43 @@ async def create_proxy(
     return next(a for a in _read_assets(room_id) if a.get("id") == asset_id)
 
 
+def _contents_using_asset(room_id: str, asset_id: str) -> list[dict[str, Any]]:
+    """Contents (projects) whose timeline references this asset — so deleting it doesn't silently
+    break a project the user still wants."""
+    out: list[dict[str, Any]] = []
+    for content in _read_contents(room_id):
+        ids: set[str] = {str(a) for a in (content.get("asset_ids") or [])}
+        seq = (content.get("timeline") or {}).get("sequence") or {}
+        for track in seq.get("tracks", []) or []:
+            for clip in track.get("clips", []) or []:
+                if clip.get("asset_id"):
+                    ids.add(str(clip["asset_id"]))
+        if asset_id in ids:
+            out.append({"id": content.get("id"), "title": content.get("title") or "(無題)"})
+    return out
+
+
+@router.delete("/{asset_id}")
+async def delete_asset(
+    asset_id: str,
+    room_id: str = Query(...),
+    force: bool = Query(False),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Delete a source asset: removes its record AND its files (local copy, proxy, thumbnail).
+    Refuses (409) if a project still uses it, unless `force=true`."""
+    assets = _read_assets(room_id)
+    asset = next((a for a in assets if a.get("id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    using = _contents_using_asset(room_id, asset_id)
+    if using and not force:
+        raise HTTPException(status_code=409, detail={"message": "asset in use", "contents": using})
+    _remove_asset_files(asset)
+    _write_assets(room_id, [a for a in assets if a.get("id") != asset_id])
+    return {"ok": True, "removed_from_contents": using}
+
+
 @router.get("/media")
 async def get_asset_media(
     request: Request,
