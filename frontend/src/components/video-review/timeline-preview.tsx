@@ -167,6 +167,11 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
   // first frame the moment it's decodable (the initial decode resolves async after the canvas
   // has already mounted — without this, the opening frame stayed black until you scrubbed).
   const [readyTick, setReadyTick] = useState(0);
+  // Media load progress for the "preparing…" overlay: how many of the assets used by this
+  // timeline have their decoder ready. Lets the user see "loading", not "broken", during the
+  // few-second media load on open (like a native NLE's loading bar).
+  const [loadProgress, setLoadProgress] = useState({ ready: 0, total: 0 });
+  const readyUrlsRef = useRef<Set<string>>(new Set());
 
   const videoAssets = useMemo(() => (assets || []).filter((a) => assetSrc(a)), [assets]);
 
@@ -270,11 +275,13 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (src) wanted.add(src);
     }
     framesRef.current.retain(wanted);
+    const countReady = () => setLoadProgress({ ready: [...wanted].filter((u) => readyUrlsRef.current.has(u)).length, total: wanted.size });
+    countReady();
     for (const src of wanted) {
       const fs = framesRef.current.get(src); // kick off decoder init
       if (fs && !attachedReadyRef.current.has(src)) {
         attachedReadyRef.current.add(src);
-        fs.ready.then(() => setReadyTick((v) => v + 1)).catch(() => {});
+        fs.ready.then(() => { readyUrlsRef.current.add(src); setReadyTick((v) => v + 1); countReady(); }).catch(() => { readyUrlsRef.current.add(src); countReady(); });
       }
     }
     for (const u of [...attachedReadyRef.current]) if (!wanted.has(u)) attachedReadyRef.current.delete(u);
@@ -780,6 +787,14 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
           className="pointer-events-none absolute left-1 top-1 rounded bg-black/70 px-2 py-1 font-mono text-[11px] text-lime-300"
         >
           t=0.00
+        </div>
+      ) : null}
+      {loadProgress.total > 0 && loadProgress.ready < loadProgress.total ? (
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/40">
+          <div className="h-7 w-7 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+          <div className="text-xs text-white/80">
+            素材を準備中… {loadProgress.ready}/{loadProgress.total}
+          </div>
         </div>
       ) : null}
       {contentRect && renderCaptions.length ? (
