@@ -3304,8 +3304,8 @@ export function VideoReviewEditor({
                                 onChange={(e) => setStyle({ x: Number(e.target.value) })} />
                             </label>
                             <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
-                              上下 {Math.round((st.y ?? 0) * 100)}%
-                              <input type="range" min="-0.5" max="0.5" step="0.01" value={st.y ?? 0}
+                              上下 {Math.round((st.y ?? 0.08) * 100)}%（下0〜上92）
+                              <input type="range" min="0" max="0.92" step="0.01" value={st.y ?? 0.08}
                                 onChange={(e) => setStyle({ y: Number(e.target.value) })} />
                             </label>
                           </div>

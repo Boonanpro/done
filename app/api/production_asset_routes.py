@@ -478,10 +478,10 @@ def _caption_style_override(style: dict[str, Any] | None, base_font: int, width:
         ox = oy = 0.0
     if (abs(ox) > 1e-4 or abs(oy) > 1e-4) and width and height:
         ox = max(-0.3, min(0.3, ox))
-        margin_v = max(54, round(height * 0.08))
-        anchor_y = height - margin_v
+        # y = fraction UP from the screen bottom (positive = up); ~0.08 is the default lower spot.
+        yf = max(0.0, min(0.92, oy)) if abs(oy) > 1e-4 else 0.08
         px = round(width / 2 + ox * width)
-        py = round(anchor_y + oy * height)
+        py = round(height - yf * height)
         parts.append(f"\\an2\\pos({px},{py})")
     else:
         parts.append("\\an2")

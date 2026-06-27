@@ -115,10 +115,11 @@ export const CAPTION_DESIGN_PRESETS: ReadonlyArray<{ id: string; label: string; 
 export function captionAnchorStyle(design: CaptionDesign, outH: number): CSSProperties {
   // Anchored at the bottom; the user moves it freely with x/y (up/down/left/right). No top/center/
   // bottom preset — x is a fraction of width (full-width box → translateX %), y a fraction of height.
-  const margin = Math.round(outH * 0.07);
+  // y = vertical POSITION as a fraction up from the screen bottom: 0 = bottom edge, ~0.92 = near
+  // the top, positive = UP. Unset captions sit in the usual lower area (0.08). x = horizontal nudge.
   const dx = design.x || 0;
-  const dy = design.y || 0;
-  const nudge = dx || dy ? { transform: `translate(${(dx * 100).toFixed(3)}%, ${Math.round(dy * outH)}px)` } : {};
+  const yFrac = design.y == null ? 0.08 : Math.max(0, Math.min(0.92, design.y));
+  const nudge = dx ? { transform: `translateX(${(dx * 100).toFixed(3)}%)` } : {};
   return {
     position: 'absolute',
     left: 0,
@@ -126,7 +127,7 @@ export function captionAnchorStyle(design: CaptionDesign, outH: number): CSSProp
     display: 'flex',
     justifyContent: 'center',
     ...nudge,
-    bottom: margin,
+    bottom: Math.round(yFrac * outH),
     alignItems: 'flex-end',
   };
 }
