@@ -360,6 +360,28 @@ export function ProductionWorkspace({
     }
   };
 
+  const deleteAsset = async (asset: ProductionAsset) => {
+    if (!window.confirm(`素材「${asset.filename || asset.original_uri}」を削除しますか？
+元動画・プロキシ・サムネイルを完全に削除します（タイムライン削除とは別です）。`)) return;
+    const url = (force: boolean) => `/api/v1/production-assets/${asset.id}?room_id=${encodeURIComponent(roomId)}${force ? '&force=true' : ''}`;
+    try {
+      let res = await fetch(url(false), { method: 'DELETE', credentials: 'include' });
+      if (res.status === 409) {
+        const body = await res.json().catch(() => null);
+        const titles = ((body?.detail?.contents as Array<{ title: string }>) || []).map((c) => c.title).join('、');
+        if (!window.confirm(`この素材は「${titles}」で使用中です。
+削除すると該当プロジェクトのその部分が表示されなくなります。
+それでも削除しますか？`)) return;
+        res = await fetch(url(true), { method: 'DELETE', credentials: 'include' });
+      }
+      if (!res.ok) throw new Error(await res.text());
+      toast.success('素材を削除しました');
+      await loadAll();
+    } catch (error) {
+      toast.error('素材の削除に失敗', { description: String(error).slice(0, 180) });
+    }
+  };
+
   const createContent = async () => {
     const title = makeUniqueTitle(newContentTitle.trim() || `Content ${contents.length + 1}`, contents.map((content) => content.title));
     const selectedAssetIds = [...draftAssetIds];
@@ -1104,8 +1126,8 @@ export function ProductionWorkspace({
                         {asset.error ? <div className="mt-1 line-clamp-2 text-[11px] text-destructive">{asset.error}</div> : null}
                       </div>
                     </div>
-                    {asset.status !== 'proxy_ready' && asset.kind === 'video' ? (
-                      <div className="mt-2 flex justify-end">
+                    <div className="mt-2 flex justify-end gap-1.5">
+                      {asset.status !== 'proxy_ready' && asset.kind === 'video' ? (
                         <Button
                           variant="outline"
                           size="sm"
@@ -1118,8 +1140,20 @@ export function ProductionWorkspace({
                         >
                           Proxy
                         </Button>
-                      </div>
-                    ) : null}
+                      ) : null}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-muted-foreground hover:text-destructive"
+                        title="この素材を削除（元動画・プロキシも削除）"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void deleteAsset(asset);
+                        }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                   </div>
                 );
               })}
