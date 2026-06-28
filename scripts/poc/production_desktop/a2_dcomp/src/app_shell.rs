@@ -27,8 +27,9 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW, PostQuitMessage,
-    RegisterClassW, TranslateMessage, CW_USEDEFAULT, MSG, WINDOW_EX_STYLE, WM_DESTROY, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
+    GetWindowLongPtrW, PostQuitMessage, RegisterClassW, SetWindowLongPtrW, TranslateMessage,
+    CW_USEDEFAULT, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WM_DESTROY, WM_SIZE, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
@@ -77,13 +78,55 @@ fn parse_rect(s: &str) -> Option<(i32, i32, u32, u32)> {
     Some((x, y, w, h))
 }
 
+/// Parse a transport command {"cmd":"play"|"pause"|"seek","pos":N} from the IPC message.
+fn parse_cmd(s: &str) -> Option<(String, f64)> {
+    let ci = s.find("\"cmd\"")?;
+    let after = &s[ci + 5..];
+    let q1 = after.find('"')?;
+    let rest = &after[q1 + 1..];
+    let q2 = rest.find('"')?;
+    let cmd = rest[..q2].to_string();
+    let pos = (|| {
+        let pi = s.find("\"pos\"")?;
+        let r = &s[pi + 5..];
+        let c = r.find(':')?;
+        let a = r[c + 1..].trim_start();
+        let end = a
+            .find(|ch: char| !(ch.is_ascii_digit() || ch == '-' || ch == '.'))
+            .unwrap_or(a.len());
+        a[..end].parse::<f64>().ok()
+    })()
+    .unwrap_or(0.0);
+    Some((cmd, pos))
+}
+
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Stashed in the window's USERDATA so `wndproc` can reflow the webview on WM_SIZE.
+struct WndState {
+    controller: ICoreWebView2Controller,
+    dcomp: IDCompositionDevice,
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
+            WM_SIZE => {
+                // window resized → update the webview bounds so the UI reflows; the page then
+                // re-reports its #preview rect (IPC) and the video re-aligns.
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+                if !ptr.is_null() {
+                    let st = &*ptr;
+                    let mut rc = RECT::default();
+                    if GetClientRect(hwnd, &mut rc).is_ok() {
+                        let _ = st.controller.SetBounds(rc);
+                        let _ = st.dcomp.Commit();
+                    }
+                }
+                LRESULT(0)
+            }
             WM_DESTROY => {
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -166,7 +209,9 @@ fn main() -> anyhow::Result<()> {
         let sink = gst::ElementFactory::make("d3d12swapchainsink")
             .build()
             .map_err(|e| anyhow::anyhow!("make d3d12swapchainsink: {e}"))?;
-        let mut engine = Engine::new_with_video_sink(1080, 1920, 30, Some(sink.clone()))?;
+        // real audio output (autoaudiosink → wasapi); falls back to silent if unavailable
+        let audio_sink = gst::ElementFactory::make("autoaudiosink").build().ok();
+        let mut engine = Engine::new_full(1080, 1920, 30, Some(sink.clone()), audio_sink)?;
         let load = engine.load(&format!("{ROOM}/contents.json"), ROOM)?;
         eprintln!(
             "[a2-step3] timeline loaded: {} video / {} overlay / {} audio, preroll_ok={}",
@@ -190,6 +235,8 @@ fn main() -> anyhow::Result<()> {
             eprintln!("[a2-step3] swapchain bound to DComp video visual ({}x{})", BW, BH);
         }
 
+        // share the engine with the IPC handler (transport commands) — play/pause/seek are &self
+        let engine = Rc::new(engine);
         engine.play()?;
 
         // ---- composition WebView2 on top (opaque chrome, transparent stage) ----
@@ -252,6 +299,13 @@ fn main() -> anyhow::Result<()> {
         controller.SetIsVisible(true)?;
         let webview = controller.CoreWebView2()?;
 
+        // let wndproc reach the controller for WM_SIZE reflow
+        let state = Box::new(WndState {
+            controller: controller.clone(),
+            dcomp: dcomp.clone(),
+        });
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
+
         // step4: follow the #preview box. JS posts {x,y,w,h} in device px; we resize the sink
         // swapchain to (w,h), rebind it (resize may recreate buffers), and move the video visual
         // to (x,y). This is what makes the native video line up with the webview's preview box
@@ -259,6 +313,7 @@ fn main() -> anyhow::Result<()> {
         let sink_c = sink.clone();
         let video_c = video_visual.clone();
         let dcomp_c = dcomp.clone();
+        let engine_c = engine.clone();
         let handler = WebMessageReceivedEventHandler::create(Box::new(
             move |_wv: Option<ICoreWebView2>,
                   args: Option<ICoreWebView2WebMessageReceivedEventArgs>|
@@ -286,6 +341,14 @@ fn main() -> anyhow::Result<()> {
                             let _ = video_c.SetOffsetX2(x as f32);
                             let _ = video_c.SetOffsetY2(y as f32);
                             let _ = dcomp_c.Commit();
+                        }
+                    } else if let Some((cmd, pos)) = parse_cmd(&s) {
+                        // transport: route UI buttons to the engine (play/pause/seek)
+                        match cmd.as_str() {
+                            "play" => { let _ = engine_c.play(); }
+                            "pause" => { let _ = engine_c.pause(); }
+                            "seek" => { let _ = engine_c.seek(pos); }
+                            _ => {}
                         }
                     }
                 }

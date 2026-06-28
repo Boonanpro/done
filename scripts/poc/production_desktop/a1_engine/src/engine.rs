@@ -124,11 +124,24 @@ impl Engine {
     /// Like `new`, but lets the caller supply the GES pipeline's video-sink (e.g. a
     /// `d3d12swapchainsink` for on-screen DComp compositing). When `None`, a headless
     /// fpsdisplaysink→fakesink is used. With a custom sink the fps counters are unavailable.
+    /// Audio is silent (use `new_full` to supply an audio sink).
     pub fn new_with_video_sink(
         width: i32,
         height: i32,
         fps: i32,
         video_sink: Option<gst::Element>,
+    ) -> anyhow::Result<Self> {
+        Self::new_full(width, height, fps, video_sink, None)
+    }
+
+    /// Full constructor: supply both the video-sink and the audio-sink. `None` audio = a silent
+    /// `fakesink` (headless); pass e.g. `autoaudiosink` to actually play the timeline's audio.
+    pub fn new_full(
+        width: i32,
+        height: i32,
+        fps: i32,
+        video_sink: Option<gst::Element>,
+        audio_sink: Option<gst::Element>,
     ) -> anyhow::Result<Self> {
         let timeline = ges::Timeline::new_audio_video();
         let layer_video = timeline.append_layer(); // 0: fullscreen video
@@ -154,8 +167,14 @@ impl Engine {
         };
         pipeline.set_property("video-sink", &vsink_elem);
 
-        let asink = gst::ElementFactory::make("fakesink").build()?;
-        asink.set_property("sync", true);
+        let asink = match audio_sink {
+            Some(a) => a,
+            None => {
+                let a = gst::ElementFactory::make("fakesink").build()?;
+                a.set_property("sync", true);
+                a
+            }
+        };
         pipeline.set_property("audio-sink", &asink);
 
         pipeline.set_mode(ges::PipelineFlags::FULL_PREVIEW)?;
