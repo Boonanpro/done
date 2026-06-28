@@ -21,6 +21,11 @@ path = "src/webview_hole.rs"
 name = "video_compose"
 path = "src/video_compose.rs"
 
+# A3: desktop shell loads the real Next.js production UI (over HTTP) with native video on top
+[[bin]]
+name = "app_shell"
+path = "src/app_shell.rs"
+
 [dependencies]
 webview2-com = "0.34"
 anyhow = "1"
