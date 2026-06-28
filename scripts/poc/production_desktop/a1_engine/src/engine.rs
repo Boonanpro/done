@@ -367,6 +367,31 @@ impl Engine {
         Ok(true)
     }
 
+    /// Replace the whole timeline with `clips` (each tagged with a lane: "video"/"overlay"/
+    /// "audio"). Removes every existing clip and rebuilds — the robust way to mirror an external
+    /// editor's edits (move/trim/split/delete/link/ripple) in one shot. Returns clips added.
+    pub fn rebuild(&mut self, clips: Vec<(String, ClipModel)>) -> anyhow::Result<usize> {
+        for layer in [&self.layer_video, &self.layer_overlay, &self.layer_audio] {
+            for clip in layer.clips() {
+                let _ = layer.remove_clip(&clip);
+            }
+        }
+        self.clips.clear();
+        let mut n = 0usize;
+        for (lane, clip) in clips {
+            let (layer, transform) = match lane.as_str() {
+                "overlay" => (Layer::Overlay, true),
+                "audio" => (Layer::Audio, false),
+                _ => (Layer::Video, false),
+            };
+            if self.add_clip(clip, layer, transform).unwrap_or(false) {
+                n += 1;
+            }
+        }
+        self.timeline.commit_sync();
+        Ok(n)
+    }
+
     /// Flushing, frame-accurate seek; returns latency (commit→ASYNC_DONE) in ms.
     pub fn seek(&self, pos_s: f64) -> SeekResult {
         let flags = gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE;

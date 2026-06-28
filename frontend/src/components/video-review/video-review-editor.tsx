@@ -468,6 +468,38 @@ export function VideoReviewEditor({
   const [tool, setTool] = useState<Tool>('rect');
   const [annotations, setAnnotations] = useState<ReviewAnnotation[]>(initialAnnotations || []);
   const [editSequence, setEditSequence] = useState<EditSequence | null>(initialSequence || null);
+  // Native shell: mirror the WHOLE timeline to the GES engine on any edit (robust — covers
+  // move/trim/split/delete/link/ripple uniformly, no per-op mapping). Debounced so rapid drags
+  // don't thrash the rebuild; also runs on first load so the engine matches the editor's data.
+  useEffect(() => {
+    if (!nativeShell) return;
+    const seq = editSequence;
+    const t = window.setTimeout(() => {
+      const clips: Array<Record<string, unknown>> = [];
+      for (const tr of seq?.tracks || []) {
+        for (const c of tr.clips || []) {
+          let lane: 'video' | 'overlay' | 'audio' | null = null;
+          if (c.track === 'overlay' || c.composition === 'pip' || c.composition === 'overlay') lane = 'overlay';
+          else if (c.track === 'audio') lane = 'audio';
+          else if (c.track === 'video') lane = 'video';
+          if (!lane || !c.asset_id) continue;
+          clips.push({
+            lane,
+            id: String(c.id),
+            asset_id: String(c.asset_id),
+            source_start: c.source_start ?? 0,
+            timeline_start: c.timeline_start,
+            timeline_end: c.timeline_end,
+            ...(c.position
+              ? { position: { x: c.position.x, y: c.position.y, width: c.position.width, height: c.position.height } }
+              : {}),
+          });
+        }
+      }
+      nativeSend({ cmd: 'rebuild', clips });
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [editSequence, nativeShell, nativeSend]);
   const [pendingAnnotation, setPendingAnnotation] = useState<DraftAnnotation | null>(null);
   // A freshly-drawn shape waiting for the user to pick its type (ぼかし/生成/ダンに指示) from a
   // popover anchored at the shape. Nothing is committed until a type is chosen.
@@ -1218,7 +1250,6 @@ export function VideoReviewEditor({
     const annotationIds = selectedIds.length > 0 ? selectedIds : selectedId ? [selectedId] : [];
     const clipIds = selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : [];
     if (annotationIds.length === 0 && clipIds.length === 0) return;
-    if (nativeShell) clipIds.forEach((id) => nativeSend({ cmd: 'delete', id: String(id) }));
     if (annotationIds.length > 0) {
       const selectedSet = new Set(annotationIds);
       setAnnotations((prev) => prev.filter((a) => !selectedSet.has(a.id)));
@@ -1297,9 +1328,6 @@ export function VideoReviewEditor({
   // every clip under the playhead. Each pair of right-halves gets a fresh shared link_id so
   // A/V partners stay paired on both sides of the cut. Total duration is unchanged.
   const splitClipAtTime = useCallback((t: number, clipIds?: Set<string>) => {
-    if (nativeShell && clipIds && clipIds.size > 0) {
-      clipIds.forEach((id) => nativeSend({ cmd: 'split', id: String(id), v: t }));
-    }
     setEditSequence((current) => {
       if (!current) return current;
       const r = (v: number) => Number(v.toFixed(2));
@@ -1743,12 +1771,6 @@ export function VideoReviewEditor({
 
   const updateSequenceClips = useCallback((clipIds: Set<string>, patch: Partial<SequenceClip>) => {
     if (clipIds.size === 0) return;
-    // native: route a clip MOVE (timeline_start change) to the engine. (Trim/position/volume
-    // patches are left for the web preview / a later pass.)
-    if (nativeShell && patch.timeline_start !== undefined) {
-      const v = patch.timeline_start;
-      clipIds.forEach((id) => nativeSend({ cmd: 'move', id: String(id), v }));
-    }
     setEditSequence((current) => {
       if (!current) return current;
       const tracks = (current.tracks || []).map((track) => ({
