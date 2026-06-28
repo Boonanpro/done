@@ -116,8 +116,20 @@ impl Engine {
         Ok(())
     }
 
-    /// Create an engine with the output frame format. No media yet — call `load`.
+    /// Create an engine with the output frame format (headless fpsdisplaysink). Call `load`.
     pub fn new(width: i32, height: i32, fps: i32) -> anyhow::Result<Self> {
+        Self::new_with_video_sink(width, height, fps, None)
+    }
+
+    /// Like `new`, but lets the caller supply the GES pipeline's video-sink (e.g. a
+    /// `d3d12swapchainsink` for on-screen DComp compositing). When `None`, a headless
+    /// fpsdisplaysink→fakesink is used. With a custom sink the fps counters are unavailable.
+    pub fn new_with_video_sink(
+        width: i32,
+        height: i32,
+        fps: i32,
+        video_sink: Option<gst::Element>,
+    ) -> anyhow::Result<Self> {
         let timeline = ges::Timeline::new_audio_video();
         let layer_video = timeline.append_layer(); // 0: fullscreen video
         let layer_overlay = timeline.append_layer(); // 1: PiP overlay video
@@ -126,15 +138,21 @@ impl Engine {
         let pipeline = ges::Pipeline::new();
         pipeline.set_timeline(&timeline)?;
 
-        // Headless sinks. fpsdisplaysink gives us rendered/dropped counters for stability.
-        let vsink = gst::parse::bin_from_description(
-            "fpsdisplaysink name=fps text-overlay=false sync=true video-sink=\"fakesink sync=true\"",
-            true,
-        )?;
-        let fps_elem = vsink
-            .by_name("fps")
-            .ok_or_else(|| anyhow::anyhow!("fpsdisplaysink 'fps' not found"))?;
-        pipeline.set_property("video-sink", &vsink);
+        // Video sink: caller-supplied, else headless fpsdisplaysink (rendered/dropped counters).
+        let (vsink_elem, fps_elem) = match video_sink {
+            Some(sink) => (sink.clone(), sink),
+            None => {
+                let bin = gst::parse::bin_from_description(
+                    "fpsdisplaysink name=fps text-overlay=false sync=true video-sink=\"fakesink sync=true\"",
+                    true,
+                )?;
+                let fps = bin
+                    .by_name("fps")
+                    .ok_or_else(|| anyhow::anyhow!("fpsdisplaysink 'fps' not found"))?;
+                (bin.upcast::<gst::Element>(), fps)
+            }
+        };
+        pipeline.set_property("video-sink", &vsink_elem);
 
         let asink = gst::ElementFactory::make("fakesink").build()?;
         asink.set_property("sync", true);
