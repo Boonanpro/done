@@ -21,6 +21,7 @@ dependencies = [
  "a1_engine",
  "anyhow",
  "gstreamer",
+ "serde_json",
  "webview2-com",
  "windows",
 ]

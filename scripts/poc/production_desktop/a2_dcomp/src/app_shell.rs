@@ -49,7 +49,7 @@ use webview2_com::{
     CreateCoreWebView2EnvironmentCompletedHandler, WebMessageReceivedEventHandler,
 };
 
-use a1_engine::Engine;
+use a1_engine::{EditOp, Engine};
 use gstreamer as gst;
 use gstreamer::glib;
 use gstreamer::glib::translate::ToGlibPtr;
@@ -84,26 +84,33 @@ fn parse_rect(s: &str) -> Option<(i32, i32, u32, u32)> {
     Some((x, y, w, h))
 }
 
-/// Parse a transport command {"cmd":"play"|"pause"|"seek","pos":N} from the IPC message.
-fn parse_cmd(s: &str) -> Option<(String, f64)> {
-    let ci = s.find("\"cmd\"")?;
-    let after = &s[ci + 5..];
+fn str_field(s: &str, key: &str) -> Option<String> {
+    let i = s.find(&format!("\"{key}\""))?;
+    let after = &s[i + key.len() + 2..];
     let q1 = after.find('"')?;
     let rest = &after[q1 + 1..];
     let q2 = rest.find('"')?;
-    let cmd = rest[..q2].to_string();
-    let pos = (|| {
-        let pi = s.find("\"pos\"")?;
-        let r = &s[pi + 5..];
-        let c = r.find(':')?;
-        let a = r[c + 1..].trim_start();
-        let end = a
-            .find(|ch: char| !(ch.is_ascii_digit() || ch == '-' || ch == '.'))
-            .unwrap_or(a.len());
-        a[..end].parse::<f64>().ok()
-    })()
-    .unwrap_or(0.0);
-    Some((cmd, pos))
+    Some(rest[..q2].to_string())
+}
+
+fn num_field(s: &str, key: &str) -> Option<f64> {
+    let i = s.find(&format!("\"{key}\""))?;
+    let r = &s[i + key.len() + 2..];
+    let c = r.find(':')?;
+    let a = r[c + 1..].trim_start();
+    let end = a
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '-' || ch == '.'))
+        .unwrap_or(a.len());
+    a[..end].parse::<f64>().ok()
+}
+
+/// Parse a command {"cmd":STR,"id":STR?,"v":N? (legacy "pos")} → (cmd, id, value).
+/// Transport: play/pause/seek/ready. Edit: move/trim/split/delete (id + value).
+fn parse_cmd(s: &str) -> Option<(String, Option<String>, f64)> {
+    let cmd = str_field(s, "cmd")?;
+    let id = str_field(s, "id");
+    let v = num_field(s, "v").or_else(|| num_field(s, "pos")).unwrap_or(0.0);
+    Some((cmd, id, v))
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -266,6 +273,26 @@ fn main() -> anyhow::Result<()> {
             load.video_clips, load.overlay_clips, load.audio_clips, load.preroll_ok
         );
 
+        // real timeline (clips) JSON to hand to the UI when the page signals 'ready'
+        let timeline_json = {
+            let seq = a1_engine::timeline_model::parse_contents(&format!("{ROOM}/contents.json"))?;
+            let clips: Vec<_> = seq
+                .tracks
+                .iter()
+                .filter(|t| matches!(t.kind.as_str(), "video" | "overlay" | "audio"))
+                .flat_map(|t| {
+                    t.clips.iter().filter(|c| !c.id.is_empty()).map(move |c| {
+                        serde_json::json!({
+                            "id": c.id, "track": t.kind,
+                            "start": c.timeline_start, "end": c.timeline_end
+                        })
+                    })
+                })
+                .collect();
+            serde_json::json!({"type":"timeline","duration": seq.duration, "clips": clips})
+                .to_string()
+        };
+
         // size the sink's swapchain to the preview box, then bind it to the DComp visual
         sink.emit_by_name::<()>("resize", &[&BW, &BH]);
         let val = sink.property_value("swapchain");
@@ -283,9 +310,10 @@ fn main() -> anyhow::Result<()> {
             eprintln!("[a2-step3] swapchain bound to DComp video visual ({}x{})", BW, BH);
         }
 
-        // share the engine with the IPC handler (transport commands) — play/pause/seek are &self
-        let engine = Rc::new(engine);
-        engine.play()?;
+        // share the engine with the IPC handler. RefCell because apply_edit is &mut self
+        // (play/pause/seek are &self → borrow(); edits → borrow_mut()).
+        let engine = Rc::new(RefCell::new(engine));
+        engine.borrow().play()?;
 
         // ---- composition WebView2 on top (opaque chrome, transparent stage) ----
         let mut udata_dir = std::env::temp_dir();
@@ -364,6 +392,8 @@ fn main() -> anyhow::Result<()> {
         let video_c = video_visual.clone();
         let dcomp_c = dcomp.clone();
         let engine_c = engine.clone();
+        let webview_c = webview.clone();
+        let timeline_json_c = timeline_json.clone();
         let handler = WebMessageReceivedEventHandler::create(Box::new(
             move |_wv: Option<ICoreWebView2>,
                   args: Option<ICoreWebView2WebMessageReceivedEventArgs>|
@@ -392,12 +422,27 @@ fn main() -> anyhow::Result<()> {
                             let _ = video_c.SetOffsetY2(y as f32);
                             let _ = dcomp_c.Commit();
                         }
-                    } else if let Some((cmd, pos)) = parse_cmd(&s) {
-                        // transport: route UI buttons to the engine (play/pause/seek)
+                    } else if let Some((cmd, id, v)) = parse_cmd(&s) {
+                        // edits change the timeline (borrow_mut), then re-seek to refresh preview
+                        let edit = |op: EditOp| {
+                            let r = engine_c.borrow_mut().apply_edit(op);
+                            if r.ok {
+                                let _ = engine_c.borrow().seek(r.verify_pos_s);
+                            }
+                        };
                         match cmd.as_str() {
-                            "play" => { let _ = engine_c.play(); }
-                            "pause" => { let _ = engine_c.pause(); }
-                            "seek" => { let _ = engine_c.seek(pos); }
+                            // page is mounted → hand it the real timeline
+                            "ready" => unsafe {
+                                let m = wide(&timeline_json_c);
+                                let _ = webview_c.PostWebMessageAsString(PCWSTR(m.as_ptr()));
+                            },
+                            "play" => { let _ = engine_c.borrow().play(); }
+                            "pause" => { let _ = engine_c.borrow().pause(); }
+                            "seek" => { let _ = engine_c.borrow().seek(v); }
+                            "move" => if let Some(id) = id { edit(EditOp::Move { clip_id: id, new_start_s: v }); }
+                            "trim" => if let Some(id) = id { edit(EditOp::Trim { clip_id: id, new_duration_s: v }); }
+                            "split" => if let Some(id) = id { edit(EditOp::Split { clip_id: id, at_s: v }); }
+                            "delete" => if let Some(id) = id { edit(EditOp::Delete { clip_id: id }); }
                             _ => {}
                         }
                     }
@@ -419,7 +464,7 @@ fn main() -> anyhow::Result<()> {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        engine.set_null();
+        engine.borrow().set_null();
         Ok(())
     }
 }
