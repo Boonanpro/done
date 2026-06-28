@@ -30,9 +30,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowLongPtrW, PostQuitMessage, RegisterClassW, SetWindowLongPtrW, TranslateMessage,
     CW_USEDEFAULT, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE,
-    WNDCLASSW,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETFOCUS, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -43,6 +42,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN, COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP,
     COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE, COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN,
     COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP, COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS,
+    COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
 };
 use webview2_com::{
     CreateCoreWebView2CompositionControllerCompletedHandler,
@@ -181,6 +181,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 } else {
                     DefWindowProcW(hwnd, msg, wp, lp)
                 }
+            }
+            WM_SETFOCUS => {
+                // host window gained focus → hand keyboard focus to the webview so the page's
+                // keydown (space / S / Delete) fires natively.
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+                if !ptr.is_null() {
+                    let st = &*ptr;
+                    let _ = st
+                        .controller
+                        .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+                }
+                LRESULT(0)
             }
             WM_DESTROY => {
                 PostQuitMessage(0);
@@ -456,6 +468,8 @@ fn main() -> anyhow::Result<()> {
         let url = wide(URL);
         webview.Navigate(PCWSTR(url.as_ptr()))?;
         dcomp.Commit()?;
+        // give the webview keyboard focus so page-level shortcuts work without a click first
+        let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
 
         eprintln!("[a3] shell up; loaded Next.js production UI, native video on the preview box");
 
