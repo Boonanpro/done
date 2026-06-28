@@ -399,6 +399,42 @@ export function VideoReviewEditor({
   const stageRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Desktop shell (WebView2) integration. When hosted in the native shell, the GES engine
+  // composites the real video OVER this stage, so we skip the WebCodecs preview here (avoids the
+  // browser decode/OOM that motivated the desktop app) and just report the stage rect (device px)
+  // for the shell to align the native video. No effect on the normal web app (chrome.webview absent).
+  const nativeShell =
+    typeof window !== 'undefined' &&
+    !!(window as unknown as { chrome?: { webview?: unknown } }).chrome?.webview;
+  useEffect(() => {
+    if (!nativeShell) return;
+    const wv = (window as unknown as { chrome?: { webview?: { postMessage(m: string): void } } }).chrome?.webview;
+    const post = () => {
+      const el = stageRef.current;
+      if (!el || !wv) return;
+      const r = el.getBoundingClientRect();
+      const d = window.devicePixelRatio || 1;
+      wv.postMessage(
+        JSON.stringify({
+          x: Math.round(r.left * d),
+          y: Math.round(r.top * d),
+          w: Math.round(r.width * d),
+          h: Math.round(r.height * d),
+        }),
+      );
+    };
+    post();
+    const id = window.setInterval(post, 200);
+    window.addEventListener('resize', post);
+    const ro = new ResizeObserver(post);
+    if (stageRef.current) ro.observe(stageRef.current);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener('resize', post);
+      ro.disconnect();
+    };
+  }, [nativeShell]);
   // Unified undo/redo: one stack of combined {annotations, sequence} snapshots so Ctrl+Z
   // steps back through ALL edits (clip moves/cuts/deletes AND annotation changes) in the
   // order they happened. Rapid bursts (a drag, a slider sweep) coalesce into one entry.
@@ -2203,20 +2239,27 @@ export function VideoReviewEditor({
                 style={{ aspectRatio: previewAspect }}
                 onContextMenu={(event) => event.preventDefault()}
               >
-                <TimelinePreview
-                  sequence={editSequence}
-                  assets={sequenceAssets || []}
-                  blurRegionsAt={blurRegionsAt}
-                  currentTime={currentTime}
-                  playing={playing}
-                  format={editSequence?.format || initialSequence?.format || '9:16'}
-                  onTimeChange={handlePreviewTime}
-                  onEnded={handlePreviewEnded}
-                  className="h-full w-full"
-                  selectedClipId={selectedSequenceClipId}
-                  onPositionChange={(clipId, position) => updateSequenceClip(clipId, { position })}
-                  onTransformChange={(clipId, transform) => updateSequenceClip(clipId, { transform })}
-                />
+                {nativeShell ? (
+                  // native engine composites the real video over this stage (no WebCodecs here)
+                  <div className="flex h-full w-full items-center justify-center text-[10px] text-neutral-700">
+                    native preview
+                  </div>
+                ) : (
+                  <TimelinePreview
+                    sequence={editSequence}
+                    assets={sequenceAssets || []}
+                    blurRegionsAt={blurRegionsAt}
+                    currentTime={currentTime}
+                    playing={playing}
+                    format={editSequence?.format || initialSequence?.format || '9:16'}
+                    onTimeChange={handlePreviewTime}
+                    onEnded={handlePreviewEnded}
+                    className="h-full w-full"
+                    selectedClipId={selectedSequenceClipId}
+                    onPositionChange={(clipId, position) => updateSequenceClip(clipId, { position })}
+                    onTransformChange={(clipId, transform) => updateSequenceClip(clipId, { transform })}
+                  />
+                )}
 
                 <div
                   className={`absolute ${tool === 'select' ? 'pointer-events-none' : 'pointer-events-auto'}`}
