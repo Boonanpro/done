@@ -37,7 +37,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2CompositionController,
     ICoreWebView2Controller, ICoreWebView2Controller2, ICoreWebView2Environment,
-    ICoreWebView2Environment3, ICoreWebView2WebMessageReceivedEventArgs, COREWEBVIEW2_COLOR,
+    ICoreWebView2Environment3, ICoreWebView2NavigationCompletedEventArgs,
+    ICoreWebView2WebMessageReceivedEventArgs, COREWEBVIEW2_COLOR,
     COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN, COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
     COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN, COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP,
     COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE, COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN,
@@ -46,7 +47,8 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
 };
 use webview2_com::{
     CreateCoreWebView2CompositionControllerCompletedHandler,
-    CreateCoreWebView2EnvironmentCompletedHandler, WebMessageReceivedEventHandler,
+    CreateCoreWebView2EnvironmentCompletedHandler, NavigationCompletedEventHandler,
+    WebMessageReceivedEventHandler,
 };
 
 use a1_engine::{EditOp, Engine};
@@ -63,10 +65,12 @@ const BY: f32 = 120.0;
 const BW: u32 = 420;
 const BH: u32 = 600;
 
-// the REAL production editor (auth: log in once in the window; the webview persists the session).
-// In native mode the editor skips WebCodecs and reports its preview-stage rect, which our IPC
-// handler uses to place the native video over the stage.
-const URL: &str =
+// Auth flow: /production-workspace isn't login-guarded, but its data API needs a token. So we
+// first navigate to the guarded root (which redirects unauthed users to /login); once the user
+// lands anywhere logged-in (not /login), a NavigationCompleted handler sends the webview to the
+// real editor — now authenticated. The webview persists the session, so it's a one-time login.
+const START_URL: &str = "http://localhost:3000/";
+const EDITOR_URL: &str =
     "http://localhost:3000/production-workspace?room_id=bd05fcc0-c143-4d1c-828e-7624e087b6c1";
 
 /// Parse {"x":N,"y":N,"w":N,"h":N} (integers) from the IPC message — no serde dependency.
@@ -469,7 +473,32 @@ fn main() -> anyhow::Result<()> {
         let mut token = EventRegistrationToken::default();
         webview.add_WebMessageReceived(&handler, &mut token)?;
 
-        let url = wide(URL);
+        // Auth redirect: after the user lands logged-in (any URL that isn't /login), send the
+        // webview to the editor (once). Unauthed users hit /login first via the guarded root.
+        let wv_nav = webview.clone();
+        let redirected = Rc::new(std::cell::Cell::new(false));
+        let nav_handler = NavigationCompletedEventHandler::create(Box::new(
+            move |_wv: Option<ICoreWebView2>,
+                  _args: Option<ICoreWebView2NavigationCompletedEventArgs>|
+                  -> windows::core::Result<()> {
+                if !redirected.get() {
+                    let mut pw = PWSTR::null();
+                    unsafe { wv_nav.Source(&mut pw) }?;
+                    let src = unsafe { pw.to_string() }.unwrap_or_default();
+                    unsafe { CoTaskMemFree(Some(pw.0 as *const core::ffi::c_void)) };
+                    if !src.contains("/login") && !src.contains("/production-workspace") {
+                        redirected.set(true);
+                        let u = wide(EDITOR_URL);
+                        unsafe { wv_nav.Navigate(PCWSTR(u.as_ptr())) }?;
+                    }
+                }
+                Ok(())
+            },
+        ));
+        let mut nav_token = EventRegistrationToken::default();
+        webview.add_NavigationCompleted(&nav_handler, &mut nav_token)?;
+
+        let url = wide(START_URL);
         webview.Navigate(PCWSTR(url.as_ptr()))?;
         dcomp.Commit()?;
         // give the webview keyboard focus so page-level shortcuts work without a click first
