@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use windows::core::{Interface, PCWSTR};
+use windows::core::{Interface, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL};
 use windows::Win32::Graphics::Direct3D11::{
@@ -20,8 +20,9 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice, IDXGISwapChain};
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::WinRT::EventRegistrationToken;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -32,13 +33,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
-    CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2CompositionController,
+    CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2CompositionController,
     ICoreWebView2Controller, ICoreWebView2Controller2, ICoreWebView2Environment,
-    ICoreWebView2Environment3, COREWEBVIEW2_COLOR,
+    ICoreWebView2Environment3, ICoreWebView2WebMessageReceivedEventArgs, COREWEBVIEW2_COLOR,
 };
 use webview2_com::{
     CreateCoreWebView2CompositionControllerCompletedHandler,
-    CreateCoreWebView2EnvironmentCompletedHandler,
+    CreateCoreWebView2EnvironmentCompletedHandler, WebMessageReceivedEventHandler,
 };
 
 use a1_engine::Engine;
@@ -63,18 +64,51 @@ const HTML: &str = r#"
   .dot{width:10px;height:10px;border-radius:50%;background:#e0564b}
   .body{flex:1;display:flex;min-height:0;background:transparent}
   .side{width:220px;background:#26262c;border-right:1px solid #000;padding:10px;font-size:12px;color:#9aa}
-  .stage{flex:1;background:transparent}
+  .stage{flex:1;display:flex;align-items:center;justify-content:center;padding:16px;background:transparent}
+  /* transparent hole; the native video visual is positioned/sized to this rect via IPC */
+  #preview{aspect-ratio:9/16;height:92%;max-width:96%;background:transparent;border:3px solid #3a86ff;border-radius:8px}
 </style></head><body>
 <div class="app">
-  <div class="top"><span class="dot"></span><b>Production — A2 step3 (native GES video)</b>
-     <span style="color:#789;font-size:12px">stage に本物の編集タイムライン映像が合成（別ウィンドウ無し）</span></div>
+  <div class="top"><span class="dot"></span><b>Production — A2 step4 (video follows preview box)</b>
+     <span style="color:#789;font-size:12px">青枠＝プレビュー枠。ネイティブ映像が枠に追従（移動/リサイズ）</span></div>
   <div class="body">
-    <div class="side">素材パネル（ダミー）<br><br>UI=WebView2(composition)。<br>下層=GES d3d12swapchainsink の実映像。</div>
-    <div class="stage"></div>
+    <div class="side">素材パネル（ダミー）<br><br>UI=WebView2(composition)。<br>映像visualが青枠の矩形(device px)に追従。</div>
+    <div class="stage"><div id="preview"></div></div>
   </div>
 </div>
+<script>
+  function report(){
+    const r = document.getElementById('preview').getBoundingClientRect();
+    const d = window.devicePixelRatio || 1;
+    window.chrome.webview.postMessage(JSON.stringify({
+      x:Math.round(r.left*d), y:Math.round(r.top*d),
+      w:Math.round(r.width*d), h:Math.round(r.height*d)}));
+  }
+  window.addEventListener('resize', report);
+  new ResizeObserver(report).observe(document.getElementById('preview'));
+  window.addEventListener('load', ()=>{ report(); setInterval(report, 200); });
+</script>
 </body></html>
 "#;
+
+/// Parse {"x":N,"y":N,"w":N,"h":N} (integers) from the IPC message — no serde dependency.
+fn parse_rect(s: &str) -> Option<(i32, i32, u32, u32)> {
+    fn field(s: &str, key: &str) -> Option<i64> {
+        let i = s.find(&format!("\"{key}\""))?;
+        let rest = &s[i + key.len() + 2..];
+        let colon = rest.find(':')?;
+        let after = rest[colon + 1..].trim_start();
+        let end = after
+            .find(|c: char| !(c.is_ascii_digit() || c == '-'))
+            .unwrap_or(after.len());
+        after[..end].parse::<i64>().ok()
+    }
+    let x = field(s, "x")? as i32;
+    let y = field(s, "y")? as i32;
+    let w = field(s, "w")?.max(1) as u32;
+    let h = field(s, "h")?.max(1) as u32;
+    Some((x, y, w, h))
+}
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -250,11 +284,55 @@ fn main() -> anyhow::Result<()> {
         controller.SetBounds(client)?;
         controller.SetIsVisible(true)?;
         let webview = controller.CoreWebView2()?;
+
+        // step4: follow the #preview box. JS posts {x,y,w,h} in device px; we resize the sink
+        // swapchain to (w,h), rebind it (resize may recreate buffers), and move the video visual
+        // to (x,y). This is what makes the native video line up with the webview's preview box
+        // across move/resize/DPI/scroll.
+        let sink_c = sink.clone();
+        let video_c = video_visual.clone();
+        let dcomp_c = dcomp.clone();
+        let handler = WebMessageReceivedEventHandler::create(Box::new(
+            move |_wv: Option<ICoreWebView2>,
+                  args: Option<ICoreWebView2WebMessageReceivedEventArgs>|
+                  -> windows::core::Result<()> {
+                if let Some(args) = args {
+                    let mut pw = PWSTR::null();
+                    unsafe { args.TryGetWebMessageAsString(&mut pw) }?;
+                    let s = unsafe { pw.to_string() }.unwrap_or_default();
+                    unsafe { CoTaskMemFree(Some(pw.0 as *const core::ffi::c_void)) };
+                    if let Some((x, y, w, h)) = parse_rect(&s) {
+                        sink_c.emit_by_name::<()>("resize", &[&w, &h]);
+                        let val = sink_c.property_value("swapchain");
+                        let stash: glib::translate::Stash<
+                            *const glib::gobject_ffi::GValue,
+                            glib::Value,
+                        > = val.to_glib_none();
+                        let raw = unsafe { glib::gobject_ffi::g_value_get_pointer(stash.0) }
+                            as *mut core::ffi::c_void;
+                        unsafe {
+                            if !raw.is_null() {
+                                if let Some(sc) = IDXGISwapChain::from_raw_borrowed(&raw) {
+                                    let _ = video_c.SetContent(&sc.clone());
+                                }
+                            }
+                            let _ = video_c.SetOffsetX2(x as f32);
+                            let _ = video_c.SetOffsetY2(y as f32);
+                            let _ = dcomp_c.Commit();
+                        }
+                    }
+                }
+                Ok(())
+            },
+        ));
+        let mut token = EventRegistrationToken::default();
+        webview.add_WebMessageReceived(&handler, &mut token)?;
+
         let html = wide(HTML);
         webview.NavigateToString(PCWSTR(html.as_ptr()))?;
         dcomp.Commit()?;
 
-        eprintln!("[a2-step3] composition WebView2 up; engine playing real timeline");
+        eprintln!("[a2-step4] composition WebView2 up; video follows #preview via IPC");
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
