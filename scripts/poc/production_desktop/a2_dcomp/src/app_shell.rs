@@ -29,8 +29,9 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowLongPtrW, PostQuitMessage, RegisterClassW, SetWindowLongPtrW, TranslateMessage,
-    CW_USEDEFAULT, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSW,
+    CW_USEDEFAULT, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE,
+    WNDCLASSW,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
@@ -114,6 +115,7 @@ fn wide(s: &str) -> Vec<u16> {
 struct WndState {
     controller: ICoreWebView2Controller,
     comp_controller: ICoreWebView2CompositionController,
+    webview: ICoreWebView2,
     dcomp: IDCompositionDevice,
 }
 
@@ -157,6 +159,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         .SendMouseInput(kind, vkeys, 0, POINT { x, y });
                 }
                 LRESULT(0)
+            }
+            WM_KEYDOWN => {
+                // composition webview doesn't get keyboard focus by default → relay Space to the
+                // page so its spacebar play/pause handler fires.
+                if (wp.0 & 0xFFFF) == 0x20 {
+                    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+                    if !ptr.is_null() {
+                        let st = &*ptr;
+                        let m = wide("space");
+                        let _ = st.webview.PostWebMessageAsString(PCWSTR(m.as_ptr()));
+                    }
+                    LRESULT(0)
+                } else {
+                    DefWindowProcW(hwnd, msg, wp, lp)
+                }
             }
             WM_DESTROY => {
                 PostQuitMessage(0);
@@ -334,6 +351,7 @@ fn main() -> anyhow::Result<()> {
         let state = Box::new(WndState {
             controller: controller.clone(),
             comp_controller: comp_controller.clone(),
+            webview: webview.clone(),
             dcomp: dcomp.clone(),
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
