@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """
-PoC-2 video producer: builds the real GES timeline and plays it on-screen via
-d3d11videosink, looping. If --hwnd is given, renders INTO that window (GstVideoOverlay)
-so a Tauri/wry shell can overlay native video onto a WebView2 preview region.
-If --hwnd 0, the sink creates its own top-level window (standalone demo).
-
-Run with Python 3.9 + bundled gi (env set by run_poc2_player.sh).
+PoC-2 video producer. Plays the real GES timeline via d3d11videosink, letting the sink
+create its OWN window (class GSTD3D11) -- that path renders video reliably (set_window_handle
+into a foreign window renders black). The Rust shell finds that window by class, strips its
+border, and keeps it positioned over the WebView2 preview region. Loops forever.
 """
-import os, sys, argparse
+import os, sys
 import gi
 gi.require_version('Gst', '1.0')
 gi.require_version('GES', '1.0')
-gi.require_version('GstVideo', '1.0')
-from gi.repository import Gst, GES, GstVideo, GLib
+from gi.repository import Gst, GES, GLib
 import poc1
 
 
 def main():
+    import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("contents")
     ap.add_argument("asset_dir")
-    ap.add_argument("--hwnd", type=int, default=0, help="target window handle (0 = own window)")
+    ap.add_argument("--mute", action="store_true")
     ap.add_argument("--width", type=int, default=1080)
     ap.add_argument("--height", type=int, default=1920)
     ap.add_argument("--fps", type=int, default=30)
@@ -29,54 +27,40 @@ def main():
 
     Gst.init(None); GES.init()
 
+    if os.environ.get("POC2_TESTSRC"):
+        # Debug: bright SMPTE bars into d3d11videosink's own window (unambiguous overlay check).
+        p = Gst.parse_launch("videotestsrc pattern=smpte ! videoconvert ! d3d11videosink")
+        p.set_state(Gst.State.PLAYING)
+        sys.stderr.write("[player] PLAYING (TESTSRC bars, own window).\n"); sys.stderr.flush()
+        GLib.MainLoop().run()
+        return
+
     by_kind, seq_dur = poc1.load_clips(args.contents)
     timeline, counts, n_assets = poc1.build_timeline(by_kind, args.asset_dir, args)
-    sys.stderr.write(f"[player] timeline built: {counts}, assets={n_assets}, dur={seq_dur:.1f}s\n")
-    sys.stderr.flush()
+    sys.stderr.write(f"[player] timeline built: {counts}, assets={n_assets}, dur={seq_dur:.1f}s\n"); sys.stderr.flush()
 
     pipe = GES.Pipeline(); pipe.set_timeline(timeline)
     vsink = Gst.ElementFactory.make("d3d11videosink", "vsink")
     vsink.set_property("force-aspect-ratio", True)
     pipe.set_property("video-sink", vsink)
-    asink = Gst.ElementFactory.make("autoaudiosink")
-    pipe.set_property("audio-sink", asink or Gst.ElementFactory.make("fakesink"))
+    if args.mute:
+        pipe.set_property("audio-sink", Gst.ElementFactory.make("fakesink"))
+    else:
+        pipe.set_property("audio-sink", Gst.ElementFactory.make("autoaudiosink") or Gst.ElementFactory.make("fakesink"))
     pipe.set_mode(GES.PipelineFlags.FULL_PREVIEW)
 
-    target_hwnd = args.hwnd
-
-    bus = pipe.get_bus()
-    bus.enable_sync_message_emission()
-
-    def on_sync(_bus, message):
-        s = message.get_structure()
-        if s and GstVideo.is_video_overlay_prepare_window_handle_message(message):
-            if target_hwnd:
-                sys.stderr.write(f"[player] binding video to hwnd {target_hwnd}\n"); sys.stderr.flush()
-                overlay = message.src
-                overlay.set_window_handle(target_hwnd)
-                try:
-                    overlay.set_render_rectangle(0, 0, -1, -1)  # fill the host window
-                except Exception:
-                    pass
-    bus.connect("sync-message::element", on_sync)
-
     loop = GLib.MainLoop()
-
-    def on_msg(_bus, message):
-        t = message.type
-        if t == Gst.MessageType.EOS:
-            pipe.seek_simple(Gst.Format.TIME,
-                             Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, 0)  # loop
-        elif t == Gst.MessageType.ERROR:
-            err, dbg = message.parse_error()
-            sys.stderr.write(f"[player] ERROR {err}: {dbg}\n"); sys.stderr.flush()
-            loop.quit()
+    bus = pipe.get_bus(); bus.add_signal_watch()
+    def on_msg(_b, m):
+        if m.type == Gst.MessageType.EOS:
+            pipe.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT, 0)
+        elif m.type == Gst.MessageType.ERROR:
+            e, d = m.parse_error(); sys.stderr.write(f"[player] ERROR {e}: {d}\n"); sys.stderr.flush()
         return True
-    bus.add_signal_watch()
     bus.connect("message", on_msg)
 
     pipe.set_state(Gst.State.PLAYING)
-    sys.stderr.write("[player] PLAYING (looping). Ctrl-C / close window to stop.\n"); sys.stderr.flush()
+    sys.stderr.write("[player] PLAYING (looping, own GSTD3D11 window).\n"); sys.stderr.flush()
     try:
         loop.run()
     except KeyboardInterrupt:
