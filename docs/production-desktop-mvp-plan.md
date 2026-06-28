@@ -32,9 +32,9 @@
 ### Phase A — 背骨＆一体感
 | # | 内容 | 依存 | 規模 |
 |---|---|---|---|
-| **A0** | **Rust+GES ビルド/インプロセス再生の premise**：gstreamer-rs/ges を Windows MSVC でリンク（pkg-config/system-deps 配線、devel一式は導入済 `C:\Users\Owner\gstreamer-poc`）→ timeline をRustで組んで自前ウィンドウに再生。**PoC‑1のRust版＝言語切替の早期de-risk** | PoC harness | M |
-| A1 | **Rustエンジンモジュール（インプロセス）**：`/production-assets` timeline JSON から構築＋`load/seek/play/pause/applyEdit/getState`。Pythonハーネスで parity 検証 | A0 | M |
-| A2 | **DComp一体化**（WebView2 visual hosting / `CoreWebView2CompositionController`）＝上記合格条件 | A0 | L |
+| **A0** ✅ | **Rust+GES ビルド/インプロセス再生の premise**：gstreamer-rs/ges を Windows MSVC でリンク（pkg-config/system-deps 配線、devel一式は導入済 `C:\Users\Owner\gstreamer-poc`）→ timeline をRustで組んで自前ウィンドウに再生。**PoC‑1のRust版＝言語切替の早期de-risk** | PoC harness | M |
+| **A1** ✅ | **Rustエンジンモジュール（インプロセス）**：`/production-assets` timeline JSON から構築＋`load/seek/play/pause/applyEdit/getState`。Pythonハーネスで parity 検証 → **GREEN**（同一機で poc1/poc3 と数値一致：build0.24s/preroll0.12s・60s再生1811フレームdrop0/30.2fps・scrub median188ms・編集reflect median0.3ms・peak RSS729MB・HW d3d11h264dec）。成果物=`scripts/poc/production_desktop/a1_engine/`、詳細=`docs/production-desktop-a1-results.md` | A0 | M |
+| A2 ← **次** | **DComp一体化**（WebView2 visual hosting / `CoreWebView2CompositionController`）＝上記合格条件 | A0 | L |
 | A3 | 既存React制作UI（production-workspace/video-review-editor）を Tauri webview に載せる | A1,A2 | M |
 
 → 完了で「実プロジェクトが1つのアプリ内で本物のUIで一体表示」。

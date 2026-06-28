@@ -1,0 +1,4 @@
+target/
+# harness run artifacts
+*_err.log
+*_report.json
