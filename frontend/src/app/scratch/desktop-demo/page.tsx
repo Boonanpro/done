@@ -1,45 +1,48 @@
 'use client';
 
-// A3 (look-first): a production-tab-style editor UI served by Next.js, loaded by the desktop
-// shell's composition WebView2. The shell composites the native GES video on top of the
-// #preview box (rect posted below in device px) and routes transport commands to the engine.
-// Scrubbing is timeline-direct: click/drag the bottom timeline to seek. Dummy data only.
+// A3 + real-edit (look-first): the desktop shell reads the real room timeline (contents.json),
+// hands it to this page on 'ready', and routes edits back to the GES engine (apply_edit).
+// The bottom timeline shows the ACTUAL clips; drag to move, drag the right edge to trim, and
+// use 分割 / 削除 on the selected clip. Scrub by clicking/dragging empty timeline. Dummy assets.
 
 import { useEffect, useRef, useState } from 'react';
 
-const DURATION = 361; // timeline length (s) — matches the room content (~360.9s)
+type Clip = { id: string; track: 'video' | 'overlay' | 'audio'; start: number; end: number };
 
 function fmt(s: number) {
   s = Math.max(0, Math.floor(s));
-  const m = Math.floor(s / 60);
-  const ss = s % 60;
-  return `${m}:${String(ss).padStart(2, '0')}`;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
+
+const LANES: { key: Clip['track']; label: string; cls: string }[] = [
+  { key: 'video', label: '映像', cls: 'bg-sky-600/80' },
+  { key: 'overlay', label: 'PiP', cls: 'bg-purple-600/80' },
+  { key: 'audio', label: '音声', cls: 'bg-emerald-600/80' },
+];
 
 export default function DesktopDemo() {
   const [playing, setPlaying] = useState(true);
   const [frac, setFrac] = useState(0);
+  const [duration, setDuration] = useState(361);
+  const [clips, setClips] = useState<Clip[]>([]);
+  const [sel, setSel] = useState<string | null>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const scrubbing = useRef(false);
+  const drag = useRef<null | { id: string; mode: 'move' | 'trim'; x0: number; s0: number; e0: number }>(null);
 
   const send = (o: Record<string, unknown>) => {
     (window as unknown as { chrome?: { webview?: { postMessage(m: string): void } } })
       .chrome?.webview?.postMessage(JSON.stringify(o));
   };
 
-  // report the #preview rect (device px) so the shell can place the native video on it
+  // report the #preview rect (device px) + ask the shell for the real timeline
   useEffect(() => {
     const post = () => {
       const el = document.getElementById('preview');
       if (!el) return;
       const r = el.getBoundingClientRect();
       const d = window.devicePixelRatio || 1;
-      send({
-        x: Math.round(r.left * d),
-        y: Math.round(r.top * d),
-        w: Math.round(r.width * d),
-        h: Math.round(r.height * d),
-      });
+      send({ x: Math.round(r.left * d), y: Math.round(r.top * d), w: Math.round(r.width * d), h: Math.round(r.height * d) });
     };
     post();
     const id = window.setInterval(post, 200);
@@ -47,6 +50,7 @@ export default function DesktopDemo() {
     const el = document.getElementById('preview');
     const ro = new ResizeObserver(post);
     if (el) ro.observe(el);
+    send({ cmd: 'ready' }); // request the real clips
     return () => {
       window.clearInterval(id);
       window.removeEventListener('resize', post);
@@ -55,70 +59,130 @@ export default function DesktopDemo() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // advance the playhead locally while playing (approximate; the actual seeks are exact)
+  // messages from the shell: 'space' (toggle) or the timeline JSON
   useEffect(() => {
-    if (!playing) return;
-    let raf = 0;
-    let last = performance.now();
-    const tick = (now: number) => {
-      const dt = (now - last) / 1000;
-      last = now;
-      setFrac((f) => Math.min(1, f + dt / DURATION));
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [playing]);
-
-  // spacebar relayed from the desktop shell → toggle play/pause
-  useEffect(() => {
-    const wv = (
-      window as unknown as {
-        chrome?: {
-          webview?: {
-            addEventListener(t: string, h: (e: { data: unknown }) => void): void;
-            removeEventListener(t: string, h: (e: { data: unknown }) => void): void;
-          };
-        };
-      }
-    ).chrome?.webview;
+    const wv = (window as unknown as { chrome?: { webview?: { addEventListener(t: string, h: (e: { data: unknown }) => void): void; removeEventListener(t: string, h: (e: { data: unknown }) => void): void } } }).chrome?.webview;
     if (!wv) return;
     const onMsg = (e: { data: unknown }) => {
-      if (e.data === 'space')
+      if (e.data === 'space') {
         setPlaying((p) => {
           const np = !p;
           send({ cmd: np ? 'play' : 'pause' });
           return np;
         });
+        return;
+      }
+      try {
+        const d = JSON.parse(String(e.data));
+        if (d?.type === 'timeline' && Array.isArray(d.clips)) {
+          setClips(d.clips as Clip[]);
+          if (typeof d.duration === 'number' && d.duration > 0) setDuration(d.duration);
+        }
+      } catch {
+        /* not JSON */
+      }
     };
     wv.addEventListener('message', onMsg);
     return () => wv.removeEventListener('message', onMsg);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const seekToClientX = (clientX: number) => {
+  // advance the playhead locally while playing (approximate; the real seeks are exact)
+  useEffect(() => {
+    if (!playing) return;
+    let raf = 0;
+    let prev = performance.now();
+    const loop = (now: number) => {
+      const dt = (now - prev) / 1000;
+      prev = now;
+      setFrac((f) => Math.min(1, f + dt / duration));
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, duration]);
+
+  const fracFromX = (clientX: number) => {
     const el = trackRef.current;
-    if (!el) return;
+    if (!el) return 0;
     const r = el.getBoundingClientRect();
-    const f = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
-    setFrac(f);
-    send({ cmd: 'seek', pos: f * DURATION });
+    return Math.min(1, Math.max(0, (clientX - r.left) / r.width));
   };
-  const onDown = (e: React.PointerEvent) => {
+
+  // scrub on empty timeline
+  const onTrackDown = (e: React.PointerEvent) => {
     scrubbing.current = true;
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-    seekToClientX(e.clientX);
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+    const f = fracFromX(e.clientX);
+    setFrac(f);
+    send({ cmd: 'seek', pos: f * duration });
   };
-  const onMove = (e: React.PointerEvent) => {
-    if (scrubbing.current) seekToClientX(e.clientX);
+  const onTrackMove = (e: React.PointerEvent) => {
+    if (!scrubbing.current) return;
+    const f = fracFromX(e.clientX);
+    setFrac(f);
+    send({ cmd: 'seek', pos: f * duration });
   };
-  const onUp = () => {
+  const onTrackUp = () => {
     scrubbing.current = false;
   };
 
-  const toggle = (p: boolean) => {
-    setPlaying(p);
-    send({ cmd: p ? 'play' : 'pause' });
+  // clip drag (move / trim)
+  const onClipDown = (e: React.PointerEvent, c: Clip, mode: 'move' | 'trim') => {
+    e.stopPropagation();
+    setSel(c.id);
+    drag.current = { id: c.id, mode, x0: e.clientX, s0: c.start, e0: c.end };
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+  };
+  const onClipMove = (e: React.PointerEvent) => {
+    const d = drag.current;
+    if (!d) return;
+    const el = trackRef.current;
+    if (!el) return;
+    const dsec = ((e.clientX - d.x0) / el.getBoundingClientRect().width) * duration;
+    setClips((cs) =>
+      cs.map((c) => {
+        if (c.id !== d.id) return c;
+        if (d.mode === 'move') {
+          const len = d.e0 - d.s0;
+          const ns = Math.max(0, d.s0 + dsec);
+          return { ...c, start: ns, end: ns + len };
+        }
+        const ne = Math.max(d.s0 + 0.4, Math.min(duration, d.e0 + dsec));
+        return { ...c, end: ne };
+      }),
+    );
+  };
+  const onClipUp = () => {
+    const d = drag.current;
+    drag.current = null;
+    if (!d) return;
+    const c = clips.find((x) => x.id === d.id);
+    if (!c) return;
+    if (d.mode === 'move') send({ cmd: 'move', id: c.id, v: c.start });
+    else send({ cmd: 'trim', id: c.id, v: c.end - c.start });
+  };
+
+  const toggle = () =>
+    setPlaying((p) => {
+      const np = !p;
+      send({ cmd: np ? 'play' : 'pause' });
+      return np;
+    });
+
+  const splitSel = () => {
+    if (!sel) return;
+    const at = frac * duration;
+    const c = clips.find((x) => x.id === sel);
+    if (!c || at <= c.start + 0.2 || at >= c.end - 0.2) return;
+    send({ cmd: 'split', id: sel, v: at });
+    setClips((cs) => cs.flatMap((x) => (x.id === sel ? [{ ...x, end: at }, { ...x, id: `${x.id}__b`, start: at }] : [x])));
+  };
+  const deleteSel = () => {
+    if (!sel) return;
+    send({ cmd: 'delete', id: sel });
+    setClips((cs) => cs.filter((x) => x.id !== sel));
+    setSel(null);
   };
 
   return (
@@ -128,16 +192,10 @@ export default function DesktopDemo() {
         <span className="font-semibold">制作タブ — Desktop</span>
         <span className="text-xs text-zinc-400">StyleUp UGC 01</span>
         <div className="ml-auto flex items-center gap-2">
-          <button
-            onClick={() => toggle(!playing)}
-            className="w-9 rounded bg-zinc-700 px-2 py-1 text-sm hover:bg-zinc-600"
-            title={playing ? '一時停止' : '再生'}
-          >
+          <button onClick={toggle} className="w-9 rounded bg-zinc-700 px-2 py-1 text-sm hover:bg-zinc-600" title={playing ? '一時停止' : '再生'}>
             {playing ? '⏸' : '▶'}
           </button>
-          <span className="tabular-nums text-xs text-zinc-400">
-            {fmt(frac * DURATION)} / {fmt(DURATION)}
-          </span>
+          <span className="tabular-nums text-xs text-zinc-400">{fmt(frac * duration)} / {fmt(duration)}</span>
           <button className="rounded bg-blue-600 px-3 py-1 text-sm hover:bg-blue-500">書き出し</button>
         </div>
       </header>
@@ -147,10 +205,7 @@ export default function DesktopDemo() {
           <div className="mb-2 text-xs font-semibold text-zinc-400">素材</div>
           <div className="grid grid-cols-2 gap-2">
             {Array.from({ length: 6 }).map((_, i) => (
-              <div
-                key={i}
-                className="flex aspect-video items-center justify-center rounded border border-black/40 bg-zinc-700/70 text-[10px] text-zinc-400"
-              >
+              <div key={i} className="flex aspect-video items-center justify-center rounded border border-black/40 bg-zinc-700/70 text-[10px] text-zinc-400">
                 clip {i + 1}
               </div>
             ))}
@@ -158,52 +213,66 @@ export default function DesktopDemo() {
         </aside>
 
         <main className="flex min-w-0 flex-1 items-center justify-center bg-[#15151a] p-5">
-          <div
-            id="preview"
-            className="relative flex aspect-[9/16] h-full max-h-full max-w-full items-center justify-center rounded-lg border-2 border-blue-500/70 bg-black/40 shadow-[0_0_0_4px_rgba(59,130,246,0.15)]"
-          >
+          <div id="preview" className="relative flex aspect-[9/16] h-full max-h-full max-w-full items-center justify-center rounded-lg border-2 border-blue-500/70 bg-black/40 shadow-[0_0_0_4px_rgba(59,130,246,0.15)]">
             <span className="text-xs text-zinc-500">プレビュー（ネイティブ映像）</span>
           </div>
         </main>
       </div>
 
-      <footer className="h-32 shrink-0 overflow-hidden border-t border-black/60 bg-[#1d1d24] p-2">
+      <footer className="h-36 shrink-0 overflow-hidden border-t border-black/60 bg-[#1d1d24] p-2">
         <div className="mb-1 flex items-center justify-between px-1">
-          <span className="text-[10px] text-zinc-500">タイムライン（クリック / ドラッグでシーク）</span>
-          <span className="tabular-nums text-[10px] text-zinc-400">{fmt(frac * DURATION)}</span>
+          <span className="text-[10px] text-zinc-500">
+            タイムライン（{clips.length}クリップ・クリップ=ドラッグ移動/右端=トリム・空白=シーク）
+          </span>
+          <div className="flex items-center gap-2">
+            <button onClick={splitSel} disabled={!sel} className="rounded bg-zinc-700 px-2 py-0.5 text-[11px] hover:bg-zinc-600 disabled:opacity-40" title="再生ヘッド位置で分割">
+              分割
+            </button>
+            <button onClick={deleteSel} disabled={!sel} className="rounded bg-red-700/80 px-2 py-0.5 text-[11px] hover:bg-red-600 disabled:opacity-40" title="選択クリップを削除">
+              削除
+            </button>
+            <span className="tabular-nums text-[10px] text-zinc-400">{fmt(frac * duration)}</span>
+          </div>
         </div>
-        <div
-          ref={trackRef}
-          onPointerDown={onDown}
-          onPointerMove={onMove}
-          onPointerUp={onUp}
-          className="relative cursor-pointer select-none"
-        >
-          <div className="space-y-1">
-            {['映像', 'PiP', '音声'].map((lane, li) => (
-              <div key={li} className="flex h-7 items-center gap-1">
-                <div className="w-10 shrink-0 text-[10px] text-zinc-500">{lane}</div>
-                <div className="flex flex-1 gap-0.5 overflow-hidden">
-                  {Array.from({ length: 18 - li * 2 }).map((_, i) => (
-                    <div
-                      key={i}
-                      className={`h-6 rounded-sm ${
-                        li === 0 ? 'bg-sky-700/70' : li === 1 ? 'bg-purple-700/70' : 'bg-emerald-700/70'
-                      }`}
-                      style={{ width: `${30 + ((i * 7) % 40)}px` }}
-                    />
-                  ))}
-                </div>
-              </div>
+
+        <div className="flex gap-1">
+          <div className="flex w-10 shrink-0 flex-col gap-1">
+            {LANES.map((l) => (
+              <div key={l.key} className="flex h-6 items-center text-[10px] text-zinc-500">{l.label}</div>
             ))}
           </div>
-          {/* playhead — same full-track coordinate space as the seek calc, so it sits exactly
-              under the cursor */}
-          <div
-            className="pointer-events-none absolute bottom-0 top-0 w-0.5 bg-red-500"
-            style={{ left: `${frac * 100}%` }}
-          >
-            <div className="absolute -left-1 -top-1 h-2 w-2 rounded-full bg-red-500" />
+          <div ref={trackRef} onPointerDown={onTrackDown} onPointerMove={onTrackMove} onPointerUp={onTrackUp} className="relative flex-1 cursor-pointer">
+            <div className="flex flex-col gap-1">
+              {LANES.map((l) => (
+                <div key={l.key} className="relative h-6 overflow-hidden rounded bg-black/20">
+                  {clips
+                    .filter((c) => c.track === l.key)
+                    .map((c) => (
+                      <div
+                        key={c.id}
+                        onPointerDown={(e) => onClipDown(e, c, 'move')}
+                        onPointerMove={onClipMove}
+                        onPointerUp={onClipUp}
+                        className={`absolute top-0 h-6 cursor-grab rounded-sm border ${l.cls} ${
+                          sel === c.id ? 'z-10 border-white' : 'border-black/30'
+                        }`}
+                        style={{ left: `${(c.start / duration) * 100}%`, width: `${Math.max(0.25, ((c.end - c.start) / duration) * 100)}%` }}
+                      >
+                        <div
+                          onPointerDown={(e) => onClipDown(e, c, 'trim')}
+                          onPointerMove={onClipMove}
+                          onPointerUp={onClipUp}
+                          className="absolute right-0 top-0 h-full w-1 cursor-ew-resize bg-white/40"
+                        />
+                      </div>
+                    ))}
+                </div>
+              ))}
+            </div>
+            {/* playhead — same coordinate space as the clip lanes */}
+            <div className="pointer-events-none absolute inset-y-0 w-0.5 bg-red-500" style={{ left: `${frac * 100}%` }}>
+              <div className="absolute -left-1 -top-1 h-2 w-2 rounded-full bg-red-500" />
+            </div>
           </div>
         </div>
       </footer>
