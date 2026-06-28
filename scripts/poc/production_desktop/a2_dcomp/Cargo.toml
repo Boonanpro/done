@@ -1,0 +1,41 @@
+[package]
+name = "a2_dcomp"
+version = "0.1.0"
+edition = "2021"
+
+# A2: DirectComposition integration for the production-desktop MVP.
+# step1 (this binary `dcomp_color`): prove in-process DComp compositing of a colored
+# composition swapchain — the foundation the WebView2 visual + GES video visual sit on.
+
+[[bin]]
+name = "dcomp_color"
+path = "src/dcomp_color.rs"
+
+# step2: composition-mode WebView2 with a transparent preview hole over the DComp color visual
+[[bin]]
+name = "webview_hole"
+path = "src/webview_hole.rs"
+
+[dependencies]
+webview2-com = "0.34"
+anyhow = "1"
+
+# pinned to 0.58 to match webview2-com 0.34 (shared windows-core ABI for COM interop)
+[dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_DirectComposition",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_HiDpi",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Com",
+  "Win32_Graphics_Gdi",
+]
+
+[profile.release]
+opt-level = 1
