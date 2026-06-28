@@ -16,9 +16,16 @@ path = "src/dcomp_color.rs"
 name = "webview_hole"
 path = "src/webview_hole.rs"
 
+# step3: real GES video (d3d12swapchainsink) composited into the DComp visual under the webview
+[[bin]]
+name = "video_compose"
+path = "src/video_compose.rs"
+
 [dependencies]
 webview2-com = "0.34"
 anyhow = "1"
+a1_engine = { path = "../a1_engine" }
+gstreamer = "0.23"
 
 # pinned to 0.58 to match webview2-com 0.34 (shared windows-core ABI for COM interop)
 [dependencies.windows]
@@ -34,6 +41,7 @@ features = [
   "Win32_UI_HiDpi",
   "Win32_System_LibraryLoader",
   "Win32_System_Com",
+  "Win32_System_WinRT",
   "Win32_Graphics_Gdi",
 ]
 
