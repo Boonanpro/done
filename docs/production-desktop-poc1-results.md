@@ -100,3 +100,35 @@
 - ✅ **PoC‑3（編集の即時反映）** — GREEN
 
 → 残りは **PoC‑2 のみ**。3つgreenでMVP着手。
+
+---
+
+# PoC‑2 — プレビュー面の WebView 統合（2026-06-28）= 実装完了・目視検証待ち
+
+§6 推奨①「ネイティブ・オーバーレイ面」を、**別プロセス分離**で実装：
+- **Rust(wry + tao + WebView2)** がシェル。webviewに「素材パネル＋青いプレビュー枠(div)」のダミーUIを表示。
+- webview の JS が preview div の矩形(devicePixel)を `window.ipc` で Rust に送信（load時＋resize＋ResizeObserver＋300ms間隔）。
+- Rust は親ウィンドウの**子HWND(STATIC)をwebviewの上**に作り、その矩形へ `SetWindowPos` で追従。
+- **GES映像は別プロセス**(`poc2_player.py`)が、その子HWNDに `GstVideoOverlay.set_window_handle` で直接描画（d3d11videosink、ループ再生）。
+- → gstreamer-rs を Rust から直リンクせず、PoC‑1の実証済みPython harnessをそのまま映像源に再利用。
+
+## ステータス: ✅ ビルド＆起動チェーン成立 / ⏳ 視覚的整列はユーザー目視待ち
+
+headlessで確認できた範囲：
+- `cargo build` 成功（wry 0.50 / tao 0.31 / Win32 FFIで`CreateWindowExW`+`SetWindowPos`、`windows`クレート不使用）。
+- 起動で **Rustが子HWND生成→GES playerをそのHWNDにspawn→player が PLAYING(ループ)** まで到達、クラッシュ無し。
+- IPC(div矩形→Rust→SetWindowPos)の配線完了。
+
+**残（要ユーザー画面）**: 青枠に映像がピタリ重なるか／リサイズ追従の遅延・ちらつき／WebView2のairspace(ネイティブ子がweb内容の上に出るか)。これらは目視でしか判定できないため、ユーザーが起動して確認する。
+
+## 触り方（ユーザー）
+
+Claude Code の入力欄で（Git Bash の `!`）：
+```
+! bash "C:/Users/Owner/AppData/Local/Temp/claude/<session>/scratchpad/poc2_overlay/run_poc2.sh"
+```
+ウィンドウが開き、青い枠内に縦型UGCタイムライン(6分・260クリップ)がループ再生。**ウィンドウをリサイズ**して映像が枠に追従するか見る。閉じる＝ウィンドウを閉じる。
+（repoから再ビルドする場合：`scripts/poc/production_desktop/poc2_overlay/` で `cargo build` → `run_poc2.sh`。要 GStreamer導入＋Python3.9、レシピは本書PoC‑1節。）
+
+## premise 進捗（更新）
+- ✅ PoC‑1 GREEN / ✅ PoC‑3 GREEN / 🟡 PoC‑2 実装完了・**視覚検証待ち**（OKなら3つ揃いMVPへ）
