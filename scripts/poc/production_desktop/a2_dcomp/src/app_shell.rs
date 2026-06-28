@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use windows::core::{Interface, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -29,7 +29,8 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
     GetWindowLongPtrW, PostQuitMessage, RegisterClassW, SetWindowLongPtrW, TranslateMessage,
-    CW_USEDEFAULT, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WM_DESTROY, WM_SIZE, WNDCLASSW,
+    CW_USEDEFAULT, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WNDCLASSW,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
@@ -37,6 +38,10 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2CompositionController,
     ICoreWebView2Controller, ICoreWebView2Controller2, ICoreWebView2Environment,
     ICoreWebView2Environment3, ICoreWebView2WebMessageReceivedEventArgs, COREWEBVIEW2_COLOR,
+    COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN, COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
+    COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN, COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP,
+    COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE, COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN,
+    COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP, COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS,
 };
 use webview2_com::{
     CreateCoreWebView2CompositionControllerCompletedHandler,
@@ -104,9 +109,11 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Stashed in the window's USERDATA so `wndproc` can reflow the webview on WM_SIZE.
+/// Stashed in the window's USERDATA so `wndproc` can reflow the webview (WM_SIZE) and forward
+/// mouse input to it (composition-hosted WebView2 does NOT get input automatically).
 struct WndState {
     controller: ICoreWebView2Controller,
+    comp_controller: ICoreWebView2CompositionController,
     dcomp: IDCompositionDevice,
 }
 
@@ -124,6 +131,30 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                         let _ = st.controller.SetBounds(rc);
                         let _ = st.dcomp.Commit();
                     }
+                }
+                LRESULT(0)
+            }
+            WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
+            | WM_MBUTTONDOWN | WM_MBUTTONUP => {
+                // forward mouse input to the composition-hosted webview (else the UI is inert)
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+                if !ptr.is_null() {
+                    let st = &*ptr;
+                    let kind = match msg {
+                        WM_MOUSEMOVE => COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+                        WM_LBUTTONDOWN => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN,
+                        WM_LBUTTONUP => COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
+                        WM_RBUTTONDOWN => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN,
+                        WM_RBUTTONUP => COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP,
+                        WM_MBUTTONDOWN => COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN,
+                        _ => COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP,
+                    };
+                    let x = (lp.0 & 0xFFFF) as i16 as i32;
+                    let y = ((lp.0 >> 16) & 0xFFFF) as i16 as i32;
+                    let vkeys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS((wp.0 & 0xFFFF) as i32);
+                    let _ = st
+                        .comp_controller
+                        .SendMouseInput(kind, vkeys, 0, POINT { x, y });
                 }
                 LRESULT(0)
             }
@@ -299,9 +330,10 @@ fn main() -> anyhow::Result<()> {
         controller.SetIsVisible(true)?;
         let webview = controller.CoreWebView2()?;
 
-        // let wndproc reach the controller for WM_SIZE reflow
+        // let wndproc reach the controller (WM_SIZE reflow) + comp controller (mouse input)
         let state = Box::new(WndState {
             controller: controller.clone(),
+            comp_controller: comp_controller.clone(),
             dcomp: dcomp.clone(),
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
