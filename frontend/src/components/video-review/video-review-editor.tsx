@@ -2664,7 +2664,10 @@ export function VideoReviewEditor({
                             ) : null}
                             {lane.items.map((item) => {
                               const left = timelineDuration ? (item.start / timelineDuration) * 100 : 0;
-                              const width = timelineDuration ? Math.max(0.8, ((item.end - item.start) / timelineDuration) * 100) : 1;
+                              // accurate width (% of timeline); a pixel minWidth keeps short clips
+                              // clickable WITHOUT the old 0.8%-of-timeline floor that, on a long
+                              // timeline, drew short clips seconds-wide and overlapped neighbours.
+                              const width = timelineDuration ? ((item.end - item.start) / timelineDuration) * 100 : 1;
                               if (item.kind === 'annotation' && item.annotation) {
                                 const a = item.annotation;
                                 return (
@@ -2672,7 +2675,7 @@ export function VideoReviewEditor({
                                     key={item.key}
                                     data-annotation-id={a.id}
                                     className={`absolute top-1 flex h-[calc(100%-8px)] cursor-grab items-center overflow-hidden rounded border text-[10px] shadow-sm active:cursor-grabbing ${laneColor(a.intent, selectedIds.includes(a.id))}`}
-                                    style={{ left: `${left}%`, width: `${width}%` }}
+                                    style={{ left: `${left}%`, width: `${width}%`, minWidth: '3px' }}
                                     onPointerDown={(event) => startTimelineDrag(event, a, 'move')}
                                     onDoubleClick={() => {
                                       selectAnnotation(a.id);
@@ -2743,6 +2746,7 @@ export function VideoReviewEditor({
                                   style={{
                                     left: `${left}%`,
                                     width: `${width}%`,
+                                    minWidth: '3px',
                                     top: 3,
                                     bottom: 3,
                                     ...(isVideo && clipAsset?.thumbnail_url
