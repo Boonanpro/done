@@ -59,9 +59,10 @@ use gstreamer::prelude::*;
 
 // the real room timeline + proxies (live under D:\done, gitignored)
 const ROOM: &str = "D:/done/uploads/production-assets/bd05fcc0-c143-4d1c-828e-7624e087b6c1";
-// video box (device px) — fixed for step3; step4 drives it from the #preview rect via IPC
-const BX: f32 = 360.0;
-const BY: f32 = 120.0;
+// video box (device px). Start OFFSCREEN so the native video isn't visible on the login / list
+// pages; the editor's preview-rect IPC moves it onscreen only while the editor is open.
+const BX: f32 = -30000.0;
+const BY: f32 = -30000.0;
 const BW: u32 = 420;
 const BH: u32 = 600;
 

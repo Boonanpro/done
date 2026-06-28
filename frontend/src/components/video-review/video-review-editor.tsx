@@ -1218,6 +1218,7 @@ export function VideoReviewEditor({
     const annotationIds = selectedIds.length > 0 ? selectedIds : selectedId ? [selectedId] : [];
     const clipIds = selectedSequenceClipIds.length > 0 ? selectedSequenceClipIds : selectedSequenceClipId ? [selectedSequenceClipId] : [];
     if (annotationIds.length === 0 && clipIds.length === 0) return;
+    if (nativeShell) clipIds.forEach((id) => nativeSend({ cmd: 'delete', id: String(id) }));
     if (annotationIds.length > 0) {
       const selectedSet = new Set(annotationIds);
       setAnnotations((prev) => prev.filter((a) => !selectedSet.has(a.id)));
@@ -1241,7 +1242,7 @@ export function VideoReviewEditor({
       });
     }
     clearSelection();
-  }, [clearSelection, linkAV, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds]);
+  }, [clearSelection, linkAV, selectedId, selectedIds, selectedSequenceClipId, selectedSequenceClipIds, nativeShell, nativeSend]);
 
   // Ripple delete: remove the selected clip(s) (+ A/V-link partners) and close the gap ONLY on
   // each affected lane (same track+layer) — later clips on that lane slide left to fill the
@@ -1296,6 +1297,9 @@ export function VideoReviewEditor({
   // every clip under the playhead. Each pair of right-halves gets a fresh shared link_id so
   // A/V partners stay paired on both sides of the cut. Total duration is unchanged.
   const splitClipAtTime = useCallback((t: number, clipIds?: Set<string>) => {
+    if (nativeShell && clipIds && clipIds.size > 0) {
+      clipIds.forEach((id) => nativeSend({ cmd: 'split', id: String(id), v: t }));
+    }
     setEditSequence((current) => {
       if (!current) return current;
       const r = (v: number) => Number(v.toFixed(2));
@@ -1336,7 +1340,7 @@ export function VideoReviewEditor({
       if (cut === 0) return current;
       return { ...current, tracks };
     });
-  }, [linkAV]);
+  }, [linkAV, nativeShell, nativeSend]);
 
   // Split a blur/instruction annotation at time t into two, partitioning its keyframes / tracked
   // path so each half keeps the right boxes (so ぼかしクリップ can be cut like any other clip).
@@ -1739,6 +1743,12 @@ export function VideoReviewEditor({
 
   const updateSequenceClips = useCallback((clipIds: Set<string>, patch: Partial<SequenceClip>) => {
     if (clipIds.size === 0) return;
+    // native: route a clip MOVE (timeline_start change) to the engine. (Trim/position/volume
+    // patches are left for the web preview / a later pass.)
+    if (nativeShell && patch.timeline_start !== undefined) {
+      const v = patch.timeline_start;
+      clipIds.forEach((id) => nativeSend({ cmd: 'move', id: String(id), v }));
+    }
     setEditSequence((current) => {
       if (!current) return current;
       const tracks = (current.tracks || []).map((track) => ({
@@ -1748,7 +1758,7 @@ export function VideoReviewEditor({
       const nextDuration = Math.max(0, ...tracks.flatMap((track) => (track.clips || []).map((clip) => clip.timeline_end || 0)));
       return { ...current, duration: Number(nextDuration.toFixed(3)), tracks };
     });
-  }, []);
+  }, [nativeShell, nativeSend]);
 
   const updateSequenceClip = useCallback((clipId: string, patch: Partial<SequenceClip>) => {
     updateSequenceClips(new Set([clipId]), patch);
