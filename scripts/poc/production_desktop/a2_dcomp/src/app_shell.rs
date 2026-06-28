@@ -63,7 +63,11 @@ const BY: f32 = 120.0;
 const BW: u32 = 420;
 const BH: u32 = 600;
 
-const URL: &str = "http://localhost:3000/scratch/desktop-demo";
+// the REAL production editor (auth: log in once in the window; the webview persists the session).
+// In native mode the editor skips WebCodecs and reports its preview-stage rect, which our IPC
+// handler uses to place the native video over the stage.
+const URL: &str =
+    "http://localhost:3000/production-workspace?room_id=bd05fcc0-c143-4d1c-828e-7624e087b6c1";
 
 /// Parse {"x":N,"y":N,"w":N,"h":N} (integers) from the IPC message — no serde dependency.
 fn parse_rect(s: &str) -> Option<(i32, i32, u32, u32)> {
