@@ -1,0 +1,8 @@
+[package]
+name = "a0_rustges"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gstreamer = "0.23"
+gstreamer-editing-services = "0.23"

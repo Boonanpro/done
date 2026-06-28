@@ -62,3 +62,15 @@
 ## 現状の資産
 - 検証ハーネス：`scripts/poc/production_desktop/`（poc1.py/poc3.py/poc2_player.py/poc2_overlay/）。
 - GES実行環境：`C:\Users\Owner\gstreamer-poc`（1.28.4, devel一式・同梱gi=cp39）。導入レシピは PoC‑1 結果ドキュメント参照。
+
+---
+
+## A0 結果（2026-06-28）= ✅ GREEN。Rust+GES が Windows でリンク＆インプロセス再生。
+
+- `gstreamer = "0.23"` ＋ `gstreamer-editing-services = "0.23"` が **Windows MSVC でリンク成功**（35s）。Rustで `ges::init` → 実プロキシをasset化 → timeline構築 → `ges::Pipeline` でインプロセス再生（position前進→EOS）を確認。
+- **ハマり＆解法（重要・再現用）**：
+  - GStreamer同梱の `pkg-config.exe`（`<GST>/bin`）を使用。`PKG_CONFIG_PATH=<GST>/lib/pkgconfig`。
+  - **`ges-sys` は `gstreamer-editing-services-1.0` を探すが、同梱pcは `gst-editing-services-1.0.pc`**（名前不一致）。`<GST>/lib/pkgconfig/gstreamer-editing-services-1.0.pc` として**コピー（エイリアス）**で解決。
+  - 必要 `.lib`（ges-1.0/gstreamer-1.0/gobject-2.0/glib-2.0 等）は同梱devel一式に存在。実行時は `<GST>/bin` をPATH。
+- 成果物：`scripts/poc/production_desktop/a0_rustges/`。
+- → **A1（Rustエンジンモジュール：timeline JSON構築＋seek/play/applyEdit、Pythonをオラクルにparity）へ**。
