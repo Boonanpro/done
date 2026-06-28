@@ -31,6 +31,7 @@ webview2-com = "0.34"
 anyhow = "1"
 a1_engine = { path = "../a1_engine" }
 gstreamer = "0.23"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # pinned to 0.58 to match webview2-com 0.34 (shared windows-core ABI for COM interop)

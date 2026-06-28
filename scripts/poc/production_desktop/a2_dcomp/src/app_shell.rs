@@ -74,6 +74,34 @@ const START_URL: &str = "http://localhost:3000/";
 const EDITOR_URL: &str =
     "http://localhost:3000/production-workspace?room_id=bd05fcc0-c143-4d1c-828e-7624e087b6c1";
 
+// Wire format for {cmd:"rebuild", clips:[...]} — the editor's full timeline (any edit → resync).
+#[derive(serde::Deserialize)]
+struct WirePos {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+#[derive(serde::Deserialize)]
+struct WireClip {
+    lane: String,
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    asset_id: Option<String>,
+    #[serde(default)]
+    source_start: f64,
+    timeline_start: f64,
+    timeline_end: f64,
+    #[serde(default)]
+    position: Option<WirePos>,
+}
+#[derive(serde::Deserialize)]
+struct RebuildMsg {
+    #[serde(default)]
+    clips: Vec<WireClip>,
+}
+
 /// Parse {"x":N,"y":N,"w":N,"h":N} (integers) from the IPC message — no serde dependency.
 fn parse_rect(s: &str) -> Option<(i32, i32, u32, u32)> {
     fn field(s: &str, key: &str) -> Option<i64> {
@@ -474,6 +502,38 @@ fn main() -> anyhow::Result<()> {
                                 let m = wide(&timeline_json_c);
                                 let _ = webview_c.PostWebMessageAsString(PCWSTR(m.as_ptr()));
                             },
+                            // robust edit sync: the editor sends its full timeline → rebuild
+                            "rebuild" => {
+                                if let Ok(msg) = serde_json::from_str::<RebuildMsg>(&s) {
+                                    use a1_engine::timeline_model::{Clip, Position};
+                                    let specs: Vec<(String, Clip)> = msg
+                                        .clips
+                                        .into_iter()
+                                        .map(|w| {
+                                            let position = w.position.map(|p| Position {
+                                                x: p.x,
+                                                y: p.y,
+                                                width: p.width,
+                                                height: p.height,
+                                            });
+                                            (
+                                                w.lane,
+                                                Clip {
+                                                    id: w.id,
+                                                    asset_id: w.asset_id,
+                                                    source_start: w.source_start,
+                                                    timeline_start: w.timeline_start,
+                                                    timeline_end: w.timeline_end,
+                                                    position,
+                                                },
+                                            )
+                                        })
+                                        .collect();
+                                    let pos = engine_c.borrow().get_state().position_s;
+                                    let _ = engine_c.borrow_mut().rebuild(specs);
+                                    let _ = engine_c.borrow().seek(pos);
+                                }
+                            }
                             "play" => { let _ = engine_c.borrow().play(); }
                             "pause" => { let _ = engine_c.borrow().pause(); }
                             "seek" => { let _ = engine_c.borrow().seek(v); }
