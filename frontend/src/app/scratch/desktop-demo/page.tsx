@@ -70,6 +70,32 @@ export default function DesktopDemo() {
     return () => cancelAnimationFrame(raf);
   }, [playing]);
 
+  // spacebar relayed from the desktop shell → toggle play/pause
+  useEffect(() => {
+    const wv = (
+      window as unknown as {
+        chrome?: {
+          webview?: {
+            addEventListener(t: string, h: (e: { data: unknown }) => void): void;
+            removeEventListener(t: string, h: (e: { data: unknown }) => void): void;
+          };
+        };
+      }
+    ).chrome?.webview;
+    if (!wv) return;
+    const onMsg = (e: { data: unknown }) => {
+      if (e.data === 'space')
+        setPlaying((p) => {
+          const np = !p;
+          send({ cmd: np ? 'play' : 'pause' });
+          return np;
+        });
+    };
+    wv.addEventListener('message', onMsg);
+    return () => wv.removeEventListener('message', onMsg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const seekToClientX = (clientX: number) => {
     const el = trackRef.current;
     if (!el) return;
@@ -171,10 +197,11 @@ export default function DesktopDemo() {
               </div>
             ))}
           </div>
-          {/* playhead (offset by the 2.5rem lane-label gutter) */}
+          {/* playhead — same full-track coordinate space as the seek calc, so it sits exactly
+              under the cursor */}
           <div
             className="pointer-events-none absolute bottom-0 top-0 w-0.5 bg-red-500"
-            style={{ left: `calc(2.5rem + (100% - 2.5rem) * ${frac})` }}
+            style={{ left: `${frac * 100}%` }}
           >
             <div className="absolute -left-1 -top-1 h-2 w-2 rounded-full bg-red-500" />
           </div>
