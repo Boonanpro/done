@@ -776,6 +776,26 @@ export function VideoReviewEditor({
     if (!nativeShell) return;
     nativeSend({ cmd: playing ? 'play' : 'pause' });
   }, [playing, nativeShell, nativeSend]);
+  // Smooth local playhead clock while playing. GES reports a jumpy playback position at clip
+  // boundaries (snaps to the clip edge), so we advance the bar locally and only gently correct
+  // toward the engine below — the video is smooth, so the bar should be too.
+  useEffect(() => {
+    if (!nativeShell || !playing) return;
+    let raf = 0;
+    let prev = performance.now();
+    const loop = (now: number) => {
+      const dt = (now - prev) / 1000;
+      prev = now;
+      const max = timelineDuration || duration || 0;
+      setCurrentTime((t) => {
+        const next = t + dt;
+        return max > 0 ? Math.min(next, max) : next;
+      });
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [nativeShell, playing, timelineDuration, duration]);
   useEffect(() => {
     if (!nativeShell) return;
     const wv = (window as unknown as { chrome?: { webview?: { addEventListener(t: string, h: (e: { data: unknown }) => void): void; removeEventListener(t: string, h: (e: { data: unknown }) => void): void } } }).chrome?.webview;
@@ -783,7 +803,10 @@ export function VideoReviewEditor({
     const onMsg = (e: { data: unknown }) => {
       try {
         const d = JSON.parse(String(e.data));
-        if (d && d.type === 'pos' && typeof d.t === 'number') setCurrentTime(d.t);
+        if (d && d.type === 'pos' && typeof d.t === 'number') {
+          // big delta = real seek/loop → snap; small = a boundary spike → gentle low-pass nudge
+          setCurrentTime((cur) => (Math.abs(d.t - cur) > 1.0 ? d.t : cur + (d.t - cur) * 0.12));
+        }
       } catch {
         /* ignore */
       }
