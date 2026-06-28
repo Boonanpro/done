@@ -185,6 +185,27 @@ export default function DesktopDemo() {
     setSel(null);
   };
 
+  // keyboard shortcuts: Space = play/pause, S = split, Delete/Backspace = delete
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        toggle();
+      } else if (e.key === 's' || e.key === 'S') {
+        e.preventDefault();
+        splitSel();
+      } else if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        deleteSel();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel, frac, clips, duration, playing]);
+
   return (
     <div className="fixed inset-0 flex flex-col overflow-hidden bg-[#15151a] text-zinc-200 select-none">
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-black/60 bg-[#26262e] px-4">
