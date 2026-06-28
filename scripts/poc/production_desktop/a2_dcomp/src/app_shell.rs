@@ -28,10 +28,11 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, PostQuitMessage, RegisterClassW, SetTimer, SetWindowLongPtrW,
-    TranslateMessage, CW_USEDEFAULT, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WM_DESTROY, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    GetWindowLongPtrW, PostQuitMessage, RegisterClassW, SetCursor, SetTimer, SetWindowLongPtrW,
+    TranslateMessage, CW_USEDEFAULT, GWLP_USERDATA, HCURSOR, HTCLIENT, MSG, WINDOW_EX_STYLE,
+    WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_TIMER,
+    WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -232,6 +233,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     }
                 }
                 LRESULT(0)
+            }
+            WM_SETCURSOR => {
+                // composition-hosted webview can't set the cursor itself → apply the cursor it
+                // wants (e.g. the trim ↔ on a clip edge) for the client area; borders default.
+                if (lp.0 & 0xFFFF) as u32 == HTCLIENT {
+                    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+                    if !ptr.is_null() {
+                        let st = &*ptr;
+                        let mut hc = HCURSOR::default();
+                        if st.comp_controller.Cursor(&mut hc).is_ok() && !hc.0.is_null() {
+                            SetCursor(hc);
+                            return LRESULT(1);
+                        }
+                    }
+                }
+                DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_SETFOCUS => {
                 // host window gained focus → hand keyboard focus to the webview so the page's
