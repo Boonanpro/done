@@ -1,0 +1,25 @@
+[package]
+name = "a1_engine"
+version = "0.1.0"
+edition = "2021"
+
+# A1: in-process Rust media engine for the production-desktop MVP.
+# Builds a GES timeline from the /production-assets timeline JSON (the single source
+# of truth) and exposes load/seek/play/pause/applyEdit/getState. The Python harnesses
+# (poc1.py / poc3.py) remain the parity oracle.
+
+[lib]
+name = "a1_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "a1_harness"
+path = "src/main.rs"
+
+[dependencies]
+gstreamer = "0.23"
+gstreamer-editing-services = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+memory-stats = "1"
