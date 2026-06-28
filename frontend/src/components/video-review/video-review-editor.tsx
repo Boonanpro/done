@@ -804,8 +804,10 @@ export function VideoReviewEditor({
       try {
         const d = JSON.parse(String(e.data));
         if (d && d.type === 'pos' && typeof d.t === 'number') {
-          // big delta = real seek/loop → snap; small = a boundary spike → gentle low-pass nudge
-          setCurrentTime((cur) => (Math.abs(d.t - cur) > 1.0 ? d.t : cur + (d.t - cur) * 0.12));
+          // The local clock (1x) already matches the smooth video. Don't follow the engine's
+          // jumpy near-boundary position (that made the bar accelerate at clip edges) — only SNAP
+          // on a big delta (a real seek / loop the local clock couldn't have produced).
+          setCurrentTime((cur) => (Math.abs(d.t - cur) > 1.5 ? d.t : cur));
         }
       } catch {
         /* ignore */
