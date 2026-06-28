@@ -37,14 +37,41 @@ export default function DesktopDemo() {
     };
   }, []);
 
+  const send = (o: Record<string, unknown>) => {
+    (window as unknown as { chrome?: { webview?: { postMessage(m: string): void } } })
+      .chrome?.webview?.postMessage(JSON.stringify(o));
+  };
+
   return (
     <div className="fixed inset-0 flex flex-col overflow-hidden bg-[#15151a] text-zinc-200 select-none">
       <header className="flex h-12 shrink-0 items-center gap-3 border-b border-black/60 bg-[#26262e] px-4">
         <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
         <span className="font-semibold">制作タブ — Desktop</span>
         <span className="text-xs text-zinc-400">StyleUp UGC 01</span>
-        <div className="ml-auto flex gap-2">
-          <button className="rounded bg-zinc-700 px-3 py-1 text-sm hover:bg-zinc-600">プレビュー</button>
+        <div className="ml-auto flex items-center gap-2">
+          <button
+            onClick={() => send({ cmd: 'pause' })}
+            className="rounded bg-zinc-700 px-2 py-1 text-sm hover:bg-zinc-600"
+            title="一時停止"
+          >
+            ⏸
+          </button>
+          <button
+            onClick={() => send({ cmd: 'play' })}
+            className="rounded bg-zinc-700 px-2 py-1 text-sm hover:bg-zinc-600"
+            title="再生"
+          >
+            ▶
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={360}
+            defaultValue={0}
+            onChange={(e) => send({ cmd: 'seek', pos: Number(e.target.value) })}
+            className="w-44 accent-blue-500"
+            title="シーク"
+          />
           <button className="rounded bg-blue-600 px-3 py-1 text-sm hover:bg-blue-500">書き出し</button>
         </div>
       </header>
