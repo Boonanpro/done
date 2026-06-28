@@ -407,6 +407,11 @@ export function VideoReviewEditor({
   const nativeShell =
     typeof window !== 'undefined' &&
     !!(window as unknown as { chrome?: { webview?: unknown } }).chrome?.webview;
+  const nativeSend = useCallback((o: Record<string, unknown>) => {
+    (window as unknown as { chrome?: { webview?: { postMessage(m: string): void } } }).chrome?.webview?.postMessage(
+      JSON.stringify(o),
+    );
+  }, []);
   useEffect(() => {
     if (!nativeShell) return;
     const wv = (window as unknown as { chrome?: { webview?: { postMessage(m: string): void } } }).chrome?.webview;
@@ -433,6 +438,8 @@ export function VideoReviewEditor({
       window.clearInterval(id);
       window.removeEventListener('resize', post);
       ro.disconnect();
+      // leaving the editor → push the native video offscreen so it doesn't linger on other pages
+      wv?.postMessage(JSON.stringify({ x: -10000, y: -10000, w: 1, h: 1 }));
     };
   }, [nativeShell]);
   // Unified undo/redo: one stack of combined {annotations, sequence} snapshots so Ctrl+Z
@@ -726,9 +733,32 @@ export function VideoReviewEditor({
       const nextTime = Number(clamp(time, 0, maxDuration).toFixed(3));
       setPlaying(false);
       setCurrentTime(nextTime);
+      if (nativeShell) nativeSend({ cmd: 'seek', pos: nextTime });
     },
-    [duration, timelineDuration]
+    [duration, timelineDuration, nativeShell, nativeSend]
   );
+
+  // Native transport bridge: in the desktop shell the GES engine is the playback source.
+  // Drive it from the editor's transport, and take the engine's position back for the playhead.
+  useEffect(() => {
+    if (!nativeShell) return;
+    nativeSend({ cmd: playing ? 'play' : 'pause' });
+  }, [playing, nativeShell, nativeSend]);
+  useEffect(() => {
+    if (!nativeShell) return;
+    const wv = (window as unknown as { chrome?: { webview?: { addEventListener(t: string, h: (e: { data: unknown }) => void): void; removeEventListener(t: string, h: (e: { data: unknown }) => void): void } } }).chrome?.webview;
+    if (!wv) return;
+    const onMsg = (e: { data: unknown }) => {
+      try {
+        const d = JSON.parse(String(e.data));
+        if (d && d.type === 'pos' && typeof d.t === 'number') setCurrentTime(d.t);
+      } catch {
+        /* ignore */
+      }
+    };
+    wv.addEventListener('message', onMsg);
+    return () => wv.removeEventListener('message', onMsg);
+  }, [nativeShell]);
   const isActiveAnnotation = useCallback(
     (annotation: Pick<ReviewAnnotation, 'start' | 'end'>) => (
       currentTime >= annotation.start && currentTime <= (annotation.end ?? annotation.start + 0.2)

@@ -28,10 +28,10 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, PostQuitMessage, RegisterClassW, SetWindowLongPtrW, TranslateMessage,
-    CW_USEDEFAULT, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETFOCUS, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    GetWindowLongPtrW, PostQuitMessage, RegisterClassW, SetTimer, SetWindowLongPtrW,
+    TranslateMessage, CW_USEDEFAULT, GWLP_USERDATA, MSG, WINDOW_EX_STYLE, WM_DESTROY, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -132,6 +132,7 @@ struct WndState {
     comp_controller: ICoreWebView2CompositionController,
     webview: ICoreWebView2,
     dcomp: IDCompositionDevice,
+    engine: Rc<RefCell<Engine>>,
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -189,6 +190,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                 } else {
                     DefWindowProcW(hwnd, msg, wp, lp)
                 }
+            }
+            WM_TIMER => {
+                // feed the engine's playback position back to the editor's playhead while playing
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+                if !ptr.is_null() {
+                    let st = &*ptr;
+                    let state = st.engine.borrow().get_state();
+                    if state.playing {
+                        let m = wide(&format!("{{\"type\":\"pos\",\"t\":{:.3}}}", state.position_s));
+                        let _ = st.webview.PostWebMessageAsString(PCWSTR(m.as_ptr()));
+                    }
+                }
+                LRESULT(0)
             }
             WM_SETFOCUS => {
                 // host window gained focus → hand keyboard focus to the webview so the page's
@@ -401,8 +415,11 @@ fn main() -> anyhow::Result<()> {
             comp_controller: comp_controller.clone(),
             webview: webview.clone(),
             dcomp: dcomp.clone(),
+            engine: engine.clone(),
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
+        // ~10 Hz position feedback to the editor playhead (WM_TIMER, on the UI thread)
+        SetTimer(hwnd, 1, 100, None);
 
         // step4: follow the #preview box. JS posts {x,y,w,h} in device px; we resize the sink
         // swapchain to (w,h), rebind it (resize may recreate buffers), and move the video visual
