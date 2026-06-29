@@ -405,7 +405,11 @@ impl Engine {
                 n += 1;
             }
         }
-        self.timeline.commit_sync();
+        // ASYNC commit: a full rebuild (esp. with 100+ caption text overlays) makes the GES
+        // nlecomposition reconfiguration expensive. commit_sync() would block the *caller* — and
+        // rebuild runs on the UI thread — long enough that Windows marks the window "not
+        // responding". commit() schedules the work on GStreamer's own threads and returns at once.
+        self.timeline.commit();
         Ok(n)
     }
 
@@ -441,6 +445,14 @@ impl Engine {
             ok: st == AsyncStatus::Ok,
             ms: t0.elapsed().as_secs_f64() * 1000.0,
         }
+    }
+
+    /// Non-blocking seek: issue the flushing seek and return immediately, WITHOUT waiting for
+    /// ASYNC_DONE. Used right after rebuild() — waiting there would re-block the UI thread on the
+    /// (possibly heavy) re-preroll. The sink presents the new frame when GStreamer is ready.
+    pub fn seek_nowait(&self, pos_s: f64) {
+        let flags = gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE;
+        let _ = self.pipeline.seek_simple(flags, ct_from_secs(pos_s));
     }
 
     pub fn play(&self) -> anyhow::Result<()> {
