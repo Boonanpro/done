@@ -374,12 +374,7 @@ impl Engine {
     /// "audio"). Removes every existing clip and rebuilds — the robust way to mirror an external
     /// editor's edits (move/trim/split/delete/link/ripple) in one shot. Returns clips added.
     pub fn rebuild(&mut self, clips: Vec<(String, ClipModel)>) -> anyhow::Result<usize> {
-        for layer in [
-            &self.layer_video,
-            &self.layer_overlay,
-            &self.layer_audio,
-            &self.layer_caption,
-        ] {
+        for layer in [&self.layer_video, &self.layer_overlay, &self.layer_audio] {
             for clip in layer.clips() {
                 let _ = layer.remove_clip(&clip);
             }
@@ -387,13 +382,11 @@ impl Engine {
         self.clips.clear();
         let mut n = 0usize;
         for (lane, clip) in clips {
+            // Captions are NOT rendered in GES: profiling showed Layer::add_clip for a
+            // TextOverlayClip costs ~286ms EACH (74 captions = 22s freeze on the UI thread),
+            // because GES reconfigures its nlecomposition per text clip. Captions are instead
+            // drawn as an HTML overlay in the WebView, on top of the transparent video region.
             if lane == "caption" {
-                if let Some(text) = clip.text.clone() {
-                    if !text.is_empty() && clip.duration_s() > 0.0 {
-                        let _ = self.add_caption(&text, clip.timeline_start, clip.duration_s());
-                        n += 1;
-                    }
-                }
                 continue;
             }
             let (layer, transform) = match lane.as_str() {
@@ -405,28 +398,8 @@ impl Engine {
                 n += 1;
             }
         }
-        // ASYNC commit: a full rebuild (esp. with 100+ caption text overlays) makes the GES
-        // nlecomposition reconfiguration expensive. commit_sync() would block the *caller* — and
-        // rebuild runs on the UI thread — long enough that Windows marks the window "not
-        // responding". commit() schedules the work on GStreamer's own threads and returns at once.
         self.timeline.commit();
         Ok(n)
-    }
-
-    /// Render a caption as a GES text overlay (bottom-centre, white, outlined) for [start, start+dur].
-    fn add_caption(&self, text: &str, start_s: f64, dur_s: f64) -> anyhow::Result<()> {
-        let clip = ges::TextOverlayClip::new()
-            .ok_or_else(|| anyhow::anyhow!("TextOverlayClip::new failed"))?;
-        self.layer_caption.add_clip(&clip)?;
-        clip.set_start(ct_from_secs(start_s));
-        clip.set_duration(ct_from_secs(dur_s));
-        clip.set_text(Some(text));
-        // a font with Japanese glyphs; size relative to the 1080×1920 output
-        clip.set_font_desc(Some("Meiryo Bold 44"));
-        clip.set_color(0xFFFFFFFF); // opaque white (ARGB)
-        clip.set_halignment(ges::TextHAlign::Center);
-        clip.set_valignment(ges::TextVAlign::Bottom);
-        Ok(())
     }
 
     /// Flushing, frame-accurate seek; returns latency (commit→ASYNC_DONE) in ms.
