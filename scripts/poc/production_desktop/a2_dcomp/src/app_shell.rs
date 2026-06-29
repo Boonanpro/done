@@ -552,7 +552,8 @@ fn main() -> anyhow::Result<()> {
                                         .collect();
                                     let pos = engine_c.borrow().get_state().position_s;
                                     let _ = engine_c.borrow_mut().rebuild(specs);
-                                    let _ = engine_c.borrow().seek(pos);
+                                    // non-blocking: never stall the UI thread on the re-preroll
+                                    engine_c.borrow().seek_nowait(pos);
                                 }
                             }
                             "play" => { let _ = engine_c.borrow().play(); }
