@@ -1,12 +1,13 @@
 'use client';
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clapperboard,
   File,
   FileText,
   FolderKanban,
@@ -50,6 +51,7 @@ import { useProjectStore, useRecoveryActions, useRecoveryState } from '@/stores/
 import { usePreviewStore, type ArtifactRecord, type SelectedElement } from '@/stores/preview-store';
 import { PreviewPane } from '@/components/preview/preview-pane';
 import { VoiceConsole } from '@/components/voice/voice-console';
+import { ProductionWorkspace } from '@/components/production/production-workspace';
 
 interface ProjectChatPanelProps {
   projectId: string;
@@ -587,6 +589,7 @@ function ChatInput({
   const replaceMessageIdRef = useRef<string | null>(null);
   // 今回のSSEで受信したサーバー上のメッセージID
   const serverMessageIdRef = useRef<string | null>(null);
+  const optimisticMessageIdRef = useRef<string | null>(null);
   const titleGeneratedRef = useRef(false);
   const streamRequestRef = useRef(0);
   const queryClient = useQueryClient();
@@ -602,6 +605,7 @@ function ChatInput({
   useEffect(() => {
     replaceMessageIdRef.current = null;
     serverMessageIdRef.current = null;
+    optimisticMessageIdRef.current = null;
   }, [roomId]);
 
   // Focus textarea when reply is selected
@@ -832,6 +836,7 @@ function ChatInput({
     setWarmupMode(projectId, isBusy ? 'switching' : 'thinking');
 
     const tempUserMessageId = `temp-user-${Date.now()}`;
+    optimisticMessageIdRef.current = tempUserMessageId;
     const optimisticUserMessage: MessageResponse = {
       id: tempUserMessageId,
       room_id: roomId,
@@ -880,6 +885,7 @@ function ChatInput({
           onUserMessage: (msg) => {
             if (streamRequestRef.current !== requestId) return;
             serverMessageIdRef.current = msg.id;
+            optimisticMessageIdRef.current = msg.id;
             if (currentReplaceId) {
               // replace: 既存メッセージの内容をサーバー版で上書き
               queryClient.setQueryData(
@@ -934,6 +940,7 @@ function ChatInput({
             aiRespondedRef.current = true;
             pendingMessageRef.current = null;
             replaceMessageIdRef.current = null;
+            optimisticMessageIdRef.current = null;
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
           },
@@ -1013,6 +1020,13 @@ function ChatInput({
       setWarmupMode(projectId, null);
       if (error instanceof Error && error.name !== 'AbortError') {
         toast.error('メッセージ送信中に問題が発生しました');
+      }
+    } finally {
+      // ストリームが終わったら必ず ref を破棄する（残骸が「ダン作業中」と
+      // 誤判定され、停止後の送信が追い連絡に誤ルーティングされるのを防ぐ）。
+      // 次の送信がすでに新しい controller をセットしている場合は触らない。
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
       }
     }
   }, [
@@ -1145,6 +1159,7 @@ function ChatInput({
   const handleCancel = useCallback(async () => {
     const pending = pendingMessageRef.current;
     const wasBeforeAI = !aiRespondedRef.current && !!pending;
+    const userMessageIdToRemove = serverMessageIdRef.current || optimisticMessageIdRef.current;
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -1155,15 +1170,25 @@ function ChatInput({
     if (wasBeforeAI) {
       setMessage(pending.text);
       setAttachedFiles(pending.files);
-      if (serverMessageIdRef.current) {
-        replaceMessageIdRef.current = serverMessageIdRef.current;
+      replaceMessageIdRef.current = null;
+      if (userMessageIdToRemove) {
+        queryClient.setQueryData(
+          ['project-messages', roomId],
+          (old: { messages: MessageResponse[] } | undefined) =>
+            old
+              ? { messages: old.messages.filter((m) => m.id !== userMessageIdToRemove) }
+              : old
+        );
       }
     }
     pendingMessageRef.current = null;
     serverMessageIdRef.current = null;
+    optimisticMessageIdRef.current = null;
 
     try {
-      await api.sm.cancelSession(roomId);
+      await api.sm.cancelSession(roomId, {
+        cancelledUserMessageId: wasBeforeAI ? userMessageIdToRemove : null,
+      });
     } catch (error) {
       console.error('Failed to cancel session:', error);
     }
@@ -1176,7 +1201,7 @@ function ChatInput({
     if (!wasBeforeAI) {
       toast.info('処理を中断しました');
     }
-  }, [invalidateProjectQueries, onSseStateChange, projectId, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
+  }, [invalidateProjectQueries, onSseStateChange, projectId, queryClient, resetRecovery, roomId, setWarmupMode, syncActiveStatus]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
@@ -1501,6 +1526,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const sendMessageRef = useRef<((content: string) => void) | null>(null);
   const isNearBottomRef = useRef(true);
+  const pendingPrependScrollRef = useRef<{ height: number; top: number } | null>(null);
   const [visibleItemCount, setVisibleItemCount] = useState(INITIAL_CHAT_RENDER_COUNT);
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
@@ -1510,6 +1536,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<MessageResponse[] | null>(null);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState<'chat' | 'production'>(() => {
+    if (typeof window === 'undefined') return 'chat';
+    const params = new URLSearchParams(window.location.search);
+    return params.get('production') === '1' || params.has('content_id') ? 'production' : 'chat';
+  });
   const pendingJumpRef = useRef<string | null>(null);
   const { warmupMode } = useRecoveryState(projectId);
 
@@ -1648,15 +1679,27 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     refetchInterval: () => (sseConnectedRef.current ? 10000 : 3000),
   });
 
-  const isActiveExecution = !!activeStatus?.active;
+  const isBackendSessionActive = !!activeStatus?.active;
 
   const { data: currentRun } = useQuery({
     queryKey: ['current-run', projectId],
     queryFn: () => api.projects.currentRun(projectId),
     enabled: !!projectId,
     retry: false,
-    refetchInterval: (query) => (isActiveExecution ? (query.state.error ? 10000 : 2000) : false),
+    // session-active はコアのin-memory状態のみで、SSE切断後の常駐セッション
+    // 継続ターンを見失う。自分のレスポンス(run.state)も実行中の根拠にして、
+    // チャットを開き直してもライブ表示とポーリングが止まらないようにする。
+    refetchInterval: (query) => (
+      (isBackendSessionActive || query.state.data?.state === 'running')
+        ? (query.state.error ? 10000 : 2000)
+        : false
+    ),
   });
+
+  // 「実行中」= バックエンドのセッション状態 or DBのrun状態のどちらか。
+  // 前者はSSE切断や常駐セッション経路で false になりうるが、後者(DB)は
+  // 処理がsinkで続いている限り running なので、開き直し後も表示が消えない。
+  const isActiveExecution = isBackendSessionActive || currentRun?.state === 'running';
 
   const { data: allExecutionEvents = [] } = useQuery({
     queryKey: ['execution-events', projectId],
@@ -1745,52 +1788,64 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
       });
     }
 
-    // Keep the live execution block anchored to the user message so the UI
-    // transitions from Thinking to tools/text without jumping through history.
     let liveBlockRendered = false;
 
-    // Group all execution events by run_id and create a block per run
-    const eventsByRun = new Map<string, ExecutionEvent[]>();
-    for (const event of allExecutionEvents) {
-      const rid = event.run_id || 'unknown';
-      if (!eventsByRun.has(rid)) eventsByRun.set(rid, []);
-      eventsByRun.get(rid)!.push(event);
-    }
+    const savedTurnIds = new Set(
+      chronologicalMessages
+        .filter((msg) => msg.sender_type === 'ai' && msg.ai_context?.turn_id)
+        .map((msg) => msg.ai_context!.turn_id!)
+    );
+    const isCurrentRunLive =
+      !!currentRun &&
+      isActiveExecution &&
+      currentRun.state === 'running';
 
-    for (const [runId, events] of eventsByRun) {
-      const steps = events
-        .filter((event) => event.event_type !== 'done' && event.event_type !== 'phase')
-        .map(eventToStep);
+    if (isCurrentRunLive) {
+      const eventsByTurn = new Map<string, ExecutionEvent[]>();
+      for (const event of allExecutionEvents) {
+        if (event.run_id !== currentRun.id) continue;
+        if (event.event_type === 'done' || event.event_type === 'phase') continue;
+        const turnId = event.turn_id || (typeof event.metadata?.turn_id === 'string' ? event.metadata.turn_id : null);
+        if (turnId && savedTurnIds.has(turnId)) continue;
+        const key = turnId || `run:${event.run_id || 'unknown'}`;
+        const list = eventsByTurn.get(key);
+        if (list) list.push(event);
+        else eventsByTurn.set(key, [event]);
+      }
 
-      const isLiveRun =
-        !!currentRun &&
-        runId === currentRun.id &&
-        isActiveExecution &&
-        currentRun.state === 'running';
+      const liveGroups = [...eventsByTurn.entries()]
+        .map(([key, events]) => ({
+          key,
+          events: [...events].sort(
+            (left, right) =>
+              (left.seq ?? 0) - (right.seq ?? 0) ||
+              new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
+          ),
+        }))
+        .sort((left, right) => {
+          const leftTime = new Date(left.events[0]?.created_at || '').getTime() || liveBlockSortKey;
+          const rightTime = new Date(right.events[0]?.created_at || '').getTime() || liveBlockSortKey;
+          return leftTime - rightTime;
+        });
 
-      // Only show the separate process block while a run is LIVE. Once the run
-      // finishes, the completed AI message carries the same tools/text inline
-      // via ai_context.blocks (AiTurnBlocks), so keeping the standalone block
-      // would just duplicate it.
-      if (isLiveRun && (steps.length > 0 || !!warmupMode)) {
+      liveGroups.forEach((group, index) => {
+        const steps = group.events.map(eventToStep);
+        if (steps.length === 0) return;
         liveBlockRendered = true;
         timedItems.push({
           item: {
             kind: 'execution-block',
-            id: `live-${projectId}`,
-            steps: steps.length > 0 ? steps : [{
-              label: transitionLabel,
-              type: 'reasoning',
-            }],
-            isLive: isLiveRun,
+            id: `live-${projectId}-${group.key}`,
+            steps,
+            isLive: index === liveGroups.length - 1,
           },
-          sortKey: liveBlockSortKey,
+          sortKey: new Date(group.events[0]?.created_at || '').getTime() || liveBlockSortKey,
           subKey: 2,
         });
-      }
+      });
     }
 
-    if (showWarmupBlock && !liveBlockRendered) {
+    if (!liveBlockRendered && (showWarmupBlock || isCurrentRunLive)) {
       timedItems.push({
         item: {
           kind: 'execution-block',
@@ -1801,7 +1856,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           }],
           isLive: true,
         },
-        sortKey: liveAnchorTime,
+        sortKey: showWarmupBlock ? liveBlockSortKey : liveAnchorTime,
         subKey: 2,
       });
     }
@@ -1828,6 +1883,15 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const hiddenOlderCount = Math.max(0, displayItems.length - visibleDisplayItems.length);
 
+  useLayoutEffect(() => {
+    const pending = pendingPrependScrollRef.current;
+    if (!pending) return;
+    pendingPrependScrollRef.current = null;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    el.scrollTop = pending.top + (el.scrollHeight - pending.height);
+  }, [visibleItemCount]);
+
   useEffect(() => {
     if (isNearBottomRef.current) {
       requestAnimationFrame(() => {
@@ -1846,6 +1910,10 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     isNearBottomRef.current = nearBottom;
     if (nearBottom) setHasNewMessages(false);
     if (el.scrollTop < 240) {
+      pendingPrependScrollRef.current = {
+        height: el.scrollHeight,
+        top: el.scrollTop,
+      };
       setVisibleItemCount((count) =>
         count >= displayItems.length
           ? count
@@ -2008,6 +2076,46 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         )}
         {project?.room_id && (
           <button
+            onClick={() => {
+              const next = workspaceMode === 'production' ? 'chat' : 'production';
+              setWorkspaceMode(next);
+              const url = new URL(window.location.href);
+              if (next === 'production') {
+                url.searchParams.set('production', '1');
+                // Also launch the desktop production app scoped to this room (done:// deep link).
+                // No-op if the app/protocol isn't installed; the inline browser workspace below
+                // stays as a fallback so nothing is lost.
+                const rid = project?.room_id;
+                if (rid) {
+                  try {
+                    const a = document.createElement('a');
+                    a.href = `done://production?room_id=${rid}`;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                  } catch {
+                    /* ignore — app not installed */
+                  }
+                }
+              } else {
+                url.searchParams.delete('production');
+                url.searchParams.delete('content_id');
+              }
+              window.history.replaceState(null, '', url.toString());
+            }}
+            className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              workspaceMode === 'production'
+                ? 'border-primary bg-primary/10 text-primary'
+                : 'border-border bg-background text-foreground hover:bg-muted'
+            }`}
+            title={workspaceMode === 'production' ? '\u30c1\u30e3\u30c3\u30c8\u306b\u623b\u308b' : '\u5236\u4f5c\u3092\u958b\u304f'}
+          >
+            <Clapperboard className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">{workspaceMode === 'production' ? '\u30c1\u30e3\u30c3\u30c8' : '\u5236\u4f5c'}</span>
+          </button>
+        )}
+        {project?.room_id && (
+          <button
             onClick={() => setSearchOpen((v) => !v)}
             className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
               searchOpen
@@ -2069,7 +2177,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       </div>
 
-      {searchOpen && (
+      {searchOpen && workspaceMode === 'chat' && (
         <div className="shrink-0 border-b border-border bg-background px-3 py-2">
           <div className="flex items-center gap-2">
             <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -2134,6 +2242,13 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         </div>
       )}
 
+      {workspaceMode === 'production' && project?.room_id ? (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <ProductionWorkspace
+            roomId={project.room_id}
+          />
+        </div>
+      ) : (
       <div ref={scrollContainerRef} onScroll={handleScroll} className="relative flex-1 overflow-y-auto">
         {hasNewMessages && (
           <button
@@ -2184,10 +2299,11 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
           </div>
         )}
       </div>
+      )}
 
       {/* 承認/却下ボタンは廃止。チャットでの承認を観察者が検知して計画を記録する */}
 
-      {project?.room_id ? (
+      {project?.room_id && workspaceMode === 'chat' ? (
         <ChatInput
           projectId={projectId}
           roomId={project.room_id}
