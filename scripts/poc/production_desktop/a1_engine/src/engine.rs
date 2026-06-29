@@ -437,7 +437,11 @@ impl Engine {
                 n += 1;
             }
         }
-        self.timeline.commit();
+        // commit_sync (not async commit): it waits for GES to finish reconfiguring before
+        // returning, so a rapid sequence of rebuilds (e.g. dragging several selected clips) can't
+        // overlap a still-in-flight commit and corrupt the nlecomposition (which crashed natively).
+        // Captions are no longer GES clips, so this no longer carries the 22s text-overlay cost.
+        self.timeline.commit_sync();
         Ok(n)
     }
 
