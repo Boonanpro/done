@@ -100,6 +100,9 @@ pub struct Engine {
     layer_audio: ges::Layer,
     layer_caption: ges::Layer,
     fps_elem: gst::Element,
+    // GPU DirectWrite text overlay in front of the on-screen sink; its `text` is updated live as
+    // the playhead crosses caption segments (one element — no per-clip GES cost). None = headless.
+    caption_overlay: Option<gst::Element>,
     clips: HashMap<String, ges::Clip>,
     asset_cache: HashMap<String, ges::UriClipAsset>,
     width: i32,
@@ -154,8 +157,43 @@ impl Engine {
         pipeline.set_timeline(&timeline)?;
 
         // Video sink: caller-supplied, else headless fpsdisplaysink (rendered/dropped counters).
+        let mut caption_overlay: Option<gst::Element> = None;
         let (vsink_elem, fps_elem) = match video_sink {
-            Some(sink) => (sink.clone(), sink),
+            Some(sink) => {
+                // Wrap the on-screen sink with a GPU DirectWrite text overlay: captions composite
+                // INTO the video frame (dwritetextoverlay takes video/x-raw(ANY) → stays on GPU
+                // memory, no CPU roundtrip). One element, `text` updated live — this avoids the
+                // GES TextOverlayClip cost (~286ms/clip) that froze the UI. Defaults already place
+                // text bottom-centre, white, black outline.
+                let cap = gst::ElementFactory::make("dwritetextoverlay")
+                    .name("caption")
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("make dwritetextoverlay: {e}"))?;
+                cap.set_property("font-family", "Meiryo");
+                cap.set_property_from_str("font-weight", "bold");
+                cap.set_property_from_str("font-size", "56");
+                cap.set_property("foreground-color", 0xFFFF_FFFFu32);
+                cap.set_property("outline-color", 0xFF00_0000u32);
+                cap.set_property("text", "");
+                // dwritetextoverlay attaches the caption as GstVideoOverlayComposition metadata (the
+                // d3d12swapchainsink advertises overlay support but never renders it). d3d12upload
+                // forces D3D12 memory (the decoders are d3d11, so the stream may arrive as d3d11/
+                // system), then d3d12overlaycompositor RENDERS the overlay metadata onto the D3D12
+                // frame on the GPU before the swapchain sink. (Self-verified on screen.)
+                let ul = gst::ElementFactory::make("d3d12upload").build()?;
+                let ovc = gst::ElementFactory::make("d3d12overlaycompositor").build()?;
+                let q = gst::ElementFactory::make("queue").build()?;
+                let bin = gst::Bin::with_name("capbin");
+                bin.add_many([&cap, &ul, &ovc, &q, &sink])?;
+                gst::Element::link_many([&cap, &ul, &ovc, &q, &sink])?;
+                let target = cap
+                    .static_pad("sink")
+                    .ok_or_else(|| anyhow::anyhow!("dwritetextoverlay sink pad missing"))?;
+                let ghost = gst::GhostPad::with_target(&target)?;
+                bin.add_pad(&ghost)?;
+                caption_overlay = Some(cap);
+                (bin.upcast::<gst::Element>(), sink)
+            }
             None => {
                 let bin = gst::parse::bin_from_description(
                     "fpsdisplaysink name=fps text-overlay=false sync=true video-sink=\"fakesink sync=true\"",
@@ -192,6 +230,7 @@ impl Engine {
             layer_audio,
             layer_caption,
             fps_elem,
+            caption_overlay,
             clips: HashMap::new(),
             asset_cache: HashMap::new(),
             width,
@@ -417,6 +456,14 @@ impl Engine {
         SeekResult {
             ok: st == AsyncStatus::Ok,
             ms: t0.elapsed().as_secs_f64() * 1000.0,
+        }
+    }
+
+    /// Set the live caption text drawn by the GPU overlay (empty = none). Cheap — just a property
+    /// set, safe to call often (e.g. when the playhead crosses caption boundaries).
+    pub fn set_caption_text(&self, text: &str) {
+        if let Some(cap) = &self.caption_overlay {
+            cap.set_property("text", text);
         }
     }
 

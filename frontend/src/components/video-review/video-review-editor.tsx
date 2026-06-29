@@ -32,7 +32,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { TimelinePreview } from './timeline-preview';
-import { CaptionLayer, type RenderCaption } from './caption-layer';
+import type { RenderCaption } from './caption-layer';
 
 type Tool = 'select' | 'rect' | 'freehand' | 'marker';
 type Intent = 'blur' | 'cut_keep' | 'cut_remove' | 'caption' | 'replace' | 'generate' | 'motion' | 'audio' | 'comment';
@@ -421,9 +421,6 @@ export function VideoReviewEditor({
       if (!el || !wv) return;
       const r = el.getBoundingClientRect();
       const d = window.devicePixelRatio || 1;
-      // CSS-px stage width drives the caption overlay scale (captions are HTML drawn over the
-      // native video, same <CaptionLayer> the web preview uses).
-      setStageCssW(r.width);
       wv.postMessage(
         JSON.stringify({
           x: Math.round(r.left * d),
@@ -442,7 +439,9 @@ export function VideoReviewEditor({
       window.clearInterval(id);
       window.removeEventListener('resize', post);
       ro.disconnect();
-      // leaving the editor → push the native video offscreen so it doesn't linger on other pages
+      // leaving the editor → pause the engine (so audio doesn't keep playing on the list page)
+      // and push the native video offscreen so it doesn't linger on other pages.
+      wv?.postMessage(JSON.stringify({ cmd: 'pause' }));
       wv?.postMessage(JSON.stringify({ x: -10000, y: -10000, w: 1, h: 1 }));
     };
   }, [nativeShell]);
@@ -769,34 +768,34 @@ export function VideoReviewEditor({
     return `${Number(a) || 9} / ${Number(b) || 16}`;
   }, [editSequence?.format, initialSequence?.format]);
 
-  // Caption overlay for the NATIVE shell: the GES engine renders only video/audio (text overlays
-  // in GES cost ~286ms each → 22s freeze), so captions are drawn as the same HTML <CaptionLayer>
-  // the web preview uses, scaled over the native video region and synced to `currentTime`. The
-  // caption DATA lives in the timeline JSON (single source of truth) — so Dan's edits and the
-  // server-side FFmpeg export read the very same captions; this only restores the preview.
-  const [stageCssW, setStageCssW] = useState(0);
-  const captionDims = useMemo(() => {
-    const [a, b] = (editSequence?.format || initialSequence?.format || '9:16').split(':').map(Number);
-    const ratio = a && b ? a / b : 9 / 16;
-    const MAX = 900; // matches timeline-preview's canvasDims
-    return ratio >= 1 ? { w: MAX, h: Math.round(MAX / ratio) } : { w: Math.round(MAX * ratio), h: MAX };
-  }, [editSequence?.format, initialSequence?.format]);
-  const renderCaptions = useMemo<RenderCaption[]>(
-    () =>
-      (editSequence?.tracks || [])
-        .filter((t) => t.type === 'caption')
-        .flatMap((t) => t.clips || [])
-        .filter((c) => typeof c.text === 'string' && c.text.trim())
-        .map((c) => ({
+  // Captions in the NATIVE shell are drawn by a GPU DirectWrite overlay INSIDE the video frame
+  // (the GES engine can't take text overlays — ~286ms/clip froze the UI; and the native video is
+  // composited ON TOP of this WebView, so an HTML overlay would be hidden behind it). We compute
+  // the caption data here and push only the ACTIVE caption's text to the engine as the playhead
+  // moves. Data lives in the timeline JSON (single source of truth) → Dan's edits and the
+  // server-side FFmpeg export read the very same captions; this only drives the preview overlay.
+  const renderCaptions = useMemo<RenderCaption[]>(() => {
+    // Detect captions exactly like the GES rebuild watcher (which found all 74): by the per-clip
+    // `c.track === 'caption'` field across ALL tracks — NOT by the track's `type`, which isn't
+    // reliably 'caption' for these clips.
+    const out: RenderCaption[] = [];
+    for (const tr of editSequence?.tracks || []) {
+      for (const c of tr.clips || []) {
+        if (c.track !== 'caption') continue;
+        const text = (c as unknown as { text?: string }).text;
+        if (typeof text !== 'string' || !text.trim()) continue;
+        out.push({
           id: String(c.id),
-          text: String(c.text),
+          text: String(text),
           start: Number(c.timeline_start || 0),
           end: Number(c.timeline_end || 0),
           design: (c.style || {}) as CaptionDesign,
           words: c.words || undefined,
-        })),
-    [editSequence],
-  );
+        });
+      }
+    }
+    return out;
+  }, [editSequence]);
   // Stable callbacks: passing inline arrows would change every render and re-run the
   // preview's playback effect each frame, resetting its master clock (stutter/rewind).
   const handlePreviewTime = useCallback((t: number) => setCurrentTime(t), []);
@@ -805,7 +804,8 @@ export function VideoReviewEditor({
     (time: number) => {
       const maxDuration = timelineDuration || duration || 0;
       const nextTime = Number(clamp(time, 0, maxDuration).toFixed(3));
-      setPlaying(false);
+      // Preserve play state: seeking (incl. clicking the ruler) should NOT stop playback — a
+      // flushing seek while playing continues from the new position. (Previously forced pause.)
       setCurrentTime(nextTime);
       if (nativeShell) nativeSend({ cmd: 'seek', pos: nextTime });
     },
@@ -818,6 +818,23 @@ export function VideoReviewEditor({
     if (!nativeShell) return;
     nativeSend({ cmd: playing ? 'play' : 'pause' });
   }, [playing, nativeShell, nativeSend]);
+  // Drive the engine's GPU caption overlay: find the caption active at the playhead and push its
+  // text only when it changes (runs each frame while playing, but sends rarely).
+  const lastCaptionRef = useRef<string>('');
+  useEffect(() => {
+    if (!nativeShell) return;
+    let text = '';
+    for (const c of renderCaptions) {
+      if (currentTime >= c.start && currentTime < c.end) {
+        text = c.text;
+        break;
+      }
+    }
+    if (text !== lastCaptionRef.current) {
+      lastCaptionRef.current = text;
+      nativeSend({ cmd: 'caption', text }); // empty string clears the overlay when no caption is active
+    }
+  }, [currentTime, renderCaptions, nativeShell, nativeSend]);
   // Smooth local playhead clock while playing. GES reports a jumpy playback position at clip
   // boundaries (snaps to the clip edge), so we advance the bar locally and only gently correct
   // toward the engine below — the video is smooth, so the bar should be too.
@@ -2369,20 +2386,11 @@ export function VideoReviewEditor({
                 onContextMenu={(event) => event.preventDefault()}
               >
                 {nativeShell ? (
-                  // native engine composites the real video over this stage (no WebCodecs here);
-                  // captions are the same HTML <CaptionLayer> the web preview uses, drawn on top.
-                  <>
-                    <div className="flex h-full w-full items-center justify-center text-[10px] text-neutral-700">
-                      native preview
-                    </div>
-                    {renderCaptions.length && stageCssW > 0 ? (
-                      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-                        <div style={{ transformOrigin: 'top left', transform: `scale(${stageCssW / captionDims.w})` }}>
-                          <CaptionLayer outW={captionDims.w} outH={captionDims.h} captions={renderCaptions} time={currentTime} />
-                        </div>
-                      </div>
-                    ) : null}
-                  </>
+                  // native engine composites the real video (+ its GPU caption overlay) over this
+                  // stage; the WebCodecs preview is skipped here (avoids the browser decode/OOM).
+                  <div className="flex h-full w-full items-center justify-center text-[10px] text-neutral-700">
+                    native preview
+                  </div>
                 ) : (
                   <TimelinePreview
                     sequence={editSequence}
