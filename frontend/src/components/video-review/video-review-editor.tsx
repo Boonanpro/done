@@ -478,11 +478,20 @@ export function VideoReviewEditor({
       const clips: Array<Record<string, unknown>> = [];
       for (const tr of seq?.tracks || []) {
         for (const c of tr.clips || []) {
-          let lane: 'video' | 'overlay' | 'audio' | null = null;
+          let lane: 'video' | 'overlay' | 'audio' | 'caption' | null = null;
           if (c.track === 'overlay' || c.composition === 'pip' || c.composition === 'overlay') lane = 'overlay';
           else if (c.track === 'audio') lane = 'audio';
           else if (c.track === 'video') lane = 'video';
-          if (!lane || !c.asset_id) continue;
+          else if (c.track === 'caption') lane = 'caption';
+          if (!lane) continue;
+          if (lane === 'caption') {
+            const text = (c as unknown as { text?: string }).text;
+            if (text) {
+              clips.push({ lane, id: String(c.id), timeline_start: c.timeline_start, timeline_end: c.timeline_end, text });
+            }
+            continue;
+          }
+          if (!c.asset_id) continue;
           clips.push({
             lane,
             id: String(c.id),

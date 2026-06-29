@@ -54,6 +54,9 @@ pub struct Clip {
     /// PiP rectangle (overlay clips only), normalized 0..1 of the output frame.
     #[serde(default)]
     pub position: Option<Position>,
+    /// Caption text (caption clips only) — rendered as a GES text overlay.
+    #[serde(default)]
+    pub text: Option<String>,
 }
 
 impl Clip {

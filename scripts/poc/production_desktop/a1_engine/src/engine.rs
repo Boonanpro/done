@@ -98,6 +98,7 @@ pub struct Engine {
     layer_video: ges::Layer,
     layer_overlay: ges::Layer,
     layer_audio: ges::Layer,
+    layer_caption: ges::Layer,
     fps_elem: gst::Element,
     clips: HashMap<String, ges::Clip>,
     asset_cache: HashMap<String, ges::UriClipAsset>,
@@ -147,6 +148,7 @@ impl Engine {
         let layer_video = timeline.append_layer(); // 0: fullscreen video
         let layer_overlay = timeline.append_layer(); // 1: PiP overlay video
         let layer_audio = timeline.append_layer(); // 2: dialogue audio
+        let layer_caption = timeline.append_layer(); // 3: caption text (composited on top)
 
         let pipeline = ges::Pipeline::new();
         pipeline.set_timeline(&timeline)?;
@@ -188,6 +190,7 @@ impl Engine {
             layer_video,
             layer_overlay,
             layer_audio,
+            layer_caption,
             fps_elem,
             clips: HashMap::new(),
             asset_cache: HashMap::new(),
@@ -371,7 +374,12 @@ impl Engine {
     /// "audio"). Removes every existing clip and rebuilds — the robust way to mirror an external
     /// editor's edits (move/trim/split/delete/link/ripple) in one shot. Returns clips added.
     pub fn rebuild(&mut self, clips: Vec<(String, ClipModel)>) -> anyhow::Result<usize> {
-        for layer in [&self.layer_video, &self.layer_overlay, &self.layer_audio] {
+        for layer in [
+            &self.layer_video,
+            &self.layer_overlay,
+            &self.layer_audio,
+            &self.layer_caption,
+        ] {
             for clip in layer.clips() {
                 let _ = layer.remove_clip(&clip);
             }
@@ -379,6 +387,15 @@ impl Engine {
         self.clips.clear();
         let mut n = 0usize;
         for (lane, clip) in clips {
+            if lane == "caption" {
+                if let Some(text) = clip.text.clone() {
+                    if !text.is_empty() && clip.duration_s() > 0.0 {
+                        let _ = self.add_caption(&text, clip.timeline_start, clip.duration_s());
+                        n += 1;
+                    }
+                }
+                continue;
+            }
             let (layer, transform) = match lane.as_str() {
                 "overlay" => (Layer::Overlay, true),
                 "audio" => (Layer::Audio, false),
@@ -390,6 +407,22 @@ impl Engine {
         }
         self.timeline.commit_sync();
         Ok(n)
+    }
+
+    /// Render a caption as a GES text overlay (bottom-centre, white, outlined) for [start, start+dur].
+    fn add_caption(&self, text: &str, start_s: f64, dur_s: f64) -> anyhow::Result<()> {
+        let clip = ges::TextOverlayClip::new()
+            .ok_or_else(|| anyhow::anyhow!("TextOverlayClip::new failed"))?;
+        self.layer_caption.add_clip(&clip)?;
+        clip.set_start(ct_from_secs(start_s));
+        clip.set_duration(ct_from_secs(dur_s));
+        clip.set_text(Some(text));
+        // a font with Japanese glyphs; size relative to the 1080×1920 output
+        clip.set_font_desc(Some("Meiryo Bold 44"));
+        clip.set_color(0xFFFFFFFF); // opaque white (ARGB)
+        clip.set_halignment(ges::TextHAlign::Center);
+        clip.set_valignment(ges::TextVAlign::Bottom);
+        Ok(())
     }
 
     /// Flushing, frame-accurate seek; returns latency (commit→ASYNC_DONE) in ms.

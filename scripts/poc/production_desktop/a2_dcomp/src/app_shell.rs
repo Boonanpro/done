@@ -96,6 +96,8 @@ struct WireClip {
     timeline_end: f64,
     #[serde(default)]
     position: Option<WirePos>,
+    #[serde(default)]
+    text: Option<String>,
 }
 #[derive(serde::Deserialize)]
 struct RebuildMsg {
@@ -542,6 +544,7 @@ fn main() -> anyhow::Result<()> {
                                                     timeline_start: w.timeline_start,
                                                     timeline_end: w.timeline_end,
                                                     position,
+                                                    text: w.text,
                                                 },
                                             )
                                         })

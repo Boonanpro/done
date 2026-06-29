@@ -1149,11 +1149,16 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         maps += ["-map", f"[{audio_out}]"]
         audio_args = ["-c:a", "aac", "-b:a", "128k"]
 
+    # Pass the filtergraph via a SCRIPT FILE, not the command line: with hundreds of clips the
+    # graph is tens of KB and a single -filter_complex arg blows past Windows' command-line limit
+    # (surfaces as WinError 206 "filename or extension too long").
+    fg_path = job_dir / f"{job_id}_filtergraph.txt"
+    fg_path.write_text(";".join(filters), encoding="utf-8")
     subprocess.run(
         [
             *command,
-            "-filter_complex",
-            ";".join(filters),
+            "-filter_complex_script",
+            str(fg_path),
             *maps,
             "-c:v",
             "libx264",
