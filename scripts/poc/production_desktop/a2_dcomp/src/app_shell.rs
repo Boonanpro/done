@@ -49,6 +49,7 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
 };
 use webview2_com::{
+    AddScriptToExecuteOnDocumentCreatedCompletedHandler,
     CreateCoreWebView2CompositionControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, NavigationCompletedEventHandler,
     WebMessageReceivedEventHandler,
@@ -327,6 +328,23 @@ fn resolve_room_id() -> String {
         }
     }
     DEFAULT.to_string()
+}
+
+/// Auth token passed from the chat via the deep link (`...&token=<jwt>`), so the desktop app can
+/// reuse the chat's login instead of prompting again. JWT chars stop at `&`/whitespace.
+fn resolve_token() -> Option<String> {
+    for a in std::env::args() {
+        if let Some(idx) = a.find("token=") {
+            let t: String = a[idx + 6..]
+                .chars()
+                .take_while(|c| *c != '&' && !c.is_whitespace())
+                .collect();
+            if !t.is_empty() {
+                return Some(t);
+            }
+        }
+    }
+    None
 }
 
 fn main() -> anyhow::Result<()> {
@@ -683,8 +701,36 @@ fn main() -> anyhow::Result<()> {
         let mut nav_token = EventRegistrationToken::default();
         webview.add_NavigationCompleted(&nav_handler, &mut nav_token)?;
 
-        let url = wide(START_URL);
-        webview.Navigate(PCWSTR(url.as_ptr()))?;
+        // If the chat passed its auth token, inject it (localStorage + cookie) BEFORE any page
+        // loads, then go straight to the (unguarded) editor — no login prompt. Otherwise fall back
+        // to the guarded root + login flow.
+        match resolve_token() {
+            Some(tok) => {
+                let script = format!(
+                    "(function(){{try{{localStorage.setItem('done-token','{t}');document.cookie='done_access_token={t}; path=/; max-age=604800';}}catch(e){{}}}})();",
+                    t = tok
+                );
+                let s = wide(&script);
+                let wv_s = webview.clone();
+                AddScriptToExecuteOnDocumentCreatedCompletedHandler::wait_for_async_operation(
+                    Box::new(move |handler| {
+                        wv_s.AddScriptToExecuteOnDocumentCreated(PCWSTR(s.as_ptr()), &handler)
+                            .map_err(webview2_com::Error::WindowsError)
+                    }),
+                    Box::new(|hr, _id| {
+                        hr?;
+                        Ok(())
+                    }),
+                )
+                .map_err(wv_err)?;
+                let url = wide(&editor_url);
+                webview.Navigate(PCWSTR(url.as_ptr()))?;
+            }
+            None => {
+                let url = wide(START_URL);
+                webview.Navigate(PCWSTR(url.as_ptr()))?;
+            }
+        }
         dcomp.Commit()?;
         // give the webview keyboard focus so page-level shortcuts work without a click first
         let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
