@@ -2077,41 +2077,27 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         {project?.room_id && (
           <button
             onClick={() => {
-              const next = workspaceMode === 'production' ? 'chat' : 'production';
-              setWorkspaceMode(next);
-              const url = new URL(window.location.href);
-              if (next === 'production') {
-                url.searchParams.set('production', '1');
-                // Also launch the desktop production app scoped to this room (done:// deep link).
-                // No-op if the app/protocol isn't installed; the inline browser workspace below
-                // stays as a fallback so nothing is lost.
-                const rid = project?.room_id;
-                if (rid) {
-                  try {
-                    const a = document.createElement('a');
-                    a.href = `done://production?room_id=${rid}`;
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-                  } catch {
-                    /* ignore — app not installed */
-                  }
-                }
-              } else {
-                url.searchParams.delete('production');
-                url.searchParams.delete('content_id');
+              // 制作 = launch the desktop production app for this room ONLY (no inline browser
+              // workspace, no chat toggle). Pass the chat's auth token so the app reuses this
+              // login (no re-login). No-op if the app/protocol isn't installed.
+              const rid = project?.room_id;
+              if (!rid) return;
+              try {
+                const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') || '' : '';
+                const a = document.createElement('a');
+                a.href = `done://production?room_id=${rid}&token=${encodeURIComponent(token)}`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+              } catch {
+                /* app not installed */
               }
-              window.history.replaceState(null, '', url.toString());
             }}
-            className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
-              workspaceMode === 'production'
-                ? 'border-primary bg-primary/10 text-primary'
-                : 'border-border bg-background text-foreground hover:bg-muted'
-            }`}
-            title={workspaceMode === 'production' ? '\u30c1\u30e3\u30c3\u30c8\u306b\u623b\u308b' : '\u5236\u4f5c\u3092\u958b\u304f'}
+            className="flex shrink-0 items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+            title="制作アプリで開く"
           >
             <Clapperboard className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">{workspaceMode === 'production' ? '\u30c1\u30e3\u30c3\u30c8' : '\u5236\u4f5c'}</span>
+            <span className="hidden sm:inline">制作</span>
           </button>
         )}
         {project?.room_id && (
