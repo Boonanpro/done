@@ -302,10 +302,44 @@ fn wv_err<E: std::fmt::Debug>(e: E) -> anyhow::Error {
     anyhow::anyhow!("{e:?}")
 }
 
+/// Resolve the room id from the command line: `--room <id>`, or any arg containing `room_id=<id>`
+/// (e.g. a `done://production?room_id=<id>` deep link from the chat 制作 tab). Falls back to the
+/// default room when launched bare.
+fn resolve_room_id() -> String {
+    const DEFAULT: &str = "bd05fcc0-c143-4d1c-828e-7624e087b6c1";
+    let args: Vec<String> = std::env::args().collect();
+    for (i, a) in args.iter().enumerate() {
+        if a == "--room" {
+            if let Some(v) = args.get(i + 1) {
+                if !v.is_empty() {
+                    return v.clone();
+                }
+            }
+        }
+        if let Some(idx) = a.find("room_id=") {
+            let id: String = a[idx + 8..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if !id.is_empty() {
+                return id;
+            }
+        }
+    }
+    DEFAULT.to_string()
+}
+
 fn main() -> anyhow::Result<()> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+
+        // Which room to open (from the deep link / CLI). The native engine loads this room's
+        // local content, and the webview opens this room's editor.
+        let room_id = resolve_room_id();
+        let room_dir = format!("D:/done/uploads/production-assets/{room_id}");
+        let editor_url = format!("http://localhost:3000/production-workspace?room_id={room_id}");
+        eprintln!("[a2] opening room_id = {room_id}");
 
         // ---- window ----
         let hmodule = GetModuleHandleW(None)?;
@@ -381,30 +415,36 @@ fn main() -> anyhow::Result<()> {
         // real audio output (autoaudiosink → wasapi); falls back to silent if unavailable
         let audio_sink = gst::ElementFactory::make("autoaudiosink").build().ok();
         let mut engine = Engine::new_full(1080, 1920, 30, Some(sink.clone()), audio_sink)?;
-        let load = engine.load(&format!("{ROOM}/contents.json"), ROOM)?;
-        eprintln!(
-            "[a2-step3] timeline loaded: {} video / {} overlay / {} audio, preroll_ok={}",
-            load.video_clips, load.overlay_clips, load.audio_clips, load.preroll_ok
-        );
+        // GRACEFUL: a room with no timeline yet (empty/missing contents.json) must NOT crash the
+        // app — open the editor (material selection) without native video instead. The swapchain
+        // bind below is a no-op when nothing prerolled.
+        match engine.load(&format!("{room_dir}/contents.json"), &room_dir) {
+            Ok(load) => eprintln!(
+                "[a2-step3] timeline loaded: {} video / {} overlay / {} audio, preroll_ok={}",
+                load.video_clips, load.overlay_clips, load.audio_clips, load.preroll_ok
+            ),
+            Err(e) => eprintln!("[a2] room '{room_id}' has no timeline yet ({e}); opening UI without native video"),
+        }
 
-        // real timeline (clips) JSON to hand to the UI when the page signals 'ready'
-        let timeline_json = {
-            let seq = a1_engine::timeline_model::parse_contents(&format!("{ROOM}/contents.json"))?;
-            let clips: Vec<_> = seq
-                .tracks
-                .iter()
-                .filter(|t| matches!(t.kind.as_str(), "video" | "overlay" | "audio"))
-                .flat_map(|t| {
-                    t.clips.iter().filter(|c| !c.id.is_empty()).map(move |c| {
-                        serde_json::json!({
-                            "id": c.id, "track": t.kind,
-                            "start": c.timeline_start, "end": c.timeline_end
+        // real timeline (clips) JSON to hand to the UI when the page signals 'ready' (empty if none)
+        let timeline_json = match a1_engine::timeline_model::parse_contents(&format!("{room_dir}/contents.json")) {
+            Ok(seq) => {
+                let clips: Vec<_> = seq
+                    .tracks
+                    .iter()
+                    .filter(|t| matches!(t.kind.as_str(), "video" | "overlay" | "audio"))
+                    .flat_map(|t| {
+                        t.clips.iter().filter(|c| !c.id.is_empty()).map(move |c| {
+                            serde_json::json!({
+                                "id": c.id, "track": t.kind,
+                                "start": c.timeline_start, "end": c.timeline_end
+                            })
                         })
                     })
-                })
-                .collect();
-            serde_json::json!({"type":"timeline","duration": seq.duration, "clips": clips})
-                .to_string()
+                    .collect();
+                serde_json::json!({"type":"timeline","duration": seq.duration, "clips": clips}).to_string()
+            }
+            Err(_) => "{\"type\":\"timeline\",\"duration\":0,\"clips\":[]}".to_string(),
         };
 
         // size the sink's swapchain to the preview box, then bind it to the DComp visual
@@ -621,6 +661,7 @@ fn main() -> anyhow::Result<()> {
         // webview to the editor (once). Unauthed users hit /login first via the guarded root.
         let wv_nav = webview.clone();
         let redirected = Rc::new(std::cell::Cell::new(false));
+        let editor_url_c = editor_url.clone();
         let nav_handler = NavigationCompletedEventHandler::create(Box::new(
             move |_wv: Option<ICoreWebView2>,
                   _args: Option<ICoreWebView2NavigationCompletedEventArgs>|
@@ -632,7 +673,7 @@ fn main() -> anyhow::Result<()> {
                     unsafe { CoTaskMemFree(Some(pw.0 as *const core::ffi::c_void)) };
                     if !src.contains("/login") && !src.contains("/production-workspace") {
                         redirected.set(true);
-                        let u = wide(EDITOR_URL);
+                        let u = wide(&editor_url_c);
                         unsafe { wv_nav.Navigate(PCWSTR(u.as_ptr())) }?;
                     }
                 }
