@@ -124,6 +124,15 @@
     margin: 0;
     padding: 0;
   }
+
+  /* Desktop native shell: the native video is composited BELOW the WebView, so the page must be
+     transparent where the preview area is (the editor leaves that region's backgrounds off in
+     native mode). Make the root transparent so the video shows through; opaque UI panels still
+     paint over it. Web (browser) is unaffected — this class is only set inside the native shell. */
+  html.native-shell,
+  html.native-shell body {
+    background-color: transparent !important;
+  }
   
   /* Custom scrollbar - Cursor style */
   ::-webkit-scrollbar {
