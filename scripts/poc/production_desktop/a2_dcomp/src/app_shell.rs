@@ -20,6 +20,7 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice, IDXGISwapChain};
+use windows::Win32::Graphics::Gdi::{GetStockObject, BLACK_BRUSH, HBRUSH};
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::WinRT::EventRegistrationToken;
@@ -290,6 +291,9 @@ fn main() -> anyhow::Result<()> {
             lpfnWndProc: Some(wndproc),
             hInstance: hinst,
             lpszClassName: class_name,
+            // black client background so transparent areas of the page (preview letterbox margins,
+            // now that the webview is transparent) render BLACK, not the default white.
+            hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
             ..Default::default()
         };
         RegisterClassW(&wc);
