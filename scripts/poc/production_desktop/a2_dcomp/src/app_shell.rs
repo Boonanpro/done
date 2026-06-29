@@ -560,6 +560,14 @@ fn main() -> anyhow::Result<()> {
                             "play" => { let _ = engine_c.borrow().play(); }
                             "pause" => { let _ = engine_c.borrow().pause(); }
                             "seek" => { engine_c.borrow().seek_nowait(v); }
+                            "caption" => {
+                                // live caption text for the GPU overlay (proper JSON unescape)
+                                let text = serde_json::from_str::<serde_json::Value>(&s)
+                                    .ok()
+                                    .and_then(|jv| jv.get("text").and_then(|t| t.as_str()).map(str::to_string))
+                                    .unwrap_or_default();
+                                engine_c.borrow().set_caption_text(&text);
+                            }
                             "move" => if let Some(id) = id { edit(EditOp::Move { clip_id: id, new_start_s: v }); }
                             "trim" => if let Some(id) = id { edit(EditOp::Trim { clip_id: id, new_duration_s: v }); }
                             "split" => if let Some(id) = id { edit(EditOp::Split { clip_id: id, at_s: v }); }
