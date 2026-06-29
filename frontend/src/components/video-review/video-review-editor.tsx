@@ -2236,8 +2236,24 @@ export function VideoReviewEditor({
         }
         applyDragOverwrite(sequenceClipDrag.id, fields);
       } else if (dragSelectionRef.current.length > 1) {
-        // Block move: shift the whole selection together (no lane change, no overwrite).
-        applyBlockMove(delta, dragSelectionRef.current);
+        // Block move: shift the whole selection together (no lane change, no overwrite). Magnet:
+        // snap the BLOCK's leading or trailing edge (whichever is closer) to a neighbour/playhead/
+        // end, using the original block bounds from the drag-start snapshot.
+        let blockDelta = delta;
+        if (snapEnabled) {
+          const sel = new Set(dragSelectionRef.current);
+          const selClips = (dragSnapshotRef.current?.tracks || [])
+            .flatMap((t) => t.clips || [])
+            .filter((c) => sel.has(c.id));
+          if (selClips.length) {
+            const blockStart = Math.min(...selClips.map((c) => c.timeline_start));
+            const blockEnd = Math.max(...selClips.map((c) => c.timeline_end));
+            const adjStart = snap(blockStart + delta) - (blockStart + delta);
+            const adjEnd = snap(blockEnd + delta) - (blockEnd + delta);
+            blockDelta = delta + (Math.abs(adjStart) <= Math.abs(adjEnd) ? adjStart : adjEnd);
+          }
+        }
+        applyBlockMove(blockDelta, dragSelectionRef.current);
       } else {
         const length = sequenceClipDrag.originalTimelineEnd - sequenceClipDrag.originalTimelineStart;
         const rawStart = sequenceClipDrag.originalTimelineStart + delta;
