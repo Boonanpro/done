@@ -20,7 +20,7 @@ use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
 };
 use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice, IDXGISwapChain};
-use windows::Win32::Graphics::Gdi::{GetStockObject, BLACK_BRUSH, HBRUSH};
+use windows::Win32::Graphics::Gdi::{GetStockObject, ScreenToClient, BLACK_BRUSH, HBRUSH};
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::WinRT::EventRegistrationToken;
@@ -32,7 +32,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, PostQuitMessage, RegisterClassW, SetCursor, SetTimer, SetWindowLongPtrW,
     TranslateMessage, CW_USEDEFAULT, GWLP_USERDATA, HCURSOR, HTCLIENT, MSG, WINDOW_EX_STYLE,
     WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_TIMER,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_TIMER,
     WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
@@ -44,7 +44,8 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN, COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
     COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_DOWN, COREWEBVIEW2_MOUSE_EVENT_KIND_MIDDLE_BUTTON_UP,
     COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE, COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_DOWN,
-    COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP, COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS,
+    COREWEBVIEW2_MOUSE_EVENT_KIND_RIGHT_BUTTON_UP, COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL,
+    COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS,
     COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
 };
 use webview2_com::{
@@ -206,6 +207,29 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
                     let _ = st
                         .comp_controller
                         .SendMouseInput(kind, vkeys, 0, POINT { x, y });
+                }
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                // forward the wheel so the composition webview can scroll (else lists/pages are
+                // stuck). NOTE: wheel messages carry SCREEN coords in lParam → convert to client;
+                // the signed wheel delta goes in mouseData (HIWORD of wParam).
+                let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const WndState;
+                if !ptr.is_null() {
+                    let st = &*ptr;
+                    let mut pt = POINT {
+                        x: (lp.0 & 0xFFFF) as i16 as i32,
+                        y: ((lp.0 >> 16) & 0xFFFF) as i16 as i32,
+                    };
+                    let _ = ScreenToClient(hwnd, &mut pt);
+                    let delta = ((wp.0 >> 16) & 0xFFFF) as i16 as i32;
+                    let vkeys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS((wp.0 & 0xFFFF) as i32);
+                    let _ = st.comp_controller.SendMouseInput(
+                        COREWEBVIEW2_MOUSE_EVENT_KIND_WHEEL,
+                        vkeys,
+                        delta as u32,
+                        pt,
+                    );
                 }
                 LRESULT(0)
             }
