@@ -800,6 +800,14 @@ export function VideoReviewEditor({
   // preview's playback effect each frame, resetting its master clock (stutter/rewind).
   const handlePreviewTime = useCallback((t: number) => setCurrentTime(t), []);
   const handlePreviewEnded = useCallback(() => setPlaying(false), []);
+  // Playhead freeze during the brief video stall after a seek-while-playing: the GES pipeline
+  // flushes + re-prerolls at the new spot (the picture pauses for a moment), so we freeze the
+  // local clock and resume it only when the engine's reported position starts advancing again
+  // (= playback resumed) — keeping the bar and the picture in lock-step instead of the bar
+  // running ahead during the load.
+  const headFrozenRef = useRef(false);
+  const seekTargetRef = useRef(0);
+  const freezeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const seekTimeline = useCallback(
     (time: number) => {
       const maxDuration = timelineDuration || duration || 0;
@@ -807,9 +815,19 @@ export function VideoReviewEditor({
       // Preserve play state: seeking (incl. clicking the ruler) should NOT stop playback — a
       // flushing seek while playing continues from the new position. (Previously forced pause.)
       setCurrentTime(nextTime);
-      if (nativeShell) nativeSend({ cmd: 'seek', pos: nextTime });
+      if (nativeShell) {
+        if (playing) {
+          // freeze the bar until the engine confirms playback resumed at the new spot
+          headFrozenRef.current = true;
+          seekTargetRef.current = nextTime;
+          if (freezeTimerRef.current) clearTimeout(freezeTimerRef.current);
+          // safety: never stay frozen more than ~1.2s if no resume signal arrives
+          freezeTimerRef.current = setTimeout(() => { headFrozenRef.current = false; }, 1200);
+        }
+        nativeSend({ cmd: 'seek', pos: nextTime });
+      }
     },
-    [duration, timelineDuration, nativeShell, nativeSend]
+    [duration, timelineDuration, nativeShell, nativeSend, playing]
   );
 
   // Native transport bridge: in the desktop shell the GES engine is the playback source.
@@ -845,6 +863,11 @@ export function VideoReviewEditor({
     const loop = (now: number) => {
       const dt = (now - prev) / 1000;
       prev = now;
+      // hold the bar still while the video re-prerolls after a seek (see headFrozenRef)
+      if (headFrozenRef.current) {
+        raf = requestAnimationFrame(loop);
+        return;
+      }
       const max = timelineDuration || duration || 0;
       setCurrentTime((t) => {
         const next = t + dt;
@@ -863,6 +886,17 @@ export function VideoReviewEditor({
       try {
         const d = JSON.parse(String(e.data));
         if (d && d.type === 'pos' && typeof d.t === 'number') {
+          if (headFrozenRef.current) {
+            // Frozen after a seek: the engine's position sits at the seek target while it
+            // re-prerolls. Resume the bar only once it advances past the target — i.e. new
+            // frames are actually presenting again — and snap to the engine's exact position.
+            if (d.t > seekTargetRef.current + 0.05) {
+              headFrozenRef.current = false;
+              if (freezeTimerRef.current) { clearTimeout(freezeTimerRef.current); freezeTimerRef.current = null; }
+              setCurrentTime(d.t);
+            }
+            return;
+          }
           // The local clock (1x) already matches the smooth video. Don't follow the engine's
           // jumpy near-boundary position (that made the bar accelerate at clip edges) — only SNAP
           // on a big delta (a real seek / loop the local clock couldn't have produced).
