@@ -413,6 +413,13 @@ export function VideoReviewEditor({
       JSON.stringify(o),
     );
   }, []);
+  // Native shell: mark <html> so the page background goes transparent (globals.css) and the native
+  // video (composited below the WebView) shows through the transparent preview area.
+  useEffect(() => {
+    if (!nativeShell) return;
+    document.documentElement.classList.add('native-shell');
+    return () => document.documentElement.classList.remove('native-shell');
+  }, [nativeShell]);
   useEffect(() => {
     if (!nativeShell) return;
     const wv = (window as unknown as { chrome?: { webview?: { postMessage(m: string): void } } }).chrome?.webview;
@@ -2350,7 +2357,7 @@ export function VideoReviewEditor({
   }, [marqueeActive]);
 
   return (
-    <div className={`flex h-full bg-background text-foreground ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
+    <div className={`flex h-full text-foreground ${nativeShell ? '' : 'bg-background'} ${embedded ? 'min-h-0' : 'min-h-screen'}`}>
       {marquee ? (
         <div
           className="pointer-events-none fixed z-50 border border-sky-400 bg-sky-400/15"
@@ -2411,20 +2418,19 @@ export function VideoReviewEditor({
         </div>
 
         <div className="flex flex-1 overflow-hidden">
-          <div className="flex min-w-0 flex-1 flex-col bg-neutral-950">
+          <div className={`flex min-w-0 flex-1 flex-col ${nativeShell ? '' : 'bg-neutral-950'}`}>
             <div className="flex min-h-0 flex-1 items-center justify-center p-4">
               <div
                 ref={stageRef}
-                className="relative h-full max-h-full max-w-full overflow-hidden bg-black"
+                className={`relative h-full max-h-full max-w-full overflow-hidden ${nativeShell ? '' : 'bg-black'}`}
                 style={{ aspectRatio: previewAspect }}
                 onContextMenu={(event) => event.preventDefault()}
               >
                 {nativeShell ? (
-                  // native engine composites the real video (+ its GPU caption overlay) over this
-                  // stage; the WebCodecs preview is skipped here (avoids the browser decode/OOM).
-                  <div className="flex h-full w-full items-center justify-center text-[10px] text-neutral-700">
-                    native preview
-                  </div>
+                  // native engine composites the real video BELOW this transparent stage (the page
+                  // is transparent here so it shows through); web overlays render on top. No
+                  // placeholder/background — anything opaque here would hide the video.
+                  null
                 ) : (
                   <TimelinePreview
                     sequence={editSequence}

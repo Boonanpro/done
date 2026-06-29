@@ -326,7 +326,11 @@ fn main() -> anyhow::Result<()> {
         let device = device.unwrap();
         let dxgi_device: IDXGIDevice = device.cast()?;
 
-        // ---- DComp tree: video visual (bottom) + webview visual (top) ----
+        // ---- DComp tree: video visual (BOTTOM) + webview visual (TOP) ----
+        // Webview on top with a transparent preview "hole" so the native video shows THROUGH it,
+        // and all of the web editor's overlay/editing UI (captions, blur boxes, handles,
+        // annotations) renders on top of the video — i.e. one integrated editor, not video pasted
+        // over the UI. (Previously video-on-top, which hid every on-video UI element.)
         let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)?;
         let target: IDCompositionTarget = dcomp.CreateTargetForHwnd(hwnd, true)?;
         let root: IDCompositionVisual = dcomp.CreateVisual()?;
@@ -336,8 +340,8 @@ fn main() -> anyhow::Result<()> {
         let webview_visual: IDCompositionVisual = dcomp.CreateVisual()?;
         webview_visual.SetOffsetX2(0.0)?;
         webview_visual.SetOffsetY2(0.0)?;
-        root.AddVisual(&webview_visual, false, None)?;
-        root.AddVisual(&video_visual, true, &webview_visual)?; // video above the opaque webview
+        root.AddVisual(&video_visual, false, None)?;
+        root.AddVisual(&webview_visual, true, &video_visual)?; // webview ABOVE the (now transparent) video region
         target.SetRoot(&root)?;
         dcomp.Commit()?;
 
@@ -451,7 +455,10 @@ fn main() -> anyhow::Result<()> {
         comp_controller.SetRootVisualTarget(&webview_visual)?;
         let controller: ICoreWebView2Controller = comp_controller.cast()?;
         let controller2: ICoreWebView2Controller2 = comp_controller.cast()?;
-        controller2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR { A: 255, R: 21, G: 21, B: 26 })?;
+        // Transparent webview background so the page can leave a "hole" (transparent preview area)
+        // through which the native video (now BELOW the webview) shows; opaque UI panels still
+        // paint over the video where they have their own backgrounds.
+        controller2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR { A: 0, R: 0, G: 0, B: 0 })?;
         let mut client = RECT::default();
         GetClientRect(hwnd, &mut client)?;
         controller.SetBounds(client)?;
