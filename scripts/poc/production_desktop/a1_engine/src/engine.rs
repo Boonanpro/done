@@ -148,10 +148,13 @@ impl Engine {
         audio_sink: Option<gst::Element>,
     ) -> anyhow::Result<Self> {
         let timeline = ges::Timeline::new_audio_video();
-        let layer_video = timeline.append_layer(); // 0: fullscreen video
-        let layer_overlay = timeline.append_layer(); // 1: PiP overlay video
+        // GES layer priority 0 composites ON TOP. The PiP overlay must sit IN FRONT of the
+        // fullscreen video, so the overlay layer is created FIRST (priority 0) and the fullscreen
+        // video SECOND (priority 1, behind). (Previously video was on top and hid the PiP.)
+        let layer_overlay = timeline.append_layer(); // 0: PiP overlay video (front)
+        let layer_video = timeline.append_layer(); // 1: fullscreen video (behind)
         let layer_audio = timeline.append_layer(); // 2: dialogue audio
-        let layer_caption = timeline.append_layer(); // 3: caption text (composited on top)
+        let layer_caption = timeline.append_layer(); // 3: (unused — captions are web overlays)
 
         let pipeline = ges::Pipeline::new();
         pipeline.set_timeline(&timeline)?;
