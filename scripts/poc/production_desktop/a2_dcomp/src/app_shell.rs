@@ -513,7 +513,8 @@ fn main() -> anyhow::Result<()> {
                         let edit = |op: EditOp| {
                             let r = engine_c.borrow_mut().apply_edit(op);
                             if r.ok {
-                                let _ = engine_c.borrow().seek(r.verify_pos_s);
+                                // non-blocking: never wait on the UI thread for the re-preroll
+                                engine_c.borrow().seek_nowait(r.verify_pos_s);
                             }
                         };
                         match cmd.as_str() {
@@ -558,7 +559,7 @@ fn main() -> anyhow::Result<()> {
                             }
                             "play" => { let _ = engine_c.borrow().play(); }
                             "pause" => { let _ = engine_c.borrow().pause(); }
-                            "seek" => { let _ = engine_c.borrow().seek(v); }
+                            "seek" => { engine_c.borrow().seek_nowait(v); }
                             "move" => if let Some(id) = id { edit(EditOp::Move { clip_id: id, new_start_s: v }); }
                             "trim" => if let Some(id) = id { edit(EditOp::Trim { clip_id: id, new_duration_s: v }); }
                             "split" => if let Some(id) = id { edit(EditOp::Split { clip_id: id, at_s: v }); }

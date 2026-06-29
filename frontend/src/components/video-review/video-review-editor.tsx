@@ -32,6 +32,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { TimelinePreview } from './timeline-preview';
+import { CaptionLayer, type RenderCaption } from './caption-layer';
 
 type Tool = 'select' | 'rect' | 'freehand' | 'marker';
 type Intent = 'blur' | 'cut_keep' | 'cut_remove' | 'caption' | 'replace' | 'generate' | 'motion' | 'audio' | 'comment';
@@ -420,6 +421,9 @@ export function VideoReviewEditor({
       if (!el || !wv) return;
       const r = el.getBoundingClientRect();
       const d = window.devicePixelRatio || 1;
+      // CSS-px stage width drives the caption overlay scale (captions are HTML drawn over the
+      // native video, same <CaptionLayer> the web preview uses).
+      setStageCssW(r.width);
       wv.postMessage(
         JSON.stringify({
           x: Math.round(r.left * d),
@@ -764,6 +768,35 @@ export function VideoReviewEditor({
     const [a, b] = (editSequence?.format || initialSequence?.format || '9:16').split(':');
     return `${Number(a) || 9} / ${Number(b) || 16}`;
   }, [editSequence?.format, initialSequence?.format]);
+
+  // Caption overlay for the NATIVE shell: the GES engine renders only video/audio (text overlays
+  // in GES cost ~286ms each → 22s freeze), so captions are drawn as the same HTML <CaptionLayer>
+  // the web preview uses, scaled over the native video region and synced to `currentTime`. The
+  // caption DATA lives in the timeline JSON (single source of truth) — so Dan's edits and the
+  // server-side FFmpeg export read the very same captions; this only restores the preview.
+  const [stageCssW, setStageCssW] = useState(0);
+  const captionDims = useMemo(() => {
+    const [a, b] = (editSequence?.format || initialSequence?.format || '9:16').split(':').map(Number);
+    const ratio = a && b ? a / b : 9 / 16;
+    const MAX = 900; // matches timeline-preview's canvasDims
+    return ratio >= 1 ? { w: MAX, h: Math.round(MAX / ratio) } : { w: Math.round(MAX * ratio), h: MAX };
+  }, [editSequence?.format, initialSequence?.format]);
+  const renderCaptions = useMemo<RenderCaption[]>(
+    () =>
+      (editSequence?.tracks || [])
+        .filter((t) => t.type === 'caption')
+        .flatMap((t) => t.clips || [])
+        .filter((c) => typeof c.text === 'string' && c.text.trim())
+        .map((c) => ({
+          id: String(c.id),
+          text: String(c.text),
+          start: Number(c.timeline_start || 0),
+          end: Number(c.timeline_end || 0),
+          design: (c.style || {}) as CaptionDesign,
+          words: c.words || undefined,
+        })),
+    [editSequence],
+  );
   // Stable callbacks: passing inline arrows would change every render and re-run the
   // preview's playback effect each frame, resetting its master clock (stutter/rewind).
   const handlePreviewTime = useCallback((t: number) => setCurrentTime(t), []);
@@ -2336,10 +2369,20 @@ export function VideoReviewEditor({
                 onContextMenu={(event) => event.preventDefault()}
               >
                 {nativeShell ? (
-                  // native engine composites the real video over this stage (no WebCodecs here)
-                  <div className="flex h-full w-full items-center justify-center text-[10px] text-neutral-700">
-                    native preview
-                  </div>
+                  // native engine composites the real video over this stage (no WebCodecs here);
+                  // captions are the same HTML <CaptionLayer> the web preview uses, drawn on top.
+                  <>
+                    <div className="flex h-full w-full items-center justify-center text-[10px] text-neutral-700">
+                      native preview
+                    </div>
+                    {renderCaptions.length && stageCssW > 0 ? (
+                      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+                        <div style={{ transformOrigin: 'top left', transform: `scale(${stageCssW / captionDims.w})` }}>
+                          <CaptionLayer outW={captionDims.w} outH={captionDims.h} captions={renderCaptions} time={currentTime} />
+                        </div>
+                      </div>
+                    ) : null}
+                  </>
                 ) : (
                   <TimelinePreview
                     sequence={editSequence}
