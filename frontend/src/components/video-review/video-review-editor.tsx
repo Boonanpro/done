@@ -32,7 +32,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { TimelinePreview } from './timeline-preview';
-import type { RenderCaption } from './caption-layer';
+import { CaptionLayer, type RenderCaption } from './caption-layer';
 
 type Tool = 'select' | 'rect' | 'freehand' | 'marker';
 type Intent = 'blur' | 'cut_keep' | 'cut_remove' | 'caption' | 'replace' | 'generate' | 'motion' | 'audio' | 'comment';
@@ -428,6 +428,7 @@ export function VideoReviewEditor({
       if (!el || !wv) return;
       const r = el.getBoundingClientRect();
       const d = window.devicePixelRatio || 1;
+      setStageCssW(r.width); // CSS-px stage width → scales the HTML CaptionLayer over the video
       wv.postMessage(
         JSON.stringify({
           x: Math.round(r.left * d),
@@ -775,12 +776,18 @@ export function VideoReviewEditor({
     return `${Number(a) || 9} / ${Number(b) || 16}`;
   }, [editSequence?.format, initialSequence?.format]);
 
-  // Captions in the NATIVE shell are drawn by a GPU DirectWrite overlay INSIDE the video frame
-  // (the GES engine can't take text overlays — ~286ms/clip froze the UI; and the native video is
-  // composited ON TOP of this WebView, so an HTML overlay would be hidden behind it). We compute
-  // the caption data here and push only the ACTIVE caption's text to the engine as the playhead
-  // moves. Data lives in the timeline JSON (single source of truth) → Dan's edits and the
-  // server-side FFmpeg export read the very same captions; this only drives the preview overlay.
+  // Captions in the NATIVE shell now render with the SAME web <CaptionLayer> the browser preview
+  // uses, as an HTML overlay over the (transparent) preview area on top of the native video — made
+  // possible by the compositing flip (webview is now ABOVE the video). This restores full caption
+  // styling AND instant edit reflection (no native rebuild round-trip). Data lives in the timeline
+  // JSON (single source of truth) → Dan's edits and the FFmpeg export read the very same captions.
+  const [stageCssW, setStageCssW] = useState(0);
+  const captionDims = useMemo(() => {
+    const [a, b] = (editSequence?.format || initialSequence?.format || '9:16').split(':').map(Number);
+    const ratio = a && b ? a / b : 9 / 16;
+    const MAX = 900; // matches timeline-preview's canvasDims
+    return ratio >= 1 ? { w: MAX, h: Math.round(MAX / ratio) } : { w: Math.round(MAX * ratio), h: MAX };
+  }, [editSequence?.format, initialSequence?.format]);
   const renderCaptions = useMemo<RenderCaption[]>(() => {
     // Detect captions exactly like the GES rebuild watcher (which found all 74): by the per-clip
     // `c.track === 'caption'` field across ALL tracks — NOT by the track's `type`, which isn't
@@ -843,23 +850,7 @@ export function VideoReviewEditor({
     if (!nativeShell) return;
     nativeSend({ cmd: playing ? 'play' : 'pause' });
   }, [playing, nativeShell, nativeSend]);
-  // Drive the engine's GPU caption overlay: find the caption active at the playhead and push its
-  // text only when it changes (runs each frame while playing, but sends rarely).
-  const lastCaptionRef = useRef<string>('');
-  useEffect(() => {
-    if (!nativeShell) return;
-    let text = '';
-    for (const c of renderCaptions) {
-      if (currentTime >= c.start && currentTime < c.end) {
-        text = c.text;
-        break;
-      }
-    }
-    if (text !== lastCaptionRef.current) {
-      lastCaptionRef.current = text;
-      nativeSend({ cmd: 'caption', text }); // empty string clears the overlay when no caption is active
-    }
-  }, [currentTime, renderCaptions, nativeShell, nativeSend]);
+  // (captions now render as the web <CaptionLayer> overlay above — no native caption text is sent)
   // Smooth local playhead clock while playing. GES reports a jumpy playback position at clip
   // boundaries (snaps to the clip edge), so we advance the bar locally and only gently correct
   // toward the engine below — the video is smooth, so the bar should be too.
@@ -2428,9 +2419,16 @@ export function VideoReviewEditor({
               >
                 {nativeShell ? (
                   // native engine composites the real video BELOW this transparent stage (the page
-                  // is transparent here so it shows through); web overlays render on top. No
-                  // placeholder/background — anything opaque here would hide the video.
-                  null
+                  // is transparent here so it shows through); the web CaptionLayer renders on top,
+                  // synced to the playhead. Anything opaque here would hide the video, so only the
+                  // (transparent) caption overlay is drawn.
+                  renderCaptions.length && stageCssW > 0 ? (
+                    <div className="pointer-events-none absolute inset-0 overflow-hidden">
+                      <div style={{ transformOrigin: 'top left', transform: `scale(${stageCssW / captionDims.w})` }}>
+                        <CaptionLayer outW={captionDims.w} outH={captionDims.h} captions={renderCaptions} time={currentTime} />
+                      </div>
+                    </div>
+                  ) : null
                 ) : (
                   <TimelinePreview
                     sequence={editSequence}
