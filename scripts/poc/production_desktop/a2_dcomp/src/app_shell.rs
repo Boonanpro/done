@@ -394,8 +394,9 @@ fn main() -> anyhow::Result<()> {
 
         // share the engine with the IPC handler. RefCell because apply_edit is &mut self
         // (play/pause/seek are &self → borrow(); edits → borrow_mut()).
+        // Stay PAUSED (load already prerolled a first frame) so nothing plays — and no AUDIO is
+        // heard — on the login / list pages; the editor's transport starts playback.
         let engine = Rc::new(RefCell::new(engine));
-        engine.borrow().play()?;
 
         // ---- composition WebView2 on top (opaque chrome, transparent stage) ----
         let mut udata_dir = std::env::temp_dir();
