@@ -17,7 +17,7 @@ use gst::glib;
 use gst::prelude::*;
 use ges::prelude::*;
 
-use crate::timeline_model::{self, Clip as ClipModel};
+use crate::timeline_model::{self, Clip as ClipModel, Position};
 
 const NS: f64 = 1_000_000_000.0;
 
@@ -28,6 +28,39 @@ fn ct_from_secs(s: f64) -> gst::ClockTime {
 
 fn secs_of(ct: gst::ClockTime) -> f64 {
     ct.nseconds() as f64 / NS
+}
+
+/// Per-clip state cached between rebuilds so we can diff (touch only what changed) instead of
+/// dropping + re-adding all ~250 clips every edit (which made each edit re-preroll the whole
+/// timeline synchronously and freeze the UI). `pos` is the PiP rect for overlay clips.
+#[derive(Clone)]
+struct ClipMeta {
+    lane: String,
+    ts: f64,
+    ss: f64,
+    dur: f64,
+    pos: Option<Position>,
+}
+
+fn pos_eq(a: &Option<Position>, b: &Option<Position>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => {
+            (x.x - y.x).abs() < 1e-4
+                && (x.y - y.y).abs() < 1e-4
+                && (x.width - y.width).abs() < 1e-4
+                && (x.height - y.height).abs() < 1e-4
+        }
+        _ => false,
+    }
+}
+
+/// Apply a PiP rect (normalized 0..1) to an overlay clip's gescompositor pad properties.
+fn set_pip(clip: &ges::Clip, pos: &Position, w: i32, h: i32) {
+    let _ = clip.set_child_property("posx", &glib::Value::from((pos.x * w as f64) as i32));
+    let _ = clip.set_child_property("posy", &glib::Value::from((pos.y * h as f64) as i32));
+    let _ = clip.set_child_property("width", &glib::Value::from((pos.width * w as f64) as i32));
+    let _ = clip.set_child_property("height", &glib::Value::from((pos.height * h as f64) as i32));
 }
 
 /// One edit operation against the live timeline. Clip targets are JSON `id`s.
@@ -104,6 +137,7 @@ pub struct Engine {
     // the playhead crosses caption segments (one element — no per-clip GES cost). None = headless.
     caption_overlay: Option<gst::Element>,
     clips: HashMap<String, ges::Clip>,
+    clip_meta: HashMap<String, ClipMeta>,
     asset_cache: HashMap<String, ges::UriClipAsset>,
     width: i32,
     height: i32,
@@ -235,6 +269,7 @@ impl Engine {
             fps_elem,
             caption_overlay,
             clips: HashMap::new(),
+            clip_meta: HashMap::new(),
             asset_cache: HashMap::new(),
             width,
             height,
@@ -407,6 +442,17 @@ impl Engine {
         }
 
         if !c.id.is_empty() {
+            // cache state so the diff rebuild can detect changes (seeds it at load() too)
+            let lane = match layer {
+                Layer::Video => "video",
+                Layer::Overlay => "overlay",
+                Layer::Audio => "audio",
+            }
+            .to_string();
+            self.clip_meta.insert(
+                c.id.clone(),
+                ClipMeta { lane, ts: c.timeline_start, ss: c.source_start, dur, pos: c.position },
+            );
             self.clips.insert(c.id, clip);
         }
         Ok(true)
@@ -416,36 +462,105 @@ impl Engine {
     /// "audio"). Removes every existing clip and rebuilds — the robust way to mirror an external
     /// editor's edits (move/trim/split/delete/link/ripple) in one shot. Returns clips added.
     pub fn rebuild(&mut self, clips: Vec<(String, ClipModel)>) -> anyhow::Result<usize> {
-        for layer in [&self.layer_video, &self.layer_overlay, &self.layer_audio] {
-            for clip in layer.clips() {
-                let _ = layer.remove_clip(&clip);
-            }
-        }
-        self.clips.clear();
-        let mut n = 0usize;
-        for (lane, clip) in clips {
-            // Captions are NOT rendered in GES: profiling showed Layer::add_clip for a
-            // TextOverlayClip costs ~286ms EACH (74 captions = 22s freeze on the UI thread),
-            // because GES reconfigures its nlecomposition per text clip. Captions are instead
-            // drawn as an HTML overlay in the WebView, on top of the transparent video region.
+        use std::collections::HashSet;
+        // DIFF rebuild: touch only what actually changed instead of dropping + re-adding all ~250
+        // clips every edit. Dropping everything made each edit re-build + re-preroll the whole
+        // timeline synchronously on the UI thread → occasional "not responding". Now a single
+        // clip move only updates that one clip, so commit cost scales with the EDIT, not the
+        // timeline. (Captions are NOT GES clips — drawn as an HTML overlay in the webview.)
+        let mut incoming_ids: HashSet<String> = HashSet::new();
+        let mut wanted: Vec<(String, ClipModel)> = Vec::new();
+        for (lane, c) in clips {
             if lane == "caption" {
                 continue;
             }
+            if c.asset_id.as_deref().map(str::is_empty).unwrap_or(true) || c.duration_s() <= 0.0 {
+                continue;
+            }
+            incoming_ids.insert(c.id.clone());
+            wanted.push((lane, c));
+        }
+
+        let mut dirty = false;
+
+        // 1) remove clips that no longer exist
+        let gone: Vec<String> = self
+            .clips
+            .keys()
+            .filter(|id| !incoming_ids.contains(*id))
+            .cloned()
+            .collect();
+        for id in gone {
+            if let Some(clip) = self.clips.remove(&id) {
+                let _ = self.layer_video.remove_clip(&clip);
+                let _ = self.layer_overlay.remove_clip(&clip);
+                let _ = self.layer_audio.remove_clip(&clip);
+                self.clip_meta.remove(&id);
+                dirty = true;
+            }
+        }
+
+        // 2) add new clips, update changed ones, leave unchanged ones untouched
+        for (lane, c) in wanted {
             let (layer, transform) = match lane.as_str() {
                 "overlay" => (Layer::Overlay, true),
                 "audio" => (Layer::Audio, false),
                 _ => (Layer::Video, false),
             };
-            if self.add_clip(clip, layer, transform).unwrap_or(false) {
-                n += 1;
+            let dur = c.duration_s();
+            match (self.clips.get(&c.id).cloned(), self.clip_meta.get(&c.id).cloned()) {
+                (Some(clip), Some(m)) if m.lane == lane => {
+                    // same clip, same lane → update timing / PiP only if it actually moved
+                    if (m.ts - c.timeline_start).abs() > 1e-4
+                        || (m.ss - c.source_start).abs() > 1e-4
+                        || (m.dur - dur).abs() > 1e-4
+                    {
+                        clip.set_start(ct_from_secs(c.timeline_start));
+                        let _ = clip.set_inpoint(ct_from_secs(c.source_start));
+                        let _ = clip.set_duration(ct_from_secs(dur));
+                        dirty = true;
+                    }
+                    if transform && !pos_eq(&m.pos, &c.position) {
+                        if let Some(pos) = &c.position {
+                            set_pip(&clip, pos, self.width, self.height);
+                        }
+                        dirty = true;
+                    }
+                    self.clip_meta.insert(
+                        c.id.clone(),
+                        ClipMeta { lane, ts: c.timeline_start, ss: c.source_start, dur, pos: c.position },
+                    );
+                }
+                _ => {
+                    // new clip, or its lane changed → drop the old (if any) and add fresh
+                    if let Some(old) = self.clips.remove(&c.id) {
+                        let _ = self.layer_video.remove_clip(&old);
+                        let _ = self.layer_overlay.remove_clip(&old);
+                        let _ = self.layer_audio.remove_clip(&old);
+                    }
+                    let (id, ts, ss, pos) =
+                        (c.id.clone(), c.timeline_start, c.source_start, c.position);
+                    if self.add_clip(c, layer, transform).unwrap_or(false) {
+                        self.clip_meta.insert(id, ClipMeta { lane, ts, ss, dur, pos });
+                        dirty = true;
+                    }
+                }
             }
         }
-        // commit_sync (not async commit): it waits for GES to finish reconfiguring before
-        // returning, so a rapid sequence of rebuilds (e.g. dragging several selected clips) can't
-        // overlap a still-in-flight commit and corrupt the nlecomposition (which crashed natively).
-        // Captions are no longer GES clips, so this no longer carries the 22s text-overlay cost.
-        self.timeline.commit_sync();
-        Ok(n)
+
+        // commit_sync only when something changed: serializes reconfiguration (no native overlap
+        // crash) but, because the diff makes the change set tiny, the re-preroll is now sub-frame
+        // for a typical edit rather than re-prerolling all ~250 clips.
+        if dirty {
+            let t = Instant::now();
+            self.timeline.commit_sync();
+            eprintln!(
+                "[rebuild] commit_sync {:.0}ms ({} clips total)",
+                t.elapsed().as_secs_f64() * 1000.0,
+                self.clips.len()
+            );
+        }
+        Ok(self.clips.len())
     }
 
     /// Flushing, frame-accurate seek; returns latency (commit→ASYNC_DONE) in ms.
