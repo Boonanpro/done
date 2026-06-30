@@ -819,6 +819,11 @@ export function VideoReviewEditor({
   // HW decoder re-inits; a free wall-clock bar would run ahead during those stalls (the desync).
   // Following the engine keeps the bar locked to the picture — it stalls when the picture stalls.
   const engPosRef = useRef({ pos: 0, wall: 0 });
+  // The thin playhead bar is moved DIRECTLY via this ref at 60Hz (no React re-render), so the heavy
+  // 324-clip editor doesn't re-render every frame just to nudge the bar (that 60Hz full re-render
+  // was churning ~13MB/s and leaking detached DOM → renderer OOM). React `currentTime` is updated
+  // at ~12Hz only for the reactive bits (captions / annotations / time readout) which don't need 60Hz.
+  const playheadBarRef = useRef<HTMLDivElement>(null);
   const seekTimeline = useCallback(
     (time: number) => {
       const maxDuration = timelineDuration || duration || 0;
@@ -848,12 +853,20 @@ export function VideoReviewEditor({
     if (!nativeShell || !playing) return;
     engPosRef.current = { ...engPosRef.current, wall: performance.now() }; // re-anchor on play
     let raf = 0;
+    let lastState = 0;
     const max = timelineDuration || duration || 0;
-    const loop = () => {
+    const loop = (now: number) => {
       const e = engPosRef.current;
       const elapsed = Math.min(Math.max((performance.now() - e.wall) / 1000, 0), 0.08);
-      const next = e.pos + elapsed;
-      setCurrentTime(max > 0 ? Math.min(next, max) : next);
+      const pos = max > 0 ? Math.min(e.pos + elapsed, max) : e.pos + elapsed;
+      // 60Hz: move ONLY the thin bar via the ref — no React re-render of the heavy editor.
+      const bar = playheadBarRef.current;
+      if (bar && timelineDuration) bar.style.left = `${(pos / timelineDuration) * 100}%`;
+      // ~12Hz: update React currentTime for the reactive bits (captions/annotations/time readout).
+      if (now - lastState > 80) {
+        lastState = now;
+        setCurrentTime(pos);
+      }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -2919,6 +2932,7 @@ export function VideoReviewEditor({
                         );
                       })}
                       <div
+                        ref={playheadBarRef}
                         className="pointer-events-none absolute top-0 bottom-0 z-10 w-px bg-destructive"
                         style={{ left: `${timelineDuration ? (currentTime / timelineDuration) * 100 : 0}%` }}
                       />
