@@ -481,7 +481,6 @@ fn main() -> anyhow::Result<()> {
             dcomp.Commit()?;
             eprintln!("[a2-step3] swapchain bound to DComp video visual ({}x{})", BW, BH);
         }
-
         // share the engine with the IPC handler. RefCell because apply_edit is &mut self
         // (play/pause/seek are &self → borrow(); edits → borrow_mut()).
         // Stay PAUSED (load already prerolled a first frame) so nothing plays — and no AUDIO is
@@ -560,8 +559,10 @@ fn main() -> anyhow::Result<()> {
             engine: engine.clone(),
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(state) as isize);
-        // ~10 Hz position feedback to the editor playhead (WM_TIMER, on the UI thread)
-        SetTimer(hwnd, 1, 100, None);
+        // ~30 Hz position feedback so the editor playhead can follow the engine's REAL position
+        // closely (the playhead mirrors the video — it stalls when the picture stalls at a clip
+        // boundary instead of running ahead on a free wall-clock).
+        SetTimer(hwnd, 1, 33, None);
 
         // step4: follow the #preview box. JS posts {x,y,w,h} in device px; we resize the sink
         // swapchain to (w,h), rebind it (resize may recreate buffers), and move the video visual

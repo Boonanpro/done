@@ -814,34 +814,23 @@ export function VideoReviewEditor({
   // preview's playback effect each frame, resetting its master clock (stutter/rewind).
   const handlePreviewTime = useCallback((t: number) => setCurrentTime(t), []);
   const handlePreviewEnded = useCallback(() => setPlaying(false), []);
-  // Playhead freeze during the brief video stall after a seek-while-playing: the GES pipeline
-  // flushes + re-prerolls at the new spot (the picture pauses for a moment), so we freeze the
-  // local clock and resume it only when the engine's reported position starts advancing again
-  // (= playback resumed) — keeping the bar and the picture in lock-step instead of the bar
-  // running ahead during the load.
-  const headFrozenRef = useRef(false);
-  const seekTargetRef = useRef(0);
-  const freezeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The playhead FOLLOWS the engine's real playback position (engPosRef = last reported position +
+  // the wall-clock time it arrived). The picture stalls ~150-650ms at each clip boundary while the
+  // HW decoder re-inits; a free wall-clock bar would run ahead during those stalls (the desync).
+  // Following the engine keeps the bar locked to the picture — it stalls when the picture stalls.
+  const engPosRef = useRef({ pos: 0, wall: 0 });
   const seekTimeline = useCallback(
     (time: number) => {
       const maxDuration = timelineDuration || duration || 0;
       const nextTime = Number(clamp(time, 0, maxDuration).toFixed(3));
-      // Preserve play state: seeking (incl. clicking the ruler) should NOT stop playback — a
-      // flushing seek while playing continues from the new position. (Previously forced pause.)
+      // Preserve play state: seeking (incl. clicking the ruler) does NOT stop playback. Anchor the
+      // follow-clock at the seek target so the bar jumps there and then stays put until the engine
+      // confirms it actually resumed there (the engine keeps reporting the target while it re-prerolls).
       setCurrentTime(nextTime);
-      if (nativeShell) {
-        if (playing) {
-          // freeze the bar until the engine confirms playback resumed at the new spot
-          headFrozenRef.current = true;
-          seekTargetRef.current = nextTime;
-          if (freezeTimerRef.current) clearTimeout(freezeTimerRef.current);
-          // safety: never stay frozen more than ~1.2s if no resume signal arrives
-          freezeTimerRef.current = setTimeout(() => { headFrozenRef.current = false; }, 1200);
-        }
-        nativeSend({ cmd: 'seek', pos: nextTime });
-      }
+      engPosRef.current = { pos: nextTime, wall: performance.now() };
+      if (nativeShell) nativeSend({ cmd: 'seek', pos: nextTime });
     },
-    [duration, timelineDuration, nativeShell, nativeSend, playing]
+    [duration, timelineDuration, nativeShell, nativeSend]
   );
 
   // Native transport bridge: in the desktop shell the GES engine is the playback source.
@@ -851,26 +840,20 @@ export function VideoReviewEditor({
     nativeSend({ cmd: playing ? 'play' : 'pause' });
   }, [playing, nativeShell, nativeSend]);
   // (captions now render as the web <CaptionLayer> overlay above — no native caption text is sent)
-  // Smooth local playhead clock while playing. GES reports a jumpy playback position at clip
-  // boundaries (snaps to the clip edge), so we advance the bar locally and only gently correct
-  // toward the engine below — the video is smooth, so the bar should be too.
+  // Playhead = engine position, interpolated forward by at most ONE feedback interval so the bar
+  // is smooth between the ~30Hz updates but can NEVER run ahead of the picture: during a stall the
+  // engine keeps reporting the same position, so the interpolation resets every ~33ms (drift ≤ the
+  // cap below). This is what makes the bar and the video/audio stay in lock-step.
   useEffect(() => {
     if (!nativeShell || !playing) return;
+    engPosRef.current = { ...engPosRef.current, wall: performance.now() }; // re-anchor on play
     let raf = 0;
-    let prev = performance.now();
-    const loop = (now: number) => {
-      const dt = (now - prev) / 1000;
-      prev = now;
-      // hold the bar still while the video re-prerolls after a seek (see headFrozenRef)
-      if (headFrozenRef.current) {
-        raf = requestAnimationFrame(loop);
-        return;
-      }
-      const max = timelineDuration || duration || 0;
-      setCurrentTime((t) => {
-        const next = t + dt;
-        return max > 0 ? Math.min(next, max) : next;
-      });
+    const max = timelineDuration || duration || 0;
+    const loop = () => {
+      const e = engPosRef.current;
+      const elapsed = Math.min(Math.max((performance.now() - e.wall) / 1000, 0), 0.08);
+      const next = e.pos + elapsed;
+      setCurrentTime(max > 0 ? Math.min(next, max) : next);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -884,21 +867,8 @@ export function VideoReviewEditor({
       try {
         const d = JSON.parse(String(e.data));
         if (d && d.type === 'pos' && typeof d.t === 'number') {
-          if (headFrozenRef.current) {
-            // Frozen after a seek: the engine's position sits at the seek target while it
-            // re-prerolls. Resume the bar only once it advances past the target — i.e. new
-            // frames are actually presenting again — and snap to the engine's exact position.
-            if (d.t > seekTargetRef.current + 0.05) {
-              headFrozenRef.current = false;
-              if (freezeTimerRef.current) { clearTimeout(freezeTimerRef.current); freezeTimerRef.current = null; }
-              setCurrentTime(d.t);
-            }
-            return;
-          }
-          // The local clock (1x) already matches the smooth video. Don't follow the engine's
-          // jumpy near-boundary position (that made the bar accelerate at clip edges) — only SNAP
-          // on a big delta (a real seek / loop the local clock couldn't have produced).
-          setCurrentTime((cur) => (Math.abs(d.t - cur) > 1.5 ? d.t : cur));
+          // record the engine's REAL position; the rAF loop above follows it (never runs ahead).
+          engPosRef.current = { pos: d.t, wall: performance.now() };
         }
       } catch {
         /* ignore */
