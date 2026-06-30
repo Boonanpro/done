@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use gstreamer as gst;
@@ -136,6 +138,10 @@ pub struct Engine {
     // GPU DirectWrite text overlay in front of the on-screen sink; its `text` is updated live as
     // the playhead crosses caption segments (one element — no per-clip GES cost). None = headless.
     caption_overlay: Option<gst::Element>,
+    // PTS of the LAST frame actually presented at the video sink (ns; u64::MAX = none yet). This
+    // is the true displayed-frame position — it stalls when the picture stalls and never spikes
+    // at clip boundaries the way query_position does. The playhead follows this.
+    displayed_pos_ns: Arc<AtomicU64>,
     clips: HashMap<String, ges::Clip>,
     clip_meta: HashMap<String, ClipMeta>,
     asset_cache: HashMap<String, ges::UriClipAsset>,
@@ -195,6 +201,7 @@ impl Engine {
 
         // Video sink: caller-supplied, else headless fpsdisplaysink (rendered/dropped counters).
         let mut caption_overlay: Option<gst::Element> = None;
+        let displayed_pos_ns = Arc::new(AtomicU64::new(u64::MAX));
         let (vsink_elem, fps_elem) = match video_sink {
             Some(sink) => {
                 // Wrap the on-screen sink with a GPU DirectWrite text overlay: captions composite
@@ -229,6 +236,21 @@ impl Engine {
                 let ghost = gst::GhostPad::with_target(&target)?;
                 bin.add_pad(&ghost)?;
                 caption_overlay = Some(cap);
+                // PAD PROBE on the real sink: record the PTS of every frame that actually reaches
+                // the screen. This is the displayed-frame position — it freezes when the picture
+                // freezes and never spikes at clip boundaries like query_position. The playhead
+                // follows this (via get_state), so the bar and the picture stay locked together.
+                if let Some(spad) = sink.static_pad("sink") {
+                    let dp = displayed_pos_ns.clone();
+                    spad.add_probe(gst::PadProbeType::BUFFER, move |_pad, info| {
+                        if let Some(gst::PadProbeData::Buffer(buf)) = &info.data {
+                            if let Some(pts) = buf.pts() {
+                                dp.store(pts.nseconds(), Ordering::Relaxed);
+                            }
+                        }
+                        gst::PadProbeReturn::Ok
+                    });
+                }
                 (bin.upcast::<gst::Element>(), sink)
             }
             None => {
@@ -268,6 +290,7 @@ impl Engine {
             layer_caption,
             fps_elem,
             caption_overlay,
+            displayed_pos_ns,
             clips: HashMap::new(),
             clip_meta: HashMap::new(),
             asset_cache: HashMap::new(),
@@ -567,6 +590,9 @@ impl Engine {
     pub fn seek(&self, pos_s: f64) -> SeekResult {
         let flags = gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE;
         let t0 = Instant::now();
+        // pin the displayed position to the seek target so the playhead holds there during the
+        // re-preroll (the probe still holds the OLD frame's PTS until the new frame presents).
+        self.displayed_pos_ns.store(ct_from_secs(pos_s).nseconds(), Ordering::Relaxed);
         if self
             .pipeline
             .seek_simple(flags, ct_from_secs(pos_s))
@@ -594,6 +620,7 @@ impl Engine {
     /// (possibly heavy) re-preroll. The sink presents the new frame when GStreamer is ready.
     pub fn seek_nowait(&self, pos_s: f64) {
         let flags = gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE;
+        self.displayed_pos_ns.store(ct_from_secs(pos_s).nseconds(), Ordering::Relaxed);
         let _ = self.pipeline.seek_simple(flags, ct_from_secs(pos_s));
     }
 
@@ -700,11 +727,16 @@ impl Engine {
     }
 
     pub fn get_state(&self) -> EngineState {
-        let position_s = self
-            .pipeline
-            .query_position::<gst::ClockTime>()
-            .map(secs_of)
-            .unwrap_or(0.0);
+        // Prefer the DISPLAYED-frame position (pad probe) — it tracks what's actually on screen and
+        // doesn't spike at clip boundaries. Fall back to query_position before the first frame.
+        let position_s = match self.displayed_pos_ns.load(Ordering::Relaxed) {
+            u64::MAX => self
+                .pipeline
+                .query_position::<gst::ClockTime>()
+                .map(secs_of)
+                .unwrap_or(0.0),
+            ns => ns as f64 / NS,
+        };
         let state = self.pipeline.current_state();
         EngineState {
             position_s,
