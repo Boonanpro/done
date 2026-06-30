@@ -181,6 +181,12 @@ export function ProductionWorkspace({
     window.history.replaceState(null, '', url.toString());
   }, []);
 
+  // Job ids we've already reacted to as terminal (done/failed). Without this, loadJobs would
+  // call loadAll on EVERY poll as long as any terminal job exists (a finished build is always
+  // 'done'), and loadAll churns selectedContent's identity -> loadJobs re-fires -> loadAll ...
+  // an infinite fetch loop (~1/s) that re-parses the 324-clip contents JSON and OOMs the renderer.
+  const reactedTerminalJobsRef = useRef<Set<string>>(new Set());
+
   const loadAll = useCallback(async () => {
     if (!roomId) return;
     setIsLoading(true);
@@ -195,13 +201,18 @@ export function ProductionWorkspace({
       const nextContents = await contentRes.json();
       setContents(nextContents);
       const urlContentId = new URLSearchParams(window.location.search).get('content_id');
-      setSelectedContent((current) =>
-        current
-          ? nextContents.find((content: ProductionContent) => content.id === current.id) || null
-          : urlContentId
-            ? nextContents.find((content: ProductionContent) => content.id === urlContentId) || null
-            : null
-      );
+      setSelectedContent((current) => {
+        const targetId = current?.id || urlContentId;
+        const found = targetId
+          ? nextContents.find((content: ProductionContent) => content.id === targetId) || null
+          : null;
+        // Keep the existing object reference when nothing actually changed, so selectedContent's
+        // identity stays stable and dependent effects (loadJobs) don't re-fire on every refresh.
+        if (current && found && found.id === current.id && found.updated_at === current.updated_at) {
+          return current;
+        }
+        return found;
+      });
     } catch (error) {
       toast.error('Failed to load production workspace', { description: String(error).slice(0, 160) });
     } finally {
@@ -238,7 +249,15 @@ export function ProductionWorkspace({
       if (!res.ok) throw new Error(await res.text());
       const nextJobs = (await res.json()) as ProductionJob[];
       setJobs(nextJobs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()));
-      if (nextJobs.some((job) => job.status === 'done' || job.status === 'failed')) {
+      // Only refresh assets/contents when a job has JUST transitioned to terminal — not while a
+      // terminal job merely exists (that re-triggers loadAll forever; see reactedTerminalJobsRef).
+      const newlyTerminal = nextJobs.filter(
+        (job) => (job.status === 'done' || job.status === 'failed') && !reactedTerminalJobsRef.current.has(job.id)
+      );
+      for (const job of nextJobs) {
+        if (job.status === 'done' || job.status === 'failed') reactedTerminalJobsRef.current.add(job.id);
+      }
+      if (newlyTerminal.length > 0) {
         void loadAll();
       }
     } catch (error) {
