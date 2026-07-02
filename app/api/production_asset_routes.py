@@ -10,6 +10,7 @@ import subprocess
 import sys
 import uuid
 import asyncio
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -587,6 +588,17 @@ def _asset_source_path(asset: dict[str, Any]) -> Path:
     return path
 
 
+def _asset_hires_path(asset: dict[str, Any]) -> Path:
+    """Prefer the ORIGINAL (full-res) source over the proxy — used for pop-out matting so the
+    cutout edges stay clean (the proxy can be ~406x720; matting on it looks coarse). Falls back
+    to the proxy if the original is missing."""
+    for key in ("local_path", "proxy_path"):
+        v = asset.get(key)
+        if v and Path(v).exists():
+            return Path(v).resolve()
+    return _asset_source_path(asset)
+
+
 def _attach_output_asset(
     room_id: str,
     content_id: str,
@@ -1033,8 +1045,83 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         # offsets and windows the overflow against the frame.
         px = round(float(pos.get("x") or 0.27) * output_width)
         py = round(float(pos.get("y") or 0.835) * output_height)
+        # Manual per-edge crop = MASK: the wipe stays at its box size/position; we only cut the
+        # trimmed strips away (cut edges reveal the main video behind). The picture does NOT move or
+        # resize. Computed here (in box pixels), applied after the cover scale below. Mirrors the
+        # native engine so the desktop preview and the export frame the wipe identically.
+        _crop = clip.get("crop") if isinstance(clip.get("crop"), dict) else None
+        _mask = None
+        if _crop:
+            _cl = max(0.0, min(0.9, float(_crop.get("left") or 0)))
+            _cr = max(0.0, min(0.9, float(_crop.get("right") or 0)))
+            _ct = max(0.0, min(0.9, float(_crop.get("top") or 0)))
+            _cb = max(0.0, min(0.9, float(_crop.get("bottom") or 0)))
+            if (_cl + _cr + _ct + _cb) > 1e-4:
+                _ml = round(ow * _cl)
+                _mt = round(oh * _ct)
+                _mkw = max(2, ow - _ml - round(ow * _cr))
+                _mkh = max(2, oh - _mt - round(oh * _cb))
+                _mask = (_ml, _mt, _mkw, _mkh)
         ts = max(0.0, float(clip.get("timeline_start") or 0))
         te = max(ts + 0.05, float(clip.get("timeline_end") or (ts + ov_dur)))
+        # --- pop-out effect (v4): composite the SAME cached bake the preview uses
+        # (popout-cache/{key}.pv.mp4 = color track + alpha track) — alphamerge, apply the clip's
+        # display transform, overlay. No re-matting at export; bakes on demand only if the cache
+        # is missing (cleaned disk / legacy clip). Falls back to a plain wipe if the bake fails
+        # (e.g. no person / no GPU). ---
+        _popout = next((e for e in (clip.get("effects") or [])
+                        if isinstance(e, dict) and e.get("type") == "popout"), None)
+        if _popout:
+            _pp = _popout.get("params") if isinstance(_popout.get("params"), dict) else {}
+            # bake geometry = the CARD box captured at apply (params.box), NOT the display position
+            _box_px = _popout_box_px(_pp.get("box") or clip.get("position"), output_width, output_height)
+            if isinstance(_pp.get("bake_start"), (int, float)) and isinstance(_pp.get("bake_end"), (int, float)):
+                _bs, _be = float(_pp["bake_start"]), float(_pp["bake_end"])
+            else:
+                _bs, _be = _popout_bake_range(asset, source_start, source_end)
+            _intensity = str(_pp.get("intensity") or "mid")
+            _shadow = _pp.get("shadow")
+            _key = _popout_key(str(clip.get("asset_id") or ""), _bs, _be, _box_px,
+                               output_width, output_height, _intensity, _shadow)
+            _pv = _popout_cache_dir(room_id) / f"{_key}.pv.mp4"
+            if not (_pv.exists() and _pv.stat().st_size > 0):
+                try:
+                    _popout_bake_sync(_asset_hires_path(asset), _pv, _box_px,
+                                      output_width, output_height, _bs, _be,
+                                      _intensity, _shadow, None)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("popout overlay failed for clip %s: %s — using plain wipe",
+                                   clip.get("id"), exc)
+                    _popout = None
+            if _popout and _pv.exists():
+                _off = max(0.0, source_start - _bs)
+                command.extend(["-ss", f"{_off:.3f}", "-t",
+                                f"{max(0.1, source_end - source_start):.3f}", "-i", str(_pv)])
+                # display transform: the bake is full-canvas, so scale to the clip's box, cut the
+                # per-edge crop strips in place (parity with the native videocrop), overlay at x/y
+                _dis = clip.get("position") if isinstance(clip.get("position"), dict) else {}
+                _dx = round(float(_dis.get("x") or 0) * output_width)
+                _dy = round(float(_dis.get("y") or 0) * output_height)
+                _dw = max(2, round(float(_dis.get("width") or 1) * output_width))
+                _dh = max(2, round(float(_dis.get("height") or 1) * output_height))
+                _chain = [f"[{input_index}:v:0][{input_index}:v:1]alphamerge"]
+                if (_dw, _dh) != (output_width, output_height):
+                    _chain.append(f"scale={_dw}:{_dh}")
+                if _mask is not None:
+                    _pl, _pt, _pkw, _pkh = (round(_dw * _cl), round(_dh * _ct),
+                                            max(2, _dw - round(_dw * _cl) - round(_dw * _cr)),
+                                            max(2, _dh - round(_dh * _ct) - round(_dh * _cb)))
+                    _chain.append(f"crop={_pkw}:{_pkh}:{_pl}:{_pt}")
+                    _dx, _dy = _dx + _pl, _dy + _pt
+                _chain.append(f"setpts=PTS-STARTPTS+{ts:.3f}/TB")
+                filters.append(",".join(_chain) + f"[pov{oi}]")
+                filters.append(
+                    f"[{video_out}][pov{oi}]overlay={_dx}:{_dy}:format=auto:"
+                    f"enable='between(t\\,{ts:.3f}\\,{te:.3f})'[vov{oi}]"
+                )
+                video_out = f"vov{oi}"
+                input_index += 1
+                continue
         ov_pad = 0.0 if ov_freeze else max(0.0, ov_dur - ov_src)
         if ov_freeze:
             ov_pre = f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={ov_dur:.3f},"
@@ -1043,16 +1130,33 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         command.extend(["-i", str(source_path)])
         # Wipe shape: clip the PiP to a circle / rounded frame via a transparent alpha mask.
         shape_filt = _shape_cut_filter(clip.get("shape"), ow, oh, alpha=True)
+        # COVER by default: keep the source's aspect ratio (fill the box, crop the overflow) instead
+        # of stretching it to the box's width AND height independently — the latter squished a 9:16
+        # wipe into a 0.4×0.3 box (the "潰れ" bug). fit=="stretch" opts back into free-deform.
+        if str(clip.get("fit") or "cover") == "stretch":
+            _scale = f"scale={ow}:{oh}"
+        else:
+            _scale = f"scale={ow}:{oh}:force_original_aspect_ratio=increase,crop={ow}:{oh}"
+        # MASK: cut the trimmed strips off the covered (and shaped) box; the kept pixels keep their
+        # place, and the overlay origin shifts by the trimmed left/top so nothing moves or resizes.
+        if _mask:
+            _ml, _mt, _mkw, _mkh = _mask
+            _maskcrop = f",crop={_mkw}:{_mkh}:{_ml}:{_mt}"
+            _mx, _my = px + _ml, py + _mt
+        else:
+            _maskcrop = ""
+            _mx, _my = px, py
         filters.append(
             f"[{input_index}:v]"
             f"trim=start={source_start:.3f}:end={source_end:.3f},"
             f"{ov_pre}"
-            f"scale={ow}:{oh},setsar=1,setpts=PTS-STARTPTS+{ts:.3f}/TB,format=yuv420p"
+            f"{_scale},setsar=1,setpts=PTS-STARTPTS+{ts:.3f}/TB,format=yuv420p"
             f"{shape_filt}"
+            f"{_maskcrop}"
             f"[ov{oi}]"
         )
         filters.append(
-            f"[{video_out}][ov{oi}]overlay={px}:{py}:enable='between(t\\,{ts:.3f}\\,{te:.3f})'[vov{oi}]"
+            f"[{video_out}][ov{oi}]overlay={_mx}:{_my}:enable='between(t\\,{ts:.3f}\\,{te:.3f})'[vov{oi}]"
         )
         video_out = f"vov{oi}"
         input_index += 1
@@ -1166,6 +1270,8 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             "veryfast",
             "-crf",
             "22",
+            "-pix_fmt",
+            "yuv420p",
             *audio_args,
             "-movflags",
             "+faststart",
@@ -3008,6 +3114,194 @@ async def get_asset_media(
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="Media file not found")
     return _range_file_response(path, request)
+
+
+# --- pop-out overlay bake (v4) -------------------------------------------------------------
+# One bake per (asset, padded source range, card box, canvas, look) produces a single
+# `{key}.pv.mp4` with TWO H.264 tracks (v:0 color / v:1 alpha-as-luma). Everything derives
+# from it with no re-matting: the native engine composites it directly (HW decode — the old
+# ProRes 4444 .mov was 200+Mbps CPU-only and dragged the whole timeline down), the browser
+# preview plays per-track `-c copy` remuxes, and the export alphamerges the two tracks.
+# The range is padded so trim/split/move NEVER re-bake (only growing past the pad does).
+POPOUT_BAKE_PAD_S = 3.0
+_POPOUT_BAKING: dict[str, bool] = {}  # f"{room_id}/{key}" -> in-flight (this process)
+
+
+def _popout_cache_dir(room_id: str) -> Path:
+    d = ASSET_ROOT / room_id / "popout-cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _popout_box_px(box: dict[str, Any] | None, W: int, H: int) -> tuple[int, int, int, int]:
+    b = box if isinstance(box, dict) else {}
+    ow = max(2, round(float(b.get("width") or 0.46) * W))
+    oh = max(2, round(float(b.get("height") or 0.145) * H))
+    px = round(float(b.get("x") or 0.27) * W)
+    py = round(float(b.get("y") or 0.835) * H)
+    return px, py, ow, oh
+
+
+def _popout_bake_range(asset: dict[str, Any], ss: float, se: float) -> tuple[float, float]:
+    """Padded bake window clamped to the asset, so trims within the pad need no re-bake."""
+    bs = max(0.0, ss - POPOUT_BAKE_PAD_S)
+    be = se + POPOUT_BAKE_PAD_S
+    meta = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    dur = float(meta.get("duration") or 0)
+    if dur > 0:
+        be = min(be, dur)
+    return round(bs, 3), round(max(be, bs + 0.1), 3)
+
+
+def _popout_key(asset_id: str, bs: float, be: float, box_px: tuple[int, int, int, int],
+                W: int, H: int, intensity: str, shadow: Any) -> str:
+    # v5: full-range alpha + auto-extended canvas (margins) — bump re-bakes older caches
+    px, py, ow, oh = box_px
+    key_src = f"v5|{asset_id}|{bs:.3f}|{be:.3f}|{px},{py},{ow},{oh}|{W}x{H}|{intensity}|{bool(shadow is not False)}"
+    return hashlib.sha1(key_src.encode()).hexdigest()[:16]
+
+
+def _popout_bake_sync(source_path: Path, out_pv: Path, box_px: tuple[int, int, int, int],
+                      W: int, H: int, bs: float, be: float, intensity: str, shadow: Any,
+                      progress_file: Path | None) -> None:
+    """Run the bake script to a temp file, then atomically publish. Blocking — call in a thread."""
+    px, py, ow, oh = box_px
+    part = out_pv.with_suffix(".part.mp4")
+    script = PROJECT_ROOT / "scripts" / "popout_overlay.py"
+    args = [sys.executable, str(script), str(source_path), "--out", str(part),
+            "--W", str(W), "--H", str(H), "--box", f"{px},{py},{ow},{oh}",
+            "--start", f"{bs:.3f}", "--duration", f"{max(0.1, be - bs):.3f}",
+            "--intensity", intensity, "--fps", "30",
+            "--meta-file", str(out_pv.parent / f"{out_pv.name.split('.')[0]}.json")]
+    if shadow is False:
+        args.append("--no-shadow")
+    if progress_file is not None:
+        args.extend(["--progress-file", str(progress_file)])
+    subprocess.run(args, check=True)
+    os.replace(part, out_pv)
+
+
+def _popout_margins(cache_dir: Path, key: str) -> dict[str, float]:
+    """Canvas-extension margins the bake recorded ({key}.json), normalized to the base frame.
+    The editor composes these into the clip's display position so the extended canvas lands
+    exactly where the un-extended one did."""
+    try:
+        with open(cache_dir / f"{key}.json", encoding="utf-8") as f:
+            m = (json.load(f) or {}).get("margins") or {}
+    except (OSError, ValueError):
+        m = {}
+    return {k: float(m.get(k) or 0.0) for k in ("l", "t", "r", "b")}
+
+
+def _popout_read_progress(progress_file: Path) -> dict[str, Any]:
+    try:
+        with open(progress_file, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+@router.post("/popout-overlay")
+async def generate_popout_overlay(payload: dict = Body(...)):
+    """Start (or reuse) the pop-out overlay bake for one clip and return immediately with the
+    cache key + bake window; the editor polls /popout-overlay/status and shows a progress bar.
+    The card box / intensity / shadow are captured once at apply (template look) — the display
+    position is the user's and never triggers a re-bake; neither do trims within the pad."""
+    room_id = str(payload.get("room_id") or "")
+    asset_id = str(payload.get("asset_id") or "")
+    if not room_id or not asset_id:
+        raise HTTPException(status_code=400, detail="room_id and asset_id required")
+    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    source_path = _asset_hires_path(asset)  # matte from the ORIGINAL, not the low-res proxy
+    fmt = str(payload.get("format") or "9:16")
+    W, H = _output_size(fmt)
+    box_px = _popout_box_px(payload.get("position"), W, H)
+    ss = max(0.0, float(payload.get("source_start") or 0.0))
+    se = max(ss + 0.1, float(payload.get("source_end") or (ss + 4.0)))
+    intensity = str(payload.get("intensity") or "mid")
+    shadow = payload.get("shadow")
+    bs, be = _popout_bake_range(asset, ss, se)
+    key = _popout_key(asset_id, bs, be, box_px, W, H, intensity, shadow)
+    cache_dir = _popout_cache_dir(room_id)
+    out_pv = cache_dir / f"{key}.pv.mp4"
+    progress_file = cache_dir / f"{key}.progress.json"
+    resp = {"key": key, "bake_start": bs, "bake_end": be, "format": fmt,
+            "url": f"/api/v1/production-assets/popout-overlay/media?room_id={room_id}&key={key}"}
+    if out_pv.exists() and out_pv.stat().st_size > 0:
+        return {**resp, "ready": True, "progress": 100, "cached": True,
+                "margins": _popout_margins(cache_dir, key)}
+    flight_key = f"{room_id}/{key}"
+    prog = _popout_read_progress(progress_file)
+    if _POPOUT_BAKING.get(flight_key):
+        return {**resp, "ready": False, "progress": int(prog.get("pct") or 0)}
+
+    async def _bake() -> None:
+        try:
+            await asyncio.to_thread(
+                _popout_bake_sync, source_path, out_pv, box_px, W, H, bs, be,
+                intensity, shadow, progress_file)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("popout overlay generation failed (%s): %s", key, exc)
+            try:
+                with open(progress_file, "w", encoding="utf-8") as f:
+                    json.dump({"done": 0, "total": 1, "pct": 0, "error": str(exc)}, f)
+            except OSError:
+                pass
+        finally:
+            _POPOUT_BAKING.pop(flight_key, None)
+
+    _POPOUT_BAKING[flight_key] = True
+    asyncio.create_task(_bake())
+    return {**resp, "ready": False, "progress": 0}
+
+
+@router.get("/popout-overlay/status")
+async def get_popout_overlay_status(room_id: str = Query(...), key: str = Query(...)):
+    safe = re.sub(r"[^0-9a-f]", "", key)[:32]
+    cache_dir = ASSET_ROOT / room_id / "popout-cache"
+    out_pv = cache_dir / f"{safe}.pv.mp4"
+    if out_pv.exists() and out_pv.stat().st_size > 0:
+        return {"ready": True, "progress": 100, "margins": _popout_margins(cache_dir, safe)}
+    prog = _popout_read_progress(cache_dir / f"{safe}.progress.json")
+    if prog.get("error"):
+        return {"ready": False, "progress": 0, "error": str(prog["error"])}
+    running = _POPOUT_BAKING.get(f"{room_id}/{safe}", False)
+    # a progress file without a live bake (e.g. server restarted mid-bake) is stale — tell the
+    # editor so it can re-POST instead of watching a frozen bar
+    if not running and prog:
+        return {"ready": False, "progress": int(prog.get("pct") or 0), "stale": True}
+    return {"ready": False, "progress": int(prog.get("pct") or 0), "running": running}
+
+
+@router.get("/popout-overlay/media")
+async def get_popout_overlay(request: Request, room_id: str = Query(...), key: str = Query(...),
+                             stream: str = Query("color")):
+    """Serve a single-track remux of the bake for the browser preview: `stream=color` (v:0) or
+    `stream=alpha` (v:1, matte in luma). Both are plain H.264 → HW-decoded <video> elements;
+    the editor merges them on a canvas (no VP9 encode anywhere). Legacy pre-v4 keys still serve
+    their .webm so old clips keep previewing until they are auto-upgraded."""
+    safe = re.sub(r"[^0-9a-f]", "", key)[:32]
+    cache_dir = ASSET_ROOT / room_id / "popout-cache"
+    out_pv = cache_dir / f"{safe}.pv.mp4"
+    if not out_pv.exists():
+        # legacy fallback serves the .webm for the COLOR stream only — it carries its own alpha,
+        # and handing it out as the matte would cut the color by its luma (wrong)
+        legacy = (cache_dir / f"{safe}.webm").resolve()
+        if stream != "alpha" and legacy.exists() and legacy.is_file():
+            return _range_file_response(legacy, request)
+        raise HTTPException(status_code=404, detail="overlay not found")
+    which = "alpha" if stream == "alpha" else "color"
+    track = 1 if which == "alpha" else 0
+    remux = cache_dir / f"{safe}.{which}.mp4"
+    if not remux.exists() or remux.stat().st_size == 0 or remux.stat().st_mtime < out_pv.stat().st_mtime:
+        part = cache_dir / f"{safe}.{which}.part.mp4"
+        await asyncio.to_thread(subprocess.run, [
+            _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(out_pv),
+            "-map", f"0:v:{track}", "-c", "copy", "-movflags", "+faststart", str(part)], check=True)
+        os.replace(part, remux)
+    return _range_file_response(remux.resolve(), request)
 
 
 @router.post("/upload", response_model=ProductionAsset)

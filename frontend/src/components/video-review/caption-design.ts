@@ -113,8 +113,6 @@ export const CAPTION_DESIGN_PRESETS: ReadonlyArray<{ id: string; label: string; 
 
 // Vertical placement of the caption block within the frame.
 export function captionAnchorStyle(design: CaptionDesign, outH: number): CSSProperties {
-  // Anchored at the bottom; the user moves it freely with x/y (up/down/left/right). No top/center/
-  // bottom preset — x is a fraction of width (full-width box → translateX %), y a fraction of height.
   // y = vertical POSITION as a fraction up from the screen bottom: 0 = bottom edge, ~0.92 = near
   // the top, positive = UP. Unset captions sit in the usual lower area (0.08). x = horizontal nudge.
   const dx = design.x || 0;

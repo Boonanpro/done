@@ -100,7 +100,15 @@ struct WireClip {
     #[serde(default)]
     position: Option<WirePos>,
     #[serde(default)]
+    fit: Option<String>,
+    #[serde(default)]
+    crop: Option<a1_engine::timeline_model::Crop>,
+    #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    effects: Vec<a1_engine::timeline_model::Effect>,
+    #[serde(default)]
+    src: Option<String>,
 }
 #[derive(serde::Deserialize)]
 struct RebuildMsg {
@@ -640,7 +648,11 @@ fn main() -> anyhow::Result<()> {
                                                     timeline_start: w.timeline_start,
                                                     timeline_end: w.timeline_end,
                                                     position,
+                                                    fit: w.fit,
+                                                    crop: w.crop,
                                                     text: w.text,
+                                                    effects: w.effects,
+                                                    src: w.src,
                                                 },
                                             )
                                         })

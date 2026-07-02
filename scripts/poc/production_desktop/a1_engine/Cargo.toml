@@ -16,6 +16,10 @@ path = "src/lib.rs"
 name = "a1_harness"
 path = "src/main.rs"
 
+[[bin]]
+name = "pv_test"
+path = "src/pv_test.rs"
+
 [dependencies]
 gstreamer = "0.23"
 gstreamer-editing-services = "0.23"
