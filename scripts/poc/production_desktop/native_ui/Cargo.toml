@@ -1,0 +1,19 @@
+[package]
+name = "native_ui"
+version = "0.1.0"
+edition = "2021"
+
+# N0: fully-native production editor UI (no WebView2, no JSON seam).
+# Step 1 = GPU-drawn timeline over real contents.json proving Filmora-class feel
+# (instant scrub, smooth zoom/scroll @60fps with 300 clips). Step 2 wires the
+# a1_engine (GES) in-process + DComp video underlay.
+
+[[bin]]
+name = "native_ui"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
