@@ -587,6 +587,21 @@ export function VideoReviewEditor({
           const nativeEffects = (c.effects || [])
             .filter((e) => e.type !== 'popout')
             .map((e) => ({ type: e.type, params: e.params || {} }));
+          // A fullscreen clip's サイズ・位置 sliders write `transform` (scale/pan, NOT `position`).
+          // The native engine only understands position boxes, and the mapping is exact: the web
+          // preview draws cover into the frame, scales about the CENTER and pans in canvas
+          // fractions (drawSource) — identical to a position box of {(1-s)/2+tx, (1-s)/2+ty, s, s}
+          // (box aspect = canvas aspect, so the native cover crop matches too).
+          const tf = c.transform as { scale?: number; x?: number; y?: number } | null | undefined;
+          const tfS = Number(tf?.scale ?? 1);
+          const tfX = Number(tf?.x ?? 0);
+          const tfY = Number(tf?.y ?? 0);
+          const hasTf = Math.abs(tfS - 1) > 1e-4 || Math.abs(tfX) > 1e-4 || Math.abs(tfY) > 1e-4;
+          const posOut = c.position
+            ? { x: c.position.x, y: c.position.y, width: c.position.width, height: c.position.height }
+            : hasTf
+              ? { x: (1 - tfS) / 2 + tfX, y: (1 - tfS) / 2 + tfY, width: tfS, height: tfS }
+              : null;
           clips.push({
             lane,
             id: String(c.id),
@@ -596,9 +611,7 @@ export function VideoReviewEditor({
               : c.source_start ?? 0,
             timeline_start: c.timeline_start,
             timeline_end: c.timeline_end,
-            ...(c.position
-              ? { position: { x: c.position.x, y: c.position.y, width: c.position.width, height: c.position.height } }
-              : {}),
+            ...(posOut ? { position: posOut } : {}),
             ...(crop
               ? { crop: { top: crop.top, bottom: crop.bottom, left: crop.left, right: crop.right } }
               : {}),
