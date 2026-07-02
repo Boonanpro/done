@@ -139,6 +139,19 @@ impl Clip {
     pub fn duration_s(&self) -> f64 {
         self.timeline_end - self.timeline_start
     }
+
+    /// The box to feed the geometry chain: an explicit position wins; a clip that only has a
+    /// CROP (e.g. a fullscreen clip the user trimmed edges off) uses the full frame so the
+    /// crop still applies. None → no transform work at all.
+    pub fn effective_position(&self) -> Option<Position> {
+        if self.position.is_some() {
+            return self.position;
+        }
+        if self.crop.is_some() {
+            return Some(Position { x: 0.0, y: 0.0, width: 1.0, height: 1.0 });
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
