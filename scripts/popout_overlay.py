@@ -174,8 +174,11 @@ def main():
         # The ALPHA track must be FULL RANGE (in_range/out_range=full + color_range pc): the
         # default limited range clamps to 16..235, i.e. "transparent" leaks 6% black (faint dark
         # frame) and "opaque" is 92% (person see-through). Verified 0..255 via signalstats.
+        # short GOP (8 frames = 0.27s): the native engine re-enters this file on every clip
+        # boundary / edit commit and must decode from the previous keyframe — 30-frame GOPs made
+        # that up to ~250ms per activation (audio ran ahead while the video spun up)
         enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-               "-g", "30", "-x264-params", "scenecut=0"]
+               "-g", "8", "-x264-params", "scenecut=0"]
         proc = subprocess.Popen(
             [FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgra",
              "-s", f"{W}x{H}", "-r", str(int(fps)), "-i", "-",

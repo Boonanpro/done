@@ -20,6 +20,10 @@ path = "src/main.rs"
 name = "pv_test"
 path = "src/pv_test.rs"
 
+[[bin]]
+name = "edit_stress"
+path = "src/edit_stress.rs"
+
 [dependencies]
 gstreamer = "0.23"
 gstreamer-editing-services = "0.23"

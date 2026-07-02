@@ -3155,9 +3155,10 @@ def _popout_bake_range(asset: dict[str, Any], ss: float, se: float) -> tuple[flo
 
 def _popout_key(asset_id: str, bs: float, be: float, box_px: tuple[int, int, int, int],
                 W: int, H: int, intensity: str, shadow: Any) -> str:
-    # v5: full-range alpha + auto-extended canvas (margins) — bump re-bakes older caches
+    # v6: short-GOP bake (fast boundary/edit activation). v5 added full-range alpha +
+    # auto-extended canvas (margins). Bumping re-bakes older caches on next editor open.
     px, py, ow, oh = box_px
-    key_src = f"v5|{asset_id}|{bs:.3f}|{be:.3f}|{px},{py},{ow},{oh}|{W}x{H}|{intensity}|{bool(shadow is not False)}"
+    key_src = f"v6|{asset_id}|{bs:.3f}|{be:.3f}|{px},{py},{ow},{oh}|{W}x{H}|{intensity}|{bool(shadow is not False)}"
     return hashlib.sha1(key_src.encode()).hexdigest()[:16]
 
 
@@ -3227,7 +3228,7 @@ async def generate_popout_overlay(payload: dict = Body(...)):
     cache_dir = _popout_cache_dir(room_id)
     out_pv = cache_dir / f"{key}.pv.mp4"
     progress_file = cache_dir / f"{key}.progress.json"
-    resp = {"key": key, "bake_start": bs, "bake_end": be, "format": fmt,
+    resp = {"key": key, "bake_start": bs, "bake_end": be, "format": fmt, "bake_v": 6,
             "url": f"/api/v1/production-assets/popout-overlay/media?room_id={room_id}&key={key}"}
     if out_pv.exists() and out_pv.stat().st_size > 0:
         return {**resp, "ready": True, "progress": 100, "cached": True,

@@ -143,6 +143,7 @@ export function popoutNeedsBake(
   if (!p.overlay_key) return true;
   if (typeof p.bake_start !== 'number' || typeof p.bake_end !== 'number') return true; // legacy → v4
   if (!p.margins) return true; // pre-v5 (limited-range alpha + frame-clipped canvas) → re-bake
+  if (Number(p.bake_v || 0) < 6) return true; // pre-v6 (long-GOP = slow boundary activation)
   if (typeof p.baked_format === 'string' && p.baked_format !== format) return true;
   const ss = Number(clip.source_start || 0);
   const se = Number(clip.source_end ?? ss);
@@ -2116,6 +2117,7 @@ export function VideoReviewEditor({
       const baked = {
         overlay_key: String(data.key || ''), bake_start: Number(data.bake_start),
         bake_end: Number(data.bake_end), baked_format: currentFormat, box,
+        bake_v: Number(data.bake_v || 0),
       };
       if (data.ready) {
         setPopoutPreviews((m) => ({ ...m, [clip.id]: { url: String(data.url || ''), preparing: false, progress: 100, key: baked.overlay_key } }));
@@ -3802,24 +3804,45 @@ export function VideoReviewEditor({
                     const intensity = (popout?.params?.intensity as string) || 'mid';
                     const shadow = (popout?.params?.shadow as boolean | undefined) ?? true;
                     const prep = popoutPreviews[selectedSequenceClip.id];
+                    // Apply/remove on EVERY selected clip, but PER CLIP: each captures ITS OWN
+                    // current position as the baked card box and keeps its own other effects
+                    // (a shared patch would bake every card at the primary clip's box). The
+                    // auto-scheduler then bakes the needy clips one by one (progress bar each).
                     const setPopout = (patch: Record<string, unknown> | null) => {
-                      const others = effects.filter((e) => e.type !== 'popout');
+                      const ids = new Set(
+                        selectedSequenceClipIds.length > 0
+                          ? selectedSequenceClipIds
+                          : selectedSequenceClipId ? [selectedSequenceClipId] : []);
+                      setEditSequence((current) => {
+                        if (!current) return current;
+                        const tracks = (current.tracks || []).map((track) => ({
+                          ...track,
+                          clips: (track.clips || []).map((c) => {
+                            if (!ids.has(String(c.id))) return c;
+                            if (c.track !== 'video' && c.track !== 'overlay') return c;
+                            if (!c.asset_id) return c;
+                            const own = (c.effects || []).filter((e) => e.type !== 'popout');
+                            const cur = (c.effects || []).find((e) => e.type === 'popout');
+                            if (patch === null) {
+                              // remove: drop the effect, put the clip back at its card box (a normal wipe)
+                              const box = cur?.params?.box as Box | undefined;
+                              return { ...c, effects: own.length ? own : null, ...(box ? { position: box, crop: null } : {}) };
+                            }
+                            // The card box a pop-out is baked with = THIS clip's current position at
+                            // apply (captured once into params.box). On FIRST apply the clip becomes a
+                            // full-frame alpha overlay the user then moves/scales/crops; a later param
+                            // tweak must NOT reset that display position.
+                            const box = (cur?.params?.box as Box | undefined) || c.position || POPOUT_DEFAULT_BOX;
+                            const next: ClipEffect = { type: 'popout', params: { intensity, shadow, box, ...(cur?.params || {}), ...patch } };
+                            return { ...c, effects: [...own, next], ...(cur ? {} : { position: POPOUT_FULL_FRAME, crop: null }) };
+                          }),
+                        }));
+                        return { ...current, tracks };
+                      });
+                      // removal leaves no bake to do; applying is picked up by the auto-scheduler,
+                      // which prioritizes the clip under the playhead and runs serially.
                       if (patch === null) {
-                        // remove: drop the effect and put the clip back at its card box (a normal wipe)
-                        const box = popout?.params?.box as Box | undefined;
-                        updateSelectedSequenceClip({ effects: others.length ? others : null, ...(box ? { position: box } : {}) });
-                        preparePopout({ ...selectedSequenceClip, effects: others });
-                      } else {
-                        // The card box a pop-out is baked with = the clip's current position at apply
-                        // (captured once into params.box). On FIRST apply the clip becomes a full-frame
-                        // alpha overlay (the .mov is full-canvas) that the user then moves/scales/crops;
-                        // a later param tweak must NOT reset that display position.
-                        const box = (popout?.params?.box as Box | undefined)
-                          || selectedSequenceClip.position || POPOUT_DEFAULT_BOX;
-                        const next: ClipEffect = { type: 'popout', params: { intensity, shadow, box, ...(popout?.params || {}), ...patch } };
-                        const display = popout ? {} : { position: POPOUT_FULL_FRAME, crop: null };
-                        updateSelectedSequenceClip({ effects: [...others, next], ...display });
-                        preparePopout({ ...selectedSequenceClip, effects: [...others, next], ...display });
+                        setPopoutPreviews((m) => { const n = { ...m }; ids.forEach((id) => delete n[id]); return n; });
                       }
                     };
                     return (
