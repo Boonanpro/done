@@ -12,7 +12,6 @@ import {
 import {
   ArrowLeft,
   Check,
-  Eraser,
   MessageSquare,
   MousePointer2,
   Pause,
@@ -90,7 +89,67 @@ export type SequenceClip = {
   crop?: { top: number; bottom: number; left: number; right: number } | null;
   // Per-clip audio volume multiplier (1 = unchanged).
   volume?: number | null;
+  // Opt-in special effects applied to this clip (NLE-style: pick a clip, add an effect).
+  // First effect: 'popout' (人物を切り抜いてカードの上辺から飛び出させる). Empty/absent = none.
+  effects?: ClipEffect[] | null;
 };
+
+// A special effect applied to a single clip. `type` selects the effect; `params` are
+// effect-specific knobs. Designed to grow (popout → 環境変更/フィルター…).
+export type ClipEffect = {
+  type: 'popout' | string;
+  params?: Record<string, unknown> | null;
+};
+
+type Box = { x: number; y: number; width: number; height: number };
+// A generated pop-out is rendered as a FULL-CANVAS alpha .mov, so its clip sits full-frame by
+// default and the user then moves/scales/crops it like any overlay. The card geometry it was baked
+// with lives in the effect's `params.box` (see popoutBox), independent of that display position.
+const POPOUT_FULL_FRAME: Box = { x: 0, y: 0, width: 1, height: 1 };
+const POPOUT_DEFAULT_BOX: Box = { x: 0.27, y: 0.835, width: 0.46, height: 0.145 };
+
+// Canvas-extension margins a bake recorded (normalized to the base frame), tolerant of a
+// missing/partial server payload.
+function asPopoutMargins(m: unknown): { l: number; t: number; r: number; b: number } {
+  const v = (m || {}) as Record<string, unknown>;
+  return { l: Number(v.l || 0), t: Number(v.t || 0), r: Number(v.r || 0), b: Number(v.b || 0) };
+}
+
+// The card geometry a pop-out is (re)generated with — stored on the effect so it's decoupled from
+// the clip's live display position (which the user edits freely without triggering a re-bake).
+export function popoutBox(clip: { position?: Box | null; effects?: ClipEffect[] | null }): Box {
+  const eff = (clip.effects || []).find((e) => e.type === 'popout');
+  const b = eff?.params?.box as Box | undefined;
+  return b || clip.position || POPOUT_DEFAULT_BOX;
+}
+
+// Does this pop-out clip need a (re-)bake? The bake covers a PADDED source window
+// (params.bake_start..bake_end, server-decided), so trim/split/move inside the pad never
+// re-bakes — only growing past it, changing the canvas format, or a legacy pre-v4 clip
+// (no bake window stored → auto-upgrade to the light color+alpha format) does. The display
+// position/crop is the user's and never triggers a bake; cache-key hashing lives on the
+// server only (the editor stores the key + window the server returns).
+export function popoutNeedsBake(
+  clip: {
+    source_start?: number | null;
+    source_end?: number | null;
+    effects?: ClipEffect[] | null;
+  },
+  format: string,
+): boolean {
+  const eff = (clip.effects || []).find((e) => e.type === 'popout');
+  if (!eff) return false;
+  const p = (eff.params || {}) as Record<string, unknown>;
+  if (!p.overlay_key) return true;
+  if (typeof p.bake_start !== 'number' || typeof p.bake_end !== 'number') return true; // legacy → v4
+  if (!p.margins) return true; // pre-v5 (limited-range alpha + frame-clipped canvas) → re-bake
+  if (typeof p.baked_format === 'string' && p.baked_format !== format) return true;
+  const ss = Number(clip.source_start || 0);
+  const se = Number(clip.source_end ?? ss);
+  if (ss < p.bake_start - 0.01) return true;
+  if (Number.isFinite(se) && se > p.bake_end + 0.01) return true;
+  return false;
+}
 
 // Per-caption style = the rich CaptionDesign (font / color / gradient / outline / box / shadow /
 // motion / position incl. x/y nudge) shared with the renderer, plus `bold` (legacy).
@@ -380,7 +439,10 @@ export function VideoReviewEditor({
   onExecuteClip,
   onExecute,
   sidePanelTop,
+  previewTopLeft,
+  roomId,
 }: {
+  roomId?: string;
   initialPath?: string;
   initialUrl?: string;
   initialThumbnailUrl?: string;
@@ -393,9 +455,11 @@ export function VideoReviewEditor({
   onSaveTimeline?: (payload: SessionPayload) => void | Promise<void>;
   onSyncCaptionAudio?: (captionIds: string[]) => Promise<Record<string, { text: string; start: number; end: number }[]>>;
   onTrackBlur?: (box: { x: number; y: number; width: number; height: number }, anchor: number, scanStart: number, scanEnd: number) => Promise<{ boxes: Record<string, number[]>; text?: string; t_start?: number | null; t_end?: number | null; found?: boolean }>;
-  onExecuteClip?: (annotation: ReviewAnnotation) => void | Promise<void>;
+  onExecuteClip?: (annotation: ReviewAnnotation) => void | boolean | Promise<void | boolean>;
   onExecute?: (payload: SessionPayload) => void | Promise<void>;
   sidePanelTop?: ReactNode;
+  /** プレビュー領域の左上に浮かせるパネル（例: 使用素材の折りたたみ）。 */
+  previewTopLeft?: ReactNode;
 }) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
@@ -481,11 +545,12 @@ export function VideoReviewEditor({
   const [editSequence, setEditSequence] = useState<EditSequence | null>(initialSequence || null);
   // Native shell: mirror the WHOLE timeline to the GES engine on any edit (robust — covers
   // move/trim/split/delete/link/ripple uniformly, no per-op mapping). Debounced so rapid drags
-  // don't thrash the rebuild; also runs on first load so the engine matches the editor's data.
-  useEffect(() => {
-    if (!nativeShell) return;
-    const seq = editSequence;
-    const t = window.setTimeout(() => {
+  // Serialize the sequence into the native engine's clip list. `cropOverride` lets a live drag
+  // (crop slider) preview a clip's new crop WITHOUT touching the heavy editSequence state — we send
+  // the engine an already-patched list so it does its cheap in-place update, and the 324-clip React
+  // editor never re-renders during the drag (that full re-render was the "重い" jank).
+  const buildNativeClips = useCallback(
+    (seq: EditSequence | null, cropOverride?: { id: string; crop: Record<string, number> }) => {
       const clips: Array<Record<string, unknown>> = [];
       for (const tr of seq?.tracks || []) {
         for (const c of tr.clips || []) {
@@ -503,23 +568,71 @@ export function VideoReviewEditor({
             continue;
           }
           if (!c.asset_id) continue;
+          const crop = cropOverride && cropOverride.id === String(c.id) ? cropOverride.crop : c.crop;
+          // Pop-out = an ordinary alpha overlay clip. Once generated, it renders from its baked
+          // color+alpha `{key}.pv.mp4` (HW-decodable — the old ProRes .mov was CPU-only and made
+          // the timeline heavy) via `src`, transformed (move/scale/crop/trim/split) through the
+          // SAME path as any clip. The bake covers a padded window, so the native inpoint is the
+          // clip's source_start RELATIVE to bake_start. While it's still baking (no overlay_key
+          // yet) we skip it so nothing wrong flashes; the inspector shows the progress bar.
+          const popoutEff = (c.effects || []).find((e) => e.type === 'popout');
+          const popoutKey = popoutEff?.params?.overlay_key as string | undefined;
+          if (popoutEff && !popoutKey) continue;
+          const popoutBakeStart = popoutEff?.params?.bake_start as number | undefined;
+          const popoutV4 = typeof popoutBakeStart === 'number';
+          const popoutSrc = popoutKey
+            ? `popout-cache/${popoutKey}${popoutV4 ? '.pv.mp4' : '.mov'}`
+            : undefined;
+          const nativeEffects = (c.effects || [])
+            .filter((e) => e.type !== 'popout')
+            .map((e) => ({ type: e.type, params: e.params || {} }));
           clips.push({
             lane,
             id: String(c.id),
             asset_id: String(c.asset_id),
-            source_start: c.source_start ?? 0,
+            source_start: popoutSrc && popoutV4
+              ? Math.max(0, (c.source_start ?? 0) - (popoutBakeStart as number))
+              : c.source_start ?? 0,
             timeline_start: c.timeline_start,
             timeline_end: c.timeline_end,
             ...(c.position
               ? { position: { x: c.position.x, y: c.position.y, width: c.position.width, height: c.position.height } }
               : {}),
+            ...(crop
+              ? { crop: { top: crop.top, bottom: crop.bottom, left: crop.left, right: crop.right } }
+              : {}),
+            ...(popoutSrc ? { src: popoutSrc } : {}),
+            ...(nativeEffects.length ? { effects: nativeEffects } : {}),
           });
         }
       }
-      nativeSend({ cmd: 'rebuild', clips });
+      return clips;
+    },
+    []
+  );
+  // don't thrash the rebuild; also runs on first load so the engine matches the editor's data.
+  useEffect(() => {
+    if (!nativeShell) return;
+    const seq = editSequence;
+    const t = window.setTimeout(() => {
+      nativeSend({ cmd: 'rebuild', clips: buildNativeClips(seq) });
     }, 300);
     return () => window.clearTimeout(t);
-  }, [editSequence, nativeShell, nativeSend]);
+  }, [editSequence, nativeShell, nativeSend, buildNativeClips]);
+  // Live crop preview during a slider drag: throttled, straight to the native engine (in-place
+  // update), bypassing editSequence so the heavy editor doesn't re-render on every tick.
+  const [dragCrop, setDragCrop] = useState<{ top: number; bottom: number; left: number; right: number } | null>(null);
+  const cropSendRef = useRef(0);
+  const sendLiveCrop = useCallback(
+    (clipId: string, crop: { top: number; bottom: number; left: number; right: number }) => {
+      if (!nativeShell) return;
+      const now = performance.now();
+      if (now - cropSendRef.current < 40) return; // ~25Hz is plenty for a smooth preview
+      cropSendRef.current = now;
+      nativeSend({ cmd: 'rebuild', clips: buildNativeClips(editSequence, { id: clipId, crop }) });
+    },
+    [nativeShell, editSequence, buildNativeClips, nativeSend]
+  );
   const [pendingAnnotation, setPendingAnnotation] = useState<DraftAnnotation | null>(null);
   // A freshly-drawn shape waiting for the user to pick its type (ぼかし/生成/ダンに指示) from a
   // popover anchored at the shape. Nothing is committed until a type is chosen.
@@ -528,6 +641,9 @@ export function VideoReviewEditor({
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedSequenceClipId, setSelectedSequenceClipId] = useState<string | null>(null);
   const [selectedSequenceClipIds, setSelectedSequenceClipIds] = useState<string[]>([]);
+  // Drop any in-progress crop-drag state when the selection changes so its sliders never show a
+  // previous clip's uncommitted crop.
+  useEffect(() => { setDragCrop(null); }, [selectedSequenceClipId]);
   const [draftRect, setDraftRect] = useState<{ start: Point; end: Point } | null>(null);
   const [draftPath, setDraftPath] = useState<Point[] | null>(null);
   const [isPointerDown, setIsPointerDown] = useState(false);
@@ -824,10 +940,36 @@ export function VideoReviewEditor({
   // was churning ~13MB/s and leaking detached DOM → renderer OOM). React `currentTime` is updated
   // at ~12Hz only for the reactive bits (captions / annotations / time readout) which don't need 60Hz.
   const playheadBarRef = useRef<HTMLDivElement>(null);
+  // Magnet for the PLAYHEAD: the clip-join times (every clip's start AND end, plus 0) that the
+  // scrubbing red line snaps onto when 🧲 is ON, so it clicks precisely onto cut points.
+  const playheadSnapPoints = useMemo(() => {
+    const pts = new Set<number>([0]);
+    for (const c of allSequenceClips) {
+      pts.add(Number((c.timeline_start || 0).toFixed(3)));
+      pts.add(Number((c.timeline_end || 0).toFixed(3)));
+    }
+    return Array.from(pts).sort((a, b) => a - b);
+  }, [allSequenceClips]);
   const seekTimeline = useCallback(
     (time: number) => {
       const maxDuration = timelineDuration || duration || 0;
-      const nextTime = Number(clamp(time, 0, maxDuration).toFixed(3));
+      let target = clamp(time, 0, maxDuration);
+      // Magnet (same 🧲 toggle as clip-drag): snap the playhead onto the nearest clip join within
+      // ~8px so it "clicks" onto cut points. OFF or nothing close -> free scrub (target unchanged).
+      if (snapEnabled && maxDuration > 0) {
+        const width = timelineRef.current?.offsetWidth || 0;
+        if (width > 0) {
+          const tol = (8 / width) * timelineDuration;
+          let best = target;
+          let bd = tol;
+          for (const g of playheadSnapPoints) {
+            const d = Math.abs(target - g);
+            if (d < bd) { bd = d; best = g; }
+          }
+          target = best;
+        }
+      }
+      const nextTime = Number(clamp(target, 0, maxDuration).toFixed(3));
       // Preserve play state: seeking (incl. clicking the ruler) does NOT stop playback. Anchor the
       // follow-clock at the seek target so the bar jumps there and then stays put until the engine
       // confirms it actually resumed there (the engine keeps reporting the target while it re-prerolls).
@@ -835,7 +977,7 @@ export function VideoReviewEditor({
       engPosRef.current = { pos: nextTime, wall: performance.now() };
       if (nativeShell) nativeSend({ cmd: 'seek', pos: nextTime });
     },
-    [duration, timelineDuration, nativeShell, nativeSend]
+    [duration, timelineDuration, nativeShell, nativeSend, snapEnabled, playheadSnapPoints]
   );
 
   // Native transport bridge: in the desktop shell the GES engine is the playback source.
@@ -1293,11 +1435,17 @@ export function VideoReviewEditor({
     if (!onExecuteClip) return;
     setExecutingId(ann.id);
     try {
-      await onExecuteClip(ann);
+      const ok = await onExecuteClip(ann);
+      // 一過性の指示クリップ（生成/コメント）は受付成功で役目を終えるので消す（false=受付失敗なら残す）。
+      // 削除は annotation autosave に乗るのでサーバー側タイムラインからも消える。
+      if (ok !== false) {
+        setAnnotations((prev) => prev.filter((a) => a.id !== ann.id));
+        clearSelection();
+      }
     } finally {
       setExecutingId(null);
     }
-  }, [onExecuteClip]);
+  }, [onExecuteClip, clearSelection]);
 
   // 追従ぼかし: run the tracker on a drawn box; store its per-frame path (track_boxes) on the
   // annotation so the preview animates the blur box along the moving object (real tracking).
@@ -1892,6 +2040,261 @@ export function VideoReviewEditor({
     updateSequenceClips(ids, patch);
   }, [selectedSequenceClipId, selectedSequenceClipIds, updateSequenceClips]);
 
+  // --- pop-out effect preview: when 飛び出し is applied/changed, prepare a browser-playable
+  // alpha overlay (matted person breaking out of the wipe box) once, so the editor preview can
+  // show it without per-frame matting. Keyed by clip id; the SAME layer is used at export. ---
+  type PopoutPrep = {
+    url?: string; preparing?: boolean; progress?: number; key?: string; error?: string;
+    pendingUrl?: string; pendingParams?: Record<string, unknown>;
+  };
+  const [popoutPreviews, setPopoutPreviews] = useState<Record<string, PopoutPrep>>({});
+  const currentFormat = editSequence?.format || initialSequence?.format || '9:16';
+  // Merge params into a clip's popout effect via the LATEST sequence state (the clip object a
+  // bake started from may be stale by the time it finishes — e.g. it was split meanwhile).
+  // The bake canvas extends beyond the frame by `margins` (so off-screen card parts / the head /
+  // the shadow keep real pixels instead of a hard cut) — when the margins change vs what the
+  // clip's display position was composed for, re-express the position so nothing moves on screen.
+  type PopoutMargins = { l: number; t: number; r: number; b: number };
+  const mergePopoutParams = useCallback((clipId: string, params: Record<string, unknown>, margins?: PopoutMargins) => {
+    setEditSequence((current) => {
+      if (!current) return current;
+      const tracks = (current.tracks || []).map((track) => ({
+        ...track,
+        clips: (track.clips || []).map((c) => {
+          if (String(c.id) !== clipId) return c;
+          const effects = (c.effects || []).map((e) =>
+            e.type === 'popout'
+              ? { ...e, params: { ...(e.params || {}), ...params, ...(margins ? { margins } : {}) } }
+              : e);
+          let position = c.position;
+          if (margins) {
+            const oldM = ((c.effects || []).find((e) => e.type === 'popout')?.params?.margins || {}) as Partial<PopoutMargins>;
+            const o = { l: Number(oldM.l || 0), t: Number(oldM.t || 0), r: Number(oldM.r || 0), b: Number(oldM.b || 0) };
+            if (o.l !== margins.l || o.t !== margins.t || o.r !== margins.r || o.b !== margins.b) {
+              const p = position || { x: 0, y: 0, width: 1, height: 1 };
+              // undo the OLD margins' compose to recover the base-frame rect, then apply the new
+              const bw = p.width / (1 + o.l + o.r);
+              const bh = p.height / (1 + o.t + o.b);
+              const bx = p.x + bw * o.l;
+              const by = p.y + bh * o.t;
+              position = {
+                x: Number((bx - bw * margins.l).toFixed(4)),
+                y: Number((by - bh * margins.t).toFixed(4)),
+                width: Number((bw * (1 + margins.l + margins.r)).toFixed(4)),
+                height: Number((bh * (1 + margins.t + margins.b)).toFixed(4)),
+              };
+            }
+          }
+          return { ...c, effects, ...(position !== c.position ? { position } : {}) };
+        }),
+      }));
+      return { ...current, tracks };
+    });
+  }, []);
+  const preparePopout = useCallback(async (clip: SequenceClip | null) => {
+    if (!clip) return;
+    const eff = (clip.effects || []).find((e) => e.type === 'popout');
+    if (!eff) { setPopoutPreviews((m) => { const n = { ...m }; delete n[clip.id]; return n; }); return; }
+    if (!roomId || !clip.asset_id) return;  // preview needs room-based source; export still works
+    // Bake from the effect's CARD BOX (params.box), not the clip's display position — the display
+    // position is the user's free move/scale and must not drive re-generation. Look params are a
+    // fixed template (no live knobs); stored values are honored for backward compat.
+    const box = popoutBox(clip);
+    const intensity = (eff.params?.intensity as string) || 'mid';
+    const shadow = (eff.params?.shadow as boolean | undefined) ?? true;
+    setPopoutPreviews((m) => ({ ...m, [clip.id]: { ...m[clip.id], preparing: true, progress: 0, error: undefined } }));
+    try {
+      const res = await fetch('/api/v1/production-assets/popout-overlay', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({ room_id: roomId, asset_id: clip.asset_id, position: box,
+          source_start: clip.source_start, source_end: clip.source_end, format: currentFormat, intensity, shadow }),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      const data = await res.json();
+      // What gets persisted on the effect once the bake is READY: the cache key + the padded
+      // bake window (trims inside it never re-bake; the native inpoint is relative to it).
+      const baked = {
+        overlay_key: String(data.key || ''), bake_start: Number(data.bake_start),
+        bake_end: Number(data.bake_end), baked_format: currentFormat, box,
+      };
+      if (data.ready) {
+        setPopoutPreviews((m) => ({ ...m, [clip.id]: { url: String(data.url || ''), preparing: false, progress: 100, key: baked.overlay_key } }));
+        mergePopoutParams(String(clip.id), baked, asPopoutMargins(data.margins));
+      } else {
+        setPopoutPreviews((m) => ({ ...m, [clip.id]: {
+          ...m[clip.id], preparing: true, progress: Number(data.progress || 0),
+          key: baked.overlay_key, pendingUrl: String(data.url || ''), pendingParams: baked,
+        } }));
+      }
+    } catch {
+      setPopoutPreviews((m) => ({ ...m, [clip.id]: { preparing: false, error: '生成に失敗しました' } }));
+    }
+  }, [roomId, currentFormat, mergePopoutParams]);
+
+  // Poll the bake progress for every in-flight clip (the server writes 0→100 as frames are
+  // matted) and finalize: store the overlay URL for the preview + persist the key/bake window
+  // on the clip so the native engine and the export pick the SAME cached file.
+  useEffect(() => {
+    const waiting = Object.entries(popoutPreviews).filter(([, v]) => v?.preparing && v.key);
+    if (!waiting.length || !roomId) return;
+    let cancelled = false;
+    const tick = async () => {
+      for (const [clipId, st] of waiting) {
+        try {
+          const res = await fetch(
+            `/api/v1/production-assets/popout-overlay/status?room_id=${encodeURIComponent(roomId)}&key=${encodeURIComponent(st.key || '')}`,
+            { credentials: 'include' });
+          if (!res.ok) continue;
+          const d = await res.json();
+          if (cancelled) return;
+          if (d.ready) {
+            setPopoutPreviews((m) => ({ ...m, [clipId]: { url: st.pendingUrl, preparing: false, progress: 100, key: st.key } }));
+            if (st.pendingParams) mergePopoutParams(clipId, st.pendingParams, asPopoutMargins(d.margins));
+          } else if (d.error) {
+            setPopoutPreviews((m) => ({ ...m, [clipId]: { preparing: false, error: String(d.error) } }));
+          } else if (d.stale) {
+            // the server restarted mid-bake — clear so the scheduler re-requests it
+            setPopoutPreviews((m) => ({ ...m, [clipId]: {} }));
+          } else {
+            setPopoutPreviews((m) => ({ ...m, [clipId]: { ...m[clipId], progress: Number(d.progress || 0) } }));
+          }
+        } catch { /* transient network error — next tick retries */ }
+      }
+    };
+    const t = window.setInterval(tick, 700);
+    return () => { cancelled = true; window.clearInterval(t); };
+  }, [popoutPreviews, roomId, mergePopoutParams]);
+
+  // Auto-prepare overlays for clips that already carry the pop-out effect (loaded content / preset)
+  // so the preview shows them without a manual re-apply. ONE AT A TIME — matting is heavy (4K),
+  // firing all clips at once storms the GPU. Prioritize the clip under the playhead so what you're
+  // looking at is ready first; the rest fill in serially as each finishes.
+  useEffect(() => {
+    const anyPreparing = Object.values(popoutPreviews).some((p) => p?.preparing);
+    if (anyPreparing) return;
+    // pending = a pop-out clip with no overlay yet, OR one whose geometry/timing changed since its
+    // overlay was baked (sig mismatch) — i.e. it was just resized/cropped/trimmed and needs re-baking.
+    const pending = allSequenceClips.filter((c) => {
+      if (!(c.effects || []).some((e) => e.type === 'popout')) return false;
+      const st = popoutPreviews[String(c.id)];
+      if (st?.preparing || st?.error) return false;  // error → manual 再試行 from the inspector
+      return popoutNeedsBake(c, currentFormat) || !st?.url;
+    });
+    if (!pending.length) return;
+    const atHead = pending.find((c) =>
+      currentTime >= Number(c.timeline_start || 0) - 0.05 && currentTime <= Number(c.timeline_end || 0) + 0.05);
+    preparePopout(atHead || pending[0]);
+  }, [allSequenceClips, popoutPreviews, preparePopout, currentTime, currentFormat]);
+
+  // One-time migration of LEGACY pop-out clips (baked before the effect became an ordinary alpha
+  // overlay clip): they carry an overlay_key but no params.box and still sit at their card box.
+  // Move the card box into params.box and place the clip full-frame so its full-canvas .mov renders
+  // 1:1 and is then freely editable. Guarded by `!box` so it runs once per clip (no loop).
+  useEffect(() => {
+    const legacy = allSequenceClips.filter((c) => {
+      const eff = (c.effects || []).find((e) => e.type === 'popout');
+      return Boolean(eff?.params?.overlay_key) && !eff?.params?.box;
+    });
+    if (!legacy.length) return;
+    for (const c of legacy) {
+      const box = (c.position as Box | null) || POPOUT_DEFAULT_BOX;
+      const nextEffects = (c.effects || []).map((e) =>
+        e.type === 'popout' ? { ...e, params: { ...(e.params || {}), box } } : e);
+      updateSequenceClip(String(c.id), { effects: nextEffects, position: POPOUT_FULL_FRAME, crop: null });
+    }
+  }, [allSequenceClips, updateSequenceClip]);
+
+  // Active pop-out overlay for the preview: the prepared popout clip covering `currentTime`.
+  // The bake is two HW-decodable H.264 streams (color + matte-as-luma) played by two hidden
+  // <video>s merged on a canvas — full-canvas geometry baked in, so lay it over the stage and
+  // sync both clocks to the playhead. Local time = (t - clip start) + (clip source_start -
+  // bake_start), because the bake covers a padded window. No per-frame matting, no VP9.
+  const popoutVideoRef = useRef<HTMLVideoElement | null>(null);
+  const popoutAlphaRef = useRef<HTMLVideoElement | null>(null);
+  const playingRef = useRef(playing);
+  playingRef.current = playing;
+  const activePopout = useMemo(() => {
+    const popClips = allSequenceClips.filter((c) => (c.effects || []).some((e) => e.type === 'popout'));
+    for (const c of popClips) {
+      const url = popoutPreviews[String(c.id)]?.url;
+      if (!url) continue;
+      const ts = Number(c.timeline_start || 0), te = Number(c.timeline_end || 0);
+      if (currentTime >= ts - 0.05 && currentTime <= te + 0.05) {
+        const p = ((c.effects || []).find((e) => e.type === 'popout')?.params || {}) as Record<string, unknown>;
+        const off = typeof p.bake_start === 'number'
+          ? Math.max(0, Number(c.source_start || 0) - (p.bake_start as number)) : 0;
+        // the canvas draws at the clip's display rect (margins are composed into it), so
+        // moving/scaling the clip in web mode matches the native/export framing
+        const pos = c.position || { x: 0, y: 0, width: 1, height: 1 };
+        return { url, alphaUrl: `${url}&stream=alpha`, ts, off, pos };
+      }
+    }
+    return null;
+  }, [allSequenceClips, popoutPreviews, currentTime]);
+  useEffect(() => {
+    if (!activePopout) return;
+    // Slave the overlay to the master playhead: play WITH the main preview, pause WHEN it pauses,
+    // and seek to the exact frame while scrubbing. During playback only correct large drift so we
+    // don't re-seek every frame (which would stutter). Color and alpha share encoder settings and
+    // keyframes, so the same corrections keep them within a frame of each other.
+    const local = Math.max(0, currentTime - activePopout.ts + activePopout.off);
+    for (const v of [popoutVideoRef.current, popoutAlphaRef.current]) {
+      if (!v) continue;
+      if (playing) {
+        if (v.paused) { try { v.currentTime = local; } catch { /* seeking */ } v.play().catch(() => {}); }
+        else if (Math.abs(v.currentTime - local) > 0.12) { try { v.currentTime = local; } catch { /* seeking */ } }
+      } else {
+        if (!v.paused) v.pause();
+        if (Math.abs(v.currentTime - local) > 0.05) { try { v.currentTime = local; } catch { /* seeking */ } }
+      }
+    }
+  }, [activePopout, currentTime, playing]);
+
+  // Draw the (playhead-controlled) overlay onto a canvas each frame: color video first, then cut
+  // it by the matte video (its LUMA is the alpha) via an SVG luminanceToAlpha filter on an
+  // offscreen canvas + destination-in. drawImage renders even a PAUSED/seeked video reliably —
+  // a bare paused <video> can stay blank — so the popout shows while scrubbing AND freezes when
+  // the main preview is paused. A legacy .webm (own alpha, no matte track) just skips the cut.
+  const popoutCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const popoutLumaRef = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    if (!activePopout) return;
+    let raf = 0;
+    const draw = () => {
+      const v = popoutVideoRef.current, a = popoutAlphaRef.current, c = popoutCanvasRef.current;
+      if (v && c && v.videoWidth && v.videoHeight) {
+        if (c.width !== v.videoWidth) c.width = v.videoWidth;
+        if (c.height !== v.videoHeight) c.height = v.videoHeight;
+        const ctx = c.getContext('2d');
+        if (ctx) {
+          ctx.clearRect(0, 0, c.width, c.height);
+          try {
+            ctx.drawImage(v, 0, 0, c.width, c.height);
+            if (a && a.videoWidth && a.readyState >= 2) {
+              let off = popoutLumaRef.current;
+              if (!off) { off = document.createElement('canvas'); popoutLumaRef.current = off; }
+              if (off.width !== c.width) off.width = c.width;
+              if (off.height !== c.height) off.height = c.height;
+              const octx = off.getContext('2d');
+              if (octx) {
+                octx.clearRect(0, 0, off.width, off.height);
+                octx.filter = 'url(#dan-popout-luma-alpha)';
+                octx.drawImage(a, 0, 0, off.width, off.height);
+                octx.filter = 'none';
+                ctx.globalCompositeOperation = 'destination-in';
+                ctx.drawImage(off, 0, 0);
+                ctx.globalCompositeOperation = 'source-over';
+              }
+            }
+          } catch { /* frame not ready */ }
+        }
+      }
+      raf = requestAnimationFrame(draw);
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [activePopout]);
+
   // Speech-following captions (karaoke / typewriter) auto-sync to the actual voice — no manual
   // step. Whenever such a caption lacks up-to-date per-word timings for its current position, we
   // derive them once (debounced). Keyed by id+span+animation so a moved or re-styled caption
@@ -2409,7 +2812,12 @@ export function VideoReviewEditor({
 
         <div className="flex flex-1 overflow-hidden">
           <div className={`flex min-w-0 flex-1 flex-col ${nativeShell ? '' : 'bg-neutral-950'}`}>
-            <div className="flex min-h-0 flex-1 items-center justify-center p-4">
+            <div className="relative flex min-h-0 flex-1 items-center justify-center p-4">
+              {previewTopLeft ? (
+                <div className="absolute left-3 top-3 z-20 max-h-[calc(100%-1.5rem)] overflow-y-auto">
+                  {previewTopLeft}
+                </div>
+              ) : null}
               <div
                 ref={stageRef}
                 className={`relative h-full max-h-full max-w-full overflow-hidden ${nativeShell ? '' : 'bg-black'}`}
@@ -2444,6 +2852,79 @@ export function VideoReviewEditor({
                     onTransformChange={(clipId, transform) => updateSequenceClip(clipId, { transform })}
                   />
                 )}
+                {/* Browser only: in the desktop app the NATIVE engine composites the pop-out
+                    (same clock = no drift, replaces the wipe). See project_production_native_rewrite_intent.
+                    Two hidden videos (color + matte-as-luma, both HW-decoded H.264) are merged on
+                    the canvas — see the draw effect above. */}
+                {!nativeShell && activePopout ? (
+                  <>
+                    <svg width="0" height="0" className="absolute" aria-hidden>
+                      <filter id="dan-popout-luma-alpha"><feColorMatrix type="luminanceToAlpha" /></filter>
+                    </svg>
+                    <video
+                      key={activePopout.url}
+                      ref={popoutVideoRef}
+                      src={activePopout.url}
+                      muted
+                      playsInline
+                      preload="auto"
+                      onCanPlay={() => {
+                        // prime a decoded frame (a never-played <video> has none for the canvas to
+                        // draw), then honor the current play state so it still stops with the main.
+                        const v = popoutVideoRef.current;
+                        if (v) v.play().then(() => { if (!playingRef.current) v.pause(); }).catch(() => {});
+                      }}
+                      className="pointer-events-none absolute h-px w-px opacity-0"
+                    />
+                    <video
+                      key={activePopout.alphaUrl}
+                      ref={popoutAlphaRef}
+                      src={activePopout.alphaUrl}
+                      muted
+                      playsInline
+                      preload="auto"
+                      onCanPlay={() => {
+                        const v = popoutAlphaRef.current;
+                        if (v) v.play().then(() => { if (!playingRef.current) v.pause(); }).catch(() => {});
+                      }}
+                      className="pointer-events-none absolute h-px w-px opacity-0"
+                    />
+                    <canvas
+                      ref={popoutCanvasRef}
+                      className="pointer-events-none absolute z-10"
+                      style={{
+                        left: `${activePopout.pos.x * 100}%`,
+                        top: `${activePopout.pos.y * 100}%`,
+                        width: `${activePopout.pos.width * 100}%`,
+                        height: `${activePopout.pos.height * 100}%`,
+                      }}
+                    />
+                  </>
+                ) : null}
+                {/* pop-out bake progress: 0→100% HUD over the card position while the person is
+                    being matted. This DOM layer sits above the native video in the app too, so
+                    the bar is visible in both. */}
+                {(() => {
+                  const entry = allSequenceClips
+                    .map((c) => ({ c, st: popoutPreviews[String(c.id)] }))
+                    .find(({ st }) => st?.preparing);
+                  if (!entry) return null;
+                  const box = popoutBox(entry.c);
+                  const pct = Math.max(0, Math.min(100, entry.st?.progress ?? 0));
+                  return (
+                    <div
+                      className="pointer-events-none absolute z-20 flex items-center justify-center"
+                      style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%` }}
+                    >
+                      <div className="w-3/4 max-w-[260px] rounded-md bg-black/70 px-3 py-2 text-center">
+                        <div className="mb-1 text-[10px] text-white">飛び出しを生成中… {pct}%</div>
+                        <div className="h-1.5 w-full overflow-hidden rounded bg-white/20">
+                          <div className="h-full rounded bg-sky-400 transition-[width] duration-500" style={{ width: `${pct}%` }} />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div
                   className={`absolute ${tool === 'select' ? 'pointer-events-none' : 'pointer-events-auto'}`}
@@ -2642,7 +3123,7 @@ export function VideoReviewEditor({
                   variant={snapEnabled ? 'default' : 'outline'}
                   size="sm"
                   className="ml-auto h-7 px-2 text-xs"
-                  title={snapEnabled ? 'マグネット ON：隣のクリップ端・赤線に吸着。クリックでOFF（自由移動）' : 'マグネット OFF：自由に動かせます。クリックでON（吸着）'}
+                  title={snapEnabled ? 'マグネット ON：クリップ端・赤線・再生ヘッドがつなぎ目に吸着。クリックでOFF（自由移動）' : 'マグネット OFF：自由に動かせます。クリックでON（吸着）'}
                   onClick={() => setSnapEnabled((v) => !v)}
                 >
                   {snapEnabled ? '🧲 マグネット' : '🧲 OFF'}
@@ -3008,45 +3489,6 @@ export function VideoReviewEditor({
                   </Button>
                 </div>
               ) : null}
-              <div className="mb-2 flex items-center justify-between">
-                <div className="text-sm font-medium">指示 ({annotations.length})</div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setAnnotations([]);
-                    clearSelection();
-                  }}
-                  disabled={annotations.length === 0}
-                >
-                  <Eraser className="mr-1 h-4 w-4" />
-                  全削除
-                </Button>
-              </div>
-              <div className="space-y-2">
-                {annotations.map((a, index) => (
-                  <button
-                    key={a.id}
-                    type="button"
-                    onClick={(event) => {
-                      selectAnnotation(a.id, event.shiftKey || event.ctrlKey || event.metaKey);
-                      seekTimeline(a.start);
-                    }}
-                    className={`w-full rounded-md border p-2 text-left text-sm transition-colors ${
-                      selectedIds.includes(a.id) ? 'border-primary bg-primary/10' : 'border-border hover:bg-muted'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="rounded bg-muted px-1.5 py-0.5 text-xs tabular-nums">{index + 1}</span>
-                      <span className="font-medium">{INTENTS.find((it) => it.value === a.intent)?.label || a.intent}</span>
-                      <span className="ml-auto text-xs tabular-nums text-muted-foreground">
-                        {fmtTime(a.start)} - {fmtTime(a.end)}
-                      </span>
-                    </div>
-                    {a.note ? <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{a.note}</div> : null}
-                  </button>
-                ))}
-              </div>
             </div>
 
             {selected && (
@@ -3221,7 +3663,14 @@ export function VideoReviewEditor({
                   // the same three controls; we map them to whichever field the clip uses.
                   (() => {
                     const pos = selectedSequenceClip.position;
-                    const isPip = !!pos && !(pos.x <= 0.001 && pos.y <= 0.001 && pos.width >= 0.999 && pos.height >= 0.999);
+                    // A pop-out is an alpha overlay positioned by its `position` box, so it's always a
+                    // PiP even at full-frame — otherwise the size/move sliders would (wrongly) write
+                    // `transform`, which the native overlay path ignores → edits do nothing. Treat any
+                    // clip carrying the pop-out effect as PiP so the sliders drive `position` (which
+                    // the engine applies instantly, no re-bake).
+                    const isPopoutClip = (selectedSequenceClip.effects || []).some((e) => e.type === 'popout');
+                    const isPip = !!pos && (isPopoutClip
+                      || !(pos.x <= 0.001 && pos.y <= 0.001 && pos.width >= 0.999 && pos.height >= 0.999));
                     let size: number, lr: number, ud: number;
                     if (isPip && pos) {
                       size = (pos.width + pos.height) / 2;
@@ -3296,8 +3745,17 @@ export function VideoReviewEditor({
                 ) : null}
                 {(selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
                   (() => {
-                    const cr = selectedSequenceClip.crop || { top: 0, bottom: 0, left: 0, right: 0 };
-                    const setCrop = (p: Partial<typeof cr>) => updateSelectedSequenceClip({ crop: { ...cr, ...p } });
+                    // Live crop uses dragCrop (local, cheap) while dragging; falls back to the saved
+                    // value. onChange only touches local state + throttled native — NOT editSequence
+                    // — so the heavy editor doesn't re-render per tick. Commit on release.
+                    const clipId = String(selectedSequenceClip.id);
+                    const cr = dragCrop || selectedSequenceClip.crop || { top: 0, bottom: 0, left: 0, right: 0 };
+                    const commitCrop = () => {
+                      if (dragCrop) {
+                        updateSelectedSequenceClip({ crop: dragCrop });
+                        setDragCrop(null);
+                      }
+                    };
                     return (
                       <div className="space-y-2 rounded-md border border-border p-2">
                         <div className="text-xs font-medium text-muted-foreground">クロップ（端を切り取る）</div>
@@ -3306,7 +3764,14 @@ export function VideoReviewEditor({
                             <label key={key} className="flex flex-col gap-1 text-[10px] text-muted-foreground">
                               {label} {Math.round((cr[key] ?? 0) * 100)}%
                               <input type="range" min="0" max="0.9" step="0.01" value={cr[key] ?? 0}
-                                onChange={(e) => setCrop({ [key]: Number(e.target.value) })} />
+                                onChange={(e) => {
+                                  const next = { ...cr, [key]: Number(e.target.value) };
+                                  setDragCrop(next);
+                                  sendLiveCrop(clipId, next);
+                                }}
+                                onPointerUp={commitCrop}
+                                onPointerCancel={commitCrop}
+                                onBlur={commitCrop} />
                             </label>
                           ))}
                         </div>
@@ -3327,6 +3792,69 @@ export function VideoReviewEditor({
                         <input type="range" min="0" max="2" step="0.05" value={vol}
                           onChange={(e) => updateSelectedSequenceClip({ volume: Number(e.target.value) })} className="w-full" />
                       </label>
+                    );
+                  })()
+                ) : null}
+                {(selectedSequenceClip.track === 'video' || selectedSequenceClip.track === 'overlay') && selectedSequenceClip.asset_id ? (
+                  (() => {
+                    const effects = selectedSequenceClip.effects || [];
+                    const popout = effects.find((e) => e.type === 'popout') || null;
+                    const intensity = (popout?.params?.intensity as string) || 'mid';
+                    const shadow = (popout?.params?.shadow as boolean | undefined) ?? true;
+                    const prep = popoutPreviews[selectedSequenceClip.id];
+                    const setPopout = (patch: Record<string, unknown> | null) => {
+                      const others = effects.filter((e) => e.type !== 'popout');
+                      if (patch === null) {
+                        // remove: drop the effect and put the clip back at its card box (a normal wipe)
+                        const box = popout?.params?.box as Box | undefined;
+                        updateSelectedSequenceClip({ effects: others.length ? others : null, ...(box ? { position: box } : {}) });
+                        preparePopout({ ...selectedSequenceClip, effects: others });
+                      } else {
+                        // The card box a pop-out is baked with = the clip's current position at apply
+                        // (captured once into params.box). On FIRST apply the clip becomes a full-frame
+                        // alpha overlay (the .mov is full-canvas) that the user then moves/scales/crops;
+                        // a later param tweak must NOT reset that display position.
+                        const box = (popout?.params?.box as Box | undefined)
+                          || selectedSequenceClip.position || POPOUT_DEFAULT_BOX;
+                        const next: ClipEffect = { type: 'popout', params: { intensity, shadow, box, ...(popout?.params || {}), ...patch } };
+                        const display = popout ? {} : { position: POPOUT_FULL_FRAME, crop: null };
+                        updateSelectedSequenceClip({ effects: [...others, next], ...display });
+                        preparePopout({ ...selectedSequenceClip, effects: [...others, next], ...display });
+                      }
+                    };
+                    return (
+                      <div className="space-y-2 rounded-md border border-border p-2">
+                        <div className="text-xs font-medium text-muted-foreground">エフェクト</div>
+                        <div className="grid grid-cols-2 gap-1">
+                          <button type="button"
+                            className={`rounded px-1 py-1 text-[10px] ${!popout ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
+                            onClick={() => setPopout(null)}>なし</button>
+                          <button type="button"
+                            className={`rounded px-1 py-1 text-[10px] ${popout ? 'bg-sky-500 text-white' : 'bg-background text-muted-foreground hover:bg-muted'}`}
+                            onClick={() => setPopout({})}>飛び出し</button>
+                        </div>
+                        {popout ? (
+                          <div className="space-y-1">
+                            {prep?.preparing ? (
+                              <div className="space-y-1">
+                                <p className="text-[10px] text-amber-500">生成中… {Math.max(0, Math.min(100, prep.progress ?? 0))}%（人物を切り抜いています）</p>
+                                <div className="h-1 w-full overflow-hidden rounded bg-muted">
+                                  <div className="h-full rounded bg-amber-500 transition-[width] duration-500" style={{ width: `${Math.max(0, Math.min(100, prep.progress ?? 0))}%` }} />
+                                </div>
+                              </div>
+                            ) : prep?.error ? (
+                              <div className="flex items-center gap-2">
+                                <p className="text-[10px] text-red-500">{prep.error}</p>
+                                <button type="button" className="rounded bg-background px-1 py-0.5 text-[10px] text-muted-foreground hover:bg-muted"
+                                  onClick={() => preparePopout(selectedSequenceClip)}>再試行</button>
+                              </div>
+                            ) : prep?.url ? (
+                              <p className="text-[10px] text-emerald-500">飛び出し適用済み</p>
+                            ) : null}
+                            <p className="text-[9px] text-muted-foreground">人物を切り抜いてカードの上辺から飛び出させます。トリム・分割・移動は待ちなしで編集できます（大きく尺を伸ばした時だけ自動で作り直します）。</p>
+                          </div>
+                        ) : null}
+                      </div>
                     );
                   })()
                 ) : null}

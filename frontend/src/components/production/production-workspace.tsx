@@ -148,6 +148,8 @@ export function ProductionWorkspace({
   const [tailPad, setTailPad] = useState(0.1);
   const [isRecutting, setIsRecutting] = useState(false);
   const [cutOpen, setCutOpen] = useState(false); // カット調整パネルは折りたたみ既定
+  const [assetsOpen, setAssetsOpen] = useState(false); // 使用素材（プレビュー左上）も折りたたみ既定
+  const [briefOpen, setBriefOpen] = useState(false); // 制作ブリーフは既定で閉じる（開くと全文）
 
   const hasProcessing = useMemo(() => assets.some((a) => a.status === 'processing'), [assets]);
   const selectedContentAssets = useMemo(
@@ -181,6 +183,12 @@ export function ProductionWorkspace({
     window.history.replaceState(null, '', url.toString());
   }, []);
 
+  // Job ids we've already reacted to as terminal (done/failed). Without this, loadJobs would
+  // call loadAll on EVERY poll as long as any terminal job exists (a finished build is always
+  // 'done'), and loadAll churns selectedContent's identity -> loadJobs re-fires -> loadAll ...
+  // an infinite fetch loop (~1/s) that re-parses the 324-clip contents JSON and OOMs the renderer.
+  const reactedTerminalJobsRef = useRef<Set<string>>(new Set());
+
   const loadAll = useCallback(async () => {
     if (!roomId) return;
     setIsLoading(true);
@@ -195,13 +203,18 @@ export function ProductionWorkspace({
       const nextContents = await contentRes.json();
       setContents(nextContents);
       const urlContentId = new URLSearchParams(window.location.search).get('content_id');
-      setSelectedContent((current) =>
-        current
-          ? nextContents.find((content: ProductionContent) => content.id === current.id) || null
-          : urlContentId
-            ? nextContents.find((content: ProductionContent) => content.id === urlContentId) || null
-            : null
-      );
+      setSelectedContent((current) => {
+        const targetId = current?.id || urlContentId;
+        const found = targetId
+          ? nextContents.find((content: ProductionContent) => content.id === targetId) || null
+          : null;
+        // Keep the existing object reference when nothing actually changed, so selectedContent's
+        // identity stays stable and dependent effects (loadJobs) don't re-fire on every refresh.
+        if (current && found && found.id === current.id && found.updated_at === current.updated_at) {
+          return current;
+        }
+        return found;
+      });
     } catch (error) {
       toast.error('Failed to load production workspace', { description: String(error).slice(0, 160) });
     } finally {
@@ -238,7 +251,15 @@ export function ProductionWorkspace({
       if (!res.ok) throw new Error(await res.text());
       const nextJobs = (await res.json()) as ProductionJob[];
       setJobs(nextJobs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()));
-      if (nextJobs.some((job) => job.status === 'done' || job.status === 'failed')) {
+      // Only refresh assets/contents when a job has JUST transitioned to terminal — not while a
+      // terminal job merely exists (that re-triggers loadAll forever; see reactedTerminalJobsRef).
+      const newlyTerminal = nextJobs.filter(
+        (job) => (job.status === 'done' || job.status === 'failed') && !reactedTerminalJobsRef.current.has(job.id)
+      );
+      for (const job of nextJobs) {
+        if (job.status === 'done' || job.status === 'failed') reactedTerminalJobsRef.current.add(job.id);
+      }
+      if (newlyTerminal.length > 0) {
         void loadAll();
       }
     } catch (error) {
@@ -528,29 +549,25 @@ export function ProductionWorkspace({
   };
 
   // Manual/mechanical edits (clip trims, caption style, etc.) already autosave and reflect
-  // live — they need NO button. The button is ONLY for asking Dan to re-edit, driven by a
-  // text instruction and/or creative instruction-clips on the timeline.
-  const CREATIVE_INTENTS = new Set(['replace', 'generate', 'motion', 'audio', 'comment']);
-  const currentTimeline = (selectedContent?.timeline || {}) as { annotations?: Array<{ intent?: string; start?: number; end?: number; note?: string }> };
+  // live — they need NO button. Text instructions run via the 実行 button (whole-timeline
+  // scope); instruction clips on the timeline each run via their own per-clip 実行 button.
+  const currentTimeline = (selectedContent?.timeline || {}) as { annotations?: Array<{ id?: string; intent?: string; start?: number; end?: number; note?: string }> };
   const pendingAnnotations = Array.isArray(currentTimeline.annotations) ? currentTimeline.annotations : [];
-  const creativeAnnotations = pendingAnnotations.filter((a) => CREATIVE_INTENTS.has(String(a?.intent || 'comment')));
   const hasText = revisionNote.trim().length > 0;
-  const hasCreativeAnnotations = creativeAnnotations.length > 0;
-  const canApplyEdits = hasText || hasCreativeAnnotations;
+  const canApplyEdits = hasText;
 
-  // Ask Dan to re-edit using the text instruction and/or creative instruction-clips.
+  // Ask Dan to re-edit from the text instruction (no region scope = whole timeline editable).
   const applyEdits = async () => {
-    if (!selectedContent) return;
-    if (!hasText && !hasCreativeAnnotations) return;
-    await requestDanEdit(revisionNote, creativeAnnotations);
+    if (!selectedContent || !hasText) return;
+    await requestDanEdit(revisionNote, []);
   };
 
-  const requestDanEdit = async (revision?: string, creativeAnns?: Array<{ intent?: string; start?: number; end?: number; note?: string }>) => {
-    if (!selectedContent) return;
+  const requestDanEdit = async (revision?: string, executedAnns?: Array<{ id?: string; intent?: string; start?: number; end?: number; note?: string }>): Promise<boolean> => {
+    if (!selectedContent) return false;
     const selectedAssets = selectedSourceAssets;
     if (selectedAssets.length === 0) {
       toast.error('素材がありません');
-      return;
+      return false;
     }
     const timeline = selectedContent.timeline || {};
     const baseBrief = typeof timeline.brief === 'string' ? timeline.brief : '';
@@ -576,7 +593,7 @@ export function ProductionWorkspace({
       })),
       brief: baseBrief,
       revision_text: trimmedRevision,
-      revision_regions: (creativeAnns || []).map((a) => ({
+      revision_regions: (executedAnns || []).map((a) => ({
         intent: a.intent, start: a.start, end: a.end, note: a.note,
       })),
       workflow_preset: typeof timeline.workflow_preset === 'string' ? timeline.workflow_preset : 'video_ugc',
@@ -585,7 +602,13 @@ export function ProductionWorkspace({
         format: selectedContent.format,
         source_asset_ids: selectedAssets.map((asset) => asset.id),
         // Keep the existing sequence so the edit is applied ON it (non-destructive).
-        annotations: creativeAnns || [],
+        // On success the backend REPLACES timeline with this — so keep ALL current
+        // annotations (blur/cut included; sending only creative ones used to drop them),
+        // minus the instruction clips being executed (consumed = auto-removed).
+        annotations: (() => {
+          const executedIds = new Set((executedAnns || []).map((a) => a.id).filter(Boolean));
+          return pendingAnnotations.filter((a) => !a.id || !executedIds.has(a.id));
+        })(),
       },
     };
     try {
@@ -603,15 +626,18 @@ export function ProductionWorkspace({
         void loadJobs();
         void loadAll();
       }, 1200);
+      return true;
     } catch (error) {
       toast.error('Danへの制作依頼に失敗しました', { description: String(error).slice(0, 180) });
+      return false;
     }
   };
 
   // Per-clip 実行: run Dan scoped to a SINGLE instruction clip (生成/ダンに指示) so the result is
   // visible without re-editing the whole content. Reuses the non-destructive dan_revise path.
-  const executeInstructionClip = async (ann: ReviewAnnotation): Promise<void> => {
-    await requestDanEdit(ann.note || '', [{ intent: ann.intent, start: ann.start, end: ann.end ?? undefined, note: ann.note ?? undefined }]);
+  // Returns whether the job was accepted (the editor removes the consumed clip only then).
+  const executeInstructionClip = async (ann: ReviewAnnotation): Promise<boolean> => {
+    return requestDanEdit(ann.note || '', [{ id: ann.id, intent: ann.intent, start: ann.start, end: ann.end ?? undefined, note: ann.note ?? undefined }]);
   };
 
   const saveContentTimeline = async (timeline: SessionPayload) => {
@@ -809,6 +835,7 @@ export function ProductionWorkspace({
       <VideoReviewEditor
         key={primaryVideo.id}
         embedded
+        roomId={roomId}
         initialPath={mediaUrl ? undefined : assetMediaPath(primaryVideo)}
         initialUrl={mediaUrl}
         initialThumbnailUrl={primaryVideo.thumbnail_url || undefined}
@@ -816,6 +843,72 @@ export function ProductionWorkspace({
         initialAnnotations={(selectedContent.timeline?.annotations as ReviewAnnotation[] | undefined) || undefined}
         initialSequence={(selectedContent.timeline?.sequence as EditSequence | undefined) || undefined}
         sequenceAssets={selectedSourceAssets.filter((asset) => asset.kind === 'video').map(sequenceAssetForEditor)}
+        previewTopLeft={
+          assetsOpen ? (
+            <div className="w-72 rounded-md border border-border bg-background/95 shadow-lg backdrop-blur">
+              <button
+                type="button"
+                onClick={() => setAssetsOpen(false)}
+                className="flex w-full items-center justify-between px-3 py-2 text-sm font-medium text-foreground"
+              >
+                <span>使用素材（{selectedSourceAssets.length}）</span>
+                <span className="text-xs text-muted-foreground">▲</span>
+              </button>
+              <div className="max-h-[50vh] overflow-y-auto px-2 pb-2">
+                <div className="grid grid-cols-2 gap-2">
+                  {selectedSourceAssets.map((asset) => (
+                    <div
+                      key={asset.id}
+                      draggable={asset.kind === 'video'}
+                      onDragStart={(event) => {
+                        if (asset.kind !== 'video') return;
+                        // payload shape matches the editor's ASSET_DND_TYPE consumer
+                        const payload = {
+                          id: asset.id,
+                          kind: asset.kind,
+                          duration: asset.metadata?.duration,
+                          label: asset.filename || asset.original_uri,
+                        };
+                        event.dataTransfer.setData('application/x-dan-asset', JSON.stringify(payload));
+                        event.dataTransfer.effectAllowed = 'copy';
+                        // dataTransfer.getData is unreadable during dragover, so expose the asset
+                        // (for the timeline's live drop-preview ghost) via window until dragend.
+                        (window as unknown as { __danDragAsset?: typeof payload }).__danDragAsset = payload;
+                      }}
+                      onDragEnd={() => {
+                        delete (window as unknown as { __danDragAsset?: unknown }).__danDragAsset;
+                      }}
+                      title={asset.kind === 'video' ? 'ドラッグでタイムラインに追加' : undefined}
+                      className={`overflow-hidden rounded border border-border bg-muted/30 ${asset.kind === 'video' ? 'cursor-grab active:cursor-grabbing' : ''}`}
+                    >
+                      <div className="flex aspect-video items-center justify-center bg-muted">
+                        {asset.thumbnail_url ? (
+                          <img src={asset.thumbnail_url} alt="" className="pointer-events-none h-full w-full object-cover" />
+                        ) : (
+                          <Film className="h-5 w-5 text-muted-foreground" />
+                        )}
+                      </div>
+                      <div className="p-1.5">
+                        <div className="truncate text-[11px] font-medium">{asset.filename || asset.original_uri}</div>
+                        <div className="mt-0.5 text-[10px] text-muted-foreground">{asset.kind} / {formatDuration(asset.metadata?.duration)}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setAssetsOpen(true)}
+              className="flex items-center gap-1.5 rounded-md border border-border bg-background/90 px-3 py-1.5 text-xs font-medium text-foreground shadow backdrop-blur hover:bg-muted"
+            >
+              <Film className="h-3.5 w-3.5" />
+              使用素材（{selectedSourceAssets.length}）
+              <span className="text-muted-foreground">▼</span>
+            </button>
+          )
+        }
         sidePanelTop={
           <div className="mb-3 space-y-3">
             <div className={`rounded-md border ${cutOpen ? 'border-sky-500/50 bg-sky-500/10 p-3' : 'border-border p-2'}`}>
@@ -873,66 +966,28 @@ export function ProductionWorkspace({
               </div>
               ) : null}
             </div>
-            <div className="rounded-md border border-border p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <div className="text-sm font-medium">使用素材</div>
-                <span className="text-xs text-muted-foreground">{selectedSourceAssets.length}個</span>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                {selectedSourceAssets.map((asset) => (
-                  <div
-                    key={asset.id}
-                    draggable={asset.kind === 'video'}
-                    onDragStart={(event) => {
-                      if (asset.kind !== 'video') return;
-                      // payload shape matches the editor's ASSET_DND_TYPE consumer
-                      const payload = {
-                        id: asset.id,
-                        kind: asset.kind,
-                        duration: asset.metadata?.duration,
-                        label: asset.filename || asset.original_uri,
-                      };
-                      event.dataTransfer.setData('application/x-dan-asset', JSON.stringify(payload));
-                      event.dataTransfer.effectAllowed = 'copy';
-                      // dataTransfer.getData is unreadable during dragover, so expose the asset
-                      // (for the timeline's live drop-preview ghost) via window until dragend.
-                      (window as unknown as { __danDragAsset?: typeof payload }).__danDragAsset = payload;
-                    }}
-                    onDragEnd={() => {
-                      delete (window as unknown as { __danDragAsset?: unknown }).__danDragAsset;
-                    }}
-                    title={asset.kind === 'video' ? 'ドラッグでタイムラインに追加' : undefined}
-                    className={`overflow-hidden rounded border border-border bg-muted/30 ${asset.kind === 'video' ? 'cursor-grab active:cursor-grabbing' : ''}`}
-                  >
-                    <div className="flex aspect-video items-center justify-center bg-muted">
-                      {asset.thumbnail_url ? (
-                        <img src={asset.thumbnail_url} alt="" className="pointer-events-none h-full w-full object-cover" />
-                      ) : (
-                        <Film className="h-5 w-5 text-muted-foreground" />
-                      )}
-                    </div>
-                    <div className="p-1.5">
-                      <div className="truncate text-[11px] font-medium">{asset.filename || asset.original_uri}</div>
-                      <div className="mt-0.5 text-[10px] text-muted-foreground">{asset.kind} / {formatDuration(asset.metadata?.duration)}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="rounded-md border border-border p-3">
-              <div className="mb-1 text-sm font-medium">制作ブリーフ</div>
-              <div className="line-clamp-6 whitespace-pre-wrap text-xs text-muted-foreground">
-                {typeof selectedContent.timeline?.brief === 'string' && selectedContent.timeline.brief.trim()
-                  ? selectedContent.timeline.brief
-                  : 'ブリーフ未設定'}
-              </div>
+            <div className="rounded-md border border-border p-2">
+              <button
+                type="button"
+                onClick={() => setBriefOpen((v) => !v)}
+                className="flex w-full items-center justify-between text-sm font-medium text-foreground"
+              >
+                <span>制作ブリーフ</span>
+                <span className="text-xs text-muted-foreground">{briefOpen ? '▲' : '▼'}</span>
+              </button>
+              {briefOpen ? (
+                <div className="mt-2 whitespace-pre-wrap text-xs text-muted-foreground">
+                  {typeof selectedContent.timeline?.brief === 'string' && selectedContent.timeline.brief.trim()
+                    ? selectedContent.timeline.brief
+                    : 'ブリーフ未設定'}
+                </div>
+              ) : null}
             </div>
             <div className="rounded-md border border-border p-3">
               <div className="mb-2 text-sm font-medium">ダンに指示</div>
               <Textarea
                 value={revisionNote}
                 onChange={(event) => setRevisionNote(event.target.value)}
-                placeholder="例: 言い直しだけ切って。語尾を切らないで。小窓パートはテロップ無し。"
                 className="min-h-20 text-xs"
               />
               <Button
@@ -941,7 +996,7 @@ export function ProductionWorkspace({
                 disabled={!canApplyEdits}
                 onClick={() => void applyEdits()}
               >
-                この指示で直す
+                実行
               </Button>
             </div>
             {latestJob && (latestJob.status === 'queued' || latestJob.status === 'running') ? (

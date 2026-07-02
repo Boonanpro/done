@@ -200,6 +200,10 @@ export function TimelinePreview({ sequence, assets, blurRegionsAt, currentTime, 
       if (track.type !== 'video' && track.type !== 'overlay') continue;
       for (const clip of track.clips || []) {
         const overlay = isOverlayClip(clip, track.type);
+        // A pop-out clip is drawn by the editor's canvas overlay (matted person breaking out of a
+        // rounded card); skip its plain-wipe rendering here so no sharp-cornered rectangle peeks
+        // out behind the rounded card.
+        if (overlay && (clip.effects || []).some((e) => e.type === 'popout')) continue;
         out.push({
           clip,
           kind: overlay ? 'overlay' : 'base',

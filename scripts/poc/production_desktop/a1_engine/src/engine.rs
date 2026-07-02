@@ -42,6 +42,14 @@ struct ClipMeta {
     ss: f64,
     dur: f64,
     pos: Option<Position>,
+    crop: Option<timeline_model::Crop>,
+    /// Pop-out overlay cache key (if this clip renders as a pop-out). A change here forces a re-add
+    /// so applying/removing/regenerating the effect swaps the wipe ↔ full-frame alpha overlay.
+    popout: Option<String>,
+    /// Explicit source path (relative to asset dir) this clip renders from, if any. A pop-out clip
+    /// points at its generated alpha .mov here; a change (e.g. re-generated → new key) forces a
+    /// re-add so the new source is picked up.
+    src: Option<String>,
 }
 
 fn pos_eq(a: &Option<Position>, b: &Option<Position>) -> bool {
@@ -57,12 +65,84 @@ fn pos_eq(a: &Option<Position>, b: &Option<Position>) -> bool {
     }
 }
 
-/// Apply a PiP rect (normalized 0..1) to an overlay clip's gescompositor pad properties.
-fn set_pip(clip: &ges::Clip, pos: &Position, w: i32, h: i32) {
-    let _ = clip.set_child_property("posx", &glib::Value::from((pos.x * w as f64) as i32));
-    let _ = clip.set_child_property("posy", &glib::Value::from((pos.y * h as f64) as i32));
-    let _ = clip.set_child_property("width", &glib::Value::from((pos.width * w as f64) as i32));
-    let _ = clip.set_child_property("height", &glib::Value::from((pos.height * h as f64) as i32));
+fn crop_eq(a: &Option<timeline_model::Crop>, b: &Option<timeline_model::Crop>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => {
+            (x.top - y.top).abs() < 1e-4
+                && (x.bottom - y.bottom).abs() < 1e-4
+                && (x.left - y.left).abs() < 1e-4
+                && (x.right - y.right).abs() < 1e-4
+        }
+        _ => false,
+    }
+}
+
+/// True when the box SIZE (width/height) is unchanged — position (x/y) may still differ. A same-size
+/// change can be applied live (apply_overlay_live); a size change must re-add (caps/aspect are baked).
+fn pos_size_eq(a: &Option<Position>, b: &Option<Position>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => (x.width - y.width).abs() < 1e-4 && (x.height - y.height).abs() < 1e-4,
+        _ => false,
+    }
+}
+
+/// Overlay placement in output pixels, from the normalized box + per-edge crop. Returns
+/// (box_w, box_h, strip_l, strip_r, strip_t, strip_b, kept_w, kept_h, kept_x, kept_y). Box dims are
+/// forced even (yuv420); the strips are the trimmed edge widths in box pixels (crop = mask).
+fn overlay_geom(
+    pos: &Position,
+    crop: &Option<timeline_model::Crop>,
+    w: i32,
+    h: i32,
+) -> (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32) {
+    let even = |v: f64| (v as i32) & !1;
+    let bx = pos.x * w as f64;
+    let by = pos.y * h as f64;
+    let bw = even(pos.width * w as f64).max(2);
+    let bh = even(pos.height * h as f64).max(2);
+    let (cl, cr, ct, cb) = crop
+        .map(|k| {
+            (
+                k.left.clamp(0.0, 0.9),
+                k.right.clamp(0.0, 0.9),
+                k.top.clamp(0.0, 0.9),
+                k.bottom.clamp(0.0, 0.9),
+            )
+        })
+        .unwrap_or((0.0, 0.0, 0.0, 0.0));
+    let l = even(bw as f64 * cl).max(0);
+    let t = even(bh as f64 * ct).max(0);
+    let r = even(bw as f64 * cr).max(0).min(bw - 2 - l);
+    let b = even(bh as f64 * cb).max(0).min(bh - 2 - t);
+    let kw = (bw - l - r).max(2);
+    let kh = (bh - t - b).max(2);
+    let kx = (bx + l as f64) as i32;
+    let ky = (by + t as f64) as i32;
+    (bw, bh, l, r, t, b, kw, kh, kx, ky)
+}
+
+/// Update an overlay clip's crop strips + placement IN PLACE (no clip rebuild): tweak the videocrop
+/// edges and the compositor pad, so a crop / move drag is a cheap property change + async commit
+/// rather than a drop+re-add+re-preroll (~350-600ms). Needs the videocrop effect already attached
+/// (add_clip always attaches it to overlays). Valid only while the box SIZE is unchanged (the
+/// videoscale caps + cover aspect are baked at add time and depend on box w/h).
+fn apply_overlay_live(clip: &ges::Clip, pos: &Position, crop: &Option<timeline_model::Crop>, w: i32, h: i32) {
+    let (_bw, _bh, l, r, t, b, kw, kh, kx, ky) = overlay_geom(pos, crop, w, h);
+    for eff in clip.top_effects() {
+        // eff is a TrackElement — both TimelineElementExt and TrackElementExt expose
+        // set_child_property, so qualify it to the (child-property) TimelineElementExt one.
+        use ges::prelude::TimelineElementExt;
+        let _ = TimelineElementExt::set_child_property(&eff, "top", &glib::Value::from(t));
+        let _ = TimelineElementExt::set_child_property(&eff, "bottom", &glib::Value::from(b));
+        let _ = TimelineElementExt::set_child_property(&eff, "left", &glib::Value::from(l));
+        let _ = TimelineElementExt::set_child_property(&eff, "right", &glib::Value::from(r));
+    }
+    let _ = clip.set_child_property("posx", &glib::Value::from(kx));
+    let _ = clip.set_child_property("posy", &glib::Value::from(ky));
+    let _ = clip.set_child_property("width", &glib::Value::from(kw));
+    let _ = clip.set_child_property("height", &glib::Value::from(kh));
 }
 
 /// One edit operation against the live timeline. Clip targets are JSON `id`s.
@@ -157,6 +237,9 @@ impl Engine {
     pub fn init() -> anyhow::Result<()> {
         gst::init()?;
         ges::init()?;
+        // `danpv://` handler for pop-out two-track bakes (idempotent: re-register is an error
+        // we can ignore — the first registration stays in effect)
+        let _ = crate::pvsrc::register();
         Ok(())
     }
 
@@ -321,14 +404,39 @@ impl Engine {
         format!("file://{s}")
     }
 
-    fn get_asset(&mut self, asset_id: &str) -> Result<ges::UriClipAsset, glib::Error> {
-        let uri = self.uri_for(asset_id);
+    /// Build a URI for a path RELATIVE to the asset dir (mirrors uri_for's Windows
+    /// canonicalize + `\\?\` strip). Used for a clip's explicit source, e.g. a generated pop-out
+    /// bake under `popout-cache/`. A two-track `.pv.mp4` bake gets the `danpv://` scheme so our
+    /// registered source (see pvsrc.rs) plays it as ONE alpha stream; everything else is file://.
+    fn uri_for_rel(&self, rel: &str) -> String {
+        let p = self.asset_dir.join(rel);
+        let mut s = p
+            .canonicalize()
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if let Some(rest) = s.strip_prefix("//?/") {
+            s = rest.to_string();
+        }
+        if !s.starts_with('/') {
+            s = format!("/{s}");
+        }
+        let scheme = if rel.ends_with(".pv.mp4") { "danpv" } else { "file" };
+        format!("{scheme}://{s}")
+    }
+
+    fn get_asset_by_uri(&mut self, uri: String) -> Result<ges::UriClipAsset, glib::Error> {
         if let Some(a) = self.asset_cache.get(&uri) {
             return Ok(a.clone());
         }
         let a = ges::UriClipAsset::request_sync(&uri)?;
         self.asset_cache.insert(uri, a.clone());
         Ok(a)
+    }
+
+    fn get_asset(&mut self, asset_id: &str) -> Result<ges::UriClipAsset, glib::Error> {
+        let uri = self.uri_for(asset_id);
+        self.get_asset_by_uri(uri)
     }
 
     /// Build the timeline from `contents.json` and preroll to PAUSED (load = build + preroll).
@@ -358,10 +466,12 @@ impl Engine {
                 }
             }
         }
-        // overlay -> layer 1, PiP transform
+        // overlay -> layer 1. A pop-out clip composites its pre-made alpha overlay FULL-FRAME
+        // (same GES pipeline = same clock as the base, no drift; replaces the plain wipe so no
+        // sharp-cornered rectangle). Falls back to the normal wipe if the overlay file is missing.
         if let Some(clips) = by_kind.remove("overlay") {
             for c in clips {
-                match self.add_clip(c, Layer::Overlay, true) {
+                match self.add_maybe_popout(c, Layer::Overlay, true) {
                     Ok(true) => overlay_clips += 1,
                     _ => skipped += 1,
                 }
@@ -414,6 +524,78 @@ impl Engine {
         })
     }
 
+    /// Composite a pop-out clip's pre-generated alpha overlay (.mov ProRes 4444, matted person
+    /// breaking out of a rounded card) FULL-FRAME on the overlay layer, at the clip's timeline
+    /// position. Same GES pipeline as everything else → perfectly synced to the base video/audio
+    /// (no separate clock), and it replaces the plain wipe so the rounded card has no sharp-cornered
+    /// rectangle behind it. Uses .mov (ProRes) NOT .webm: GStreamer's vp9dec drops VP9 alpha so a
+    /// .webm overlay never prerolls and freezes the whole pipeline; avdec_prores decodes the alpha.
+    /// Returns Ok(false) if the overlay file isn't there (caller falls back to the plain wipe).
+    #[allow(dead_code)] // superseded by Clip.src (pop-out is now an ordinary alpha overlay clip)
+    fn add_popout_overlay(&mut self, c: &ClipModel, key: &str) -> anyhow::Result<bool> {
+        let dur = c.duration_s();
+        if dur <= 0.0 {
+            return Ok(false);
+        }
+        let path = self.asset_dir.join("popout-cache").join(format!("{key}.mov"));
+        if !path.exists() {
+            return Ok(false);
+        }
+        let mut s = path
+            .canonicalize()
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if let Some(rest) = s.strip_prefix("//?/") {
+            s = rest.to_string();
+        }
+        if !s.starts_with('/') {
+            s = format!("/{s}");
+        }
+        let uri = format!("file://{s}");
+        let asset = match ges::UriClipAsset::request_sync(&uri) {
+            Ok(a) => a,
+            Err(_) => return Ok(false),
+        };
+        // full-frame (no PiP transform); the overlay .webm starts at 0 and matches the clip duration
+        match self.layer_overlay.add_asset(
+            &asset,
+            ct_from_secs(c.timeline_start),
+            ct_from_secs(0.0),
+            ct_from_secs(dur),
+            ges::TrackType::VIDEO,
+        ) {
+            Ok(clip) => {
+                if !c.id.is_empty() {
+                    self.clip_meta.insert(
+                        c.id.clone(),
+                        ClipMeta {
+                            lane: "overlay".to_string(),
+                            ts: c.timeline_start,
+                            ss: c.source_start,
+                            dur,
+                            pos: c.position.clone(),
+                            crop: c.crop.clone(),
+                            popout: Some(key.to_string()),
+                            src: None,
+                        },
+                    );
+                    self.clips.insert(c.id.clone(), clip);
+                }
+                Ok(true)
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
+    /// Add a clip. A pop-out is no longer a special render path: the web side generates its alpha
+    /// .mov and hands it over as an ordinary overlay clip via `Clip.src`, so it composites, moves,
+    /// scales, crops, trims and splits through the exact same path as any other clip. Kept as a thin
+    /// wrapper so existing call sites read clearly.
+    fn add_maybe_popout(&mut self, c: ClipModel, layer: Layer, transform: bool) -> anyhow::Result<bool> {
+        self.add_clip(c, layer, transform)
+    }
+
     fn add_clip(&mut self, c: ClipModel, layer: Layer, transform: bool) -> anyhow::Result<bool> {
         let asset_id = match &c.asset_id {
             Some(a) if !a.is_empty() => a.clone(),
@@ -423,9 +605,22 @@ impl Engine {
         if dur <= 0.0 {
             return Ok(false);
         }
-        let asset = match self.get_asset(&asset_id) {
-            Ok(a) => a,
-            Err(_) => return Ok(false),
+        // Resolve the source: a clip with an effective source (explicit `src`, or a pop-out's
+        // generated alpha .mov under popout-cache/) uses that file directly; otherwise the normal
+        // asset_id → proxy path.
+        let eff_src = c.effective_src();
+        let asset = {
+            let res = match eff_src.as_deref() {
+                Some(rel) if !rel.is_empty() => {
+                    let uri = self.uri_for_rel(rel);
+                    self.get_asset_by_uri(uri)
+                }
+                _ => self.get_asset(&asset_id),
+            };
+            match res {
+                Ok(a) => a,
+                Err(_) => return Ok(false),
+            }
         };
         let (gl, ttype) = match layer {
             Layer::Video => (&self.layer_video, ges::TrackType::VIDEO),
@@ -435,7 +630,7 @@ impl Engine {
         let clip = match gl.add_asset(
             &asset,
             ct_from_secs(c.timeline_start),
-            ct_from_secs(c.source_start),
+            ct_from_secs(c.effective_source_start()),
             ct_from_secs(dur),
             ttype,
         ) {
@@ -445,22 +640,29 @@ impl Engine {
 
         if transform {
             if let Some(pos) = c.position {
-                let _ = clip.set_child_property(
-                    "posx",
-                    &glib::Value::from((pos.x * self.width as f64) as i32),
-                );
-                let _ = clip.set_child_property(
-                    "posy",
-                    &glib::Value::from((pos.y * self.height as f64) as i32),
-                );
-                let _ = clip.set_child_property(
-                    "width",
-                    &glib::Value::from((pos.width * self.width as f64) as i32),
-                );
-                let _ = clip.set_child_property(
-                    "height",
-                    &glib::Value::from((pos.height * self.height as f64) as i32),
-                );
+                let (bw, bh, l, r, t, b, kw, kh, kx, ky) =
+                    overlay_geom(&pos, &c.crop, self.width, self.height);
+                let cover = c.fit.as_deref() != Some("stretch");
+                // Effect chain (always attached so crop can later be tweaked live without a rebuild):
+                //  1) aspectratiocrop  — COVER: crop the source to the box aspect so the fill is
+                //     undistorted (fixes the "潰れ" squish). Skipped in free-deform (stretch) mode.
+                //  2) videoscale→box   — normalize to exact box pixels so the crop strips are exact.
+                //  3) videocrop        — per-edge crop = MASK: cut the trimmed strips (0 when none);
+                //     the kept pixels keep their scale/place, and the pad offset (kx,ky) puts the
+                //     kept region exactly where it sat, so nothing moves or resizes.
+                let mut chain: Vec<String> = Vec::new();
+                if cover && bw > 1 && bh > 1 {
+                    chain.push(format!("aspectratiocrop aspect-ratio={}/{}", bw, bh));
+                }
+                chain.push(format!("videoscale ! video/x-raw,width={},height={}", bw, bh));
+                chain.push(format!("videocrop top={} bottom={} left={} right={}", t, b, l, r));
+                if let Ok(effect) = ges::Effect::new(&chain.join(" ! ")) {
+                    let _ = clip.add(&effect);
+                }
+                let _ = clip.set_child_property("posx", &glib::Value::from(kx));
+                let _ = clip.set_child_property("posy", &glib::Value::from(ky));
+                let _ = clip.set_child_property("width", &glib::Value::from(kw));
+                let _ = clip.set_child_property("height", &glib::Value::from(kh));
             }
         }
 
@@ -474,7 +676,7 @@ impl Engine {
             .to_string();
             self.clip_meta.insert(
                 c.id.clone(),
-                ClipMeta { lane, ts: c.timeline_start, ss: c.source_start, dur, pos: c.position },
+                ClipMeta { lane, ts: c.timeline_start, ss: c.effective_source_start(), dur, pos: c.position, crop: c.crop, popout: None, src: eff_src.clone() },
             );
             self.clips.insert(c.id, clip);
         }
@@ -533,26 +735,53 @@ impl Engine {
             let dur = c.duration_s();
             match (self.clips.get(&c.id).cloned(), self.clip_meta.get(&c.id).cloned()) {
                 (Some(clip), Some(m)) if m.lane == lane => {
-                    // same clip, same lane → update timing / PiP only if it actually moved
-                    if (m.ts - c.timeline_start).abs() > 1e-4
-                        || (m.ss - c.source_start).abs() > 1e-4
-                        || (m.dur - dur).abs() > 1e-4
-                    {
+                    // timing (start/inpoint/duration) — cheap in-place, needs a (batched) commit.
+                    let eff_ss = c.effective_source_start();
+                    let timing_changed = (m.ts - c.timeline_start).abs() > 1e-4
+                        || (m.ss - eff_ss).abs() > 1e-4
+                        || (m.dur - dur).abs() > 1e-4;
+                    if timing_changed {
                         clip.set_start(ct_from_secs(c.timeline_start));
-                        let _ = clip.set_inpoint(ct_from_secs(c.source_start));
+                        let _ = clip.set_inpoint(ct_from_secs(eff_ss));
                         let _ = clip.set_duration(ct_from_secs(dur));
                         dirty = true;
                     }
-                    if transform && !pos_eq(&m.pos, &c.position) {
-                        if let Some(pos) = &c.position {
-                            set_pip(&clip, pos, self.width, self.height);
+                    let size_changed = transform && !pos_size_eq(&m.pos, &c.position);
+                    let geom_changed =
+                        transform && (!pos_eq(&m.pos, &c.position) || !crop_eq(&m.crop, &c.crop));
+                    // Applying/removing/regenerating the pop-out effect swaps wipe ↔ full-frame alpha
+                    // overlay → a structural re-add (an in-place meta update can't change the render path).
+                    let popout_changed = m.popout != c.popout_overlay_key();
+                    // The clip's source file changed (e.g. pop-out (re)generated → new .mov, or applied/
+                    // removed) → must re-add so the new media is loaded, not just re-positioned.
+                    let src_changed = m.src != c.effective_src();
+                    if size_changed || popout_changed || src_changed {
+                        // Structural change → drop and re-add. add_maybe_popout sets clip_meta itself.
+                        if let Some(old) = self.clips.remove(&c.id) {
+                            let _ = self.layer_video.remove_clip(&old);
+                            let _ = self.layer_overlay.remove_clip(&old);
+                            let _ = self.layer_audio.remove_clip(&old);
                         }
-                        dirty = true;
+                        if self.add_maybe_popout(c, layer, transform).unwrap_or(false) {
+                            dirty = true;
+                        }
+                    } else {
+                        if geom_changed {
+                            // Same box size — only x/y and/or crop moved. Tweak the videocrop edges +
+                            // pad IN PLACE (no clip rebuild → no re-preroll). This is the fast path a
+                            // crop/move drag hits: an async commit instead of a ~350-600ms commit_sync.
+                            if let Some(pos) = &c.position {
+                                apply_overlay_live(&clip, pos, &c.crop, self.width, self.height);
+                            }
+                            if !timing_changed {
+                                let _ = self.timeline.commit();
+                            }
+                        }
+                        self.clip_meta.insert(
+                            c.id.clone(),
+                            ClipMeta { lane, ts: c.timeline_start, ss: eff_ss, dur, pos: c.position, crop: c.crop, popout: m.popout.clone(), src: c.effective_src() },
+                        );
                     }
-                    self.clip_meta.insert(
-                        c.id.clone(),
-                        ClipMeta { lane, ts: c.timeline_start, ss: c.source_start, dur, pos: c.position },
-                    );
                 }
                 _ => {
                     // new clip, or its lane changed → drop the old (if any) and add fresh
@@ -561,10 +790,7 @@ impl Engine {
                         let _ = self.layer_overlay.remove_clip(&old);
                         let _ = self.layer_audio.remove_clip(&old);
                     }
-                    let (id, ts, ss, pos) =
-                        (c.id.clone(), c.timeline_start, c.source_start, c.position);
-                    if self.add_clip(c, layer, transform).unwrap_or(false) {
-                        self.clip_meta.insert(id, ClipMeta { lane, ts, ss, dur, pos });
+                    if self.add_maybe_popout(c, layer, transform).unwrap_or(false) {
                         dirty = true;
                     }
                 }

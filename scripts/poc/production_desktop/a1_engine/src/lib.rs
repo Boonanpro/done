@@ -5,6 +5,7 @@
 //! (poc1.py / poc3.py) stay as the parity oracle.
 
 pub mod engine;
+pub mod pvsrc;
 pub mod timeline_model;
 
 pub use engine::{EditOp, EditResult, Engine, EngineState, LoadReport, SeekResult};
