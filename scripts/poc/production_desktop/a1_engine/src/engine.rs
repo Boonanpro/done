@@ -676,7 +676,10 @@ impl Engine {
             .to_string();
             self.clip_meta.insert(
                 c.id.clone(),
-                ClipMeta { lane, ts: c.timeline_start, ss: c.effective_source_start(), dur, pos: c.position, crop: c.crop, popout: None, src: eff_src.clone() },
+                // popout mirrors popout_overlay_key() so the rebuild diff compares like with
+                // like — storing None here while the diff reads Some(key) re-added EVERY pop-out
+                // clip on EVERY rebuild (edits took seconds once 12 pop-outs were on the timeline)
+                ClipMeta { lane, ts: c.timeline_start, ss: c.effective_source_start(), dur, pos: c.position, crop: c.crop, popout: c.popout_overlay_key(), src: eff_src.clone() },
             );
             self.clips.insert(c.id, clip);
         }
@@ -769,12 +772,13 @@ impl Engine {
                         if geom_changed {
                             // Same box size — only x/y and/or crop moved. Tweak the videocrop edges +
                             // pad IN PLACE (no clip rebuild → no re-preroll). This is the fast path a
-                            // crop/move drag hits: an async commit instead of a ~350-600ms commit_sync.
+                            // crop/move drag hits. NO commit: child-property changes apply live and
+                            // are not nle structure — committing here flushed + re-activated the
+                            // playhead's source stack on every 25Hz drag tick, which with a pop-out
+                            // source active (2 decoders + alphacombine re-init) cost 250ms+ per tick
+                            // and froze all geometry editing.
                             if let Some(pos) = &c.position {
                                 apply_overlay_live(&clip, pos, &c.crop, self.width, self.height);
-                            }
-                            if !timing_changed {
-                                let _ = self.timeline.commit();
                             }
                         }
                         self.clip_meta.insert(
