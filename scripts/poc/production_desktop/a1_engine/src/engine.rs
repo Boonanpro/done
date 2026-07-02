@@ -457,10 +457,12 @@ impl Engine {
             by_kind.entry(tr.kind.clone()).or_default().extend(tr.clips);
         }
 
-        // video -> layer 0, no transform
+        // video -> layer 0. transform=true so a fullscreen clip the user resizes/moves/crops
+        // gets the same live geometry as a wipe (clips without a position/crop pay no cost —
+        // the effect chain is only attached when one is set).
         if let Some(clips) = by_kind.remove("video") {
             for c in clips {
-                match self.add_clip(c, Layer::Video, false) {
+                match self.add_clip(c, Layer::Video, true) {
                     Ok(true) => video_clips += 1,
                     _ => skipped += 1,
                 }
@@ -639,7 +641,7 @@ impl Engine {
         };
 
         if transform {
-            if let Some(pos) = c.position {
+            if let Some(pos) = c.effective_position() {
                 let (bw, bh, l, r, t, b, kw, kh, kx, ky) =
                     overlay_geom(&pos, &c.crop, self.width, self.height);
                 let cover = c.fit.as_deref() != Some("stretch");
@@ -733,7 +735,7 @@ impl Engine {
             let (layer, transform) = match lane.as_str() {
                 "overlay" => (Layer::Overlay, true),
                 "audio" => (Layer::Audio, false),
-                _ => (Layer::Video, false),
+                _ => (Layer::Video, true),
             };
             let dur = c.duration_s();
             match (self.clips.get(&c.id).cloned(), self.clip_meta.get(&c.id).cloned()) {
@@ -752,13 +754,19 @@ impl Engine {
                     let size_changed = transform && !pos_size_eq(&m.pos, &c.position);
                     let geom_changed =
                         transform && (!pos_eq(&m.pos, &c.position) || !crop_eq(&m.crop, &c.crop));
+                    // a bare clip (no position/crop at add time) has NO geometry effect chain —
+                    // the first crop/position needs a structural re-add to attach it
+                    let chain_missing = transform
+                        && m.pos.is_none()
+                        && m.crop.is_none()
+                        && (c.position.is_some() || c.crop.is_some());
                     // Applying/removing/regenerating the pop-out effect swaps wipe ↔ full-frame alpha
                     // overlay → a structural re-add (an in-place meta update can't change the render path).
                     let popout_changed = m.popout != c.popout_overlay_key();
                     // The clip's source file changed (e.g. pop-out (re)generated → new .mov, or applied/
                     // removed) → must re-add so the new media is loaded, not just re-positioned.
                     let src_changed = m.src != c.effective_src();
-                    if size_changed || popout_changed || src_changed {
+                    if size_changed || popout_changed || src_changed || chain_missing {
                         // Structural change → drop and re-add. add_maybe_popout sets clip_meta itself.
                         if let Some(old) = self.clips.remove(&c.id) {
                             let _ = self.layer_video.remove_clip(&old);
@@ -777,8 +785,12 @@ impl Engine {
                             // playhead's source stack on every 25Hz drag tick, which with a pop-out
                             // source active (2 decoders + alphacombine re-init) cost 250ms+ per tick
                             // and froze all geometry editing.
-                            if let Some(pos) = &c.position {
-                                apply_overlay_live(&clip, pos, &c.crop, self.width, self.height);
+                            if let Some(pos) = c.effective_position() {
+                                apply_overlay_live(&clip, &pos, &c.crop, self.width, self.height);
+                            } else {
+                                // position AND crop both removed → put the clip back full-frame
+                                let full = Position { x: 0.0, y: 0.0, width: 1.0, height: 1.0 };
+                                apply_overlay_live(&clip, &full, &None, self.width, self.height);
                             }
                         }
                         self.clip_meta.insert(
