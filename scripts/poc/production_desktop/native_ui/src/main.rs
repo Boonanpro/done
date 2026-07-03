@@ -302,10 +302,14 @@ fn mask_build_pass(doc: &model::Doc, d3d: &media::D3d, masks: &mut MaskMap) -> b
         }
         for c in &tr.clips {
             let Some((key, _)) = c.popout_key() else { continue };
-            if masks.contains_key(&key) {
-                continue;
-            }
             let mt = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
+            if let Some(entry) = masks.get(&key) {
+                // None = matte twin wasn't on disk earlier; a bake may have finished
+                // since — pick it up in-session (no restart needed)
+                if entry.is_some() || !std::path::Path::new(&mt).exists() {
+                    continue;
+                }
+            }
             let meta = if std::path::Path::new(&mt).exists() {
                 model::PopMeta::load(&doc.rel_path(&format!("popout-cache/{key}.json")))
             } else {
@@ -442,6 +446,23 @@ fn compose(
             let rel = format!("popout-cache/{key}.pv.mp4");
             let path = doc.rel_path(&rel);
             if !std::path::Path::new(&path).exists() {
+                // bake not finished yet: show the person as a PLAIN PiP at the card box —
+                // an applied-but-baking clip must never just vanish from the preview
+                if let Some(aid) = c.asset_id.as_deref() {
+                    let bb = c.popout_card_box().unwrap_or(b);
+                    let p2 = doc.asset_path_q(aid, original);
+                    let src_t = c.source_start + (t - c.timeline_start);
+                    let vs = pool.get(d3d, &p2, 0, false, src_t)?;
+                    if fast {
+                        exact &= vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                    } else {
+                        vs.ensure_frame(d3d, src_t)
+                            .map_err(|e| e.context(format!("baking-pip {} src_t={src_t:.2}", vs.name)))?;
+                    }
+                    let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
+                    comp.draw(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), true, None)?;
+                    used.push(p2);
+                }
                 continue;
             }
             let src_t = off + (t - c.timeline_start);
@@ -654,6 +675,54 @@ fn warm_upcoming(
         }
     }
     false
+}
+
+/// Tiny localhost-only HTTP client (the sandbox popout endpoints are auth-free local
+/// APIs) — a dependency-free TcpStream request beats pulling a whole HTTP stack.
+fn http_local(method: &str, path: &str, json_body: Option<&str>) -> anyhow::Result<String> {
+    use std::io::{Read, Write};
+    let mut st = std::net::TcpStream::connect(("127.0.0.1", 8000))?;
+    st.set_read_timeout(Some(std::time::Duration::from_secs(20)))?;
+    let body = json_body.unwrap_or("");
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:8000\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    st.write_all(req.as_bytes())?;
+    let mut buf = Vec::new();
+    st.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf).to_string();
+    let Some(split) = text.find("\r\n\r\n") else {
+        anyhow::bail!("bad http response ({} bytes)", buf.len());
+    };
+    let (head, mut rest) = (text[..split].to_string(), text[split + 4..].to_string());
+    if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+        let mut out = String::new();
+        let mut s2 = rest.as_str();
+        while let Some(nl) = s2.find("\r\n") {
+            let n = usize::from_str_radix(s2[..nl].trim(), 16).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            out.push_str(&s2[nl + 2..nl + 2 + n]);
+            s2 = &s2[nl + 2 + n + 2..];
+        }
+        rest = out;
+    }
+    if !head.starts_with("HTTP/1.1 2") && !head.starts_with("HTTP/1.0 2") {
+        anyhow::bail!("http {}: {}", head.lines().next().unwrap_or(""), &rest[..rest.len().min(200)]);
+    }
+    Ok(rest)
+}
+
+/// Popout bake state shown ON the clip itself (the user's request: the clip's look
+/// changes, not a sidebar spinner).
+#[derive(Clone, Copy, PartialEq)]
+enum PopState {
+    Baking(u8),
+    Failed,
+    Ready,
 }
 
 fn chr_nl() -> &'static str {
@@ -1301,6 +1370,11 @@ struct App {
     tex: Option<egui::TextureHandle>,
     last_seq: u64,
     playing: bool,
+    /// clip_id -> popout bake display state (polled from the cache dir, not the server)
+    pop_states: std::collections::HashMap<String, PopState>,
+    bake_results: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
+    last_pop_poll: Instant,
+    last_push: Instant,
     // Filmora semantics (observed in its logs: Pause -> seek -> auto Play): any timeline
     // interaction while playing pauses first; playback auto-resumes once the video ring
     // is ready at the new position.
@@ -1377,6 +1451,10 @@ impl App {
             tex: None,
             last_seq: 0,
             playing: false,
+            pop_states: Default::default(),
+            bake_results: Default::default(),
+            last_pop_poll: Instant::now(),
+            last_push: Instant::now(),
             resume_pending: None,
             resume_on_release: false,
             t: 0.0,
@@ -1523,9 +1601,195 @@ impl App {
         Ok(())
     }
 
+    fn room_id(&self) -> String {
+        self.doc
+            .asset_dir
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn timeline_format(&self) -> String {
+        self.doc
+            .raw
+            .get(0)
+            .and_then(|r| {
+                r.get("timeline")
+                    .and_then(|t| t.get("format"))
+                    .or_else(|| r.get("format"))
+            })
+            .and_then(|v| v.as_str())
+            .unwrap_or("9:16")
+            .to_string()
+    }
+
+    /// E key: toggle the pop-out effect on the selected person clips. Applying kicks the
+    /// server bake (auth-free local API) on a background thread; the clip itself turns
+    /// into a "生成中 n%" progress strip until the bake lands.
+    fn toggle_popout(&mut self) {
+        let sel: Vec<(String, model::Clip)> = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .filter(|tr| tr.kind == "overlay" || tr.kind == "video")
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| self.selected.contains(&c.id) && c.asset_id.is_some())
+            .map(|c| (c.id.clone(), c.clone()))
+            .collect();
+        if sel.is_empty() {
+            return;
+        }
+        let remove = sel.iter().all(|(id, c)| {
+            c.popout_params().is_some() && !matches!(self.pop_states.get(id), Some(PopState::Failed))
+        });
+        if remove {
+            let ids: Vec<String> = sel.iter().map(|(id, _)| id.clone()).collect();
+            self.apply_edit(true, |raw| edits::set_popout(raw, &ids, None));
+            for id in ids {
+                self.pop_states.remove(&id);
+            }
+            return;
+        }
+        let room = self.room_id();
+        let fmt = self.timeline_format();
+        for (id, c) in sel {
+            if c.popout_params().is_some() && !matches!(self.pop_states.get(&id), Some(PopState::Failed)) {
+                continue; // already applied and healthy
+            }
+            let box_ = c
+                .position
+                .unwrap_or(model::Pos { x: 0.30, y: 0.655, width: 0.40, height: 0.30 });
+            // effect goes on the clip IMMEDIATELY (state shows 0%); the key arrives async
+            let params = serde_json::json!({
+                "intensity": "mid", "shadow": true,
+                "box": {"x": box_.x, "y": box_.y, "width": box_.width, "height": box_.height},
+                "baked_format": fmt,
+            });
+            let ids = vec![id.clone()];
+            self.apply_edit(true, move |raw| edits::set_popout(raw, &ids, Some(params)));
+            self.pop_states.insert(id.clone(), PopState::Baking(0));
+            let payload = serde_json::json!({
+                "room_id": room, "asset_id": c.asset_id,
+                "format": fmt,
+                "position": {"x": box_.x, "y": box_.y, "width": box_.width, "height": box_.height},
+                "source_start": c.source_start,
+                "source_end": c.source_start + (c.timeline_end - c.timeline_start),
+                "intensity": "mid", "shadow": true,
+            })
+            .to_string();
+            let sink = self.bake_results.clone();
+            let cid = id.clone();
+            std::thread::spawn(move || {
+                let res = http_local("POST", "/api/v1/production-assets/popout-overlay", Some(&payload))
+                    .and_then(|txt| Ok(serde_json::from_str::<serde_json::Value>(&txt)?))
+                    .map_err(|e| format!("{e:#}"));
+                sink.lock().unwrap().push((cid, res));
+            });
+        }
+    }
+
+    /// Bake bookkeeping: absorb async POST results into effect params, poll progress
+    /// files, finalize margins/position when a bake lands. Called from update() and the
+    /// headless self-test.
+    fn poll_popout_bakes(&mut self) {
+        // async bake-POST results: write the returned key/bake window into the effect
+        {
+            let results: Vec<(String, Result<serde_json::Value, String>)> =
+                std::mem::take(&mut *self.bake_results.lock().unwrap());
+            for (cid, res) in results {
+                match res {
+                    Ok(v) => {
+                        let (key, bs, be) = (
+                            v.get("key").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                            v.get("bake_start").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                            v.get("bake_end").and_then(|x| x.as_f64()).unwrap_or(0.0),
+                        );
+                        if key.is_empty() {
+                            self.pop_states.insert(cid, PopState::Failed);
+                            continue;
+                        }
+                        let clip = self
+                            .doc
+                            .seq
+                            .tracks
+                            .iter()
+                            .flat_map(|tr| tr.clips.iter())
+                            .find(|c| c.id == cid)
+                            .cloned();
+                        if let Some(c) = clip {
+                            if let Some(p) = c.popout_params() {
+                                let mut p2 = p.clone();
+                                if let Some(o) = p2.as_object_mut() {
+                                    o.insert("overlay_key".into(), serde_json::json!(key));
+                                    o.insert("bake_start".into(), serde_json::json!(bs));
+                                    o.insert("bake_end".into(), serde_json::json!(be));
+                                    o.insert("bake_v".into(), serde_json::json!(7));
+                                }
+                                let ids = vec![cid.clone()];
+                                self.apply_edit(false, move |raw| edits::set_popout(raw, &ids, Some(p2)));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("popout bake request failed: {e}");
+                        self.pop_states.insert(cid, PopState::Failed);
+                    }
+                }
+            }
+        }
+        // poll bake progress straight off the cache dir (same machine — no server round
+        // trip) and finalize margins/position the moment a bake lands
+        if self.last_pop_poll.elapsed().as_millis() > 700 {
+            self.last_pop_poll = Instant::now();
+            let cache = format!("{}/popout-cache", self.doc.asset_dir);
+            let mut finalize: Vec<(String, serde_json::Value)> = Vec::new();
+            for tr in &self.doc.seq.tracks {
+                for c in &tr.clips {
+                    let Some(p) = c.popout_params() else { continue };
+                    let Some(key) = p.get("overlay_key").and_then(|k| k.as_str()) else {
+                        continue; // POST still in flight
+                    };
+                    let pv_ok = std::fs::metadata(format!("{cache}/{key}.pv.mp4"))
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false);
+                    if pv_ok {
+                        if p.get("margins").is_none() {
+                            if let Some(m) = std::fs::read_to_string(format!("{cache}/{key}.json"))
+                                .ok()
+                                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                                .and_then(|j| j.get("margins").cloned())
+                            {
+                                finalize.push((c.id.clone(), m));
+                            }
+                        }
+                        self.pop_states.insert(c.id.clone(), PopState::Ready);
+                        continue;
+                    }
+                    let prog = std::fs::read_to_string(format!("{cache}/{key}.progress.json"))
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+                    let state = match prog {
+                        Some(j) if j.get("error").is_some() => PopState::Failed,
+                        Some(j) => PopState::Baking(
+                            j.get("pct").and_then(|v| v.as_i64()).unwrap_or(0).clamp(0, 99) as u8,
+                        ),
+                        None => PopState::Baking(0),
+                    };
+                    self.pop_states.insert(c.id.clone(), state);
+                }
+            }
+            for (cid, m) in finalize {
+                self.apply_edit(false, move |raw| edits::finalize_popout(raw, &cid, &m));
+            }
+        }
+    }
+
     fn push_req(&mut self, scrubbing: bool) {
         let mut r = self.shared.req.lock().unwrap();
         self.gen += 1;
+        self.last_push = Instant::now();
         *r = Req { t: self.t, playing: self.playing, scrubbing, gen: self.gen };
     }
 
@@ -1592,11 +1856,60 @@ impl App {
                     egui::pos2(x1.min(rect.right()), y0 + lane_h - 3.0),
                 );
                 let is_pop = c.effects.iter().any(|e| e.kind == "popout");
+                let pop_state = if is_pop { self.pop_states.get(&c.id).copied() } else { None };
                 p.rect_filled(
                     r,
                     3.0,
                     if is_pop { egui::Color32::from_rgb(220, 120, 60) } else { color },
                 );
+                // the CLIP ITSELF shows the bake state (not a sidebar spinner):
+                // baking = progress fill sweeping left->right + percentage label
+                match pop_state {
+                    Some(PopState::Baking(pct)) => {
+                        p.rect_filled(r, 3.0, color); // base look while baking
+                        let w = r.width() * (pct as f32 / 100.0).clamp(0.02, 1.0);
+                        let pr = egui::Rect::from_min_size(r.min, egui::vec2(w, r.height()));
+                        p.rect_filled(pr, 3.0, egui::Color32::from_rgb(220, 120, 60));
+                        if r.width() > 90.0 {
+                            p.text(
+                                r.center(),
+                                egui::Align2::CENTER_CENTER,
+                                format!("飛び出し生成中 {pct}%"),
+                                egui::FontId::proportional(10.0),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                        let pulse = ((ui.input(|i| i.time) * 3.0).sin() * 0.5 + 0.5) as f32;
+                        p.rect_stroke(
+                            r,
+                            3.0,
+                            egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(255, 190, 120, (90.0 + 160.0 * pulse) as u8)),
+                        );
+                    }
+                    Some(PopState::Failed) => {
+                        p.rect_stroke(r, 3.0, egui::Stroke::new(2.0, egui::Color32::from_rgb(230, 60, 60)));
+                        if r.width() > 70.0 {
+                            p.text(
+                                r.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "失敗 (Eで再試行)",
+                                egui::FontId::proportional(10.0),
+                                egui::Color32::from_rgb(255, 120, 120),
+                            );
+                        }
+                    }
+                    _ => {
+                        if is_pop && r.width() > 56.0 {
+                            p.text(
+                                egui::pos2(r.left() + 4.0, r.top() + 2.0),
+                                egui::Align2::LEFT_TOP,
+                                "飛び出し",
+                                egui::FontId::proportional(9.0),
+                                egui::Color32::from_white_alpha(210),
+                            );
+                        }
+                    }
+                }
                 if (tr.kind == "video" || tr.kind == "overlay") && !is_pop {
                     if let Some(th) = c.asset_id.as_ref().and_then(|a| self.thumbs.get(a)) {
                         let tile_w = (r.height() * 16.0 / 9.0).max(8.0);
@@ -1807,6 +2120,10 @@ impl eframe::App for App {
                 self.apply_edit(true, |raw| edits::split_clips(raw, &ids, t, salt));
             }
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::E) && !i.modifiers.ctrl) {
+            self.toggle_popout();
+        }
+        self.poll_popout_bakes();
         if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
             if !self.selected.is_empty() {
                 let ids = edits::expand_links(&self.doc.raw, &self.selected);
@@ -1873,7 +2190,12 @@ impl eframe::App for App {
         }
         self.underruns = self.shared.underruns.load(Ordering::Relaxed);
         if self.playing {
-            self.t = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
+            let c = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
+            // the audio clock re-anchors a beat after a seek/play request — until it does,
+            // showing it would flash the playhead bar back to the OLD position
+            if (c - self.t).abs() < 0.3 || self.last_push.elapsed().as_secs_f32() > 1.2 {
+                self.t = c;
+            }
             if self.t >= self.dur - 0.05 {
                 self.playing = false;
                 self.push_req(false);
@@ -2193,6 +2515,70 @@ fn main() -> eframe::Result<()> {
         }
         let ms = b0.elapsed().as_secs_f64() * 1000.0;
         println!("BENCH scrub60={:.1}ms/tick worst={worst:.0}ms", ms / 60.0);
+        std::process::exit(0);
+    }
+    // --selftest-apply: headless E-apply flow — strip a clip's popout, re-apply, follow
+    // the bake to finalized params (uses the real local server; cached keys finish instantly)
+    if args.iter().any(|a| a == "--selftest-apply") {
+        let contents = args.get(1).cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = args.get(2).cloned().unwrap_or_else(|| ROOM.to_string());
+        let mut app = App::new(&contents, &dir).expect("app");
+        let target = app
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .filter(|tr| tr.kind == "overlay")
+            .flat_map(|tr| tr.clips.iter())
+            .find(|c| c.popout_params().is_some())
+            .map(|c| c.id.clone())
+            .expect("no popout clip to test with");
+        println!("target clip: {target}");
+        app.selected = vec![target.clone()];
+        app.toggle_popout(); // remove
+        let has = |app: &App| {
+            app.doc
+                .seq
+                .tracks
+                .iter()
+                .flat_map(|tr| tr.clips.iter())
+                .find(|c| c.id == target)
+                .and_then(|c| c.popout_params().cloned())
+        };
+        assert!(has(&app).is_none(), "remove failed");
+        println!("removed OK");
+        app.toggle_popout(); // apply -> POST -> poll
+        let t0 = std::time::Instant::now();
+        loop {
+            app.poll_popout_bakes();
+            let p = has(&app);
+            let st = app.selected.get(0).and_then(|_| app.pop_states.get(&target)).copied();
+            if let Some(p) = &p {
+                if p.get("overlay_key").is_some() && p.get("margins").is_some() {
+                    println!(
+                        "APPLY PASS key={} margins={} state={:?} ({}ms)",
+                        p["overlay_key"], p["margins"],
+                        match st { Some(PopState::Ready) => "Ready", Some(PopState::Baking(_)) => "Baking", Some(PopState::Failed) => "Failed", None => "None" },
+                        t0.elapsed().as_millis()
+                    );
+                    break;
+                }
+            }
+            if let Some(PopState::Failed) = st {
+                println!("APPLY FAIL (bake failed)");
+                break;
+            }
+            if t0.elapsed().as_secs() > 240 {
+                println!("APPLY TIMEOUT state={:?}", st.map(|x| match x { PopState::Ready => "R", PopState::Baking(_) => "B", PopState::Failed => "F" }));
+                break;
+            }
+            if let Some(PopState::Baking(pct)) = st {
+                if pct > 0 && t0.elapsed().as_millis() % 3000 < 300 {
+                    println!("baking {pct}%");
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
         std::process::exit(0);
     }
     // --probe-open <path> <stream> [full_range]: open one decoder standalone and report

@@ -110,6 +110,23 @@ impl Clip {
         let (key, off) = self.popout_key()?;
         Some((format!("popout-cache/{key}.pv.mp4"), off))
     }
+    /// The popout effect's params object, if this clip has one.
+    pub fn popout_params(&self) -> Option<&serde_json::Value> {
+        self.effects
+            .iter()
+            .find(|e| e.kind == "popout")
+            .map(|e| &e.params)
+    }
+    /// The CARD box the popout was applied with (params.box, canvas fractions).
+    pub fn popout_card_box(&self) -> Option<Pos> {
+        let b = self.popout_params()?.get("box")?;
+        Some(Pos {
+            x: b.get("x")?.as_f64()?,
+            y: b.get("y")?.as_f64()?,
+            width: b.get("width")?.as_f64()?,
+            height: b.get("height")?.as_f64()?,
+        })
+    }
     /// (overlay cache key, source offset into the baked files)
     pub fn popout_key(&self) -> Option<(String, f64)> {
         let e = self.effects.iter().find(|e| e.kind == "popout")?;
