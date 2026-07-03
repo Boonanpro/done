@@ -201,8 +201,13 @@ def main():
                 [FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "gray",
                  "-s", f"{W}x{H*2}", "-r", str(int(fps)), "-i", "-",
                  "-filter_complex",
-                 f"[0:v]split=2[t0][t1];[t0]crop={W}:{H}:0:0,format=yuv420p,setparams=range=pc[m0];"
-                 f"[t1]crop={W}:{H}:0:{H},format=yuv420p,setparams=range=pc[m1]",
+                 # scale in/out_range=full is MANDATORY (same as the pv alpha track): without it
+                 # the gray->yuv420p conversion squeezes 0..255 into ~6..249, which the live
+                 # compositor renders as a faint white film (transparent=2.4%) + a slightly
+                 # see-through person (opaque=97.6%)
+                 f"[0:v]split=2[t0][t1];"
+                 f"[t0]crop={W}:{H}:0:0,scale=in_range=full:out_range=full,format=yuv420p,setparams=range=pc[m0];"
+                 f"[t1]crop={W}:{H}:0:{H},scale=in_range=full:out_range=full,format=yuv420p,setparams=range=pc[m1]",
                  "-map", "[m0]", "-map", "[m1]", "-c:v", "libx264", "-preset", "veryfast",
                  "-crf", "18", "-g", "8", "-x264-params", "scenecut=0",
                  "-color_range", "pc", "-movflags", "+faststart",

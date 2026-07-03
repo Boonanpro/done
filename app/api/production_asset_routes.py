@@ -2901,49 +2901,42 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
         if hasattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS"):
             creationflags = subprocess.BELOW_NORMAL_PRIORITY_CLASS  # type: ignore[attr-defined]
 
-        subprocess.run(
-            [
-                _ffmpeg(),
-                "-y",
-                "-i",
-                str(src),
-                # fps=30 forces a CONSTANT frame rate. Source phone screen recordings are often
-                # variable-frame-rate (VFR), and VFR breaks seek-by-time everywhere: the editor's
-                # preview seeks to the wrong frame / freezes, and our OCR/ffmpeg trackers land on the
-                # wrong timestamp. A CFR proxy makes seeking reliable across the board.
-                "-vf",
-                "scale=-2:720,fps=30",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "28",
-                # SHORT GOP (keyframe every 15 frames = 0.5s) + no B-frames. A long GOP is the
-                # heavy part of scrubbing/seeking: to show a random frame the decoder must decode
-                # the whole group from its keyframe. DaVinci avoids this by using cheap intra-frame
-                # codecs; the browser can't, but a short GOP gives the same effect — any frame is
-                # ≤15 frames from a keyframe, so seeking decodes little. Measured on real GPU:
-                # cut the decoder stalls/HOLDs during scrub roughly 3x. Costs ~2-3x file size.
-                "-g",
-                "15",
-                "-bf",
-                "0",
-                "-vsync",
-                "cfr",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "96k",
-                "-movflags",
-                "+faststart",
-                str(proxy),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-            check=True,
-        )
+        # fps=30 forces a CONSTANT frame rate. Source phone screen recordings are often
+        # variable-frame-rate (VFR), and VFR breaks seek-by-time everywhere: the editor's
+        # preview seeks to the wrong frame / freezes, and our OCR/ffmpeg trackers land on the
+        # wrong timestamp. A CFR proxy makes seeking reliable across the board.
+        #
+        # LONG SIDE 1920 + high quality (was 720p CRF28): this proxy is what the native
+        # editor shows WHILE SCRUBBING (originals are long-GOP 4K = ~200ms per seek flush,
+        # physically unable to track a fast drag; the proxy seeks in ~20ms). At preview-pane
+        # size a 1080x1920 cq16 proxy is indistinguishable from the original — the old
+        # 406x720 CRF28 one is what read as "proxy-ish mush". Filmora ships the same trick:
+        # its MediaProxy cache holds 1080x1920 ~19Mbps files for 4K sources (verified with
+        # ffprobe on a real install) — its "4K scrubbing" runs on those.
+        #
+        # SHORT GOP (keyframe every 15 frames = 0.5s) + no B-frames: any frame is cheap to
+        # reach from a keyframe, which is what makes scrub seeks ~20ms.
+        _common = ["-g", "15", "-bf", "0", "-vsync", "cfr",
+                   "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(proxy)]
+        _vf = ["-vf", "scale=w=1920:h=1920:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30"]
+        _encoders = [
+            ["-c:v", "h264_nvenc", "-rc", "vbr", "-cq", "16", "-b:v", "0", "-preset", "p4"],
+            ["-c:v", "libx264", "-preset", "veryfast", "-crf", "17"],
+        ]
+        _done = False
+        for _enc in _encoders:
+            _r = subprocess.run(
+                [_ffmpeg(), "-y", "-i", str(src), *_vf, *_enc, *_common],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                check=False,
+            )
+            if _r.returncode == 0 and proxy.exists() and proxy.stat().st_size > 0:
+                _done = True
+                break
+        if not _done:
+            raise RuntimeError("proxy encode failed (nvenc and libx264)")
         subprocess.run(
             [
                 _ffmpeg(),
