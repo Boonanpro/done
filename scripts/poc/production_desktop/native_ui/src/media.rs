@@ -608,6 +608,7 @@ struct Slot {
     vs: VideoStream,
     used_frame: u64,
     touch: u64, // last frame_no this slot was used OR primed — LRU eviction key
+    touched_at: std::time::Instant, // wall-clock twin of `touch` (Olive: idle-time eviction)
 }
 
 pub struct VideoPool {
@@ -639,6 +640,7 @@ impl VideoPool {
                     .map_err(|e| e.context(format!("open {path}#{stream}")))?,
                 used_frame: 0,
                 touch: frame_no,
+                touched_at: std::time::Instant::now(),
             });
         }
         let fitness = |s: &Slot| -> i32 {
@@ -675,12 +677,14 @@ impl VideoPool {
                         .map_err(|e| e.context(format!("open spare {path}#{stream}")))?,
                     used_frame: 0,
                     touch: frame_no,
+                    touched_at: std::time::Instant::now(),
                 });
             }
             best = entry.len() - 1;
         }
         entry[best].used_frame = frame_no;
         entry[best].touch = frame_no;
+        entry[best].touched_at = std::time::Instant::now();
         Ok(&mut entry[best].vs)
     }
 
@@ -691,6 +695,16 @@ impl VideoPool {
     pub fn evict_stale(&mut self, keep: u64) {
         let now = self.frame_no;
         self.slots.retain(|_, v| v.iter().any(|s| s.touch + keep > now));
+    }
+
+    /// Olive-style idle eviction (aggressive during playback): drop (path,stream) entries
+    /// whose slots have ALL been untouched for `max_idle` — bounds GPU memory when playback
+    /// sweeps across many files. NOT for paused state (a warm pool is the point there; our
+    /// MF opens cost 100-300ms vs Olive's cheap FFmpeg opens).
+    pub fn evict_idle(&mut self, max_idle: std::time::Duration) {
+        let now = std::time::Instant::now();
+        self.slots
+            .retain(|_, v| v.iter().any(|s| now.duration_since(s.touched_at) < max_idle));
     }
 
     /// (open files, open decoder instances) — pool growth watchdog
@@ -718,6 +732,7 @@ impl VideoPool {
                     .map_err(|e| e.context(format!("warm open {path}#{stream}")))?,
                 used_frame: 0,
                 touch: frame_no,
+                touched_at: std::time::Instant::now(),
             });
         }
         Ok(())
@@ -752,6 +767,7 @@ impl VideoPool {
             return Ok(false);
         };
         entry[spare].touch = frame_no; // primed-for-soon: not eviction fodder
+        entry[spare].touched_at = std::time::Instant::now();
         entry[spare].vs.prime_step(src_in)?;
         Ok(true)
     }

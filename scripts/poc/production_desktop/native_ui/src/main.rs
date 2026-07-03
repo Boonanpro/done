@@ -164,6 +164,122 @@ enum Drag {
     Trim { ids: Vec<String>, left: bool },
 }
 
+/// Olive-style composed-frame cache: finished timeline frames (ORIGINAL quality, 30fps
+/// grid) LZ4-compressed in RAM. Scrub/jump/playback over cached spans just decompress
+/// (~3-6ms) instead of composing (30-100ms+). Conservative correctness: ANY document edit
+/// clears the whole cache — a stale frame is structurally impossible. Filled during
+/// paused idle (playhead outward) and opportunistically from playback production.
+struct FrameCache {
+    frames: std::collections::HashMap<i64, Vec<u8>>,
+    bytes: usize,
+    budget: usize,
+    hits: u64,
+    misses: u64,
+}
+
+impl FrameCache {
+    fn new() -> Self {
+        Self {
+            frames: Default::default(),
+            bytes: 0,
+            budget: 2_500_000_000, // ~2.5GB ≈ 30-40s of 1080x1920 frames
+            hits: 0,
+            misses: 0,
+        }
+    }
+    fn idx(t: f64) -> i64 {
+        (t * 30.0).round() as i64
+    }
+    fn clear(&mut self) {
+        self.frames.clear();
+        self.bytes = 0;
+    }
+    fn get(&mut self, t: f64, out: &mut Vec<u8>) -> bool {
+        if let Some(z) = self.frames.get(&Self::idx(t)) {
+            if let Ok(raw) = lz4_flex::decompress_size_prepended(z) {
+                out.clear();
+                out.extend_from_slice(&raw);
+                self.hits += 1;
+                return true;
+            }
+        }
+        self.misses += 1;
+        false
+    }
+    fn contains(&self, t: f64) -> bool {
+        self.frames.contains_key(&Self::idx(t))
+    }
+    fn insert(&mut self, t: f64, rgba: &[u8], playhead: f64) {
+        let key = Self::idx(t);
+        if self.frames.contains_key(&key) {
+            return;
+        }
+        let z = lz4_flex::compress_prepend_size(rgba);
+        self.bytes += z.len();
+        self.frames.insert(key, z);
+        // over budget: evict farthest-from-playhead first
+        while self.bytes > self.budget {
+            let ph = Self::idx(playhead);
+            let Some((&far, _)) = self.frames.iter().max_by_key(|(k, _)| (**k - ph).abs()) else {
+                break;
+            };
+            if let Some(z) = self.frames.remove(&far) {
+                self.bytes -= z.len();
+            }
+        }
+    }
+}
+
+/// asset_id -> source-frame pts table ({asset}_proxy.pts.json, written at proxy encode).
+/// The settle/produce path snaps source times to the NEAREST real frame start so a scrub
+/// on the CFR proxy and its settle on the (possibly VFR) original show the same picture.
+type PtsMap = std::collections::HashMap<String, Option<std::sync::Arc<Vec<f64>>>>;
+
+/// Load ONE missing pts table per idle slice (a 43k-frame table parses in ~50ms).
+fn pts_load_pass(doc: &model::Doc, maps: &mut PtsMap) -> bool {
+    for tr in &doc.seq.tracks {
+        if tr.kind != "video" && tr.kind != "overlay" {
+            continue;
+        }
+        for c in &tr.clips {
+            let Some(aid) = c.asset_id.as_deref() else { continue };
+            if maps.contains_key(aid) {
+                continue;
+            }
+            let p = format!("{}/{}_proxy.pts.json", doc.asset_dir, aid);
+            let loaded = std::fs::read_to_string(&p)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|v| {
+                    let pts: Vec<f64> = v
+                        .get("pts")?
+                        .as_array()?
+                        .iter()
+                        .filter_map(|x| x.as_f64())
+                        .collect();
+                    (pts.len() > 1).then(|| std::sync::Arc::new(pts))
+                });
+            let had = loaded.is_some();
+            maps.insert(aid.to_string(), loaded);
+            if had {
+                return true; // one parse per slice
+            }
+        }
+    }
+    false
+}
+
+/// Snap a source time to the nearest real frame start (+tiny epsilon so the decoder's
+/// "newest frame <= t" lands exactly on it).
+fn snap_src_t(maps: &PtsMap, asset_id: &str, src_t: f64) -> f64 {
+    let Some(Some(pts)) = maps.get(asset_id) else { return src_t };
+    let i = pts.partition_point(|p| *p <= src_t);
+    let lo = if i > 0 { pts[i - 1] } else { pts[0] };
+    let hi = *pts.get(i).unwrap_or(&lo);
+    let chosen = if (src_t - lo).abs() <= (hi - src_t).abs() { lo } else { hi };
+    chosen + 0.0002
+}
+
 /// key -> Some((bake meta, static card-mask texture)) when the LIVE matte path is usable,
 /// None when this key has no matte twin (v6 bake) and stays on the pv fallback.
 type MaskMap = std::collections::HashMap<
@@ -221,6 +337,7 @@ fn compose(
     pool: &mut media::VideoPool,
     comp: &mut compositor::Compositor,
     masks: &MaskMap,
+    pts_maps: &PtsMap,
     t: f64,
     original: bool,
     fast: bool, // scrub: budgeted seek — newest reachable frame now, exact frame on settle
@@ -243,8 +360,12 @@ fn compose(
     let f_deadline = Instant::now() + std::time::Duration::from_millis(30);
     if let Some(c) = base {
         let _t = Instant::now();
-        let path = doc.asset_path_q(c.asset_id.as_deref().unwrap(), original);
-        let src_t = c.source_start + (t - c.timeline_start);
+        let aid = c.asset_id.as_deref().unwrap();
+        let path = doc.asset_path_q(aid, original);
+        let mut src_t = c.source_start + (t - c.timeline_start);
+        if !fast && original {
+            src_t = snap_src_t(pts_maps, aid, src_t);
+        }
         let vs = pool.get(d3d, &path, 0, false, src_t)?;
         if fast {
             exact &= vs.ensure_frame_scrub(d3d, src_t, 20.0)?;
@@ -765,6 +886,8 @@ fn media_thread(shared: Arc<Shared>) {
         let mut scrub_t0 = Instant::now();
         let mut scrub_exact = true; // last scrub compose reached the exact frame
         let mut masks: MaskMap = Default::default();
+        let mut pts_maps: PtsMap = Default::default();
+        let mut fcache = FrameCache::new();
         // Look-ahead ring: timeline frames composed AHEAD of the playhead on a fixed 30fps
         // grid. Presentation picks from the ring and NEVER waits for a decode — GOP walks
         // and source switches are paid in the ring's future (the Filmora mechanism).
@@ -777,6 +900,7 @@ fn media_thread(shared: Arc<Shared>) {
             if ptr != last_doc_ptr {
                 last_doc_ptr = ptr;
                 warm_done = false;
+                fcache.clear(); // edited: NEVER show a stale composed frame
             }
             let dur = doc.duration();
             let r = shared.req.lock().unwrap().clone();
@@ -811,7 +935,7 @@ fn media_thread(shared: Arc<Shared>) {
                         // the ring rebuilds — no more seconds of frozen video chasing a
                         // running clock
                         jump_to = Some(r.t);
-                        if let Ok(_snap) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, r.t, true, true) {
+                        if let Ok(_snap) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, r.t, true, true) {
                             seq += 1;
                             let mut f = shared.frame.lock().unwrap();
                             f.rgba.clear();
@@ -839,7 +963,14 @@ fn media_thread(shared: Arc<Shared>) {
                 let mut slept = false;
                 if len < RING_DEPTH && next_t <= dur {
                     let t0 = Instant::now();
-                    let res = compose(&doc, &d3d, &mut pool, &mut comp, &masks, next_t, true, false);
+                    // cache hit = decompress instead of compose (jump refills become ~instant)
+                    let mut cached_buf: Vec<u8> = Vec::new();
+                    let from_cache = fcache.get(next_t, &mut cached_buf);
+                    let res = if from_cache {
+                        Ok((Vec::new(), true))
+                    } else {
+                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, true, false)
+                    };
                     ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
                     match res {
                         Ok((used, _)) => {
@@ -847,9 +978,10 @@ fn media_thread(shared: Arc<Shared>) {
                                 eprintln!("SLOWPROD t={next_t:.2}: {ms_comp:.0}ms");
                             }
                             let p0 = Instant::now();
+                            let frame_ref: &Vec<u8> = if from_cache { &cached_buf } else { &comp.rgba };
                             {
                                 let mut rg = shared.ring.lock().unwrap();
-                                rg.push_back((next_t, comp.rgba.clone()));
+                                rg.push_back((next_t, frame_ref.clone()));
                                 // never trim against the OLD clock while a jump is pending —
                                 // a backward seek's fresh frames all look "stale" to it
                                 if jump_to.is_none() {
@@ -858,6 +990,11 @@ fn media_thread(shared: Arc<Shared>) {
                                     }
                                 }
                                 shared.ring_level.store(rg.len(), Ordering::Relaxed);
+                            }
+                            if !from_cache && len >= 6 && ms_comp < 25.0 {
+                                // cheap frames get cached opportunistically (lz4 ~5ms);
+                                // expensive ones must not steal more of the tick
+                                fcache.insert(next_t, &comp.rgba, t);
                             }
                             ms_push = p0.elapsed().as_secs_f32() * 1000.0;
                             if len >= 8 {
@@ -883,6 +1020,9 @@ fn media_thread(shared: Arc<Shared>) {
                     }
                     if pool.frame_no % 120 == 0 {
                         pool.evict_stale(900); // ~30s of composes — passed pop-outs get freed
+                        // Olive uses 5s normal / 1s during playback; our opens are ~100x
+                        // costlier, so 12s and playback-only
+                        pool.evict_idle(std::time::Duration::from_secs(12));
                     }
                     if pool.frame_no % 300 == 0 {
                         let (nf, ni) = pool.stats();
@@ -920,7 +1060,25 @@ fn media_thread(shared: Arc<Shared>) {
             }
             let settled = !r.scrubbing && settle.elapsed().as_secs_f32() > 0.2;
             let dirty = r.gen != last_gen || (t - last_t).abs() > 1e-6;
-            if dirty {
+            if dirty && {
+                // composed-frame cache first: scrub/settle over a cached span shows the
+                // ORIGINAL-quality frame in ~5ms without touching a decoder
+                let mut buf = Vec::new();
+                if fcache.get(t, &mut buf) {
+                    seq += 1;
+                    let mut f = shared.frame.lock().unwrap();
+                    f.rgba = buf;
+                    f.seq = seq;
+                    f.comp_ms = 0.0;
+                    f.quality = "original";
+                    scrub_exact = true;
+                    last_gen = r.gen;
+                    last_t = t;
+                    false // handled — skip the compose branch
+                } else {
+                    true
+                }
+            } {
                 // Scrub decodes the HIGH-QUALITY proxy (long side 1920, CRF19, GOP15 —
                 // indistinguishable from the original at pane size, seeks in ~20ms so the
                 // preview stays glued to the finger); the settle/refine pass and playback
@@ -928,7 +1086,7 @@ fn media_thread(shared: Arc<Shared>) {
                 // runs on auto-proxies too, ours were just 406x720 CRF28 mush before.
                 let original = !r.scrubbing;
                 let t0 = Instant::now();
-                match compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, original, r.scrubbing) {
+                match compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, original, r.scrubbing) {
                     Ok((used, exact)) => {
                         scrub_exact = !r.scrubbing || exact;
                         seq += 1;
@@ -972,10 +1130,21 @@ fn media_thread(shared: Arc<Shared>) {
                 // queue and stalling every decoder ReadSample behind it (~50ms/sample)
                 let resting = settle.elapsed().as_secs_f32() > 0.12;
                 if r.scrubbing && !scrub_exact && resting {
+                    let mut buf = Vec::new();
+                    if fcache.get(t, &mut buf) {
+                        seq += 1;
+                        let mut f = shared.frame.lock().unwrap();
+                        f.rgba = buf;
+                        f.seq = seq;
+                        f.quality = "original";
+                        scrub_exact = true;
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        continue;
+                    }
                     // finger resting mid-drag on a long-GOP spot: keep refining toward the
                     // exact frame, one budget slice per pass (converges like Filmora's
                     // "stop and the picture sharpens to the real frame")
-                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, true, true) {
+                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, true) {
                         scrub_exact = ex;
                         seq += 1;
                         let mut f = shared.frame.lock().unwrap();
@@ -1000,7 +1169,7 @@ fn media_thread(shared: Arc<Shared>) {
                     rg.back().map(|(ft, _)| ft + STEP).unwrap_or_else(|| (t / STEP).floor() * STEP)
                 };
                 if next_t <= dur {
-                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, next_t, true, false) {
+                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, true, false) {
                         let mut rg = shared.ring.lock().unwrap();
                         rg.push_back((next_t, comp.rgba.clone()));
                         shared.ring_level.store(rg.len(), Ordering::Relaxed);
@@ -1013,10 +1182,52 @@ fn media_thread(shared: Arc<Shared>) {
                 // pop-out card masks for the live matte path — one σ26 blur per slice.
                 // BEFORE the warm pass: few and quick, and without them pop-outs render
                 // from the stale pv twin
+            } else if pts_load_pass(&doc, &mut pts_maps) {
+                // frame-pts tables for exact proxy<->original settling
             } else if !warm_done {
                 // THEN: open every decoder the rest of the timeline needs (a cold open
                 // mid-play is a 100-200ms media-thread stall = visible gap)
                 warm_done = warm_open_pass(&doc, &d3d, &mut pool, &masks);
+            } else if {
+                // Olive-style background fill: compose ORIGINAL-quality frames outward
+                // from the playhead into the frame cache (one per idle slice). Everything
+                // it covers turns scrubs/jumps into ~5ms cache hits.
+                let mut target = None;
+                'fill: for step in 0..(45.0 * 30.0) as i64 {
+                    for dir in [1i64, -1i64] {
+                        let idx = FrameCache::idx(t) + dir * step;
+                        if idx < 0 {
+                            continue;
+                        }
+                        let ft = idx as f64 / 30.0;
+                        if ft > dur {
+                            continue;
+                        }
+                        if !fcache.contains(ft) {
+                            target = Some(ft);
+                            break 'fill;
+                        }
+                    }
+                }
+                if let Some(ft) = target {
+                    if let Ok(_) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, true, false) {
+                        fcache.insert(ft, &comp.rgba, t);
+                    }
+                    if fcache.frames.len() % 300 == 0 {
+                        eprintln!(
+                            "FCACHE frames={} mb={} hit={} miss={}",
+                            fcache.frames.len(),
+                            fcache.bytes / 1_048_576,
+                            fcache.hits,
+                            fcache.misses
+                        );
+                    }
+                    true
+                } else {
+                    false
+                }
+            } {
+                // filled one cache frame this slice
             } else {
                 // idle: chew on one aux job slice (thumbnails / waveform peaks)
                 let job = { shared.aux_req.lock().unwrap().first().cloned() };
@@ -1080,6 +1291,11 @@ struct App {
     tex: Option<egui::TextureHandle>,
     last_seq: u64,
     playing: bool,
+    // Filmora semantics (observed in its logs: Pause -> seek -> auto Play): any timeline
+    // interaction while playing pauses first; playback auto-resumes once the video ring
+    // is ready at the new position.
+    resume_pending: Option<Instant>,
+    resume_on_release: bool,
     t: f64,
     dur: f64,
     pps: f32,
@@ -1151,6 +1367,8 @@ impl App {
             tex: None,
             last_seq: 0,
             playing: false,
+            resume_pending: None,
+            resume_on_release: false,
             t: 0.0,
             dur,
             pps: 8.0,
@@ -1431,6 +1649,21 @@ impl App {
         // ---- interactions: trim edges > move body > scrub empty space ----
         let to_t = |scroll_x: f32, pps: f32, x: f32| ((scroll_x + (x - rect.left())) / pps).max(0.0) as f64;
         if resp.drag_started() || (resp.clicked() && self.drag == Drag::None) {
+            // Filmora semantics: touching the timeline while playing pauses playback FIRST
+            // (its own logs show Pause -> seek -> auto Play). This also kills the bug where
+            // the running clock overwrote the clicked position on release, cancelling the
+            // jump ("映像だけ飛んでヘッドは元の場所" / seconds of frozen video).
+            let was_playing = self.playing;
+            if was_playing {
+                self.t = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
+                self.playing = false;
+                if resp.drag_started() {
+                    self.resume_on_release = true; // resume when the drag ends
+                } else {
+                    self.resume_pending = Some(Instant::now()); // plain click: resume ASAP
+                }
+                self.push_req(false);
+            }
             if let Some(pos) = resp.interact_pointer_pos() {
                 let hit = hits.iter().find(|(r, _)| r.expand2(egui::vec2(4.0, 0.0)).contains(pos));
                 match hit {
@@ -1508,6 +1741,10 @@ impl App {
         }
         if resp.drag_stopped() {
             self.drag = Drag::None;
+            if self.resume_on_release {
+                self.resume_on_release = false;
+                self.resume_pending = Some(Instant::now());
+            }
             self.push_req(false); // settle on full quality
         }
 
@@ -1594,7 +1831,23 @@ impl eframe::App for App {
                 self.t = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
             }
             self.playing = !self.playing;
+            self.resume_pending = None; // explicit toggle overrides any pending auto-resume
             self.push_req(false);
+        }
+        // auto-resume after a timeline interaction paused playback: wait until the ring
+        // is rebuilt at the new position (or a short timeout), exactly like Filmora's
+        // Pause -> seek -> Play cycle
+        if let Some(t0) = self.resume_pending {
+            if self.playing {
+                self.resume_pending = None;
+            } else if self.drag == Drag::None && !self.resume_on_release {
+                let lvl = self.shared.ring_level.load(Ordering::Relaxed);
+                if lvl >= 4 || t0.elapsed().as_millis() > 700 {
+                    self.resume_pending = None;
+                    self.playing = true;
+                    self.push_req(false);
+                }
+            }
         }
         // frame step while paused (Filmora parity: arrow keys = +-1 frame)
         if !self.playing {
@@ -1774,9 +2027,11 @@ fn main() -> eframe::Result<()> {
             let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H)?;
             let mut masks: MaskMap = Default::default();
             while mask_build_pass(&doc, &d3d, &mut masks) {}
+            let mut pts_maps: PtsMap = Default::default();
+            while pts_load_pass(&doc, &mut pts_maps) {}
             // twice: settle the double-buffered readback onto this exact frame
-            compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, true, false)?;
-            compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, true, false)?;
+            compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, false)?;
+            compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, false)?;
             let mut ppm = format!("P6\n{CANVAS_W} {CANVAS_H}\n255\n").into_bytes();
             for px in comp.rgba.chunks(4) {
                 ppm.extend_from_slice(&px[..3]);
@@ -1916,14 +2171,16 @@ fn main() -> eframe::Result<()> {
         let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H).unwrap();
         let mut masks: MaskMap = Default::default();
         while mask_build_pass(&doc, &d3d, &mut masks) {}
+        let mut pts_maps: PtsMap = Default::default();
+        while pts_load_pass(&doc, &mut pts_maps) {}
         let mut t = t0v;
-        let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, false, true);
+        let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true);
         let b0 = Instant::now();
         let mut worst = 0f64;
         for _ in 0..60 {
             t += 0.33;
             let c0 = Instant::now();
-            let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, false, true);
+            let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true);
             worst = worst.max(c0.elapsed().as_secs_f64() * 1000.0);
         }
         let ms = b0.elapsed().as_secs_f64() * 1000.0;
@@ -2042,6 +2299,18 @@ fn main() -> eframe::Result<()> {
                         }
                     }
                     s(1200);
+                    bump(60.0, false, false);
+                    // let the background frame cache fill around t=60, then re-scrub the
+                    // same span: cached scrub should be ~5ms/frame at ORIGINAL quality
+                    s(20000);
+                    eprintln!("SELFTEST cached-scrub");
+                    let mut t = 55.0f64;
+                    for _ in 0..120 {
+                        t += 0.083;
+                        bump(t, false, true);
+                        s(33);
+                    }
+                    s(600);
                     bump(60.0, false, false);
                     eprintln!("SELFTEST done");
                 });
