@@ -304,6 +304,110 @@ impl VideoStream {
     }
 }
 
+/// One-shot thumbnail: open, decode the frame at `t`, return (w, h, RGBA) downscaled.
+pub fn thumbnail(d3d: &D3d, path: &str, t: f64, max_w: usize) -> Result<(usize, usize, Vec<u8>)> {
+    let mut vs = VideoStream::open(d3d, path, 0, false)?;
+    vs.ensure_frame(d3d, t)?;
+    unsafe {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        vs.bgra.GetDesc(&mut desc);
+        let sdesc = D3D11_TEXTURE2D_DESC {
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+            ..desc
+        };
+        let mut st: Option<ID3D11Texture2D> = None;
+        d3d.device.CreateTexture2D(&sdesc, None, Some(&mut st))?;
+        let st = st.unwrap();
+        d3d.ctx.CopyResource(&st, &vs.bgra);
+        let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+        d3d.ctx.Map(&st, 0, D3D11_MAP_READ, 0, Some(&mut m))?;
+        let (w, h) = (desc.Width as usize, desc.Height as usize);
+        let ow = max_w.min(w);
+        let oh = (h * ow / w).max(1);
+        let pitch = m.RowPitch as usize;
+        let base = m.pData as *const u8;
+        let mut out = vec![0u8; ow * oh * 4];
+        for y in 0..oh {
+            let sy = y * h / oh;
+            let row = std::slice::from_raw_parts(base.add(sy * pitch), w * 4);
+            for x in 0..ow {
+                let sx = x * w / ow;
+                let o = (y * ow + x) * 4;
+                out[o] = row[sx * 4 + 2];
+                out[o + 1] = row[sx * 4 + 1];
+                out[o + 2] = row[sx * 4];
+                out[o + 3] = 255;
+            }
+        }
+        d3d.ctx.Unmap(&st, 0);
+        Ok((ow, oh, out))
+    }
+}
+
+/// Incremental audio-peak scan (waveforms): call step() repeatedly; each call decodes a
+/// slice so playback requests never wait long.
+pub struct PeakScan {
+    dec: AudioDecoder,
+    rate: u32,
+    ch: usize,
+    bucket: usize,
+    pub peaks: Vec<f32>,
+    cur: f32,
+    fill: usize,
+    pub done: bool,
+}
+
+impl PeakScan {
+    pub fn new(path: &str) -> Result<Self> {
+        let (rate, ch) = (48000u32, 2usize);
+        Ok(Self {
+            dec: AudioDecoder::open(path, rate, ch)?,
+            rate,
+            ch,
+            bucket: 48000usize / 50 * 2, // 20ms * stereo
+            peaks: Vec::new(),
+            cur: 0.0,
+            fill: 0,
+            done: false,
+        })
+    }
+    pub fn step(&mut self) -> Result<()> {
+        for _ in 0..24 {
+            if self.dec.eos {
+                if self.fill > 0 {
+                    self.peaks.push(self.cur);
+                }
+                self.done = true;
+                return Ok(());
+            }
+            self.dec.pump(self.rate, self.ch)?;
+            while !self.dec.fifo.is_empty() {
+                let n = self.dec.fifo.len().min(self.bucket - self.fill);
+                for v in self.dec.fifo.drain(..n) {
+                    let a = v.abs();
+                    if a > self.cur {
+                        self.cur = a;
+                    }
+                }
+                self.fill += n;
+                if self.fill >= self.bucket {
+                    self.peaks.push(self.cur);
+                    self.cur = 0.0;
+                    self.fill = 0;
+                }
+            }
+        }
+        Ok(())
+    }
+    /// seconds per peak bucket
+    pub fn spb(&self) -> f64 {
+        self.bucket as f64 / self.ch as f64 / self.rate as f64
+    }
+}
+
 /// Pool of open video streams keyed by (path, stream index).
 pub struct VideoPool {
     pub streams: HashMap<(String, u32), VideoStream>,
@@ -324,14 +428,14 @@ impl VideoPool {
 }
 
 // ---------------- audio ----------------
-struct AudioDecoder {
+pub struct AudioDecoder {
     reader: IMFSourceReader,
-    fifo: VecDeque<f32>,
-    eos: bool,
+    pub fifo: VecDeque<f32>,
+    pub eos: bool,
 }
 
 impl AudioDecoder {
-    fn open(path: &str, rate: u32, ch: usize) -> Result<Self> {
+    pub fn open(path: &str, rate: u32, ch: usize) -> Result<Self> {
         unsafe {
             let wp = wide(path);
             let reader = MFCreateSourceReaderFromURL(PCWSTR(wp.as_ptr()), None)?;
@@ -347,7 +451,7 @@ impl AudioDecoder {
             Ok(Self { reader, fifo: VecDeque::new(), eos: false })
         }
     }
-    fn pump(&mut self, rate: u32, ch: usize) -> Result<Option<(f64, f64)>> {
+    pub fn pump(&mut self, rate: u32, ch: usize) -> Result<Option<(f64, f64)>> {
         if self.eos {
             return Ok(None);
         }
