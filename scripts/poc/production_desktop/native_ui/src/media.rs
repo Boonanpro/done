@@ -116,7 +116,11 @@ impl VideoStream {
             reader.SetStreamSelection(stream, true)?;
             let cur = reader.GetCurrentMediaType(stream)?;
             let sz = cur.GetUINT64(&MF_MT_FRAME_SIZE)?;
-            let (width, height) = ((sz >> 32) as u32, (sz & 0xffff_ffff) as u32);
+            let (src_w, src_h) = ((sz >> 32) as u32, (sz & 0xffff_ffff) as u32);
+            // MF does NOT auto-rotate; honor the rotation metadata via the VideoProcessor and
+            // swap the destination dims for 90/270 so downstream sees an upright frame.
+            let rotation = cur.GetUINT32(&MF_MT_VIDEO_ROTATION).unwrap_or(0) % 360;
+            let (width, height) = if rotation == 90 || rotation == 270 { (src_h, src_w) } else { (src_w, src_h) };
 
             // BGRA destination + VideoProcessor
             let desc = D3D11_TEXTURE2D_DESC {
@@ -136,8 +140,8 @@ impl VideoStream {
             let vp_enum = d3d.vdev.CreateVideoProcessorEnumerator(&D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
                 InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
                 InputFrameRate: DXGI_RATIONAL { Numerator: 30, Denominator: 1 },
-                InputWidth: width,
-                InputHeight: height,
+                InputWidth: src_w,
+                InputHeight: src_h,
                 OutputFrameRate: DXGI_RATIONAL { Numerator: 30, Denominator: 1 },
                 OutputWidth: width,
                 OutputHeight: height,
@@ -156,6 +160,14 @@ impl VideoStream {
             let cs_out = D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 };
             d3d.vctx.VideoProcessorSetStreamColorSpace(&vp, 0, &cs_in);
             d3d.vctx.VideoProcessorSetOutputColorSpace(&vp, &cs_out);
+            if rotation != 0 {
+                let r = match rotation {
+                    90 => D3D11_VIDEO_PROCESSOR_ROTATION_90,
+                    180 => D3D11_VIDEO_PROCESSOR_ROTATION_180,
+                    _ => D3D11_VIDEO_PROCESSOR_ROTATION_270,
+                };
+                d3d.vctx.VideoProcessorSetStreamRotation(&vp, 0, true, r);
+            }
             let mut ov: Option<ID3D11VideoProcessorOutputView> = None;
             d3d.vdev.CreateVideoProcessorOutputView(
                 &bgra,
@@ -245,6 +257,20 @@ impl VideoStream {
             self.has_frame = true;
             Ok(())
         }
+    }
+
+    /// Lookahead: position the decoder AT src_t without touching the last shown frame.
+    /// No-op if already there (or within the decode-ahead window).
+    pub fn prime(&mut self, _d3d: &D3d, src_t: f64) -> Result<()> {
+        if let Some((pts, _)) = &self.pending {
+            if (*pts - src_t).abs() < 0.4 {
+                return Ok(());
+            }
+        }
+        if (self.last_pts - src_t).abs() < 0.4 {
+            return Ok(());
+        }
+        self.seek(src_t)
     }
 
     /// Ensure `bgra` holds the newest frame with pts <= t. Seeks on backward/far-forward jumps.
@@ -385,6 +411,7 @@ impl AudioDecoder {
 /// WASAPI shared render + per-asset decoders. `clock()` (frames played) is the master
 /// clock while playing. `fill()` pulls PCM according to the document's audio track.
 pub struct AudioOut {
+    latency_s: f64,
     client: IAudioClient,
     render: IAudioRenderClient,
     pub rate: u32,
@@ -409,7 +436,13 @@ impl AudioOut {
             client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 2_000_000, 0, fmt, None)?;
             let render: IAudioRenderClient = client.GetService()?;
             let buffer_frames = client.GetBufferSize()?;
+            // device output latency: the clock must report what is AUDIBLE now, not what was
+            // submitted — uncorrected this made video lead the heard audio by ~20-40ms
+            // (visible on lip-synced closeups like the pop-out clips)
+            let latency_s = client.GetStreamLatency().map(|l| l as f64 / 10_000_000.0).unwrap_or(0.0);
+            eprintln!("audio device latency: {:.1}ms", latency_s * 1000.0);
             Ok(Self {
+                latency_s,
                 client,
                 render,
                 rate,
@@ -450,7 +483,9 @@ impl AudioOut {
 
     pub fn clock(&self) -> f64 {
         let padding = unsafe { self.client.GetCurrentPadding().unwrap_or(0) } as u64;
-        self.base_t + self.frames_written.saturating_sub(padding) as f64 / self.rate as f64
+        (self.base_t + self.frames_written.saturating_sub(padding) as f64 / self.rate as f64
+            - self.latency_s)
+            .max(self.base_t)
     }
 
     pub fn fill(&mut self, doc: &crate::model::Doc) -> Result<()> {

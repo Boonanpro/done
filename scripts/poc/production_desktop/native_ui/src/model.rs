@@ -106,6 +106,8 @@ impl Clip {
 pub struct Doc {
     pub seq: Sequence,
     pub asset_dir: String,
+    /// asset_id -> ORIGINAL file path (from assets.json local_path), when it exists on disk.
+    pub originals: std::collections::HashMap<String, String>,
 }
 
 impl Doc {
@@ -117,7 +119,34 @@ impl Doc {
             .next()
             .map(|r| r.timeline.sequence)
             .unwrap_or_default();
-        Ok(Self { seq, asset_dir: asset_dir.replace('\\', "/") })
+        let dir = asset_dir.replace(char::from(92), "/");
+        // originals from assets.json: preview decodes the SOURCE file (no proxy softness),
+        // falling back to the proxy when the original is missing
+        let mut originals = std::collections::HashMap::new();
+        if let Ok(txt) = std::fs::read_to_string(format!("{dir}/assets.json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                for a in v.as_array().cloned().unwrap_or_default() {
+                    let id = a.get("id").and_then(|x| x.as_str());
+                    let lp = a.get("local_path").and_then(|x| x.as_str());
+                    if let (Some(id), Some(lp)) = (id, lp) {
+                        if std::path::Path::new(lp).exists() {
+                            originals.insert(id.to_string(), lp.replace(char::from(92), "/"));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Self { seq, asset_dir: dir, originals })
+    }
+
+    /// Best source for QUALITY (original when available) vs SPEED (proxy: small, short GOP).
+    pub fn asset_path_q(&self, asset_id: &str, original: bool) -> String {
+        if original {
+            if let Some(p) = self.originals.get(asset_id) {
+                return p.clone();
+            }
+        }
+        self.asset_path(asset_id)
     }
     pub fn asset_path(&self, asset_id: &str) -> String {
         format!("{}/{}_proxy.mp4", self.asset_dir, asset_id)
