@@ -65,6 +65,10 @@ struct Shared {
     ring_level: std::sync::atomic::AtomicUsize,
     ring: Mutex<std::collections::VecDeque<(f64, Vec<u8>)>>,
     ring_gen: AtomicU64,
+    // timeline position the ring is being built FOR (f64 bits). On a mid-play seek this
+    // moves to the new playhead BEFORE the clock does — audio waits on it (JUMPGATE) and
+    // the presenter goes hands-off so it can't eat the rebuilt ring as "stale".
+    ring_target_bits: AtomicU64,
     doc: Mutex<Arc<model::Doc>>,
     aux_req: Mutex<Vec<AuxJob>>,
     aux: Mutex<AuxOut>,
@@ -103,8 +107,34 @@ fn audio_thread(shared: Arc<Shared>) {
             last_gen = gen;
             let cur = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
             if (t_req - cur).abs() > 0.3 {
-                let _ = audio.start_at(t_req); // playhead jumped mid-play
-                shared.clock_bits.store(t_req.to_bits(), Ordering::Relaxed);
+                // playhead jumped mid-play: WAIT for the video ring to rebuild at the new
+                // position before restarting the clock (same gate as play start). Restarting
+                // instantly made production chase a running clock — audio played while the
+                // video froze for seconds catching up.
+                let t0 = std::time::Instant::now();
+                let mut aborted = false;
+                loop {
+                    let rt = f64::from_bits(shared.ring_target_bits.load(Ordering::Relaxed));
+                    let lvl = shared.ring_level.load(Ordering::Relaxed);
+                    if ((rt - t_req).abs() < 0.5 && lvl >= 4) || t0.elapsed().as_millis() > 600 {
+                        break;
+                    }
+                    let r2 = shared.req.lock().unwrap().clone();
+                    if r2.gen != gen || !r2.playing {
+                        aborted = true; // newer seek / paused — that event drives the clock
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                if !aborted {
+                    let _ = audio.start_at(t_req);
+                    shared.clock_bits.store(t_req.to_bits(), Ordering::Relaxed);
+                    eprintln!(
+                        "JUMPGATE {:.0}ms ring={}",
+                        t0.elapsed().as_secs_f32() * 1000.0,
+                        shared.ring_level.load(Ordering::Relaxed)
+                    );
+                }
             }
         }
         if playing {
@@ -206,6 +236,11 @@ fn compose(
     comp.begin(d3d);
     let mut _ms_base = 0f64;
     let mut _ms_ov = 0f64;
+    // scrub deadline: the FULLSCREEN base updates every tick (that's what the eye tracks
+    // while whipping); decorations (pop-out person / mattes) update only while the tick
+    // budget lasts and land exactly at rest via the refine loop — original pixels always,
+    // never a proxy
+    let f_deadline = Instant::now() + std::time::Duration::from_millis(30);
     if let Some(c) = base {
         let _t = Instant::now();
         let path = doc.asset_path_q(c.asset_id.as_deref().unwrap(), original);
@@ -236,27 +271,40 @@ fn compose(
                 let src_t = c.source_start + (t - c.timeline_start);
                 let mt_path = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
                 let mt_t = off + (t - c.timeline_start);
-                {
+                // ONE pool.get per stream: a second get in the same compose sees the
+                // instance as busy-this-frame and OPENS A SPARE (~50ms + an empty texture)
+                // — that was 110ms/frame of the pop-out scrub cost
+                let otex = {
                     let s = pool.get(d3d, &opath, 0, false, src_t)?;
                     if fast {
-                        exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                        if Instant::now() < f_deadline {
+                            exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                        } else {
+                            exact = false; // out of budget — stale person, refined at rest
+                        }
                     } else {
                         s.ensure_frame(d3d, src_t)
                             .map_err(|e| e.context(format!("live-orig {} src_t={src_t:.2}", s.name)))?;
                     }
-                }
+                    s.bgra.clone()
+                };
+                let mut mt_tex = Vec::with_capacity(2);
                 for stream in [MT_PERSON, MT_SHADOW] {
                     let s = pool.get(d3d, &mt_path, stream, true, mt_t)?;
                     if fast {
-                        exact &= s.ensure_frame_scrub(d3d, mt_t, 8.0)?;
+                        if Instant::now() < f_deadline {
+                            exact &= s.ensure_frame_scrub(d3d, mt_t, 8.0)?;
+                        } else {
+                            exact = false;
+                        }
                     } else {
                         s.ensure_frame(d3d, mt_t)
                             .map_err(|e| e.context(format!("live-mt {} src_t={mt_t:.2}", s.name)))?;
                     }
+                    mt_tex.push(s.bgra.clone());
                 }
-                let otex = pool.get(d3d, &opath, 0, false, src_t)?.bgra.clone();
-                let ptex = pool.get(d3d, &mt_path, MT_PERSON, true, mt_t)?.bgra.clone();
-                let stex = pool.get(d3d, &mt_path, MT_SHADOW, true, mt_t)?.bgra.clone();
+                let stex = mt_tex.pop().unwrap();
+                let ptex = mt_tex.pop().unwrap();
                 let (cw, ch) = (meta.canvas[0] as f32, meta.canvas[1] as f32);
                 let aff = [
                     meta.src_x as f32 / cw,
@@ -277,29 +325,34 @@ fn compose(
             let src_t = off + (t - c.timeline_start);
             const COLOR: u32 = 1; // MF enumerates this pv's 2 video tracks in reverse mux order
             const MATTE: u32 = 0;
-            {
+            let (ctex, cwh) = {
                 let s = pool.get(d3d, &path, COLOR, false, src_t)?;
                 if fast {
-                    exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                    if Instant::now() < f_deadline {
+                        exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                    } else {
+                        exact = false;
+                    }
                 } else {
                     s.ensure_frame(d3d, src_t)
                         .map_err(|e| e.context(format!("pv-color {} src_t={src_t:.2}", s.name)))?;
                 }
-            }
-            {
+                (s.bgra.clone(), (s.width, s.height))
+            };
+            let mtex = {
                 let s = pool.get(d3d, &path, MATTE, true, src_t)?;
                 if fast {
-                    exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                    if Instant::now() < f_deadline {
+                        exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                    } else {
+                        exact = false;
+                    }
                 } else {
                     s.ensure_frame(d3d, src_t)
                         .map_err(|e| e.context(format!("pv-matte {} src_t={src_t:.2}", s.name)))?;
                 }
-            }
-            let (ctex, cwh) = {
-                let s = pool.get(d3d, &path, COLOR, false, src_t)?;
-                (s.bgra.clone(), (s.width, s.height))
+                s.bgra.clone()
             };
-            let mtex = pool.get(d3d, &path, MATTE, true, src_t)?.bgra.clone();
             comp.draw(d3d, &ctex, cwh, (b.x, b.y, b.width, b.height), false, Some(&mtex))?;
             used.push(path);
         } else if let Some(aid) = c.asset_id.as_deref() {
@@ -307,7 +360,11 @@ fn compose(
             let src_t = c.source_start + (t - c.timeline_start);
             let vs = pool.get(d3d, &path, 0, false, src_t)?;
             if fast {
-                exact &= vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                if Instant::now() < f_deadline {
+                    exact &= vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                } else {
+                    exact = false;
+                }
             } else {
                 vs.ensure_frame(d3d, src_t)
                     .map_err(|e| e.context(format!("overlay {} src_t={src_t:.2}", vs.name)))?;
@@ -576,6 +633,28 @@ fn warm_open_pass(
             }
         }
     }
+    // scrub proxies: the drag path decodes these — a cold open on the first drag is a
+    // visible hitch
+    let mut proxies: Vec<String> = Vec::new();
+    for tr in &doc.seq.tracks {
+        if tr.kind != "video" && tr.kind != "overlay" {
+            continue;
+        }
+        for c in &tr.clips {
+            if let Some(aid) = c.asset_id.as_deref() {
+                let p = doc.asset_path(aid);
+                if std::path::Path::new(&p).exists() && !proxies.contains(&p) {
+                    proxies.push(p);
+                }
+            }
+        }
+    }
+    for p in proxies {
+        if !pool.has_instances(&p, 0, 1) {
+            let _ = pool.warm_open(d3d, &p, 0, false, 1);
+            return false;
+        }
+    }
     true
 }
 
@@ -605,6 +684,14 @@ fn presenter_thread(shared: Arc<Shared>) {
             session_gap_max = 0.0;
         }
         let t = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
+        let target = f64::from_bits(shared.ring_target_bits.load(Ordering::Relaxed));
+        if (target - t).abs() > 0.5 {
+            // mid-play seek in flight: the ring belongs to the NEW position, the clock is
+            // still at the old one — popping "stale" frames here would eat the rebuild
+            last_pub = None;
+            std::thread::sleep(std::time::Duration::from_millis(4));
+            continue;
+        }
         let mut grabbed: Option<(f64, Vec<u8>)> = None;
         {
             let mut ring = shared.ring.lock().unwrap();
@@ -664,6 +751,7 @@ fn media_thread(shared: Arc<Shared>) {
         let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H)?;
         let mut was_playing;
         let mut last_gen = u64::MAX;
+        let mut jump_to: Option<f64> = None; // mid-play seek target until the clock follows
         let mut last_t = -1.0f64;
         let mut seq = 0u64;
         let mut peak_scan: Option<(String, media::PeakScan)> = None;
@@ -703,20 +791,47 @@ fn media_thread(shared: Arc<Shared>) {
             if r.playing {
                 if r.gen != last_gen {
                     last_gen = r.gen;
-                    let mut rg = shared.ring.lock().unwrap();
-                    let aligned = rg
-                        .front()
-                        .map(|(ft, _)| (*ft - t).abs() < 2.0 / 30.0 || (*ft < t && rg.back().map(|(bt, _)| *bt >= t).unwrap_or(false)))
-                        .unwrap_or(false);
-                    if !aligned {
-                        rg.clear();
-                        shared.ring_gen.fetch_add(1, Ordering::Relaxed);
+                    let jump = (r.t - t).abs() > 0.3;
+                    let target = if jump { r.t } else { t };
+                    {
+                        let mut rg = shared.ring.lock().unwrap();
+                        let aligned = rg
+                            .front()
+                            .map(|(ft, _)| (*ft - target).abs() < 2.0 / 30.0 || (*ft < target && rg.back().map(|(bt, _)| *bt >= target).unwrap_or(false)))
+                            .unwrap_or(false);
+                        if !aligned {
+                            rg.clear();
+                            shared.ring_level.store(0, Ordering::Relaxed);
+                            shared.ring_gen.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    if jump {
+                        // seek during playback: SNAP the preview to the new position NOW
+                        // (budgeted seek, <~60ms) while the audio gate holds the clock and
+                        // the ring rebuilds — no more seconds of frozen video chasing a
+                        // running clock
+                        jump_to = Some(r.t);
+                        if let Ok(_snap) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, r.t, true, true) {
+                            seq += 1;
+                            let mut f = shared.frame.lock().unwrap();
+                            f.rgba.clear();
+                            f.rgba.extend_from_slice(&comp.rgba);
+                            f.seq = seq;
+                            f.quality = "original";
+                        }
                     }
                 }
+                if let Some(j) = jump_to {
+                    if (t - j).abs() < 0.3 {
+                        jump_to = None; // audio restarted at the new position — normal ops
+                    }
+                }
+                let t_build = jump_to.unwrap_or(t);
+                shared.ring_target_bits.store(t_build.to_bits(), Ordering::Relaxed);
                 let (next_t, len) = {
                     let rg = shared.ring.lock().unwrap();
                     (
-                        rg.back().map(|(ft, _)| ft + STEP).unwrap_or_else(|| (t / STEP).floor() * STEP),
+                        rg.back().map(|(ft, _)| ft + STEP).unwrap_or_else(|| (t_build / STEP).floor() * STEP),
                         rg.len(),
                     )
                 };
@@ -735,9 +850,14 @@ fn media_thread(shared: Arc<Shared>) {
                             {
                                 let mut rg = shared.ring.lock().unwrap();
                                 rg.push_back((next_t, comp.rgba.clone()));
-                                while rg.front().map(|(ft, _)| *ft < t - 2.0 * STEP).unwrap_or(false) {
-                                    rg.pop_front();
+                                // never trim against the OLD clock while a jump is pending —
+                                // a backward seek's fresh frames all look "stale" to it
+                                if jump_to.is_none() {
+                                    while rg.front().map(|(ft, _)| *ft < t - 2.0 * STEP).unwrap_or(false) {
+                                        rg.pop_front();
+                                    }
                                 }
+                                shared.ring_level.store(rg.len(), Ordering::Relaxed);
                             }
                             ms_push = p0.elapsed().as_secs_f32() * 1000.0;
                             if len >= 8 {
@@ -801,7 +921,12 @@ fn media_thread(shared: Arc<Shared>) {
             let settled = !r.scrubbing && settle.elapsed().as_secs_f32() > 0.2;
             let dirty = r.gen != last_gen || (t - last_t).abs() > 1e-6;
             if dirty {
-                let original = !r.scrubbing; // full quality unless mid-drag
+                // Scrub decodes the HIGH-QUALITY proxy (long side 1920, CRF19, GOP15 —
+                // indistinguishable from the original at pane size, seeks in ~20ms so the
+                // preview stays glued to the finger); the settle/refine pass and playback
+                // use the original. This is Filmora's actual mechanism — its 4K scrubbing
+                // runs on auto-proxies too, ours were just 406x720 CRF28 mush before.
+                let original = !r.scrubbing;
                 let t0 = Instant::now();
                 match compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, original, r.scrubbing) {
                     Ok((used, exact)) => {
@@ -818,7 +943,7 @@ fn media_thread(shared: Arc<Shared>) {
                             comp_hist.retain(|(t2, _)| now.duration_since(*t2).as_secs_f32() < 1.0);
                             f.comp_max = comp_hist.iter().map(|(_, v)| *v).fold(0.0, f32::max);
                             last_pub = Some(now);
-                            f.quality = if original { "original" } else { "scrub" };
+                            f.quality = "original";
                         }
                         let _ = used;
                     }
@@ -842,18 +967,22 @@ fn media_thread(shared: Arc<Shared>) {
                 last_gen = r.gen;
                 last_t = t;
             } else if !settled {
-                if r.scrubbing && !scrub_exact {
+                // refine only once the pointer actually RESTS — refining between drag
+                // ticks kept compose+readback running back-to-back, saturating the GPU
+                // queue and stalling every decoder ReadSample behind it (~50ms/sample)
+                let resting = settle.elapsed().as_secs_f32() > 0.12;
+                if r.scrubbing && !scrub_exact && resting {
                     // finger resting mid-drag on a long-GOP spot: keep refining toward the
                     // exact frame, one budget slice per pass (converges like Filmora's
                     // "stop and the picture sharpens to the real frame")
-                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, false, true) {
+                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, true, true) {
                         scrub_exact = ex;
                         seq += 1;
                         let mut f = shared.frame.lock().unwrap();
                         f.rgba.clear();
                         f.rgba.extend_from_slice(&comp.rgba);
                         f.seq = seq;
-                        f.quality = "scrub";
+                        f.quality = "original";
                     } else {
                         scrub_exact = true; // failed — stop hammering
                     }
@@ -984,6 +1113,7 @@ impl App {
             ring_level: std::sync::atomic::AtomicUsize::new(0),
             ring: Mutex::new(Default::default()),
             ring_gen: AtomicU64::new(0),
+            ring_target_bits: AtomicU64::new(0f64.to_bits()),
             doc: Mutex::new(doc.clone()),
             aux_req: Mutex::new(Vec::new()),
             aux: Mutex::new(AuxOut::default()),
@@ -1660,6 +1790,146 @@ fn main() -> eframe::Result<()> {
         }
         std::process::exit(0);
     }
+    // --probe-pair <path>: open BOTH video streams of one file simultaneously and
+    // alternate reads (reproduces the in-app matte-twin pattern)
+    if let Some(i) = args.iter().position(|a| a == "--probe-pair") {
+        let path = args.get(i + 1).cloned().unwrap_or_default();
+        match media::D3d::new() {
+            Ok(d3d) => {
+                let mut a = media::VideoStream::open(&d3d, &path, 0, true).unwrap();
+                let mut b = media::VideoStream::open(&d3d, &path, 1, true).unwrap();
+                let _ = a.ensure_frame(&d3d, 1.0);
+                let _ = b.ensure_frame(&d3d, 1.0);
+                let t0 = std::time::Instant::now();
+                for i in 1..=60 {
+                    let t = 1.0 + i as f64 / 30.0;
+                    let _ = a.ensure_frame(&d3d, t);
+                    let _ = b.ensure_frame(&d3d, t);
+                }
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                println!("PAIR seq60x2={ms:.0}ms ({:.1}ms/frame-pair)", ms / 60.0);
+                // and the scrub pattern: 0.33s jumps with budget
+                let t1 = std::time::Instant::now();
+                let mut t = 3.0;
+                for _ in 0..12 {
+                    t += 0.33;
+                    let _ = a.ensure_frame_scrub(&d3d, t, 14.0);
+                    let _ = b.ensure_frame_scrub(&d3d, t, 14.0);
+                }
+                let ms = t1.elapsed().as_secs_f64() * 1000.0;
+                println!("PAIR scrub12x2={ms:.0}ms ({:.1}ms/tick)", ms / 12.0);
+                // now under decoder-session load: open N extra readers and repeat
+                if let Some(extra) = args.get(i + 2).and_then(|v| v.parse::<usize>().ok()) {
+                    let epath = args.get(i + 3).cloned().unwrap_or_else(|| path.clone());
+                    let mut held = Vec::new();
+                    for k in 0..extra {
+                        match media::VideoStream::open(&d3d, &epath, 0, false) {
+                            Ok(mut v) => {
+                                let _ = v.ensure_frame(&d3d, 1.0 + k as f64);
+                                held.push(v);
+                            }
+                            Err(e) => {
+                                println!("extra open {k} failed: {e:#}");
+                                break;
+                            }
+                        }
+                    }
+                    println!("held {} extra decoders", held.len());
+                    let t2 = std::time::Instant::now();
+                    let mut t = 8.0;
+                    for _ in 0..12 {
+                        t += 0.33;
+                        let _ = a.ensure_frame_scrub(&d3d, t, 14.0);
+                        let _ = b.ensure_frame_scrub(&d3d, t, 14.0);
+                    }
+                    let ms = t2.elapsed().as_secs_f64() * 1000.0;
+                    println!("PAIR loaded scrub12x2={ms:.0}ms ({:.1}ms/tick)", ms / 12.0);
+                }
+            }
+            Err(e) => println!("D3D ERR {e:#}"),
+        }
+        std::process::exit(0);
+    }
+    // --probe-многo <dir> <n>: open n mt PAIRS from popout-cache (different files) plus
+    // scrub the LAST pair — reproduces the in-app many-readers state
+    if let Some(i) = args.iter().position(|a| a == "--probe-many") {
+        let dir = args.get(i + 1).cloned().unwrap_or_default();
+        let n: usize = args.get(i + 2).and_then(|v| v.parse().ok()).unwrap_or(8);
+        let d3d = media::D3d::new().unwrap();
+        let mut mts: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().to_string_lossy().replace(char::from(92), "/"))
+            .filter(|p| p.ends_with(".mt.mp4"))
+            .collect();
+        mts.sort();
+        mts.truncate(n);
+        let mut held = Vec::new();
+        for p in &mts {
+            for st in [0u32, 1u32] {
+                if let Ok(mut v) = media::VideoStream::open(&d3d, p, st, true) {
+                    let _ = v.ensure_frame(&d3d, 1.0);
+                    held.push(v);
+                }
+            }
+        }
+        println!("held {} readers over {} mt files", held.len(), mts.len());
+        let last = held.len() - 2;
+        let (h0, h1) = held.split_at_mut(last + 1);
+        let a = &mut h0[last];
+        let b = &mut h1[0];
+        let t0 = std::time::Instant::now();
+        let mut t = 2.0;
+        for _ in 0..12 {
+            t += 0.33;
+            let _ = a.ensure_frame_scrub(&d3d, t, 14.0);
+            let _ = b.ensure_frame_scrub(&d3d, t, 14.0);
+        }
+        println!("MANY scrub12x2={:.1}ms/tick", t0.elapsed().as_secs_f64() * 1000.0 / 12.0);
+        // interleave with an ACTIVE 4K read each tick (the in-app compose pattern)
+        if let Some(fourk) = args.get(i + 3) {
+            let mut o = media::VideoStream::open(&d3d, fourk, 0, false).unwrap();
+            let _ = o.ensure_frame(&d3d, 30.0);
+            let (h0, h1) = held.split_at_mut(last + 1);
+            let a = &mut h0[last];
+            let b = &mut h1[0];
+            let t1 = std::time::Instant::now();
+            let mut t = 6.0;
+            for k in 0..12 {
+                t += 0.33;
+                let _ = o.ensure_frame_scrub(&d3d, 30.0 + (k as f64) * 0.33, 12.0);
+                let _ = a.ensure_frame_scrub(&d3d, t, 14.0);
+                let _ = b.ensure_frame_scrub(&d3d, t, 14.0);
+            }
+            println!("MANY+4K scrub12x3={:.1}ms/tick", t1.elapsed().as_secs_f64() * 1000.0 / 12.0);
+        }
+        std::process::exit(0);
+    }
+    // --bench-scrub <t0>: headless scrub over the real timeline (full compose path, no UI)
+    if let Some(i) = args.iter().position(|a| a == "--bench-scrub") {
+        let t0v: f64 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(40.0);
+        let contents = args.get(1).cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = args.get(2).cloned().unwrap_or_else(|| ROOM.to_string());
+        let doc = model::Doc::load(&contents, &dir).unwrap();
+        let d3d = media::D3d::new().unwrap();
+        let mut pool = media::VideoPool::new();
+        let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H).unwrap();
+        let mut masks: MaskMap = Default::default();
+        while mask_build_pass(&doc, &d3d, &mut masks) {}
+        let mut t = t0v;
+        let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, false, true);
+        let b0 = Instant::now();
+        let mut worst = 0f64;
+        for _ in 0..60 {
+            t += 0.33;
+            let c0 = Instant::now();
+            let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, false, true);
+            worst = worst.max(c0.elapsed().as_secs_f64() * 1000.0);
+        }
+        let ms = b0.elapsed().as_secs_f64() * 1000.0;
+        println!("BENCH scrub60={:.1}ms/tick worst={worst:.0}ms", ms / 60.0);
+        std::process::exit(0);
+    }
     // --probe-open <path> <stream> [full_range]: open one decoder standalone and report
     if let Some(i) = args.iter().position(|a| a == "--probe-open") {
         let path = args.get(i + 1).cloned().unwrap_or_default();
@@ -1669,7 +1939,18 @@ fn main() -> eframe::Result<()> {
             Ok(d3d) => match media::VideoStream::open(&d3d, &path, stream, fr) {
                 Ok(mut vs) => {
                     let r = vs.ensure_frame(&d3d, 1.0);
-                    println!("OK {}x{} ensure={:?}", vs.width, vs.height, r.map(|_| ()));
+                    let t0 = std::time::Instant::now();
+                    let mut n = 0;
+                    for i in 1..=60 {
+                        if vs.ensure_frame(&d3d, 1.0 + i as f64 / 30.0).is_ok() {
+                            n += 1;
+                        }
+                    }
+                    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                    println!(
+                        "OK {}x{} ensure={:?} seq60={:.0}ms ({:.1}ms/frame, n={n})",
+                        vs.width, vs.height, r.map(|_| ()), ms, ms / 60.0
+                    );
                 }
                 Err(e) => println!("ERR {e:#}"),
             },
@@ -1723,6 +2004,47 @@ fn main() -> eframe::Result<()> {
                     app.t = t.min(app.dur);
                     app.push_req(false);
                 }
+            }
+            // --selftest: drive the ENGINE directly (no OS input — immune to a human
+            // moving the real mouse): play -> fwd jump -> back jump -> 30Hz scrub -> stop
+            if args.iter().any(|a| a == "--selftest") {
+                let sh = app.shared.clone();
+                std::thread::spawn(move || {
+                    let bump = |t: f64, playing: bool, scrubbing: bool| {
+                        let mut r = sh.req.lock().unwrap();
+                        r.t = t;
+                        r.playing = playing;
+                        r.scrubbing = scrubbing;
+                        r.gen += 1;
+                    };
+                    let s = |ms: u64| std::thread::sleep(std::time::Duration::from_millis(ms));
+                    s(4000);
+                    eprintln!("SELFTEST play@5");
+                    bump(5.0, true, false);
+                    s(8000);
+                    eprintln!("SELFTEST fwd-jump@90");
+                    bump(90.0, true, false);
+                    s(8000);
+                    eprintln!("SELFTEST back-jump@30");
+                    bump(30.0, true, false);
+                    s(8000);
+                    eprintln!("SELFTEST pause+scrub");
+                    bump(38.0, false, false);
+                    s(600);
+                    // 30Hz drag: 40 -> 80 -> 60, then rest (refine-to-exact)
+                    let mut t = 40.0f64;
+                    for leg in [(80.0f64, 120u64), (60.0f64, 60u64)] {
+                        let step = (leg.0 - t) / leg.1 as f64;
+                        for _ in 0..leg.1 {
+                            t += step;
+                            bump(t, false, true);
+                            s(33);
+                        }
+                    }
+                    s(1200);
+                    bump(60.0, false, false);
+                    eprintln!("SELFTEST done");
+                });
             }
             Ok(Box::new(app))
         }),
