@@ -91,7 +91,12 @@ impl VideoStream {
             let attrs = attrs.unwrap();
             attrs.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, &d3d.mgr)?;
             attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
-            attrs.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
+            // NO ENABLE_ADVANCED_VIDEO_PROCESSING: we output native NV12 and convert with
+            // our own VideoProcessor — the reader-internal VP MFT only made every seek
+            // flush ~5x more expensive (55ms -> ~300ms on the 4K originals)
+            // scrub responsiveness: without this the reader queues frames ahead internally
+            // and every SetCurrentPosition pays a long flush (~100ms+ on 4K long-GOP)
+            attrs.SetUINT32(&MF_LOW_LATENCY, 1)?;
             let wp = wide(path);
             let reader = MFCreateSourceReaderFromURL(PCWSTR(wp.as_ptr()), &attrs)?;
             // `stream` = Nth VIDEO track; resolve to the actual MF stream index (stream 0 of a
@@ -373,9 +378,10 @@ impl VideoStream {
         }
         let t0 = std::time::Instant::now();
         // forward within this window continues the decode (progress accumulates across
-        // ticks); anything else re-seeks to the preceding keyframe
-        let cont = (self.last_pts >= 0.0 && t >= self.last_pts && t < self.last_pts + 4.0)
-            || self.pending_pts().map(|p| t >= p && t < p + 4.0).unwrap_or(false);
+        // ticks); anything else re-seeks to the preceding keyframe. 1.2s: walking a long-GOP
+        // 4K source across the timeline's cut jumps (1-3s) cost far more than a keyframe seek
+        let cont = (self.last_pts >= 0.0 && t >= self.last_pts && t < self.last_pts + 1.2)
+            || self.pending_pts().map(|p| t >= p && t < p + 1.2).unwrap_or(false);
         if !cont {
             unsafe {
                 let pv = PROPVARIANT::from((t * HNS) as i64);
@@ -402,6 +408,7 @@ impl VideoStream {
             self.blit(d3d, &s)?;
             self.last_pts = pts;
         }
+        let _ = cont;
         Ok(exact && self.has_frame)
     }
 
