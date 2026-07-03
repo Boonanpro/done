@@ -62,6 +62,9 @@ struct Shared {
     frame: Mutex<FrameOut>,
     clock_bits: AtomicU64,
     underruns: AtomicU64,
+    ring_level: std::sync::atomic::AtomicUsize,
+    ring: Mutex<std::collections::VecDeque<(f64, Vec<u8>)>>,
+    ring_gen: AtomicU64,
     doc: Mutex<Arc<model::Doc>>,
     aux_req: Mutex<Vec<AuxJob>>,
     aux: Mutex<AuxOut>,
@@ -82,6 +85,12 @@ fn audio_thread(shared: Arc<Shared>) {
         let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
         if playing != was_playing {
             if playing {
+                let t0 = std::time::Instant::now();
+                while shared.ring_level.load(Ordering::Relaxed) < 4
+                    && t0.elapsed().as_millis() < 400
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
                 let _ = audio.start_at(t_req);
                 shared.clock_bits.store(t_req.to_bits(), Ordering::Relaxed);
             } else {
@@ -99,7 +108,12 @@ fn audio_thread(shared: Arc<Shared>) {
         }
         if playing {
             let _ = audio.fill(&doc);
-            shared.clock_bits.store(audio.clock().to_bits(), Ordering::Relaxed);
+            let c = audio.clock();
+            let prev = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
+            if (c - prev).abs() > 0.3 {
+                eprintln!("CLOCK-JUMP {prev:.2} -> {c:.2}");
+            }
+            shared.clock_bits.store(c.to_bits(), Ordering::Relaxed);
             shared.underruns.store(audio.underruns, Ordering::Relaxed);
         }
         std::thread::sleep(std::time::Duration::from_millis(8));
@@ -200,24 +214,35 @@ fn prime_upcoming(
     original: bool,
     used: &[String],
 ) {
+    let _ = used;
+    // BUDGETED: nearest upcoming boundary first, and at most ONE slice of decode work per
+    // call — un-budgeted priming ate 100-180ms per loop and starved both the ring and the
+    // boundary it was supposed to protect.
+    let mut ups: Vec<&model::Clip> = Vec::new();
     for tr in &doc.seq.tracks {
         if tr.kind != "video" && tr.kind != "overlay" {
             continue;
         }
         for c in &tr.clips {
-            if c.timeline_start <= t || c.timeline_start > t + 3.0 {
-                continue;
+            if c.timeline_start > t && c.timeline_start <= t + 3.0 {
+                ups.push(c);
             }
-            if let Some((rel, off)) = c.popout() {
-                let path = doc.rel_path(&rel);
-                let src_in = off + (c.timeline_start - c.timeline_start); // = off
-                let _ = pool.prime_spare(d3d, &path, 0, true, src_in + 0.0); // matte (full range)
-                let _ = pool.prime_spare(d3d, &path, 1, false, src_in); // color
-            } else if let Some(aid) = c.asset_id.as_deref() {
-                let path = doc.asset_path_q(aid, original);
-                let _ = pool.prime_spare(d3d, &path, 0, false, c.source_start);
-            }
-            let _ = used;
+        }
+    }
+    ups.sort_by(|a, b| a.timeline_start.partial_cmp(&b.timeline_start).unwrap());
+    for c in ups {
+        let worked = if let Some((rel, off)) = c.popout() {
+            let path = doc.rel_path(&rel);
+            pool.prime_spare(d3d, &path, 0, true, off).unwrap_or(false)
+                || pool.prime_spare(d3d, &path, 1, false, off).unwrap_or(false)
+        } else if let Some(aid) = c.asset_id.as_deref() {
+            let path = doc.asset_path_q(aid, original);
+            pool.prime_spare(d3d, &path, 0, false, c.source_start).unwrap_or(false)
+        } else {
+            false
+        };
+        if worked {
+            return; // one slice per loop — the ring keeps breathing
         }
     }
 }
@@ -250,6 +275,7 @@ fn probe_duration(path: &str) -> Option<f64> {
 fn warm_open_pass(doc: &model::Doc, d3d: &media::D3d, pool: &mut media::VideoPool) -> bool {
     use std::collections::HashMap;
     let mut count: HashMap<String, usize> = HashMap::new();
+    let mut spans: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
     let mut pops: Vec<String> = Vec::new();
     for tr in &doc.seq.tracks {
         if tr.kind != "video" && tr.kind != "overlay" {
@@ -262,12 +288,27 @@ fn warm_open_pass(doc: &model::Doc, d3d: &media::D3d, pool: &mut media::VideoPoo
                     pops.push(p);
                 }
             } else if let Some(aid) = c.asset_id.as_deref() {
-                *count.entry(doc.asset_path_q(aid, true)).or_default() += 1;
+                let p = doc.asset_path_q(aid, true);
+                *count.entry(p.clone()).or_default() += 1;
+                spans.entry(p).or_default().push((c.timeline_start, c.timeline_end));
             }
         }
     }
     for (path, n) in count {
-        let want = if n >= 2 { 2 } else { 1 };
+        // instances = max simultaneous on-screen uses of this file (fullscreen + wipe of
+        // the same source overlap!) + 1 spare for boundary ping-pong
+        let ss = spans.get(&path).cloned().unwrap_or_default();
+        let mut concurrent = 1usize;
+        for (i, a) in ss.iter().enumerate() {
+            let mut o = 1;
+            for (j, b) in ss.iter().enumerate() {
+                if i != j && a.0 < b.1 && b.0 < a.1 {
+                    o += 1;
+                }
+            }
+            concurrent = concurrent.max(o.min(2));
+        }
+        let want = if n >= 2 { concurrent + 1 } else { 1 };
         if !pool.has_instances(&path, 0, want) {
             let _ = pool.warm_open(d3d, &path, 0, false, want);
             return false; // one open per idle slice
@@ -286,6 +327,84 @@ fn warm_open_pass(doc: &model::Doc, d3d: &media::D3d, pool: &mut media::VideoPoo
     true
 }
 
+/// Presenter: its ONLY job is moving the right ring frame to the screen every few ms.
+/// It never decodes, never composes, never waits on production — so a slow production
+/// step can only ever drain the ring, never delay presentation itself.
+fn presenter_thread(shared: Arc<Shared>) {
+    let mut published_t = -1.0f64;
+    let mut last_pub: Option<Instant> = None;
+    let mut session_gap_max = 0.0f32;
+    let mut seen_gen = u64::MAX;
+    let mut seq_hi = 1_000_000u64;
+    loop {
+        let playing = shared.req.lock().unwrap().playing;
+        if !playing {
+            published_t = -1.0;
+            last_pub = None;
+            session_gap_max = 0.0;
+            std::thread::sleep(std::time::Duration::from_millis(6));
+            continue;
+        }
+        let g = shared.ring_gen.load(Ordering::Relaxed);
+        if g != seen_gen {
+            seen_gen = g;
+            published_t = -1.0;
+            last_pub = None;
+            session_gap_max = 0.0;
+        }
+        let t = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
+        let mut grabbed: Option<(f64, Vec<u8>)> = None;
+        {
+            let mut ring = shared.ring.lock().unwrap();
+            while ring.front().map(|(ft, _)| *ft < t - 1.0 / 30.0).unwrap_or(false) {
+                ring.pop_front();
+            }
+            if let Some((ft, _)) = ring.iter().rev().find(|(ft, _)| *ft <= t) {
+                let ft = *ft;
+                if ft > published_t {
+                    if let Some((_, rgba)) = ring.iter().find(|(x, _)| *x == ft) {
+                        grabbed = Some((ft, rgba.clone()));
+                    }
+                }
+            }
+            shared.ring_level.store(ring.len(), Ordering::Relaxed);
+        }
+        if grabbed.is_none() {
+            if let Some(lp) = last_pub {
+                let idle = lp.elapsed().as_secs_f32() * 1000.0;
+                if idle > 500.0 && idle % 500.0 < 8.0 {
+                    let (fr, ba, ln) = {
+                        let rg = shared.ring.lock().unwrap();
+                        (rg.front().map(|(f2, _)| *f2), rg.back().map(|(b2, _)| *b2), rg.len())
+                    };
+                    eprintln!("PRES-IDLE {idle:.0}ms t={t:.2} pub={published_t:.2} ring={ln} front={fr:?} back={ba:?}");
+                }
+            }
+        }
+        if let Some((ft, rgba)) = grabbed {
+            let now = Instant::now();
+            seq_hi += 1;
+            let mut f = shared.frame.lock().unwrap();
+            f.rgba = rgba;
+            f.seq = seq_hi;
+            f.quality = "original";
+            if let Some(lp) = last_pub {
+                let gms = now.duration_since(lp).as_secs_f32() * 1000.0;
+                if gms > session_gap_max {
+                    session_gap_max = gms;
+                }
+                if gms > 120.0 {
+                    eprintln!("GAP {gms:.0}ms at timeline t={ft:.2} (clock {t:.2})");
+                }
+            }
+            f.gap_max = session_gap_max;
+            last_pub = Some(now);
+            published_t = ft;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(4));
+    }
+}
+
 fn media_thread(shared: Arc<Shared>) {
     let run = || -> anyhow::Result<()> {
         let d3d = media::D3d::new()?;
@@ -301,6 +420,11 @@ fn media_thread(shared: Arc<Shared>) {
         let mut last_pub: Option<Instant> = None;
         let mut warm_done = false;
         let mut last_doc_ptr: usize = 0;
+        // Look-ahead ring: timeline frames composed AHEAD of the playhead on a fixed 30fps
+        // grid. Presentation picks from the ring and NEVER waits for a decode — GOP walks
+        // and source switches are paid in the ring's future (the Filmora mechanism).
+        const STEP: f64 = 1.0 / 30.0;
+        const RING_DEPTH: usize = 12; // ~400ms of slack
         loop {
             let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
             let ptr = Arc::as_ptr(&doc) as usize;
@@ -317,7 +441,60 @@ fn media_thread(shared: Arc<Shared>) {
             } else {
                 r.t
             };
-            let dirty = r.playing || r.gen != last_gen || (t - last_t).abs() > 1e-6;
+            if r.playing {
+                if r.gen != last_gen {
+                    last_gen = r.gen;
+                    let mut rg = shared.ring.lock().unwrap();
+                    let aligned = rg
+                        .front()
+                        .map(|(ft, _)| (*ft - t).abs() < 2.0 / 30.0 || (*ft < t && rg.back().map(|(bt, _)| *bt >= t).unwrap_or(false)))
+                        .unwrap_or(false);
+                    if !aligned {
+                        rg.clear();
+                        shared.ring_gen.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                let (next_t, len) = {
+                    let rg = shared.ring.lock().unwrap();
+                    (
+                        rg.back().map(|(ft, _)| ft + STEP).unwrap_or_else(|| (t / STEP).floor() * STEP),
+                        rg.len(),
+                    )
+                };
+                if len < RING_DEPTH && next_t <= dur {
+                    let t0 = Instant::now();
+                    match compose(&doc, &d3d, &mut pool, &mut comp, next_t, true) {
+                        Ok(used) => {
+                            let cms = t0.elapsed().as_secs_f32() * 1000.0;
+                            if cms > 60.0 {
+                                eprintln!("SLOWPROD t={next_t:.2}: {cms:.0}ms");
+                            }
+                            {
+                                let mut rg = shared.ring.lock().unwrap();
+                                rg.push_back((next_t, comp.rgba.clone()));
+                                while rg.front().map(|(ft, _)| *ft < t - 2.0 * STEP).unwrap_or(false) {
+                                    rg.pop_front();
+                                }
+                            }
+                            if len >= 8 {
+                                prime_upcoming(&doc, &d3d, &mut pool, next_t, true, &used);
+                            }
+                        }
+                        Err(e) => eprintln!("compose: {e:#}"),
+                    }
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                last_t = t;
+                continue;
+            }
+            // PAUSED: keep the ring pre-built ahead of the playhead so pressing play is
+            // instant (the ~1s start hole was the ring warming up from empty)
+            if r.gen != last_gen {
+                shared.ring.lock().unwrap().clear();
+                shared.ring_gen.fetch_add(1, Ordering::Relaxed);
+            }
+            let dirty = r.gen != last_gen || (t - last_t).abs() > 1e-6;
             if dirty {
                 let original = !r.scrubbing; // full quality unless mid-drag
                 let t0 = Instant::now();
@@ -334,25 +511,33 @@ fn media_thread(shared: Arc<Shared>) {
                             comp_hist.push((now, f.comp_ms));
                             comp_hist.retain(|(t2, _)| now.duration_since(*t2).as_secs_f32() < 1.0);
                             f.comp_max = comp_hist.iter().map(|(_, v)| *v).fold(0.0, f32::max);
-                            if r.playing {
-                                if let Some(lp) = last_pub {
-                                    let g = now.duration_since(lp).as_secs_f32() * 1000.0;
-                                    gap_hist.push((now, g));
-                                }
-                                gap_hist.retain(|(t2, _)| now.duration_since(*t2).as_secs_f32() < 2.0);
-                                f.gap_max = gap_hist.iter().map(|(_, v)| *v).fold(0.0, f32::max);
-                            }
                             last_pub = Some(now);
                             f.quality = if original { "original" } else { "proxy" };
                         }
-                        if r.playing {
-                            prime_upcoming(&doc, &d3d, &mut pool, t, original, &used);
-                        }
+                        let _ = used;
                     }
                     Err(e) => eprintln!("compose: {e:#}"),
                 }
                 last_gen = r.gen;
                 last_t = t;
+            } else if !warm_done {
+                // FIRST: open every decoder the timeline needs (a cold open mid-play is a
+                // 100-200ms media-thread stall = visible gap)
+                warm_done = warm_open_pass(&doc, &d3d, &mut pool);
+            } else if shared.ring.lock().unwrap().len() < RING_DEPTH {
+                // paused pre-build: produce ahead of the frozen playhead
+                let next_t = {
+                    let rg = shared.ring.lock().unwrap();
+                    rg.back().map(|(ft, _)| ft + STEP).unwrap_or_else(|| (t / STEP).floor() * STEP)
+                };
+                if next_t <= dur {
+                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, next_t, true) {
+                        let mut rg = shared.ring.lock().unwrap();
+                        rg.push_back((next_t, comp.rgba.clone()));
+                        shared.ring_level.store(rg.len(), Ordering::Relaxed);
+                        let _ = u2;
+                    }
+                }
             } else {
                 // idle: chew on one aux job slice (thumbnails / waveform peaks)
                 let job = { shared.aux_req.lock().unwrap().first().cloned() };
@@ -391,13 +576,7 @@ fn media_thread(shared: Arc<Shared>) {
                             shared.aux_req.lock().unwrap().retain(|j| !matches!(j, AuxJob::Peaks { asset_id: a2, .. } if *a2 == asset_id));
                         }
                     }
-                    None => {
-                        if !warm_done {
-                            warm_done = warm_open_pass(&doc, &d3d, &mut pool);
-                        } else {
-                            std::thread::sleep(std::time::Duration::from_millis(3));
-                        }
-                    }
+                    None => std::thread::sleep(std::time::Duration::from_millis(3)),
                 }
             }
         }
@@ -452,6 +631,9 @@ impl App {
             }),
             clock_bits: AtomicU64::new(0f64.to_bits()),
             underruns: AtomicU64::new(0),
+            ring_level: std::sync::atomic::AtomicUsize::new(0),
+            ring: Mutex::new(Default::default()),
+            ring_gen: AtomicU64::new(0),
             doc: Mutex::new(doc.clone()),
             aux_req: Mutex::new(Vec::new()),
             aux: Mutex::new(AuxOut::default()),
@@ -467,6 +649,12 @@ impl App {
             std::thread::Builder::new()
                 .name("audio".into())
                 .spawn(move || audio_thread(shared))?;
+        }
+        {
+            let shared = shared.clone();
+            std::thread::Builder::new()
+                .name("presenter".into())
+                .spawn(move || presenter_thread(shared))?;
         }
         Ok(Self {
             doc,

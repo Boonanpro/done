@@ -64,12 +64,14 @@ impl D3d {
 /// One decoded video stream of one file: NV12 via HW decode, converted to an owned BGRA
 /// texture with a per-source VideoProcessor. Keeps a 1-frame lookahead + last position.
 pub struct VideoStream {
+    pub name: String,
     reader: IMFSourceReader,
     stream: u32,
     pub width: u32,
     pub height: u32,
     pending: Option<(f64, IMFSample)>,
     last_pts: f64,
+    last_req: f64,
     prime_target: Option<f64>,
     // NV12 -> BGRA converter
     vp: ID3D11VideoProcessor,
@@ -182,12 +184,14 @@ impl VideoStream {
                 Some(&mut ov),
             )?;
             Ok(Self {
+                name: format!("{}#{}", path.rsplit('/').next().unwrap_or(path), stream),
                 reader,
                 stream,
                 width,
                 height,
                 pending: None,
                 last_pts: -1.0,
+                last_req: -1.0,
                 prime_target: None,
                 vp,
                 vp_enum,
@@ -218,11 +222,20 @@ impl VideoStream {
             self.reader.SetCurrentPosition(&GUID::zeroed(), &pv)?;
         }
         self.pending = None;
+        let mut prev: Option<(f64, IMFSample)> = None;
         while let Some((pts, s)) = self.read_next()? {
             if pts + 0.0005 >= t {
+                if pts > t + 0.2 {
+                    if let Some(p) = prev.take() {
+                        self.pending = Some(p); // VFR hold: show the pre-gap frame
+                        // the future frame is re-fetched on the next advance
+                        break;
+                    }
+                }
                 self.pending = Some((pts, s));
                 break;
             }
+            prev = Some((pts, s));
         }
         Ok(())
     }
@@ -288,7 +301,7 @@ impl VideoStream {
             self.prime_target = Some(src_t);
             self.pending = None;
         }
-        for _ in 0..4 {
+        for _ in 0..1 {
             match self.read_next()? {
                 Some((pts, sm)) => {
                     if pts + 0.0005 >= src_t {
@@ -337,9 +350,26 @@ impl VideoStream {
                 self.prime_target = None;
             }
         }
-        let jump = t < self.last_pts - 0.05 || t > self.last_pts + 1.0 || self.last_pts < 0.0;
-        let jump = jump && !self.pending_pts().map(|p| (p - t).abs() < 0.6).unwrap_or(false);
+        let back = self.last_req >= 0.0 && t < self.last_req - 0.05;
+        let cold = self.last_pts < 0.0;
+        let far = self.pending.is_none() && t > self.last_pts + 1.5;
+        self.last_req = t;
+        let jump = (back || cold || far)
+            && !self.pending_pts().map(|p| (p - t).abs() < 0.6).unwrap_or(false);
         if jump {
+            let _jt = std::time::Instant::now();
+            let r = self.ensure_jump(d3d, t);
+            let ms = _jt.elapsed().as_secs_f64() * 1000.0;
+            if ms > 60.0 {
+                eprintln!("JUMPSEEK {} to {:.2}: {:.0}ms", self.name, t, ms);
+            }
+            return r;
+        }
+        self.ensure_advance(d3d, t)
+    }
+
+    fn ensure_jump(&mut self, d3d: &D3d, t: f64) -> Result<bool> {
+        {
             self.seek(t)?;
             // present the first frame at/after t immediately (scrub shows something NOW)
             if let Some((pts, s)) = self.pending.take() {
@@ -347,8 +377,11 @@ impl VideoStream {
                 self.last_pts = pts;
                 self.pending = self.read_next()?;
             }
-            return Ok(self.has_frame);
+            Ok(self.has_frame)
         }
+    }
+
+    fn ensure_advance(&mut self, d3d: &D3d, t: f64) -> Result<bool> {
         let mut newest: Option<(f64, IMFSample)> = None;
         loop {
             match &self.pending {
@@ -531,7 +564,7 @@ impl VideoPool {
         // nothing fits and the best is on screen this frame -> open/use the spare so the
         // on-screen picture never gets torn away mid-frame
         if fitness(&entry[best]) == 0 && entry[best].used_frame == frame_no {
-            if entry.len() < 2 {
+            if entry.len() < 3 {
                 entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
             }
             best = entry.len() - 1;
@@ -553,7 +586,7 @@ impl VideoPool {
     pub fn warm_open(&mut self, d3d: &D3d, path: &str, stream: u32, full_range: bool, instances: usize) -> Result<()> {
         let key = (path.to_string(), stream);
         let entry = self.slots.entry(key).or_default();
-        while entry.len() < instances.min(2) {
+        while entry.len() < instances.min(3) {
             entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
         }
         Ok(())
@@ -567,34 +600,28 @@ impl VideoPool {
         stream: u32,
         full_range: bool,
         src_in: f64,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        let _ = (d3d, full_range);
         let key = (path.to_string(), stream);
         let frame_no = self.frame_no;
-        let entry = self.slots.entry(key).or_default();
+        let Some(entry) = self.slots.get_mut(&key) else {
+            return Ok(false); // never OPEN here — warm_open_pass owns opens (idle only)
+        };
         if entry.is_empty() {
-            entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
+            return Ok(false);
         }
         // already primed anywhere? done.
         if entry.iter().any(|s| {
             s.vs.pending_pts().map(|p| (p - src_in).abs() < 0.4).unwrap_or(false)
                 || (s.vs.last_pts - src_in).abs() < 0.4
         }) {
-            return Ok(());
+            return Ok(false);
         }
-        let spare = match entry.iter().position(|s| s.used_frame != frame_no) {
-            Some(i) => i,
-            None => {
-                if entry.len() < 2 {
-                    entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
-                }
-                entry.len() - 1
-            }
+        let Some(spare) = entry.iter().position(|s| s.used_frame != frame_no) else {
+            return Ok(false);
         };
-        if entry[spare].used_frame == frame_no {
-            return Ok(()); // everything is on screen; do not disturb
-        }
-        let _ = d3d;
-        entry[spare].vs.prime_step(src_in).map(|_| ())
+        entry[spare].vs.prime_step(src_in)?;
+        Ok(true)
     }
 }
 
