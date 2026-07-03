@@ -13,6 +13,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod compositor;
+mod edits;
 mod media;
 mod model;
 
@@ -45,6 +46,15 @@ struct Shared {
     req: Mutex<Req>,
     frame: Mutex<FrameOut>,
     clock_bits: AtomicU64,
+    doc: Mutex<Arc<model::Doc>>,
+}
+
+#[derive(Clone, PartialEq)]
+enum Drag {
+    None,
+    Scrub,
+    Move { ids: Vec<String>, grab: f64, orig: f64, applied: f64 },
+    Trim { ids: Vec<String>, left: bool },
 }
 
 fn compose(
@@ -144,18 +154,19 @@ fn prime_upcoming(
     }
 }
 
-fn media_thread(doc: Arc<model::Doc>, shared: Arc<Shared>) {
+fn media_thread(shared: Arc<Shared>) {
     let run = || -> anyhow::Result<()> {
         let d3d = media::D3d::new()?;
         let mut pool = media::VideoPool::new();
         let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H)?;
         let mut audio = media::AudioOut::new().ok();
-        let dur = doc.duration();
         let mut was_playing = false;
         let mut last_gen = u64::MAX;
         let mut last_t = -1.0f64;
         let mut seq = 0u64;
         loop {
+            let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
+            let dur = doc.duration();
             let r = shared.req.lock().unwrap().clone();
             if r.playing != was_playing {
                 if let Some(a) = audio.as_mut() {
@@ -215,6 +226,12 @@ fn media_thread(doc: Arc<model::Doc>, shared: Arc<Shared>) {
 struct App {
     doc: Arc<model::Doc>,
     shared: Arc<Shared>,
+    selected: Vec<String>,
+    drag: Drag,
+    undo: Vec<serde_json::Value>,
+    redo: Vec<serde_json::Value>,
+    save_at: Option<Instant>,
+    salt: u64,
     tex: Option<egui::TextureHandle>,
     last_seq: u64,
     playing: bool,
@@ -242,17 +259,23 @@ impl App {
                 quality: "proxy",
             }),
             clock_bits: AtomicU64::new(0f64.to_bits()),
+            doc: Mutex::new(doc.clone()),
         });
         {
-            let doc = doc.clone();
             let shared = shared.clone();
             std::thread::Builder::new()
                 .name("media".into())
-                .spawn(move || media_thread(doc, shared))?;
+                .spawn(move || media_thread(shared))?;
         }
         Ok(Self {
             doc,
             shared,
+            selected: Vec::new(),
+            drag: Drag::None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            save_at: None,
+            salt: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
             tex: None,
             last_seq: 0,
             playing: false,
@@ -266,6 +289,61 @@ impl App {
             quality: "proxy",
             gen: 0,
         })
+    }
+
+    /// Apply an edit to the RAW document, re-derive the typed view, hand it to the media
+    /// thread, and schedule a debounced save. Undo = raw snapshots.
+    fn apply_edit(&mut self, snapshot: bool, f: impl FnOnce(&mut serde_json::Value)) {
+        if snapshot {
+            self.undo.push(self.doc.raw.clone());
+            if self.undo.len() > 60 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        }
+        let mut raw = self.doc.raw.clone();
+        f(&mut raw);
+        if let Ok(nd) = model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
+            let nd = Arc::new(nd);
+            self.doc = nd.clone();
+            *self.shared.doc.lock().unwrap() = nd;
+            self.dur = self.doc.duration();
+            self.save_at = Some(Instant::now() + std::time::Duration::from_millis(1200));
+            self.push_req(false);
+        }
+    }
+
+    fn restore(&mut self, raw: serde_json::Value) {
+        if let Ok(nd) = model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
+            let nd = Arc::new(nd);
+            self.doc = nd.clone();
+            *self.shared.doc.lock().unwrap() = nd;
+            self.dur = self.doc.duration();
+            self.save_at = Some(Instant::now() + std::time::Duration::from_millis(1200));
+            self.push_req(false);
+        }
+    }
+
+    /// Snap t to nearby clip edges / the playhead (8px feel like Filmora's magnet).
+    fn snap(&self, t: f64, ignore: &[String]) -> f64 {
+        let tol = (8.0 / self.pps) as f64;
+        let mut best = t;
+        let mut bd = tol;
+        for tr in &self.doc.seq.tracks {
+            for c in &tr.clips {
+                if ignore.contains(&c.id) {
+                    continue;
+                }
+                for e in [c.timeline_start, c.timeline_end] {
+                    let d = (e - t).abs();
+                    if d < bd {
+                        bd = d;
+                        best = e;
+                    }
+                }
+            }
+        }
+        best
     }
 
     fn push_req(&mut self, scrubbing: bool) {
@@ -316,6 +394,7 @@ impl App {
         let lane_h =
             ((h - ruler_h - 4.0) / (self.doc.seq.tracks.len().max(1) as f32)).clamp(16.0, 42.0);
         let mut clips_drawn = 0usize;
+        let mut hits: Vec<(egui::Rect, String)> = Vec::new();
         for (li, tr) in self.doc.seq.tracks.iter().enumerate() {
             let y0 = rect.top() + ruler_h + 2.0 + li as f32 * lane_h;
             let color = match tr.kind.as_str() {
@@ -341,7 +420,17 @@ impl App {
                     3.0,
                     if is_pop { egui::Color32::from_rgb(220, 120, 60) } else { color },
                 );
-                p.rect_stroke(r, 3.0, egui::Stroke::new(1.0, egui::Color32::from_gray(25)));
+                let sel = self.selected.contains(&c.id);
+                p.rect_stroke(
+                    r,
+                    3.0,
+                    if sel {
+                        egui::Stroke::new(2.0, egui::Color32::WHITE)
+                    } else {
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(25))
+                    },
+                );
+                hits.push((r, c.id.clone()));
                 clips_drawn += 1;
             }
         }
@@ -354,15 +443,86 @@ impl App {
             );
         }
 
-        if resp.dragged() || resp.clicked() {
+        // ---- interactions: trim edges > move body > scrub empty space ----
+        let to_t = |scroll_x: f32, pps: f32, x: f32| ((scroll_x + (x - rect.left())) / pps).max(0.0) as f64;
+        if resp.drag_started() || (resp.clicked() && self.drag == Drag::None) {
             if let Some(pos) = resp.interact_pointer_pos() {
-                let nt = ((self.scroll_x + (pos.x - rect.left())) / self.pps)
-                    .clamp(0.0, self.dur as f32);
-                self.t = nt as f64;
-                self.push_req(resp.dragged());
+                let hit = hits.iter().find(|(r, _)| r.expand2(egui::vec2(4.0, 0.0)).contains(pos));
+                match hit {
+                    Some((r, id)) => {
+                        if !self.selected.contains(id) {
+                            if ui.input(|i| i.modifiers.ctrl) {
+                                self.selected.push(id.clone());
+                            } else {
+                                self.selected = vec![id.clone()];
+                            }
+                        }
+                        let ids = edits::expand_links(&self.doc.raw, &self.selected);
+                        if resp.drag_started() {
+                            self.undo.push(self.doc.raw.clone());
+                            self.redo.clear();
+                            if (pos.x - r.left()).abs() < 6.0 {
+                                self.drag = Drag::Trim { ids, left: true };
+                            } else if (pos.x - r.right()).abs() < 6.0 {
+                                self.drag = Drag::Trim { ids, left: false };
+                            } else {
+                                let ts = self
+                                    .doc
+                                    .seq
+                                    .tracks
+                                    .iter()
+                                    .flat_map(|tr| tr.clips.iter())
+                                    .find(|c| c.id == *id)
+                                    .map(|c| c.timeline_start)
+                                    .unwrap_or(0.0);
+                                self.drag = Drag::Move {
+                                    ids,
+                                    grab: to_t(self.scroll_x, self.pps, pos.x),
+                                    orig: ts,
+                                    applied: 0.0,
+                                };
+                            }
+                        }
+                    }
+                    None => {
+                        if resp.clicked() {
+                            self.selected.clear();
+                        }
+                        self.drag = Drag::Scrub;
+                        self.t = to_t(self.scroll_x, self.pps, pos.x).min(self.dur);
+                        self.push_req(false);
+                    }
+                }
+            }
+        }
+        if resp.dragged() {
+            if let Some(pos) = resp.interact_pointer_pos() {
+                match self.drag.clone() {
+                    Drag::Scrub => {
+                        self.t = to_t(self.scroll_x, self.pps, pos.x).min(self.dur);
+                        self.push_req(true);
+                    }
+                    Drag::Move { ids, grab, orig, applied } => {
+                        let want =
+                            self.snap(orig + (to_t(self.scroll_x, self.pps, pos.x) - grab), &ids);
+                        let dt = want - orig - applied;
+                        if dt.abs() > 1e-4 {
+                            self.apply_edit(false, |raw| edits::move_clips(raw, &ids, dt));
+                            if let Drag::Move { applied, .. } = &mut self.drag {
+                                *applied += dt;
+                            }
+                        }
+                    }
+                    Drag::Trim { ids, left } => {
+                        let nt = self.snap(to_t(self.scroll_x, self.pps, pos.x), &ids);
+                        self.apply_edit(false, |raw| edits::trim_clip(raw, &ids, left, nt));
+                    }
+                    Drag::None => {}
+                }
             }
         }
         if resp.drag_stopped() {
+            self.drag = Drag::None;
             self.push_req(false); // settle on full quality
         }
 
@@ -389,6 +549,56 @@ impl eframe::App for App {
         self.last_frames.push(now);
         self.last_frames.retain(|t| now.duration_since(*t).as_secs_f32() < 1.0);
         self.ui_fps = self.last_frames.len() as f32;
+
+        // edit keys: S=split, Del=delete, Ctrl+Z/Y=undo/redo
+        if ctx.input(|i| i.key_pressed(egui::Key::S) && !i.modifiers.ctrl) {
+            let t = self.t;
+            let base: Vec<String> = if self.selected.is_empty() {
+                self.doc
+                    .seq
+                    .tracks
+                    .iter()
+                    .flat_map(|tr| tr.clips.iter())
+                    .filter(|c| t > c.timeline_start + 0.05 && t < c.timeline_end - 0.05)
+                    .map(|c| c.id.clone())
+                    .collect()
+            } else {
+                self.selected.clone()
+            };
+            if !base.is_empty() {
+                let ids = edits::expand_links(&self.doc.raw, &base);
+                let salt = self.salt;
+                self.salt += 1;
+                self.apply_edit(true, |raw| edits::split_clips(raw, &ids, t, salt));
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+            if !self.selected.is_empty() {
+                let ids = edits::expand_links(&self.doc.raw, &self.selected);
+                self.selected.clear();
+                self.apply_edit(true, |raw| edits::delete_clips(raw, &ids));
+            }
+        }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
+            if let Some(prev) = self.undo.pop() {
+                self.redo.push(self.doc.raw.clone());
+                self.restore(prev);
+            }
+        }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Y)) {
+            if let Some(next) = self.redo.pop() {
+                self.undo.push(self.doc.raw.clone());
+                self.restore(next);
+            }
+        }
+        if let Some(at) = self.save_at {
+            if Instant::now() >= at {
+                self.save_at = None;
+                if let Err(e) = edits::save(&self.doc.raw, &self.doc.contents_path) {
+                    eprintln!("save: {e:#}");
+                }
+            }
+        }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             if self.playing {

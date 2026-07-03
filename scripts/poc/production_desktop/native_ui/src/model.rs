@@ -104,6 +104,8 @@ impl Clip {
 }
 
 pub struct Doc {
+    pub raw: serde_json::Value,
+    pub contents_path: String,
     pub seq: Sequence,
     pub asset_dir: String,
     /// asset_id -> ORIGINAL file path (from assets.json local_path), when it exists on disk.
@@ -113,7 +115,13 @@ pub struct Doc {
 impl Doc {
     pub fn load(contents_path: &str, asset_dir: &str) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(contents_path)?;
-        let roots: Vec<Root> = serde_json::from_str(&text)?;
+        let raw: serde_json::Value = serde_json::from_str(&text)?;
+        Self::from_raw(raw, contents_path, asset_dir)
+    }
+
+    /// Re-derive the typed view from a (possibly edited) raw document.
+    pub fn from_raw(raw: serde_json::Value, contents_path: &str, asset_dir: &str) -> anyhow::Result<Self> {
+        let roots: Vec<Root> = serde_json::from_value(raw.clone())?;
         let seq = roots
             .into_iter()
             .next()
@@ -136,7 +144,7 @@ impl Doc {
                 }
             }
         }
-        Ok(Self { seq, asset_dir: dir, originals })
+        Ok(Self { raw, contents_path: contents_path.to_string(), seq, asset_dir: dir, originals })
     }
 
     /// Best source for QUALITY (original when available) vs SPEED (proxy: small, short GOP).
