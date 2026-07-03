@@ -44,15 +44,17 @@ struct FrameOut {
     quality: &'static str,
 }
 
+const THUMB_BUCKET_S: f64 = 5.0; // filmstrip granularity: one real frame per 5s of source
+
 #[derive(Clone, PartialEq)]
 enum AuxJob {
-    Thumb { asset_id: String, path: String },
+    Thumb { asset_id: String, path: String, bucket: i64 },
     Peaks { asset_id: String, path: String },
 }
 
 #[derive(Default)]
 struct AuxOut {
-    thumbs: std::collections::HashMap<String, (usize, usize, Vec<u8>)>,
+    thumbs: std::collections::HashMap<(String, i64), (usize, usize, Vec<u8>)>,
     peaks: std::collections::HashMap<String, (f64, Vec<f32>)>, // (sec/bucket, peaks)
     ver: u64,
 }
@@ -335,6 +337,36 @@ fn mask_build_pass(doc: &model::Doc, d3d: &media::D3d, masks: &mut MaskMap) -> b
     false
 }
 
+/// Draw a person clip as a PLAIN PiP at the card box — the stand-in whenever the baked
+/// pop-out isn't usable (still baking, or the cache file is broken).
+#[allow(clippy::too_many_arguments)]
+fn draw_plain_pip(
+    doc: &model::Doc,
+    d3d: &media::D3d,
+    pool: &mut media::VideoPool,
+    comp: &mut compositor::Compositor,
+    c: &model::Clip,
+    b: model::Pos,
+    t: f64,
+    original: bool,
+    fast: bool,
+) -> anyhow::Result<Option<String>> {
+    let Some(aid) = c.asset_id.as_deref() else { return Ok(None) };
+    let bb = c.popout_card_box().unwrap_or(b);
+    let p2 = doc.asset_path_q(aid, original);
+    let src_t = c.source_start + (t - c.timeline_start);
+    let vs = pool.get(d3d, &p2, 0, false, src_t)?;
+    if fast {
+        let _ = vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
+    } else {
+        vs.ensure_frame(d3d, src_t)
+            .map_err(|e| e.context(format!("plain-pip {} src_t={src_t:.2}", vs.name)))?;
+    }
+    let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
+    comp.draw(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), true, None)?;
+    Ok(Some(p2))
+}
+
 fn compose(
     doc: &model::Doc,
     d3d: &media::D3d,
@@ -445,60 +477,59 @@ fn compose(
             }
             let rel = format!("popout-cache/{key}.pv.mp4");
             let path = doc.rel_path(&rel);
-            if !std::path::Path::new(&path).exists() {
-                // bake not finished yet: show the person as a PLAIN PiP at the card box —
-                // an applied-but-baking clip must never just vanish from the preview
-                if let Some(aid) = c.asset_id.as_deref() {
-                    let bb = c.popout_card_box().unwrap_or(b);
-                    let p2 = doc.asset_path_q(aid, original);
-                    let src_t = c.source_start + (t - c.timeline_start);
-                    let vs = pool.get(d3d, &p2, 0, false, src_t)?;
-                    if fast {
-                        exact &= vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
-                    } else {
-                        vs.ensure_frame(d3d, src_t)
-                            .map_err(|e| e.context(format!("baking-pip {} src_t={src_t:.2}", vs.name)))?;
-                    }
-                    let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
-                    comp.draw(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), true, None)?;
+            let pv_usable = std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false);
+            if !pv_usable {
+                // bake not finished (or a broken 0-byte cache): show the person as a
+                // PLAIN PiP at the card box — the clip must never vanish, and one bad
+                // cache file must never take the whole preview down
+                if let Some(p2) = draw_plain_pip(doc, d3d, pool, comp, c, b, t, original, fast)? {
                     used.push(p2);
                 }
                 continue;
             }
-            let src_t = off + (t - c.timeline_start);
-            const COLOR: u32 = 1; // MF enumerates this pv's 2 video tracks in reverse mux order
-            const MATTE: u32 = 0;
-            let (ctex, cwh) = {
-                let s = pool.get(d3d, &path, COLOR, false, src_t)?;
-                if fast {
-                    if Instant::now() < f_deadline {
-                        exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+            let pv_draw = (|pool: &mut media::VideoPool, comp: &mut compositor::Compositor, used: &mut Vec<String>| -> anyhow::Result<()> {
+                let src_t = off + (t - c.timeline_start);
+                const COLOR: u32 = 1; // MF enumerates this pv's 2 video tracks in reverse mux order
+                const MATTE: u32 = 0;
+                let (ctex, cwh) = {
+                    let s = pool.get(d3d, &path, COLOR, false, src_t)?;
+                    if fast {
+                        if Instant::now() < f_deadline {
+                            exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                        } else {
+                            exact = false;
+                        }
                     } else {
-                        exact = false;
+                        s.ensure_frame(d3d, src_t)
+                            .map_err(|e| e.context(format!("pv-color {} src_t={src_t:.2}", s.name)))?;
                     }
-                } else {
-                    s.ensure_frame(d3d, src_t)
-                        .map_err(|e| e.context(format!("pv-color {} src_t={src_t:.2}", s.name)))?;
-                }
-                (s.bgra.clone(), (s.width, s.height))
-            };
-            let mtex = {
-                let s = pool.get(d3d, &path, MATTE, true, src_t)?;
-                if fast {
-                    if Instant::now() < f_deadline {
-                        exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                    (s.bgra.clone(), (s.width, s.height))
+                };
+                let mtex = {
+                    let s = pool.get(d3d, &path, MATTE, true, src_t)?;
+                    if fast {
+                        if Instant::now() < f_deadline {
+                            exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                        } else {
+                            exact = false;
+                        }
                     } else {
-                        exact = false;
+                        s.ensure_frame(d3d, src_t)
+                            .map_err(|e| e.context(format!("pv-matte {} src_t={src_t:.2}", s.name)))?;
                     }
-                } else {
-                    s.ensure_frame(d3d, src_t)
-                        .map_err(|e| e.context(format!("pv-matte {} src_t={src_t:.2}", s.name)))?;
+                    s.bgra.clone()
+                };
+                comp.draw(d3d, &ctex, cwh, (b.x, b.y, b.width, b.height), false, Some(&mtex))?;
+                used.push(path.clone());
+                Ok(())
+            })(pool, comp, &mut used);
+            if let Err(e) = pv_draw {
+                eprintln!("pv fallback {key}: {e:#}");
+                if let Some(p2) = draw_plain_pip(doc, d3d, pool, comp, c, b, t, original, fast)? {
+                    used.push(p2);
                 }
-                s.bgra.clone()
-            };
-            comp.draw(d3d, &ctex, cwh, (b.x, b.y, b.width, b.height), false, Some(&mtex))?;
-            used.push(path);
-        } else if let Some(aid) = c.asset_id.as_deref() {
+            }
+        } else if let Some(aid) = c.asset_id.as_deref() {        } else if let Some(aid) = c.asset_id.as_deref() {
             let path = doc.asset_path_q(aid, original);
             let src_t = c.source_start + (t - c.timeline_start);
             let vs = pool.get(d3d, &path, 0, false, src_t)?;
@@ -1267,10 +1298,10 @@ fn media_thread(shared: Arc<Shared>) {
                 // THEN: open every decoder the rest of the timeline needs (a cold open
                 // mid-play is a 100-200ms media-thread stall = visible gap)
                 warm_done = warm_open_pass(&doc, &d3d, &mut pool, &masks);
-            } else if {
+            } else if shared.aux_req.lock().unwrap().is_empty() && {
                 // Olive-style background fill: compose ORIGINAL-quality frames outward
-                // from the playhead into the frame cache (one per idle slice). Everything
-                // it covers turns scrubs/jumps into ~5ms cache hits.
+                // from the playhead into the frame cache (one per idle slice). AFTER
+                // thumbnails/waveforms (visible UI beats invisible cache warmth).
                 let mut target = None;
                 'fill: for step in 0..(45.0 * 30.0) as i64 {
                     for dir in [1i64, -1i64] {
@@ -1311,18 +1342,21 @@ fn media_thread(shared: Arc<Shared>) {
                 // idle: chew on one aux job slice (thumbnails / waveform peaks)
                 let job = { shared.aux_req.lock().unwrap().first().cloned() };
                 match job {
-                    Some(AuxJob::Thumb { asset_id, path }) => {
-                        let got = media::thumbnail(&d3d, &path, 1.0, 96).ok();
+                    Some(AuxJob::Thumb { asset_id, path, bucket }) => {
+                        let tt = bucket as f64 * THUMB_BUCKET_S + THUMB_BUCKET_S * 0.5;
+                        let got = media::thumbnail(&d3d, &path, tt, 96).ok();
                         {
                             let mut a = shared.aux.lock().unwrap();
                             if let Some(t) = got {
-                                a.thumbs.insert(asset_id.clone(), t);
+                                a.thumbs.insert((asset_id.clone(), bucket), t);
                             } else {
-                                a.thumbs.insert(asset_id.clone(), (1, 1, vec![40, 40, 40, 255]));
+                                a.thumbs.insert((asset_id.clone(), bucket), (1, 1, vec![40, 40, 40, 255]));
                             }
                             a.ver += 1;
                         }
-                        shared.aux_req.lock().unwrap().retain(|j| !matches!(j, AuxJob::Thumb { asset_id: a2, .. } if *a2 == asset_id));
+                        shared.aux_req.lock().unwrap().retain(
+                            |j| !matches!(j, AuxJob::Thumb { asset_id: a2, bucket: b2, .. } if *a2 == asset_id && *b2 == bucket),
+                        );
                     }
                     Some(AuxJob::Peaks { asset_id, path }) => {
                         if peak_scan.as_ref().map(|(id, _)| id != &asset_id).unwrap_or(true) {
@@ -1364,12 +1398,13 @@ struct App {
     redo: Vec<serde_json::Value>,
     save_at: Option<Instant>,
     salt: u64,
-    thumbs: std::collections::HashMap<String, egui::TextureHandle>,
+    thumbs: std::collections::HashMap<(String, i64), egui::TextureHandle>,
     peaks: std::collections::HashMap<String, (f64, Vec<f32>)>,
     aux_ver: u64,
     tex: Option<egui::TextureHandle>,
     last_seq: u64,
     playing: bool,
+    show_help: bool,
     /// clip_id -> popout bake display state (polled from the cache dir, not the server)
     pop_states: std::collections::HashMap<String, PopState>,
     bake_results: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
@@ -1451,6 +1486,7 @@ impl App {
             tex: None,
             last_seq: 0,
             playing: false,
+            show_help: false,
             pop_states: Default::default(),
             bake_results: Default::default(),
             last_pop_poll: Instant::now(),
@@ -1836,6 +1872,29 @@ impl App {
             ((h - ruler_h - 4.0) / (self.doc.seq.tracks.len().max(1) as f32)).clamp(16.0, 42.0);
         let mut clips_drawn = 0usize;
         let mut hits: Vec<(egui::Rect, String)> = Vec::new();
+        // Filmora-style unified A/V clips: audio linked to a video/overlay clip is DRAWN
+        // as part of that clip (waveform strip along its bottom) instead of duplicating a
+        // clip on the audio lane. Standalone audio (BGM etc.) stays on the audio lane.
+        let linked_av: std::collections::HashSet<String> = {
+            let vids: std::collections::HashSet<&str> = self
+                .doc
+                .seq
+                .tracks
+                .iter()
+                .filter(|tr| tr.kind == "video" || tr.kind == "overlay")
+                .flat_map(|tr| tr.clips.iter())
+                .filter_map(|c| c.link_id.as_deref())
+                .collect();
+            self.doc
+                .seq
+                .tracks
+                .iter()
+                .filter(|tr| tr.kind == "audio")
+                .flat_map(|tr| tr.clips.iter())
+                .filter(|c| c.link_id.as_deref().map(|l| vids.contains(l)).unwrap_or(false))
+                .map(|c| c.id.clone())
+                .collect()
+        };
         for (li, tr) in self.doc.seq.tracks.iter().enumerate() {
             let y0 = rect.top() + ruler_h + 2.0 + li as f32 * lane_h;
             let color = match tr.kind.as_str() {
@@ -1846,6 +1905,9 @@ impl App {
                 _ => egui::Color32::from_gray(90),
             };
             for c in &tr.clips {
+                if tr.kind == "audio" && linked_av.contains(&c.id) {
+                    continue; // drawn as part of its video clip
+                }
                 let x0 = rect.left() + (c.timeline_start as f32) * self.pps - self.scroll_x;
                 let x1 = rect.left() + (c.timeline_end as f32) * self.pps - self.scroll_x;
                 if x1 < rect.left() || x0 > rect.right() {
@@ -1911,23 +1973,53 @@ impl App {
                     }
                 }
                 if (tr.kind == "video" || tr.kind == "overlay") && !is_pop {
-                    if let Some(th) = c.asset_id.as_ref().and_then(|a| self.thumbs.get(a)) {
+                    if let Some(aid) = c.asset_id.as_ref() {
+                        // FILMSTRIP: each tile shows the actual source frame at its position
                         let tile_w = (r.height() * 16.0 / 9.0).max(8.0);
-                        let mut x = r.left();
+                        let mut x = x0.max(rect.left()); // start at the clip's true left edge
                         while x < r.right() {
-                            let tr2 = egui::Rect::from_min_max(
-                                egui::pos2(x, r.top()),
-                                egui::pos2((x + tile_w).min(r.right()), r.bottom()),
-                            );
-                            let frac = tr2.width() / tile_w;
-                            p.image(
-                                th.id(),
-                                tr2,
-                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(frac, 1.0)),
-                                egui::Color32::from_white_alpha(210),
-                            );
+                            let tt = c.source_start
+                                + (((x - x0) / self.pps) as f64).max(0.0);
+                            let b = (tt / THUMB_BUCKET_S) as i64;
+                            let th = self
+                                .thumbs
+                                .get(&(aid.clone(), b))
+                                .or_else(|| self.thumbs.get(&(aid.clone(), 0)));
+                            if let Some(th) = th {
+                                let tr2 = egui::Rect::from_min_max(
+                                    egui::pos2(x, r.top()),
+                                    egui::pos2((x + tile_w).min(r.right()), r.bottom()),
+                                );
+                                let frac = tr2.width() / tile_w;
+                                p.image(
+                                    th.id(),
+                                    tr2,
+                                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(frac, 1.0)),
+                                    egui::Color32::from_white_alpha(210),
+                                );
+                            }
                             x += tile_w;
                         }
+                    }
+                }
+                if (tr.kind == "video" || tr.kind == "overlay") && c.link_id.is_some() {
+                    // unified A/V: waveform ribbon along the clip's bottom quarter
+                    if let Some((spb, pk)) = c.asset_id.as_ref().and_then(|a| self.peaks.get(a)) {
+                        let base_y = r.bottom() - 1.0;
+                        let amp = (r.height() * 0.28).min(12.0);
+                        let n = (r.width() as usize).max(1);
+                        let mut pts: Vec<egui::Pos2> = Vec::with_capacity(n);
+                        for i in 0..n {
+                            let tt = c.source_start
+                                + ((i as f32 / n as f32) * (c.timeline_end - c.timeline_start) as f32) as f64;
+                            let idx = (tt / spb) as usize;
+                            let v = pk.get(idx).copied().unwrap_or(0.0).min(1.0);
+                            pts.push(egui::pos2(r.left() + i as f32, base_y - v * amp));
+                        }
+                        p.add(egui::Shape::line(
+                            pts,
+                            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(190, 255, 205, 170)),
+                        ));
                     }
                 }
                 if tr.kind == "audio" {
@@ -2127,8 +2219,14 @@ impl eframe::App for App {
         if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
             if !self.selected.is_empty() {
                 let ids = edits::expand_links(&self.doc.raw, &self.selected);
+                let ripple = ctx.input(|i| i.modifiers.shift);
                 self.selected.clear();
-                self.apply_edit(true, |raw| edits::delete_clips(raw, &ids));
+                if ripple {
+                    // Shift+Del: delete AND close the gap (ripple / 左詰め)
+                    self.apply_edit(true, |raw| edits::ripple_delete(raw, &ids));
+                } else {
+                    self.apply_edit(true, |raw| edits::delete_clips(raw, &ids));
+                }
             }
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
@@ -2175,6 +2273,32 @@ impl eframe::App for App {
                     self.push_req(false);
                 }
             }
+        }
+        // Home/End = timeline start/end, +/- = zoom around the playhead
+        if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+            self.t = 0.0;
+            self.playing = false;
+            self.resume_pending = None;
+            self.push_req(false);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::End)) {
+            self.t = self.dur;
+            self.playing = false;
+            self.resume_pending = None;
+            self.push_req(false);
+        }
+        for (key, dir) in [(egui::Key::Plus, 1.0f32), (egui::Key::Equals, 1.0), (egui::Key::Minus, -1.0)] {
+            if ctx.input(|i| i.key_pressed(key)) {
+                let old_pps = self.pps;
+                self.pps = (self.pps * (1.0 + dir * 0.25)).clamp(1.0, 400.0);
+                // keep the playhead visually anchored while zooming
+                self.scroll_x = ((self.t as f32) * self.pps
+                    - ((self.t as f32) * old_pps - self.scroll_x))
+                    .max(0.0);
+            }
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F1) || i.key_pressed(egui::Key::Questionmark)) {
+            self.show_help = !self.show_help;
         }
         // frame step while paused (Filmora parity: arrow keys = +-1 frame)
         if !self.playing {
@@ -2227,7 +2351,7 @@ impl eframe::App for App {
 
         // aux results -> egui textures / peak store
         {
-            let mut fresh: Vec<(String, (usize, usize, Vec<u8>))> = Vec::new();
+            let mut fresh: Vec<((String, i64), (usize, usize, Vec<u8>))> = Vec::new();
             {
                 let a = self.shared.aux.lock().unwrap();
                 if a.ver != self.aux_ver {
@@ -2246,7 +2370,10 @@ impl eframe::App for App {
             }
             for (k, (w, h, rgba)) in fresh {
                 let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
-                self.thumbs.insert(k.clone(), ctx.load_texture(format!("th_{k}"), img, egui::TextureOptions::LINEAR));
+                self.thumbs.insert(
+                    k.clone(),
+                    ctx.load_texture(format!("th_{}_{}", k.0, k.1), img, egui::TextureOptions::LINEAR),
+                );
             }
         }
         // request thumbs/peaks for assets on the timeline that lack them
@@ -2257,8 +2384,19 @@ impl eframe::App for App {
                 for tr in &self.doc.seq.tracks {
                     for c in &tr.clips {
                         let Some(aid) = c.asset_id.clone() else { continue };
-                        if (tr.kind == "video" || tr.kind == "overlay") && !self.thumbs.contains_key(&aid) {
-                            want.push(AuxJob::Thumb { asset_id: aid.clone(), path: self.doc.asset_path(&aid) });
+                        if tr.kind == "video" || tr.kind == "overlay" {
+                            let s0 = c.source_start;
+                            let s1 = c.source_start + (c.timeline_end - c.timeline_start);
+                            let (b0, b1) = ((s0 / THUMB_BUCKET_S) as i64, (s1 / THUMB_BUCKET_S) as i64);
+                            for b in b0..=b1 {
+                                if !self.thumbs.contains_key(&(aid.clone(), b)) {
+                                    want.push(AuxJob::Thumb {
+                                        asset_id: aid.clone(),
+                                        path: self.doc.asset_path(&aid),
+                                        bucket: b,
+                                    });
+                                }
+                            }
                         }
                         if tr.kind == "audio" && !self.peaks.contains_key(&aid) {
                             want.push(AuxJob::Peaks { asset_id: aid.clone(), path: self.doc.asset_path(&aid) });
@@ -2339,6 +2477,33 @@ impl eframe::App for App {
                     });
                 }
             });
+        if self.show_help {
+            egui::Window::new("ショートカット (F1で閉じる)")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+                .show(ctx, |ui| {
+                    for (k, d) in [
+                        ("Space", "再生 / 一時停止"),
+                        ("← →", "1フレーム移動"),
+                        ("Home / End", "先頭 / 末尾へ"),
+                        ("+ / -", "ズーム"),
+                        ("S", "分割"),
+                        ("E", "飛び出し 適用/解除"),
+                        ("Del", "削除"),
+                        ("Shift+Del", "削除して左詰め"),
+                        ("Ctrl+Z / Y", "元に戻す / やり直し"),
+                        ("Ctrl+クリック", "複数選択"),
+                        ("ドラッグ端", "トリム / 中央: 移動"),
+                        ("Ctrl+ホイール", "ズーム / ホイール: 横スクロール"),
+                    ] {
+                        ui.horizontal(|ui| {
+                            ui.monospace(format!("{k:<14}"));
+                            ui.label(d);
+                        });
+                    }
+                });
+        }
         ctx.request_repaint();
     }
 }
