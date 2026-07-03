@@ -70,6 +70,7 @@ pub struct VideoStream {
     pub height: u32,
     pending: Option<(f64, IMFSample)>,
     last_pts: f64,
+    prime_target: Option<f64>,
     // NV12 -> BGRA converter
     vp: ID3D11VideoProcessor,
     vp_enum: ID3D11VideoProcessorEnumerator,
@@ -187,6 +188,7 @@ impl VideoStream {
                 height,
                 pending: None,
                 last_pts: -1.0,
+                prime_target: None,
                 vp,
                 vp_enum,
                 bgra,
@@ -263,6 +265,47 @@ impl VideoStream {
         self.pending.as_ref().map(|(p, _)| *p)
     }
 
+    /// Incremental prime: advance the decoder TOWARD src_t a couple of frames per call and
+    /// return true when positioned. A full accurate seek on a 4K long-GOP original costs
+    /// ~200ms — running that synchronously on the media thread froze video AND starved the
+    /// audio buffer (the "stutter moved earlier + audio breaks" bug). Sliced, it costs
+    /// ≤~12ms per loop iteration.
+    pub fn prime_step(&mut self, src_t: f64) -> Result<bool> {
+        let positioned = self
+            .pending_pts()
+            .map(|p| (p - src_t).abs() < 0.4)
+            .unwrap_or(false)
+            || (self.last_pts >= 0.0 && (self.last_pts - src_t).abs() < 0.4);
+        if positioned {
+            self.prime_target = None;
+            return Ok(true);
+        }
+        if self.prime_target.map(|pt| (pt - src_t).abs() > 0.05).unwrap_or(true) {
+            unsafe {
+                let pv = PROPVARIANT::from((src_t * HNS) as i64);
+                self.reader.SetCurrentPosition(&GUID::zeroed(), &pv)?;
+            }
+            self.prime_target = Some(src_t);
+            self.pending = None;
+        }
+        for _ in 0..4 {
+            match self.read_next()? {
+                Some((pts, sm)) => {
+                    if pts + 0.0005 >= src_t {
+                        self.pending = Some((pts, sm));
+                        self.prime_target = None;
+                        return Ok(true);
+                    }
+                }
+                None => {
+                    self.prime_target = None;
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Lookahead: position the decoder AT src_t without touching the last shown frame.
     /// No-op if already there (or within the decode-ahead window).
     pub fn prime(&mut self, _d3d: &D3d, src_t: f64) -> Result<()> {
@@ -279,7 +322,23 @@ impl VideoStream {
 
     /// Ensure `bgra` holds the newest frame with pts <= t. Seeks on backward/far-forward jumps.
     pub fn ensure_frame(&mut self, d3d: &D3d, t: f64) -> Result<bool> {
+        // a prime walk toward ~t is in flight: FINISH it (decode forward) instead of
+        // re-seeking — re-seek would restart the whole GOP walk from the keyframe
+        if let Some(pt) = self.prime_target {
+            if (pt - t).abs() < 0.6 {
+                while let Some((pts, sm)) = self.read_next()? {
+                    if pts + 0.0005 >= t.min(pt) {
+                        self.pending = Some((pts, sm));
+                        break;
+                    }
+                }
+                self.prime_target = None;
+            } else {
+                self.prime_target = None;
+            }
+        }
         let jump = t < self.last_pts - 0.05 || t > self.last_pts + 1.0 || self.last_pts < 0.0;
+        let jump = jump && !self.pending_pts().map(|p| (p - t).abs() < 0.6).unwrap_or(false);
         if jump {
             self.seek(t)?;
             // present the first frame at/after t immediately (scrub shows something NOW)
@@ -481,6 +540,25 @@ impl VideoPool {
         Ok(&mut entry[best].vs)
     }
 
+    /// True if (path,stream) already has `n` open instances.
+    pub fn has_instances(&self, path: &str, stream: u32, n: usize) -> bool {
+        self.slots
+            .get(&(path.to_string(), stream))
+            .map(|v| v.len() >= n)
+            .unwrap_or(false)
+    }
+
+    /// Open an instance WITHOUT seeking (idle warm-up: a mid-playback MFCreateSourceReader
+    /// on a 14GB original costs ~100-200ms on this thread — never pay it while playing).
+    pub fn warm_open(&mut self, d3d: &D3d, path: &str, stream: u32, full_range: bool, instances: usize) -> Result<()> {
+        let key = (path.to_string(), stream);
+        let entry = self.slots.entry(key).or_default();
+        while entry.len() < instances.min(2) {
+            entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
+        }
+        Ok(())
+    }
+
     /// Prime the OFF-SCREEN instance at an upcoming in-point (opens the spare if needed).
     pub fn prime_spare(
         &mut self,
@@ -515,7 +593,8 @@ impl VideoPool {
         if entry[spare].used_frame == frame_no {
             return Ok(()); // everything is on screen; do not disturb
         }
-        entry[spare].vs.prime(d3d, src_in)
+        let _ = d3d;
+        entry[spare].vs.prime_step(src_in).map(|_| ())
     }
 }
 
@@ -607,6 +686,7 @@ impl AudioDecoder {
 /// WASAPI shared render + per-asset decoders. `clock()` (frames played) is the master
 /// clock while playing. `fill()` pulls PCM according to the document's audio track.
 pub struct AudioOut {
+    pub underruns: u64,
     latency_s: f64,
     client: IAudioClient,
     render: IAudioRenderClient,
@@ -638,6 +718,7 @@ impl AudioOut {
             let latency_s = client.GetStreamLatency().map(|l| l as f64 / 10_000_000.0).unwrap_or(0.0);
             eprintln!("audio device latency: {:.1}ms", latency_s * 1000.0);
             Ok(Self {
+                underruns: 0,
                 latency_s,
                 client,
                 render,
@@ -687,6 +768,9 @@ impl AudioOut {
     pub fn fill(&mut self, doc: &crate::model::Doc) -> Result<()> {
         unsafe {
             let padding = self.client.GetCurrentPadding()?;
+            if self.started && padding == 0 {
+                self.underruns += 1; // the device ran dry — this is an audible break
+            }
             let avail = self.buffer_frames - padding;
             if avail == 0 {
                 if !self.started {
