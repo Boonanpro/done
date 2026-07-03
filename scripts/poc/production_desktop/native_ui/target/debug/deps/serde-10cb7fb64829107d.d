@@ -1,0 +1,14 @@
+D:\done-desktop\scripts\poc\production_desktop\native_ui\target\debug\deps\serde-10cb7fb64829107d.d: C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs D:\done-desktop\scripts\poc\production_desktop\native_ui\target\debug\build\serde-e509b2a8907d6139\out/private.rs
+
+D:\done-desktop\scripts\poc\production_desktop\native_ui\target\debug\deps\libserde-10cb7fb64829107d.rlib: C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs D:\done-desktop\scripts\poc\production_desktop\native_ui\target\debug\build\serde-e509b2a8907d6139\out/private.rs
+
+D:\done-desktop\scripts\poc\production_desktop\native_ui\target\debug\deps\libserde-10cb7fb64829107d.rmeta: C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs D:\done-desktop\scripts\poc\production_desktop\native_ui\target\debug\build\serde-e509b2a8907d6139\out/private.rs
+
+C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs:
+C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs:
+C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs:
+C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs:
+C:\Users\Owner\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs:
+D:\done-desktop\scripts\poc\production_desktop\native_ui\target\debug\build\serde-e509b2a8907d6139\out/private.rs:
+
+# env-dep:OUT_DIR=D:\\done-desktop\\scripts\\poc\\production_desktop\\native_ui\\target\\debug\\build\\serde-e509b2a8907d6139\\out
