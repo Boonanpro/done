@@ -1,0 +1,2 @@
+# Rust build artifacts (native NLE crates) - never commit target/
+*/target/

@@ -3,10 +3,10 @@ name = "native_ui"
 version = "0.1.0"
 edition = "2021"
 
-# N0: fully-native production editor UI (no WebView2, no JSON seam).
-# Step 1 = GPU-drawn timeline over real contents.json proving Filmora-class feel
-# (instant scrub, smooth zoom/scroll @60fps with 300 clips). Step 2 wires the
-# a1_engine (GES) in-process + DComp video underlay.
+# M1+M2: the fully-native editor — one process, zero seams.
+# egui UI (GPU-drawn timeline) + M0 frame server (MF/D3D11 HW decode) +
+# D3D11 shader compositor (layers + pop-out color×matte). Loads the REAL
+# room contents.json (same document Dan reads/writes).
 
 [[bin]]
 name = "native_ui"
@@ -17,3 +17,17 @@ eframe = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_Media_MediaFoundation",
+  "Win32_Media_Audio",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Direct3D_Fxc",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+]
