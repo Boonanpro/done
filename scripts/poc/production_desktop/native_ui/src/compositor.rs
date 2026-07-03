@@ -86,7 +86,9 @@ pub struct Compositor {
     pub height: u32,
     canvas: ID3D11Texture2D,
     rtv: ID3D11RenderTargetView,
-    staging: ID3D11Texture2D,
+    staging: [ID3D11Texture2D; 2],
+    staging_i: usize,
+    staging_warm: bool,
     vs: ID3D11VertexShader,
     ps_plain: ID3D11PixelShader,
     ps_popout: ID3D11PixelShader,
@@ -121,8 +123,10 @@ impl Compositor {
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
                 ..desc
             };
-            let mut staging: Option<ID3D11Texture2D> = None;
-            d3d.device.CreateTexture2D(&sdesc, None, Some(&mut staging))?;
+            let mut staging0: Option<ID3D11Texture2D> = None;
+            d3d.device.CreateTexture2D(&sdesc, None, Some(&mut staging0))?;
+            let mut staging1: Option<ID3D11Texture2D> = None;
+            d3d.device.CreateTexture2D(&sdesc, None, Some(&mut staging1))?;
 
             let vsb = compile("vs", "vs_5_0")?;
             let psb1 = compile("ps_plain", "ps_5_0")?;
@@ -176,7 +180,9 @@ impl Compositor {
                 height,
                 canvas,
                 rtv: rtv.unwrap(),
-                staging: staging.unwrap(),
+                staging: [staging0.unwrap(), staging1.unwrap()],
+                staging_i: 0,
+                staging_warm: false,
                 vs: vs.unwrap(),
                 ps_plain: ps_plain.unwrap(),
                 ps_popout: ps_popout.unwrap(),
@@ -258,12 +264,22 @@ impl Compositor {
         }
     }
 
-    /// Read the canvas back as RGBA (for the egui preview texture).
+    /// Read the canvas back as RGBA — DOUBLE-BUFFERED: copy into staging[i], map
+    /// staging[i-1] (last frame). Mapping the just-copied one stalls on the whole in-flight
+    /// GPU frame (measured 30-85ms); mapping the previous is a pure memcpy for +1 frame of
+    /// preview latency.
     pub fn readback(&mut self, d3d: &D3d) -> Result<()> {
         unsafe {
-            d3d.ctx.CopyResource(&self.staging, &self.canvas);
+            let cur = self.staging_i;
+            let prev = 1 - cur;
+            d3d.ctx.CopyResource(&self.staging[cur], &self.canvas);
+            self.staging_i = prev;
+            if !self.staging_warm {
+                self.staging_warm = true;
+                return Ok(()); // first frame: nothing older to map yet
+            }
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            d3d.ctx.Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            d3d.ctx.Map(&self.staging[prev], 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
             let pitch = mapped.RowPitch as usize;
             let src = mapped.pData as *const u8;
             let (w, h) = (self.width as usize, self.height as usize);
@@ -277,7 +293,7 @@ impl Compositor {
                     out[x * 4 + 3] = 255;
                 }
             }
-            d3d.ctx.Unmap(&self.staging, 0);
+            d3d.ctx.Unmap(&self.staging[prev], 0);
             Ok(())
         }
     }

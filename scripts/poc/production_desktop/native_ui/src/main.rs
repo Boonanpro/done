@@ -39,7 +39,8 @@ struct FrameOut {
     rgba: Vec<u8>,
     seq: u64,
     comp_ms: f32,
-    comp_max: f32, // worst compose over the last second (boundary-stall detector)
+    comp_max: f32,  // worst compose over the last second
+    gap_max: f32,   // worst wall-clock gap between published frames (what the eye sees)
     quality: &'static str,
 }
 
@@ -60,9 +61,49 @@ struct Shared {
     req: Mutex<Req>,
     frame: Mutex<FrameOut>,
     clock_bits: AtomicU64,
+    underruns: AtomicU64,
     doc: Mutex<Arc<model::Doc>>,
     aux_req: Mutex<Vec<AuxJob>>,
     aux: Mutex<AuxOut>,
+}
+
+/// Audio on its own thread: the WASAPI buffer is refilled no matter what the video side is
+/// doing, so an expensive video seek can never make sound stutter again. Also owns the
+/// master clock and restarts the stream when the playhead jumps (scrub while playing).
+fn audio_thread(shared: Arc<Shared>) {
+    let Ok(mut audio) = media::AudioOut::new() else { return };
+    let mut was_playing = false;
+    let mut last_gen = u64::MAX;
+    loop {
+        let (playing, t_req, gen) = {
+            let r = shared.req.lock().unwrap();
+            (r.playing, r.t, r.gen)
+        };
+        let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
+        if playing != was_playing {
+            if playing {
+                let _ = audio.start_at(t_req);
+                shared.clock_bits.store(t_req.to_bits(), Ordering::Relaxed);
+            } else {
+                audio.stop();
+            }
+            was_playing = playing;
+            last_gen = gen;
+        } else if playing && gen != last_gen {
+            last_gen = gen;
+            let cur = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
+            if (t_req - cur).abs() > 0.3 {
+                let _ = audio.start_at(t_req); // playhead jumped mid-play
+                shared.clock_bits.store(t_req.to_bits(), Ordering::Relaxed);
+            }
+        }
+        if playing {
+            let _ = audio.fill(&doc);
+            shared.clock_bits.store(audio.clock().to_bits(), Ordering::Relaxed);
+            shared.underruns.store(audio.underruns, Ordering::Relaxed);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -87,8 +128,12 @@ fn compose(
         let (b, o) = doc.active_video(t);
         (b.cloned(), o.into_iter().cloned().collect::<Vec<_>>())
     };
+    let _t_begin = Instant::now();
     comp.begin(d3d);
+    let mut _ms_base = 0f64;
+    let mut _ms_ov = 0f64;
     if let Some(c) = base {
+        let _t = Instant::now();
         let path = doc.asset_path_q(c.asset_id.as_deref().unwrap(), original);
         let src_t = c.source_start + (t - c.timeline_start);
         let vs = pool.get(d3d, &path, 0, false, src_t)?;
@@ -97,7 +142,9 @@ fn compose(
         let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
         comp.draw(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None)?;
         used.push(path);
+        _ms_base = _t.elapsed().as_secs_f64() * 1000.0;
     }
+    let _t = Instant::now();
     for c in &overlays {
         let b = c.display_box();
         if let Some((rel, off)) = c.popout() {
@@ -133,7 +180,14 @@ fn compose(
             used.push(path);
         }
     }
+    _ms_ov = _t.elapsed().as_secs_f64() * 1000.0;
+    let _t = Instant::now();
     comp.readback(d3d)?;
+    let _ms_rb = _t.elapsed().as_secs_f64() * 1000.0;
+    let total = _t_begin.elapsed().as_secs_f64() * 1000.0;
+    if total > 40.0 {
+        eprintln!("slow compose t={t:.2}: base={_ms_base:.0} ov={_ms_ov:.0} rb={_ms_rb:.0} total={total:.0}");
+    }
     Ok(used)
 }
 
@@ -151,17 +205,18 @@ fn prime_upcoming(
             continue;
         }
         for c in &tr.clips {
-            if c.timeline_start <= t || c.timeline_start > t + 0.8 {
+            if c.timeline_start <= t || c.timeline_start > t + 3.0 {
                 continue;
             }
-            let (path, src_in) = if let Some((rel, off)) = c.popout() {
-                (doc.rel_path(&rel), off)
+            if let Some((rel, off)) = c.popout() {
+                let path = doc.rel_path(&rel);
+                let src_in = off + (c.timeline_start - c.timeline_start); // = off
+                let _ = pool.prime_spare(d3d, &path, 0, true, src_in + 0.0); // matte (full range)
+                let _ = pool.prime_spare(d3d, &path, 1, false, src_in); // color
             } else if let Some(aid) = c.asset_id.as_deref() {
-                (doc.asset_path_q(aid, original), c.source_start)
-            } else {
-                continue;
-            };
-            let _ = pool.prime_spare(d3d, &path, 0, false, src_in);
+                let path = doc.asset_path_q(aid, original);
+                let _ = pool.prime_spare(d3d, &path, 0, false, c.source_start);
+            }
             let _ = used;
         }
     }
@@ -190,41 +245,75 @@ fn probe_duration(path: &str) -> Option<f64> {
     }
 }
 
+/// Open ONE not-yet-open decoder instance per call (idle time only). Returns true when
+/// every stream the timeline can hit is pre-opened, so playback never pays an open.
+fn warm_open_pass(doc: &model::Doc, d3d: &media::D3d, pool: &mut media::VideoPool) -> bool {
+    use std::collections::HashMap;
+    let mut count: HashMap<String, usize> = HashMap::new();
+    let mut pops: Vec<String> = Vec::new();
+    for tr in &doc.seq.tracks {
+        if tr.kind != "video" && tr.kind != "overlay" {
+            continue;
+        }
+        for c in &tr.clips {
+            if let Some((rel, _)) = c.popout() {
+                let p = doc.rel_path(&rel);
+                if std::path::Path::new(&p).exists() && !pops.contains(&p) {
+                    pops.push(p);
+                }
+            } else if let Some(aid) = c.asset_id.as_deref() {
+                *count.entry(doc.asset_path_q(aid, true)).or_default() += 1;
+            }
+        }
+    }
+    for (path, n) in count {
+        let want = if n >= 2 { 2 } else { 1 };
+        if !pool.has_instances(&path, 0, want) {
+            let _ = pool.warm_open(d3d, &path, 0, false, want);
+            return false; // one open per idle slice
+        }
+    }
+    for p in pops {
+        if !pool.has_instances(&p, 0, 1) {
+            let _ = pool.warm_open(d3d, &p, 0, true, 1);
+            return false;
+        }
+        if !pool.has_instances(&p, 1, 1) {
+            let _ = pool.warm_open(d3d, &p, 1, false, 1);
+            return false;
+        }
+    }
+    true
+}
+
 fn media_thread(shared: Arc<Shared>) {
     let run = || -> anyhow::Result<()> {
         let d3d = media::D3d::new()?;
         let mut pool = media::VideoPool::new();
         let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H)?;
-        let mut audio = media::AudioOut::new().ok();
-        let mut was_playing = false;
+        let mut was_playing;
         let mut last_gen = u64::MAX;
         let mut last_t = -1.0f64;
         let mut seq = 0u64;
         let mut peak_scan: Option<(String, media::PeakScan)> = None;
         let mut comp_hist: Vec<(Instant, f32)> = Vec::new();
+        let mut gap_hist: Vec<(Instant, f32)> = Vec::new();
+        let mut last_pub: Option<Instant> = None;
+        let mut warm_done = false;
+        let mut last_doc_ptr: usize = 0;
         loop {
             let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
+            let ptr = Arc::as_ptr(&doc) as usize;
+            if ptr != last_doc_ptr {
+                last_doc_ptr = ptr;
+                warm_done = false;
+            }
             let dur = doc.duration();
             let r = shared.req.lock().unwrap().clone();
-            if r.playing != was_playing {
-                if let Some(a) = audio.as_mut() {
-                    if r.playing {
-                        let _ = a.start_at(r.t);
-                    } else {
-                        a.stop();
-                    }
-                }
-                was_playing = r.playing;
-            }
+            was_playing = r.playing;
+            let _ = was_playing;
             let t = if r.playing {
-                if let Some(a) = audio.as_mut() {
-                    let _ = a.fill(&doc);
-                    let c = a.clock().min(dur);
-                    shared.clock_bits.store(c.to_bits(), Ordering::Relaxed);
-                    c
-                } else {
-                    r.t
-                }
+                f64::from_bits(shared.clock_bits.load(Ordering::Relaxed)).min(dur)
             } else {
                 r.t
             };
@@ -245,6 +334,15 @@ fn media_thread(shared: Arc<Shared>) {
                             comp_hist.push((now, f.comp_ms));
                             comp_hist.retain(|(t2, _)| now.duration_since(*t2).as_secs_f32() < 1.0);
                             f.comp_max = comp_hist.iter().map(|(_, v)| *v).fold(0.0, f32::max);
+                            if r.playing {
+                                if let Some(lp) = last_pub {
+                                    let g = now.duration_since(lp).as_secs_f32() * 1000.0;
+                                    gap_hist.push((now, g));
+                                }
+                                gap_hist.retain(|(t2, _)| now.duration_since(*t2).as_secs_f32() < 2.0);
+                                f.gap_max = gap_hist.iter().map(|(_, v)| *v).fold(0.0, f32::max);
+                            }
+                            last_pub = Some(now);
                             f.quality = if original { "original" } else { "proxy" };
                         }
                         if r.playing {
@@ -293,7 +391,13 @@ fn media_thread(shared: Arc<Shared>) {
                             shared.aux_req.lock().unwrap().retain(|j| !matches!(j, AuxJob::Peaks { asset_id: a2, .. } if *a2 == asset_id));
                         }
                     }
-                    None => std::thread::sleep(std::time::Duration::from_millis(3)),
+                    None => {
+                        if !warm_done {
+                            warm_done = warm_open_pass(&doc, &d3d, &mut pool);
+                        } else {
+                            std::thread::sleep(std::time::Duration::from_millis(3));
+                        }
+                    }
                 }
             }
         }
@@ -326,6 +430,8 @@ struct App {
     last_frames: Vec<Instant>,
     comp_ms: f32,
     comp_max: f32,
+    gap_max: f32,
+    underruns: u64,
     quality: &'static str,
     gen: u64,
 }
@@ -341,9 +447,11 @@ impl App {
                 seq: 0,
                 comp_ms: 0.0,
                 comp_max: 0.0,
+                gap_max: 0.0,
                 quality: "proxy",
             }),
             clock_bits: AtomicU64::new(0f64.to_bits()),
+            underruns: AtomicU64::new(0),
             doc: Mutex::new(doc.clone()),
             aux_req: Mutex::new(Vec::new()),
             aux: Mutex::new(AuxOut::default()),
@@ -353,6 +461,12 @@ impl App {
             std::thread::Builder::new()
                 .name("media".into())
                 .spawn(move || media_thread(shared))?;
+        }
+        {
+            let shared = shared.clone();
+            std::thread::Builder::new()
+                .name("audio".into())
+                .spawn(move || audio_thread(shared))?;
         }
         Ok(Self {
             doc,
@@ -377,6 +491,8 @@ impl App {
             last_frames: Vec::new(),
             comp_ms: 0.0,
             comp_max: 0.0,
+            gap_max: 0.0,
+            underruns: 0,
             quality: "proxy",
             gen: 0,
         })
@@ -728,10 +844,12 @@ impl App {
             rect.left_top() + egui::vec2(6.0, h - 16.0),
             egui::Align2::LEFT_TOP,
             format!(
-                "{} clips | comp {:.1}ms max {:.0}ms | ui {:.0}fps | {} | {}",
+                "{} clips | comp {:.1}ms max {:.0}ms | frame gap max {:.0}ms | audio drops {} | ui {:.0}fps | {} | {}",
                 clips_drawn,
                 self.comp_ms,
                 self.comp_max,
+                self.gap_max,
+                self.underruns,
                 self.ui_fps,
                 self.quality,
                 if self.playing { "PLAYING" } else { "PAUSED" }
@@ -807,6 +925,7 @@ impl eframe::App for App {
             self.playing = !self.playing;
             self.push_req(false);
         }
+        self.underruns = self.shared.underruns.load(Ordering::Relaxed);
         if self.playing {
             self.t = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
             if self.t >= self.dur - 0.05 {
@@ -822,6 +941,7 @@ impl eframe::App for App {
                 self.last_seq = f.seq;
                 self.comp_ms = f.comp_ms;
                 self.comp_max = f.comp_max;
+                self.gap_max = f.gap_max;
                 self.quality = f.quality;
                 let img = egui::ColorImage::from_rgba_unmultiplied(
                     [CANVAS_W as usize, CANVAS_H as usize],
