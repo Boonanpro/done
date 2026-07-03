@@ -341,6 +341,7 @@ fn compose(
     t: f64,
     original: bool,
     fast: bool, // scrub: budgeted seek — newest reachable frame now, exact frame on settle
+    exact_rb: bool, // interactive one-shot: synchronous readback (THIS frame's pixels)
 ) -> anyhow::Result<(Vec<String>, bool)> {
     pool.frame_no += 1;
     let mut used = Vec::new();
@@ -497,7 +498,11 @@ fn compose(
     }
     _ms_ov = _t.elapsed().as_secs_f64() * 1000.0;
     let _t = Instant::now();
-    comp.readback(d3d)?;
+    if exact_rb {
+        comp.readback_sync(d3d)?;
+    } else {
+        comp.readback(d3d)?;
+    }
     let _ms_rb = _t.elapsed().as_secs_f64() * 1000.0;
     let total = _t_begin.elapsed().as_secs_f64() * 1000.0;
     if total > 40.0 {
@@ -888,6 +893,7 @@ fn media_thread(shared: Arc<Shared>) {
         let mut masks: MaskMap = Default::default();
         let mut pts_maps: PtsMap = Default::default();
         let mut fcache = FrameCache::new();
+        let mut prev_was_compose = false;
         // Look-ahead ring: timeline frames composed AHEAD of the playhead on a fixed 30fps
         // grid. Presentation picks from the ring and NEVER waits for a decode — GOP walks
         // and source switches are paid in the ring's future (the Filmora mechanism).
@@ -935,7 +941,7 @@ fn media_thread(shared: Arc<Shared>) {
                         // the ring rebuilds — no more seconds of frozen video chasing a
                         // running clock
                         jump_to = Some(r.t);
-                        if let Ok(_snap) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, r.t, true, true) {
+                        if let Ok(_snap) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, r.t, true, true, true) {
                             seq += 1;
                             let mut f = shared.frame.lock().unwrap();
                             f.rgba.clear();
@@ -969,7 +975,7 @@ fn media_thread(shared: Arc<Shared>) {
                     let res = if from_cache {
                         Ok((Vec::new(), true))
                     } else {
-                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, true, false)
+                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, true, false, false)
                     };
                     ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
                     match res {
@@ -991,11 +997,15 @@ fn media_thread(shared: Arc<Shared>) {
                                 }
                                 shared.ring_level.store(rg.len(), Ordering::Relaxed);
                             }
-                            if !from_cache && len >= 6 && ms_comp < 25.0 {
-                                // cheap frames get cached opportunistically (lz4 ~5ms);
-                                // expensive ones must not steal more of the tick
-                                fcache.insert(next_t, &comp.rgba, t);
+                            if !from_cache && prev_was_compose && len >= 6 && ms_comp < 25.0 {
+                                // cheap frames get cached opportunistically (lz4 ~5ms).
+                                // ASYNC readback returns the PREVIOUS compose's pixels, so
+                                // the content belongs to next_t - STEP — keying it at
+                                // next_t poisoned the cache with shifted frames (the
+                                // "ちらちら" flicker on jumps into cached spans)
+                                fcache.insert(next_t - STEP, &comp.rgba, t);
                             }
+                            prev_was_compose = !from_cache;
                             ms_push = p0.elapsed().as_secs_f32() * 1000.0;
                             if len >= 8 {
                                 let p1 = Instant::now();
@@ -1086,7 +1096,7 @@ fn media_thread(shared: Arc<Shared>) {
                 // runs on auto-proxies too, ours were just 406x720 CRF28 mush before.
                 let original = !r.scrubbing;
                 let t0 = Instant::now();
-                match compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, original, r.scrubbing) {
+                match compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, original, r.scrubbing, true) {
                     Ok((used, exact)) => {
                         scrub_exact = !r.scrubbing || exact;
                         seq += 1;
@@ -1144,7 +1154,7 @@ fn media_thread(shared: Arc<Shared>) {
                     // finger resting mid-drag on a long-GOP spot: keep refining toward the
                     // exact frame, one budget slice per pass (converges like Filmora's
                     // "stop and the picture sharpens to the real frame")
-                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, true) {
+                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, true, true) {
                         scrub_exact = ex;
                         seq += 1;
                         let mut f = shared.frame.lock().unwrap();
@@ -1169,7 +1179,7 @@ fn media_thread(shared: Arc<Shared>) {
                     rg.back().map(|(ft, _)| ft + STEP).unwrap_or_else(|| (t / STEP).floor() * STEP)
                 };
                 if next_t <= dur {
-                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, true, false) {
+                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, true, false, false) {
                         let mut rg = shared.ring.lock().unwrap();
                         rg.push_back((next_t, comp.rgba.clone()));
                         shared.ring_level.store(rg.len(), Ordering::Relaxed);
@@ -1210,7 +1220,7 @@ fn media_thread(shared: Arc<Shared>) {
                     }
                 }
                 if let Some(ft) = target {
-                    if let Ok(_) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, true, false) {
+                    if let Ok(_) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, true, false, true) {
                         fcache.insert(ft, &comp.rgba, t);
                     }
                     if fcache.frames.len() % 300 == 0 {
@@ -2029,9 +2039,7 @@ fn main() -> eframe::Result<()> {
             while mask_build_pass(&doc, &d3d, &mut masks) {}
             let mut pts_maps: PtsMap = Default::default();
             while pts_load_pass(&doc, &mut pts_maps) {}
-            // twice: settle the double-buffered readback onto this exact frame
-            compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, false)?;
-            compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, false)?;
+            compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, false, true)?;
             let mut ppm = format!("P6\n{CANVAS_W} {CANVAS_H}\n255\n").into_bytes();
             for px in comp.rgba.chunks(4) {
                 ppm.extend_from_slice(&px[..3]);
@@ -2174,13 +2182,13 @@ fn main() -> eframe::Result<()> {
         let mut pts_maps: PtsMap = Default::default();
         while pts_load_pass(&doc, &mut pts_maps) {}
         let mut t = t0v;
-        let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true);
+        let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, true);
         let b0 = Instant::now();
         let mut worst = 0f64;
         for _ in 0..60 {
             t += 0.33;
             let c0 = Instant::now();
-            let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true);
+            let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, true);
             worst = worst.max(c0.elapsed().as_secs_f64() * 1000.0);
         }
         let ms = b0.elapsed().as_secs_f64() * 1000.0;

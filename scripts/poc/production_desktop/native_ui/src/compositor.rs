@@ -463,12 +463,26 @@ impl Compositor {
     /// GPU frame (measured 30-85ms); mapping the previous is a pure memcpy for +1 frame of
     /// preview latency.
     pub fn readback(&mut self, d3d: &D3d) -> Result<()> {
+        self.readback_inner(d3d, false)
+    }
+
+    /// SYNCHRONOUS readback: maps the frame just composed (one GPU sync, ~5-20ms).
+    /// For INTERACTIVE one-shot frames (click/seek/scrub-settle/cache fill) — the
+    /// double-buffered variant returns the PREVIOUS compose, which on a playhead jump
+    /// flashed the OLD position for a beat before the new frame arrived.
+    pub fn readback_sync(&mut self, d3d: &D3d) -> Result<()> {
+        self.readback_inner(d3d, true)
+    }
+
+    fn readback_inner(&mut self, d3d: &D3d, sync: bool) -> Result<()> {
         unsafe {
             let cur = self.staging_i;
             let prev = 1 - cur;
             d3d.ctx.CopyResource(&self.staging[cur], &self.canvas);
             self.staging_i = prev;
-            let map_src = if self.staging_warm {
+            let map_src = if sync {
+                cur
+            } else if self.staging_warm {
                 prev
             } else {
                 // first frame: map the JUST-copied staging synchronously (one-time GPU
