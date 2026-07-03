@@ -77,16 +77,45 @@ pub struct Effect {
     pub params: serde_json::Value,
 }
 
+/// Bake metadata ({key}.json, v7+) — everything the live matte compositor needs to place
+/// the ORIGINAL frame into the bake's canvas space and rebuild the static card masks.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PopMeta {
+    pub canvas: [u32; 2],
+    pub src_x: i32,
+    pub src_y: i32,
+    pub sw: u32,
+    pub sh: u32,
+    #[serde(rename = "box")]
+    pub bbox: [i32; 4], // px, py, ow, oh (canvas coords)
+    pub radius: i32,
+    #[serde(default)]
+    pub v: i32,
+}
+
+impl PopMeta {
+    pub fn load(path: &str) -> Option<Self> {
+        let txt = std::fs::read_to_string(path).ok()?;
+        let m: PopMeta = serde_json::from_str(&txt).ok()?;
+        (m.v >= 7 && m.canvas[0] > 0 && m.canvas[1] > 0 && m.sw > 0 && m.sh > 0).then_some(m)
+    }
+}
+
 impl Clip {
     pub fn dur(&self) -> f64 {
         self.timeline_end - self.timeline_start
     }
     /// Pop-out v4+: (pv relative path, source offset = source_start - bake_start).
     pub fn popout(&self) -> Option<(String, f64)> {
+        let (key, off) = self.popout_key()?;
+        Some((format!("popout-cache/{key}.pv.mp4"), off))
+    }
+    /// (overlay cache key, source offset into the baked files)
+    pub fn popout_key(&self) -> Option<(String, f64)> {
         let e = self.effects.iter().find(|e| e.kind == "popout")?;
         let key = e.params.get("overlay_key")?.as_str()?;
         let bs = e.params.get("bake_start")?.as_f64()?;
-        Some((format!("popout-cache/{key}.pv.mp4"), (self.source_start - bs).max(0.0)))
+        Some((key.to_string(), (self.source_start - bs).max(0.0)))
     }
     /// Display box in canvas fractions (position wins; else transform scale/pan; else full).
     pub fn display_box(&self) -> Pos {
