@@ -2937,6 +2937,23 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
                 break
         if not _done:
             raise RuntimeError("proxy encode failed (nvenc and libx264)")
+        # PTS sidecar (Filmora keeps the same table next to its proxies): every source video
+        # frame's pts in seconds. The native editor snaps proxy->original switches to these
+        # so VFR sources can't flicker by one frame when a scrub settles.
+        try:
+            _pr = subprocess.run(
+                [_ffmpeg().replace("ffmpeg.exe", "ffprobe.exe"), "-v", "error",
+                 "-select_streams", "v:0", "-show_entries", "packet=pts_time",
+                 "-of", "csv=p=0", str(src)],
+                capture_output=True, text=True, creationflags=creationflags, check=False,
+            )
+            _pts = sorted(float(x) for x in _pr.stdout.split() if x and x != "N/A")
+            if _pts:
+                _tmp = out_dir / f"{asset_id}_proxy.pts.json.tmp"
+                _tmp.write_text(json.dumps({"v": 1, "pts": [round(x, 6) for x in _pts]}))
+                _tmp.replace(out_dir / f"{asset_id}_proxy.pts.json")
+        except Exception:
+            pass  # sidecar is an enhancement, never block the proxy
         subprocess.run(
             [
                 _ffmpeg(),
