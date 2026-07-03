@@ -3155,10 +3155,11 @@ def _popout_bake_range(asset: dict[str, Any], ss: float, se: float) -> tuple[flo
 
 def _popout_key(asset_id: str, bs: float, be: float, box_px: tuple[int, int, int, int],
                 W: int, H: int, intensity: str, shadow: Any) -> str:
-    # v6: short-GOP bake (fast boundary/edit activation). v5 added full-range alpha +
+    # v7: accurate-seek time base (lipsync) + matte-only twin for the native live
+    # compositor. v6 short-GOP, v5 full-range alpha +
     # auto-extended canvas (margins). Bumping re-bakes older caches on next editor open.
     px, py, ow, oh = box_px
-    key_src = f"v6|{asset_id}|{bs:.3f}|{be:.3f}|{px},{py},{ow},{oh}|{W}x{H}|{intensity}|{bool(shadow is not False)}"
+    key_src = f"v7|{asset_id}|{bs:.3f}|{be:.3f}|{px},{py},{ow},{oh}|{W}x{H}|{intensity}|{bool(shadow is not False)}"
     return hashlib.sha1(key_src.encode()).hexdigest()[:16]
 
 
@@ -3173,7 +3174,8 @@ def _popout_bake_sync(source_path: Path, out_pv: Path, box_px: tuple[int, int, i
             "--W", str(W), "--H", str(H), "--box", f"{px},{py},{ow},{oh}",
             "--start", f"{bs:.3f}", "--duration", f"{max(0.1, be - bs):.3f}",
             "--intensity", intensity, "--fps", "30",
-            "--meta-file", str(out_pv.parent / f"{out_pv.name.split('.')[0]}.json")]
+            "--meta-file", str(out_pv.parent / f"{out_pv.name.split('.')[0]}.json"),
+            "--matte-out", str(out_pv.parent / f"{out_pv.name.split('.')[0]}.mt.mp4")]
     if shadow is False:
         args.append("--no-shadow")
     if progress_file is not None:

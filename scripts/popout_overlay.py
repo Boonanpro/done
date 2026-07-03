@@ -90,6 +90,9 @@ def main():
     ap.add_argument("--no-shadow", action="store_true"); ap.add_argument("--radius", type=int, default=None)
     ap.add_argument("--progress-file", default=None)
     ap.add_argument("--meta-file", default=None, help="write bake metadata (canvas margins) here")
+    ap.add_argument("--matte-out", default=None,
+                    help="also write a matte-only mp4 (v0=person alpha, v1=contact-shadow base) "
+                         "for the native live compositor (color comes from the ORIGINAL at runtime)")
     a = ap.parse_args()
     px, py, ow, oh = (int(v) for v in a.box.split(","))
     W, H = a.W, a.H
@@ -102,10 +105,15 @@ def main():
         # 1. extract source segment scaled so the PERSON is larger than the box: source height
         #    maps to oh/below (so only `below` fraction of person is inside the card).
         person_h = int(round(oh / below)); person_h -= person_h % 2  # even (yuv420p)
-        ss = ["-ss", str(a.start)] if a.start is not None else []
+        # ACCURATE seek: coarse input-seek 2s early (fast), exact output-side trim after.
+        # A single input-seek lands on the source frame grid, which baked a constant
+        # lipsync offset (tens of ms) into every overlay.
+        pre = max(0.0, (a.start or 0.0) - 2.0)
+        ss = ["-ss", f"{pre:.6f}"] if a.start is not None else []
+        fine = ["-ss", f"{(a.start or 0.0) - pre:.6f}"] if a.start is not None else []
         t = ["-t", str(a.duration)] if a.duration is not None else []
         seg = os.path.join(work, "seg.mp4")
-        subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", *ss, "-i", a.input, *t,
+        subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", *ss, "-i", a.input, *fine, *t,
                         "-vf", f"scale=-2:{person_h}", "-r", str(a.fps), "-an",
                         "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", seg, "-y"], check=True)
 
@@ -187,6 +195,18 @@ def main():
              "[a]alphaextract,scale=in_range=full:out_range=full,format=yuv420p,setparams=range=pc[av]",
              "-map", "[cv]", "-map", "[av]", *enc, "-color_range:v:1", "pc",
              "-movflags", "+faststart", a.out, "-y"], stdin=subprocess.PIPE)
+        mproc = None
+        if a.matte_out:
+            mproc = subprocess.Popen(
+                [FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "gray",
+                 "-s", f"{W}x{H*2}", "-r", str(int(fps)), "-i", "-",
+                 "-filter_complex",
+                 f"[0:v]split=2[t0][t1];[t0]crop={W}:{H}:0:0,format=yuv420p,setparams=range=pc[m0];"
+                 f"[t1]crop={W}:{H}:0:{H},format=yuv420p,setparams=range=pc[m1]",
+                 "-map", "[m0]", "-map", "[m1]", "-c:v", "libx264", "-preset", "veryfast",
+                 "-crf", "18", "-g", "8", "-x264-params", "scenecut=0",
+                 "-color_range", "pc", "-movflags", "+faststart",
+                 a.matte_out, "-y"], stdin=subprocess.PIPE)
         rec = [None] * 4; n = 0
         eps = 1e-6
         with torch.no_grad():
@@ -233,14 +253,25 @@ def main():
                 bgra = torch.cat([torch.clamp(out_rgb, 0, 255), (out_a * 255).unsqueeze(0)], dim=0)
                 frame_out = bgra.permute(1, 2, 0).to(torch.uint8).cpu().numpy()
                 proc.stdin.write(np.ascontiguousarray(frame_out).tobytes())
+                if mproc is not None:
+                    sh_base = torch.roll(gauss_blur(person_a, 16), 22, dims=0)
+                    stacked = torch.cat([person_a, sh_base], dim=0)
+                    mframe = (torch.clamp(stacked, 0, 1) * 255).to(torch.uint8).cpu().numpy()
+                    mproc.stdin.write(np.ascontiguousarray(mframe).tobytes())
                 n += 1
                 if n % 10 == 0: write_progress(a.progress_file, n, total)
         proc.stdin.close(); rc = proc.wait(); cap.release()
+        if mproc is not None:
+            mproc.stdin.close()
+            if mproc.wait() != 0:
+                raise RuntimeError("matte encoder failed")
         if rc != 0:
             raise RuntimeError(f"ffmpeg encoder exited {rc}")
         if a.meta_file:
             meta = {"margins": {"l": L / BW, "t": T / BH, "r": R / BW, "b": B / BH},
-                    "base": [BW, BH], "canvas": [W, H], "fps": int(fps)}
+                    "base": [BW, BH], "canvas": [W, H], "fps": int(fps),
+                    "src_x": src_x, "src_y": src_y, "sw": sw, "sh": sh,
+                    "box": [px, py, ow, oh], "radius": radius, "v": 7}
             tmp = a.meta_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(meta, f)
