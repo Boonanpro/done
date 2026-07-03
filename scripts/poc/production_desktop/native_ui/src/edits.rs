@@ -184,3 +184,95 @@ pub fn save(root: &Value, contents_path: &str) -> anyhow::Result<()> {
     std::fs::rename(&tmp, contents_path)?;
     Ok(())
 }
+
+/// Add/replace or remove the popout effect on the given clips.
+pub fn set_popout(raw: &mut serde_json::Value, ids: &[String], params: Option<serde_json::Value>) {
+    for_each_clip(raw, |c| {
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !ids.iter().any(|i| i == id) {
+            return;
+        }
+        let effects = c
+            .as_object_mut()
+            .unwrap()
+            .entry("effects")
+            .or_insert_with(|| serde_json::Value::Array(vec![]));
+        // removing: restore the display position to the CARD box the effect was applied
+        // with (apply had swapped position to the margins-composed full frame)
+        let mut restore: Option<serde_json::Value> = None;
+        if params.is_none() {
+            if let Some(arr) = effects.as_array() {
+                restore = arr
+                    .iter()
+                    .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("popout"))
+                    .and_then(|e| e.get("params"))
+                    .and_then(|p| p.get("box"))
+                    .cloned();
+            }
+        }
+        if let Some(arr) = effects.as_array_mut() {
+            arr.retain(|e| e.get("type").and_then(|t| t.as_str()) != Some("popout"));
+            if let Some(p) = &params {
+                arr.push(serde_json::json!({"type": "popout", "params": p}));
+            }
+        }
+        if let Some(b) = restore {
+            c.as_object_mut().unwrap().insert("position".into(), b);
+        }
+    });
+}
+
+/// Bake finished: record margins on the effect and re-express the display position as the
+/// margins-composed full frame (the bake canvas extends beyond the frame).
+pub fn finalize_popout(raw: &mut serde_json::Value, id: &str, margins: &serde_json::Value) {
+    let (l, t, r, b) = (
+        margins.get("l").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        margins.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        margins.get("r").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        margins.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0),
+    );
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) != Some(id) {
+            return;
+        }
+        if let Some(arr) = c.get_mut("effects").and_then(|e| e.as_array_mut()) {
+            for e in arr.iter_mut() {
+                if e.get("type").and_then(|t| t.as_str()) == Some("popout") {
+                    if let Some(p) = e.get_mut("params").and_then(|p| p.as_object_mut()) {
+                        p.insert("margins".into(), margins.clone());
+                    }
+                }
+            }
+        }
+        let o = c.as_object_mut().unwrap();
+        o.insert(
+            "position".into(),
+            serde_json::json!({
+                "x": (0.0 - l * 10000.0).round() / 10000.0,
+                "y": (0.0 - t * 10000.0).round() / 10000.0,
+                "width": ((1.0 + l + r) * 10000.0).round() / 10000.0,
+                "height": ((1.0 + t + b) * 10000.0).round() / 10000.0,
+            }),
+        );
+        o.insert("crop".into(), serde_json::Value::Null);
+        o.insert("muted".into(), serde_json::Value::Bool(true));
+    });
+}
+
+fn for_each_clip(raw: &mut serde_json::Value, mut f: impl FnMut(&mut serde_json::Value)) {
+    if let Some(tracks) = raw
+        .get_mut(0)
+        .and_then(|r| r.get_mut("timeline"))
+        .and_then(|x| x.get_mut("sequence"))
+        .and_then(|x| x.get_mut("tracks"))
+        .and_then(|x| x.as_array_mut())
+    {
+        for tr in tracks {
+            if let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) {
+                for c in clips {
+                    f(c);
+                }
+            }
+        }
+    }
+}
