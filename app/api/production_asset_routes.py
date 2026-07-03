@@ -2407,33 +2407,42 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
         if hasattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS"):
             creationflags = subprocess.BELOW_NORMAL_PRIORITY_CLASS  # type: ignore[attr-defined]
 
-        subprocess.run(
-            [
-                _ffmpeg(),
-                "-y",
-                "-i",
-                str(src),
-                "-vf",
-                "scale=-2:720",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "28",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "96k",
-                "-movflags",
-                "+faststart",
-                str(proxy),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-            check=True,
-        )
+        # fps=30 forces a CONSTANT frame rate. Source phone screen recordings are often
+        # variable-frame-rate (VFR), and VFR breaks seek-by-time everywhere: the editor's
+        # preview seeks to the wrong frame / freezes, and our OCR/ffmpeg trackers land on the
+        # wrong timestamp. A CFR proxy makes seeking reliable across the board.
+        #
+        # LONG SIDE 1920 + high quality (was 720p CRF28): this proxy is what the native
+        # editor shows WHILE SCRUBBING (originals are long-GOP 4K = ~200ms per seek flush,
+        # physically unable to track a fast drag; the proxy seeks in ~20ms). At preview-pane
+        # size a 1080x1920 CRF~19 proxy is indistinguishable from the original — the old
+        # 406x720 CRF28 one is what read as "proxy-ish mush". Filmora ships the same trick
+        # (auto proxies at ~1/2 source res) — its scrubbing only LOOKS like original 4K.
+        #
+        # SHORT GOP (keyframe every 15 frames = 0.5s) + no B-frames. A long GOP is the
+        # heavy part of scrubbing/seeking: to show a random frame the decoder must decode
+        # the whole group from its keyframe.
+        _common = ["-g", "15", "-bf", "0", "-vsync", "cfr",
+                   "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(proxy)]
+        _vf = ["-vf", "scale=w=1920:h=1920:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30"]
+        _encoders = [
+            ["-c:v", "h264_nvenc", "-rc", "vbr", "-cq", "16", "-b:v", "0", "-preset", "p4"],
+            ["-c:v", "libx264", "-preset", "veryfast", "-crf", "17"],
+        ]
+        _done = False
+        for _enc in _encoders:
+            _r = subprocess.run(
+                [_ffmpeg(), "-y", "-i", str(src), *_vf, *_enc, *_common],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                check=False,
+            )
+            if _r.returncode == 0 and proxy.exists() and proxy.stat().st_size > 0:
+                _done = True
+                break
+        if not _done:
+            raise RuntimeError("proxy encode failed (nvenc and libx264)")
         subprocess.run(
             [
                 _ffmpeg(),
