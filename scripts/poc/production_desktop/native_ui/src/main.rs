@@ -134,11 +134,63 @@ enum Drag {
     Trim { ids: Vec<String>, left: bool },
 }
 
+/// key -> Some((bake meta, static card-mask texture)) when the LIVE matte path is usable,
+/// None when this key has no matte twin (v6 bake) and stays on the pv fallback.
+type MaskMap = std::collections::HashMap<
+    String,
+    Option<(model::PopMeta, windows::Win32::Graphics::Direct3D11::ID3D11Texture2D)>,
+>;
+
+// mt.mp4 mux order is [person α, shadow base] but MF enumerates the two video tracks in
+// REVERSE mux order (same quirk as the pv twin) — verified visually.
+const MT_PERSON: u32 = 1;
+const MT_SHADOW: u32 = 0;
+
+/// Build ONE missing pop-out mask texture per call (the σ26 blur costs ~0.3s — idle only).
+/// v6 keys (no matte twin on disk) are memoized as None and stay on the pv fallback for
+/// this session; the effect-clip migration re-keys everything anyway.
+fn mask_build_pass(doc: &model::Doc, d3d: &media::D3d, masks: &mut MaskMap) -> bool {
+    for tr in &doc.seq.tracks {
+        if tr.kind != "video" && tr.kind != "overlay" {
+            continue;
+        }
+        for c in &tr.clips {
+            let Some((key, _)) = c.popout_key() else { continue };
+            if masks.contains_key(&key) {
+                continue;
+            }
+            let mt = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
+            let meta = if std::path::Path::new(&mt).exists() {
+                model::PopMeta::load(&doc.rel_path(&format!("popout-cache/{key}.json")))
+            } else {
+                None
+            };
+            let Some(meta) = meta else {
+                masks.insert(key, None);
+                continue;
+            };
+            match compositor::Compositor::build_popout_mask(d3d, &meta) {
+                Ok(tex) => {
+                    eprintln!("mask built {key} {}x{}", meta.canvas[0], meta.canvas[1]);
+                    masks.insert(key, Some((meta, tex)));
+                }
+                Err(e) => {
+                    eprintln!("mask build {key}: {e:#}");
+                    masks.insert(key, None);
+                }
+            }
+            return true; // one per idle slice
+        }
+    }
+    false
+}
+
 fn compose(
     doc: &model::Doc,
     d3d: &media::D3d,
     pool: &mut media::VideoPool,
     comp: &mut compositor::Compositor,
+    masks: &MaskMap,
     t: f64,
     original: bool,
     fast: bool, // scrub: budgeted seek — newest reachable frame now, exact frame on settle
@@ -174,7 +226,50 @@ fn compose(
     let _t = Instant::now();
     for c in &overlays {
         let b = c.display_box();
-        if let Some((rel, off)) = c.popout() {
+        if let Some((key, off)) = c.popout_key() {
+            // LIVE matte path: color sampled from the ORIGINAL frame — the same file and
+            // the same src_t the AUDIO plays, so lips can't drift. The baked pv (30fps
+            // re-encode, ~17ms staler) remains the fallback while no matte twin exists.
+            let live = masks.get(&key).and_then(|o| o.clone());
+            if let (Some((meta, mask)), Some(aid)) = (live, c.asset_id.as_deref()) {
+                let opath = doc.asset_path_q(aid, original);
+                let src_t = c.source_start + (t - c.timeline_start);
+                let mt_path = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
+                let mt_t = off + (t - c.timeline_start);
+                {
+                    let s = pool.get(d3d, &opath, 0, false, src_t)?;
+                    if fast {
+                        exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                    } else {
+                        s.ensure_frame(d3d, src_t)
+                            .map_err(|e| e.context(format!("live-orig {} src_t={src_t:.2}", s.name)))?;
+                    }
+                }
+                for stream in [MT_PERSON, MT_SHADOW] {
+                    let s = pool.get(d3d, &mt_path, stream, true, mt_t)?;
+                    if fast {
+                        exact &= s.ensure_frame_scrub(d3d, mt_t, 8.0)?;
+                    } else {
+                        s.ensure_frame(d3d, mt_t)
+                            .map_err(|e| e.context(format!("live-mt {} src_t={mt_t:.2}", s.name)))?;
+                    }
+                }
+                let otex = pool.get(d3d, &opath, 0, false, src_t)?.bgra.clone();
+                let ptex = pool.get(d3d, &mt_path, MT_PERSON, true, mt_t)?.bgra.clone();
+                let stex = pool.get(d3d, &mt_path, MT_SHADOW, true, mt_t)?.bgra.clone();
+                let (cw, ch) = (meta.canvas[0] as f32, meta.canvas[1] as f32);
+                let aff = [
+                    meta.src_x as f32 / cw,
+                    meta.src_y as f32 / ch,
+                    meta.sw as f32 / cw,
+                    meta.sh as f32 / ch,
+                ];
+                comp.draw_popout_live(d3d, &otex, &ptex, &stex, &mask, (b.x, b.y, b.width, b.height), aff)?;
+                used.push(opath);
+                used.push(mt_path);
+                continue;
+            }
+            let rel = format!("popout-cache/{key}.pv.mp4");
             let path = doc.rel_path(&rel);
             if !std::path::Path::new(&path).exists() {
                 continue;
@@ -238,6 +333,7 @@ fn prime_upcoming(
     doc: &model::Doc,
     d3d: &media::D3d,
     pool: &mut media::VideoPool,
+    masks: &MaskMap,
     t: f64,
     original: bool,
     used: &[String],
@@ -259,10 +355,23 @@ fn prime_upcoming(
     }
     ups.sort_by(|a, b| a.timeline_start.partial_cmp(&b.timeline_start).unwrap());
     for c in ups {
-        let worked = if let Some((rel, off)) = c.popout() {
-            let path = doc.rel_path(&rel);
-            pool.prime_spare(d3d, &path, 0, true, off).unwrap_or(false)
-                || pool.prime_spare(d3d, &path, 1, false, off).unwrap_or(false)
+        let worked = if let Some((key, off)) = c.popout_key() {
+            let live = masks.get(&key).map_or(false, |o| o.is_some());
+            if live {
+                let mt = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
+                let orig = c
+                    .asset_id
+                    .as_deref()
+                    .map(|aid| doc.asset_path_q(aid, original));
+                orig.map(|p| pool.prime_spare(d3d, &p, 0, false, c.source_start).unwrap_or(false))
+                    .unwrap_or(false)
+                    || pool.prime_spare(d3d, &mt, MT_PERSON, true, off).unwrap_or(false)
+                    || pool.prime_spare(d3d, &mt, MT_SHADOW, true, off).unwrap_or(false)
+            } else {
+                let path = doc.rel_path(&format!("popout-cache/{key}.pv.mp4"));
+                pool.prime_spare(d3d, &path, 0, true, off).unwrap_or(false)
+                    || pool.prime_spare(d3d, &path, 1, false, off).unwrap_or(false)
+            }
         } else if let Some(aid) = c.asset_id.as_deref() {
             let path = doc.asset_path_q(aid, original);
             pool.prime_spare(d3d, &path, 0, false, c.source_start).unwrap_or(false)
@@ -279,14 +388,25 @@ fn prime_upcoming(
 /// OPEN (100-300ms). Warm instances for clips starting in the next few seconds, nearest
 /// first, one open per call. Without this, a session that goes straight from launch to
 /// play has no spares, boundary priming no-ops, and every big source jump walks cold.
-fn warm_upcoming(doc: &model::Doc, d3d: &media::D3d, pool: &mut media::VideoPool, t: f64) -> bool {
+fn warm_upcoming(
+    doc: &model::Doc,
+    d3d: &media::D3d,
+    pool: &mut media::VideoPool,
+    masks: &MaskMap,
+    t: f64,
+) -> bool {
+    let is_live = |c: &model::Clip| {
+        c.popout_key()
+            .map_or(false, |(k, _)| masks.get(&k).map_or(false, |o| o.is_some()))
+    };
     let mut uses: std::collections::HashMap<String, usize> = Default::default();
     for tr in &doc.seq.tracks {
         if tr.kind != "video" && tr.kind != "overlay" {
             continue;
         }
         for c in &tr.clips {
-            if c.popout().is_none() {
+            // live pop-outs decode the original too — count them as concurrent users
+            if c.popout().is_none() || is_live(c) {
                 if let Some(aid) = c.asset_id.as_deref() {
                     *uses.entry(doc.asset_path_q(aid, true)).or_default() += 1;
                 }
@@ -307,8 +427,28 @@ fn warm_upcoming(doc: &model::Doc, d3d: &media::D3d, pool: &mut media::VideoPool
     }
     ups.sort_by(|a, b| a.timeline_start.partial_cmp(&b.timeline_start).unwrap());
     for c in ups {
-        if let Some((rel, _)) = c.popout() {
-            let p = doc.rel_path(&rel);
+        if let Some((key, _)) = c.popout_key() {
+            if is_live(c) {
+                let mt = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
+                for s in [MT_PERSON, MT_SHADOW] {
+                    if !pool.has_instances(&mt, s, 1) {
+                        let _ = pool.warm_open(d3d, &mt, s, true, 1);
+                        return true;
+                    }
+                }
+                if let Some(aid) = c.asset_id.as_deref() {
+                    let p = doc.asset_path_q(aid, true);
+                    let want = if uses.get(&p).copied().unwrap_or(0) >= 2 { 2 } else { 1 };
+                    for n in 1..=want {
+                        if !pool.has_instances(&p, 0, n) {
+                            let _ = pool.warm_open(d3d, &p, 0, false, n);
+                            return true;
+                        }
+                    }
+                }
+                continue;
+            }
+            let p = doc.rel_path(&format!("popout-cache/{key}.pv.mp4"));
             if !std::path::Path::new(&p).exists() {
                 continue;
             }
@@ -358,20 +498,46 @@ fn probe_duration(path: &str) -> Option<f64> {
 
 /// Open ONE not-yet-open decoder instance per call (idle time only). Returns true when
 /// every stream the timeline can hit is pre-opened, so playback never pays an open.
-fn warm_open_pass(doc: &model::Doc, d3d: &media::D3d, pool: &mut media::VideoPool) -> bool {
+/// CAPPED: decoders are GPU memory — warming a whole long timeline exhausted VRAM
+/// (0x8007000E on the next mid-play open). Past the cap, the near-playhead warmer
+/// (warm_upcoming) and the LRU eviction cover playback.
+fn warm_open_pass(
+    doc: &model::Doc,
+    d3d: &media::D3d,
+    pool: &mut media::VideoPool,
+    masks: &MaskMap,
+) -> bool {
+    const INSTANCE_CAP: usize = 40;
+    if pool.stats().1 >= INSTANCE_CAP {
+        return true; // budget spent — treat as warm
+    }
     use std::collections::HashMap;
     let mut count: HashMap<String, usize> = HashMap::new();
     let mut spans: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
-    let mut pops: Vec<String> = Vec::new();
+    let mut pops: Vec<(String, bool)> = Vec::new(); // (path, is_matte_twin)
     for tr in &doc.seq.tracks {
         if tr.kind != "video" && tr.kind != "overlay" {
             continue;
         }
         for c in &tr.clips {
-            if let Some((rel, _)) = c.popout() {
-                let p = doc.rel_path(&rel);
-                if std::path::Path::new(&p).exists() && !pops.contains(&p) {
-                    pops.push(p);
+            if let Some((key, _)) = c.popout_key() {
+                let live = masks.get(&key).map_or(false, |o| o.is_some());
+                if live {
+                    // live path decodes the matte twin + the ORIGINAL (counted below)
+                    let p = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
+                    if !pops.iter().any(|(q, _)| *q == p) {
+                        pops.push((p, true));
+                    }
+                    if let Some(aid) = c.asset_id.as_deref() {
+                        let p = doc.asset_path_q(aid, true);
+                        *count.entry(p.clone()).or_default() += 1;
+                        spans.entry(p).or_default().push((c.timeline_start, c.timeline_end));
+                    }
+                } else {
+                    let p = doc.rel_path(&format!("popout-cache/{key}.pv.mp4"));
+                    if std::path::Path::new(&p).exists() && !pops.iter().any(|(q, _)| *q == p) {
+                        pops.push((p, false));
+                    }
                 }
             } else if let Some(aid) = c.asset_id.as_deref() {
                 let p = doc.asset_path_q(aid, true);
@@ -400,14 +566,14 @@ fn warm_open_pass(doc: &model::Doc, d3d: &media::D3d, pool: &mut media::VideoPoo
             return false; // one open per idle slice
         }
     }
-    for p in pops {
-        if !pool.has_instances(&p, 0, 1) {
-            let _ = pool.warm_open(d3d, &p, 0, true, 1);
-            return false;
-        }
-        if !pool.has_instances(&p, 1, 1) {
-            let _ = pool.warm_open(d3d, &p, 1, false, 1);
-            return false;
+    for (p, is_mt) in pops {
+        // matte twin: both tracks full range; pv: ordinal 0 = matte (full), 1 = color
+        let ranges: [(u32, bool); 2] = if is_mt { [(0, true), (1, true)] } else { [(0, true), (1, false)] };
+        for (s, fr) in ranges {
+            if !pool.has_instances(&p, s, 1) {
+                let _ = pool.warm_open(d3d, &p, s, fr, 1);
+                return false;
+            }
         }
     }
     true
@@ -510,6 +676,7 @@ fn media_thread(shared: Arc<Shared>) {
         let mut scrub_win: Vec<f32> = Vec::new();
         let mut scrub_t0 = Instant::now();
         let mut scrub_exact = true; // last scrub compose reached the exact frame
+        let mut masks: MaskMap = Default::default();
         // Look-ahead ring: timeline frames composed AHEAD of the playhead on a fixed 30fps
         // grid. Presentation picks from the ring and NEVER waits for a decode — GOP walks
         // and source switches are paid in the ring's future (the Filmora mechanism).
@@ -557,7 +724,7 @@ fn media_thread(shared: Arc<Shared>) {
                 let mut slept = false;
                 if len < RING_DEPTH && next_t <= dur {
                     let t0 = Instant::now();
-                    let res = compose(&doc, &d3d, &mut pool, &mut comp, next_t, true, false);
+                    let res = compose(&doc, &d3d, &mut pool, &mut comp, &masks, next_t, true, false);
                     ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
                     match res {
                         Ok((used, _)) => {
@@ -575,7 +742,7 @@ fn media_thread(shared: Arc<Shared>) {
                             ms_push = p0.elapsed().as_secs_f32() * 1000.0;
                             if len >= 8 {
                                 let p1 = Instant::now();
-                                prime_upcoming(&doc, &d3d, &mut pool, next_t, true, &used);
+                                prime_upcoming(&doc, &d3d, &mut pool, &masks, next_t, true, &used);
                                 ms_prime = p1.elapsed().as_secs_f32() * 1000.0;
                                 if ms_prime > 60.0 {
                                     eprintln!("SLOWPRIME t={next_t:.2}: {ms_prime:.0}ms");
@@ -603,7 +770,7 @@ fn media_thread(shared: Arc<Shared>) {
                     }
                 } else {
                     slept = true;
-                    if !warm_upcoming(&doc, &d3d, &mut pool, t) {
+                    if !warm_upcoming(&doc, &d3d, &mut pool, &masks, t) {
                         std::thread::sleep(std::time::Duration::from_millis(2));
                     }
                 }
@@ -636,7 +803,7 @@ fn media_thread(shared: Arc<Shared>) {
             if dirty {
                 let original = !r.scrubbing; // full quality unless mid-drag
                 let t0 = Instant::now();
-                match compose(&doc, &d3d, &mut pool, &mut comp, t, original, r.scrubbing) {
+                match compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, original, r.scrubbing) {
                     Ok((used, exact)) => {
                         scrub_exact = !r.scrubbing || exact;
                         seq += 1;
@@ -679,7 +846,7 @@ fn media_thread(shared: Arc<Shared>) {
                     // finger resting mid-drag on a long-GOP spot: keep refining toward the
                     // exact frame, one budget slice per pass (converges like Filmora's
                     // "stop and the picture sharpens to the real frame")
-                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, t, false, true) {
+                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, false, true) {
                         scrub_exact = ex;
                         seq += 1;
                         let mut f = shared.frame.lock().unwrap();
@@ -704,7 +871,7 @@ fn media_thread(shared: Arc<Shared>) {
                     rg.back().map(|(ft, _)| ft + STEP).unwrap_or_else(|| (t / STEP).floor() * STEP)
                 };
                 if next_t <= dur {
-                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, next_t, true, false) {
+                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, next_t, true, false) {
                         let mut rg = shared.ring.lock().unwrap();
                         rg.push_back((next_t, comp.rgba.clone()));
                         shared.ring_level.store(rg.len(), Ordering::Relaxed);
@@ -713,10 +880,14 @@ fn media_thread(shared: Arc<Shared>) {
                 } else {
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
+            } else if mask_build_pass(&doc, &d3d, &mut masks) {
+                // pop-out card masks for the live matte path — one σ26 blur per slice.
+                // BEFORE the warm pass: few and quick, and without them pop-outs render
+                // from the stale pv twin
             } else if !warm_done {
                 // THEN: open every decoder the rest of the timeline needs (a cold open
                 // mid-play is a 100-200ms media-thread stall = visible gap)
-                warm_done = warm_open_pass(&doc, &d3d, &mut pool);
+                warm_done = warm_open_pass(&doc, &d3d, &mut pool, &masks);
             } else {
                 // idle: chew on one aux job slice (thumbnails / waveform peaks)
                 let job = { shared.aux_req.lock().unwrap().first().cloned() };
@@ -1295,6 +1466,18 @@ impl eframe::App for App {
             self.playing = !self.playing;
             self.push_req(false);
         }
+        // frame step while paused (Filmora parity: arrow keys = +-1 frame)
+        if !self.playing {
+            const FSTEP: f64 = 1.0 / 30.0;
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                self.t = ((self.t / FSTEP).round() * FSTEP + FSTEP).min(self.dur);
+                self.push_req(false);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                self.t = ((self.t / FSTEP).round() * FSTEP - FSTEP).max(0.0);
+                self.push_req(false);
+            }
+        }
         self.underruns = self.shared.underruns.load(Ordering::Relaxed);
         if self.playing {
             self.t = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
@@ -1447,6 +1630,53 @@ impl eframe::App for App {
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    // --dump-frame <t> <out.ppm>: headless compose of one timeline frame — deterministic
+    // A/B verification (live matte path vs pv fallback) with no window and no user input
+    if let Some(i) = args.iter().position(|a| a == "--dump-frame") {
+        let t: f64 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let out = args.get(i + 2).cloned().unwrap_or_else(|| "frame.ppm".into());
+        let contents = args.get(1).cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = args.get(2).cloned().unwrap_or_else(|| ROOM.to_string());
+        let r = (|| -> anyhow::Result<()> {
+            let doc = model::Doc::load(&contents, &dir)?;
+            let d3d = media::D3d::new()?;
+            let mut pool = media::VideoPool::new();
+            let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H)?;
+            let mut masks: MaskMap = Default::default();
+            while mask_build_pass(&doc, &d3d, &mut masks) {}
+            // twice: settle the double-buffered readback onto this exact frame
+            compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, true, false)?;
+            compose(&doc, &d3d, &mut pool, &mut comp, &masks, t, true, false)?;
+            let mut ppm = format!("P6\n{CANVAS_W} {CANVAS_H}\n255\n").into_bytes();
+            for px in comp.rgba.chunks(4) {
+                ppm.extend_from_slice(&px[..3]);
+            }
+            std::fs::write(&out, ppm)?;
+            println!("dumped t={t} -> {out}");
+            Ok(())
+        })();
+        if let Err(e) = r {
+            println!("DUMP ERR {e:#}");
+        }
+        std::process::exit(0);
+    }
+    // --probe-open <path> <stream> [full_range]: open one decoder standalone and report
+    if let Some(i) = args.iter().position(|a| a == "--probe-open") {
+        let path = args.get(i + 1).cloned().unwrap_or_default();
+        let stream: u32 = args.get(i + 2).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let fr = args.get(i + 3).map(|v| v == "1").unwrap_or(true);
+        match media::D3d::new() {
+            Ok(d3d) => match media::VideoStream::open(&d3d, &path, stream, fr) {
+                Ok(mut vs) => {
+                    let r = vs.ensure_frame(&d3d, 1.0);
+                    println!("OK {}x{} ensure={:?}", vs.width, vs.height, r.map(|_| ()));
+                }
+                Err(e) => println!("ERR {e:#}"),
+            },
+            Err(e) => println!("D3D ERR {e:#}"),
+        }
+        std::process::exit(0);
+    }
     let contents = args
         .get(1)
         .cloned()
