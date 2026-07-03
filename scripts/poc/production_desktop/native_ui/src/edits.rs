@@ -276,3 +276,53 @@ fn for_each_clip(raw: &mut serde_json::Value, mut f: impl FnMut(&mut serde_json:
         }
     }
 }
+
+/// Ripple delete: remove the clips AND close the gaps they leave — everything after each
+/// removed span shifts left, across ALL tracks (Filmora's magnetic delete).
+pub fn ripple_delete(raw: &mut serde_json::Value, ids: &[String]) {
+    // collect spans first
+    let mut spans: Vec<(f64, f64)> = Vec::new();
+    if let Some(tracks) = raw
+        .get(0)
+        .and_then(|r| r.get("timeline"))
+        .and_then(|x| x.get("sequence"))
+        .and_then(|x| x.get("tracks"))
+        .and_then(|x| x.as_array())
+    {
+        for tr in tracks {
+            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if ids.iter().any(|i| i == id) {
+                    let ts = c.get("timeline_start").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let te = c.get("timeline_end").and_then(|v| v.as_f64()).unwrap_or(ts);
+                    spans.push((ts, te));
+                }
+            }
+        }
+    }
+    delete_clips(raw, ids);
+    // merge overlapping spans, then shift right-to-left so offsets stay valid
+    spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let mut merged: Vec<(f64, f64)> = Vec::new();
+    for sp in spans {
+        if let Some(last) = merged.last_mut() {
+            if sp.0 <= last.1 + 1e-6 {
+                last.1 = last.1.max(sp.1);
+                continue;
+            }
+        }
+        merged.push(sp);
+    }
+    for (ts, te) in merged.into_iter().rev() {
+        let d = te - ts;
+        for_each_clip(raw, |c| {
+            let cs = c.get("timeline_start").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if cs >= te - 1e-6 {
+                let ce = c.get("timeline_end").and_then(|v| v.as_f64()).unwrap_or(cs);
+                let o = c.as_object_mut().unwrap();
+                o.insert("timeline_start".into(), serde_json::json!(((cs - d) * 1000.0).round() / 1000.0));
+                o.insert("timeline_end".into(), serde_json::json!(((ce - d) * 1000.0).round() / 1000.0));
+            }
+        });
+    }
+}

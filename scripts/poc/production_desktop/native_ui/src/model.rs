@@ -45,6 +45,8 @@ pub struct Clip {
     pub effects: Vec<Effect>,
     #[serde(default)]
     pub text: Option<String>,
+    #[serde(default)]
+    pub link_id: Option<String>,
 }
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct Pos {
