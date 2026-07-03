@@ -259,6 +259,10 @@ impl VideoStream {
         }
     }
 
+    pub fn pending_pts(&self) -> Option<f64> {
+        self.pending.as_ref().map(|(p, _)| *p)
+    }
+
     /// Lookahead: position the decoder AT src_t without touching the last shown frame.
     /// No-op if already there (or within the decode-ahead window).
     pub fn prime(&mut self, _d3d: &D3d, src_t: f64) -> Result<()> {
@@ -408,22 +412,110 @@ impl PeakScan {
     }
 }
 
-/// Pool of open video streams keyed by (path, stream index).
+/// Ping-pong pool: up to TWO decoder instances per (path, stream). Dan's timelines are
+/// mostly the SAME file chopped into consecutive cuts, so a boundary is a source-time jump
+/// inside one file — with a single decoder that jump forces an accurate seek (~200ms on a
+/// 4K long-GOP original) exactly ON the cut. The spare instance gets primed at the NEXT
+/// cut's in-point ahead of time; at the boundary we just switch instances.
+struct Slot {
+    vs: VideoStream,
+    used_frame: u64,
+}
+
 pub struct VideoPool {
-    pub streams: HashMap<(String, u32), VideoStream>,
+    slots: HashMap<(String, u32), Vec<Slot>>,
+    pub frame_no: u64,
 }
 
 impl VideoPool {
     pub fn new() -> Self {
-        Self { streams: HashMap::new() }
+        Self { slots: HashMap::new(), frame_no: 0 }
     }
-    pub fn get(&mut self, d3d: &D3d, path: &str, stream: u32, full_range: bool) -> Result<&mut VideoStream> {
+
+    /// Best instance for showing src_t NOW: prefer one already positioned (continuing or
+    /// primed near), else the one not on screen this frame, opening the second on demand.
+    pub fn get(
+        &mut self,
+        d3d: &D3d,
+        path: &str,
+        stream: u32,
+        full_range: bool,
+        src_t: f64,
+    ) -> Result<&mut VideoStream> {
         let key = (path.to_string(), stream);
-        if !self.streams.contains_key(&key) {
-            let vs = VideoStream::open(d3d, path, stream, full_range)?;
-            self.streams.insert(key.clone(), vs);
+        let frame_no = self.frame_no;
+        let entry = self.slots.entry(key).or_default();
+        if entry.is_empty() {
+            entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
         }
-        Ok(self.streams.get_mut(&key).unwrap())
+        let fitness = |s: &Slot| -> i32 {
+            let near_last = s.vs.last_pts >= 0.0 && src_t >= s.vs.last_pts - 0.05 && src_t < s.vs.last_pts + 1.0;
+            let primed = s
+                .vs
+                .pending_pts()
+                .map(|p| (p - src_t).abs() < 0.5)
+                .unwrap_or(false);
+            if near_last {
+                2
+            } else if primed {
+                1
+            } else {
+                0
+            }
+        };
+        let mut best = 0usize;
+        for i in 1..entry.len() {
+            if fitness(&entry[i]) > fitness(&entry[best]) {
+                best = i;
+            }
+        }
+        // nothing fits and the best is on screen this frame -> open/use the spare so the
+        // on-screen picture never gets torn away mid-frame
+        if fitness(&entry[best]) == 0 && entry[best].used_frame == frame_no {
+            if entry.len() < 2 {
+                entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
+            }
+            best = entry.len() - 1;
+        }
+        entry[best].used_frame = frame_no;
+        Ok(&mut entry[best].vs)
+    }
+
+    /// Prime the OFF-SCREEN instance at an upcoming in-point (opens the spare if needed).
+    pub fn prime_spare(
+        &mut self,
+        d3d: &D3d,
+        path: &str,
+        stream: u32,
+        full_range: bool,
+        src_in: f64,
+    ) -> Result<()> {
+        let key = (path.to_string(), stream);
+        let frame_no = self.frame_no;
+        let entry = self.slots.entry(key).or_default();
+        if entry.is_empty() {
+            entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
+        }
+        // already primed anywhere? done.
+        if entry.iter().any(|s| {
+            s.vs.pending_pts().map(|p| (p - src_in).abs() < 0.4).unwrap_or(false)
+                || (s.vs.last_pts - src_in).abs() < 0.4
+        }) {
+            return Ok(());
+        }
+        let spare = match entry.iter().position(|s| s.used_frame != frame_no) {
+            Some(i) => i,
+            None => {
+                if entry.len() < 2 {
+                    entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
+                }
+                entry.len() - 1
+            }
+        };
+        if entry[spare].used_frame == frame_no {
+            return Ok(()); // everything is on screen; do not disturb
+        }
+        entry[spare].vs.prime(d3d, src_in)
     }
 }
 

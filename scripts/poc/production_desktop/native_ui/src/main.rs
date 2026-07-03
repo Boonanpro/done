@@ -39,6 +39,7 @@ struct FrameOut {
     rgba: Vec<u8>,
     seq: u64,
     comp_ms: f32,
+    comp_max: f32, // worst compose over the last second (boundary-stall detector)
     quality: &'static str,
 }
 
@@ -80,6 +81,7 @@ fn compose(
     t: f64,
     original: bool,
 ) -> anyhow::Result<Vec<String>> {
+    pool.frame_no += 1;
     let mut used = Vec::new();
     let (base, overlays) = {
         let (b, o) = doc.active_video(t);
@@ -89,7 +91,7 @@ fn compose(
     if let Some(c) = base {
         let path = doc.asset_path_q(c.asset_id.as_deref().unwrap(), original);
         let src_t = c.source_start + (t - c.timeline_start);
-        let vs = pool.get(d3d, &path, 0, false)?;
+        let vs = pool.get(d3d, &path, 0, false, src_t)?;
         vs.ensure_frame(d3d, src_t)?;
         let b = c.display_box();
         let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
@@ -107,24 +109,24 @@ fn compose(
             const COLOR: u32 = 1; // MF enumerates this pv's 2 video tracks in reverse mux order
             const MATTE: u32 = 0;
             {
-                let s = pool.get(d3d, &path, COLOR, false)?;
+                let s = pool.get(d3d, &path, COLOR, false, src_t)?;
                 s.ensure_frame(d3d, src_t)?;
             }
             {
-                let s = pool.get(d3d, &path, MATTE, true)?;
+                let s = pool.get(d3d, &path, MATTE, true, src_t)?;
                 s.ensure_frame(d3d, src_t)?;
             }
             let (ctex, cwh) = {
-                let s = pool.get(d3d, &path, COLOR, false)?;
+                let s = pool.get(d3d, &path, COLOR, false, src_t)?;
                 (s.bgra.clone(), (s.width, s.height))
             };
-            let mtex = pool.get(d3d, &path, MATTE, true)?.bgra.clone();
+            let mtex = pool.get(d3d, &path, MATTE, true, src_t)?.bgra.clone();
             comp.draw(d3d, &ctex, cwh, (b.x, b.y, b.width, b.height), false, Some(&mtex))?;
             used.push(path);
         } else if let Some(aid) = c.asset_id.as_deref() {
             let path = doc.asset_path_q(aid, original);
             let src_t = c.source_start + (t - c.timeline_start);
-            let vs = pool.get(d3d, &path, 0, false)?;
+            let vs = pool.get(d3d, &path, 0, false, src_t)?;
             vs.ensure_frame(d3d, src_t)?;
             let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
             comp.draw(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None)?;
@@ -159,12 +161,8 @@ fn prime_upcoming(
             } else {
                 continue;
             };
-            if used.iter().any(|u| *u == path) {
-                continue; // never disturb a stream that is on screen right now
-            }
-            if let Ok(vs) = pool.get(d3d, &path, 0, false) {
-                let _ = vs.prime(d3d, src_in);
-            }
+            let _ = pool.prime_spare(d3d, &path, 0, false, src_in);
+            let _ = used;
         }
     }
 }
@@ -203,6 +201,7 @@ fn media_thread(shared: Arc<Shared>) {
         let mut last_t = -1.0f64;
         let mut seq = 0u64;
         let mut peak_scan: Option<(String, media::PeakScan)> = None;
+        let mut comp_hist: Vec<(Instant, f32)> = Vec::new();
         loop {
             let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
             let dur = doc.duration();
@@ -242,6 +241,10 @@ fn media_thread(shared: Arc<Shared>) {
                             f.rgba.extend_from_slice(&comp.rgba);
                             f.seq = seq;
                             f.comp_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                            let now = Instant::now();
+                            comp_hist.push((now, f.comp_ms));
+                            comp_hist.retain(|(t2, _)| now.duration_since(*t2).as_secs_f32() < 1.0);
+                            f.comp_max = comp_hist.iter().map(|(_, v)| *v).fold(0.0, f32::max);
                             f.quality = if original { "original" } else { "proxy" };
                         }
                         if r.playing {
@@ -322,6 +325,7 @@ struct App {
     ui_fps: f32,
     last_frames: Vec<Instant>,
     comp_ms: f32,
+    comp_max: f32,
     quality: &'static str,
     gen: u64,
 }
@@ -336,6 +340,7 @@ impl App {
                 rgba: vec![0; (CANVAS_W * CANVAS_H * 4) as usize],
                 seq: 0,
                 comp_ms: 0.0,
+                comp_max: 0.0,
                 quality: "proxy",
             }),
             clock_bits: AtomicU64::new(0f64.to_bits()),
@@ -371,6 +376,7 @@ impl App {
             ui_fps: 0.0,
             last_frames: Vec::new(),
             comp_ms: 0.0,
+            comp_max: 0.0,
             quality: "proxy",
             gen: 0,
         })
@@ -722,9 +728,10 @@ impl App {
             rect.left_top() + egui::vec2(6.0, h - 16.0),
             egui::Align2::LEFT_TOP,
             format!(
-                "{} clips | comp {:.1}ms | ui {:.0}fps | {} | {}",
+                "{} clips | comp {:.1}ms max {:.0}ms | ui {:.0}fps | {} | {}",
                 clips_drawn,
                 self.comp_ms,
+                self.comp_max,
                 self.ui_fps,
                 self.quality,
                 if self.playing { "PLAYING" } else { "PAUSED" }
@@ -814,6 +821,7 @@ impl eframe::App for App {
             if f.seq != self.last_seq && f.rgba.len() == (CANVAS_W * CANVAS_H * 4) as usize {
                 self.last_seq = f.seq;
                 self.comp_ms = f.comp_ms;
+                self.comp_max = f.comp_max;
                 self.quality = f.quality;
                 let img = egui::ColorImage::from_rgba_unmultiplied(
                     [CANVAS_W as usize, CANVAS_H as usize],
