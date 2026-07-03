@@ -77,6 +77,7 @@ fn audio_thread(shared: Arc<Shared>) {
     let Ok(mut audio) = media::AudioOut::new() else { return };
     let mut was_playing = false;
     let mut last_gen = u64::MAX;
+    let mut last_tick = Instant::now();
     loop {
         let (playing, t_req, gen) = {
             let r = shared.req.lock().unwrap();
@@ -115,6 +116,11 @@ fn audio_thread(shared: Arc<Shared>) {
             }
             shared.clock_bits.store(c.to_bits(), Ordering::Relaxed);
             shared.underruns.store(audio.underruns, Ordering::Relaxed);
+            if last_tick.elapsed().as_secs_f32() >= 5.0 {
+                last_tick = Instant::now();
+                let ring = shared.ring_level.load(Ordering::Relaxed);
+                eprintln!("TICK t={c:.2} ring={ring} drops={}", audio.underruns);
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(8));
     }
@@ -135,9 +141,11 @@ fn compose(
     comp: &mut compositor::Compositor,
     t: f64,
     original: bool,
-) -> anyhow::Result<Vec<String>> {
+    fast: bool, // scrub: budgeted seek — newest reachable frame now, exact frame on settle
+) -> anyhow::Result<(Vec<String>, bool)> {
     pool.frame_no += 1;
     let mut used = Vec::new();
+    let mut exact = true; // false while any budgeted scrub seek stopped short of t
     let (base, overlays) = {
         let (b, o) = doc.active_video(t);
         (b.cloned(), o.into_iter().cloned().collect::<Vec<_>>())
@@ -151,7 +159,12 @@ fn compose(
         let path = doc.asset_path_q(c.asset_id.as_deref().unwrap(), original);
         let src_t = c.source_start + (t - c.timeline_start);
         let vs = pool.get(d3d, &path, 0, false, src_t)?;
-        vs.ensure_frame(d3d, src_t)?;
+        if fast {
+            exact &= vs.ensure_frame_scrub(d3d, src_t, 20.0)?;
+        } else {
+            vs.ensure_frame(d3d, src_t)
+                .map_err(|e| e.context(format!("base {} src_t={src_t:.2}", vs.name)))?;
+        }
         let b = c.display_box();
         let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
         comp.draw(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None)?;
@@ -171,11 +184,21 @@ fn compose(
             const MATTE: u32 = 0;
             {
                 let s = pool.get(d3d, &path, COLOR, false, src_t)?;
-                s.ensure_frame(d3d, src_t)?;
+                if fast {
+                    exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                } else {
+                    s.ensure_frame(d3d, src_t)
+                        .map_err(|e| e.context(format!("pv-color {} src_t={src_t:.2}", s.name)))?;
+                }
             }
             {
                 let s = pool.get(d3d, &path, MATTE, true, src_t)?;
-                s.ensure_frame(d3d, src_t)?;
+                if fast {
+                    exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                } else {
+                    s.ensure_frame(d3d, src_t)
+                        .map_err(|e| e.context(format!("pv-matte {} src_t={src_t:.2}", s.name)))?;
+                }
             }
             let (ctex, cwh) = {
                 let s = pool.get(d3d, &path, COLOR, false, src_t)?;
@@ -188,7 +211,12 @@ fn compose(
             let path = doc.asset_path_q(aid, original);
             let src_t = c.source_start + (t - c.timeline_start);
             let vs = pool.get(d3d, &path, 0, false, src_t)?;
-            vs.ensure_frame(d3d, src_t)?;
+            if fast {
+                exact &= vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
+            } else {
+                vs.ensure_frame(d3d, src_t)
+                    .map_err(|e| e.context(format!("overlay {} src_t={src_t:.2}", vs.name)))?;
+            }
             let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
             comp.draw(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None)?;
             used.push(path);
@@ -202,7 +230,7 @@ fn compose(
     if total > 40.0 {
         eprintln!("slow compose t={t:.2}: base={_ms_base:.0} ov={_ms_ov:.0} rb={_ms_rb:.0} total={total:.0}");
     }
-    Ok(used)
+    Ok((used, exact))
 }
 
 /// Pre-seek decoders for clips starting soon so entering them costs nothing.
@@ -245,6 +273,64 @@ fn prime_upcoming(
             return; // one slice per loop — the ring keeps breathing
         }
     }
+}
+
+/// Ring is FULL (~400ms of slack) — the ONLY moment mid-play that can afford a decoder
+/// OPEN (100-300ms). Warm instances for clips starting in the next few seconds, nearest
+/// first, one open per call. Without this, a session that goes straight from launch to
+/// play has no spares, boundary priming no-ops, and every big source jump walks cold.
+fn warm_upcoming(doc: &model::Doc, d3d: &media::D3d, pool: &mut media::VideoPool, t: f64) -> bool {
+    let mut uses: std::collections::HashMap<String, usize> = Default::default();
+    for tr in &doc.seq.tracks {
+        if tr.kind != "video" && tr.kind != "overlay" {
+            continue;
+        }
+        for c in &tr.clips {
+            if c.popout().is_none() {
+                if let Some(aid) = c.asset_id.as_deref() {
+                    *uses.entry(doc.asset_path_q(aid, true)).or_default() += 1;
+                }
+            }
+        }
+    }
+    let mut ups: Vec<&model::Clip> = Vec::new();
+    for tr in &doc.seq.tracks {
+        if tr.kind != "video" && tr.kind != "overlay" {
+            continue;
+        }
+        for c in &tr.clips {
+            let active = c.timeline_start <= t && t < c.timeline_end;
+            if active || (c.timeline_start > t && c.timeline_start <= t + 8.0) {
+                ups.push(c);
+            }
+        }
+    }
+    ups.sort_by(|a, b| a.timeline_start.partial_cmp(&b.timeline_start).unwrap());
+    for c in ups {
+        if let Some((rel, _)) = c.popout() {
+            let p = doc.rel_path(&rel);
+            if !std::path::Path::new(&p).exists() {
+                continue;
+            }
+            for (s, fr) in [(0u32, true), (1u32, false)] {
+                if !pool.has_instances(&p, s, 1) {
+                    let _ = pool.warm_open(d3d, &p, s, fr, 1);
+                    return true;
+                }
+            }
+        } else if let Some(aid) = c.asset_id.as_deref() {
+            let p = doc.asset_path_q(aid, true);
+            // files cut into multiple clips need a 2nd instance (boundary ping-pong)
+            let want = if uses.get(&p).copied().unwrap_or(0) >= 2 { 2 } else { 1 };
+            for n in 1..=want {
+                if !pool.has_instances(&p, 0, n) {
+                    let _ = pool.warm_open(d3d, &p, 0, false, n);
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn chr_nl() -> &'static str {
@@ -420,12 +506,17 @@ fn media_thread(shared: Arc<Shared>) {
         let mut last_pub: Option<Instant> = None;
         let mut warm_done = false;
         let mut last_doc_ptr: usize = 0;
+        let mut settle = Instant::now(); // last user interaction (scrub/edit/seek)
+        let mut scrub_win: Vec<f32> = Vec::new();
+        let mut scrub_t0 = Instant::now();
+        let mut scrub_exact = true; // last scrub compose reached the exact frame
         // Look-ahead ring: timeline frames composed AHEAD of the playhead on a fixed 30fps
         // grid. Presentation picks from the ring and NEVER waits for a decode — GOP walks
         // and source switches are paid in the ring's future (the Filmora mechanism).
         const STEP: f64 = 1.0 / 30.0;
         const RING_DEPTH: usize = 12; // ~400ms of slack
         loop {
+            let hb0 = Instant::now();
             let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
             let ptr = Arc::as_ptr(&doc) as usize;
             if ptr != last_doc_ptr {
@@ -436,6 +527,7 @@ fn media_thread(shared: Arc<Shared>) {
             let r = shared.req.lock().unwrap().clone();
             was_playing = r.playing;
             let _ = was_playing;
+            let ms_pre = hb0.elapsed().as_secs_f32() * 1000.0; // doc clone + req lock
             let t = if r.playing {
                 f64::from_bits(shared.clock_bits.load(Ordering::Relaxed)).min(dur)
             } else {
@@ -461,14 +553,18 @@ fn media_thread(shared: Arc<Shared>) {
                         rg.len(),
                     )
                 };
+                let (mut ms_comp, mut ms_push, mut ms_prime) = (0f32, 0f32, 0f32);
+                let mut slept = false;
                 if len < RING_DEPTH && next_t <= dur {
                     let t0 = Instant::now();
-                    match compose(&doc, &d3d, &mut pool, &mut comp, next_t, true) {
-                        Ok(used) => {
-                            let cms = t0.elapsed().as_secs_f32() * 1000.0;
-                            if cms > 60.0 {
-                                eprintln!("SLOWPROD t={next_t:.2}: {cms:.0}ms");
+                    let res = compose(&doc, &d3d, &mut pool, &mut comp, next_t, true, false);
+                    ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
+                    match res {
+                        Ok((used, _)) => {
+                            if ms_comp > 60.0 {
+                                eprintln!("SLOWPROD t={next_t:.2}: {ms_comp:.0}ms");
                             }
+                            let p0 = Instant::now();
                             {
                                 let mut rg = shared.ring.lock().unwrap();
                                 rg.push_back((next_t, comp.rgba.clone()));
@@ -476,30 +572,73 @@ fn media_thread(shared: Arc<Shared>) {
                                     rg.pop_front();
                                 }
                             }
+                            ms_push = p0.elapsed().as_secs_f32() * 1000.0;
                             if len >= 8 {
+                                let p1 = Instant::now();
                                 prime_upcoming(&doc, &d3d, &mut pool, next_t, true, &used);
+                                ms_prime = p1.elapsed().as_secs_f32() * 1000.0;
+                                if ms_prime > 60.0 {
+                                    eprintln!("SLOWPRIME t={next_t:.2}: {ms_prime:.0}ms");
+                                }
                             }
                         }
-                        Err(e) => eprintln!("compose: {e:#}"),
+                        // errors were invisible to SLOWPROD — a failing compose that takes
+                        // 100ms+ per attempt looks like "producer stopped for no reason"
+                        Err(e) => {
+                            let msg = format!("{e:#}");
+                            eprintln!("compose ERR t={next_t:.2} after {ms_comp:.0}ms: {msg}");
+                            if msg.contains("0x8007000E") {
+                                // out of (GPU) memory: dump idle decoder instances NOW
+                                pool.evict_stale(120);
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(30));
+                        }
+                    }
+                    if pool.frame_no % 120 == 0 {
+                        pool.evict_stale(900); // ~30s of composes — passed pop-outs get freed
+                    }
+                    if pool.frame_no % 300 == 0 {
+                        let (nf, ni) = pool.stats();
+                        eprintln!("POOL files={nf} instances={ni}");
                     }
                 } else {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    slept = true;
+                    if !warm_upcoming(&doc, &d3d, &mut pool, t) {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                }
+                // heartbeat: name ANY producer iteration that starved the ring, with the
+                // stage that ate the time (the t≈54 stall showed no SLOWPROD — the block
+                // is outside the old timed regions)
+                let tot = hb0.elapsed().as_secs_f32() * 1000.0;
+                if tot > 100.0 && !(slept && tot < 110.0) {
+                    eprintln!(
+                        "HEART {tot:.0}ms t={t:.2} next={next_t:.2} ring={len} pre={ms_pre:.0} comp={ms_comp:.0} push={ms_push:.0} prime={ms_prime:.0} slept={slept}"
+                    );
                 }
                 last_t = t;
                 continue;
             }
             // PAUSED: keep the ring pre-built ahead of the playhead so pressing play is
             // instant (the ~1s start hole was the ring warming up from empty)
+            if r.gen != last_gen || r.scrubbing {
+                // ANY interaction pushes background work out of the way — pre-build, warm
+                // opens and thumbnails restart only after ~200ms of stillness. Sharing this
+                // thread with 200ms background composes is what broke scrub tracking.
+                settle = Instant::now();
+            }
             if r.gen != last_gen {
                 shared.ring.lock().unwrap().clear();
                 shared.ring_gen.fetch_add(1, Ordering::Relaxed);
             }
+            let settled = !r.scrubbing && settle.elapsed().as_secs_f32() > 0.2;
             let dirty = r.gen != last_gen || (t - last_t).abs() > 1e-6;
             if dirty {
                 let original = !r.scrubbing; // full quality unless mid-drag
                 let t0 = Instant::now();
-                match compose(&doc, &d3d, &mut pool, &mut comp, t, original) {
-                    Ok(used) => {
+                match compose(&doc, &d3d, &mut pool, &mut comp, t, original, r.scrubbing) {
+                    Ok((used, exact)) => {
+                        scrub_exact = !r.scrubbing || exact;
                         seq += 1;
                         {
                             let mut f = shared.frame.lock().unwrap();
@@ -512,32 +651,72 @@ fn media_thread(shared: Arc<Shared>) {
                             comp_hist.retain(|(t2, _)| now.duration_since(*t2).as_secs_f32() < 1.0);
                             f.comp_max = comp_hist.iter().map(|(_, v)| *v).fold(0.0, f32::max);
                             last_pub = Some(now);
-                            f.quality = if original { "original" } else { "proxy" };
+                            f.quality = if original { "original" } else { "scrub" };
                         }
                         let _ = used;
                     }
                     Err(e) => eprintln!("compose: {e:#}"),
                 }
+                if r.scrubbing {
+                    // scrub responsiveness meter: frames delivered per second while dragging
+                    scrub_win.push(t0.elapsed().as_secs_f32() * 1000.0);
+                    if scrub_t0.elapsed().as_secs_f32() >= 1.0 {
+                        let n = scrub_win.len();
+                        let avg = scrub_win.iter().sum::<f32>() / n as f32;
+                        let worst = scrub_win.iter().copied().fold(0.0, f32::max);
+                        eprintln!("SCRUB {n}fps avg={avg:.0}ms worst={worst:.0}ms");
+                        scrub_win.clear();
+                        scrub_t0 = Instant::now();
+                    }
+                } else {
+                    scrub_win.clear();
+                    scrub_t0 = Instant::now();
+                }
                 last_gen = r.gen;
                 last_t = t;
-            } else if !warm_done {
-                // FIRST: open every decoder the timeline needs (a cold open mid-play is a
-                // 100-200ms media-thread stall = visible gap)
-                warm_done = warm_open_pass(&doc, &d3d, &mut pool);
+            } else if !settled {
+                if r.scrubbing && !scrub_exact {
+                    // finger resting mid-drag on a long-GOP spot: keep refining toward the
+                    // exact frame, one budget slice per pass (converges like Filmora's
+                    // "stop and the picture sharpens to the real frame")
+                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, t, false, true) {
+                        scrub_exact = ex;
+                        seq += 1;
+                        let mut f = shared.frame.lock().unwrap();
+                        f.rgba.clear();
+                        f.rgba.extend_from_slice(&comp.rgba);
+                        f.seq = seq;
+                        f.quality = "scrub";
+                    } else {
+                        scrub_exact = true; // failed — stop hammering
+                    }
+                } else {
+                    // interaction in flight: keep this thread FREE so the next scrub frame
+                    // starts the instant it arrives
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
             } else if shared.ring.lock().unwrap().len() < RING_DEPTH {
-                // paused pre-build: produce ahead of the frozen playhead
+                // FIRST: pre-build the ring ahead of the frozen playhead so pressing play
+                // is instant — compose opens the decoders it needs on demand, so this must
+                // not wait behind the full warm pass (59 files ≈ tens of seconds)
                 let next_t = {
                     let rg = shared.ring.lock().unwrap();
                     rg.back().map(|(ft, _)| ft + STEP).unwrap_or_else(|| (t / STEP).floor() * STEP)
                 };
                 if next_t <= dur {
-                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, next_t, true) {
+                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, next_t, true, false) {
                         let mut rg = shared.ring.lock().unwrap();
                         rg.push_back((next_t, comp.rgba.clone()));
                         shared.ring_level.store(rg.len(), Ordering::Relaxed);
                         let _ = u2;
                     }
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                 }
+            } else if !warm_done {
+                // THEN: open every decoder the rest of the timeline needs (a cold open
+                // mid-play is a 100-200ms media-thread stall = visible gap)
+                warm_done = warm_open_pass(&doc, &d3d, &mut pool);
             } else {
                 // idle: chew on one aux job slice (thumbnails / waveform peaks)
                 let job = { shared.aux_req.lock().unwrap().first().cloned() };
@@ -704,7 +883,10 @@ impl App {
             *self.shared.doc.lock().unwrap() = nd;
             self.dur = self.doc.duration();
             self.save_at = Some(Instant::now() + std::time::Duration::from_millis(1200));
-            self.push_req(false);
+            // mid-drag edits (move/trim) count as scrubbing: the media thread must stay
+            // free for the next tick, and the preview uses the budgeted scrub seek
+            let scrubbing = !matches!(self.drag, Drag::None);
+            self.push_req(scrubbing);
         }
     }
 
@@ -1303,6 +1485,13 @@ fn main() -> eframe::Result<()> {
                     if let Err(e) = app.import_file(std::path::Path::new(f)) {
                         eprintln!("import: {e:#}");
                     }
+                }
+            }
+            // --seek <t>: open with the playhead at t (targeted repro runs)
+            if let Some(i) = args.iter().position(|a| a == "--seek") {
+                if let Some(t) = args.get(i + 1).and_then(|v| v.parse::<f64>().ok()) {
+                    app.t = t.min(app.dur);
+                    app.push_req(false);
                 }
             }
             Ok(Box::new(app))

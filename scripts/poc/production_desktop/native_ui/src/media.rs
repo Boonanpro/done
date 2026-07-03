@@ -73,6 +73,8 @@ pub struct VideoStream {
     last_pts: f64,
     last_req: f64,
     prime_target: Option<f64>,
+    dur: f64,      // container duration — requests past it freeze on the last frame
+    pub eos: bool, // reader returned ENDOFSTREAM; cleared by seek
     // NV12 -> BGRA converter
     vp: ID3D11VideoProcessor,
     vp_enum: ID3D11VideoProcessorEnumerator,
@@ -183,6 +185,10 @@ impl VideoStream {
                 },
                 Some(&mut ov),
             )?;
+            let dur = reader
+                .GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
+                .map(|pv| pv.as_raw().Anonymous.Anonymous.Anonymous.hVal as f64 / HNS)
+                .unwrap_or(f64::MAX);
             Ok(Self {
                 name: format!("{}#{}", path.rsplit('/').next().unwrap_or(path), stream),
                 reader,
@@ -193,6 +199,8 @@ impl VideoStream {
                 last_pts: -1.0,
                 last_req: -1.0,
                 prime_target: None,
+                dur,
+                eos: false,
                 vp,
                 vp_enum,
                 bgra,
@@ -210,17 +218,26 @@ impl VideoStream {
             self.reader
                 .ReadSample(self.stream, 0, None, Some(&mut flags), Some(&mut pts), Some(&mut sample))?;
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                self.eos = true;
                 return Ok(None);
             }
             Ok(sample.map(|s| (pts as f64 / HNS, s)))
         }
     }
 
+    /// Clamp a requested source time into the file (seeking past the end raises
+    /// 0xC00D36E5 and clip in/out points routinely overshoot the baked file by a frame).
+    fn clamp_t(&self, t: f64) -> f64 {
+        t.min(self.dur - 0.01).max(0.0)
+    }
+
     fn seek(&mut self, t: f64) -> Result<()> {
+        let t = self.clamp_t(t);
         unsafe {
             let pv = PROPVARIANT::from((t * HNS) as i64);
             self.reader.SetCurrentPosition(&GUID::zeroed(), &pv)?;
         }
+        self.eos = false;
         self.pending = None;
         let mut prev: Option<(f64, IMFSample)> = None;
         while let Some((pts, s)) = self.read_next()? {
@@ -284,6 +301,11 @@ impl VideoStream {
     /// audio buffer (the "stutter moved earlier + audio breaks" bug). Sliced, it costs
     /// ≤~12ms per loop iteration.
     pub fn prime_step(&mut self, src_t: f64) -> Result<bool> {
+        let src_t = self.clamp_t(src_t);
+        if self.eos && self.pending.is_none() && src_t >= self.last_pts {
+            self.prime_target = None;
+            return Ok(true); // nothing beyond the end to position at
+        }
         let positioned = self
             .pending_pts()
             .map(|p| (p - src_t).abs() < 0.4)
@@ -298,6 +320,7 @@ impl VideoStream {
                 let pv = PROPVARIANT::from((src_t * HNS) as i64);
                 self.reader.SetCurrentPosition(&GUID::zeroed(), &pv)?;
             }
+            self.eos = false;
             self.prime_target = Some(src_t);
             self.pending = None;
         }
@@ -333,12 +356,68 @@ impl VideoStream {
         self.seek(src_t)
     }
 
+    /// SCRUB frame: put something honest on screen within ~budget_ms. Walks the GOP toward
+    /// the exact frame only while the budget lasts, then shows the newest frame reached
+    /// (nearest keyframe on long-GOP sources — the Filmora fast-drag look). Returns true
+    /// when the EXACT frame for t is on screen; false = budget ran out mid-walk, call
+    /// again (same t) to keep refining while the finger rests.
+    pub fn ensure_frame_scrub(&mut self, d3d: &D3d, t: f64, budget_ms: f64) -> Result<bool> {
+        let t = self.clamp_t(t);
+        self.prime_target = None;
+        self.last_req = t;
+        if self.has_frame && self.last_pts >= 0.0 && (self.last_pts - t).abs() < 0.04 {
+            return Ok(true); // already showing this frame
+        }
+        if self.eos && self.pending.is_none() && self.has_frame && t >= self.last_pts {
+            return Ok(true); // past the last real frame: freeze it
+        }
+        let t0 = std::time::Instant::now();
+        // forward within this window continues the decode (progress accumulates across
+        // ticks); anything else re-seeks to the preceding keyframe
+        let cont = (self.last_pts >= 0.0 && t >= self.last_pts && t < self.last_pts + 4.0)
+            || self.pending_pts().map(|p| t >= p && t < p + 4.0).unwrap_or(false);
+        if !cont {
+            unsafe {
+                let pv = PROPVARIANT::from((t * HNS) as i64);
+                self.reader.SetCurrentPosition(&GUID::zeroed(), &pv)?;
+            }
+            self.pending = None;
+        }
+        let mut newest: Option<(f64, IMFSample)> = None;
+        let mut exact = true; // stays true when we stop at a future frame / EOS
+        loop {
+            let nx = if self.pending.is_some() { self.pending.take() } else { self.read_next()? };
+            let Some((pts, s)) = nx else { break };
+            if pts > t + 0.0005 {
+                self.pending = Some((pts, s)); // future frame — keep for the next tick
+                break;
+            }
+            newest = Some((pts, s));
+            if t0.elapsed().as_secs_f64() * 1000.0 > budget_ms {
+                exact = false; // budget spent mid-walk — show what we reached
+                break;
+            }
+        }
+        if let Some((pts, s)) = newest {
+            self.blit(d3d, &s)?;
+            self.last_pts = pts;
+        }
+        Ok(exact && self.has_frame)
+    }
+
     /// Ensure `bgra` holds the newest frame with pts <= t. Seeks on backward/far-forward jumps.
     pub fn ensure_frame(&mut self, d3d: &D3d, t: f64) -> Result<bool> {
+        let t = self.clamp_t(t);
+        if self.eos && self.pending.is_none() && self.has_frame && t >= self.last_pts {
+            self.prime_target = None;
+            self.last_req = t;
+            return Ok(true); // past the last real frame: freeze it (NLE end-of-source)
+        }
         // a prime walk toward ~t is in flight: FINISH it (decode forward) instead of
         // re-seeking — re-seek would restart the whole GOP walk from the keyframe
         if let Some(pt) = self.prime_target {
             if (pt - t).abs() < 0.6 {
+                let w0 = std::time::Instant::now();
                 while let Some((pts, sm)) = self.read_next()? {
                     if pts + 0.0005 >= t.min(pt) {
                         self.pending = Some((pts, sm));
@@ -346,13 +425,22 @@ impl VideoStream {
                     }
                 }
                 self.prime_target = None;
+                let wms = w0.elapsed().as_secs_f64() * 1000.0;
+                if wms > 60.0 {
+                    eprintln!("PRIMEWALK {} to {:.2}: {:.0}ms", self.name, t, wms);
+                }
             } else {
                 self.prime_target = None;
             }
         }
         let back = self.last_req >= 0.0 && t < self.last_req - 0.05;
         let cold = self.last_pts < 0.0;
-        let far = self.pending.is_none() && t > self.last_pts + 1.5;
+        // far-forward: BOTH the shown frame and the lookahead frame are well behind t.
+        // (pending ahead of t = a VFR hold — keep the frame, don't re-seek. But pending
+        // just after last_pts with t minutes ahead = a big source jump at a cut; requiring
+        // pending.is_none() here made that walk EVERY frame to t — the 4.5s stall.)
+        let far = t > self.last_pts + 1.5
+            && self.pending_pts().map(|p| p < t - 1.5).unwrap_or(true);
         self.last_req = t;
         let jump = (back || cold || far)
             && !self.pending_pts().map(|p| (p - t).abs() < 0.6).unwrap_or(false);
@@ -512,6 +600,7 @@ impl PeakScan {
 struct Slot {
     vs: VideoStream,
     used_frame: u64,
+    touch: u64, // last frame_no this slot was used OR primed — LRU eviction key
 }
 
 pub struct VideoPool {
@@ -538,10 +627,19 @@ impl VideoPool {
         let frame_no = self.frame_no;
         let entry = self.slots.entry(key).or_default();
         if entry.is_empty() {
-            entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
+            entry.push(Slot {
+                vs: VideoStream::open(d3d, path, stream, full_range)
+                    .map_err(|e| e.context(format!("open {path}#{stream}")))?,
+                used_frame: 0,
+                touch: frame_no,
+            });
         }
         let fitness = |s: &Slot| -> i32 {
-            let near_last = s.vs.last_pts >= 0.0 && src_t >= s.vs.last_pts - 0.05 && src_t < s.vs.last_pts + 1.0;
+            let near_last = s.vs.last_pts >= 0.0
+                && src_t >= s.vs.last_pts - 0.05
+                // at EOS the shown frame IS correct for any later src_t (freeze-frame) —
+                // without this, get() opened doomed spares for past-the-end requests
+                && (src_t < s.vs.last_pts + 1.0 || s.vs.eos);
             let primed = s
                 .vs
                 .pending_pts()
@@ -565,12 +663,32 @@ impl VideoPool {
         // on-screen picture never gets torn away mid-frame
         if fitness(&entry[best]) == 0 && entry[best].used_frame == frame_no {
             if entry.len() < 3 {
-                entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
+                entry.push(Slot {
+                    vs: VideoStream::open(d3d, path, stream, full_range)
+                        .map_err(|e| e.context(format!("open spare {path}#{stream}")))?,
+                    used_frame: 0,
+                    touch: frame_no,
+                });
             }
             best = entry.len() - 1;
         }
         entry[best].used_frame = frame_no;
+        entry[best].touch = frame_no;
         Ok(&mut entry[best].vs)
+    }
+
+    /// Drop every (path,stream) whose slots have ALL been idle for `keep` composed frames.
+    /// Decoder instances accumulate over a long timeline (every pop-out segment is its own
+    /// file = its own HW decoder session + 4K textures) — unbounded, that exhausts GPU
+    /// memory (0x8007000E) and video production dies permanently.
+    pub fn evict_stale(&mut self, keep: u64) {
+        let now = self.frame_no;
+        self.slots.retain(|_, v| v.iter().any(|s| s.touch + keep > now));
+    }
+
+    /// (open files, open decoder instances) — pool growth watchdog
+    pub fn stats(&self) -> (usize, usize) {
+        (self.slots.len(), self.slots.values().map(|v| v.len()).sum())
     }
 
     /// True if (path,stream) already has `n` open instances.
@@ -585,9 +703,15 @@ impl VideoPool {
     /// on a 14GB original costs ~100-200ms on this thread — never pay it while playing).
     pub fn warm_open(&mut self, d3d: &D3d, path: &str, stream: u32, full_range: bool, instances: usize) -> Result<()> {
         let key = (path.to_string(), stream);
+        let frame_no = self.frame_no;
         let entry = self.slots.entry(key).or_default();
         while entry.len() < instances.min(3) {
-            entry.push(Slot { vs: VideoStream::open(d3d, path, stream, full_range)?, used_frame: 0 });
+            entry.push(Slot {
+                vs: VideoStream::open(d3d, path, stream, full_range)
+                    .map_err(|e| e.context(format!("warm open {path}#{stream}")))?,
+                used_frame: 0,
+                touch: frame_no,
+            });
         }
         Ok(())
     }
@@ -620,6 +744,7 @@ impl VideoPool {
         let Some(spare) = entry.iter().position(|s| s.used_frame != frame_no) else {
             return Ok(false);
         };
+        entry[spare].touch = frame_no; // primed-for-soon: not eviction fodder
         entry[spare].vs.prime_step(src_in)?;
         Ok(true)
     }
