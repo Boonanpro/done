@@ -4400,18 +4400,70 @@ fn main() -> eframe::Result<()> {
         let nd = model::Doc::from_raw(raw, &doc.contents_path, &doc.asset_dir).expect("redoc");
         let after: usize = nd.seq.tracks.iter().map(|t| t.clips.len()).sum();
         let orig = doc.seq.tracks.iter().flat_map(|t| t.clips.iter()).find(|c| c.id == vid).unwrap();
+        let (orig_ts, orig_te) = (orig.timeline_start, orig.timeline_end);
+        let d = orig_te - orig_ts;
         let copy = nd
             .seq
             .tracks
             .iter()
             .flat_map(|t| t.clips.iter())
-            .find(|c| c.id.contains("__dup_"))
+            .find(|c| c.id.contains("__dup_") && c.id.starts_with(&vid))
             .expect("copy");
+        // INVARIANT 1: the edit introduces NO NEW same-track overlap (legacy data may
+        // already contain some — measure the delta, not the absolute)
+        let count_overlaps = |d: &model::Doc| -> usize {
+            let mut n = 0usize;
+            for tr in &d.seq.tracks {
+                for (i, a) in tr.clips.iter().enumerate() {
+                    for b in tr.clips.iter().skip(i + 1) {
+                        if a.timeline_start < b.timeline_end - 0.002
+                            && b.timeline_start < a.timeline_end - 0.002
+                        {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            n
+        };
+        let overlaps = count_overlaps(&nd) as i64 - count_overlaps(&doc) as i64;
+        // INVARIANT 2: everything that started at/after the block end moved right by d
+        let after_map: std::collections::HashMap<&str, f64> = nd
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.as_str(), c.timeline_start))
+            .collect();
+        let mut shifted_bad = 0usize;
+        for tr in &doc.seq.tracks {
+            for c in &tr.clips {
+                if ids.contains(&c.id) || c.timeline_start < orig_te - 1e-6 {
+                    continue;
+                }
+                if let Some(&na) = after_map.get(c.id.as_str()) {
+                    if (na - (c.timeline_start + d)).abs() > 0.002 {
+                        shifted_bad += 1;
+                    }
+                }
+            }
+        }
+        // INVARIANT 3: the copy pair keeps a 0ms A/V relationship
+        let copy_audio = nd
+            .seq
+            .tracks
+            .iter()
+            .filter(|t| t.kind == "audio")
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.link_id.is_some() && c.link_id == copy.link_id);
+        let av_off = copy_audio
+            .map(|a| ((copy.source_start - copy.timeline_start) - (a.source_start - a.timeline_start)).abs())
+            .unwrap_or(-1.0);
         println!(
-            "DUP before={before} after={after} linked={} copy_start={:.3} (orig_end={:.3}) copy_link_new={}",
+            "DUP before={before} after={after} linked={} copy_start={:.3} (orig_end={:.3}) copy_link_new={} new_overlaps={overlaps} shifted_bad={shifted_bad} av_off={av_off:.4}",
             ids.len(),
             copy.timeline_start,
-            orig.timeline_end,
+            orig_te,
             copy.link_id.as_deref() != orig.link_id.as_deref()
         );
         std::process::exit(0);

@@ -176,10 +176,45 @@ pub fn split_clips(root: &mut Value, ids: &[String], t: f64, salt: u64) {
     }
 }
 
-/// Duplicate the selected clips in place: each copy lands right AFTER its original on the
-/// same track (standard NLE Ctrl+D). Linked A/V pairs get a fresh shared link_id so the
-/// copies stay linked to each other, not to the originals.
+/// Duplicate the selection as a BLOCK with a ripple INSERT (Filmora/CapCut semantics):
+/// copies land right after the selection keeping their relative layout, and everything
+/// that starts at/after the selection's end — on ALL tracks — shifts right to make room.
+/// Without the ripple, a copy dropped onto a gap-free timeline overlaps the next clip:
+/// two videos stack and both audios play at once (the "duplicate is broken" report).
+/// Linked A/V pairs get a fresh shared link_id so copies link to each other, not the originals.
 pub fn duplicate_clips(root: &mut Value, ids: &[String], salt: u64) {
+    // selection block bounds
+    let mut bs = f64::MAX;
+    let mut be = f64::MIN;
+    if let Some(seq) = root.get(0).and_then(|r| r.get("timeline")).and_then(|t| t.get("sequence")) {
+        if let Some(tracks) = seq.get("tracks").and_then(|t| t.as_array()) {
+            for tr in tracks {
+                for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                    if ids.contains(&sid(c)) {
+                        bs = bs.min(f(c, "timeline_start"));
+                        be = be.max(f(c, "timeline_end"));
+                    }
+                }
+            }
+        }
+    }
+    if !(be > bs) {
+        return;
+    }
+    let d = be - bs;
+    // 1) ripple: make room AFTER the block (all tracks, same rule as ripple_delete inverted)
+    for_each_clip(root, |c| {
+        if ids.contains(&sid(c)) {
+            return;
+        }
+        let cs = f(c, "timeline_start");
+        if cs >= be - 1e-6 {
+            let ce = f(c, "timeline_end");
+            setf(c, "timeline_start", cs + d);
+            setf(c, "timeline_end", ce + d);
+        }
+    });
+    // 2) copies at original position + block length (relative layout preserved)
     let mut n = 0u64;
     let mut new_links: std::collections::HashMap<String, String> = Default::default();
     let Some(seq) = root
@@ -194,17 +229,15 @@ pub fn duplicate_clips(root: &mut Value, ids: &[String], salt: u64) {
             if let Some(cs) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) {
                 let mut out: Vec<Value> = Vec::with_capacity(cs.len());
                 for c in cs.drain(..) {
-                    let hit = ids.contains(&sid(&c));
-                    if !hit {
+                    if !ids.contains(&sid(&c)) {
                         out.push(c);
                         continue;
                     }
                     let (ts, te) = (f(&c, "timeline_start"), f(&c, "timeline_end"));
-                    let d = (te - ts).max(0.05);
                     let mut copy = c.clone();
                     n += 1;
                     copy["id"] = Value::from(format!("{}__dup_{}_{}", sid(&c), salt, n));
-                    setf(&mut copy, "timeline_start", te);
+                    setf(&mut copy, "timeline_start", ts + d);
                     setf(&mut copy, "timeline_end", te + d);
                     if let Some(l) = link(&c) {
                         let nl = new_links
