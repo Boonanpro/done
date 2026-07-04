@@ -61,9 +61,8 @@ float4 ps_popout_live(VOut i) : SV_Target {
   float be = bf * (1 - pa) * 0.6;
   rgb = rgb * (1 - be) + float3(0.8235, 0.7647, 0.7843) * be; // border_col 210,195,200 RGB
   outa = saturate(outa + be);
-  // 4. contact shadow cast by the popped head onto the card
-  float shm = shb * ca * (1 - pa) * 0.5;
-  rgb *= (1 - shm);
+  // (contact shadow removed by user request: it read as a black ring around the body
+  //  plus a flickering translucent silhouette behind it — no shadow, clean cutout)
   // 5. person on top; premultiplied out
   float nna = outa + pa * (1 - outa);
   rgb = (rgb * outa * (1 - pa) + src * pa) / max(nna, 1e-6);

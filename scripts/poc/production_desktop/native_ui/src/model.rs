@@ -242,6 +242,16 @@ impl Doc {
         let base = it.next();
         (base, it.collect())
     }
+    /// ALL audio-lane clips overlapping [t0, t1) — the mixer plays every one of them.
+    pub fn active_audio_span(&self, t0: f64, t1: f64) -> Vec<&Clip> {
+        self.seq
+            .tracks
+            .iter()
+            .filter(|tr| tr.kind == "audio")
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| c.asset_id.is_some() && c.timeline_end > t0 && c.timeline_start < t1)
+            .collect()
+    }
     /// Active audio clip at t (first match).
     pub fn active_audio(&self, t: f64) -> Option<&Clip> {
         self.seq

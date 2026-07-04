@@ -3968,6 +3968,19 @@ impl eframe::App for App {
     }
 }
 
+
+/// Positional CLI args (contents.json path, asset dir) end at the first `--flag`;
+/// everything after belongs to flags and their values. A done:// deep link is a flag-like
+/// launch too, not a path.
+fn positional_args(args: &[String]) -> Vec<String> {
+    args.iter()
+        .skip(1)
+        .take_while(|a| !a.starts_with("--") && !a.starts_with("done://"))
+        .take(2)
+        .cloned()
+        .collect()
+}
+
 fn main() -> eframe::Result<()> {
     // launched without a console (.lnk / double-click): tee diagnostics to a log file so
     // real-user sessions stay diagnosable
@@ -3993,18 +4006,20 @@ fn main() -> eframe::Result<()> {
     if let Some(i) = args.iter().position(|a| a == "--dump-frame") {
         let t: f64 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
         let out = args.get(i + 2).cloned().unwrap_or_else(|| "frame.ppm".into());
-        let contents = args.get(1).cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
-        let dir = args.get(2).cloned().unwrap_or_else(|| ROOM.to_string());
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let r = (|| -> anyhow::Result<()> {
-            let doc = model::Doc::load(&contents, &dir)?;
-            let d3d = media::D3d::new()?;
+            use anyhow::Context;
+            let doc = model::Doc::load(&contents, &dir).context("doc load")?;
+            let d3d = media::D3d::new().context("d3d")?;
             let mut pool = media::VideoPool::new();
-            let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H)?;
+            let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H).context("compositor")?;
             let mut masks: MaskMap = Default::default();
             while mask_build_pass(&doc, &d3d, &mut masks) {}
             let mut pts_maps: PtsMap = Default::default();
             while pts_load_pass(&doc, &mut pts_maps) {}
-            compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, false, true)?;
+            compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, false, true)
+                .context("compose")?;
             let mut ppm = format!("P6\n{CANVAS_W} {CANVAS_H}\n255\n").into_bytes();
             for px in comp.rgba.chunks(4) {
                 ppm.extend_from_slice(&px[..3]);
@@ -4136,8 +4151,8 @@ fn main() -> eframe::Result<()> {
     // --bench-scrub <t0>: headless scrub over the real timeline (full compose path, no UI)
     if let Some(i) = args.iter().position(|a| a == "--bench-scrub") {
         let t0v: f64 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(40.0);
-        let contents = args.get(1).cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
-        let dir = args.get(2).cloned().unwrap_or_else(|| ROOM.to_string());
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let doc = model::Doc::load(&contents, &dir).unwrap();
         let d3d = media::D3d::new().unwrap();
         let mut pool = media::VideoPool::new();
@@ -4163,8 +4178,8 @@ fn main() -> eframe::Result<()> {
     // --selftest-apply: headless E-apply flow — strip a clip's popout, re-apply, follow
     // the bake to finalized params (uses the real local server; cached keys finish instantly)
     if args.iter().any(|a| a == "--selftest-apply") {
-        let contents = args.get(1).cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
-        let dir = args.get(2).cloned().unwrap_or_else(|| ROOM.to_string());
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let mut app = App::new(&contents, &dir).expect("app");
         let target = app
             .doc
@@ -4226,8 +4241,8 @@ fn main() -> eframe::Result<()> {
     }
     // --selftest-move: headless lane-move — move an overlay clip to the video track
     if args.iter().any(|a| a == "--selftest-move") {
-        let contents = args.get(1).cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
-        let dir = args.get(2).cloned().unwrap_or_else(|| ROOM.to_string());
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let mut app = App::new(&contents, &dir).expect("app");
         let (src_ti, cid) = app
             .doc
@@ -4317,16 +4332,12 @@ fn main() -> eframe::Result<()> {
         .as_ref()
         .map(|r| format!("D:/done/uploads/production-assets/{r}"))
         .unwrap_or_else(|| ROOM.to_string());
-    let contents = args
-        .get(1)
-        .filter(|a| !a.starts_with("done://"))
+    let positional = positional_args(&args);
+    let contents = positional
+        .first()
         .cloned()
         .unwrap_or_else(|| format!("{room_dir}/contents.json"));
-    let dir = args
-        .get(2)
-        .filter(|a| !a.starts_with("done://"))
-        .cloned()
-        .unwrap_or(room_dir);
+    let dir = positional.get(1).cloned().unwrap_or(room_dir);
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 940.0])
@@ -4355,10 +4366,8 @@ fn main() -> eframe::Result<()> {
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?;
             // bare launch (no explicit contents arg): open the LIBRARY (assets ->
             // generation -> open), the full production entry point
-            let explicit = std::env::args()
-                .nth(1)
-                .map(|a| !a.starts_with("--") && !a.starts_with("done://"))
-                .unwrap_or(false);
+            let all: Vec<String> = std::env::args().collect();
+            let explicit = !positional_args(&all).is_empty();
             if !explicit {
                 app.screen = Screen::Library;
                 app.lib_refresh();
