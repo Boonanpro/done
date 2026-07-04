@@ -403,17 +403,48 @@ pub fn ripple_delete(raw: &mut serde_json::Value, ids: &[String]) {
         }
         merged.push(sp);
     }
+    // Closing the gap = REMOVING the time interval [ts,te) from the whole timeline.
+    // Just shifting clips that start after te (the old code) smashed shifted clips into
+    // clips STRADDLING the span (a caption running across the cut kept its full length
+    // while everything behind it moved left -> same-track overlap). Correct mapping:
+    // map(t) = t < ts ? t : max(ts, t - d) applied to both edges; a clip that collapses
+    // lived inside the span and is dropped; source in/out points follow the cut edges.
     for (ts, te) in merged.into_iter().rev() {
         let d = te - ts;
+        let mut dead: Vec<String> = Vec::new();
         for_each_clip(raw, |c| {
-            let cs = c.get("timeline_start").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            if cs >= te - 1e-6 {
-                let ce = c.get("timeline_end").and_then(|v| v.as_f64()).unwrap_or(cs);
-                let o = c.as_object_mut().unwrap();
-                o.insert("timeline_start".into(), serde_json::json!(((cs - d) * 1000.0).round() / 1000.0));
-                o.insert("timeline_end".into(), serde_json::json!(((ce - d) * 1000.0).round() / 1000.0));
+            let cs = f(c, "timeline_start");
+            let ce = f(c, "timeline_end");
+            if ce <= ts + 1e-6 {
+                return; // fully before the removed span
             }
+            let map = |t: f64| if t <= ts { t } else { (t - d).max(ts) };
+            let (ncs, nce) = (map(cs), map(ce));
+            if nce - ncs < 0.05 {
+                dead.push(sid(c));
+                return;
+            }
+            let has_src = c.get("source_start").map(|v| v.is_number()).unwrap_or(false);
+            if has_src {
+                // head of the clip removed (clip starts inside the span): in-point advances
+                if cs > ts - 1e-6 && cs < te {
+                    let head_cut = (te.min(ce) - cs).max(0.0);
+                    setf(c, "source_start", f(c, "source_start") + head_cut);
+                }
+                // tail / middle removed: out-point retreats by the rest of the cut
+                let removed = (ce.min(te) - cs.max(ts)).max(0.0);
+                let head_cut = if cs > ts - 1e-6 && cs < te { (te.min(ce) - cs).max(0.0) } else { 0.0 };
+                let tail_cut = (removed - head_cut).max(0.0);
+                if tail_cut > 1e-6 && c.get("source_end").map(|v| v.is_number()).unwrap_or(false) {
+                    setf(c, "source_end", f(c, "source_end") - tail_cut);
+                }
+            }
+            setf(c, "timeline_start", ncs);
+            setf(c, "timeline_end", nce);
         });
+        if !dead.is_empty() {
+            delete_clips(raw, &dead);
+        }
     }
 }
 
