@@ -1508,16 +1508,19 @@ impl App {
         }
         let mut raw = self.doc.raw.clone();
         f(&mut raw);
-        if let Ok(nd) = model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
-            let nd = Arc::new(nd);
-            self.doc = nd.clone();
-            *self.shared.doc.lock().unwrap() = nd;
-            self.dur = self.doc.duration();
-            self.save_at = Some(Instant::now() + std::time::Duration::from_millis(1200));
-            // mid-drag edits (move/trim) count as scrubbing: the media thread must stay
-            // free for the next tick, and the preview uses the budgeted scrub seek
-            let scrubbing = !matches!(self.drag, Drag::None);
-            self.push_req(scrubbing);
+        match model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
+            Ok(nd) => {
+                let nd = Arc::new(nd);
+                self.doc = nd.clone();
+                *self.shared.doc.lock().unwrap() = nd;
+                self.dur = self.doc.duration();
+                self.save_at = Some(Instant::now() + std::time::Duration::from_millis(1200));
+                // mid-drag edits (move/trim) count as scrubbing: the media thread must stay
+                // free for the next tick, and the preview uses the budgeted scrub seek
+                let scrubbing = !matches!(self.drag, Drag::None);
+                self.push_req(scrubbing);
+            }
+            Err(e) => eprintln!("apply_edit: doc rebuild FAILED (edit dropped): {e:#}"),
         }
     }
 
@@ -1823,6 +1826,35 @@ impl App {
         }
     }
 
+    /// Drop a dragged clip onto another lane: move its visual clip(s) to that track.
+    /// Any non-audio lane is a valid target — lanes are just layers.
+    fn drop_move_to_lane(&mut self, ids: &[String], target: usize) {
+        let tk = self.doc.seq.tracks.get(target).map(|t| t.kind.clone()).unwrap_or_default();
+        let src_track = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .position(|tr| tr.kind != "audio" && tr.clips.iter().any(|c| ids.contains(&c.id)));
+        let vids: Vec<String> = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .filter(|tr| tr.kind != "audio")
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| ids.contains(&c.id))
+            .map(|c| c.id.clone())
+            .collect();
+        eprintln!(
+            "DROPLANE target={target}({tk}) src={src_track:?} clips={}",
+            vids.len()
+        );
+        if tk != "audio" && src_track != Some(target) && !vids.is_empty() {
+            self.apply_edit(true, move |raw| edits::move_to_track(raw, &vids, target));
+        }
+    }
+
     fn push_req(&mut self, scrubbing: bool) {
         let mut r = self.shared.req.lock().unwrap();
         self.gen += 1;
@@ -1949,20 +1981,17 @@ impl App {
                     egui::Color32::from_rgba_unmultiplied(120, 170, 255, 22),
                 );
             }
-            // lane header + separator
+            // lane header: just a layer number — lanes have no fixed roles, upper = front
             p.text(
                 egui::pos2(rect.left() + 6.0, y0 + lane_h * 0.5),
                 egui::Align2::LEFT_CENTER,
-                match tr.kind.as_str() {
-                    "video" => "映像",
-                    "overlay" => "前面",
-                    "audio" => "音声",
-                    "caption" => "テロップ",
-                    "effect" => "効果",
-                    _ => "?",
+                if tr.kind == "audio" {
+                    format!("A{}", ti + 1)
+                } else {
+                    format!("{}", ti + 1)
                 },
                 egui::FontId::proportional(11.0),
-                egui::Color32::from_gray(170),
+                egui::Color32::from_gray(140),
             );
             p.line_segment(
                 [egui::pos2(rect.left(), y0 + lane_h + 1.5), egui::pos2(rect.right(), y0 + lane_h + 1.5)],
@@ -2244,6 +2273,9 @@ impl App {
                     }
                     Drag::Move { ids, grab, orig, applied } => {
                         // vertical: remember which lane the pointer is over (drop target)
+                        if self.hover_lane.is_none() {
+                            eprintln!("MOVEDRAG start");
+                        }
                         self.hover_lane = lane_tops
                             .iter()
                             .find(|&&(_, y0, lh)| pos.y >= y0 && pos.y <= y0 + lh)
@@ -2271,30 +2303,20 @@ impl App {
         }
         if resp.drag_stopped() {
             let prev = std::mem::replace(&mut self.drag, Drag::None);
+            eprintln!(
+                "DRAGSTOP prev={} hover={:?}",
+                match &prev {
+                    Drag::None => "none",
+                    Drag::Scrub => "scrub",
+                    Drag::Move { .. } => "move",
+                    Drag::Trim { .. } => "trim",
+                },
+                self.hover_lane
+            );
             // dropped on another visual lane: move the clip to that track
             if let (Drag::Move { ids, .. }, Some(target)) = (&prev, self.hover_lane) {
-                let tk = self.doc.seq.tracks.get(target).map(|t| t.kind.clone()).unwrap_or_default();
-                let src_track = self
-                    .doc
-                    .seq
-                    .tracks
-                    .iter()
-                    .position(|tr| tr.clips.iter().any(|c| ids.contains(&c.id) && (tr.kind == "video" || tr.kind == "overlay")));
-                if (tk == "video" || tk == "overlay") && src_track != Some(target) {
-                    let vids: Vec<String> = self
-                        .doc
-                        .seq
-                        .tracks
-                        .iter()
-                        .filter(|tr| tr.kind == "video" || tr.kind == "overlay")
-                        .flat_map(|tr| tr.clips.iter())
-                        .filter(|c| ids.contains(&c.id))
-                        .map(|c| c.id.clone())
-                        .collect();
-                    if !vids.is_empty() {
-                        self.apply_edit(false, move |raw| edits::move_to_track(raw, &vids, target));
-                    }
-                }
+                let ids2 = ids.clone();
+                self.drop_move_to_lane(&ids2, target);
             }
             self.hover_lane = None;
             self.snap_line = None;
@@ -2362,6 +2384,9 @@ impl App {
                 }
             }
         });
+        // claim any leftover space: under-reporting our size made the resizable panel
+        // shrink back a few px every frame (the "drifts back after release" bug)
+        ui.allocate_space(ui.available_size());
     }
 }
 
@@ -2704,6 +2729,23 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result<()> {
+    // launched without a console (.lnk / double-click): tee diagnostics to a log file so
+    // real-user sessions stay diagnosable
+    unsafe {
+        use windows::Win32::System::Console::{GetStdHandle, SetStdHandle, STD_ERROR_HANDLE};
+        let bad = GetStdHandle(STD_ERROR_HANDLE)
+            .map(|h: windows::Win32::Foundation::HANDLE| h.is_invalid())
+            .unwrap_or(true);
+        if bad {
+            let path = format!("{}/native_ui.log", std::env::temp_dir().to_string_lossy());
+            if let Ok(f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                use std::os::windows::io::IntoRawHandle;
+                let h = windows::Win32::Foundation::HANDLE(f.into_raw_handle());
+                let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+                eprintln!("=== native_ui start {} ===", std::process::id());
+            }
+        }
+    }
     let args: Vec<String> = std::env::args().collect();
     // --dump-frame <t> <out.ppm>: headless compose of one timeline frame — deterministic
     // A/B verification (live matte path vs pv fallback) with no window and no user input
@@ -2939,6 +2981,43 @@ fn main() -> eframe::Result<()> {
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
+        std::process::exit(0);
+    }
+    // --selftest-move: headless lane-move — move an overlay clip to the video track
+    if args.iter().any(|a| a == "--selftest-move") {
+        let contents = args.get(1).cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = args.get(2).cloned().unwrap_or_else(|| ROOM.to_string());
+        let mut app = App::new(&contents, &dir).expect("app");
+        let (src_ti, cid) = app
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, tr)| tr.kind == "overlay")
+            .flat_map(|(ti, tr)| tr.clips.iter().map(move |c| (ti, c.id.clone())))
+            .next()
+            .expect("no overlay clip");
+        let target = app
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .position(|tr| tr.kind == "video")
+            .expect("no video track");
+        println!("moving {cid} from track {src_ti} to {target}");
+        app.drop_move_to_lane(&[cid.clone()], target);
+        let now_in = app
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .position(|tr| tr.clips.iter().any(|c| c.id == cid));
+        println!(
+            "MOVE {} (now in track {:?})",
+            if now_in == Some(target) { "PASS" } else { "FAIL" },
+            now_in
+        );
         std::process::exit(0);
     }
     // --probe-open <path> <stream> [full_range]: open one decoder standalone and report

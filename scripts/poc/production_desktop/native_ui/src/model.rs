@@ -226,8 +226,8 @@ impl Doc {
     pub fn active_video(&self, t: f64) -> (Option<&Clip>, Vec<&Clip>) {
         let mut layers: Vec<&Clip> = Vec::new();
         for tr in &self.seq.tracks {
-            if tr.kind != "video" && tr.kind != "overlay" {
-                continue;
+            if tr.kind == "audio" {
+                continue; // any non-audio lane can hold visual clips — no role rules
             }
             for c in &tr.clips {
                 if c.asset_id.is_none() || t < c.timeline_start || t >= c.timeline_end {

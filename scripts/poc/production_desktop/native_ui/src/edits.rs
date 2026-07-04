@@ -354,8 +354,8 @@ pub fn move_to_track(raw: &mut serde_json::Value, ids: &[String], target: usize)
         return;
     }
     let tkind = tracks[target].get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if tkind != "video" && tkind != "overlay" {
-        return;
+    if tkind == "audio" {
+        return; // visual clips can live on any non-audio lane
     }
     let mut moved: Vec<serde_json::Value> = Vec::new();
     for tr in tracks.iter_mut() {
