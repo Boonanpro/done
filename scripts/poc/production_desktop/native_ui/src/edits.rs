@@ -176,6 +176,52 @@ pub fn split_clips(root: &mut Value, ids: &[String], t: f64, salt: u64) {
     }
 }
 
+/// Duplicate the selected clips in place: each copy lands right AFTER its original on the
+/// same track (standard NLE Ctrl+D). Linked A/V pairs get a fresh shared link_id so the
+/// copies stay linked to each other, not to the originals.
+pub fn duplicate_clips(root: &mut Value, ids: &[String], salt: u64) {
+    let mut n = 0u64;
+    let mut new_links: std::collections::HashMap<String, String> = Default::default();
+    let Some(seq) = root
+        .get_mut(0)
+        .and_then(|r| r.get_mut("timeline"))
+        .and_then(|t| t.get_mut("sequence"))
+    else {
+        return;
+    };
+    if let Some(tracks) = seq.get_mut("tracks").and_then(|t| t.as_array_mut()) {
+        for tr in tracks {
+            if let Some(cs) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) {
+                let mut out: Vec<Value> = Vec::with_capacity(cs.len());
+                for c in cs.drain(..) {
+                    let hit = ids.contains(&sid(&c));
+                    if !hit {
+                        out.push(c);
+                        continue;
+                    }
+                    let (ts, te) = (f(&c, "timeline_start"), f(&c, "timeline_end"));
+                    let d = (te - ts).max(0.05);
+                    let mut copy = c.clone();
+                    n += 1;
+                    copy["id"] = Value::from(format!("{}__dup_{}_{}", sid(&c), salt, n));
+                    setf(&mut copy, "timeline_start", te);
+                    setf(&mut copy, "timeline_end", te + d);
+                    if let Some(l) = link(&c) {
+                        let nl = new_links
+                            .entry(l)
+                            .or_insert_with(|| format!("lk_dup_{}_{}", salt, n))
+                            .clone();
+                        copy["link_id"] = Value::from(nl);
+                    }
+                    out.push(c);
+                    out.push(copy);
+                }
+                *cs = out;
+            }
+        }
+    }
+}
+
 /// Atomic write-back of the WHOLE document (tmp + rename) — the same file the web editor,
 /// Dan and the server exporter read.
 pub fn save(root: &Value, contents_path: &str) -> anyhow::Result<()> {

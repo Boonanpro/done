@@ -3503,6 +3503,23 @@ impl eframe::App for App {
                 }
             }
         }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::D)) && !self.selected.is_empty()
+        {
+            let ids = edits::expand_links(&self.doc.raw, &self.selected);
+            let salt = std::process::id() as u64 ^ (self.t * 1000.0) as u64;
+            self.apply_edit(false, move |raw| edits::duplicate_clips(raw, &ids, salt));
+            self.toast("複製しました（元クリップの直後）");
+        }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
+            self.selected = self
+                .doc
+                .seq
+                .tracks
+                .iter()
+                .flat_map(|tr| tr.clips.iter())
+                .map(|c| c.id.clone())
+                .collect();
+        }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
             if let Some(prev) = self.undo.pop() {
                 self.redo.push(self.doc.raw.clone());
@@ -4071,7 +4088,10 @@ impl eframe::App for App {
                         ("Del", "削除"),
                         ("Shift+Del", "削除して左詰め"),
                         ("Ctrl+Z / Y", "元に戻す / やり直し"),
+                        ("Ctrl+D", "選択クリップを複製（直後に）"),
+                        ("Ctrl+A", "全クリップ選択"),
                         ("Ctrl+クリック", "複数選択"),
+                        ("空白ドラッグ", "矩形で複数選択（マーキー）"),
                         ("ドラッグ端", "トリム / 中央: 移動"),
                         ("Ctrl+ホイール", "ズーム / ホイール: 横スクロール"),
                     ] {
@@ -4355,6 +4375,45 @@ fn main() -> eframe::Result<()> {
             }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
+        std::process::exit(0);
+    }
+    // --selftest-dup: headless duplicate — clone the 3rd video clip (with its linked
+    // audio) in a COPY of the doc and verify counts/geometry; the real file is untouched
+    if args.iter().any(|a| a == "--selftest-dup") {
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
+        let doc = model::Doc::load(&contents, &dir).expect("doc");
+        let vid = doc
+            .seq
+            .tracks
+            .iter()
+            .filter(|tr| tr.kind != "audio")
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| c.asset_id.is_some())
+            .nth(2)
+            .map(|c| c.id.clone())
+            .expect("clip");
+        let before: usize = doc.seq.tracks.iter().map(|t| t.clips.len()).sum();
+        let ids = edits::expand_links(&doc.raw, &[vid.clone()]);
+        let mut raw = doc.raw.clone();
+        edits::duplicate_clips(&mut raw, &ids, 7);
+        let nd = model::Doc::from_raw(raw, &doc.contents_path, &doc.asset_dir).expect("redoc");
+        let after: usize = nd.seq.tracks.iter().map(|t| t.clips.len()).sum();
+        let orig = doc.seq.tracks.iter().flat_map(|t| t.clips.iter()).find(|c| c.id == vid).unwrap();
+        let copy = nd
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.id.contains("__dup_"))
+            .expect("copy");
+        println!(
+            "DUP before={before} after={after} linked={} copy_start={:.3} (orig_end={:.3}) copy_link_new={}",
+            ids.len(),
+            copy.timeline_start,
+            orig.timeline_end,
+            copy.link_id.as_deref() != orig.link_id.as_deref()
+        );
         std::process::exit(0);
     }
     // --selftest-move: headless lane-move — move an overlay clip to the video track
