@@ -1667,7 +1667,7 @@ impl App {
             .seq
             .tracks
             .iter()
-            .filter(|tr| tr.kind == "overlay" || tr.kind == "video")
+            .filter(|tr| tr.kind != "audio")
             .flat_map(|tr| tr.clips.iter())
             .filter(|c| self.selected.contains(&c.id) && c.asset_id.is_some())
             .map(|c| (c.id.clone(), c.clone()))
@@ -1958,7 +1958,7 @@ impl App {
                 .seq
                 .tracks
                 .iter()
-                .filter(|tr| tr.kind == "video" || tr.kind == "overlay")
+                .filter(|tr| tr.kind != "audio")
                 .flat_map(|tr| tr.clips.iter())
                 .filter_map(|c| c.link_id.as_deref())
                 .collect();
@@ -2071,7 +2071,7 @@ impl App {
                         }
                     }
                 }
-                if tr.kind == "video" || tr.kind == "overlay" {
+                if tr.kind != "audio" {
                     if let Some(aid) = c.asset_id.as_ref() {
                         // FILMSTRIP: each tile shows the actual source frame at its position
                         let tile_w = (r.height() * 16.0 / 9.0).max(8.0);
@@ -2101,7 +2101,7 @@ impl App {
                         }
                     }
                 }
-                if (tr.kind == "video" || tr.kind == "overlay") && c.link_id.is_some() {
+                if tr.kind != "audio" && c.link_id.is_some() {
                     // unified A/V: waveform ribbon along the clip's bottom quarter
                     if let Some((spb, pk)) = c.asset_id.as_ref().and_then(|a| self.peaks.get(a)) {
                         let base_y = r.bottom() - 1.0;
@@ -2272,14 +2272,42 @@ impl App {
                         self.push_req(true);
                     }
                     Drag::Move { ids, grab, orig, applied } => {
-                        // vertical: remember which lane the pointer is over (drop target)
-                        if self.hover_lane.is_none() {
-                            eprintln!("MOVEDRAG start");
-                        }
+                        // vertical: the clip FOLLOWS the pointer's lane live (not on release)
                         self.hover_lane = lane_tops
                             .iter()
                             .find(|&&(_, y0, lh)| pos.y >= y0 && pos.y <= y0 + lh)
                             .map(|&(ti, _, _)| ti);
+                        if let Some(target) = self.hover_lane {
+                            let tk_ok = self
+                                .doc
+                                .seq
+                                .tracks
+                                .get(target)
+                                .map(|t| t.kind != "audio")
+                                .unwrap_or(false);
+                            let already = self
+                                .doc
+                                .seq
+                                .tracks
+                                .get(target)
+                                .map(|t| t.clips.iter().any(|c| ids.contains(&c.id)))
+                                .unwrap_or(true);
+                            if tk_ok && !already {
+                                let vids: Vec<String> = self
+                                    .doc
+                                    .seq
+                                    .tracks
+                                    .iter()
+                                    .filter(|tr| tr.kind != "audio")
+                                    .flat_map(|tr| tr.clips.iter())
+                                    .filter(|c| ids.contains(&c.id))
+                                    .map(|c| c.id.clone())
+                                    .collect();
+                                if !vids.is_empty() {
+                                    self.apply_edit(false, move |raw| edits::move_to_track(raw, &vids, target));
+                                }
+                            }
+                        }
                         let raw_t = orig + (to_t(self.scroll_x, self.pps, pos.x) - grab);
                         let want = self.snap(raw_t, &ids);
                         self.snap_line = ((want - raw_t).abs() > 1e-9).then_some(want);
@@ -2313,11 +2341,7 @@ impl App {
                 },
                 self.hover_lane
             );
-            // dropped on another visual lane: move the clip to that track
-            if let (Drag::Move { ids, .. }, Some(target)) = (&prev, self.hover_lane) {
-                let ids2 = ids.clone();
-                self.drop_move_to_lane(&ids2, target);
-            }
+            let _ = &prev; // lane moves happen LIVE during the drag now
             self.hover_lane = None;
             self.snap_line = None;
             if self.resume_on_release {
@@ -2591,7 +2615,7 @@ impl eframe::App for App {
                 for tr in &self.doc.seq.tracks {
                     for c in &tr.clips {
                         let Some(aid) = c.asset_id.clone() else { continue };
-                        if tr.kind == "video" || tr.kind == "overlay" {
+                        if tr.kind != "audio" {
                             let s0 = c.source_start;
                             let s1 = c.source_start + (c.timeline_end - c.timeline_start);
                             let (b0, b1) = ((s0 / THUMB_BUCKET_S) as i64, (s1 / THUMB_BUCKET_S) as i64);
