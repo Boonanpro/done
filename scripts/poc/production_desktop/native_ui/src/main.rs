@@ -382,42 +382,21 @@ fn compose(
     pool.frame_no += 1;
     let mut used = Vec::new();
     let mut exact = true; // false while any budgeted scrub seek stopped short of t
-    let (base, overlays) = {
+    let layers: Vec<model::Clip> = {
         let (b, o) = doc.active_video(t);
-        (b.cloned(), o.into_iter().cloned().collect::<Vec<_>>())
+        b.into_iter().chain(o).cloned().collect()
     };
     let _t_begin = Instant::now();
     comp.begin(d3d);
-    let mut _ms_base = 0f64;
+    let _ms_base = 0f64;
     let mut _ms_ov = 0f64;
     // scrub deadline: the FULLSCREEN base updates every tick (that's what the eye tracks
     // while whipping); decorations (pop-out person / mattes) update only while the tick
     // budget lasts and land exactly at rest via the refine loop — original pixels always,
     // never a proxy
     let f_deadline = Instant::now() + std::time::Duration::from_millis(30);
-    if let Some(c) = base {
-        let _t = Instant::now();
-        let aid = c.asset_id.as_deref().unwrap();
-        let path = doc.asset_path_q(aid, original);
-        let mut src_t = c.source_start + (t - c.timeline_start);
-        if !fast && original {
-            src_t = snap_src_t(pts_maps, aid, src_t);
-        }
-        let vs = pool.get(d3d, &path, 0, false, src_t)?;
-        if fast {
-            exact &= vs.ensure_frame_scrub(d3d, src_t, 20.0)?;
-        } else {
-            vs.ensure_frame(d3d, src_t)
-                .map_err(|e| e.context(format!("base {} src_t={src_t:.2}", vs.name)))?;
-        }
-        let b = c.display_box();
-        let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
-        comp.draw(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None)?;
-        used.push(path);
-        _ms_base = _t.elapsed().as_secs_f64() * 1000.0;
-    }
     let _t = Instant::now();
-    for c in &overlays {
+    for c in &layers {
         let b = c.display_box();
         if let Some((key, off)) = c.popout_key() {
             // LIVE matte path: color sampled from the ORIGINAL frame — the same file and
@@ -529,9 +508,12 @@ fn compose(
                     used.push(p2);
                 }
             }
-        } else if let Some(aid) = c.asset_id.as_deref() {        } else if let Some(aid) = c.asset_id.as_deref() {
+        } else if let Some(aid) = c.asset_id.as_deref() {
             let path = doc.asset_path_q(aid, original);
-            let src_t = c.source_start + (t - c.timeline_start);
+            let mut src_t = c.source_start + (t - c.timeline_start);
+            if !fast && original {
+                src_t = snap_src_t(pts_maps, aid, src_t);
+            }
             let vs = pool.get(d3d, &path, 0, false, src_t)?;
             if fast {
                 if Instant::now() < f_deadline {
@@ -1407,6 +1389,7 @@ struct App {
     show_help: bool,
     toast: Option<(String, Instant)>,
     snap_line: Option<f64>,
+    hover_lane: Option<usize>,
     /// clip_id -> popout bake display state (polled from the cache dir, not the server)
     pop_states: std::collections::HashMap<String, PopState>,
     bake_results: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
@@ -1491,6 +1474,7 @@ impl App {
             show_help: false,
             toast: None,
             snap_line: None,
+            hover_lane: None,
             pop_states: Default::default(),
             bake_results: Default::default(),
             last_pop_poll: Instant::now(),
@@ -1672,20 +1656,20 @@ impl App {
     /// server bake (auth-free local API) on a background thread; the clip itself turns
     /// into a "生成中 n%" progress strip until the bake lands.
     fn toggle_popout(&mut self) {
-        // pop-out is a PiP effect: only overlay-lane clips qualify (applying it to a
-        // fullscreen clip made "nothing change" and un-applying shrank the clip)
+        // ANY video clip can pop out — where it sits on the timeline is the user's
+        // business. The card box: a PiP-ish display position is reused as the card;
+        // a (near-)fullscreen clip gets the standard card preset.
         let sel: Vec<(String, model::Clip)> = self
             .doc
             .seq
             .tracks
             .iter()
-            .filter(|tr| tr.kind == "overlay")
+            .filter(|tr| tr.kind == "overlay" || tr.kind == "video")
             .flat_map(|tr| tr.clips.iter())
             .filter(|c| self.selected.contains(&c.id) && c.asset_id.is_some())
             .map(|c| (c.id.clone(), c.clone()))
             .collect();
         if sel.is_empty() {
-            self.toast("飛び出しは小窓(PiP)クリップに適用します — 上段の人物クリップを選択してください");
             return;
         }
         let remove = sel.iter().all(|(id, c)| {
@@ -1705,9 +1689,10 @@ impl App {
             if c.popout_params().is_some() && !matches!(self.pop_states.get(&id), Some(PopState::Failed)) {
                 continue; // already applied and healthy
             }
-            let box_ = c
-                .position
-                .unwrap_or(model::Pos { x: 0.30, y: 0.655, width: 0.40, height: 0.30 });
+            let box_ = match c.position {
+                Some(p) if p.width < 0.9 && p.height < 0.9 => p,
+                _ => model::Pos { x: 0.27, y: 0.655, width: 0.46, height: 0.30 },
+            };
             // effect goes on the clip IMMEDIATELY (state shows 0%); the key arrives async
             let orig_pos = c
                 .position
@@ -1899,18 +1884,18 @@ impl App {
             s += step_s;
         }
 
-        // NLE lane order: FRONT-most on top (caption > overlay > video), audio at the
-        // bottom. The doc's track array order is compositing data, not display order.
-        let prio = |kind: &str| match kind {
-            "caption" => 0,
-            "effect" => 1,
-            "overlay" => 2,
-            "video" => 3,
-            "audio" => 4,
-            _ => 5,
-        };
-        let mut order: Vec<usize> = (0..self.doc.seq.tracks.len()).collect();
-        order.sort_by_key(|&i| (prio(&self.doc.seq.tracks[i].kind), i));
+        // Layered-track model (Filmora/Olive): the tracks array IS the stacking order,
+        // index 0 = back. Display shows visual tracks top=front (reverse array order);
+        // audio tracks sit below the visual stack (universal NLE convention). No
+        // kind-based pinning — reorder/move clips and the render follows.
+        let visual: Vec<usize> = (0..self.doc.seq.tracks.len())
+            .rev()
+            .filter(|&i| self.doc.seq.tracks[i].kind != "audio")
+            .collect();
+        let audio: Vec<usize> = (0..self.doc.seq.tracks.len())
+            .filter(|&i| self.doc.seq.tracks[i].kind == "audio")
+            .collect();
+        let order: Vec<usize> = visual.into_iter().chain(audio).collect();
         let kind_h = |kind: &str| match kind {
             "video" => 54.0f32,
             "overlay" => 46.0,
@@ -1957,6 +1942,13 @@ impl App {
         };
         for &(ti, y0, lane_h) in &lane_tops {
             let tr = &self.doc.seq.tracks[ti];
+            if self.hover_lane == Some(ti) && matches!(self.drag, Drag::Move { .. }) {
+                p.rect_filled(
+                    egui::Rect::from_min_max(egui::pos2(body.left(), y0), egui::pos2(body.right(), y0 + lane_h)),
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(120, 170, 255, 22),
+                );
+            }
             // lane header + separator
             p.text(
                 egui::pos2(rect.left() + 6.0, y0 + lane_h * 0.5),
@@ -1998,19 +1990,18 @@ impl App {
                 );
                 let is_pop = c.effects.iter().any(|e| e.kind == "popout");
                 let pop_state = if is_pop { self.pop_states.get(&c.id).copied() } else { None };
-                p.rect_filled(
-                    r,
-                    3.0,
-                    if is_pop { egui::Color32::from_rgb(220, 120, 60) } else { color },
-                );
-                // the CLIP ITSELF shows the bake state (not a sidebar spinner):
-                // baking = progress fill sweeping left->right + percentage label
+                p.rect_filled(r, 3.0, color);
+                // effect state ON the clip, without killing the "what is this clip"
+                // read: thin orange effect strip on top + translucent progress veil
+                if is_pop {
+                    let strip = egui::Rect::from_min_max(r.min, egui::pos2(r.right(), r.top() + 4.0));
+                    p.rect_filled(strip, 2.0, egui::Color32::from_rgb(255, 150, 60));
+                }
                 match pop_state {
                     Some(PopState::Baking(pct)) => {
-                        p.rect_filled(r, 3.0, color); // base look while baking
                         let w = r.width() * (pct as f32 / 100.0).clamp(0.02, 1.0);
-                        let pr = egui::Rect::from_min_size(r.min, egui::vec2(w, r.height()));
-                        p.rect_filled(pr, 3.0, egui::Color32::from_rgb(220, 120, 60));
+                        let veil = egui::Rect::from_min_size(r.min, egui::vec2(w, r.height()));
+                        p.rect_filled(veil, 3.0, egui::Color32::from_rgba_unmultiplied(255, 150, 60, 70));
                         if r.width() > 90.0 {
                             p.text(
                                 r.center(),
@@ -2042,16 +2033,16 @@ impl App {
                     _ => {
                         if is_pop && r.width() > 56.0 {
                             p.text(
-                                egui::pos2(r.left() + 4.0, r.top() + 2.0),
+                                egui::pos2(r.left() + 4.0, r.top() + 6.0),
                                 egui::Align2::LEFT_TOP,
                                 "飛び出し",
                                 egui::FontId::proportional(9.0),
-                                egui::Color32::from_white_alpha(210),
+                                egui::Color32::from_white_alpha(230),
                             );
                         }
                     }
                 }
-                if (tr.kind == "video" || tr.kind == "overlay") && !is_pop {
+                if tr.kind == "video" || tr.kind == "overlay" {
                     if let Some(aid) = c.asset_id.as_ref() {
                         // FILMSTRIP: each tile shows the actual source frame at its position
                         let tile_w = (r.height() * 16.0 / 9.0).max(8.0);
@@ -2252,6 +2243,11 @@ impl App {
                         self.push_req(true);
                     }
                     Drag::Move { ids, grab, orig, applied } => {
+                        // vertical: remember which lane the pointer is over (drop target)
+                        self.hover_lane = lane_tops
+                            .iter()
+                            .find(|&&(_, y0, lh)| pos.y >= y0 && pos.y <= y0 + lh)
+                            .map(|&(ti, _, _)| ti);
                         let raw_t = orig + (to_t(self.scroll_x, self.pps, pos.x) - grab);
                         let want = self.snap(raw_t, &ids);
                         self.snap_line = ((want - raw_t).abs() > 1e-9).then_some(want);
@@ -2274,7 +2270,33 @@ impl App {
             }
         }
         if resp.drag_stopped() {
-            self.drag = Drag::None;
+            let prev = std::mem::replace(&mut self.drag, Drag::None);
+            // dropped on another visual lane: move the clip to that track
+            if let (Drag::Move { ids, .. }, Some(target)) = (&prev, self.hover_lane) {
+                let tk = self.doc.seq.tracks.get(target).map(|t| t.kind.clone()).unwrap_or_default();
+                let src_track = self
+                    .doc
+                    .seq
+                    .tracks
+                    .iter()
+                    .position(|tr| tr.clips.iter().any(|c| ids.contains(&c.id) && (tr.kind == "video" || tr.kind == "overlay")));
+                if (tk == "video" || tk == "overlay") && src_track != Some(target) {
+                    let vids: Vec<String> = self
+                        .doc
+                        .seq
+                        .tracks
+                        .iter()
+                        .filter(|tr| tr.kind == "video" || tr.kind == "overlay")
+                        .flat_map(|tr| tr.clips.iter())
+                        .filter(|c| ids.contains(&c.id))
+                        .map(|c| c.id.clone())
+                        .collect();
+                    if !vids.is_empty() {
+                        self.apply_edit(false, move |raw| edits::move_to_track(raw, &vids, target));
+                    }
+                }
+            }
+            self.hover_lane = None;
             self.snap_line = None;
             if self.resume_on_release {
                 self.resume_on_release = false;
@@ -2588,7 +2610,9 @@ impl eframe::App for App {
         }
 
         egui::TopBottomPanel::bottom("timeline")
-            .exact_height(240.0)
+            .resizable(true)
+            .default_height(260.0)
+            .height_range(140.0..=700.0)
             .show(ctx, |ui| self.timeline_ui(ui));
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::from_gray(10)))
