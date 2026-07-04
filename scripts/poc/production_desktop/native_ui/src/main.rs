@@ -1397,7 +1397,37 @@ fn media_thread(shared: Arc<Shared>) {
     }
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum Screen {
+    Library,
+    Editor,
+}
+
+#[derive(Default)]
+struct Library {
+    assets: Vec<serde_json::Value>,
+    contents: Vec<serde_json::Value>,
+    selected_assets: Vec<String>,
+    thumbs: std::collections::HashMap<String, egui::TextureHandle>,
+    brief: String,
+    title: String,
+    format: String,
+    preset: usize,
+    register_path: String,
+    thumb_tried: std::collections::HashSet<String>,
+    gen_content: Option<String>,
+    gen_job: Option<String>,
+    events: Vec<String>,
+    error: Option<String>,
+    started: bool,
+}
+
 struct App {
+    screen: Screen,
+    lib: Library,
+    lib_poll: Instant,
+    lib_sink: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
+    lib_gen_stash: Option<serde_json::Value>,
     doc: Arc<model::Doc>,
     shared: Arc<Shared>,
     selected: Vec<String>,
@@ -1491,6 +1521,11 @@ impl App {
                 .spawn(move || presenter_thread(shared))?;
         }
         Ok(Self {
+            screen: Screen::Editor,
+            lib: Library { format: "9:16".into(), ..Default::default() },
+            lib_poll: Instant::now(),
+            lib_sink: Default::default(),
+            lib_gen_stash: None,
             doc,
             shared,
             selected: Vec::new(),
@@ -1894,6 +1929,120 @@ impl App {
         if tk != "audio" && src_track != Some(target) && !vids.is_empty() {
             self.apply_edit(true, move |raw| edits::move_to_track(raw, &vids, target));
         }
+    }
+
+    fn lib_get(&self, tag: &str, path: String) {
+        let sink = self.lib_sink.clone();
+        let tag = tag.to_string();
+        std::thread::spawn(move || {
+            let res = http_local("GET", &path, None)
+                .and_then(|t| Ok(serde_json::from_str::<serde_json::Value>(&t)?))
+                .map_err(|e| format!("{e:#}"));
+            sink.lock().unwrap().push((tag, res));
+        });
+    }
+
+    fn lib_post(&self, tag: &str, path: String, body: serde_json::Value) {
+        let sink = self.lib_sink.clone();
+        let tag = tag.to_string();
+        std::thread::spawn(move || {
+            let res = http_local("POST", &path, Some(&body.to_string()))
+                .and_then(|t| Ok(serde_json::from_str::<serde_json::Value>(&t)?))
+                .map_err(|e| format!("{e:#}"));
+            sink.lock().unwrap().push((tag, res));
+        });
+    }
+
+    fn lib_refresh(&mut self) {
+        let room = self.room_id();
+        self.lib_get("assets", format!("/api/v1/production-assets?room_id={room}"));
+        self.lib_get("contents", format!("/api/v1/production-assets/contents?room_id={room}"));
+    }
+
+    /// Open a content in the editor. The editor machinery assumes index 0, so the picked
+    /// content is moved to the array head (order is cosmetic; saving writes the whole
+    /// array back, nothing is lost).
+    fn open_content(&mut self, content_id: &str) {
+        let path = format!("{}/contents.json", self.doc.asset_dir);
+        let Ok(txt) = std::fs::read_to_string(&path) else { return };
+        let Ok(mut raw) = serde_json::from_str::<serde_json::Value>(&txt) else { return };
+        if let Some(arr) = raw.as_array_mut() {
+            if let Some(idx) = arr.iter().position(|c| c.get("id").and_then(|v| v.as_str()) == Some(content_id)) {
+                let c = arr.remove(idx);
+                arr.insert(0, c);
+            }
+        }
+        if let Ok(nd) = model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
+            let nd = Arc::new(nd);
+            self.doc = nd.clone();
+            *self.shared.doc.lock().unwrap() = nd;
+            self.dur = self.doc.duration();
+            self.t = 0.0;
+            self.playing = false;
+            self.selected.clear();
+            self.undo.clear();
+            self.redo.clear();
+            self.pop_states.clear();
+            self.screen = Screen::Editor;
+            self.push_req(false);
+        }
+    }
+
+    fn start_generation(&mut self) {
+        let room = self.room_id();
+        let presets: [(&str, &str, &str); 5] = [
+            ("映像→UGC", "9:16", "UGC風の縦型ショート動画にしてください。テンポ良く、無音や間はカットしてください。"),
+            ("映像→ストーリー", "9:16", "ストーリー性のある縦型動画に編集してください。"),
+            ("映像→映画風", "16:9", "映画の予告編のような雰囲気の横型動画にしてください。"),
+            ("画像→広告画像", "4:5", "商品広告向けの画像コンテンツを作ってください。"),
+            ("自由制作", "9:16", ""),
+        ];
+        let (pname, _, pbrief) = presets[self.lib.preset.min(4)];
+        let brief = if self.lib.brief.trim().is_empty() { pbrief.to_string() } else { self.lib.brief.clone() };
+        let title = if self.lib.title.trim().is_empty() {
+            format!("{pname} {}", self.lib.contents.len() + 1)
+        } else {
+            self.lib.title.clone()
+        };
+        let assets: Vec<serde_json::Value> = self
+            .lib
+            .assets
+            .iter()
+            .filter(|a| {
+                a.get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|id| self.lib.selected_assets.iter().any(|s| s == id))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        let asset_ids: Vec<String> = assets
+            .iter()
+            .filter_map(|a| a.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+        let fmt = self.lib.format.clone();
+        let timeline = serde_json::json!({
+            "brief": brief, "workflow_preset": pname, "format": fmt,
+            "source_asset_ids": asset_ids, "annotations": [],
+        });
+        self.lib.started = true;
+        self.lib.error = None;
+        self.lib.events.clear();
+        let body = serde_json::json!({
+            "room_id": room, "title": title, "format": fmt,
+            "asset_ids": asset_ids, "timeline": timeline,
+        });
+        // content is created first; the dan_plan job is kicked when its id comes back
+        self.lib_post("gen_content", "/api/v1/production-assets/contents".into(), body);
+        // stash what the job needs
+        self.lib.gen_content = None;
+        self.lib.gen_job = None;
+        let stash = serde_json::json!({
+            "brief": brief, "workflow_preset": pname, "format": fmt,
+            "asset_ids": asset_ids, "source_assets": assets, "timeline": timeline, "title": title,
+        });
+        self.lib.events.push("コンテンツを作成しています…".into());
+        self.lib_gen_stash = Some(stash);
     }
 
     fn content_id(&self) -> String {
@@ -2712,8 +2861,380 @@ impl App {
     }
 }
 
+impl App {
+    fn absorb_lib(&mut self) {
+        let taken: Vec<(String, Result<serde_json::Value, String>)> =
+            std::mem::take(&mut *self.lib_sink.lock().unwrap());
+        for (tag, res) in taken {
+            match (tag.as_str(), res) {
+                ("assets", Ok(v)) => {
+                    self.lib.assets = v.as_array().cloned().unwrap_or_default();
+                }
+                ("contents", Ok(v)) => {
+                    self.lib.contents = v.as_array().cloned().unwrap_or_default();
+                }
+                ("gen_content", Ok(v)) => {
+                    let cid = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    if cid.is_empty() {
+                        self.lib.error = Some("コンテンツ作成に失敗".into());
+                        self.lib.started = false;
+                        continue;
+                    }
+                    self.lib.gen_content = Some(cid.clone());
+                    self.lib.events.push("ダンの計画ジョブを開始しています…".into());
+                    let st = self.lib_gen_stash.clone().unwrap_or(serde_json::json!({}));
+                    let body = serde_json::json!({
+                        "room_id": self.room_id(),
+                        "content_id": cid,
+                        "instruction": {
+                            "mode": "dan_plan",
+                            "content_id": cid,
+                            "content_title": st.get("title").cloned().unwrap_or_default(),
+                            "asset_ids": st.get("asset_ids").cloned().unwrap_or_default(),
+                            "source_assets": st.get("source_assets").cloned().unwrap_or_default(),
+                            "brief": st.get("brief").cloned().unwrap_or_default(),
+                            "workflow_preset": st.get("workflow_preset").cloned().unwrap_or_default(),
+                            "timeline": st.get("timeline").cloned().unwrap_or_default(),
+                        },
+                    });
+                    self.lib_post("gen_job", "/api/v1/production-assets/jobs".into(), body);
+                }
+                ("gen_job", Ok(v)) => {
+                    self.lib.gen_job = v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string());
+                    self.lib.events.push("ダンが制作中…".into());
+                }
+                ("job_poll", Ok(v)) => {
+                    let Some(job_id) = self.lib.gen_job.clone() else { continue };
+                    let found = v.as_array().and_then(|a| {
+                        a.iter()
+                            .find(|j| j.get("id").and_then(|x| x.as_str()) == Some(job_id.as_str()))
+                            .cloned()
+                    });
+                    let Some(job) = found else { continue };
+                    match job.get("status").and_then(|s| s.as_str()).unwrap_or("") {
+                        "done" => {
+                            let cid = self.lib.gen_content.clone().unwrap_or_default();
+                            self.lib.started = false;
+                            self.lib.gen_job = None;
+                            self.lib.events.push("完成。開いています…".into());
+                            self.open_content(&cid);
+                        }
+                        "failed" => {
+                            self.lib.error = Some(
+                                job.get("error").and_then(|e| e.as_str()).unwrap_or("失敗").to_string(),
+                            );
+                            self.lib.started = false;
+                            self.lib.gen_job = None;
+                        }
+                        _ => {}
+                    }
+                }
+                ("events_poll", Ok(v)) => {
+                    if let Some(arr) = v.as_array() {
+                        let msgs: Vec<String> = arr
+                            .iter()
+                            .rev()
+                            .take(8)
+                            .rev()
+                            .filter_map(|e| e.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                            .collect();
+                        if !msgs.is_empty() {
+                            self.lib.events = msgs;
+                        }
+                    }
+                }
+                ("act", Ok(_)) => {
+                    self.lib_refresh();
+                }
+                (_, Err(e)) => {
+                    self.lib.error = Some(e.clone());
+                    self.lib.started = false;
+                    eprintln!("library api error: {e}");
+                }
+                _ => {}
+            }
+        }
+        if self.lib_poll.elapsed().as_millis() > 2000 {
+            self.lib_poll = Instant::now();
+            let room = self.room_id();
+            if let (Some(_), Some(job)) = (&self.lib.gen_content, &self.lib.gen_job) {
+                self.lib_get("job_poll", format!("/api/v1/production-assets/jobs?room_id={room}"));
+                self.lib_get(
+                    "events_poll",
+                    format!("/api/v1/production-assets/jobs/{job}/events?room_id={room}"),
+                );
+            }
+            if self.screen == Screen::Library
+                && self
+                    .lib
+                    .assets
+                    .iter()
+                    .any(|a| a.get("status").and_then(|s| s.as_str()) == Some("processing"))
+            {
+                self.lib_refresh();
+            }
+        }
+    }
+
+    fn library_ui(&mut self, ctx: &egui::Context) {
+        if let Ok(cid) = std::env::var("NATIVE_LIB_OPEN") {
+            if !cid.is_empty() {
+                std::env::set_var("NATIVE_LIB_OPEN", "");
+                self.open_content(&cid);
+                return;
+            }
+        }
+        if let Ok(aid) = std::env::var("NATIVE_LIB_GEN") {
+            if !aid.is_empty() && !self.lib.assets.is_empty() && !self.lib.started {
+                std::env::set_var("NATIVE_LIB_GEN", "");
+                self.lib.selected_assets = vec![aid];
+                self.lib.title = "ネイティブ生成テスト".into();
+                self.start_generation();
+            }
+        }
+        // thumbnails from the room dir ({id}_thumb.jpg) — decoded once, cached
+        let room_dir = self.doc.asset_dir.clone();
+        let ids: Vec<String> = self
+            .lib
+            .assets
+            .iter()
+            .filter_map(|a| a.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+        for id in ids {
+            if self.lib.thumbs.contains_key(&id) {
+                continue;
+            }
+            let p = format!("{room_dir}/{id}_thumb.jpg");
+            if !std::path::Path::new(&p).exists() && !self.lib.thumb_tried.contains(&id) {
+                // missing thumb: spawn ffmpeg once against the proxy (or original)
+                self.lib.thumb_tried.insert(id.clone());
+                let src = [format!("{room_dir}/{id}_proxy.mp4"), format!("{room_dir}/{id}.mp4")]
+                    .into_iter()
+                    .find(|f| std::fs::metadata(f).map(|m| m.len() > 0).unwrap_or(false));
+                if let Some(src) = src {
+                    let ff = ["ffmpeg", "C:/Users/Owner/ffmpeg/bin/ffmpeg.exe", "C:/ffmpeg/bin/ffmpeg.exe"]
+                        .into_iter()
+                        .find(|f| *f == "ffmpeg" || std::path::Path::new(f).exists())
+                        .unwrap_or("ffmpeg");
+                    let _ = std::process::Command::new(ff)
+                        .args(["-y", "-ss", "0.5", "-i", &src, "-frames:v", "1", "-vf", "scale=320:-2", &p])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(&p) {
+                if let Ok(img) = image::load_from_memory(&bytes) {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+                    let tex = ctx.load_texture(
+                        format!("lib_{id}"),
+                        egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.lib.thumbs.insert(id, tex);
+                }
+            }
+        }
+        egui::SidePanel::right("gen_panel").exact_width(340.0).show(ctx, |ui| {
+            ui.add_space(8.0);
+            ui.heading("新しく作る");
+            ui.add_space(6.0);
+            let presets = [
+                "映像→UGC (9:16)",
+                "映像→ストーリー (9:16)",
+                "映像→映画風 (16:9)",
+                "画像→広告画像 (4:5)",
+                "自由制作 (9:16)",
+            ];
+            for (i, p) in presets.iter().enumerate() {
+                if ui.selectable_label(self.lib.preset == i, *p).clicked() {
+                    self.lib.preset = i;
+                    self.lib.format = ["9:16", "9:16", "16:9", "4:5", "9:16"][i].into();
+                }
+            }
+            ui.add_space(6.0);
+            ui.label("タイトル");
+            ui.text_edit_singleline(&mut self.lib.title);
+            ui.label("何を作るか（ブリーフ）");
+            ui.add(
+                egui::TextEdit::multiline(&mut self.lib.brief)
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY),
+            );
+            ui.horizontal(|ui| {
+                ui.label("形式");
+                for f in ["9:16", "16:9", "1:1", "4:5"] {
+                    if ui.selectable_label(self.lib.format == f, f).clicked() {
+                        self.lib.format = f.into();
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            let n = self.lib.selected_assets.len();
+            let can = n > 0 && !self.lib.started;
+            let btxt = format!("▶ ダンに作らせる（素材{n}件）");
+            if ui
+                .add_enabled(can, egui::Button::new(btxt).min_size(egui::vec2(300.0, 34.0)))
+                .clicked()
+            {
+                self.start_generation();
+            }
+            if self.lib.started {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("ダンが制作中…（数分かかります）");
+                });
+                for ev in &self.lib.events {
+                    ui.label(egui::RichText::new(ev).small().weak());
+                }
+            }
+            if let Some(e) = &self.lib.error {
+                ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
+            }
+            ui.separator();
+            ui.label("素材をパスで登録（PC内のファイル）");
+            ui.text_edit_singleline(&mut self.lib.register_path);
+            if ui.button("登録").clicked() && !self.lib.register_path.trim().is_empty() {
+                let body = serde_json::json!({
+                    "room_id": self.room_id(),
+                    "uri": self.lib.register_path.trim(),
+                    "source_type": "local_path",
+                    "make_proxy": true,
+                });
+                self.lib.register_path.clear();
+                self.lib_post("act", "/api/v1/production-assets/register".into(), body);
+            }
+            ui.label(
+                egui::RichText::new("ヒント: 動画ファイルをこのウィンドウにドロップしても登録できます")
+                    .small()
+                    .weak(),
+            );
+        });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("制作ライブラリ");
+                if ui.small_button("🔄 更新").clicked() {
+                    self.lib_refresh();
+                }
+            });
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("コンテンツ（クリックで開く）").strong());
+                ui.horizontal_wrapped(|ui| {
+                    let contents = self.lib.contents.clone();
+                    for c in &contents {
+                        let title = c.get("title").and_then(|v| v.as_str()).unwrap_or("(無題)");
+                        let cid = c.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let nclips = c
+                            .get("timeline")
+                            .and_then(|t| t.get("sequence"))
+                            .and_then(|sq| sq.get("tracks"))
+                            .and_then(|t| t.as_array())
+                            .map(|t| {
+                                t.iter()
+                                    .map(|tr| tr.get("clips").and_then(|c| c.as_array()).map(|c| c.len()).unwrap_or(0))
+                                    .sum::<usize>()
+                            })
+                            .unwrap_or(0);
+                        let label = format!("🎬 {title}\n{nclips} clips");
+                        if ui.add_sized(egui::vec2(160.0, 56.0), egui::Button::new(label)).clicked()
+                            && !cid.is_empty()
+                        {
+                            self.open_content(&cid);
+                        }
+                    }
+                });
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("素材（クリックで選択 → 右の「ダンに作らせる」）").strong());
+                ui.horizontal_wrapped(|ui| {
+                    let assets = self.lib.assets.clone();
+                    for a in &assets {
+                        let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let name = a
+                            .get("filename")
+                            .or_else(|| a.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(無名)")
+                            .to_string();
+                        let status = a.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                        let selected = self.lib.selected_assets.iter().any(|s| *s == id);
+                        let (rect, resp) =
+                            ui.allocate_exact_size(egui::vec2(150.0, 110.0), egui::Sense::click());
+                        let p = ui.painter_at(rect);
+                        p.rect_filled(rect, 6.0, egui::Color32::from_gray(28));
+                        if let Some(t) = self.lib.thumbs.get(&id) {
+                            let img_r = egui::Rect::from_min_max(
+                                rect.min + egui::vec2(4.0, 4.0),
+                                egui::pos2(rect.right() - 4.0, rect.bottom() - 26.0),
+                            );
+                            p.image(
+                                t.id(),
+                                img_r,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                        let badge = if status == "proxy_ready" {
+                            "OK"
+                        } else if status == "processing" {
+                            "..."
+                        } else {
+                            "-"
+                        };
+                        let short: String = name.chars().take(16).collect();
+                        p.text(
+                            egui::pos2(rect.left() + 6.0, rect.bottom() - 12.0),
+                            egui::Align2::LEFT_CENTER,
+                            format!("[{badge}] {short}"),
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_gray(200),
+                        );
+                        p.rect_stroke(
+                            rect,
+                            6.0,
+                            if selected {
+                                egui::Stroke::new(2.5, egui::Color32::from_rgb(90, 170, 255))
+                            } else {
+                                egui::Stroke::new(1.0, egui::Color32::from_gray(45))
+                            },
+                        );
+                        if resp.clicked() && !id.is_empty() {
+                            if selected {
+                                self.lib.selected_assets.retain(|s| *s != id);
+                            } else {
+                                self.lib.selected_assets.push(id.clone());
+                            }
+                        }
+                    }
+                });
+            });
+        });
+        // drag & drop: local files register by path (no upload roundtrip needed)
+        let dropped: Vec<std::path::PathBuf> =
+            ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        for pth in dropped {
+            let body = serde_json::json!({
+                "room_id": self.room_id(),
+                "uri": pth.to_string_lossy().replace(char::from(92), "/"),
+                "source_type": "local_path",
+                "make_proxy": true,
+            });
+            self.lib_post("act", "/api/v1/production-assets/register".into(), body);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(300));
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.absorb_lib();
+        if self.screen == Screen::Library {
+            self.library_ui(ctx);
+            return;
+        }
         let now = Instant::now();
         self.last_frames.push(now);
         self.last_frames.retain(|t| now.duration_since(*t).as_secs_f32() < 1.0);
@@ -2959,6 +3480,13 @@ impl eframe::App for App {
         self.poll_export();
         egui::TopBottomPanel::top("toolbar").exact_height(30.0).show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
+                if ui.button("📚 ライブラリ").clicked() {
+                    self.playing = false;
+                    self.push_req(false);
+                    self.lib_refresh();
+                    self.screen = Screen::Library;
+                }
+                ui.separator();
                 let exporting = self.export_job.is_some();
                 if ui
                     .add_enabled(!exporting, egui::Button::new("📤 書き出し"))
@@ -3487,6 +4015,13 @@ fn main() -> eframe::Result<()> {
             cc.egui_ctx.set_fonts(fonts);
             let mut app = App::new(&contents, &dir)
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?;
+            // bare launch (no explicit contents arg): open the LIBRARY (assets ->
+            // generation -> open), the full production entry point
+            let explicit = std::env::args().nth(1).map(|a| !a.starts_with("--")).unwrap_or(false);
+            if !explicit {
+                app.screen = Screen::Library;
+                app.lib_refresh();
+            }
             // --import <file>: same code path as drag&drop (also our self-test hook)
             let args: Vec<String> = std::env::args().collect();
             if let Some(i) = args.iter().position(|a| a == "--import") {
