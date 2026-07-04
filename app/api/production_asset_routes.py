@@ -864,6 +864,26 @@ def _shape_cut_filter(shape: str | None, w: int, h: int, alpha: bool) -> str:
     return f",geq=lum='if({cond}\\,lum(X,Y)\\,16)':cb='if({cond}\\,cb(X,Y)\\,128)':cr='if({cond}\\,cr(X,Y)\\,128)'"
 
 
+def _movie_input(path: Any, seek: float, *, audio: bool = False, streams: str | None = None, fmt: str | None = None) -> str:
+    """movie=/amovie= source for the filtergraph SCRIPT — replaces a command-line -i input.
+
+    With hundreds of clips the per-clip "-i path" args alone blow Windows' 32K argv limit
+    (WinError 206); the script file has no such cap. seek_point additionally avoids decoding
+    every source from t=0 (a bare -i + trim= drops frames only AFTER decoding them).
+    """
+    # two-level parse: the graph parser strips the quotes, then the OPTION parser still
+    # splits on ':' — so the drive colon must be escaped even inside quotes ('C\:/...')
+    p = str(path).replace("\\", "/").replace("'", "\\'").replace(":", "\\:")
+    out = ("amovie" if audio else "movie") + f"=filename='{p}'"
+    if seek > 0.001:
+        out += f":seek_point={seek:.3f}"
+    if streams:
+        out += f":streams={streams}"
+    if fmt:
+        out += f":format_name={fmt}"
+    return out
+
+
 def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
@@ -885,7 +905,6 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
 
     command = [_ffmpeg(), "-y"]
     filters: list[str] = []
-    input_index = 0
 
     # --- base video: concat the full-frame clips (pip/overlay clips excluded) ---
     concat_parts: list[str] = []
@@ -897,7 +916,6 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         source_path = _asset_source_path(asset)
         metadata = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else _probe_video(source_path)
         source_start, source_end, out_dur, src_dur, is_freeze = _clip_source_range(clip, metadata)
-        command.extend(["-i", str(source_path)])
         pad_needed = 0.0 if is_freeze else max(0.0, out_dur - src_dur)
         bpos = clip.get("position") if isinstance(clip.get("position"), dict) else None
         is_full_pos = (not bpos) or (
@@ -926,7 +944,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                 _pad = f",tpad=stop_mode=clone:stop_duration={pad_needed:.3f}" if pad_needed > 0.02 else ""
                 setpts = f"setpts=PTS-STARTPTS,{_scale}{_pad}"
             filters.append(
-                f"[{input_index}:v]"
+                _movie_input(source_path, source_start) + ","
                 f"trim=start={source_start:.3f}:end={source_end:.3f},"
                 f"{setpts},format=yuv420p{base_shape}"
                 f"[v{rendered_count}]"
@@ -961,7 +979,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             elif pad_needed > 0.02:
                 tpad = f",tpad=stop_mode=clone:stop_duration={pad_needed:.3f}"
             filters.append(
-                f"[{input_index}:v]"
+                _movie_input(source_path, source_start) + ","
                 f"trim=start={source_start:.3f}:end={source_end:.3f},"
                 f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps=30,{crop_filt}setsar=1{tpad},format=yuv420p"
                 f"[src{rendered_count}]"
@@ -978,7 +996,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                     vol = 1.0
                 vol_filt = f",volume={vol:.3f}" if abs(vol - 1.0) > 1e-3 else ""
                 filters.append(
-                    f"[{input_index}:a]"
+                    _movie_input(source_path, source_start, audio=True) + ","
                     f"atrim=start={source_start:.3f}:end={source_end:.3f},"
                     f"asetpts=PTS-STARTPTS,apad,atrim=duration={out_dur:.3f},aresample=48000,aformat=channel_layouts=stereo{vol_filt}"
                     f"[a{rendered_count}]"
@@ -991,7 +1009,6 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             concat_parts.extend([f"[v{rendered_count}]", f"[a{rendered_count}]"])
         else:
             concat_parts.append(f"[v{rendered_count}]")
-        input_index += 1
         rendered_count += 1
 
     if rendered_count == 0:
@@ -1084,7 +1101,9 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             _key = _popout_key(str(clip.get("asset_id") or ""), _bs, _be, _box_px,
                                output_width, output_height, _intensity, _shadow)
             _pv = _popout_cache_dir(room_id) / f"{_key}.pv.mp4"
-            if not (_pv.exists() and _pv.stat().st_size > 0):
+            # >4KB, not >0: an interrupted bake leaves a tiny headerless stub (moov atom
+            # missing) that movie= can't open — treat it as missing and re-bake over it
+            if not (_pv.exists() and _pv.stat().st_size > 4096):
                 try:
                     _popout_bake_sync(_asset_hires_path(asset), _pv, _box_px,
                                       output_width, output_height, _bs, _be,
@@ -1093,10 +1112,21 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                     logger.warning("popout overlay failed for clip %s: %s — using plain wipe",
                                    clip.get("id"), exc)
                     _popout = None
-            if _popout and _pv.exists():
+            if _popout and _pv.exists() and _pv.stat().st_size > 4096:
                 _off = max(0.0, source_start - _bs)
-                command.extend(["-ss", f"{_off:.3f}", "-t",
-                                f"{max(0.1, source_end - source_start):.3f}", "-i", str(_pv)])
+                _pdur = max(0.1, source_end - source_start)
+                # the pv bake has 2 video tracks (color + alpha) — pull both from one movie=
+                # source, trim each to the clip window, and alphamerge the pair. Index specs
+                # (0+1), NOT "v:0+v:1": the option parser splits on ':' even when escaped.
+                filters.append(
+                    _movie_input(_pv, _off, streams="0+1") + f"[pvc{oi}][pva{oi}]"
+                )
+                filters.append(
+                    f"[pvc{oi}]trim=start={_off:.3f}:end={_off + _pdur:.3f},setpts=PTS-STARTPTS[pvct{oi}]"
+                )
+                filters.append(
+                    f"[pva{oi}]trim=start={_off:.3f}:end={_off + _pdur:.3f},setpts=PTS-STARTPTS[pvat{oi}]"
+                )
                 # display transform: the bake is full-canvas, so scale to the clip's box, cut the
                 # per-edge crop strips in place (parity with the native videocrop), overlay at x/y
                 _dis = clip.get("position") if isinstance(clip.get("position"), dict) else {}
@@ -1104,7 +1134,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                 _dy = round(float(_dis.get("y") or 0) * output_height)
                 _dw = max(2, round(float(_dis.get("width") or 1) * output_width))
                 _dh = max(2, round(float(_dis.get("height") or 1) * output_height))
-                _chain = [f"[{input_index}:v:0][{input_index}:v:1]alphamerge"]
+                _chain = [f"[pvct{oi}][pvat{oi}]alphamerge"]
                 if (_dw, _dh) != (output_width, output_height):
                     _chain.append(f"scale={_dw}:{_dh}")
                 if _mask is not None:
@@ -1120,14 +1150,12 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                     f"enable='between(t\\,{ts:.3f}\\,{te:.3f})'[vov{oi}]"
                 )
                 video_out = f"vov{oi}"
-                input_index += 1
                 continue
         ov_pad = 0.0 if ov_freeze else max(0.0, ov_dur - ov_src)
         if ov_freeze:
             ov_pre = f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={ov_dur:.3f},"
         else:
             ov_pre = "setpts=PTS-STARTPTS," + (f"tpad=stop_mode=clone:stop_duration={ov_pad:.3f}," if ov_pad > 0.02 else "")
-        command.extend(["-i", str(source_path)])
         # Wipe shape: clip the PiP to a circle / rounded frame via a transparent alpha mask.
         shape_filt = _shape_cut_filter(clip.get("shape"), ow, oh, alpha=True)
         # COVER by default: keep the source's aspect ratio (fill the box, crop the overflow) instead
@@ -1147,7 +1175,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             _maskcrop = ""
             _mx, _my = px, py
         filters.append(
-            f"[{input_index}:v]"
+            _movie_input(source_path, source_start) + ","
             f"trim=start={source_start:.3f}:end={source_end:.3f},"
             f"{ov_pre}"
             f"{_scale},setsar=1,setpts=PTS-STARTPTS+{ts:.3f}/TB,format=yuv420p"
@@ -1159,7 +1187,6 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             f"[{video_out}][ov{oi}]overlay={_mx}:{_my}:enable='between(t\\,{ts:.3f}\\,{te:.3f})'[vov{oi}]"
         )
         video_out = f"vov{oi}"
-        input_index += 1
 
     captions = _sequence_caption_clips(sequence)
     if captions:
@@ -1181,18 +1208,19 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                     # PTS so frame 0 lands at the caption's start time.
                     fps = float(ov["fps"])
                     pattern = str(ov["seq_dir"] / "%05d.png")
-                    command.extend(["-framerate", f"{fps:g}", "-i", pattern])
+                    # image2 defaults to 25fps — retime from the frame INDEX so the sampling
+                    # fps is exact, then shift frame 0 to the caption start
                     filters.append(
-                        f"[{input_index}:v]format=rgba,setpts=PTS-STARTPTS+{cs:.3f}/TB[capsrc{ci}]"
+                        _movie_input(pattern, 0.0, fmt="image2")
+                        + f",format=rgba,setpts=N/({fps:g}*TB)+{cs:.3f}/TB[capsrc{ci}]"
                     )
                 else:
-                    command.extend(["-loop", "1", "-t", f"{ce:.3f}", "-i", str(ov["png"])])
-                    filters.append(f"[{input_index}:v]format=rgba[capsrc{ci}]")
+                    # single frame: overlay's default eof_action=repeat holds it, enable= gates it
+                    filters.append(_movie_input(ov["png"], 0.0) + f",format=rgba[capsrc{ci}]")
                 filters.append(
                     f"[{video_out}][capsrc{ci}]overlay=0:0:enable='between(t\\,{cs:.3f}\\,{ce:.3f})'[vcap{ci}]"
                 )
                 video_out = f"vcap{ci}"
-                input_index += 1
             filters.append(f"[{video_out}]format=yuv420p[vcapf]")
             video_out = "vcapf"
         else:
@@ -1219,20 +1247,18 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                 continue
             ts_ms = max(0, round(float(clip.get("timeline_start") or 0) * 1000))
             label = f"au{len(audio_labels)}"
-            command.extend(["-i", str(source_path)])
             try:
                 avol = float(clip.get("volume")) if clip.get("volume") is not None else 1.0
             except Exception:
                 avol = 1.0
             avol_filt = f",volume={avol:.3f}" if abs(avol - 1.0) > 1e-3 else ""
             filters.append(
-                f"[{input_index}:a]"
+                _movie_input(source_path, source_start, audio=True) + ","
                 f"atrim=start={source_start:.3f}:end={source_end:.3f},"
                 f"asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo{avol_filt},adelay={ts_ms}|{ts_ms}"
                 f"[{label}]"
             )
             audio_labels.append(label)
-            input_index += 1
         if len(audio_labels) == 1:
             audio_out = audio_labels[0]
         elif len(audio_labels) > 1:
