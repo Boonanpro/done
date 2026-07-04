@@ -3526,6 +3526,84 @@ def _recut_assemble(room_id: str, content_id: str, decisions: dict[str, Any], as
     return _assemble_sequence_from_decisions(decisions, transcripts, room_id, fmt)
 
 
+_CAPTION_CACHE_GUARD = __import__("threading").Lock()
+_CAPTION_INFLIGHT: set[str] = set()
+
+
+@router.post("/caption-cache")
+async def caption_cache(
+    payload: dict[str, Any] = Body(...),
+    current_user: TokenData = Depends(get_current_user),
+):
+    """Designed-caption PNGs for the NATIVE preview — the exact /caption-frame render the
+    export burns in, cached per (canvas, text, words, design). Returns key/path/ready per
+    item immediately; missing ones render in a background thread (one browser launch for
+    the whole batch) and appear on disk, where the native app picks them up."""
+    room_id = str(payload.get("room_id") or "")
+    if not room_id:
+        raise HTTPException(status_code=400, detail="room_id required")
+    out_w = int(payload.get("outW") or 1080)
+    out_h = int(payload.get("outH") or 1920)
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    cache_dir = _room_dir(room_id) / "caption-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    results: list[dict[str, Any]] = []
+    to_render: list[dict[str, Any]] = []
+    render_keys: list[str] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        text = str(it.get("text") or "").strip()
+        design = it.get("design") if isinstance(it.get("design"), dict) else {}
+        words = it.get("words") if isinstance(it.get("words"), list) else []
+        key_src = json.dumps(
+            {"w": out_w, "h": out_h, "t": text, "d": design, "words": words},
+            ensure_ascii=False, sort_keys=True,
+        )
+        key = hashlib.sha1(key_src.encode()).hexdigest()[:16]
+        png = cache_dir / f"{key}.png"
+        ready = png.exists() and png.stat().st_size > 0
+        results.append({"key": key, "ready": ready})
+        if not ready and text:
+            with _CAPTION_CACHE_GUARD:
+                if key in _CAPTION_INFLIGHT:
+                    continue
+                _CAPTION_INFLIGHT.add(key)
+            render_keys.append(key)
+            # animated designs get their MID frame — a designed still beats plain text;
+            # the export still burns the full animation
+            to_render.append({"png": str(png), "text": text, "time": 0.0,
+                              "design": design, "words": words})
+    if to_render:
+        spec_path = cache_dir / f"_spec_{render_keys[0]}.json"
+        spec_path.write_text(
+            json.dumps({"outW": out_w, "outH": out_h,
+                        "web_base": os.environ.get("DAN_CAPTION_RENDER_BASE", "http://127.0.0.1:3000"),
+                        "items": to_render}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        def _run(spec=spec_path, keys=tuple(render_keys)) -> None:
+            try:
+                script = PROJECT_ROOT / "scripts" / "render_caption_pngs.py"
+                cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                subprocess.run([sys.executable, str(script), str(spec)],
+                               capture_output=True, timeout=600, creationflags=cflags)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("caption-cache render failed: %s", exc)
+            finally:
+                with _CAPTION_CACHE_GUARD:
+                    for k in keys:
+                        _CAPTION_INFLIGHT.discard(k)
+                try:
+                    spec.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        __import__("threading").Thread(target=_run, daemon=True).start()
+    return {"results": results, "rendering": len(to_render)}
+
+
 @router.post("/contents/{content_id}/recut")
 async def recut_content(
     content_id: str,
