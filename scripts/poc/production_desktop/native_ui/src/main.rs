@@ -164,6 +164,7 @@ enum Drag {
     Scrub,
     Move { ids: Vec<String>, grab: f64, orig: f64, applied: f64 },
     Trim { ids: Vec<String>, left: bool },
+    Marquee { anchor: egui::Pos2 },
 }
 
 /// Olive-style composed-frame cache: finished timeline frames (ORIGINAL quality, 30fps
@@ -1437,6 +1438,7 @@ struct App {
     lib_poll: Instant,
     lib_sink: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
     lib_gen_stash: Option<serde_json::Value>,
+    marquee: Option<egui::Rect>,
     recut_open: bool,
     recut_thresh: f32,
     recut_lead: f32,
@@ -1542,6 +1544,7 @@ impl App {
             lib_poll: Instant::now(),
             lib_sink: Default::default(),
             lib_gen_stash: None,
+            marquee: None,
             recut_open: false,
             recut_thresh: 0.45,
             recut_lead: 0.06,
@@ -2787,10 +2790,19 @@ impl App {
                         }
                     }
                     None => {
-                        self.selected.clear();
-                        self.drag = Drag::Scrub;
-                        self.t = to_t(self.scroll_x, self.pps, pos.x).min(self.dur);
-                        self.push_req(false);
+                        // ruler strip keeps the press-scrub feel; empty LANE space arms a
+                        // marquee (drag = box-select, a tiny click still seeks on release)
+                        if pos.y <= body.top() + 18.0 {
+                            self.selected.clear();
+                            self.drag = Drag::Scrub;
+                            self.t = to_t(self.scroll_x, self.pps, pos.x).min(self.dur);
+                            self.push_req(false);
+                        } else {
+                            if !ui.input(|i| i.modifiers.ctrl) {
+                                self.selected.clear();
+                            }
+                            self.drag = Drag::Marquee { anchor: pos };
+                        }
                     }
                 }
             }
@@ -2856,9 +2868,23 @@ impl App {
                         self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
                         self.apply_edit(false, |raw| edits::trim_clip(raw, &ids, left, nt));
                     }
+                    Drag::Marquee { anchor } => {
+                        let r = egui::Rect::from_two_pos(anchor, pos);
+                        self.marquee = Some(r);
+                        self.selected = hits
+                            .iter()
+                            .filter(|(cr, _)| cr.intersects(r))
+                            .map(|(_, id)| id.clone())
+                            .collect();
+                    }
                     Drag::None => {}
                 }
             }
+        }
+        // marquee rectangle overlay
+        if let Some(r) = self.marquee {
+            p.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(90, 160, 255, 24));
+            p.rect_stroke(r, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 180, 255)));
         }
         // lane reorder: while a header is being dragged, dropping over another lane's
         // row moves the track there (live on release)
@@ -2877,6 +2903,16 @@ impl App {
         }
         if resp.drag_stopped() {
             let prev = std::mem::replace(&mut self.drag, Drag::None);
+            if let Drag::Marquee { anchor } = &prev {
+                let moved = self
+                    .marquee
+                    .map(|r| r.width().max(r.height()) > 4.0)
+                    .unwrap_or(false);
+                if !moved {
+                    self.t = to_t(self.scroll_x, self.pps, anchor.x).min(self.dur);
+                }
+                self.marquee = None;
+            }
             eprintln!(
                 "DRAGSTOP prev={} hover={:?}",
                 match &prev {
@@ -2884,6 +2920,7 @@ impl App {
                     Drag::Scrub => "scrub",
                     Drag::Move { .. } => "move",
                     Drag::Trim { .. } => "trim",
+                    Drag::Marquee { .. } => "marquee",
                 },
                 self.hover_lane
             );
