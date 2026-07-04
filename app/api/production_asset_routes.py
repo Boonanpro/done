@@ -370,7 +370,7 @@ def _sequence_caption_clips(sequence: dict[str, Any] | None) -> list[dict[str, A
         return []
     clips: list[dict[str, Any]] = []
     for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("type") != "caption":
+        if not isinstance(track, dict) or track.get("type") != "caption" or track.get("hidden"):
             continue
         for clip in track.get("clips") or []:
             if isinstance(clip, dict) and str(clip.get("text") or "").strip():
@@ -655,7 +655,7 @@ def _sequence_overlay_clips(sequence: dict[str, Any] | None) -> list[dict[str, A
         return []
     clips: list[dict[str, Any]] = []
     for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict):
+        if not isinstance(track, dict) or track.get("hidden"):
             continue
         ttype = track.get("type")
         for clip in track.get("clips") or []:
@@ -669,13 +669,29 @@ def _sequence_overlay_clips(sequence: dict[str, Any] | None) -> list[dict[str, A
 def _sequence_audio_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(sequence, dict):
         return []
+    tracks = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict)]
+    # link_id -> the visual lane that owns the linked audio (unified A/V rule)
+    link_owner: dict[str, dict[str, Any]] = {}
+    for t in tracks:
+        if t.get("type") == "audio":
+            continue
+        for cl in t.get("clips") or []:
+            if isinstance(cl, dict) and cl.get("link_id") and cl["link_id"] not in link_owner:
+                link_owner[cl["link_id"]] = t
+    any_solo = any(t.get("solo") for t in tracks)
     clips: list[dict[str, Any]] = []
-    for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("type") != "audio":
+    for track in tracks:
+        if track.get("type") != "audio":
             continue
         for clip in track.get("clips") or []:
-            if isinstance(clip, dict) and clip.get("asset_id"):
-                clips.append(clip)
+            if not (isinstance(clip, dict) and clip.get("asset_id")):
+                continue
+            gov = link_owner.get(clip.get("link_id") or "", track)
+            if gov.get("muted"):
+                continue
+            if any_solo and not gov.get("solo"):
+                continue
+            clips.append(clip)
     return sorted(clips, key=lambda c: float(c.get("timeline_start") or 0))
 
 
@@ -684,7 +700,7 @@ def _sequence_effect_clips(sequence: dict[str, Any] | None) -> list[dict[str, An
         return []
     clips: list[dict[str, Any]] = []
     for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("type") != "effect":
+        if not isinstance(track, dict) or track.get("type") != "effect" or track.get("hidden"):
             continue
         for clip in track.get("clips") or []:
             if isinstance(clip, dict) and isinstance(clip.get("region"), dict):

@@ -982,7 +982,15 @@ impl AudioOut {
             let fills = self.fills;
             let mut scratch = std::mem::take(&mut self.scratch);
             let mut mixed = 0usize;
-            for c in doc.active_audio_span(t0, t1) {
+            let any_solo = doc.seq.tracks.iter().any(|t| t.solo);
+            for (own, c) in doc.active_audio_span(t0, t1) {
+                // lane header flags: linked audio follows its VISUAL clip's lane
+                let gov = doc.audio_gov_track(c, own);
+                if let Some(gtr) = doc.seq.tracks.get(gov) {
+                    if gtr.muted || (any_solo && !gtr.solo) {
+                        continue;
+                    }
+                }
                 let Some(aid) = c.asset_id.as_deref() else { continue };
                 let vol = c.volume as f32;
                 if vol <= 0.001 {

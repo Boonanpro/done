@@ -24,6 +24,18 @@ pub struct Track {
     pub kind: String,
     #[serde(default)]
     pub clips: Vec<Clip>,
+    // lane controls (standard NLE header toggles)
+    #[serde(default)]
+    pub locked: bool,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub solo: bool,
+    // magnet (auto close gaps on delete): None = default (ON for the main video lane)
+    #[serde(default)]
+    pub magnet: Option<bool>,
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct Clip {
@@ -228,8 +240,8 @@ impl Doc {
     pub fn active_video(&self, t: f64) -> (Option<&Clip>, Vec<&Clip>) {
         let mut layers: Vec<&Clip> = Vec::new();
         for tr in &self.seq.tracks {
-            if tr.kind == "audio" {
-                continue; // any non-audio lane can hold visual clips — no role rules
+            if tr.kind == "audio" || tr.hidden {
+                continue; // audio lanes & hidden lanes don't paint — no role rules otherwise
             }
             for c in &tr.clips {
                 if c.asset_id.is_none() || t < c.timeline_start || t >= c.timeline_end {
@@ -242,14 +254,37 @@ impl Doc {
         let base = it.next();
         (base, it.collect())
     }
+    /// Is lane `ti` magnetic (delete = close the gap)? Explicit flag wins; the default is
+    /// ON only for the MAIN video lane (the first video track = the storyline spine).
+    pub fn is_magnet(&self, ti: usize) -> bool {
+        let Some(tr) = self.seq.tracks.get(ti) else { return false };
+        if let Some(m) = tr.magnet {
+            return m;
+        }
+        tr.kind == "video"
+            && self.seq.tracks.iter().position(|t| t.kind == "video") == Some(ti)
+    }
+    /// The lane whose 🔊/S flags govern an audio clip: its linked visual clip's lane when
+    /// linked (unified A/V), else its own audio lane.
+    pub fn audio_gov_track(&self, clip: &Clip, own: usize) -> usize {
+        if let Some(l) = &clip.link_id {
+            for (i, tr) in self.seq.tracks.iter().enumerate() {
+                if tr.kind != "audio" && tr.clips.iter().any(|v| v.link_id.as_ref() == Some(l)) {
+                    return i;
+                }
+            }
+        }
+        own
+    }
     /// ALL audio-lane clips overlapping [t0, t1) — the mixer plays every one of them.
-    pub fn active_audio_span(&self, t0: f64, t1: f64) -> Vec<&Clip> {
+    pub fn active_audio_span(&self, t0: f64, t1: f64) -> Vec<(usize, &Clip)> {
         self.seq
             .tracks
             .iter()
-            .filter(|tr| tr.kind == "audio")
-            .flat_map(|tr| tr.clips.iter())
-            .filter(|c| c.asset_id.is_some() && c.timeline_end > t0 && c.timeline_start < t1)
+            .enumerate()
+            .filter(|(_, tr)| tr.kind == "audio")
+            .flat_map(|(i, tr)| tr.clips.iter().map(move |c| (i, c)))
+            .filter(|(_, c)| c.asset_id.is_some() && c.timeline_end > t0 && c.timeline_start < t1)
             .collect()
     }
     /// Active audio clip at t (first match).
