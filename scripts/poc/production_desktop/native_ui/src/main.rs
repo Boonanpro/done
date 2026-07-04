@@ -2463,7 +2463,14 @@ impl App {
 
         // ---- interactions: trim edges > move body > scrub empty space ----
         let to_t = |scroll_x: f32, pps: f32, x: f32| ((scroll_x + (x - body.left())) / pps).max(0.0) as f64;
-        if resp.drag_started() || (resp.clicked() && self.drag == Drag::None) {
+        // selection & drag arming happen ON PRESS (standard NLE feel) — the old
+        // clicked()/drag_started() pair depended on release timing and a clean previous
+        // drag state, which made selection feel unreliable
+        let pressed_here = resp.hovered() && ui.input(|i| i.pointer.primary_pressed());
+        if pressed_here {
+            self.drag = Drag::None; // clear any stale drag state
+        }
+        if pressed_here || resp.drag_started() {
             // Filmora semantics: touching the timeline while playing pauses playback FIRST
             // (its own logs show Pause -> seek -> auto Play). This also kills the bug where
             // the running clock overwrote the clicked position on release, cancelling the
@@ -2505,7 +2512,7 @@ impl App {
                             }
                         }
                         let ids = edits::expand_links(&self.doc.raw, &self.selected);
-                        if resp.drag_started() {
+                        if self.drag == Drag::None {
                             self.undo.push(self.doc.raw.clone());
                             self.redo.clear();
                             if (pos.x - r.left()).abs() < 6.0 {
@@ -2532,9 +2539,7 @@ impl App {
                         }
                     }
                     None => {
-                        if resp.clicked() {
-                            self.selected.clear();
-                        }
+                        self.selected.clear();
                         self.drag = Drag::Scrub;
                         self.t = to_t(self.scroll_x, self.pps, pos.x).min(self.dur);
                         self.push_req(false);
