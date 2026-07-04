@@ -337,3 +337,47 @@ pub fn ripple_delete(raw: &mut serde_json::Value, ids: &[String]) {
         });
     }
 }
+
+/// Move clips to another track (drag between lanes). The clip renders in front/behind
+/// simply by which track it lands on; its "track" kind field follows the target.
+pub fn move_to_track(raw: &mut serde_json::Value, ids: &[String], target: usize) {
+    let Some(tracks) = raw
+        .get_mut(0)
+        .and_then(|r| r.get_mut("timeline"))
+        .and_then(|x| x.get_mut("sequence"))
+        .and_then(|x| x.get_mut("tracks"))
+        .and_then(|x| x.as_array_mut())
+    else {
+        return;
+    };
+    if target >= tracks.len() {
+        return;
+    }
+    let tkind = tracks[target].get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if tkind != "video" && tkind != "overlay" {
+        return;
+    }
+    let mut moved: Vec<serde_json::Value> = Vec::new();
+    for tr in tracks.iter_mut() {
+        if let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) {
+            let mut i = 0;
+            while i < clips.len() {
+                let id = clips[i].get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if ids.iter().any(|x| x == id) {
+                    moved.push(clips.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    for mut c in moved {
+        if let Some(o) = c.as_object_mut() {
+            o.insert("track".into(), serde_json::json!(tkind));
+        }
+        tracks[target]
+            .get_mut("clips")
+            .and_then(|c| c.as_array_mut())
+            .map(|arr| arr.push(c));
+    }
+}

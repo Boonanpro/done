@@ -220,10 +220,11 @@ impl Doc {
             .fold(0.0f64, f64::max);
         d.max(self.seq.duration)
     }
-    /// Active video-lane clip (base, bottom) and overlay clips (top) at time t.
+    /// Active visual clips at t, in STACKING ORDER (track array index = back-to-front).
+    /// The first entry paints the background; later entries layer on top. No kind
+    /// special-casing — a clip renders in front simply because its track is higher.
     pub fn active_video(&self, t: f64) -> (Option<&Clip>, Vec<&Clip>) {
-        let mut base = None;
-        let mut overlays = Vec::new();
+        let mut layers: Vec<&Clip> = Vec::new();
         for tr in &self.seq.tracks {
             if tr.kind != "video" && tr.kind != "overlay" {
                 continue;
@@ -232,14 +233,12 @@ impl Doc {
                 if c.asset_id.is_none() || t < c.timeline_start || t >= c.timeline_end {
                     continue;
                 }
-                if tr.kind == "video" {
-                    base = Some(c);
-                } else {
-                    overlays.push(c);
-                }
+                layers.push(c);
             }
         }
-        (base, overlays)
+        let mut it = layers.into_iter();
+        let base = it.next();
+        (base, it.collect())
     }
     /// Active audio clip at t (first match).
     pub fn active_audio(&self, t: f64) -> Option<&Clip> {
