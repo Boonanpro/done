@@ -982,6 +982,12 @@ impl AudioOut {
                             .get_mut(&path)
                             .unwrap()
                             .pull(&mut out[done * ch..(done + n) * ch], rate, ch)?;
+                        if (c.volume - 1.0).abs() > 1e-3 {
+                            let g = c.volume as f32;
+                            for v in out[done * ch..(done + n) * ch].iter_mut() {
+                                *v *= g;
+                            }
+                        }
                         done += n;
                     }
                     None => {

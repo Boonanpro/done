@@ -47,6 +47,8 @@ pub struct Clip {
     pub text: Option<String>,
     #[serde(default)]
     pub link_id: Option<String>,
+    #[serde(default = "one")]
+    pub volume: f64,
 }
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct Pos {
