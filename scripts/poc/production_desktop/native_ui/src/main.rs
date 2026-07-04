@@ -4377,6 +4377,128 @@ fn main() -> eframe::Result<()> {
         }
         std::process::exit(0);
     }
+    // --selftest-invariants: run EVERY edit op on a clone of the open doc and machine-
+    // check the "any normal NLE behaves like this" invariants: an op introduces no new
+    // same-track overlap (where structural), linked A/V pairs stay at 0ms offset, and no
+    // clip goes negative. This is the regression net for the implicit-spec bugs
+    // (single-voice audio, duplicate-overlap, ...) — run it after touching edits.rs.
+    if args.iter().any(|a| a == "--selftest-invariants") {
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
+        let doc = model::Doc::load(&contents, &dir).expect("doc");
+        let overlaps = |d: &model::Doc| -> i64 {
+            let mut n = 0i64;
+            for tr in &d.seq.tracks {
+                for (i, a) in tr.clips.iter().enumerate() {
+                    for b in tr.clips.iter().skip(i + 1) {
+                        if a.timeline_start < b.timeline_end - 0.002
+                            && b.timeline_start < a.timeline_end - 0.002
+                        {
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            n
+        };
+        let av_bad = |d: &model::Doc| -> i64 {
+            let mut n = 0i64;
+            let vids: Vec<&model::Clip> = d
+                .seq
+                .tracks
+                .iter()
+                .filter(|t| t.kind != "audio")
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| c.link_id.is_some() && c.asset_id.is_some())
+                .collect();
+            for a in d
+                .seq
+                .tracks
+                .iter()
+                .filter(|t| t.kind == "audio")
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| c.link_id.is_some())
+            {
+                if let Some(v) = vids.iter().find(|v| v.link_id == a.link_id) {
+                    let off = (v.source_start - v.timeline_start) - (a.source_start - a.timeline_start);
+                    if off.abs() > 0.002 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let neg = |d: &model::Doc| -> i64 {
+            d.seq
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| c.timeline_start < -0.001 || c.timeline_end < c.timeline_start - 0.001)
+                .count() as i64
+        };
+        let (ov0, av0, ng0) = (overlaps(&doc), av_bad(&doc), neg(&doc));
+        let vid = doc
+            .seq
+            .tracks
+            .iter()
+            .filter(|t| t.kind != "audio")
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.asset_id.is_some() && c.dur() > 1.0)
+            .nth(2)
+            .map(|c| c.id.clone())
+            .expect("clip");
+        let ids = edits::expand_links(&doc.raw, &[vid.clone()]);
+        let mid = doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.id == vid)
+            .map(|c| (c.timeline_start + c.timeline_end) / 2.0)
+            .unwrap();
+        type Op = (&'static str, bool, Box<dyn Fn(&mut serde_json::Value)>);
+        let ids2 = ids.clone();
+        let ids3 = ids.clone();
+        let ids4 = ids.clone();
+        let ids5 = ids.clone();
+        let ids6 = ids.clone();
+        let ids7 = ids.clone();
+        let ops: Vec<Op> = vec![
+            ("split", true, Box::new(move |r| edits::split_clips(r, &ids2, mid, 99))),
+            ("ripple_delete", true, Box::new(move |r| edits::ripple_delete(r, &ids3))),
+            ("duplicate", true, Box::new(move |r| edits::duplicate_clips(r, &ids4, 99))),
+            // free move may overlap by USER intent — overlap delta not checked
+            ("move+0.5", false, Box::new(move |r| edits::move_clips(r, &ids5, 0.5))),
+            ("move-9999", false, Box::new(move |r| edits::move_clips(r, &ids6, -9999.0))),
+            ("volume0.5", true, Box::new(move |r| edits::set_volume(r, &ids7, 0.5))),
+        ];
+        let mut fail = 0;
+        for (name, check_ov, op) in ops {
+            let mut raw = doc.raw.clone();
+            op(&mut raw);
+            match model::Doc::from_raw(raw, &doc.contents_path, &doc.asset_dir) {
+                Ok(nd) => {
+                    let dov = overlaps(&nd) - ov0;
+                    let dav = av_bad(&nd) - av0;
+                    let dng = neg(&nd) - ng0;
+                    let ok = (!check_ov || dov <= 0) && dav <= 0 && dng <= 0;
+                    if !ok {
+                        fail += 1;
+                    }
+                    println!(
+                        "INV {name:<14} {} new_overlaps={dov} av_broken={dav} negative={dng}",
+                        if ok { "PASS" } else { "FAIL" }
+                    );
+                }
+                Err(e) => {
+                    fail += 1;
+                    println!("INV {name:<14} FAIL reparse: {e:#}");
+                }
+            }
+        }
+        println!("INVARIANTS {}", if fail == 0 { "ALL PASS" } else { "FAILURES" });
+        std::process::exit(if fail == 0 { 0 } else { 1 });
+    }
     // --selftest-dup: headless duplicate — clone the 3rd video clip (with its linked
     // audio) in a COPY of the doc and verify counts/geometry; the real file is untouched
     if args.iter().any(|a| a == "--selftest-dup") {
