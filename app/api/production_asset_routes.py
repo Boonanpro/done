@@ -1097,7 +1097,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             else:
                 _bs, _be = _popout_bake_range(asset, source_start, source_end)
             _intensity = str(_pp.get("intensity") or "mid")
-            _shadow = _pp.get("shadow")
+            _shadow = _pp.get("shadow") is True  # default OFF (parity with the live look)
             _key = _popout_key(str(clip.get("asset_id") or ""), _bs, _be, _box_px,
                                output_width, output_height, _intensity, _shadow)
             _pv = _popout_cache_dir(room_id) / f"{_key}.pv.mp4"
@@ -3269,7 +3269,8 @@ async def generate_popout_overlay(payload: dict = Body(...)):
     ss = max(0.0, float(payload.get("source_start") or 0.0))
     se = max(ss + 0.1, float(payload.get("source_end") or (ss + 4.0)))
     intensity = str(payload.get("intensity") or "mid")
-    shadow = payload.get("shadow")
+    # contact shadow is opt-in now (user: no black ring / no translucent silhouette)
+    shadow = payload.get("shadow") is True
     bs, be = _popout_bake_range(asset, ss, se)
     key = _popout_key(asset_id, bs, be, box_px, W, H, intensity, shadow)
     cache_dir = _popout_cache_dir(room_id)
