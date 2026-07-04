@@ -870,9 +870,19 @@ pub struct AudioOut {
     buffer_frames: u32,
     frames_written: u64,
     base_t: f64, // timeline time at frames_written==0 (set on play/seek)
-    decoders: HashMap<String, AudioDecoder>,
-    cur_clip: Option<(String, f64, f64)>, // (clip id, timeline_start, source_start)
+    streams: HashMap<String, ClipStream>, // keyed by CLIP id — overlapping clips mix
+    scratch: Vec<f32>,
+    fills: u64,
+    last_mixed: usize,
     started: bool,
+}
+
+/// One decoded audio lane clip. next_src_t tracks continuity so sequential fills
+/// don't re-seek; a jump (scrub/loop) re-seeks just this stream.
+struct ClipStream {
+    dec: AudioDecoder,
+    next_src_t: f64,
+    last_used: u64,
 }
 
 impl AudioOut {
@@ -902,8 +912,10 @@ impl AudioOut {
                 buffer_frames,
                 frames_written: 0,
                 base_t: 0.0,
-                decoders: HashMap::new(),
-                cur_clip: None,
+                streams: HashMap::new(),
+                scratch: Vec::new(),
+                fills: 0,
+                last_mixed: 0,
                 started: false,
             })
         }
@@ -919,7 +931,9 @@ impl AudioOut {
         }
         self.frames_written = 0;
         self.base_t = t;
-        self.cur_clip = None;
+        for st in self.streams.values_mut() {
+            st.next_src_t = f64::NAN; // force a re-seek on the next fill
+        }
         Ok(())
     }
 
@@ -957,50 +971,71 @@ impl AudioOut {
             let ptr = self.render.GetBuffer(avail)?;
             let out = std::slice::from_raw_parts_mut(ptr as *mut f32, avail as usize * self.ch);
             let (rate, ch) = (self.rate, self.ch);
-            let mut done = 0usize;
-            while done < avail as usize {
-                let t_write = self.base_t + (self.frames_written as f64 + done as f64) / rate as f64;
-                match doc.active_audio(t_write) {
-                    Some(c) => {
-                        let path = doc.asset_path(c.asset_id.as_deref().unwrap());
-                        let src_t = c.source_start + (t_write - c.timeline_start);
-                        let key = c.id.clone();
-                        let need_seek = match &self.cur_clip {
-                            Some((id, _, _)) => *id != key,
-                            None => true,
-                        };
-                        if !self.decoders.contains_key(&path) {
-                            self.decoders.insert(path.clone(), AudioDecoder::open(&path, rate, ch)?);
+            for v in out.iter_mut() {
+                *v = 0.0;
+            }
+            // MIX every audible audio-lane clip overlapping this buffer window — stacked
+            // clips all play (an NLE mixes; it does not pick one), volume 0 = silent
+            let t0 = self.base_t + self.frames_written as f64 / rate as f64;
+            let t1 = t0 + avail as f64 / rate as f64;
+            self.fills += 1;
+            let fills = self.fills;
+            let mut scratch = std::mem::take(&mut self.scratch);
+            let mut mixed = 0usize;
+            for c in doc.active_audio_span(t0, t1) {
+                let Some(aid) = c.asset_id.as_deref() else { continue };
+                let vol = c.volume as f32;
+                if vol <= 0.001 {
+                    continue;
+                }
+                let s0 = (((c.timeline_start - t0).max(0.0)) * rate as f64).round() as usize;
+                let s1 = ((((c.timeline_end.min(t1)) - t0) * rate as f64).round() as usize)
+                    .min(avail as usize);
+                if s1 <= s0 {
+                    continue;
+                }
+                if !self.streams.contains_key(&c.id) {
+                    let path = doc.asset_path(aid);
+                    match AudioDecoder::open(&path, rate, ch) {
+                        Ok(dec) => {
+                            self.streams.insert(
+                                c.id.clone(),
+                                ClipStream { dec, next_src_t: f64::NAN, last_used: fills },
+                            );
                         }
-                        if need_seek {
-                            self.decoders.get_mut(&path).unwrap().seek(src_t, rate, ch)?;
-                            self.cur_clip = Some((key, c.timeline_start, c.source_start));
-                        }
-                        let left = ((c.timeline_end - t_write) * rate as f64).ceil().max(1.0) as usize;
-                        let n = left.min(avail as usize - done);
-                        self.decoders
-                            .get_mut(&path)
-                            .unwrap()
-                            .pull(&mut out[done * ch..(done + n) * ch], rate, ch)?;
-                        if (c.volume - 1.0).abs() > 1e-3 {
-                            let g = c.volume as f32;
-                            for v in out[done * ch..(done + n) * ch].iter_mut() {
-                                *v *= g;
-                            }
-                        }
-                        done += n;
-                    }
-                    None => {
-                        // silence for 20ms worth or to end of gap
-                        let n = (rate as usize / 50).min(avail as usize - done).max(1);
-                        for v in out[done * ch..(done + n) * ch].iter_mut() {
-                            *v = 0.0;
-                        }
-                        self.cur_clip = None;
-                        done += n;
+                        Err(_) => continue, // asset without a decodable audio stream
                     }
                 }
+                let st = self.streams.get_mut(&c.id).unwrap();
+                st.last_used = fills;
+                let src_t = c.source_start + (t0 + s0 as f64 / rate as f64) - c.timeline_start;
+                if !st.next_src_t.is_finite() || (st.next_src_t - src_t).abs() > 0.03 {
+                    if st.dec.seek(src_t, rate, ch).is_err() {
+                        continue;
+                    }
+                }
+                let n = (s1 - s0) * ch;
+                scratch.clear();
+                scratch.resize(n, 0.0);
+                if st.dec.pull(&mut scratch[..n], rate, ch).is_err() {
+                    continue;
+                }
+                st.next_src_t = src_t + (s1 - s0) as f64 / rate as f64;
+                for (o, sv) in out[s0 * ch..s1 * ch].iter_mut().zip(scratch.iter()) {
+                    *o += *sv * vol;
+                }
+                mixed += 1;
             }
+            self.scratch = scratch;
+            if mixed != self.last_mixed {
+                eprintln!("AMIX {mixed} clips");
+                self.last_mixed = mixed;
+            }
+            for v in out.iter_mut() {
+                *v = v.clamp(-1.0, 1.0);
+            }
+            // drop decoders idle for ~4s of fills (each fill ≈ 10ms device period)
+            self.streams.retain(|_, st| fills - st.last_used < 400);
             self.render.ReleaseBuffer(avail, 0)?;
             self.frames_written += avail as u64;
             if !self.started {
