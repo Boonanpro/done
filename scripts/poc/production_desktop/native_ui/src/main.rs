@@ -2295,6 +2295,75 @@ impl App {
         });
     }
 
+    /// One asset card in the library grid: thumbnail, name, status chip, selection state.
+    fn asset_card(&mut self, ui: &mut egui::Ui, a: &serde_json::Value) {
+        let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = a
+            .get("filename")
+            .or_else(|| a.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("(無名)")
+            .to_string();
+        let status = a.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        let selected = self.lib.selected_assets.iter().any(|s| *s == id);
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(150.0, 116.0), egui::Sense::click());
+        let hov = resp.hovered();
+        let p = ui.painter_at(rect);
+        p.rect_filled(rect, 8.0, if hov { egui::Color32::from_rgb(36, 36, 41) } else { egui::Color32::from_rgb(28, 28, 32) });
+        let img_r = egui::Rect::from_min_max(
+            rect.min + egui::vec2(4.0, 4.0),
+            egui::pos2(rect.right() - 4.0, rect.bottom() - 24.0),
+        );
+        if let Some(t) = self.lib.thumbs.get(&id) {
+            p.image(
+                t.id(),
+                img_r,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        } else {
+            p.rect_filled(img_r, 6.0, egui::Color32::from_rgb(18, 18, 21));
+            p.text(img_r.center(), egui::Align2::CENTER_CENTER, "🎞", egui::FontId::proportional(22.0), egui::Color32::from_gray(70));
+        }
+        // status chip (only when NOT ready — ready needs no noise)
+        let chip = match status {
+            "processing" | "registered" => Some(("処理中…", egui::Color32::from_rgb(200, 150, 40))),
+            "failed" => Some(("失敗", egui::Color32::from_rgb(200, 70, 70))),
+            _ => None,
+        };
+        if let Some((label, col)) = chip {
+            let cr = egui::Rect::from_min_size(img_r.min + egui::vec2(5.0, 5.0), egui::vec2(52.0, 17.0));
+            p.rect_filled(cr, 8.0, col.gamma_multiply(0.9));
+            p.text(cr.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(10.0), egui::Color32::WHITE);
+        }
+        let short: String = name.chars().take(16).collect();
+        p.text(
+            egui::pos2(rect.left() + 7.0, rect.bottom() - 12.0),
+            egui::Align2::LEFT_CENTER,
+            short,
+            egui::FontId::proportional(10.0),
+            egui::Color32::from_gray(200),
+        );
+        if selected {
+            p.rect_stroke(rect, 8.0, egui::Stroke::new(2.5, UI_ACCENT));
+            let cc = egui::pos2(rect.right() - 13.0, rect.top() + 13.0);
+            p.circle_filled(cc, 9.0, UI_ACCENT);
+            p.text(cc, egui::Align2::CENTER_CENTER, "✔", egui::FontId::proportional(11.0), egui::Color32::WHITE);
+        } else {
+            p.rect_stroke(rect, 8.0, egui::Stroke::new(1.0, if hov { egui::Color32::from_gray(120) } else { egui::Color32::from_gray(48) }));
+        }
+        if hov {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() && !id.is_empty() {
+            if selected {
+                self.lib.selected_assets.retain(|s| *s != id);
+            } else {
+                self.lib.selected_assets.push(id.clone());
+            }
+        }
+    }
+
     fn lib_get(&self, tag: &str, path: String) {
         let sink = self.lib_sink.clone();
         let tag = tag.to_string();
@@ -2714,27 +2783,42 @@ impl App {
             }
         }
 
-        let ruler_h = 18.0;
+        let ruler_h = 20.0;
         p.rect_filled(
             egui::Rect::from_min_max(body.min, egui::pos2(body.right(), body.top() + ruler_h)),
             0.0,
-            egui::Color32::from_gray(26),
+            egui::Color32::from_rgb(17, 17, 19),
         );
         let step_s = (60.0 / self.pps).ceil().max(1.0);
+        // minor ticks: quarters of the labelled step (skip when they'd crowd)
+        let minor = step_s / 4.0;
+        if minor * self.pps >= 7.0 {
+            let mut m = (self.scroll_x / self.pps / minor).floor() * minor;
+            while m * self.pps - self.scroll_x < w {
+                let x = body.left() + m * self.pps - self.scroll_x;
+                if x >= body.left() {
+                    p.line_segment(
+                        [egui::pos2(x, body.top() + ruler_h - 5.0), egui::pos2(x, body.top() + ruler_h)],
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(55)),
+                    );
+                }
+                m += minor;
+            }
+        }
         let mut s = (self.scroll_x / self.pps / step_s).floor() * step_s;
         while s * self.pps - self.scroll_x < w {
             let x = body.left() + s * self.pps - self.scroll_x;
             if x >= body.left() {
                 p.line_segment(
-                    [egui::pos2(x, body.top()), egui::pos2(x, body.top() + ruler_h)],
-                    egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
+                    [egui::pos2(x, body.top() + ruler_h - 9.0), egui::pos2(x, body.top() + ruler_h)],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(105)),
                 );
                 p.text(
-                    egui::pos2(x + 3.0, body.top() + 2.0),
+                    egui::pos2(x + 4.0, body.top() + 2.0),
                     egui::Align2::LEFT_TOP,
                     format!("{:02}:{:02}", (s as i64) / 60, (s as i64) % 60),
-                    egui::FontId::proportional(10.0),
-                    egui::Color32::from_gray(150),
+                    egui::FontId::monospace(9.5),
+                    egui::Color32::from_gray(135),
                 );
             }
             s += step_s;
@@ -2900,6 +2984,16 @@ impl App {
                 [egui::pos2(rect.left(), y0 + lane_h + 1.5), egui::pos2(rect.right(), y0 + lane_h + 1.5)],
                 egui::Stroke::new(1.0, egui::Color32::from_gray(28)),
             );
+            // lane row background: a whisper of contrast so empty lanes read as lanes
+            p.rect_filled(
+                egui::Rect::from_min_max(egui::pos2(body.left(), y0), egui::pos2(body.right(), y0 + lane_h)),
+                0.0,
+                if tr.kind == "audio" {
+                    egui::Color32::from_rgb(19, 23, 22)
+                } else {
+                    egui::Color32::from_rgb(21, 21, 24)
+                },
+            );
             let color = match tr.kind.as_str() {
                 "video" => egui::Color32::from_rgb(70, 110, 190),
                 "overlay" => egui::Color32::from_rgb(150, 90, 200),
@@ -2922,7 +3016,30 @@ impl App {
                 );
                 let is_pop = c.effects.iter().any(|e| e.kind == "popout");
                 let pop_state = if is_pop { self.pop_states.get(&c.id).copied() } else { None };
-                p.rect_filled(r, 3.0, color);
+                let is_caption = c.text.is_some() && c.asset_id.is_none();
+                if is_caption {
+                    // caption clip: dark slate body + mustard accent edge + the TEXT itself
+                    p.rect_filled(r, 4.0, egui::Color32::from_rgb(46, 42, 30));
+                    p.rect_filled(
+                        egui::Rect::from_min_max(r.min, egui::pos2(r.left() + 3.0, r.bottom())),
+                        2.0,
+                        color,
+                    );
+                    if r.width() > 22.0 {
+                        let txt = c.text.clone().unwrap_or_default().replace(chr_nl(), " ");
+                        let max_chars = ((r.width() - 10.0) / 10.0) as usize;
+                        let shown: String = txt.chars().take(max_chars.max(1)).collect();
+                        p.text(
+                            egui::pos2(r.left() + 7.0, r.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            shown,
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_gray(215),
+                        );
+                    }
+                } else {
+                    p.rect_filled(r, 4.0, color.gamma_multiply(0.55));
+                }
                 // effect state ON the clip, without killing the "what is this clip"
                 // read: thin orange effect strip on top + translucent progress veil
                 if is_pop {
@@ -2972,22 +3089,26 @@ impl App {
                             );
                         }
                     }
-                    _ => {
-                        if is_pop && r.width() > 56.0 {
-                            p.text(
-                                egui::pos2(r.left() + 4.0, r.top() + 6.0),
-                                egui::Align2::LEFT_TOP,
-                                "飛び出し",
-                                egui::FontId::proportional(9.0),
-                                egui::Color32::from_white_alpha(230),
-                            );
-                        }
-                    }
+                    _ => {}
                 }
+                // Filmora-style title strip: colored bar with the clip name; filmstrip below
+                let strip_h = if !is_caption && c.asset_id.is_some() && lane_h >= 40.0 { 14.0 } else { 0.0 };
                 if tr.kind != "audio" {
                     if let Some(aid) = c.asset_id.as_ref() {
-                        // FILMSTRIP: each tile shows the actual source frame at its position
-                        let tile_w = (r.height() * 16.0 / 9.0).max(8.0);
+                        // FILMSTRIP: each tile shows the actual source frame at its position,
+                        // at the SOURCE's aspect (a portrait video gets narrow tiles, not a
+                        // squashed 16:9 smear)
+                        let film_top = r.top() + strip_h;
+                        let film_h = r.height() - strip_h;
+                        let aspect = self
+                            .thumbs
+                            .get(&(aid.clone(), 0))
+                            .map(|t| {
+                                let sz = t.size();
+                                (sz[0] as f32 / sz[1].max(1) as f32).clamp(0.3, 2.5)
+                            })
+                            .unwrap_or(16.0 / 9.0);
+                        let tile_w = (film_h * aspect).max(8.0);
                         let mut x = x0.max(rect.left()); // start at the clip's true left edge
                         while x < r.right() {
                             let tt = c.source_start
@@ -2999,7 +3120,7 @@ impl App {
                                 .or_else(|| self.thumbs.get(&(aid.clone(), 0)));
                             if let Some(th) = th {
                                 let tr2 = egui::Rect::from_min_max(
-                                    egui::pos2(x, r.top()),
+                                    egui::pos2(x, film_top),
                                     egui::pos2((x + tile_w).min(r.right()), r.bottom()),
                                 );
                                 let frac = tr2.width() / tile_w;
@@ -3014,50 +3135,80 @@ impl App {
                         }
                     }
                 }
+                if strip_h > 0.0 {
+                    let strip = egui::Rect::from_min_max(r.min, egui::pos2(r.right(), r.top() + strip_h));
+                    p.rect_filled(
+                        strip,
+                        egui::Rounding { nw: 4.0, ne: 4.0, sw: 0.0, se: 0.0 },
+                        if is_pop { egui::Color32::from_rgb(200, 110, 30) } else { color },
+                    );
+                    if strip.width() > 30.0 {
+                        let name = c
+                            .asset_id
+                            .as_ref()
+                            .and_then(|a| self.doc.asset_names.get(a))
+                            .cloned()
+                            .unwrap_or_default();
+                        let label = if is_pop { format!("飛び出し | {name}") } else { name };
+                        let max_chars = ((strip.width() - 10.0) / 7.0) as usize;
+                        let shown: String = label.chars().take(max_chars.max(1)).collect();
+                        p.text(
+                            egui::pos2(strip.left() + 5.0, strip.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            shown,
+                            egui::FontId::proportional(9.5),
+                            egui::Color32::from_white_alpha(235),
+                        );
+                    }
+                }
                 if tr.kind != "audio" && c.link_id.is_some() {
                     // unified A/V: waveform ribbon along the clip's bottom quarter
                     if let Some((spb, pk)) = c.asset_id.as_ref().and_then(|a| self.peaks.get(a)) {
                         let base_y = r.bottom() - 1.0;
-                        let amp = (r.height() * 0.28).min(12.0);
-                        let n = (r.width() as usize).max(1);
-                        let mut pts: Vec<egui::Pos2> = Vec::with_capacity(n);
+                        let amp = (r.height() * 0.26).min(12.0);
+                        let n = ((r.width() / 2.0) as usize).max(1);
                         for i in 0..n {
+                            let x = r.left() + (i as f32) * 2.0;
                             let tt = c.source_start
                                 + ((i as f32 / n as f32) * (c.timeline_end - c.timeline_start) as f32) as f64;
                             let idx = (tt / spb) as usize;
                             let v = pk.get(idx).copied().unwrap_or(0.0).min(1.0);
-                            pts.push(egui::pos2(r.left() + i as f32, base_y - v * amp));
+                            p.line_segment(
+                                [egui::pos2(x, base_y), egui::pos2(x, base_y - v * amp)],
+                                egui::Stroke::new(1.4, egui::Color32::from_rgba_unmultiplied(55, 215, 175, 130)),
+                            );
                         }
-                        p.add(egui::Shape::line(
-                            pts,
-                            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(190, 255, 205, 170)),
-                        ));
                     }
                 }
                 if tr.kind == "audio" {
                     if let Some((spb, pk)) = c.asset_id.as_ref().and_then(|a| self.peaks.get(a)) {
                         let mid = r.center().y;
-                        let half = r.height() * 0.48;
-                        let n = (r.width() as usize).max(1);
-                        let mut pts: Vec<egui::Pos2> = Vec::with_capacity(n);
+                        let half = r.height() * 0.44;
+                        let n = ((r.width() / 2.0) as usize).max(1);
                         for i in 0..n {
+                            let x = r.left() + (i as f32) * 2.0;
                             let tt = c.source_start
                                 + ((i as f32 / n as f32) * (c.timeline_end - c.timeline_start) as f32) as f64;
                             let idx = (tt / spb) as usize;
-                            let v = pk.get(idx).copied().unwrap_or(0.0).min(1.0);
-                            pts.push(egui::pos2(r.left() + i as f32, mid - v * half));
+                            let v = pk.get(idx).copied().unwrap_or(0.0).min(1.0).max(0.04);
+                            p.line_segment(
+                                [egui::pos2(x, mid + v * half), egui::pos2(x, mid - v * half)],
+                                egui::Stroke::new(1.4, egui::Color32::from_rgb(45, 190, 155)),
+                            );
                         }
-                        p.add(egui::Shape::line(pts, egui::Stroke::new(1.0, egui::Color32::from_rgb(20, 90, 40))));
                     }
                 }
                 let sel = self.selected.contains(&c.id);
+                let hovered = pointer.map(|pt| r.contains(pt)).unwrap_or(false);
                 p.rect_stroke(
                     r,
-                    3.0,
+                    4.0,
                     if sel {
                         egui::Stroke::new(2.0, egui::Color32::WHITE)
+                    } else if hovered && !tr.locked {
+                        egui::Stroke::new(1.5, egui::Color32::from_gray(160))
                     } else {
-                        egui::Stroke::new(1.0, egui::Color32::from_gray(25))
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(12))
                     },
                 );
                 if sel {
@@ -3592,179 +3743,211 @@ impl App {
                 }
             }
         }
-        egui::SidePanel::right("gen_panel").exact_width(340.0).show(ctx, |ui| {
-            ui.add_space(8.0);
-            ui.heading("新しく作る");
-            ui.add_space(6.0);
-            let presets = [
-                "映像→UGC (9:16)",
-                "映像→ストーリー (9:16)",
-                "映像→映画風 (16:9)",
-                "画像→広告画像 (4:5)",
-                "自由制作 (9:16)",
-            ];
-            for (i, p) in presets.iter().enumerate() {
-                if ui.selectable_label(self.lib.preset == i, *p).clicked() {
-                    self.lib.preset = i;
-                    self.lib.format = ["9:16", "9:16", "16:9", "4:5", "9:16"][i].into();
-                }
-            }
-            ui.add_space(6.0);
-            ui.label("タイトル");
-            ui.text_edit_singleline(&mut self.lib.title);
-            ui.label("何を作るか（ブリーフ）");
-            ui.add(
-                egui::TextEdit::multiline(&mut self.lib.brief)
-                    .desired_rows(4)
-                    .desired_width(f32::INFINITY),
-            );
-            ui.horizontal(|ui| {
-                ui.label("形式");
-                for f in ["9:16", "16:9", "1:1", "4:5"] {
-                    if ui.selectable_label(self.lib.format == f, f).clicked() {
-                        self.lib.format = f.into();
+        egui::SidePanel::right("gen_panel").exact_width(360.0).show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_space(10.0);
+                ui.heading("新しく作る");
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new("素材を選んでダンに丸ごと編集させます").weak().small());
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("1. 作りたいもの").strong());
+                let presets = [
+                    ("映像→UGC", "9:16", "テンポ良く無音をカットした縦型ショート"),
+                    ("映像→ストーリー", "9:16", "ストーリー仕立ての縦型動画"),
+                    ("映像→映画風", "16:9", "予告編のような横型動画"),
+                    ("画像→広告画像", "4:5", "商品広告向けの画像"),
+                    ("自由制作", "9:16", "ブリーフの指示だけで自由に"),
+                ];
+                for (i, (name, fmt, desc)) in presets.iter().enumerate() {
+                    let on = self.lib.preset == i;
+                    let fill = if on { egui::Color32::from_rgb(0, 84, 66) } else { egui::Color32::from_rgb(34, 34, 39) };
+                    let resp = ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(format!("{name}  {fmt}\n{desc}")).size(11.5),
+                        )
+                        .min_size(egui::vec2(330.0, 40.0))
+                        .fill(fill)
+                        .stroke(if on {
+                            egui::Stroke::new(1.5, UI_ACCENT)
+                        } else {
+                            egui::Stroke::new(1.0, egui::Color32::from_gray(50))
+                        }),
+                    );
+                    if resp.clicked() {
+                        self.lib.preset = i;
+                        self.lib.format = fmt.to_string();
                     }
                 }
-            });
-            ui.add_space(8.0);
-            let n = self.lib.selected_assets.len();
-            let can = n > 0 && !self.lib.started;
-            let btxt = format!("▶ ダンに作らせる（素材{n}件）");
-            if ui
-                .add_enabled(can, egui::Button::new(btxt).min_size(egui::vec2(300.0, 34.0)))
-                .clicked()
-            {
-                self.start_generation();
-            }
-            if self.lib.started {
-                ui.add_space(6.0);
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new("2. 内容（任意）").strong());
+                ui.add(egui::TextEdit::singleline(&mut self.lib.title).hint_text("タイトル（空なら自動）").desired_width(f32::INFINITY));
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.lib.brief)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("どう作ってほしいか（例: 冒頭3秒で結論、テロップ大きめ）"),
+                );
                 ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("ダンが制作中…（数分かかります）");
+                    ui.label(egui::RichText::new("形式").weak());
+                    for f in ["9:16", "16:9", "1:1", "4:5"] {
+                        if ui.selectable_label(self.lib.format == f, f).clicked() {
+                            self.lib.format = f.into();
+                        }
+                    }
                 });
-                for ev in &self.lib.events {
-                    ui.label(egui::RichText::new(ev).small().weak());
+                ui.add_space(12.0);
+                let n = self.lib.selected_assets.len();
+                let can = n > 0 && !self.lib.started;
+                if ui
+                    .add_enabled(
+                        can,
+                        egui::Button::new(
+                            egui::RichText::new(format!("▶  ダンに作らせる（素材{n}件）"))
+                                .size(14.0)
+                                .color(egui::Color32::WHITE),
+                        )
+                        .min_size(egui::vec2(330.0, 40.0))
+                        .rounding(8.0)
+                        .fill(if can { UI_ACCENT } else { egui::Color32::from_gray(45) }),
+                    )
+                    .clicked()
+                {
+                    self.start_generation();
                 }
-            }
-            if let Some(e) = &self.lib.error {
-                ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
-            }
-            ui.separator();
-            ui.label("素材をパスで登録（PC内のファイル）");
-            ui.text_edit_singleline(&mut self.lib.register_path);
-            if ui.button("登録").clicked() && !self.lib.register_path.trim().is_empty() {
-                let body = serde_json::json!({
-                    "room_id": self.room_id(),
-                    "uri": self.lib.register_path.trim(),
-                    "source_type": "local_path",
-                    "make_proxy": true,
+                if n == 0 && !self.lib.started {
+                    ui.label(
+                        egui::RichText::new("← 左の素材をクリックして選んでください")
+                            .small()
+                            .color(egui::Color32::from_rgb(240, 190, 80)),
+                    );
+                }
+                if self.lib.started {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("ダンが制作中…（数分。完成すると自動で開きます）");
+                    });
+                    for ev in &self.lib.events {
+                        ui.label(egui::RichText::new(ev).small().weak());
+                    }
+                }
+                if let Some(e) = &self.lib.error {
+                    ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
+                }
+                ui.add_space(14.0);
+                ui.separator();
+                ui.label(egui::RichText::new("素材を追加").strong());
+                ui.label(
+                    egui::RichText::new("動画ファイルをこのウィンドウにドラッグ&ドロップ")
+                        .small()
+                        .weak(),
+                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.lib.register_path)
+                            .hint_text("またはPC内のパスを貼り付け")
+                            .desired_width(250.0),
+                    );
+                    if ui.button("追加").clicked() && !self.lib.register_path.trim().is_empty() {
+                        let body = serde_json::json!({
+                            "room_id": self.room_id(),
+                            "uri": self.lib.register_path.trim(),
+                            "source_type": "local_path",
+                            "make_proxy": true,
+                        });
+                        self.lib.register_path.clear();
+                        self.lib_post("act", "/api/v1/production-assets/register".into(), body);
+                    }
                 });
-                self.lib.register_path.clear();
-                self.lib_post("act", "/api/v1/production-assets/register".into(), body);
-            }
-            ui.label(
-                egui::RichText::new("ヒント: 動画ファイルをこのウィンドウにドロップしても登録できます")
-                    .small()
-                    .weak(),
-            );
+            });
         });
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.heading("制作ライブラリ");
-                if ui.small_button("🔄 更新").clicked() {
+                if ui
+                    .add(egui::Button::new("🔄").frame(false))
+                    .on_hover_text("一覧を更新")
+                    .clicked()
+                {
                     self.lib_refresh();
                 }
             });
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new("コンテンツ（クリックで開く）").strong());
+                // ---- contents ----
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("コンテンツ").strong().size(13.0));
+                ui.label(egui::RichText::new("クリックで編集画面が開きます").weak().small());
+                ui.add_space(2.0);
                 ui.horizontal_wrapped(|ui| {
                     let contents = self.lib.contents.clone();
                     for c in &contents {
-                        let title = c.get("title").and_then(|v| v.as_str()).unwrap_or("(無題)");
+                        let title = c.get("title").and_then(|v| v.as_str()).unwrap_or("(無題)").to_string();
                         let cid = c.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let nclips = c
-                            .get("timeline")
-                            .and_then(|t| t.get("sequence"))
+                        let sq = c.get("timeline").and_then(|t| t.get("sequence"));
+                        let nclips: usize = sq
                             .and_then(|sq| sq.get("tracks"))
                             .and_then(|t| t.as_array())
-                            .map(|t| {
-                                t.iter()
-                                    .map(|tr| tr.get("clips").and_then(|c| c.as_array()).map(|c| c.len()).unwrap_or(0))
-                                    .sum::<usize>()
-                            })
+                            .map(|t| t.iter().map(|tr| tr.get("clips").and_then(|c| c.as_array()).map(|c| c.len()).unwrap_or(0)).sum())
                             .unwrap_or(0);
-                        let label = format!("🎬 {title}\n{nclips} clips");
-                        if ui.add_sized(egui::vec2(160.0, 56.0), egui::Button::new(label)).clicked()
-                            && !cid.is_empty()
-                        {
+                        let dur = sq.and_then(|sq| sq.get("duration")).and_then(|d| d.as_f64()).unwrap_or(0.0);
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(200.0, 62.0), egui::Sense::click());
+                        let pp = ui.painter_at(rect);
+                        let hov = resp.hovered();
+                        pp.rect_filled(rect, 8.0, if hov { egui::Color32::from_rgb(42, 42, 48) } else { egui::Color32::from_rgb(32, 32, 37) });
+                        pp.rect_stroke(rect, 8.0, egui::Stroke::new(1.0, if hov { UI_ACCENT } else { egui::Color32::from_gray(50) }));
+                        let tshort: String = title.chars().take(14).collect();
+                        pp.text(egui::pos2(rect.left() + 10.0, rect.top() + 14.0), egui::Align2::LEFT_CENTER,
+                                format!("🎬 {tshort}"), egui::FontId::proportional(12.5), egui::Color32::from_gray(230));
+                        pp.text(egui::pos2(rect.left() + 10.0, rect.bottom() - 15.0), egui::Align2::LEFT_CENTER,
+                                format!("{nclips}クリップ・{:.0}:{:02}", dur as i64 / 60, dur as i64 % 60),
+                                egui::FontId::proportional(10.0), egui::Color32::from_gray(140));
+                        if hov {
+                            pp.text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER,
+                                    "開く ▶", egui::FontId::proportional(11.0), UI_ACCENT);
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if resp.clicked() && !cid.is_empty() {
                             self.open_content(&cid);
                         }
                     }
-                });
-                ui.add_space(10.0);
-                ui.label(egui::RichText::new("素材（クリックで選択 → 右の「ダンに作らせる」）").strong());
-                ui.horizontal_wrapped(|ui| {
-                    let assets = self.lib.assets.clone();
-                    for a in &assets {
-                        let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let name = a
-                            .get("filename")
-                            .or_else(|| a.get("name"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("(無名)")
-                            .to_string();
-                        let status = a.get("status").and_then(|v| v.as_str()).unwrap_or("");
-                        let selected = self.lib.selected_assets.iter().any(|s| *s == id);
-                        let (rect, resp) =
-                            ui.allocate_exact_size(egui::vec2(150.0, 110.0), egui::Sense::click());
-                        let p = ui.painter_at(rect);
-                        p.rect_filled(rect, 6.0, egui::Color32::from_gray(28));
-                        if let Some(t) = self.lib.thumbs.get(&id) {
-                            let img_r = egui::Rect::from_min_max(
-                                rect.min + egui::vec2(4.0, 4.0),
-                                egui::pos2(rect.right() - 4.0, rect.bottom() - 26.0),
-                            );
-                            p.image(
-                                t.id(),
-                                img_r,
-                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                egui::Color32::WHITE,
-                            );
-                        }
-                        let badge = if status == "proxy_ready" {
-                            "OK"
-                        } else if status == "processing" {
-                            "..."
-                        } else {
-                            "-"
-                        };
-                        let short: String = name.chars().take(16).collect();
-                        p.text(
-                            egui::pos2(rect.left() + 6.0, rect.bottom() - 12.0),
-                            egui::Align2::LEFT_CENTER,
-                            format!("[{badge}] {short}"),
-                            egui::FontId::proportional(10.0),
-                            egui::Color32::from_gray(200),
-                        );
-                        p.rect_stroke(
-                            rect,
-                            6.0,
-                            if selected {
-                                egui::Stroke::new(2.5, egui::Color32::from_rgb(90, 170, 255))
-                            } else {
-                                egui::Stroke::new(1.0, egui::Color32::from_gray(45))
-                            },
-                        );
-                        if resp.clicked() && !id.is_empty() {
-                            if selected {
-                                self.lib.selected_assets.retain(|s| *s != id);
-                            } else {
-                                self.lib.selected_assets.push(id.clone());
-                            }
-                        }
+                    if contents.is_empty() {
+                        ui.label(egui::RichText::new("まだありません。素材を選んで右の「ダンに作らせる」から").weak());
                     }
                 });
+                // ---- user assets ----
+                ui.add_space(12.0);
+                let assets = self.lib.assets.clone();
+                let (mine, generated): (Vec<_>, Vec<_>) = assets
+                    .iter()
+                    .partition(|a| a.get("source_type").and_then(|v| v.as_str()) != Some("generated"));
+                ui.label(egui::RichText::new("あなたの素材").strong().size(13.0));
+                ui.label(egui::RichText::new("クリックで選択 → 右の「ダンに作らせる」").weak().small());
+                ui.add_space(2.0);
+                ui.horizontal_wrapped(|ui| {
+                    for a in &mine {
+                        self.asset_card(ui, a);
+                    }
+                    if mine.is_empty() {
+                        ui.label(egui::RichText::new("動画ファイルをこのウィンドウにドロップして追加").weak());
+                    }
+                });
+                // ---- generated (collapsed) ----
+                if !generated.is_empty() {
+                    ui.add_space(10.0);
+                    egui::CollapsingHeader::new(
+                        egui::RichText::new(format!("ダンの生成物（{}件）", generated.len())).size(12.5),
+                    )
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            for a in &generated {
+                                self.asset_card(ui, a);
+                            }
+                        });
+                    });
+                }
+                ui.add_space(20.0);
             });
         });
         // drag & drop: local files register by path (no upload roundtrip needed)
@@ -5063,7 +5246,7 @@ fn main() -> eframe::Result<()> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 940.0])
-            .with_title("done native editor (M2)"),
+            .with_title("done Studio"),
         ..Default::default()
     };
     eframe::run_native(

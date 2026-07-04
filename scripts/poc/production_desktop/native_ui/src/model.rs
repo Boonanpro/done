@@ -172,6 +172,7 @@ pub struct Doc {
     pub asset_dir: String,
     /// asset_id -> ORIGINAL file path (from assets.json local_path), when it exists on disk.
     pub originals: std::collections::HashMap<String, String>,
+    pub asset_names: std::collections::HashMap<String, String>,
 }
 
 impl Doc {
@@ -193,10 +194,17 @@ impl Doc {
         // originals from assets.json: preview decodes the SOURCE file (no proxy softness),
         // falling back to the proxy when the original is missing
         let mut originals = std::collections::HashMap::new();
+        let mut asset_names = std::collections::HashMap::new();
         if let Ok(txt) = std::fs::read_to_string(format!("{dir}/assets.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
                 for a in v.as_array().cloned().unwrap_or_default() {
                     let id = a.get("id").and_then(|x| x.as_str());
+                    if let (Some(id), Some(name)) = (
+                        id,
+                        a.get("filename").or_else(|| a.get("name")).and_then(|x| x.as_str()),
+                    ) {
+                        asset_names.insert(id.to_string(), name.to_string());
+                    }
                     let lp = a.get("local_path").and_then(|x| x.as_str());
                     if let (Some(id), Some(lp)) = (id, lp) {
                         if std::path::Path::new(lp).exists() {
@@ -206,7 +214,7 @@ impl Doc {
                 }
             }
         }
-        Ok(Self { raw, contents_path: contents_path.to_string(), seq, asset_dir: dir, originals })
+        Ok(Self { raw, contents_path: contents_path.to_string(), seq, asset_dir: dir, originals, asset_names })
     }
 
     /// Best source for QUALITY (original when available) vs SPEED (proxy: small, short GOP).
