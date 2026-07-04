@@ -1428,6 +1428,11 @@ struct App {
     lib_poll: Instant,
     lib_sink: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
     lib_gen_stash: Option<serde_json::Value>,
+    recut_open: bool,
+    recut_thresh: f32,
+    recut_lead: f32,
+    recut_tail: f32,
+    recut_busy: bool,
     doc: Arc<model::Doc>,
     shared: Arc<Shared>,
     selected: Vec<String>,
@@ -1526,6 +1531,11 @@ impl App {
             lib_poll: Instant::now(),
             lib_sink: Default::default(),
             lib_gen_stash: None,
+            recut_open: false,
+            recut_thresh: 0.45,
+            recut_lead: 0.06,
+            recut_tail: 0.10,
+            recut_busy: false,
             doc,
             shared,
             selected: Vec::new(),
@@ -2946,6 +2956,23 @@ impl App {
                 ("act", Ok(_)) => {
                     self.lib_refresh();
                 }
+                ("recut", Ok(v)) => {
+                    self.recut_busy = false;
+                    let cuts = v.get("cut_count").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let removed = v.get("removed_total").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                    let nclips = v.get("clip_count").and_then(|x| x.as_i64()).unwrap_or(0);
+                    let cid = self.content_id();
+                    self.open_content(&cid);
+                    self.toast(&format!(
+                        "再カット完了 ✓ {cuts}箇所・約{}秒短縮（クリップ{nclips}個）",
+                        removed.round() as i64
+                    ));
+                }
+                ("recut", Err(e)) => {
+                    self.recut_busy = false;
+                    let msg = e.chars().take(80).collect::<String>();
+                    self.toast(&format!("再カット失敗: {msg}"));
+                }
                 (_, Err(e)) => {
                     self.lib.error = Some(e.clone());
                     self.lib.started = false;
@@ -3487,6 +3514,13 @@ impl eframe::App for App {
                     self.screen = Screen::Library;
                 }
                 ui.separator();
+                if ui
+                    .selectable_label(self.recut_open, "✂ カット調整")
+                    .on_hover_text("無音の詰め具合を変えてダンのカットを組み直す")
+                    .clicked()
+                {
+                    self.recut_open = !self.recut_open;
+                }
                 let exporting = self.export_job.is_some();
                 if ui
                     .add_enabled(!exporting, egui::Button::new("📤 書き出し"))
@@ -3587,6 +3621,80 @@ impl eframe::App for App {
                     });
                 }
             });
+        if std::env::var("NATIVE_RECUT_OPEN").map(|v| !v.is_empty()).unwrap_or(false) {
+            std::env::set_var("NATIVE_RECUT_OPEN", "");
+            self.recut_open = true;
+        }
+        if !self.recut_busy
+            && std::env::var("NATIVE_RECUT_RUN").map(|v| !v.is_empty()).unwrap_or(false)
+        {
+            std::env::set_var("NATIVE_RECUT_RUN", "");
+            self.recut_open = true;
+            self.recut_busy = true;
+            let room = self.room_id();
+            let cid = self.content_id();
+            let body = serde_json::json!({
+                "silence_threshold": self.recut_thresh,
+                "lead": self.recut_lead,
+                "tail": self.recut_tail,
+            });
+            self.lib_post(
+                "recut",
+                format!("/api/v1/production-assets/contents/{cid}/recut?room_id={room}"),
+                body,
+            );
+        }
+        if self.recut_open {
+            let mut open = self.recut_open;
+            egui::Window::new("カット再調整")
+                .open(&mut open)
+                .resizable(false)
+                .default_width(300.0)
+                .show(ctx, |ui| {
+                    ui.label(format!("無音とみなす長さ {:.2}秒", self.recut_thresh));
+                    ui.add(egui::Slider::new(&mut self.recut_thresh, 0.20..=1.20).show_value(false));
+                    ui.label(format!("カット前の余白 {:.2}秒", self.recut_lead));
+                    ui.add(egui::Slider::new(&mut self.recut_lead, 0.0..=0.40).show_value(false));
+                    ui.label(format!("カット後の余白 {:.2}秒", self.recut_tail));
+                    ui.add(egui::Slider::new(&mut self.recut_tail, 0.0..=0.60).show_value(false));
+                    ui.add_space(6.0);
+                    let btxt = if self.recut_busy { "再カット中…" } else { "この設定で再カット" };
+                    if ui
+                        .add_enabled(!self.recut_busy, egui::Button::new(btxt).min_size(egui::vec2(280.0, 28.0)))
+                        .clicked()
+                    {
+                        self.recut_busy = true;
+                        self.playing = false;
+                        self.push_req(false);
+                        let room = self.room_id();
+                        let cid = self.content_id();
+                        let body = serde_json::json!({
+                            "silence_threshold": self.recut_thresh,
+                            "lead": self.recut_lead,
+                            "tail": self.recut_tail,
+                        });
+                        self.lib_post(
+                            "recut",
+                            format!("/api/v1/production-assets/contents/{cid}/recut?room_id={room}"),
+                            body,
+                        );
+                    }
+                    if self.recut_busy {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("組み直しています…");
+                        });
+                    }
+                    ui.label(
+                        egui::RichText::new(
+                            "※ダンの自動カットを組み直します。手動のクリップ編集はリセットされます",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                });
+            self.recut_open = open;
+        }
         if let Some((msg, at)) = self.toast.clone() {
             if at.elapsed().as_secs_f32() < 3.0 {
                 egui::Area::new(egui::Id::new("toast"))
