@@ -2936,6 +2936,46 @@ impl App {
                 }
             }
         }
+        // OVERLAP INDICATOR: same-lane overlapping clips look CONTIGUOUS when their
+        // rects merge (the invisible-overlap trap: a duplicated clip sat on the next one,
+        // audio doubled, and nothing on screen showed why). Mark every same-track overlap
+        // with a red hatched band so the state is impossible to miss.
+        for &(ti, y0, lh) in &lane_tops {
+            let tr = &self.doc.seq.tracks[ti];
+            for (i, a) in tr.clips.iter().enumerate() {
+                for b in tr.clips.iter().skip(i + 1) {
+                    let os = a.timeline_start.max(b.timeline_start);
+                    let oe = a.timeline_end.min(b.timeline_end);
+                    if oe - os < 0.01 {
+                        continue;
+                    }
+                    let x0 = (body.left() + (os as f32) * self.pps - self.scroll_x).max(body.left());
+                    let x1 = (body.left() + (oe as f32) * self.pps - self.scroll_x).min(body.right());
+                    if x1 <= x0 {
+                        continue;
+                    }
+                    let r = egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y0 + lh));
+                    p.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(255, 40, 40, 60));
+                    let mut x = x0;
+                    while x < x1 {
+                        p.line_segment(
+                            [egui::pos2(x, y0 + lh), egui::pos2((x + lh).min(x1), y0)],
+                            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 60, 60, 160)),
+                        );
+                        x += 8.0;
+                    }
+                    if x1 - x0 > 26.0 {
+                        p.text(
+                            egui::pos2((x0 + x1) / 2.0, y0 + lh / 2.0),
+                            egui::Align2::CENTER_CENTER,
+                            "重なり",
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_rgb(255, 120, 120),
+                        );
+                    }
+                }
+            }
+        }
         // marquee rectangle overlay
         if let Some(r) = self.marquee {
             p.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(90, 160, 255, 24));
@@ -4741,6 +4781,26 @@ fn main() -> eframe::Result<()> {
             }
             // --selftest: drive the ENGINE directly (no OS input — immune to a human
             // moving the real mouse): play -> fwd jump -> back jump -> 30Hz scrub -> stop
+            // --play-probe <t>: start playback at t after warmup and run ~12s — headless
+            // boundary/dup debugging with full engine logs, no synthetic input needed
+            if let Some(i) = args.iter().position(|a| a == "--play-probe") {
+                let t0: f64 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                let sh = app.shared.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(4000));
+                    eprintln!("PLAYPROBE start t={t0}");
+                    {
+                        let mut r = sh.req.lock().unwrap();
+                        r.t = t0;
+                        r.playing = true;
+                        r.scrubbing = false;
+                        r.gen += 1;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(12000));
+                    eprintln!("PLAYPROBE end clock={:.3}", f64::from_bits(sh.clock_bits.load(Ordering::Relaxed)));
+                    std::process::exit(0);
+                });
+            }
             if args.iter().any(|a| a == "--selftest") {
                 let sh = app.shared.clone();
                 std::thread::spawn(move || {
