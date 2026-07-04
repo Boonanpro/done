@@ -2028,23 +2028,33 @@ impl App {
                 }
                 match pop_state {
                     Some(PopState::Baking(pct)) => {
-                        let w = r.width() * (pct as f32 / 100.0).clamp(0.02, 1.0);
-                        let veil = egui::Rect::from_min_size(r.min, egui::vec2(w, r.height()));
-                        p.rect_filled(veil, 3.0, egui::Color32::from_rgba_unmultiplied(255, 150, 60, 70));
-                        if r.width() > 90.0 {
-                            p.text(
-                                r.center(),
-                                egui::Align2::CENTER_CENTER,
-                                format!("飛び出し生成中 {pct}%"),
-                                egui::FontId::proportional(10.0),
-                                egui::Color32::WHITE,
-                            );
+                        // UNMISSABLE progress, without hiding what the clip is:
+                        // moderate veil + a SOLID 5px progress bar + always-on label
+                        let frac = (pct as f32 / 100.0).clamp(0.02, 1.0);
+                        let veil = egui::Rect::from_min_size(r.min, egui::vec2(r.width() * frac, r.height()));
+                        p.rect_filled(veil, 3.0, egui::Color32::from_rgba_unmultiplied(255, 150, 60, 110));
+                        let bar = egui::Rect::from_min_max(
+                            egui::pos2(r.left(), r.bottom() - 5.0),
+                            egui::pos2(r.left() + r.width() * frac, r.bottom()),
+                        );
+                        p.rect_filled(bar, 2.0, egui::Color32::from_rgb(255, 150, 60));
+                        let label = if r.width() > 90.0 {
+                            format!("飛び出し生成中 {pct}%")
+                        } else {
+                            format!("{pct}%")
+                        };
+                        if r.width() > 24.0 {
+                            let font = egui::FontId::proportional(if r.width() > 90.0 { 10.0 } else { 9.0 });
+                            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                                p.text(r.center() + egui::vec2(dx, dy), egui::Align2::CENTER_CENTER, &label, font.clone(), egui::Color32::BLACK);
+                            }
+                            p.text(r.center(), egui::Align2::CENTER_CENTER, &label, font, egui::Color32::WHITE);
                         }
                         let pulse = ((ui.input(|i| i.time) * 3.0).sin() * 0.5 + 0.5) as f32;
                         p.rect_stroke(
                             r,
                             3.0,
-                            egui::Stroke::new(1.5, egui::Color32::from_rgba_unmultiplied(255, 190, 120, (90.0 + 160.0 * pulse) as u8)),
+                            egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(255, 190, 120, (120.0 + 130.0 * pulse) as u8)),
                         );
                     }
                     Some(PopState::Failed) => {
