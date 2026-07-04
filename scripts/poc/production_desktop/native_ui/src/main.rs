@@ -2417,7 +2417,7 @@ impl App {
     }
 
     fn timeline_ui(&mut self, ui: &mut egui::Ui) {
-        const GUTTER: f32 = 92.0; // lane headers (number + lock/eye/mute/solo/magnet icons)
+        const GUTTER: f32 = 112.0; // lane headers (number + lock/eye/mute/solo/magnet icons)
         const BOTTOM: f32 = 24.0; // zoom slider + scrollbar
         let h = ui.available_height() - BOTTOM;
         let w = ui.available_width();
@@ -2583,8 +2583,8 @@ impl App {
                 let mut x = rect.left() + 24.0;
                 for (key, glyph, on) in icons {
                     let r = egui::Rect::from_min_size(
-                        egui::pos2(x, y0 + lane_h * 0.5 - 7.0),
-                        egui::vec2(13.0, 14.0),
+                        egui::pos2(x, y0 + lane_h * 0.5 - 9.0),
+                        egui::vec2(17.0, 18.0),
                     );
                     let iresp = ui.interact(r, egui::Id::new(("lane_flag", ti, key)), egui::Sense::click());
                     let col = if on {
@@ -2603,7 +2603,7 @@ impl App {
                         r.center(),
                         egui::Align2::CENTER_CENTER,
                         glyph,
-                        egui::FontId::proportional(11.0),
+                        egui::FontId::proportional(15.0),
                         col,
                     );
                     if iresp.on_hover_text(match key {
@@ -2623,7 +2623,7 @@ impl App {
                         };
                         flag_click = Some((ti, key, !cur));
                     }
-                    x += 13.0;
+                    x += 18.0;
                 }
             }
             p.line_segment(
