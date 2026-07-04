@@ -197,17 +197,21 @@ pub fn set_popout(raw: &mut serde_json::Value, ids: &[String], params: Option<se
             .unwrap()
             .entry("effects")
             .or_insert_with(|| serde_json::Value::Array(vec![]));
-        // removing: restore the display position to the CARD box the effect was applied
-        // with (apply had swapped position to the margins-composed full frame)
-        let mut restore: Option<serde_json::Value> = None;
+        // removing: restore the display position the clip had BEFORE the effect was
+        // applied (recorded as params.orig_position at apply)
+        let mut restore: Option<Option<serde_json::Value>> = None;
         if params.is_none() {
             if let Some(arr) = effects.as_array() {
-                restore = arr
+                if let Some(p) = arr
                     .iter()
                     .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("popout"))
                     .and_then(|e| e.get("params"))
-                    .and_then(|p| p.get("box"))
-                    .cloned();
+                {
+                    restore = Some(match p.get("orig_position") {
+                        Some(serde_json::Value::Null) | None => p.get("box").cloned(),
+                        Some(v) => Some(v.clone()),
+                    });
+                }
             }
         }
         if let Some(arr) = effects.as_array_mut() {
@@ -216,8 +220,15 @@ pub fn set_popout(raw: &mut serde_json::Value, ids: &[String], params: Option<se
                 arr.push(serde_json::json!({"type": "popout", "params": p}));
             }
         }
-        if let Some(b) = restore {
-            c.as_object_mut().unwrap().insert("position".into(), b);
+        if let Some(r) = restore {
+            match r {
+                Some(b) => {
+                    c.as_object_mut().unwrap().insert("position".into(), b);
+                }
+                None => {
+                    c.as_object_mut().unwrap().remove("position");
+                }
+            }
         }
     });
 }
