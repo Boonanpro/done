@@ -176,24 +176,22 @@ pub fn split_clips(root: &mut Value, ids: &[String], t: f64, salt: u64) {
     }
 }
 
-/// Duplicate the selection as a BLOCK with a ripple INSERT (Filmora/CapCut semantics):
-/// copies land right after the selection keeping their relative layout, and everything
-/// that starts at/after the selection's end — on ALL tracks — shifts right to make room.
-/// Without the ripple, a copy dropped onto a gap-free timeline overlaps the next clip:
-/// two videos stack and both audios play at once (the "duplicate is broken" report).
-/// Linked A/V pairs get a fresh shared link_id so copies link to each other, not the originals.
+/// Duplicate the selection: NOTHING else on the timeline ever moves (no ripple — a
+/// global shift bred unintended gaps). Placement:
+///   1. right after the block on the SAME lanes, if that span is free on every lane, else
+///   2. at the ORIGINAL time on another lane with space (per source lane; a new lane is
+///      appended when none fits) — the red-flagged invisible-overlap case can't happen.
+/// Linked A/V copies get a fresh shared link_id so they link to each other, not the originals.
 pub fn duplicate_clips(root: &mut Value, ids: &[String], salt: u64) {
-    // selection block bounds
+    // block bounds
     let mut bs = f64::MAX;
     let mut be = f64::MIN;
-    if let Some(seq) = root.get(0).and_then(|r| r.get("timeline")).and_then(|t| t.get("sequence")) {
-        if let Some(tracks) = seq.get("tracks").and_then(|t| t.as_array()) {
-            for tr in tracks {
-                for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
-                    if ids.contains(&sid(c)) {
-                        bs = bs.min(f(c, "timeline_start"));
-                        be = be.max(f(c, "timeline_end"));
-                    }
+    if let Some(tracks) = tracks_ref(root) {
+        for tr in tracks {
+            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                if ids.contains(&sid(c)) {
+                    bs = bs.min(f(c, "timeline_start"));
+                    be = be.max(f(c, "timeline_end"));
                 }
             }
         }
@@ -202,57 +200,191 @@ pub fn duplicate_clips(root: &mut Value, ids: &[String], salt: u64) {
         return;
     }
     let d = be - bs;
-    // 1) ripple: make room AFTER the block (all tracks, same rule as ripple_delete inverted)
-    for_each_clip(root, |c| {
-        if ids.contains(&sid(c)) {
-            return;
-        }
-        let cs = f(c, "timeline_start");
-        if cs >= be - 1e-6 {
-            let ce = f(c, "timeline_end");
-            setf(c, "timeline_start", cs + d);
-            setf(c, "timeline_end", ce + d);
-        }
-    });
-    // 2) copies at original position + block length (relative layout preserved)
-    let mut n = 0u64;
-    let mut new_links: std::collections::HashMap<String, String> = Default::default();
-    let Some(seq) = root
-        .get_mut(0)
-        .and_then(|r| r.get_mut("timeline"))
-        .and_then(|t| t.get_mut("sequence"))
-    else {
-        return;
-    };
-    if let Some(tracks) = seq.get_mut("tracks").and_then(|t| t.as_array_mut()) {
-        for tr in tracks {
-            if let Some(cs) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) {
-                let mut out: Vec<Value> = Vec::with_capacity(cs.len());
-                for c in cs.drain(..) {
-                    if !ids.contains(&sid(&c)) {
-                        out.push(c);
+    // can every copy land at +d on its own lane without touching a non-selected clip?
+    let mut fits_after = true;
+    if let Some(tracks) = tracks_ref(root) {
+        'outer: for tr in tracks {
+            let clips = tr.get("clips").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+            for c in &clips {
+                if !ids.contains(&sid(c)) {
+                    continue;
+                }
+                let (nts, nte) = (f(c, "timeline_start") + d, f(c, "timeline_end") + d);
+                for o in &clips {
+                    if ids.contains(&sid(o)) {
                         continue;
                     }
-                    let (ts, te) = (f(&c, "timeline_start"), f(&c, "timeline_end"));
-                    let mut copy = c.clone();
-                    n += 1;
-                    copy["id"] = Value::from(format!("{}__dup_{}_{}", sid(&c), salt, n));
-                    setf(&mut copy, "timeline_start", ts + d);
-                    setf(&mut copy, "timeline_end", te + d);
-                    if let Some(l) = link(&c) {
-                        let nl = new_links
-                            .entry(l)
-                            .or_insert_with(|| format!("lk_dup_{}_{}", salt, n))
-                            .clone();
-                        copy["link_id"] = Value::from(nl);
+                    if f(o, "timeline_start") < nte - 0.002 && nts < f(o, "timeline_end") - 0.002 {
+                        fits_after = false;
+                        break 'outer;
                     }
-                    out.push(c);
-                    out.push(copy);
                 }
-                *cs = out;
             }
         }
     }
+    let mut n = 0u64;
+    let mut new_links: std::collections::HashMap<String, String> = Default::default();
+    let mut mk_copy = |c: &Value, shift: f64| -> Value {
+        let mut copy = c.clone();
+        n += 1;
+        copy["id"] = Value::from(format!("{}__dup_{}_{}", sid(c), salt, n));
+        setf(&mut copy, "timeline_start", f(c, "timeline_start") + shift);
+        setf(&mut copy, "timeline_end", f(c, "timeline_end") + shift);
+        if let Some(l) = link(c) {
+            let nl = new_links
+                .entry(l)
+                .or_insert_with(|| format!("lk_dup_{}_{}", salt, n))
+                .clone();
+            copy["link_id"] = Value::from(nl);
+        }
+        copy
+    };
+    if fits_after {
+        // contiguous on the same lanes
+        let Some(tracks) = tracks_mut(root) else { return };
+        for tr in tracks {
+            let Some(cs) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else { continue };
+            let copies: Vec<Value> = cs
+                .iter()
+                .filter(|c| ids.contains(&sid(c)))
+                .map(|c| mk_copy(c, d))
+                .collect();
+            cs.extend(copies);
+        }
+        return;
+    }
+    // per source lane: copies keep their ORIGINAL times on another lane with space
+    let n_tracks = tracks_ref(root).map(|t| t.len()).unwrap_or(0);
+    for si in 0..n_tracks {
+        let (copies, kind): (Vec<Value>, String) = {
+            let Some(tracks) = tracks_ref(root) else { return };
+            let tr = &tracks[si];
+            let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let copies = tr
+                .get("clips")
+                .and_then(|c| c.as_array())
+                .map(|cs| {
+                    cs.iter()
+                        .filter(|c| ids.contains(&sid(c)))
+                        .map(|c| mk_copy(c, 0.0))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (copies, kind)
+        };
+        if copies.is_empty() {
+            continue;
+        }
+        let want_audio = kind == "audio";
+        // first other lane of the same category where every copy fits
+        let target: Option<usize> = {
+            let tracks = tracks_ref(root).unwrap();
+            (0..tracks.len()).find(|&ti| {
+                if ti == si {
+                    return false;
+                }
+                let tk = tracks[ti].get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if (tk == "audio") != want_audio {
+                    return false;
+                }
+                let empty = vec![];
+                let cs = tracks[ti].get("clips").and_then(|c| c.as_array()).unwrap_or(&empty);
+                copies.iter().all(|cp| {
+                    cs.iter().all(|o| {
+                        !(f(o, "timeline_start") < f(cp, "timeline_end") - 0.002
+                            && f(cp, "timeline_start") < f(o, "timeline_end") - 0.002)
+                    })
+                })
+            })
+        };
+        let Some(tracks) = tracks_mut(root) else { return };
+        match target {
+            Some(ti) => {
+                if let Some(cs) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
+                    cs.extend(copies);
+                }
+            }
+            None => {
+                let lane_kind = if want_audio { "audio" } else { "overlay" };
+                tracks.push(serde_json::json!({
+                    "id": format!("{lane_kind}_dup_{salt}_{si}"),
+                    "type": lane_kind,
+                    "clips": copies,
+                }));
+            }
+        }
+    }
+}
+
+/// Toggle a lane header flag (locked / hidden / muted / solo / magnet) on track `ti`.
+pub fn set_track_flag(raw: &mut Value, ti: usize, key: &str, val: bool) {
+    if let Some(tracks) = tracks_mut(raw) {
+        if let Some(tr) = tracks.get_mut(ti) {
+            tr[key] = Value::from(val);
+        }
+    }
+}
+
+/// Magnet-lane delete: remove the clips, remove clips ATTACHED to them (a clip is attached
+/// to whichever deleted clip its HEAD sits on — Filmora/DaVinci rule; audio lanes excluded,
+/// BGM is independent), then close the gaps (ripple). `ids` should already be link-expanded.
+pub fn magnet_delete(raw: &mut Value, ids: &[String]) {
+    // spans of the deleted clips
+    let mut spans: Vec<(f64, f64)> = Vec::new();
+    let mut src_tracks: Vec<usize> = Vec::new();
+    if let Some(tracks) = tracks_ref(raw) {
+        for (ti, tr) in tracks.iter().enumerate() {
+            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                if ids.contains(&sid(c)) {
+                    spans.push((f(c, "timeline_start"), f(c, "timeline_end")));
+                    if !src_tracks.contains(&ti) {
+                        src_tracks.push(ti);
+                    }
+                }
+            }
+        }
+    }
+    // attached = head inside a deleted span, on a non-audio lane other than the source lanes
+    let mut attached: Vec<String> = Vec::new();
+    if let Some(tracks) = tracks_ref(raw) {
+        for (ti, tr) in tracks.iter().enumerate() {
+            let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if kind == "audio" || src_tracks.contains(&ti) {
+                continue;
+            }
+            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                let id = sid(c);
+                if ids.contains(&id) {
+                    continue;
+                }
+                let head = f(c, "timeline_start");
+                if spans.iter().any(|&(ts, te)| head >= ts - 1e-6 && head < te - 1e-6) {
+                    attached.push(id);
+                }
+            }
+        }
+    }
+    if !attached.is_empty() {
+        let all = expand_links(raw, &attached); // pull their linked audio along
+        delete_clips(raw, &all);
+    }
+    ripple_delete(raw, ids);
+}
+
+fn tracks_ref(root: &Value) -> Option<&Vec<Value>> {
+    root.get(0)?
+        .get("timeline")?
+        .get("sequence")?
+        .get("tracks")?
+        .as_array()
+}
+
+fn tracks_mut(root: &mut Value) -> Option<&mut Vec<Value>> {
+    root.get_mut(0)?
+        .get_mut("timeline")?
+        .get_mut("sequence")?
+        .get_mut("tracks")?
+        .as_array_mut()
 }
 
 /// Atomic write-back of the WHOLE document (tmp + rename) — the same file the web editor,

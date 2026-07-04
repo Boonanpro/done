@@ -1456,6 +1456,10 @@ struct App {
     selected: Vec<String>,
     drag: Drag,
     undo: Vec<serde_json::Value>,
+    // armed at gesture start (press/drag), committed to `undo` by the FIRST real edit.
+    // Pushing at press time polluted the stack with no-op snapshots (a plain click piled
+    // identical states, so Ctrl+Z seemed to only ever go one step back).
+    pending_undo: Option<serde_json::Value>,
     redo: Vec<serde_json::Value>,
     save_at: Option<Instant>,
     salt: u64,
@@ -1567,6 +1571,7 @@ impl App {
             selected: Vec::new(),
             drag: Drag::None,
             undo: Vec::new(),
+            pending_undo: None,
             redo: Vec::new(),
             save_at: None,
             thumbs: Default::default(),
@@ -1612,7 +1617,15 @@ impl App {
     /// thread, and schedule a debounced save. Undo = raw snapshots.
     fn apply_edit(&mut self, snapshot: bool, f: impl FnOnce(&mut serde_json::Value)) {
         if snapshot {
+            self.pending_undo = None;
             self.undo.push(self.doc.raw.clone());
+            if self.undo.len() > 60 {
+                self.undo.remove(0);
+            }
+            self.redo.clear();
+        } else if let Some(prev) = self.pending_undo.take() {
+            // first real edit of the armed gesture — commit the pre-gesture state
+            self.undo.push(prev);
             if self.undo.len() > 60 {
                 self.undo.remove(0);
             }
@@ -2357,12 +2370,10 @@ impl App {
             if let Some(pt) = resp.interact_pointer_pos() {
                 let corner = corners.iter().position(|cp| cp.distance(pt) < 10.0);
                 if let Some(ci) = corner {
-                    self.undo.push(self.doc.raw.clone());
-                    self.redo.clear();
+                    self.pending_undo = Some(self.doc.raw.clone());
                     self.inspect_drag = Some((c.id.clone(), ci as u8 + 1, pt, b));
                 } else if bx.contains(pt) {
-                    self.undo.push(self.doc.raw.clone());
-                    self.redo.clear();
+                    self.pending_undo = Some(self.doc.raw.clone());
                     self.inspect_drag = Some((c.id.clone(), 0, pt, b));
                 }
             }
@@ -2406,7 +2417,7 @@ impl App {
     }
 
     fn timeline_ui(&mut self, ui: &mut egui::Ui) {
-        const GUTTER: f32 = 64.0; // lane headers
+        const GUTTER: f32 = 92.0; // lane headers (number + lock/eye/mute/solo/magnet icons)
         const BOTTOM: f32 = 24.0; // zoom slider + scrollbar
         let h = ui.available_height() - BOTTOM;
         let w = ui.available_width();
@@ -2515,6 +2526,7 @@ impl App {
                 .map(|c| c.id.clone())
                 .collect()
         };
+        let mut flag_click: Option<(usize, String, bool)> = None;
         for &(ti, y0, lane_h) in &lane_tops {
             let tr = &self.doc.seq.tracks[ti];
             // lane header itself is draggable: reorder tracks (stacking order)
@@ -2525,8 +2537,7 @@ impl App {
             let hresp = ui.interact(hdr, egui::Id::new(("lane_hdr", ti)), egui::Sense::click_and_drag());
             if hresp.drag_started() {
                 self.lane_reorder = Some(ti);
-                self.undo.push(self.doc.raw.clone());
-                self.redo.clear();
+                self.pending_undo = Some(self.doc.raw.clone());
             }
             if hresp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
@@ -2541,9 +2552,10 @@ impl App {
                     egui::Color32::from_rgba_unmultiplied(120, 170, 255, 22),
                 );
             }
-            // lane header: just a layer number — lanes have no fixed roles, upper = front
+            // lane header: layer number + standard NLE toggles (lock / eye / mute / solo,
+            // magnet on the main video lane). Lanes still have no fixed roles.
             p.text(
-                egui::pos2(rect.left() + 6.0, y0 + lane_h * 0.5),
+                egui::pos2(rect.left() + 4.0, y0 + lane_h * 0.5),
                 egui::Align2::LEFT_CENTER,
                 if tr.kind == "audio" {
                     format!("A{}", ti + 1)
@@ -2553,6 +2565,67 @@ impl App {
                 egui::FontId::proportional(11.0),
                 egui::Color32::from_gray(140),
             );
+            {
+                let is_audio = tr.kind == "audio";
+                let magnet_here = !is_audio
+                    && tr.kind == "video"
+                    && self.doc.seq.tracks.iter().position(|t| t.kind == "video") == Some(ti);
+                let base_video = magnet_here; // eye is not offered on the storyline spine
+                let mut icons: Vec<(&str, &str, bool)> = vec![("locked", "🔒", tr.locked)];
+                if !is_audio && !base_video {
+                    icons.push(("hidden", "👁", tr.hidden));
+                }
+                icons.push(("muted", "🔇", tr.muted));
+                icons.push(("solo", "Ｓ", tr.solo));
+                if magnet_here {
+                    icons.push(("magnet", "磁", self.doc.is_magnet(ti)));
+                }
+                let mut x = rect.left() + 24.0;
+                for (key, glyph, on) in icons {
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(x, y0 + lane_h * 0.5 - 7.0),
+                        egui::vec2(13.0, 14.0),
+                    );
+                    let iresp = ui.interact(r, egui::Id::new(("lane_flag", ti, key)), egui::Sense::click());
+                    let col = if on {
+                        match key {
+                            "locked" => egui::Color32::from_rgb(240, 180, 70),
+                            "hidden" | "muted" => egui::Color32::from_rgb(240, 110, 110),
+                            "solo" => egui::Color32::from_rgb(120, 220, 130),
+                            _ => egui::Color32::from_rgb(120, 180, 255),
+                        }
+                    } else if iresp.hovered() {
+                        egui::Color32::from_gray(190)
+                    } else {
+                        egui::Color32::from_gray(80)
+                    };
+                    p.text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        glyph,
+                        egui::FontId::proportional(11.0),
+                        col,
+                    );
+                    if iresp.on_hover_text(match key {
+                        "locked" => "ロック（編集不可）",
+                        "hidden" => "表示/非表示",
+                        "muted" => "ミュート",
+                        "solo" => "ソロ（このレーンの音だけ再生）",
+                        _ => "マグネット（消したら左詰め）",
+                    }).clicked() {
+                        let key = key.to_string();
+                        let cur = match key.as_str() {
+                            "locked" => tr.locked,
+                            "hidden" => tr.hidden,
+                            "muted" => tr.muted,
+                            "solo" => tr.solo,
+                            _ => self.doc.is_magnet(ti),
+                        };
+                        flag_click = Some((ti, key, !cur));
+                    }
+                    x += 13.0;
+                }
+            }
             p.line_segment(
                 [egui::pos2(rect.left(), y0 + lane_h + 1.5), egui::pos2(rect.right(), y0 + lane_h + 1.5)],
                 egui::Stroke::new(1.0, egui::Color32::from_gray(28)),
@@ -2734,7 +2807,9 @@ impl App {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                     }
                 }
-                hits.push((r, c.id.clone()));
+                if !tr.locked {
+                    hits.push((r, c.id.clone()));
+                }
                 clips_drawn += 1;
             }
         }
@@ -2767,6 +2842,10 @@ impl App {
             }
         }
 
+        if let Some((ti, key, val)) = flag_click {
+            self.apply_edit(true, move |raw| edits::set_track_flag(raw, ti, &key, val));
+            self.push_req(false);
+        }
         // ---- interactions: trim edges > move body > scrub empty space ----
         let to_t = |scroll_x: f32, pps: f32, x: f32| ((scroll_x + (x - body.left())) / pps).max(0.0) as f64;
         // selection & drag arming happen ON PRESS (standard NLE feel) — the old
@@ -2819,8 +2898,7 @@ impl App {
                         }
                         let ids = edits::expand_links(&self.doc.raw, &self.selected);
                         if self.drag == Drag::None {
-                            self.undo.push(self.doc.raw.clone());
-                            self.redo.clear();
+                            self.pending_undo = Some(self.doc.raw.clone());
                             if (pos.x - r.left()).abs() < 6.0 {
                                 self.drag = Drag::Trim { ids, left: true };
                             } else if (pos.x - r.right()).abs() < 6.0 {
@@ -2933,46 +3011,6 @@ impl App {
                             .collect();
                     }
                     Drag::None => {}
-                }
-            }
-        }
-        // OVERLAP INDICATOR: same-lane overlapping clips look CONTIGUOUS when their
-        // rects merge (the invisible-overlap trap: a duplicated clip sat on the next one,
-        // audio doubled, and nothing on screen showed why). Mark every same-track overlap
-        // with a red hatched band so the state is impossible to miss.
-        for &(ti, y0, lh) in &lane_tops {
-            let tr = &self.doc.seq.tracks[ti];
-            for (i, a) in tr.clips.iter().enumerate() {
-                for b in tr.clips.iter().skip(i + 1) {
-                    let os = a.timeline_start.max(b.timeline_start);
-                    let oe = a.timeline_end.min(b.timeline_end);
-                    if oe - os < 0.01 {
-                        continue;
-                    }
-                    let x0 = (body.left() + (os as f32) * self.pps - self.scroll_x).max(body.left());
-                    let x1 = (body.left() + (oe as f32) * self.pps - self.scroll_x).min(body.right());
-                    if x1 <= x0 {
-                        continue;
-                    }
-                    let r = egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y0 + lh));
-                    p.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(255, 40, 40, 60));
-                    let mut x = x0;
-                    while x < x1 {
-                        p.line_segment(
-                            [egui::pos2(x, y0 + lh), egui::pos2((x + lh).min(x1), y0)],
-                            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 60, 60, 160)),
-                        );
-                        x += 8.0;
-                    }
-                    if x1 - x0 > 26.0 {
-                        p.text(
-                            egui::pos2((x0 + x1) / 2.0, y0 + lh / 2.0),
-                            egui::Align2::CENTER_CENTER,
-                            "重なり",
-                            egui::FontId::proportional(10.0),
-                            egui::Color32::from_rgb(255, 120, 120),
-                        );
-                    }
                 }
             }
         }
@@ -3533,13 +3571,39 @@ impl eframe::App for App {
         if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
             if !self.selected.is_empty() {
                 let ids = edits::expand_links(&self.doc.raw, &self.selected);
-                let ripple = ctx.input(|i| i.modifiers.shift);
+                let force_ripple = ctx.input(|i| i.modifiers.shift);
                 self.selected.clear();
-                if ripple {
-                    // Shift+Del: delete AND close the gap (ripple / 左詰め)
+                if force_ripple {
+                    // Shift+Del: delete AND close the gap everywhere (explicit ripple)
                     self.apply_edit(true, |raw| edits::ripple_delete(raw, &ids));
                 } else {
-                    self.apply_edit(true, |raw| edits::delete_clips(raw, &ids));
+                    // Del: MAGNET lanes close their gap and take attached clips (head rule)
+                    // with them; other lanes just delete and leave the gap.
+                    let mut mag: Vec<String> = Vec::new();
+                    let mut plain: Vec<String> = Vec::new();
+                    for (ti, tr) in self.doc.seq.tracks.iter().enumerate() {
+                        let magnetic = self.doc.is_magnet(ti);
+                        for c in &tr.clips {
+                            if ids.contains(&c.id) {
+                                if magnetic {
+                                    mag.push(c.id.clone());
+                                } else {
+                                    plain.push(c.id.clone());
+                                }
+                            }
+                        }
+                    }
+                    // linked audio of magnet-lane clips belongs to the magnet pass
+                    let mag = if mag.is_empty() { mag } else { edits::expand_links(&self.doc.raw, &mag) };
+                    let plain: Vec<String> = plain.into_iter().filter(|i| !mag.contains(i)).collect();
+                    self.apply_edit(true, move |raw| {
+                        if !plain.is_empty() {
+                            edits::delete_clips(raw, &plain);
+                        }
+                        if !mag.is_empty() {
+                            edits::magnet_delete(raw, &mag);
+                        }
+                    });
                 }
             }
         }
@@ -3547,8 +3611,8 @@ impl eframe::App for App {
         {
             let ids = edits::expand_links(&self.doc.raw, &self.selected);
             let salt = std::process::id() as u64 ^ (self.t * 1000.0) as u64;
-            self.apply_edit(false, move |raw| edits::duplicate_clips(raw, &ids, salt));
-            self.toast("複製しました（元クリップの直後）");
+            self.apply_edit(true, move |raw| edits::duplicate_clips(raw, &ids, salt));
+            self.toast("複製しました（右に空きが無い場合は別レーンの同じ時刻）");
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
             self.selected = self
@@ -3556,6 +3620,7 @@ impl eframe::App for App {
                 .seq
                 .tracks
                 .iter()
+                .filter(|tr| !tr.locked)
                 .flat_map(|tr| tr.clips.iter())
                 .map(|c| c.id.clone())
                 .collect();
@@ -3816,8 +3881,7 @@ impl eframe::App for App {
                     let mut vol = c.volume as f32;
                     let sl = ui.add(egui::Slider::new(&mut vol, 0.0..=2.0).show_value(true).fixed_decimals(2));
                     if sl.drag_started() {
-                        self.undo.push(self.doc.raw.clone());
-                        self.redo.clear();
+                        self.pending_undo = Some(self.doc.raw.clone());
                     }
                     if sl.changed() {
                         let ids = edits::expand_links(&self.doc.raw, &[c.id.clone()]);
@@ -3857,7 +3921,7 @@ impl eframe::App for App {
                             .seq
                             .tracks
                             .iter()
-                            .filter(|tr| tr.kind == "caption")
+                            .filter(|tr| tr.kind == "caption" && !tr.hidden)
                             .flat_map(|tr| tr.clips.iter())
                             .filter(|c| t >= c.timeline_start && t < c.timeline_end)
                             .filter_map(|c| c.text.clone().map(|txt| (c.id.clone(), txt)))
@@ -4125,8 +4189,9 @@ impl eframe::App for App {
                         ("+ / -", "ズーム"),
                         ("S", "分割"),
                         ("E", "飛び出し 適用/解除"),
-                        ("Del", "削除"),
-                        ("Shift+Del", "削除して左詰め"),
+                        ("Del", "削除（メインレーンは左詰め+付随クリップも削除）"),
+                        ("Shift+Del", "削除して左詰め（全レーン強制）"),
+                        ("ヘッダアイコン", "🔒ロック / 👁表示 / 🔇ミュート / Sソロ / 磁マグネット"),
                         ("Ctrl+Z / Y", "元に戻す / やり直し"),
                         ("Ctrl+D", "選択クリップを複製（直後に）"),
                         ("Ctrl+A", "全クリップ選択"),
@@ -4539,42 +4604,86 @@ fn main() -> eframe::Result<()> {
         println!("INVARIANTS {}", if fail == 0 { "ALL PASS" } else { "FAILURES" });
         std::process::exit(if fail == 0 { 0 } else { 1 });
     }
-    // --selftest-dup: headless duplicate — clone the 3rd video clip (with its linked
-    // audio) in a COPY of the doc and verify counts/geometry; the real file is untouched
-    if args.iter().any(|a| a == "--selftest-dup") {
+    // --selftest-magnet: main-lane delete closes the gap AND takes attached clips
+    // (head-under rule) with it, without touching BGM-style standalone audio
+    if args.iter().any(|a| a == "--selftest-magnet") {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let doc = model::Doc::load(&contents, &dir).expect("doc");
-        let vid = doc
+        // pick a main-lane clip that has at least one caption whose HEAD sits inside it
+        let main_ti = doc.seq.tracks.iter().position(|t| t.kind == "video").expect("video lane");
+        let caps: Vec<(String, f64)> = doc
             .seq
             .tracks
             .iter()
-            .filter(|tr| tr.kind != "audio")
-            .flat_map(|tr| tr.clips.iter())
-            .filter(|c| c.asset_id.is_some())
-            .nth(2)
-            .map(|c| c.id.clone())
-            .expect("clip");
-        let before: usize = doc.seq.tracks.iter().map(|t| t.clips.len()).sum();
+            .filter(|t| t.kind == "caption")
+            .flat_map(|t| t.clips.iter())
+            .map(|c| (c.id.clone(), c.timeline_start))
+            .collect();
+        let target = doc.seq.tracks[main_ti]
+            .clips
+            .iter()
+            .find(|v| {
+                v.asset_id.is_some()
+                    && caps.iter().any(|(_, h)| *h >= v.timeline_start && *h < v.timeline_end - 0.01)
+            })
+            .expect("clip with attached caption");
+        let (vid, ts, te) = (target.id.clone(), target.timeline_start, target.timeline_end);
+        let attached: Vec<String> = caps
+            .iter()
+            .filter(|(_, h)| *h >= ts && *h < te - 0.01)
+            .map(|(id, _)| id.clone())
+            .collect();
         let ids = edits::expand_links(&doc.raw, &[vid.clone()]);
         let mut raw = doc.raw.clone();
-        edits::duplicate_clips(&mut raw, &ids, 7);
+        edits::magnet_delete(&mut raw, &ids);
         let nd = model::Doc::from_raw(raw, &doc.contents_path, &doc.asset_dir).expect("redoc");
-        let after: usize = nd.seq.tracks.iter().map(|t| t.clips.len()).sum();
-        let orig = doc.seq.tracks.iter().flat_map(|t| t.clips.iter()).find(|c| c.id == vid).unwrap();
-        let (orig_ts, orig_te) = (orig.timeline_start, orig.timeline_end);
-        let d = orig_te - orig_ts;
-        let copy = nd
+        let alive: std::collections::HashSet<&str> = nd
             .seq
             .tracks
             .iter()
             .flat_map(|t| t.clips.iter())
-            .find(|c| c.id.contains("__dup_") && c.id.starts_with(&vid))
-            .expect("copy");
-        // INVARIANT 1: the edit introduces NO NEW same-track overlap (legacy data may
-        // already contain some — measure the delta, not the absolute)
-        let count_overlaps = |d: &model::Doc| -> usize {
-            let mut n = 0usize;
+            .map(|c| c.id.as_str())
+            .collect();
+        let attached_gone = attached.iter().all(|id| !alive.contains(id.as_str()));
+        let main_gone = !alive.contains(vid.as_str());
+        // gap closed: the clip after `te` moved left by (te - ts)
+        let d = te - ts;
+        let next_before = doc.seq.tracks[main_ti]
+            .clips
+            .iter()
+            .filter(|c| c.timeline_start >= te - 1e-6)
+            .min_by(|a, b| a.timeline_start.partial_cmp(&b.timeline_start).unwrap())
+            .map(|c| (c.id.clone(), c.timeline_start));
+        let gap_closed = next_before
+            .as_ref()
+            .map(|(id, old_ts)| {
+                nd.seq.tracks[main_ti]
+                    .clips
+                    .iter()
+                    .find(|c| &c.id == id)
+                    .map(|c| (c.timeline_start - (old_ts - d)).abs() < 0.002)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(true);
+        let ok = attached_gone && main_gone && gap_closed;
+        println!(
+            "MAGNET {} main_gone={main_gone} attached={}/{} gone gap_closed={gap_closed}",
+            if ok { "PASS" } else { "FAIL" },
+            attached.iter().filter(|id| !alive.contains(id.as_str())).count(),
+            attached.len()
+        );
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+    // --selftest-dup: headless duplicate — both placement branches on a doc CLONE:
+    //   A) LAST clip (space after) -> contiguous copy right after, nothing else moves
+    //   B) MIDDLE clip (packed)    -> copy at the SAME time on another lane, nothing moves
+    if args.iter().any(|a| a == "--selftest-dup") {
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
+        let doc = model::Doc::load(&contents, &dir).expect("doc");
+        let count_overlaps = |d: &model::Doc| -> i64 {
+            let mut n = 0i64;
             for tr in &d.seq.tracks {
                 for (i, a) in tr.clips.iter().enumerate() {
                     for b in tr.clips.iter().skip(i + 1) {
@@ -4588,47 +4697,73 @@ fn main() -> eframe::Result<()> {
             }
             n
         };
-        let overlaps = count_overlaps(&nd) as i64 - count_overlaps(&doc) as i64;
-        // INVARIANT 2: everything that started at/after the block end moved right by d
-        let after_map: std::collections::HashMap<&str, f64> = nd
-            .seq
-            .tracks
-            .iter()
-            .flat_map(|t| t.clips.iter())
-            .map(|c| (c.id.as_str(), c.timeline_start))
-            .collect();
-        let mut shifted_bad = 0usize;
-        for tr in &doc.seq.tracks {
-            for c in &tr.clips {
-                if ids.contains(&c.id) || c.timeline_start < orig_te - 1e-6 {
-                    continue;
-                }
-                if let Some(&na) = after_map.get(c.id.as_str()) {
-                    if (na - (c.timeline_start + d)).abs() > 0.002 {
-                        shifted_bad += 1;
+        let run = |name: &str, pick_last: bool| {
+            let vids: Vec<&model::Clip> = doc
+                .seq
+                .tracks
+                .iter()
+                .filter(|t| t.kind != "audio")
+                .flat_map(|t| t.clips.iter())
+                .filter(|c| c.asset_id.is_some() && c.dur() > 1.0)
+                .collect();
+            let target = if pick_last {
+                vids.iter().max_by(|a, b| a.timeline_end.partial_cmp(&b.timeline_end).unwrap()).unwrap()
+            } else {
+                &vids[2]
+            };
+            let vid = target.id.clone();
+            let (ots, ote) = (target.timeline_start, target.timeline_end);
+            let ids = edits::expand_links(&doc.raw, &[vid.clone()]);
+            let mut raw = doc.raw.clone();
+            edits::duplicate_clips(&mut raw, &ids, 7);
+            let nd = model::Doc::from_raw(raw, &doc.contents_path, &doc.asset_dir).expect("redoc");
+            let copy = nd
+                .seq
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .find(|c| c.id.starts_with(&vid) && c.id.contains("__dup_"))
+                .expect("copy");
+            // nothing else may move — every original clip keeps identical times
+            let before: std::collections::HashMap<&str, (f64, f64)> = doc
+                .seq
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .map(|c| (c.id.as_str(), (c.timeline_start, c.timeline_end)))
+                .collect();
+            let mut moved = 0usize;
+            for tr in &nd.seq.tracks {
+                for c in &tr.clips {
+                    if c.id.contains("__dup_") {
+                        continue;
+                    }
+                    if let Some(&(ts, te)) = before.get(c.id.as_str()) {
+                        if (ts - c.timeline_start).abs() > 0.002 || (te - c.timeline_end).abs() > 0.002 {
+                            moved += 1;
+                        }
                     }
                 }
             }
-        }
-        // INVARIANT 3: the copy pair keeps a 0ms A/V relationship
-        let copy_audio = nd
-            .seq
-            .tracks
-            .iter()
-            .filter(|t| t.kind == "audio")
-            .flat_map(|t| t.clips.iter())
-            .find(|c| c.link_id.is_some() && c.link_id == copy.link_id);
-        let av_off = copy_audio
-            .map(|a| ((copy.source_start - copy.timeline_start) - (a.source_start - a.timeline_start)).abs())
-            .unwrap_or(-1.0);
-        println!(
-            "DUP before={before} after={after} linked={} copy_start={:.3} (orig_end={:.3}) copy_link_new={} new_overlaps={overlaps} shifted_bad={shifted_bad} av_off={av_off:.4}",
-            ids.len(),
-            copy.timeline_start,
-            orig_te,
-            copy.link_id.as_deref() != orig.link_id.as_deref()
-        );
-        std::process::exit(0);
+            let new_ov = count_overlaps(&nd) - count_overlaps(&doc);
+            let placement = if (copy.timeline_start - ote).abs() < 0.01 {
+                "after"
+            } else if (copy.timeline_start - ots).abs() < 0.01 {
+                "other-lane"
+            } else {
+                "???"
+            };
+            let ok = moved == 0 && new_ov <= 0 && placement != "???";
+            println!(
+                "DUP[{name}] {} placement={placement} moved={moved} new_overlaps={new_ov} copy=[{:.2},{:.2}] orig=[{:.2},{:.2}]",
+                if ok { "PASS" } else { "FAIL" },
+                copy.timeline_start, copy.timeline_end, ots, ote
+            );
+            ok
+        };
+        let a = run("last", true);
+        let b = run("middle", false);
+        std::process::exit(if a && b { 0 } else { 1 });
     }
     // --selftest-move: headless lane-move — move an overlay clip to the video track
     if args.iter().any(|a| a == "--selftest-move") {
