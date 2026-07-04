@@ -1405,6 +1405,8 @@ struct App {
     last_seq: u64,
     playing: bool,
     show_help: bool,
+    toast: Option<(String, Instant)>,
+    snap_line: Option<f64>,
     /// clip_id -> popout bake display state (polled from the cache dir, not the server)
     pop_states: std::collections::HashMap<String, PopState>,
     bake_results: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
@@ -1487,6 +1489,8 @@ impl App {
             last_seq: 0,
             playing: false,
             show_help: false,
+            toast: None,
+            snap_line: None,
             pop_states: Default::default(),
             bake_results: Default::default(),
             last_pop_poll: Instant::now(),
@@ -1637,6 +1641,10 @@ impl App {
         Ok(())
     }
 
+    fn toast(&mut self, msg: &str) {
+        self.toast = Some((msg.to_string(), Instant::now()));
+    }
+
     fn room_id(&self) -> String {
         self.doc
             .asset_dir
@@ -1664,17 +1672,20 @@ impl App {
     /// server bake (auth-free local API) on a background thread; the clip itself turns
     /// into a "生成中 n%" progress strip until the bake lands.
     fn toggle_popout(&mut self) {
+        // pop-out is a PiP effect: only overlay-lane clips qualify (applying it to a
+        // fullscreen clip made "nothing change" and un-applying shrank the clip)
         let sel: Vec<(String, model::Clip)> = self
             .doc
             .seq
             .tracks
             .iter()
-            .filter(|tr| tr.kind == "overlay" || tr.kind == "video")
+            .filter(|tr| tr.kind == "overlay")
             .flat_map(|tr| tr.clips.iter())
             .filter(|c| self.selected.contains(&c.id) && c.asset_id.is_some())
             .map(|c| (c.id.clone(), c.clone()))
             .collect();
         if sel.is_empty() {
+            self.toast("飛び出しは小窓(PiP)クリップに適用します — 上段の人物クリップを選択してください");
             return;
         }
         let remove = sel.iter().all(|(id, c)| {
@@ -1698,9 +1709,14 @@ impl App {
                 .position
                 .unwrap_or(model::Pos { x: 0.30, y: 0.655, width: 0.40, height: 0.30 });
             // effect goes on the clip IMMEDIATELY (state shows 0%); the key arrives async
+            let orig_pos = c
+                .position
+                .map(|p| serde_json::json!({"x": p.x, "y": p.y, "width": p.width, "height": p.height}))
+                .unwrap_or(serde_json::Value::Null);
             let params = serde_json::json!({
                 "intensity": "mid", "shadow": true,
                 "box": {"x": box_.x, "y": box_.y, "width": box_.width, "height": box_.height},
+                "orig_position": orig_pos,
                 "baked_format": fmt,
             });
             let ids = vec![id.clone()];
@@ -1830,17 +1846,25 @@ impl App {
     }
 
     fn timeline_ui(&mut self, ui: &mut egui::Ui) {
-        let h = ui.available_height();
+        const GUTTER: f32 = 64.0; // lane headers
+        const BOTTOM: f32 = 24.0; // zoom slider + scrollbar
+        let h = ui.available_height() - BOTTOM;
         let w = ui.available_width();
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click_and_drag());
+        let body = egui::Rect::from_min_max(egui::pos2(rect.left() + GUTTER, rect.top()), rect.max);
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, egui::Color32::from_gray(18));
+        p.rect_filled(
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + GUTTER, rect.bottom())),
+            0.0,
+            egui::Color32::from_gray(24),
+        );
 
         let (scroll, zoom_mod, pointer) =
             ui.input(|i| (i.raw_scroll_delta, i.modifiers.ctrl, i.pointer.hover_pos()));
-        if rect.contains(pointer.unwrap_or_default()) {
+        if body.contains(pointer.unwrap_or_default()) {
             if zoom_mod && scroll.y != 0.0 {
-                let px = pointer.unwrap().x - rect.left();
+                let px = pointer.unwrap().x - body.left();
                 let t_at = (self.scroll_x + px) / self.pps;
                 self.pps = (self.pps * (1.0 + scroll.y.signum() * 0.15)).clamp(1.0, 400.0);
                 self.scroll_x = (t_at * self.pps - px).max(0.0);
@@ -1850,26 +1874,62 @@ impl App {
         }
 
         let ruler_h = 18.0;
+        p.rect_filled(
+            egui::Rect::from_min_max(body.min, egui::pos2(body.right(), body.top() + ruler_h)),
+            0.0,
+            egui::Color32::from_gray(26),
+        );
         let step_s = (60.0 / self.pps).ceil().max(1.0);
         let mut s = (self.scroll_x / self.pps / step_s).floor() * step_s;
         while s * self.pps - self.scroll_x < w {
-            let x = rect.left() + s * self.pps - self.scroll_x;
-            p.line_segment(
-                [egui::pos2(x, rect.top()), egui::pos2(x, rect.top() + ruler_h)],
-                egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
-            );
-            p.text(
-                egui::pos2(x + 3.0, rect.top() + 2.0),
-                egui::Align2::LEFT_TOP,
-                format!("{:02}:{:02}", (s as i64) / 60, (s as i64) % 60),
-                egui::FontId::proportional(10.0),
-                egui::Color32::from_gray(150),
-            );
+            let x = body.left() + s * self.pps - self.scroll_x;
+            if x >= body.left() {
+                p.line_segment(
+                    [egui::pos2(x, body.top()), egui::pos2(x, body.top() + ruler_h)],
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
+                );
+                p.text(
+                    egui::pos2(x + 3.0, body.top() + 2.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("{:02}:{:02}", (s as i64) / 60, (s as i64) % 60),
+                    egui::FontId::proportional(10.0),
+                    egui::Color32::from_gray(150),
+                );
+            }
             s += step_s;
         }
 
-        let lane_h =
-            ((h - ruler_h - 4.0) / (self.doc.seq.tracks.len().max(1) as f32)).clamp(16.0, 42.0);
+        // NLE lane order: FRONT-most on top (caption > overlay > video), audio at the
+        // bottom. The doc's track array order is compositing data, not display order.
+        let prio = |kind: &str| match kind {
+            "caption" => 0,
+            "effect" => 1,
+            "overlay" => 2,
+            "video" => 3,
+            "audio" => 4,
+            _ => 5,
+        };
+        let mut order: Vec<usize> = (0..self.doc.seq.tracks.len()).collect();
+        order.sort_by_key(|&i| (prio(&self.doc.seq.tracks[i].kind), i));
+        let kind_h = |kind: &str| match kind {
+            "video" => 54.0f32,
+            "overlay" => 46.0,
+            "audio" => 30.0,
+            "caption" => 22.0,
+            _ => 20.0,
+        };
+        let total_h: f32 = order.iter().map(|&i| kind_h(&self.doc.seq.tracks[i].kind) + 3.0).sum();
+        let avail = h - ruler_h - 6.0;
+        let squeeze = (avail / total_h).min(1.0);
+        let mut lane_tops: Vec<(usize, f32, f32)> = Vec::new(); // (track idx, y0, height)
+        {
+            let mut y = rect.top() + ruler_h + 3.0;
+            for &i in &order {
+                let lh = kind_h(&self.doc.seq.tracks[i].kind) * squeeze;
+                lane_tops.push((i, y, lh));
+                y += lh + 3.0 * squeeze;
+            }
+        }
         let mut clips_drawn = 0usize;
         let mut hits: Vec<(egui::Rect, String)> = Vec::new();
         // Filmora-style unified A/V clips: audio linked to a video/overlay clip is DRAWN
@@ -1895,8 +1955,27 @@ impl App {
                 .map(|c| c.id.clone())
                 .collect()
         };
-        for (li, tr) in self.doc.seq.tracks.iter().enumerate() {
-            let y0 = rect.top() + ruler_h + 2.0 + li as f32 * lane_h;
+        for &(ti, y0, lane_h) in &lane_tops {
+            let tr = &self.doc.seq.tracks[ti];
+            // lane header + separator
+            p.text(
+                egui::pos2(rect.left() + 6.0, y0 + lane_h * 0.5),
+                egui::Align2::LEFT_CENTER,
+                match tr.kind.as_str() {
+                    "video" => "映像",
+                    "overlay" => "前面",
+                    "audio" => "音声",
+                    "caption" => "テロップ",
+                    "effect" => "効果",
+                    _ => "?",
+                },
+                egui::FontId::proportional(11.0),
+                egui::Color32::from_gray(170),
+            );
+            p.line_segment(
+                [egui::pos2(rect.left(), y0 + lane_h + 1.5), egui::pos2(rect.right(), y0 + lane_h + 1.5)],
+                egui::Stroke::new(1.0, egui::Color32::from_gray(28)),
+            );
             let color = match tr.kind.as_str() {
                 "video" => egui::Color32::from_rgb(70, 110, 190),
                 "overlay" => egui::Color32::from_rgb(150, 90, 200),
@@ -1908,14 +1987,14 @@ impl App {
                 if tr.kind == "audio" && linked_av.contains(&c.id) {
                     continue; // drawn as part of its video clip
                 }
-                let x0 = rect.left() + (c.timeline_start as f32) * self.pps - self.scroll_x;
-                let x1 = rect.left() + (c.timeline_end as f32) * self.pps - self.scroll_x;
-                if x1 < rect.left() || x0 > rect.right() {
+                let x0 = body.left() + (c.timeline_start as f32) * self.pps - self.scroll_x;
+                let x1 = body.left() + (c.timeline_end as f32) * self.pps - self.scroll_x;
+                if x1 < body.left() || x0 > body.right() {
                     continue;
                 }
                 let r = egui::Rect::from_min_max(
-                    egui::pos2(x0.max(rect.left()), y0),
-                    egui::pos2(x1.min(rect.right()), y0 + lane_h - 3.0),
+                    egui::pos2(x0.max(body.left()), y0),
+                    egui::pos2(x1.min(body.right()), y0 + lane_h),
                 );
                 let is_pop = c.effects.iter().any(|e| e.kind == "popout");
                 let pop_state = if is_pop { self.pop_states.get(&c.id).copied() } else { None };
@@ -2048,21 +2127,58 @@ impl App {
                         egui::Stroke::new(1.0, egui::Color32::from_gray(25))
                     },
                 );
+                if sel {
+                    // trim handles on the selected clip's edges
+                    for hx in [r.left(), r.right()] {
+                        p.rect_filled(
+                            egui::Rect::from_center_size(egui::pos2(hx, r.center().y), egui::vec2(5.0, (lane_h * 0.55).min(22.0))),
+                            2.0,
+                            egui::Color32::WHITE,
+                        );
+                    }
+                }
+                if let Some(pt) = pointer {
+                    if r.expand2(egui::vec2(5.0, 0.0)).contains(pt)
+                        && ((pt.x - r.left()).abs() < 6.0 || (pt.x - r.right()).abs() < 6.0)
+                    {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                }
                 hits.push((r, c.id.clone()));
                 clips_drawn += 1;
             }
         }
 
-        let hx = rect.left() + (self.t as f32) * self.pps - self.scroll_x;
-        if hx >= rect.left() && hx <= rect.right() {
+        let hx = body.left() + (self.t as f32) * self.pps - self.scroll_x;
+        if hx >= body.left() && hx <= body.right() {
             p.line_segment(
-                [egui::pos2(hx, rect.top()), egui::pos2(hx, rect.bottom())],
+                [egui::pos2(hx, body.top()), egui::pos2(hx, rect.bottom())],
                 egui::Stroke::new(1.5, egui::Color32::from_rgb(240, 60, 60)),
             );
+            // grab handle on the ruler
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(hx - 6.0, body.top()),
+                    egui::pos2(hx + 6.0, body.top()),
+                    egui::pos2(hx, body.top() + 11.0),
+                ],
+                egui::Color32::from_rgb(240, 60, 60),
+                egui::Stroke::NONE,
+            ));
+        }
+        // snap guide while dragging
+        if let Some(st) = self.snap_line {
+            let sx = body.left() + (st as f32) * self.pps - self.scroll_x;
+            if sx >= body.left() && sx <= body.right() {
+                p.line_segment(
+                    [egui::pos2(sx, body.top()), egui::pos2(sx, rect.bottom())],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 220, 90)),
+                );
+            }
         }
 
         // ---- interactions: trim edges > move body > scrub empty space ----
-        let to_t = |scroll_x: f32, pps: f32, x: f32| ((scroll_x + (x - rect.left())) / pps).max(0.0) as f64;
+        let to_t = |scroll_x: f32, pps: f32, x: f32| ((scroll_x + (x - body.left())) / pps).max(0.0) as f64;
         if resp.drag_started() || (resp.clicked() && self.drag == Drag::None) {
             // Filmora semantics: touching the timeline while playing pauses playback FIRST
             // (its own logs show Pause -> seek -> auto Play). This also kills the bug where
@@ -2136,8 +2252,9 @@ impl App {
                         self.push_req(true);
                     }
                     Drag::Move { ids, grab, orig, applied } => {
-                        let want =
-                            self.snap(orig + (to_t(self.scroll_x, self.pps, pos.x) - grab), &ids);
+                        let raw_t = orig + (to_t(self.scroll_x, self.pps, pos.x) - grab);
+                        let want = self.snap(raw_t, &ids);
+                        self.snap_line = ((want - raw_t).abs() > 1e-9).then_some(want);
                         let dt = want - orig - applied;
                         if dt.abs() > 1e-4 {
                             self.apply_edit(false, |raw| edits::move_clips(raw, &ids, dt));
@@ -2147,7 +2264,9 @@ impl App {
                         }
                     }
                     Drag::Trim { ids, left } => {
-                        let nt = self.snap(to_t(self.scroll_x, self.pps, pos.x), &ids);
+                        let raw_t = to_t(self.scroll_x, self.pps, pos.x);
+                        let nt = self.snap(raw_t, &ids);
+                        self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
                         self.apply_edit(false, |raw| edits::trim_clip(raw, &ids, left, nt));
                     }
                     Drag::None => {}
@@ -2156,6 +2275,7 @@ impl App {
         }
         if resp.drag_stopped() {
             self.drag = Drag::None;
+            self.snap_line = None;
             if self.resume_on_release {
                 self.resume_on_release = false;
                 self.resume_pending = Some(Instant::now());
@@ -2164,22 +2284,62 @@ impl App {
         }
 
         p.text(
-            rect.left_top() + egui::vec2(6.0, h - 16.0),
+            egui::pos2(rect.left() + GUTTER + 6.0, rect.bottom() - 14.0),
             egui::Align2::LEFT_TOP,
             format!(
-                "{} clips | comp {:.1}ms max {:.0}ms | frame gap max {:.0}ms | audio drops {} | ui {:.0}fps | {} | {}",
+                "{} clips | {:02}:{:02}.{:02} | {}",
                 clips_drawn,
-                self.comp_ms,
-                self.comp_max,
-                self.gap_max,
-                self.underruns,
-                self.ui_fps,
-                self.quality,
-                if self.playing { "PLAYING" } else { "PAUSED" }
+                (self.t as i64) / 60,
+                (self.t as i64) % 60,
+                ((self.t * 100.0) as i64) % 100,
+                if self.playing { "再生中" } else { "停止" }
             ),
             egui::FontId::proportional(11.0),
             egui::Color32::from_gray(200),
         );
+
+        // ---- bottom bar: zoom slider / fit / horizontal scrollbar ----
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            if ui.small_button("全体").clicked() {
+                self.pps = ((ui.available_width() - GUTTER - 40.0) / (self.dur.max(1.0) as f32)).clamp(1.0, 400.0);
+                self.scroll_x = 0.0;
+            }
+            let mut z = self.pps.ln();
+            let resp = ui.add(
+                egui::Slider::new(&mut z, 1.0f32.ln()..=400.0f32.ln())
+                    .show_value(false)
+                    .text("ズーム"),
+            );
+            if resp.changed() {
+                // zoom around the playhead
+                let anchor = (self.t as f32) * self.pps - self.scroll_x;
+                self.pps = z.exp().clamp(1.0, 400.0);
+                self.scroll_x = ((self.t as f32) * self.pps - anchor).max(0.0);
+            }
+            // scrollbar: thumb = visible window over the whole duration
+            let (bar, bresp) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width() - 8.0, 12.0),
+                egui::Sense::click_and_drag(),
+            );
+            let pb = ui.painter_at(bar);
+            pb.rect_filled(bar, 4.0, egui::Color32::from_gray(30));
+            let total_w = (self.dur as f32) * self.pps;
+            let view_w = bar.width().min(total_w.max(1.0));
+            let frac_w = (bar.width() / total_w.max(1.0)).min(1.0);
+            let frac_x = (self.scroll_x / total_w.max(1.0)).min(1.0);
+            let thumb = egui::Rect::from_min_size(
+                egui::pos2(bar.left() + frac_x * bar.width(), bar.top() + 1.0),
+                egui::vec2((frac_w * bar.width()).max(24.0), bar.height() - 2.0),
+            );
+            pb.rect_filled(thumb, 4.0, egui::Color32::from_gray(90));
+            if bresp.dragged() || bresp.clicked() {
+                if let Some(pos) = bresp.interact_pointer_pos() {
+                    let fx = ((pos.x - bar.left()) / bar.width()).clamp(0.0, 1.0);
+                    self.scroll_x = (fx * total_w - view_w * 0.5).max(0.0);
+                }
+            }
+        });
     }
 }
 
@@ -2477,6 +2637,17 @@ impl eframe::App for App {
                     });
                 }
             });
+        if let Some((msg, at)) = self.toast.clone() {
+            if at.elapsed().as_secs_f32() < 3.0 {
+                egui::Area::new(egui::Id::new("toast"))
+                    .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -260.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(msg));
+                    });
+            } else {
+                self.toast = None;
+            }
+        }
         if self.show_help {
             egui::Window::new("ショートカット (F1で閉じる)")
                 .collapsible(false)
