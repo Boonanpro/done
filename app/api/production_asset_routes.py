@@ -2634,7 +2634,16 @@ Rules:
 
 def _run_production_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], user_id: str) -> None:
     _update_job(room_id, job_id, {"status": "running"})
-    _update_content(room_id, content_id, {"status": "running", "timeline": instruction.get("timeline") or {}})
+    # NEVER blow away the stored timeline with an empty/partial instruction payload —
+    # a job posted without a full timeline (e.g. plain export test) must not wipe the
+    # user's edit (this exact accident deleted a rebuilt 324-clip timeline once)
+    def _timeline_patch() -> dict:
+        tl = instruction.get("timeline")
+        if isinstance(tl, dict) and isinstance(tl.get("sequence"), dict) and tl["sequence"].get("tracks"):
+            return {"timeline": tl}
+        return {}
+
+    _update_content(room_id, content_id, {"status": "running", **_timeline_patch()})
     job_dir = _room_dir(room_id) / "jobs" / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     instruction_path = job_dir / "timeline_instruction.json"
@@ -2777,7 +2786,7 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             result.update(render_result)
         _append_job_event(room_id, job_id, {"type": "status", "text": result["message"]})
         _update_job(room_id, job_id, {"status": "done", "result": result, "error": None})
-        _update_content(room_id, content_id, {"status": "ready", "timeline": instruction.get("timeline") or {}})
+        _update_content(room_id, content_id, {"status": "ready", **_timeline_patch()})
     except Exception as exc:
         _append_job_event(room_id, job_id, {"type": "error", "text": str(exc)})
         _update_job(room_id, job_id, {"status": "failed", "error": str(exc)})
