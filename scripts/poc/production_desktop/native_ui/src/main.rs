@@ -24,6 +24,12 @@ use std::time::Instant;
 use eframe::egui;
 
 const ROOM: &str = "D:/done/uploads/production-assets/bd05fcc0-c143-4d1c-828e-7624e087b6c1";
+// design tokens (Filmora-reference dark theme: near-black stage, teal accent, pink playhead)
+const UI_ACCENT: egui::Color32 = egui::Color32::from_rgb(0, 190, 150);
+const UI_PLAYHEAD: egui::Color32 = egui::Color32::from_rgb(255, 74, 85);
+const UI_PANEL: egui::Color32 = egui::Color32::from_rgb(24, 24, 27);
+const UI_STAGE: egui::Color32 = egui::Color32::from_rgb(12, 12, 14);
+
 const CANVAS_W: u32 = 1080;
 const CANVAS_H: u32 = 1920;
 
@@ -2025,6 +2031,270 @@ impl App {
         self.lib_post("capcache", "/api/v1/production-assets/caption-cache".into(), body);
     }
 
+    fn toggle_play(&mut self) {
+        if self.playing {
+            // freeze the playhead where the audible clock actually was
+            self.t = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
+        }
+        self.playing = !self.playing;
+        self.resume_pending = None;
+        self.push_req(false);
+    }
+
+    fn split_at_playhead(&mut self) {
+        let t = self.t;
+        let base: Vec<String> = if self.selected.is_empty() {
+            self.doc
+                .seq
+                .tracks
+                .iter()
+                .flat_map(|tr| tr.clips.iter())
+                .filter(|c| t > c.timeline_start + 0.05 && t < c.timeline_end - 0.05)
+                .map(|c| c.id.clone())
+                .collect()
+        } else {
+            self.selected.clone()
+        };
+        if !base.is_empty() {
+            let ids = edits::expand_links(&self.doc.raw, &base);
+            let salt = self.salt;
+            self.salt += 1;
+            self.apply_edit(true, |raw| edits::split_clips(raw, &ids, t, salt));
+        }
+    }
+
+    fn delete_selected(&mut self, force_ripple: bool) {
+        if self.selected.is_empty() {
+            return;
+        }
+        let ids = edits::expand_links(&self.doc.raw, &self.selected);
+        self.selected.clear();
+        if force_ripple {
+            self.apply_edit(true, |raw| edits::ripple_delete(raw, &ids));
+            return;
+        }
+        let mut mag: Vec<String> = Vec::new();
+        let mut plain: Vec<String> = Vec::new();
+        for (ti, tr) in self.doc.seq.tracks.iter().enumerate() {
+            let magnetic = self.doc.is_magnet(ti);
+            for c in &tr.clips {
+                if ids.contains(&c.id) {
+                    if magnetic {
+                        mag.push(c.id.clone());
+                    } else {
+                        plain.push(c.id.clone());
+                    }
+                }
+            }
+        }
+        let mag = if mag.is_empty() { mag } else { edits::expand_links(&self.doc.raw, &mag) };
+        let plain: Vec<String> = plain.into_iter().filter(|i| !mag.contains(i)).collect();
+        self.apply_edit(true, move |raw| {
+            if !plain.is_empty() {
+                edits::delete_clips(raw, &plain);
+            }
+            if !mag.is_empty() {
+                edits::magnet_delete(raw, &mag);
+            }
+        });
+    }
+
+    fn do_undo(&mut self) {
+        if let Some(prev) = self.undo.pop() {
+            self.redo.push(self.doc.raw.clone());
+            self.restore(prev);
+        }
+    }
+
+    fn do_redo(&mut self) {
+        if let Some(next) = self.redo.pop() {
+            self.undo.push(self.doc.raw.clone());
+            self.restore(next);
+        }
+    }
+
+    fn zoom_fit(&mut self, width: f32) {
+        self.pps = ((width - 112.0 - 40.0) / (self.dur.max(1.0) as f32)).clamp(1.0, 400.0);
+        self.scroll_x = 0.0;
+    }
+
+    /// transport bar under the preview: jump/step/play buttons + seek bar + timecode
+    fn transport_ui(&mut self, ui: &mut egui::Ui) {
+        let fmt_tc = |t: f64| {
+            let fr = ((t * 30.0).round() as i64).max(0);
+            format!("{:02}:{:02}:{:02}", fr / 1800, (fr / 30) % 60, fr % 30)
+        };
+        ui.horizontal_centered(|ui| {
+            ui.add_space(10.0);
+            let mut tbtn = |ui: &mut egui::Ui, glyph: &str, tip: &str| -> bool {
+                ui.add(
+                    egui::Button::new(egui::RichText::new(glyph).size(17.0))
+                        .min_size(egui::vec2(34.0, 30.0))
+                        .frame(false),
+                )
+                .on_hover_text(tip)
+                .clicked()
+            };
+            if tbtn(ui, "⏮", "先頭へ (Home)") {
+                self.playing = false;
+                self.t = 0.0;
+                self.push_req(false);
+            }
+            if tbtn(ui, "⏪", "1フレーム戻る (←)") {
+                self.playing = false;
+                self.t = (self.t - 1.0 / 30.0).max(0.0);
+                self.push_req(false);
+            }
+            let glyph = if self.playing { "⏸" } else { "▶" };
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new(glyph).size(21.0).color(egui::Color32::WHITE))
+                        .min_size(egui::vec2(44.0, 32.0))
+                        .rounding(16.0)
+                        .fill(if self.playing {
+                            egui::Color32::from_rgb(60, 60, 66)
+                        } else {
+                            UI_ACCENT
+                        }),
+                )
+                .on_hover_text("再生 / 一時停止 (Space)")
+                .clicked()
+            {
+                self.toggle_play();
+            }
+            if tbtn(ui, "⏩", "1フレーム進む (→)") {
+                self.playing = false;
+                self.t = (self.t + 1.0 / 30.0).min(self.dur);
+                self.push_req(false);
+            }
+            if tbtn(ui, "⏭", "末尾へ (End)") {
+                self.playing = false;
+                self.t = self.dur;
+                self.push_req(false);
+            }
+            ui.add_space(8.0);
+            // timecode (current / total)
+            let tc_now = if self.playing {
+                f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed))
+            } else {
+                self.t
+            };
+            // seek bar fills the middle
+            let tc_w = 150.0;
+            let bar_w = (ui.available_width() - tc_w - 16.0).max(60.0);
+            let (bar, bresp) = ui.allocate_exact_size(egui::vec2(bar_w, 26.0), egui::Sense::click_and_drag());
+            let pb = ui.painter_at(bar);
+            let line_y = bar.center().y;
+            pb.line_segment(
+                [egui::pos2(bar.left(), line_y), egui::pos2(bar.right(), line_y)],
+                egui::Stroke::new(4.0, egui::Color32::from_rgb(52, 52, 58)),
+            );
+            let frac = (tc_now / self.dur.max(0.001)).clamp(0.0, 1.0) as f32;
+            let px = bar.left() + frac * bar.width();
+            pb.line_segment(
+                [egui::pos2(bar.left(), line_y), egui::pos2(px, line_y)],
+                egui::Stroke::new(4.0, UI_ACCENT),
+            );
+            pb.circle_filled(egui::pos2(px, line_y), if bresp.hovered() || bresp.dragged() { 8.0 } else { 6.0 }, egui::Color32::WHITE);
+            if bresp.drag_started() && self.playing {
+                self.t = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
+                self.playing = false;
+                self.resume_on_release = true;
+                self.push_req(false);
+            }
+            if bresp.dragged() || bresp.clicked() {
+                if let Some(pos) = bresp.interact_pointer_pos() {
+                    let f = ((pos.x - bar.left()) / bar.width()).clamp(0.0, 1.0);
+                    self.playing = false;
+                    self.t = (f as f64) * self.dur;
+                    self.push_req(bresp.dragged());
+                }
+            }
+            if bresp.drag_stopped() {
+                self.push_req(false);
+                if self.resume_on_release {
+                    self.resume_on_release = false;
+                    self.resume_pending = Some(Instant::now());
+                }
+            }
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("{} / {}", fmt_tc(tc_now), fmt_tc(self.dur)))
+                        .monospace()
+                        .size(13.0)
+                        .color(egui::Color32::from_gray(200)),
+                )
+                .selectable(false),
+            );
+        });
+    }
+
+    /// icon strip above the ruler: undo/redo, split, delete, zoom (Filmora layout)
+    fn timeline_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.add_space(6.0);
+            let mut ibtn = |ui: &mut egui::Ui, glyph: &str, tip: &str, enabled: bool| -> bool {
+                ui.add_enabled(
+                    enabled,
+                    egui::Button::new(egui::RichText::new(glyph).size(15.0))
+                        .min_size(egui::vec2(30.0, 26.0))
+                        .frame(false),
+                )
+                .on_hover_text(tip)
+                .clicked()
+            };
+            let can_undo = !self.undo.is_empty();
+            let can_redo = !self.redo.is_empty();
+            if ibtn(ui, "↶", "元に戻す (Ctrl+Z)", can_undo) {
+                self.do_undo();
+            }
+            if ibtn(ui, "↷", "やり直し (Ctrl+Y)", can_redo) {
+                self.do_redo();
+            }
+            ui.separator();
+            if ibtn(ui, "✂", "再生ヘッドで分割 (S)", true) {
+                self.split_at_playhead();
+            }
+            if ibtn(ui, "🗑", "削除 (Del)", !self.selected.is_empty()) {
+                self.delete_selected(false);
+            }
+            ui.separator();
+            ui.label(
+                egui::RichText::new(if self.selected.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}個選択中", self.selected.len())
+                })
+                .small()
+                .weak(),
+            );
+            // zoom cluster on the right (fixed-height child: a bare with_layout would
+            // claim the panel's full remaining height and balloon the panel)
+            let w = ui.available_width();
+            ui.allocate_ui_with_layout(
+                egui::vec2(w, 26.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.add_space(8.0);
+                    if ui.small_button("全体").on_hover_text("全体をフィット").clicked() {
+                        let w = ui.ctx().screen_rect().width();
+                        self.zoom_fit(w);
+                    }
+                    let mut z = self.pps.ln();
+                    let resp = ui.add(
+                        egui::Slider::new(&mut z, 1.0f32.ln()..=400.0f32.ln()).show_value(false),
+                    );
+                    if resp.changed() {
+                        let anchor = (self.t as f32) * self.pps - self.scroll_x;
+                        self.pps = z.exp().clamp(1.0, 400.0);
+                        self.scroll_x = ((self.t as f32) * self.pps - anchor).max(0.0);
+                    }
+                    ui.label(egui::RichText::new("🔍").size(13.0));
+                },
+            );
+        });
+    }
+
     fn lib_get(&self, tag: &str, path: String) {
         let sink = self.lib_sink.clone();
         let tag = tag.to_string();
@@ -2818,7 +3088,7 @@ impl App {
         if hx >= body.left() && hx <= body.right() {
             p.line_segment(
                 [egui::pos2(hx, body.top()), egui::pos2(hx, rect.bottom())],
-                egui::Stroke::new(1.5, egui::Color32::from_rgb(240, 60, 60)),
+                egui::Stroke::new(1.5, UI_PLAYHEAD),
             );
             // grab handle on the ruler
             p.add(egui::Shape::convex_polygon(
@@ -2827,7 +3097,7 @@ impl App {
                     egui::pos2(hx + 6.0, body.top()),
                     egui::pos2(hx, body.top() + 11.0),
                 ],
-                egui::Color32::from_rgb(240, 60, 60),
+                UI_PLAYHEAD,
                 egui::Stroke::NONE,
             ));
         }
@@ -3082,25 +3352,9 @@ impl App {
             egui::Color32::from_gray(200),
         );
 
-        // ---- bottom bar: zoom slider / fit / horizontal scrollbar ----
+        // ---- bottom bar: horizontal scrollbar (zoom lives in the timeline toolbar) ----
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            if ui.small_button("全体").clicked() {
-                self.pps = ((ui.available_width() - GUTTER - 40.0) / (self.dur.max(1.0) as f32)).clamp(1.0, 400.0);
-                self.scroll_x = 0.0;
-            }
-            let mut z = self.pps.ln();
-            let resp = ui.add(
-                egui::Slider::new(&mut z, 1.0f32.ln()..=400.0f32.ln())
-                    .show_value(false)
-                    .text("ズーム"),
-            );
-            if resp.changed() {
-                // zoom around the playhead
-                let anchor = (self.t as f32) * self.pps - self.scroll_x;
-                self.pps = z.exp().clamp(1.0, 400.0);
-                self.scroll_x = ((self.t as f32) * self.pps - anchor).max(0.0);
-            }
             // scrollbar: thumb = visible window over the whole duration
             let (bar, bresp) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width() - 8.0, 12.0),
@@ -3124,9 +3378,9 @@ impl App {
                 }
             }
         });
-        // claim any leftover space: under-reporting our size made the resizable panel
-        // shrink back a few px every frame (the "drifts back after release" bug)
-        ui.allocate_space(ui.available_size());
+        // NOTE: the old "claim leftover space" hack (anti shrink-drift) is gone — with the
+        // toolbar row above us it flipped into a GROW loop that ballooned the panel to its
+        // max height. The exact-size allocation above already reports our height honestly.
     }
 }
 
@@ -3544,68 +3798,15 @@ impl eframe::App for App {
 
         // edit keys: S=split, Del=delete, Ctrl+Z/Y=undo/redo
         if ctx.input(|i| i.key_pressed(egui::Key::S) && !i.modifiers.ctrl) {
-            let t = self.t;
-            let base: Vec<String> = if self.selected.is_empty() {
-                self.doc
-                    .seq
-                    .tracks
-                    .iter()
-                    .flat_map(|tr| tr.clips.iter())
-                    .filter(|c| t > c.timeline_start + 0.05 && t < c.timeline_end - 0.05)
-                    .map(|c| c.id.clone())
-                    .collect()
-            } else {
-                self.selected.clone()
-            };
-            if !base.is_empty() {
-                let ids = edits::expand_links(&self.doc.raw, &base);
-                let salt = self.salt;
-                self.salt += 1;
-                self.apply_edit(true, |raw| edits::split_clips(raw, &ids, t, salt));
-            }
+            self.split_at_playhead();
         }
         if ctx.input(|i| i.key_pressed(egui::Key::E) && !i.modifiers.ctrl) {
             self.toggle_popout();
         }
         self.poll_popout_bakes();
         if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
-            if !self.selected.is_empty() {
-                let ids = edits::expand_links(&self.doc.raw, &self.selected);
-                let force_ripple = ctx.input(|i| i.modifiers.shift);
-                self.selected.clear();
-                if force_ripple {
-                    // Shift+Del: delete AND close the gap everywhere (explicit ripple)
-                    self.apply_edit(true, |raw| edits::ripple_delete(raw, &ids));
-                } else {
-                    // Del: MAGNET lanes close their gap and take attached clips (head rule)
-                    // with them; other lanes just delete and leave the gap.
-                    let mut mag: Vec<String> = Vec::new();
-                    let mut plain: Vec<String> = Vec::new();
-                    for (ti, tr) in self.doc.seq.tracks.iter().enumerate() {
-                        let magnetic = self.doc.is_magnet(ti);
-                        for c in &tr.clips {
-                            if ids.contains(&c.id) {
-                                if magnetic {
-                                    mag.push(c.id.clone());
-                                } else {
-                                    plain.push(c.id.clone());
-                                }
-                            }
-                        }
-                    }
-                    // linked audio of magnet-lane clips belongs to the magnet pass
-                    let mag = if mag.is_empty() { mag } else { edits::expand_links(&self.doc.raw, &mag) };
-                    let plain: Vec<String> = plain.into_iter().filter(|i| !mag.contains(i)).collect();
-                    self.apply_edit(true, move |raw| {
-                        if !plain.is_empty() {
-                            edits::delete_clips(raw, &plain);
-                        }
-                        if !mag.is_empty() {
-                            edits::magnet_delete(raw, &mag);
-                        }
-                    });
-                }
-            }
+            let force_ripple = ctx.input(|i| i.modifiers.shift);
+            self.delete_selected(force_ripple);
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::D)) && !self.selected.is_empty()
         {
@@ -3626,16 +3827,10 @@ impl eframe::App for App {
                 .collect();
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
-            if let Some(prev) = self.undo.pop() {
-                self.redo.push(self.doc.raw.clone());
-                self.restore(prev);
-            }
+            self.do_undo();
         }
         if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Y)) {
-            if let Some(next) = self.redo.pop() {
-                self.undo.push(self.doc.raw.clone());
-                self.restore(next);
-            }
+            self.do_redo();
         }
         if let Some(at) = self.save_at {
             if Instant::now() >= at {
@@ -3647,13 +3842,7 @@ impl eframe::App for App {
         }
 
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            if self.playing {
-                // freeze the playhead where the audible clock actually was
-                self.t = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
-            }
-            self.playing = !self.playing;
-            self.resume_pending = None; // explicit toggle overrides any pending auto-resume
-            self.push_req(false);
+            self.toggle_play();
         }
         // auto-resume after a timeline interaction paused playback: wait until the ring
         // is rebuilt at the new position (or a short timeout), exactly like Filmora's
@@ -3824,7 +4013,7 @@ impl eframe::App for App {
         }
 
         self.poll_export();
-        egui::TopBottomPanel::top("toolbar").exact_height(30.0).show(ctx, |ui| {
+        egui::TopBottomPanel::top("toolbar").exact_height(38.0).show(ctx, |ui| {
             ui.horizontal_centered(|ui| {
                 if ui.button("📚 ライブラリ").clicked() {
                     self.playing = false;
@@ -3898,7 +4087,14 @@ impl eframe::App for App {
             .resizable(true)
             .default_height(260.0)
             .height_range(140.0..=700.0)
-            .show(ctx, |ui| self.timeline_ui(ui));
+            .show(ctx, |ui| {
+                self.timeline_toolbar(ui);
+                ui.add_space(2.0);
+                self.timeline_ui(ui);
+            });
+        egui::TopBottomPanel::bottom("transport")
+            .exact_height(44.0)
+            .show(ctx, |ui| self.transport_ui(ui));
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::from_gray(10)))
             .show(ctx, |ui| {
@@ -4888,6 +5084,38 @@ fn main() -> eframe::Result<()> {
                 }
             }
             cc.egui_ctx.set_fonts(fonts);
+            // pro-NLE dark theme: flat near-black panels, rounded widgets, teal accent.
+            // Pin dark FIRST — egui 0.29 follows the OS (light) theme per frame otherwise
+            // and silently discards set_visuals.
+            cc.egui_ctx.set_theme(egui::Theme::Dark);
+            let mut vis = egui::Visuals::dark();
+            vis.panel_fill = UI_PANEL;
+            vis.window_fill = egui::Color32::from_rgb(30, 30, 34);
+            vis.extreme_bg_color = egui::Color32::from_rgb(14, 14, 16);
+            vis.faint_bg_color = egui::Color32::from_rgb(32, 32, 36);
+            vis.widgets.noninteractive.bg_fill = UI_PANEL;
+            vis.widgets.inactive.bg_fill = egui::Color32::from_rgb(40, 40, 45);
+            vis.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(40, 40, 45);
+            vis.widgets.hovered.bg_fill = egui::Color32::from_rgb(56, 56, 62);
+            vis.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(56, 56, 62);
+            vis.widgets.active.bg_fill = egui::Color32::from_rgb(0, 120, 96);
+            vis.widgets.active.weak_bg_fill = egui::Color32::from_rgb(0, 120, 96);
+            vis.selection.bg_fill = egui::Color32::from_rgb(0, 122, 98);
+            vis.selection.stroke = egui::Stroke::new(1.0, UI_ACCENT);
+            for w in [
+                &mut vis.widgets.noninteractive,
+                &mut vis.widgets.inactive,
+                &mut vis.widgets.hovered,
+                &mut vis.widgets.active,
+                &mut vis.widgets.open,
+            ] {
+                w.rounding = egui::Rounding::same(6.0);
+            }
+            cc.egui_ctx.set_visuals(vis);
+            cc.egui_ctx.style_mut(|st| {
+                st.spacing.button_padding = egui::vec2(10.0, 5.0);
+                st.spacing.item_spacing = egui::vec2(7.0, 6.0);
+            });
             let mut app = App::new(&contents, &dir)
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?;
             // bare launch (no explicit contents arg): open the LIBRARY (assets ->
