@@ -1439,6 +1439,11 @@ struct App {
     lib_sink: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
     lib_gen_stash: Option<serde_json::Value>,
     marquee: Option<egui::Rect>,
+    cap_keys: std::collections::HashMap<String, String>, // caption clip id -> render key
+    cap_tex: std::collections::HashMap<String, egui::TextureHandle>, // key -> texture
+    cap_probe: std::collections::HashMap<String, Instant>, // key -> last disk check
+    cap_sig: u64,
+    cap_req_ids: Vec<String>,
     recut_open: bool,
     recut_thresh: f32,
     recut_lead: f32,
@@ -1545,6 +1550,11 @@ impl App {
             lib_sink: Default::default(),
             lib_gen_stash: None,
             marquee: None,
+            cap_keys: Default::default(),
+            cap_tex: Default::default(),
+            cap_probe: Default::default(),
+            cap_sig: 0,
+            cap_req_ids: Vec::new(),
             recut_open: false,
             recut_thresh: 0.45,
             recut_lead: 0.06,
@@ -1955,6 +1965,51 @@ impl App {
         if tk != "audio" && src_track != Some(target) && !vids.is_empty() {
             self.apply_edit(true, move |raw| edits::move_to_track(raw, &vids, target));
         }
+    }
+
+    /// Designed captions: when the caption set changes, ask the server for the SAME
+    /// /caption-frame PNGs the export burns in (cached server-side); the preview then
+    /// shows the real design instead of plain text.
+    fn caption_cache_pass(&mut self) {
+        use std::hash::{Hash, Hasher};
+        let mut specs: Vec<(String, serde_json::Value)> = Vec::new();
+        let tracks = self.doc.raw.get(0).and_then(|c| c.get("timeline")).and_then(|t| t.get("sequence")).and_then(|sq| sq.get("tracks")).and_then(|t| t.as_array());
+        if let Some(tracks) = tracks {
+            for tr in tracks {
+                for cl in tr.get("clips").and_then(|c| c.as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
+                    let text = cl.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    let id = cl.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let spec = serde_json::json!({
+                        "text": text,
+                        "design": cl.get("style").cloned().unwrap_or(serde_json::json!({})),
+                        "words": cl.get("words").cloned().unwrap_or(serde_json::json!([])),
+                    });
+                    specs.push((id, spec));
+                }
+            }
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (id, sp) in &specs {
+            id.hash(&mut h);
+            sp.to_string().hash(&mut h);
+        }
+        let sig = h.finish();
+        if sig == self.cap_sig || specs.is_empty() {
+            return;
+        }
+        self.cap_sig = sig;
+        self.cap_req_ids = specs.iter().map(|(id, _)| id.clone()).collect();
+        let items: Vec<serde_json::Value> = specs.into_iter().map(|(_, sp)| sp).collect();
+        let body = serde_json::json!({
+            "room_id": self.room_id(),
+            "outW": CANVAS_W,
+            "outH": CANVAS_H,
+            "items": items,
+        });
+        self.lib_post("capcache", "/api/v1/production-assets/caption-cache".into(), body);
     }
 
     fn lib_get(&self, tag: &str, path: String) {
@@ -3082,6 +3137,21 @@ impl App {
                 ("act", Ok(_)) => {
                     self.lib_refresh();
                 }
+                ("capcache", Ok(v)) => {
+                    if let Some(res) = v.get("results").and_then(|r| r.as_array()) {
+                        for (i, r) in res.iter().enumerate() {
+                            if let (Some(id), Some(key)) = (
+                                self.cap_req_ids.get(i),
+                                r.get("key").and_then(|k| k.as_str()),
+                            ) {
+                                self.cap_keys.insert(id.clone(), key.to_string());
+                            }
+                        }
+                    }
+                }
+                ("capcache", Err(e)) => {
+                    eprintln!("capcache error: {e}");
+                }
                 ("recut", Ok(v)) => {
                     self.recut_busy = false;
                     let cuts = v.get("cut_count").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -3388,6 +3458,7 @@ impl eframe::App for App {
             self.library_ui(ctx);
             return;
         }
+        self.caption_cache_pass();
         let now = Instant::now();
         self.last_frames.push(now);
         self.last_frames.retain(|t| now.duration_since(*t).as_secs_f32() < 1.0);
@@ -3724,7 +3795,7 @@ impl eframe::App for App {
                         // dark outline, bottom-centre — the export bakes the full styling
                         // server-side; this is the live view)
                         let t = self.t;
-                        let texts: Vec<String> = self
+                        let active: Vec<(String, String)> = self
                             .doc
                             .seq
                             .tracks
@@ -3732,8 +3803,55 @@ impl eframe::App for App {
                             .filter(|tr| tr.kind == "caption")
                             .flat_map(|tr| tr.clips.iter())
                             .filter(|c| t >= c.timeline_start && t < c.timeline_end)
-                            .filter_map(|c| c.text.clone())
+                            .filter_map(|c| c.text.clone().map(|txt| (c.id.clone(), txt)))
                             .collect();
+                        // designed captions: draw the server-rendered PNG (export parity);
+                        // fall back to plain outlined text until it lands on disk
+                        let mut texts: Vec<String> = Vec::new();
+                        for (cid, txt) in &active {
+                            let Some(key) = self.cap_keys.get(cid).cloned() else {
+                                texts.push(txt.clone());
+                                continue;
+                            };
+                            if !self.cap_tex.contains_key(&key) {
+                                let due = self
+                                    .cap_probe
+                                    .get(&key)
+                                    .map(|at| at.elapsed().as_millis() > 1000)
+                                    .unwrap_or(true);
+                                if due {
+                                    self.cap_probe.insert(key.clone(), Instant::now());
+                                    let p = format!("{}/caption-cache/{key}.png", self.doc.asset_dir);
+                                    if let Ok(bytes) = std::fs::read(&p) {
+                                        if let Ok(img) = image::load_from_memory(&bytes) {
+                                            let rgba = img.to_rgba8();
+                                            let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+                                            let tex = ui.ctx().load_texture(
+                                                format!("cap_{key}"),
+                                                egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
+                                                egui::TextureOptions::LINEAR,
+                                            );
+                                            self.cap_tex.insert(key.clone(), tex);
+                                        }
+                                    }
+                                }
+                            }
+                            match self.cap_tex.get(&key) {
+                                Some(tex) => {
+                                    // the PNG is canvas-sized: map it onto the letterboxed
+                                    // VIDEO rect, not the whole panel
+                                    let vid = egui::Rect::from_center_size(resp.rect.center(), size);
+                                    let p = ui.painter_at(vid);
+                                    p.image(
+                                        tex.id(),
+                                        vid,
+                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                        egui::Color32::WHITE,
+                                    );
+                                }
+                                None => texts.push(txt.clone()),
+                            }
+                        }
                         if !texts.is_empty() {
                             let p = ui.painter_at(resp.rect);
                             let fsz = (size.y * 0.032).max(12.0);
