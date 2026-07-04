@@ -697,10 +697,19 @@ static API_TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new
 /// Auth token for the local server: --token arg > DONE_TOKEN env > ~/.done/native_token.txt
 /// (long-lived token minted server-side; done:// launches will inject their own).
 fn load_api_token(args: &[String]) {
-    let tok = args
+    // a done:// deep link carries the freshest token — it wins over --token/env/file
+    let deep_tok = args
         .iter()
-        .position(|a| a == "--token")
-        .and_then(|i| args.get(i + 1).cloned())
+        .find(|a| a.starts_with("done://"))
+        .and_then(|url| url.split('?').nth(1))
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=").map(|v| v.to_string())))
+        .filter(|v| !v.is_empty());
+    let tok = deep_tok
+        .or_else(|| {
+            args.iter()
+                .position(|a| a == "--token")
+                .and_then(|i| args.get(i + 1).cloned())
+        })
         .or_else(|| std::env::var("DONE_TOKEN").ok())
         .or_else(|| {
             let p = format!(
@@ -1433,6 +1442,8 @@ struct App {
     recut_lead: f32,
     recut_tail: f32,
     recut_busy: bool,
+    revise_open: bool,
+    revise_text: String,
     doc: Arc<model::Doc>,
     shared: Arc<Shared>,
     selected: Vec<String>,
@@ -1536,6 +1547,8 @@ impl App {
             recut_lead: 0.06,
             recut_tail: 0.10,
             recut_busy: false,
+            revise_open: false,
+            revise_text: String::new(),
             doc,
             shared,
             selected: Vec::new(),
@@ -1996,6 +2009,82 @@ impl App {
             self.screen = Screen::Editor;
             self.push_req(false);
         }
+    }
+
+    /// "ダンに指示": non-destructive dan_revise on the open content. Reuses the library
+    /// generation machinery (gen_content + gen_job + job_poll) — on done the content
+    /// auto-reloads in the editor.
+    fn start_revision(&mut self) {
+        let note = self.revise_text.trim().to_string();
+        if note.is_empty() || self.lib.started {
+            return;
+        }
+        let cid = self.content_id();
+        let room = self.room_id();
+        let path = format!("{}/contents.json", self.doc.asset_dir);
+        let Ok(txt) = std::fs::read_to_string(&path) else {
+            self.toast("contents.json が読めません");
+            return;
+        };
+        let Ok(raw) = serde_json::from_str::<serde_json::Value>(&txt) else { return };
+        let empty: Vec<serde_json::Value> = Vec::new();
+        let arr = raw.as_array().unwrap_or(&empty);
+        let Some(content) = arr
+            .iter()
+            .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(cid.as_str()))
+        else {
+            self.toast("コンテンツが見つかりません");
+            return;
+        };
+        let timeline = content.get("timeline").cloned().unwrap_or(serde_json::json!({}));
+        let asset_ids = content.get("asset_ids").cloned().unwrap_or(serde_json::json!([]));
+        let id_list: Vec<String> = asset_ids
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let source_assets: Vec<serde_json::Value> = self
+            .lib
+            .assets
+            .iter()
+            .filter(|a| {
+                a.get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|id| id_list.iter().any(|x| x == id))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        let mut tl = timeline.clone();
+        if let Some(o) = tl.as_object_mut() {
+            o.insert("format".into(), content.get("format").cloned().unwrap_or(serde_json::json!("9:16")));
+            o.insert("source_asset_ids".into(), asset_ids.clone());
+        }
+        let body = serde_json::json!({
+            "room_id": room,
+            "content_id": cid,
+            "instruction": {
+                "mode": "dan_revise",
+                "content_id": cid,
+                "content_title": content.get("title").cloned().unwrap_or_default(),
+                "asset_ids": asset_ids,
+                "source_assets": source_assets,
+                "brief": timeline.get("brief").cloned().unwrap_or(serde_json::json!("")),
+                "revision_text": note,
+                "revision_regions": [],
+                "workflow_preset": timeline.get("workflow_preset").cloned().unwrap_or(serde_json::json!("video_ugc")),
+                "timeline": tl,
+            },
+        });
+        self.lib.gen_content = Some(cid);
+        self.lib.gen_job = None;
+        self.lib.error = None;
+        self.lib.started = true;
+        self.lib.events = vec!["ダンに指示を送っています…".into()];
+        self.lib_post("gen_job", "/api/v1/production-assets/jobs".into(), body);
     }
 
     fn start_generation(&mut self) {
@@ -3521,6 +3610,16 @@ impl eframe::App for App {
                 {
                     self.recut_open = !self.recut_open;
                 }
+                if ui
+                    .selectable_label(self.revise_open, "🤖 ダンに指示")
+                    .on_hover_text("この動画への修正指示を言葉で送る（例: 冒頭をもっとテンポ良く）")
+                    .clicked()
+                {
+                    self.revise_open = !self.revise_open;
+                    if self.revise_open && self.lib.assets.is_empty() {
+                        self.lib_refresh();
+                    }
+                }
                 let exporting = self.export_job.is_some();
                 if ui
                     .add_enabled(!exporting, egui::Button::new("📤 書き出し"))
@@ -3621,6 +3720,67 @@ impl eframe::App for App {
                     });
                 }
             });
+        if let Ok(t) = std::env::var("NATIVE_REVISE_RUN") {
+            if !t.is_empty() && !self.lib.started {
+                self.revise_open = true;
+                if self.lib.assets.is_empty() {
+                    // wait for the asset list; retry the refresh on the shared 2s timer
+                    if self.lib_poll.elapsed().as_millis() > 2000 {
+                        self.lib_poll = Instant::now();
+                        self.lib_refresh();
+                    }
+                } else {
+                    std::env::set_var("NATIVE_REVISE_RUN", "");
+                    self.revise_text = t;
+                    self.start_revision();
+                    self.revise_text.clear();
+                }
+            }
+        }
+        if self.revise_open {
+            let mut open = self.revise_open;
+            let mut sent = false;
+            egui::Window::new("ダンに指示")
+                .open(&mut open)
+                .resizable(false)
+                .default_width(340.0)
+                .show(ctx, |ui| {
+                    ui.label("この動画をどう直してほしいか、言葉で指示してください");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.revise_text)
+                            .desired_rows(4)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("例: 冒頭の自己紹介を短くして、テロップを大きめに"),
+                    );
+                    ui.add_space(4.0);
+                    let can = !self.revise_text.trim().is_empty() && !self.lib.started;
+                    if ui
+                        .add_enabled(can, egui::Button::new("▶ ダンに修正させる").min_size(egui::vec2(320.0, 28.0)))
+                        .clicked()
+                    {
+                        sent = true;
+                    }
+                    if self.lib.started {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("ダンが修正中…（完成すると自動で反映されます）");
+                        });
+                        for ev in &self.lib.events {
+                            ui.label(egui::RichText::new(ev).small().weak());
+                        }
+                    }
+                    if let Some(e) = &self.lib.error {
+                        ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
+                    }
+                });
+            self.revise_open = open;
+            if sent {
+                self.playing = false;
+                self.push_req(false);
+                self.start_revision();
+                self.revise_text.clear();
+            }
+        }
         if std::env::var("NATIVE_RECUT_OPEN").map(|v| !v.is_empty()).unwrap_or(false) {
             std::env::set_var("NATIVE_RECUT_OPEN", "");
             self.recut_open = true;
@@ -4092,11 +4252,44 @@ fn main() -> eframe::Result<()> {
         }
         std::process::exit(0);
     }
+    // done://production?room_id=X&token=Y — the chat 制作タブ deep link. Room resolves to
+    // its uploads dir; a fresh token is persisted so later bare launches stay signed in.
+    let mut deep_room: Option<String> = None;
+    if let Some(url) = args.iter().find(|a| a.starts_with("done://")) {
+        if let Some(q) = url.split('?').nth(1) {
+            for kv in q.split('&') {
+                let mut it = kv.splitn(2, '=');
+                match (it.next(), it.next()) {
+                    (Some("room_id"), Some(v)) if !v.is_empty() => deep_room = Some(v.to_string()),
+                    (Some("token"), Some(v)) if !v.is_empty() => {
+                        // already applied by load_api_token (deep token wins); persist for
+                        // later bare launches
+                        let p = format!(
+                            "{}/.done",
+                            std::env::var("USERPROFILE").unwrap_or_default().replace(char::from(92), "/")
+                        );
+                        let _ = std::fs::create_dir_all(&p);
+                        let _ = std::fs::write(format!("{p}/native_token.txt"), v);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let room_dir = deep_room
+        .as_ref()
+        .map(|r| format!("D:/done/uploads/production-assets/{r}"))
+        .unwrap_or_else(|| ROOM.to_string());
     let contents = args
         .get(1)
+        .filter(|a| !a.starts_with("done://"))
         .cloned()
-        .unwrap_or_else(|| format!("{ROOM}/contents.json"));
-    let dir = args.get(2).cloned().unwrap_or_else(|| ROOM.to_string());
+        .unwrap_or_else(|| format!("{room_dir}/contents.json"));
+    let dir = args
+        .get(2)
+        .filter(|a| !a.starts_with("done://"))
+        .cloned()
+        .unwrap_or(room_dir);
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 940.0])
@@ -4125,7 +4318,10 @@ fn main() -> eframe::Result<()> {
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("{e:#}").into() })?;
             // bare launch (no explicit contents arg): open the LIBRARY (assets ->
             // generation -> open), the full production entry point
-            let explicit = std::env::args().nth(1).map(|a| !a.starts_with("--")).unwrap_or(false);
+            let explicit = std::env::args()
+                .nth(1)
+                .map(|a| !a.starts_with("--") && !a.starts_with("done://"))
+                .unwrap_or(false);
             if !explicit {
                 app.screen = Screen::Library;
                 app.lib_refresh();
