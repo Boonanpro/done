@@ -381,3 +381,59 @@ pub fn move_to_track(raw: &mut serde_json::Value, ids: &[String], target: usize)
             .map(|arr| arr.push(c));
     }
 }
+
+/// Set a clip's display position (canvas fractions) — the preview inspector drag.
+pub fn set_position(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f64, h: f64) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) != Some(id) {
+            return;
+        }
+        c.as_object_mut().unwrap().insert(
+            "position".into(),
+            serde_json::json!({
+                "x": (x * 10000.0).round() / 10000.0,
+                "y": (y * 10000.0).round() / 10000.0,
+                "width": (w * 10000.0).round() / 10000.0,
+                "height": (h * 10000.0).round() / 10000.0,
+            }),
+        );
+    });
+}
+
+/// Set a caption clip's text.
+pub fn set_text(raw: &mut serde_json::Value, id: &str, text: &str) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) == Some(id) {
+            c.as_object_mut().unwrap().insert("text".into(), serde_json::json!(text));
+        }
+    });
+}
+
+/// Set a clip's volume (applies to its linked audio at playback and export).
+pub fn set_volume(raw: &mut serde_json::Value, ids: &[String], vol: f64) {
+    for_each_clip(raw, |c| {
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if ids.iter().any(|i| i == id) {
+            c.as_object_mut().unwrap().insert(
+                "volume".into(),
+                serde_json::json!((vol * 1000.0).round() / 1000.0),
+            );
+        }
+    });
+}
+
+/// Reorder tracks (lane header drag): array order IS the stacking order.
+pub fn reorder_tracks(raw: &mut serde_json::Value, from: usize, to: usize) {
+    if let Some(tracks) = raw
+        .get_mut(0)
+        .and_then(|r| r.get_mut("timeline"))
+        .and_then(|x| x.get_mut("sequence"))
+        .and_then(|x| x.get_mut("tracks"))
+        .and_then(|x| x.as_array_mut())
+    {
+        if from < tracks.len() && to < tracks.len() && from != to {
+            let tr = tracks.remove(from);
+            tracks.insert(to, tr);
+        }
+    }
+}

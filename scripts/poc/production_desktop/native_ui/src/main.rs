@@ -692,13 +692,39 @@ fn warm_upcoming(
 
 /// Tiny localhost-only HTTP client (the sandbox popout endpoints are auth-free local
 /// APIs) — a dependency-free TcpStream request beats pulling a whole HTTP stack.
+static API_TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Auth token for the local server: --token arg > DONE_TOKEN env > ~/.done/native_token.txt
+/// (long-lived token minted server-side; done:// launches will inject their own).
+fn load_api_token(args: &[String]) {
+    let tok = args
+        .iter()
+        .position(|a| a == "--token")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| std::env::var("DONE_TOKEN").ok())
+        .or_else(|| {
+            let p = format!(
+                "{}/.done/native_token.txt",
+                std::env::var("USERPROFILE").unwrap_or_default().replace(char::from(92), "/")
+            );
+            std::fs::read_to_string(p).ok().map(|t| t.trim().to_string())
+        })
+        .filter(|t| !t.is_empty());
+    let _ = API_TOKEN.set(tok);
+}
+
 fn http_local(method: &str, path: &str, json_body: Option<&str>) -> anyhow::Result<String> {
     use std::io::{Read, Write};
     let mut st = std::net::TcpStream::connect(("127.0.0.1", 8000))?;
     st.set_read_timeout(Some(std::time::Duration::from_secs(20)))?;
     let body = json_body.unwrap_or("");
+    let auth = API_TOKEN
+        .get()
+        .and_then(|t| t.as_ref())
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:8000\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:8000\r\nConnection: close\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
         body.len(),
         body
     );
@@ -1390,6 +1416,14 @@ struct App {
     toast: Option<(String, Instant)>,
     snap_line: Option<f64>,
     hover_lane: Option<usize>,
+    /// preview inspector: (clip id, drag kind, pointer at start, box at start)
+    inspect_drag: Option<(String, u8, egui::Pos2, model::Pos)>,
+    caption_edit: Option<(String, String)>,
+    lane_reorder: Option<usize>,
+    export_result: std::sync::Arc<Mutex<Option<Result<serde_json::Value, String>>>>,
+    export_job: Option<String>,
+    export_status: Option<String>,
+    export_poll: Instant,
     /// clip_id -> popout bake display state (polled from the cache dir, not the server)
     pop_states: std::collections::HashMap<String, PopState>,
     bake_results: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
@@ -1475,6 +1509,13 @@ impl App {
             toast: None,
             snap_line: None,
             hover_lane: None,
+            inspect_drag: None,
+            caption_edit: None,
+            lane_reorder: None,
+            export_result: Default::default(),
+            export_job: None,
+            export_status: None,
+            export_poll: Instant::now(),
             pop_states: Default::default(),
             bake_results: Default::default(),
             last_pop_poll: Instant::now(),
@@ -1855,6 +1896,202 @@ impl App {
         }
     }
 
+    fn content_id(&self) -> String {
+        self.doc
+            .raw
+            .get(0)
+            .and_then(|r| r.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn start_export(&mut self) {
+        // mode "export" renders the CURRENT timeline server-side (the sequence rides in
+        // the instruction — what you see is exactly what gets rendered)
+        let timeline = self
+            .doc
+            .raw
+            .get(0)
+            .and_then(|r| r.get("timeline"))
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
+        let payload = serde_json::json!({
+            "room_id": self.room_id(),
+            "content_id": self.content_id(),
+            "instruction": {"mode": "export", "timeline": timeline},
+        })
+        .to_string();
+        self.export_status = Some("書き出しを開始しています…".into());
+        let sink = self.export_result.clone();
+        std::thread::spawn(move || {
+            let res = http_local("POST", "/api/v1/production-assets/jobs", Some(&payload))
+                .and_then(|t| Ok(serde_json::from_str::<serde_json::Value>(&t)?))
+                .map_err(|e| format!("{e:#}"));
+            *sink.lock().unwrap() = Some(res);
+        });
+    }
+
+    fn poll_export(&mut self) {
+        let taken = self.export_result.lock().unwrap().take();
+        if let Some(res) = taken {
+            match res {
+                Ok(v) => {
+                    if !self.absorb_export_poll(&v) {
+                        // not a poll payload -> job-creation response
+                        self.export_job = v.get("id").and_then(|x| x.as_str()).map(|s| s.to_string());
+                        self.export_status = Some("書き出し中…".into());
+                    }
+                }
+                Err(e) => {
+                    self.export_status = Some(format!("書き出しエラー: {e}"));
+                    self.export_job = None;
+                    eprintln!("export failed: {e}");
+                }
+            }
+        }
+        let Some(job_id) = self.export_job.clone() else { return };
+        if self.export_poll.elapsed().as_millis() < 2000 {
+            return;
+        }
+        self.export_poll = Instant::now();
+        let path = format!(
+            "/api/v1/production-assets/jobs?room_id={}&content_id={}",
+            self.room_id(),
+            self.content_id()
+        );
+        let sink = self.export_result.clone();
+        std::thread::spawn(move || {
+            let res = http_local("GET", &path, None)
+                .and_then(|t| Ok(serde_json::from_str::<serde_json::Value>(&t)?))
+                .map(|list| serde_json::json!({"poll": list, "job": job_id}))
+                .map_err(|e| format!("{e:#}"));
+            *sink.lock().unwrap() = Some(res);
+        });
+    }
+
+    fn absorb_export_poll(&mut self, v: &serde_json::Value) -> bool {
+        let (Some(list), Some(job_id)) = (v.get("poll"), v.get("job").and_then(|x| x.as_str())) else {
+            return false;
+        };
+        let Some(job) = list.as_array().and_then(|a| a.iter().find(|j| j.get("id").and_then(|x| x.as_str()) == Some(job_id))) else {
+            return true;
+        };
+        match job.get("status").and_then(|s| s.as_str()).unwrap_or("") {
+            "done" => {
+                let out = job
+                    .get("result")
+                    .and_then(|r| r.get("output_path"))
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                self.export_job = None;
+                self.export_status = Some(format!("書き出し完了: {out}"));
+                self.toast(&format!("書き出し完了 → {out}"));
+            }
+            "failed" => {
+                let err = job.get("error").and_then(|e| e.as_str()).unwrap_or("不明なエラー");
+                self.export_job = None;
+                self.export_status = Some(format!("書き出し失敗: {err}"));
+            }
+            st => {
+                self.export_status = Some(format!("書き出し{}…", if st == "queued" { "待機中" } else { "中" }));
+            }
+        }
+        true
+    }
+
+    /// Preview inspector: the selected clip's display box is drawn over the preview and
+    /// can be MOVED (drag inside) or RESIZED (corner handles, aspect kept) directly.
+    fn preview_inspector(&mut self, ui: &mut egui::Ui, resp: &egui::Response) {
+        let img = resp.rect;
+        // exactly one selected visual clip
+        let sel: Vec<model::Clip> = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .filter(|tr| tr.kind != "audio")
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| self.selected.contains(&c.id) && c.asset_id.is_some())
+            .cloned()
+            .collect();
+        if sel.len() != 1 {
+            return;
+        }
+        let c = &sel[0];
+        // only meaningful while the clip is on screen
+        if self.t < c.timeline_start || self.t >= c.timeline_end {
+            return;
+        }
+        let b = c.display_box();
+        let bx = egui::Rect::from_min_size(
+            egui::pos2(
+                img.left() + (b.x as f32) * img.width(),
+                img.top() + (b.y as f32) * img.height(),
+            ),
+            egui::vec2((b.width as f32) * img.width(), (b.height as f32) * img.height()),
+        );
+        let p = ui.painter_at(img);
+        p.rect_stroke(bx, 2.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 170, 255)));
+        let corners = [bx.min, egui::pos2(bx.max.x, bx.min.y), egui::pos2(bx.min.x, bx.max.y), bx.max];
+        for cp in corners {
+            p.rect_filled(egui::Rect::from_center_size(cp, egui::vec2(9.0, 9.0)), 2.0, egui::Color32::from_rgb(90, 170, 255));
+        }
+        let pointer = resp.interact_pointer_pos().or(resp.hover_pos());
+        // cursor feedback
+        if let Some(pt) = pointer {
+            if corners.iter().any(|cp| cp.distance(pt) < 10.0) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+            } else if bx.contains(pt) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
+        }
+        if resp.drag_started() {
+            if let Some(pt) = resp.interact_pointer_pos() {
+                let corner = corners.iter().position(|cp| cp.distance(pt) < 10.0);
+                if let Some(ci) = corner {
+                    self.undo.push(self.doc.raw.clone());
+                    self.redo.clear();
+                    self.inspect_drag = Some((c.id.clone(), ci as u8 + 1, pt, b));
+                } else if bx.contains(pt) {
+                    self.undo.push(self.doc.raw.clone());
+                    self.redo.clear();
+                    self.inspect_drag = Some((c.id.clone(), 0, pt, b));
+                }
+            }
+        }
+        if resp.dragged() {
+            if let (Some((id, mode, start, ob)), Some(pt)) = (self.inspect_drag.clone(), resp.interact_pointer_pos()) {
+                let dx = ((pt.x - start.x) / img.width()) as f64;
+                let dy = ((pt.y - start.y) / img.height()) as f64;
+                let (nx, ny, nw, nh) = if mode == 0 {
+                    (ob.x + dx, ob.y + dy, ob.width, ob.height)
+                } else {
+                    // corner resize, aspect kept, anchored at the OPPOSITE corner
+                    let (ax, ay, sxs, sys) = match mode {
+                        1 => (ob.x + ob.width, ob.y + ob.height, -1.0, -1.0),
+                        2 => (ob.x, ob.y + ob.height, 1.0, -1.0),
+                        3 => (ob.x + ob.width, ob.y, -1.0, 1.0),
+                        _ => (ob.x, ob.y, 1.0, 1.0),
+                    };
+                    let scale_w = (ob.width + dx * sxs).max(0.03) / ob.width;
+                    let scale_h = (ob.height + dy * sys).max(0.03) / ob.height;
+                    let sc = scale_w.max(scale_h);
+                    let (nw, nh) = (ob.width * sc, ob.height * sc);
+                    let nx = if sxs < 0.0 { ax - nw } else { ax };
+                    let ny = if sys < 0.0 { ay - nh } else { ay };
+                    (nx, ny, nw, nh)
+                };
+                self.apply_edit(false, move |raw| edits::set_position(raw, &id, nx, ny, nw, nh));
+            }
+        }
+        if resp.drag_stopped() {
+            self.inspect_drag = None;
+            self.push_req(false); // settle full quality after the adjustment
+        }
+    }
+
     fn push_req(&mut self, scrubbing: bool) {
         let mut r = self.shared.req.lock().unwrap();
         self.gen += 1;
@@ -1974,6 +2211,23 @@ impl App {
         };
         for &(ti, y0, lane_h) in &lane_tops {
             let tr = &self.doc.seq.tracks[ti];
+            // lane header itself is draggable: reorder tracks (stacking order)
+            let hdr = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), y0),
+                egui::pos2(rect.left() + GUTTER - 2.0, y0 + lane_h),
+            );
+            let hresp = ui.interact(hdr, egui::Id::new(("lane_hdr", ti)), egui::Sense::click_and_drag());
+            if hresp.drag_started() {
+                self.lane_reorder = Some(ti);
+                self.undo.push(self.doc.raw.clone());
+                self.redo.clear();
+            }
+            if hresp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+            }
+            if self.lane_reorder == Some(ti) {
+                p.rect_filled(hdr, 2.0, egui::Color32::from_rgba_unmultiplied(120, 170, 255, 40));
+            }
             if self.hover_lane == Some(ti) && matches!(self.drag, Drag::Move { .. }) {
                 p.rect_filled(
                     egui::Rect::from_min_max(egui::pos2(body.left(), y0), egui::pos2(body.right(), y0 + lane_h)),
@@ -2229,6 +2483,20 @@ impl App {
                 let hit = hits.iter().find(|(r, _)| r.expand2(egui::vec2(4.0, 0.0)).contains(pos));
                 match hit {
                     Some((r, id)) => {
+                        if resp.double_clicked() {
+                            if let Some(c) = self
+                                .doc
+                                .seq
+                                .tracks
+                                .iter()
+                                .flat_map(|tr| tr.clips.iter())
+                                .find(|c| c.id == *id)
+                            {
+                                if let Some(txt) = &c.text {
+                                    self.caption_edit = Some((c.id.clone(), txt.clone()));
+                                }
+                            }
+                        }
                         if !self.selected.contains(id) {
                             if ui.input(|i| i.modifiers.ctrl) {
                                 self.selected.push(id.clone());
@@ -2337,6 +2605,21 @@ impl App {
                     }
                     Drag::None => {}
                 }
+            }
+        }
+        // lane reorder: while a header is being dragged, dropping over another lane's
+        // row moves the track there (live on release)
+        if let Some(from) = self.lane_reorder {
+            let released = ui.input(|i| i.pointer.any_released());
+            if released {
+                if let Some(pt) = ui.input(|i| i.pointer.interact_pos()) {
+                    if let Some(&(to, _, _)) = lane_tops.iter().find(|&&(_, y0, lh)| pt.y >= y0 && pt.y <= y0 + lh) {
+                        if to != from {
+                            self.apply_edit(false, move |raw| edits::reorder_tracks(raw, from, to));
+                        }
+                    }
+                }
+                self.lane_reorder = None;
             }
         }
         if resp.drag_stopped() {
@@ -2668,6 +2951,54 @@ impl eframe::App for App {
             }
         }
 
+        self.poll_export();
+        egui::TopBottomPanel::top("toolbar").exact_height(30.0).show(ctx, |ui| {
+            ui.horizontal_centered(|ui| {
+                let exporting = self.export_job.is_some();
+                if ui
+                    .add_enabled(!exporting, egui::Button::new("📤 書き出し"))
+                    .clicked()
+                {
+                    self.start_export();
+                }
+                if exporting {
+                    ui.spinner();
+                }
+                if let Some(st) = &self.export_status {
+                    ui.label(st.clone());
+                }
+                // volume for the selected clip (linked audio / audio clip)
+                let selv: Option<model::Clip> = if self.selected.len() == 1 {
+                    self.doc
+                        .seq
+                        .tracks
+                        .iter()
+                        .flat_map(|tr| tr.clips.iter())
+                        .find(|c| c.id == self.selected[0] && (c.link_id.is_some() || c.asset_id.is_some()))
+                        .cloned()
+                } else {
+                    None
+                };
+                if let Some(c) = selv {
+                    ui.separator();
+                    ui.label("音量");
+                    let mut vol = c.volume as f32;
+                    let sl = ui.add(egui::Slider::new(&mut vol, 0.0..=2.0).show_value(true).fixed_decimals(2));
+                    if sl.drag_started() {
+                        self.undo.push(self.doc.raw.clone());
+                        self.redo.clear();
+                    }
+                    if sl.changed() {
+                        let ids = edits::expand_links(&self.doc.raw, &[c.id.clone()]);
+                        let v = vol as f64;
+                        self.apply_edit(false, move |raw| edits::set_volume(raw, &ids, v));
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new("F1: ショートカット一覧 | クリップをダブルクリック=テロップ編集 | 番号ヘッダをドラッグ=レーン並べ替え").weak().small());
+                });
+            });
+        });
         egui::TopBottomPanel::bottom("timeline")
             .resizable(true)
             .default_height(260.0)
@@ -2677,12 +3008,15 @@ impl eframe::App for App {
             .frame(egui::Frame::none().fill(egui::Color32::from_gray(10)))
             .show(ctx, |ui| {
                 let avail = ui.available_size();
-                if let Some(tex) = &self.tex {
+                if let Some(tex) = self.tex.clone() {
                     let (cw, ch) = (CANVAS_W as f32, CANVAS_H as f32);
                     let scale = (avail.x / cw).min(avail.y / ch);
                     let size = egui::vec2(cw * scale, ch * scale);
                     ui.centered_and_justified(|ui| {
-                        let resp = ui.add(egui::Image::new((tex.id(), size)));
+                        let resp = ui
+                            .add(egui::Image::new((tex.id(), size)))
+                            .interact(egui::Sense::click_and_drag());
+                        self.preview_inspector(ui, &resp);
                         // captions: active caption clips drawn over the frame (white bold with
                         // dark outline, bottom-centre — the export bakes the full styling
                         // server-side; this is the live view)
@@ -2729,6 +3063,40 @@ impl eframe::App for App {
                     });
             } else {
                 self.toast = None;
+            }
+        }
+        if let Some((cid, mut buf)) = self.caption_edit.clone() {
+            let mut save = false;
+            let mut cancel = false;
+            egui::Window::new("テロップ編集")
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.add(egui::TextEdit::multiline(&mut buf).desired_width(360.0).desired_rows(3));
+                    ui.horizontal(|ui| {
+                        if ui.button("保存 (Ctrl+Enter)").clicked() {
+                            save = true;
+                        }
+                        if ui.button("キャンセル (Esc)").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter)) {
+                save = true;
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                cancel = true;
+            }
+            if save {
+                let text = buf.clone();
+                let id2 = cid.clone();
+                self.apply_edit(true, move |raw| edits::set_text(raw, &id2, &text));
+                self.caption_edit = None;
+            } else if cancel {
+                self.caption_edit = None;
+            } else {
+                self.caption_edit = Some((cid, buf));
             }
         }
         if self.show_help {
@@ -2781,6 +3149,7 @@ fn main() -> eframe::Result<()> {
         }
     }
     let args: Vec<String> = std::env::args().collect();
+    load_api_token(&args);
     // --dump-frame <t> <out.ppm>: headless compose of one timeline frame — deterministic
     // A/B verification (live matte path vs pv fallback) with no window and no user input
     if let Some(i) = args.iter().position(|a| a == "--dump-frame") {
