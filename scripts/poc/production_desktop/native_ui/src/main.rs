@@ -385,6 +385,7 @@ fn draw_plain_pip(
         let (tex, wh) = if let Some(x) = got {
             x
         } else {
+            fz_log(&format!("FZ_FALLBACK pip id={} t={t:.2} fast={fast}", c.id));
             let vs = pool.get(d3d, &p2, 0, false, src_t)?;
             let is_exact = if fast {
                 vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
@@ -414,6 +415,21 @@ fn draw_plain_pip(
     Ok(Some(p2))
 }
 
+/// Throttled diagnostics for the freeze paths (at most one line per 500ms) — cheap
+/// enough to stay on permanently; %TEMP%/native_ui.log captures real user sessions.
+fn fz_log(msg: &str) {
+    thread_local! {
+        static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    }
+    LAST.with(|l| {
+        let now = std::time::Instant::now();
+        if l.get().map(|p| now.duration_since(p).as_millis() > 500).unwrap_or(true) {
+            l.set(Some(now));
+            eprintln!("{msg}");
+        }
+    });
+}
+
 /// Load a freeze clip's materialized PNG into the still cache (once). Returns whether
 /// the still is now available under `key`.
 fn load_freeze_png(
@@ -428,11 +444,23 @@ fn load_freeze_png(
     }
     let Some(rel) = c.freeze_still.as_deref() else { return false };
     let p = doc.rel_path(rel);
-    let Ok(bytes) = std::fs::read(&p) else { return false };
-    let Ok(img) = image::load_from_memory(&bytes) else { return false };
+    let Ok(bytes) = std::fs::read(&p) else {
+        fz_log(&format!("FZ_WAIT png-not-ready {rel}"));
+        return false;
+    };
+    let t0 = std::time::Instant::now();
+    let Ok(img) = image::load_from_memory(&bytes) else {
+        fz_log(&format!("FZ_ERR png-decode-failed {rel}"));
+        return false;
+    };
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
-    comp.still_put_rgba(d3d, key.clone(), w, h, rgba.as_raw()).is_ok()
+    let ok = comp.still_put_rgba(d3d, key.clone(), w, h, rgba.as_raw()).is_ok();
+    eprintln!(
+        "STILL_LOAD {}ms {rel} {w}x{h} ok={ok}",
+        t0.elapsed().as_millis()
+    );
+    ok
 }
 
 fn compose(
@@ -507,6 +535,7 @@ fn compose(
                         // freeze still not baked yet: whatever we show now is provisional —
                         // force a settle pass so the ORIGINAL-quality bake happens at rest
                         exact = false;
+                        fz_log(&format!("FZ_FALLBACK popout id={} t={t:.2} fast={fast}", c.id));
                     }
                     let o = {
                         let sdec = pool.get(d3d, &opath, 0, false, src_t)?;
@@ -630,6 +659,10 @@ fn compose(
                 let (tex, wh) = if let Some(x) = got {
                     x
                 } else {
+                    fz_log(&format!(
+                        "FZ_FALLBACK base id={} t={t:.2} fast={fast} original={original}",
+                        c.id
+                    ));
                     let vs = pool.get(d3d, &path, 0, false, src_t)?;
                     if !original {
                         exact = false; // proxy frame is provisional — settle bakes the still
@@ -1188,8 +1221,10 @@ fn media_thread(shared: Arc<Shared>) {
                     shared.dirty_from_bits.swap(f64::INFINITY.to_bits(), Ordering::Relaxed),
                 );
                 if df.is_finite() {
+                    eprintln!("CACHE_INVAL from={df:.2}");
                     fcache.invalidate_from((df - 0.2).max(0.0));
                 } else {
+                    eprintln!("CACHE_CLEAR full");
                     fcache.clear(); // unknown provenance (open/undo/redo): full reset
                 }
             }
@@ -2891,9 +2926,11 @@ impl App {
         let t = t + snap_delta; // shift the split point so src lands ON the frame
         let salt = self.salt;
         self.salt += 1;
-        // Filmora-style: write the frozen frame to a REAL image file right now and let the
-        // clip display that file — a materialized still cannot wander, ever
-        let still_rel = self
+        // Filmora-style materialized still — but NEVER on the UI thread (the sync call
+        // froze the app for seconds and flashed a console window: confirmed bug). The clip
+        // records the PNG path up front; the engine picks the file up the moment the
+        // background ffmpeg finishes.
+        let bake = self
             .doc
             .seq
             .tracks
@@ -2903,15 +2940,23 @@ impl App {
             .and_then(|c| {
                 let aid = c.asset_id.as_deref()?;
                 let src = c.source_start + (t - c.timeline_start);
-                let dir = format!("{}/stills", self.doc.asset_dir);
-                let _ = std::fs::create_dir_all(&dir);
-                let rel = format!("stills/fz_{salt}.png");
-                let out = format!("{}/{rel}", self.doc.asset_dir);
                 let srcp = self.doc.asset_path_q(aid, true);
+                Some((src, srcp))
+            });
+        let still_rel = bake.as_ref().map(|_| format!("stills/fz_{salt}.png"));
+        if let (Some((src, srcp)), Some(rel)) = (bake, still_rel.clone()) {
+            let dir = format!("{}/stills", self.doc.asset_dir);
+            let out = format!("{}/{rel}", self.doc.asset_dir);
+            eprintln!("FREEZE_PRESS t={t:.3} src={src:.3} out={rel}");
+            std::thread::spawn(move || {
+                use std::os::windows::process::CommandExt;
+                let _ = std::fs::create_dir_all(&dir);
                 let ff = ["C:/Users/Owner/ffmpeg/bin/ffmpeg.exe", "C:/ffmpeg/bin/ffmpeg.exe"]
                     .into_iter()
                     .find(|f| std::path::Path::new(f).exists())
                     .unwrap_or("ffmpeg");
+                let t0 = std::time::Instant::now();
+                let tmp = format!("{out}.part.png");
                 let ok = std::process::Command::new(ff)
                     .args([
                         "-y",
@@ -2921,27 +2966,29 @@ impl App {
                         &srcp,
                         "-frames:v",
                         "1",
-                        &out,
+                        &tmp,
                     ])
+                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status()
                     .map(|st| st.success())
                     .unwrap_or(false);
-                let good = ok
-                    && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false);
-                good.then_some(rel)
+                let good = ok && std::fs::metadata(&tmp).map(|m| m.len() > 0).unwrap_or(false);
+                if good {
+                    let _ = std::fs::rename(&tmp, &out);
+                    eprintln!("FZ_BAKE_DONE {}ms {rel}", t0.elapsed().as_millis());
+                } else {
+                    let _ = std::fs::remove_file(&tmp);
+                    eprintln!("FZ_BAKE_FAIL {}ms {rel} src={srcp}", t0.elapsed().as_millis());
+                }
             });
-        let has_png = still_rel.is_some();
+        }
         self.apply_edit(true, move |raw| {
             edits::freeze_frame_with_still(raw, &id, t, 2.0, salt, still_rel)
         });
         self.push_req(false);
-        self.toast(if has_png {
-            "フリーズフレームを挿入しました（2秒・静止画ファイル生成済み）"
-        } else {
-            "フリーズフレームを挿入しました（2秒）"
-        });
+        self.toast("フリーズフレームを挿入しました（2秒・静止画は数秒で確定します）");
     }
 
     /// Insert a library asset at the playhead on the main video lane (ripple insert).
