@@ -378,22 +378,22 @@ fn draw_plain_pip(
     let p2 = doc.asset_path_q(aid, original);
     let src_t = c.src_at(t);
     if c.is_freeze() {
-        // freeze PiP renders from the still cache too — zero pool traffic after the
-        // first decode; the still is only baked from an EXACT frame
-        let key = (p2.clone(), (src_t * 1000.0).round() as i64);
+        // freeze PiP: asset-keyed still, baked only from an exact ORIGINAL decode
+        let key = (format!("fz:{aid}"), (src_t * 1000.0).round() as i64);
         let got = comp.still_get(&key);
         let (tex, wh) = if let Some(x) = got {
             x
         } else {
             let vs = pool.get(d3d, &p2, 0, false, src_t)?;
             let is_exact = if fast {
-                vs.ensure_frame_scrub(d3d, src_t, 12.0)?
+                vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                false
             } else {
                 vs.ensure_frame(d3d, src_t)?;
                 true
             };
             let tw = (vs.bgra.clone(), (vs.width, vs.height));
-            if is_exact {
+            if is_exact && original {
                 comp.still_put(d3d, key, &tw.0, tw.1)?;
             }
             tw
@@ -462,9 +462,9 @@ fn compose(
                 // clip (budgeted approximations differ per position) and fought the pool.
                 let fz_keys = if c.is_freeze() {
                     Some((
-                        (opath.clone(), (src_t * 1000.0).round() as i64),
-                        (format!("{mt_path}#0"), (mt_t * 1000.0).round() as i64),
-                        (format!("{mt_path}#1"), (mt_t * 1000.0).round() as i64),
+                        (format!("fz:{aid}"), (src_t * 1000.0).round() as i64),
+                        (format!("fz:{key}#mt0"), (mt_t * 1000.0).round() as i64),
+                        (format!("fz:{key}#mt1"), (mt_t * 1000.0).round() as i64),
                     ))
                 } else {
                     None
@@ -478,16 +478,20 @@ fn compose(
                     ptex = pp;
                     stex = ss;
                 } else {
+                    if fz_keys.is_some() {
+                        // freeze still not baked yet: whatever we show now is provisional —
+                        // force a settle pass so the ORIGINAL-quality bake happens at rest
+                        exact = false;
+                    }
                     let o = {
                         let sdec = pool.get(d3d, &opath, 0, false, src_t)?;
-                        if fast && fz_keys.is_none() {
+                        if fast {
                             if Instant::now() < f_deadline {
                                 exact &= sdec.ensure_frame_scrub(d3d, src_t, 12.0)?;
                             } else {
                                 exact = false; // out of budget — stale person, refined at rest
                             }
                         } else {
-                            // freeze bakes want the EXACT frame even mid-scrub (one-time cost)
                             sdec.ensure_frame(d3d, src_t)
                                 .map_err(|e| e.context(format!("live-orig {} src_t={src_t:.2}", sdec.name)))?;
                         }
@@ -496,7 +500,7 @@ fn compose(
                     let mut mt_tex = Vec::with_capacity(2);
                     for stream in [MT_PERSON, MT_SHADOW] {
                         let sdec = pool.get(d3d, &mt_path, stream, true, mt_t)?;
-                        if fast && fz_keys.is_none() {
+                        if fast {
                             if Instant::now() < f_deadline {
                                 exact &= sdec.ensure_frame_scrub(d3d, mt_t, 8.0)?;
                             } else {
@@ -510,7 +514,7 @@ fn compose(
                     }
                     let ss = mt_tex.pop().unwrap();
                     let pp = mt_tex.pop().unwrap();
-                    if let Some((ko, kp, ks)) = fz_keys {
+                    if let (Some((ko, kp, ks)), true) = (fz_keys, original && !fast) {
                         let _ = comp.still_put(d3d, ko, &o.0, o.1);
                         let _ = comp.still_put(d3d, kp, &pp.0, pp.1);
                         let _ = comp.still_put(d3d, ks, &ss.0, ss.1);
@@ -592,29 +596,29 @@ fn compose(
                 src_t = snap_src_t(pts_maps, aid, src_t);
             }
             if c.is_freeze() {
-                // freeze frames render from a private still — no pool traffic, so the
-                // neighbouring clips keep their ping-pong decoder instances (the stutter
-                // around a freeze was this exact contention). The still is baked from an
-                // EXACT frame only; a mid-scrub tick before it exists shows the budget
-                // frame WITHOUT caching it (a cached approximation would freeze the wrong
-                // picture forever).
-                let key = (path.clone(), (src_t * 1000.0).round() as i64);
+                // Freeze still: keyed by ASSET (a path key forked into separate proxy- and
+                // original-quality stills that visibly swapped), baked ONLY from an exact
+                // ORIGINAL decode. Until it exists, live frames show WITHOUT being cached.
+                let key = (format!("fz:{aid}"), (src_t * 1000.0).round() as i64);
                 let got = comp.still_get(&key);
                 let (tex, wh) = if let Some(x) = got {
                     x
                 } else {
                     let vs = pool.get(d3d, &path, 0, false, src_t)?;
+                    if !original {
+                        exact = false; // proxy frame is provisional — settle bakes the still
+                    }
                     let is_exact = if fast {
-                        vs.ensure_frame_scrub(d3d, src_t, 12.0)?
+                        exact = false; // still not baked yet — settle must come back
+                        vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                        false
                     } else {
                         vs.ensure_frame(d3d, src_t)?;
                         true
                     };
                     let tw = (vs.bgra.clone(), (vs.width, vs.height));
-                    if is_exact {
+                    if is_exact && original {
                         comp.still_put(d3d, key, &tw.0, tw.1)?;
-                    } else {
-                        exact = false; // refine loop will come back and bake it properly
                     }
                     tw
                 };
@@ -2826,6 +2830,39 @@ impl App {
             self.toast("フリーズ: 再生ヘッドを映像クリップの上に置いてください");
             return;
         };
+        // Snap the captured SOURCE time to a real frame start (pts sidecar) — the paused
+        // preview shows the snapped frame, so an unsnapped capture froze a picture up to
+        // one frame away from what the user was looking at.
+        let snap_delta = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .find(|c| c.id == id)
+            .and_then(|c| {
+                let aid = c.asset_id.as_deref()?;
+                let src = c.source_start + (t - c.timeline_start);
+                let p = format!("{}/{aid}_proxy.pts.json", self.doc.asset_dir);
+                let txt = std::fs::read_to_string(p).ok()?;
+                let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+                let pts: Vec<f64> = v
+                    .get("pts")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|x| x.as_f64())
+                    .collect();
+                if pts.is_empty() {
+                    return None;
+                }
+                let i = pts.partition_point(|p| *p <= src);
+                let lo = if i > 0 { pts[i - 1] } else { pts[0] };
+                let hi = *pts.get(i).unwrap_or(&lo);
+                let chosen = if (src - lo).abs() <= (hi - src).abs() { lo } else { hi };
+                Some(chosen + 0.0002 - src)
+            })
+            .unwrap_or(0.0);
+        let t = t + snap_delta; // shift the split point so src lands ON the frame
         let salt = self.salt;
         self.salt += 1;
         self.apply_edit(true, move |raw| edits::freeze_frame(raw, &id, t, 2.0, salt));
