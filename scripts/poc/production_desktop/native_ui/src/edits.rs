@@ -390,6 +390,106 @@ pub fn magnet_delete(raw: &mut Value, ids: &[String]) {
     ripple_delete(raw, ids);
 }
 
+/// Ripple-shift every clip starting at/after `t` right by `d` (all lanes).
+fn ripple_open(raw: &mut Value, t: f64, d: f64) {
+    for_each_clip(raw, |c| {
+        let cs = f(c, "timeline_start");
+        if cs >= t - 1e-6 {
+            let ce = f(c, "timeline_end");
+            setf(c, "timeline_start", cs + d);
+            setf(c, "timeline_end", ce + d);
+        }
+    });
+}
+
+/// Freeze-frame: split `id` at `t`, open a `dur`-second hole, and drop in a clip that
+/// holds the frame (exporter convention: source_start >= source_end = freeze).
+pub fn freeze_frame(raw: &mut Value, id: &str, t: f64, dur: f64, salt: u64) {
+    // capture BEFORE splitting: the source time under the playhead + the track/asset
+    let mut info: Option<(String, f64)> = None; // (asset_id, src_at)
+    let mut track_idx: Option<usize> = None;
+    if let Some(tracks) = tracks_ref(raw) {
+        for (ti, tr) in tracks.iter().enumerate() {
+            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                if sid(c) == id {
+                    let src = f(c, "source_start") + (t - f(c, "timeline_start"));
+                    if let Some(aid) = c.get("asset_id").and_then(|v| v.as_str()) {
+                        info = Some((aid.to_string(), src));
+                        track_idx = Some(ti);
+                    }
+                }
+            }
+        }
+    }
+    let Some((aid, src)) = info else { return };
+    let ids = expand_links(raw, &[id.to_string()]);
+    split_clips(raw, &ids, t, salt);
+    ripple_open(raw, t, dur);
+    let clip = serde_json::json!({
+        "id": format!("fz_{salt}_{}", &aid[..8.min(aid.len())]),
+        "asset_id": aid,
+        "timeline_start": (t * 1000.0).round() / 1000.0,
+        "timeline_end": ((t + dur) * 1000.0).round() / 1000.0,
+        "source_start": (src * 1000.0).round() / 1000.0,
+        "source_end": (src * 1000.0).round() / 1000.0,
+    });
+    if let (Some(tracks), Some(ti)) = (tracks_mut(raw), track_idx) {
+        if let Some(cs) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
+            cs.push(clip);
+        }
+    }
+}
+
+/// Insert a library asset at `t` on the main video lane (ripple insert on all lanes),
+/// with a linked audio clip when the asset has sound.
+pub fn insert_asset(raw: &mut Value, t: f64, dur: f64, asset_id: &str, has_audio: bool, salt: u64) {
+    ripple_open(raw, t, dur);
+    let link = format!("lk_ins_{salt}");
+    let vclip = serde_json::json!({
+        "id": format!("ins_v_{salt}"),
+        "asset_id": asset_id,
+        "timeline_start": (t * 1000.0).round() / 1000.0,
+        "timeline_end": ((t + dur) * 1000.0).round() / 1000.0,
+        "source_start": 0.0,
+        "source_end": (dur * 1000.0).round() / 1000.0,
+        "link_id": link,
+    });
+    let Some(tracks) = tracks_mut(raw) else { return };
+    let vt = tracks
+        .iter()
+        .position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("video"));
+    match vt {
+        Some(ti) => {
+            if let Some(cs) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
+                cs.push(vclip);
+            }
+        }
+        None => tracks.push(serde_json::json!({"id": "video_ins", "type": "video", "clips": [vclip]})),
+    }
+    if has_audio {
+        let aclip = serde_json::json!({
+            "id": format!("ins_a_{salt}"),
+            "asset_id": asset_id,
+            "timeline_start": (t * 1000.0).round() / 1000.0,
+            "timeline_end": ((t + dur) * 1000.0).round() / 1000.0,
+            "source_start": 0.0,
+            "source_end": (dur * 1000.0).round() / 1000.0,
+            "link_id": link,
+        });
+        let at = tracks
+            .iter()
+            .position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("audio"));
+        match at {
+            Some(ti) => {
+                if let Some(cs) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
+                    cs.push(aclip);
+                }
+            }
+            None => tracks.push(serde_json::json!({"id": "audio_ins", "type": "audio", "clips": [aclip]})),
+        }
+    }
+}
+
 fn tracks_ref(root: &Value) -> Option<&Vec<Value>> {
     root.get(0)?
         .get("timeline")?

@@ -48,6 +48,8 @@ pub struct Clip {
     #[serde(default)]
     pub source_start: f64,
     #[serde(default)]
+    pub source_end: Option<f64>,
+    #[serde(default)]
     pub timeline_start: f64,
     #[serde(default)]
     pub timeline_end: f64,
@@ -120,6 +122,18 @@ impl PopMeta {
 }
 
 impl Clip {
+    /// Freeze-frame clip? (exporter convention: source_start >= source_end)
+    pub fn is_freeze(&self) -> bool {
+        self.source_end.map(|se| se <= self.source_start + 1e-6).unwrap_or(false)
+    }
+    /// Source time shown at timeline time t — a freeze clip holds its one frame.
+    pub fn src_at(&self, t: f64) -> f64 {
+        if self.is_freeze() {
+            self.source_start
+        } else {
+            self.source_start + (t - self.timeline_start)
+        }
+    }
     /// Per-edge crop fractions (left, top, right, bottom), clamped like the exporter.
     pub fn crop_ltrb(&self) -> Option<(f64, f64, f64, f64)> {
         let c = self.crop.as_ref()?;
