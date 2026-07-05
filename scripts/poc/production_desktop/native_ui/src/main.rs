@@ -3098,6 +3098,77 @@ impl App {
     /// Open a content in the editor. The editor machinery assumes index 0, so the picked
     /// content is moved to the array head (order is cosmetic; saving writes the whole
     /// array back, nothing is lost).
+    /// Legacy freeze clips (created before the materialized-PNG era, or while the
+    /// silent ffmpeg bug ate the bake) have no freeze_still and fall back to per-frame
+    /// decoding forever — the measured source of "the still moves". Bake their PNGs.
+    fn migrate_legacy_freezes(&mut self) {
+        let jobs: Vec<(String, String, f64)> = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| c.is_freeze() && c.freeze_still.is_none() && c.asset_id.is_some())
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    self.doc.asset_path_q(c.asset_id.as_deref().unwrap(), true),
+                    c.source_start,
+                )
+            })
+            .collect();
+        if jobs.is_empty() {
+            return;
+        }
+        eprintln!("FZ_MIGRATE {} legacy freeze clips", jobs.len());
+        for (cid, srcp, src) in jobs {
+            let rel = format!("stills/fzmig_{}.png", cid.replace(['/', '\\'], "_"));
+            let out = format!("{}/{rel}", self.doc.asset_dir);
+            let dir = format!("{}/stills", self.doc.asset_dir);
+            let rel2 = rel.clone();
+            let cid2 = cid.clone();
+            self.apply_edit(false, move |raw| {
+                edits::set_freeze_still(raw, &cid2, &rel2);
+            });
+            if std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) {
+                continue; // already baked in an earlier session
+            }
+            std::thread::spawn(move || {
+                use std::os::windows::process::CommandExt;
+                let _ = std::fs::create_dir_all(&dir);
+                let ff = ["C:/Users/Owner/ffmpeg/bin/ffmpeg.exe", "C:/ffmpeg/bin/ffmpeg.exe"]
+                    .into_iter()
+                    .find(|f| std::path::Path::new(f).exists())
+                    .unwrap_or("ffmpeg");
+                let tmp = format!("{out}.part.png");
+                let ok = std::process::Command::new(ff)
+                    .args([
+                        "-y",
+                        "-ss",
+                        &format!("{:.4}", (src - 0.0002).max(0.0)),
+                        "-i",
+                        &srcp,
+                        "-frames:v",
+                        "1",
+                        &tmp,
+                    ])
+                    .creation_flags(0x0800_0000)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|st| st.success())
+                    .unwrap_or(false);
+                if ok && std::fs::metadata(&tmp).map(|m| m.len() > 0).unwrap_or(false) {
+                    let _ = std::fs::rename(&tmp, &out);
+                    eprintln!("FZ_MIGRATE_DONE {rel}");
+                } else {
+                    let _ = std::fs::remove_file(&tmp);
+                    eprintln!("FZ_MIGRATE_FAIL {rel}");
+                }
+            });
+        }
+    }
+
     fn open_content(&mut self, content_id: &str) {
         let path = format!("{}/contents.json", self.doc.asset_dir);
         let Ok(txt) = std::fs::read_to_string(&path) else { return };
@@ -3121,6 +3192,7 @@ impl App {
             self.pop_states.clear();
             self.screen = Screen::Editor;
             self.push_req(false);
+            self.migrate_legacy_freezes();
         }
     }
 
