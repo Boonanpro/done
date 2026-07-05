@@ -432,7 +432,7 @@ fn compose(
                 let opath = doc.asset_path_q(aid, original);
                 let src_t = c.src_at(t);
                 let mt_path = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
-                let mt_t = off + (t - c.timeline_start);
+                let mt_t = if c.is_freeze() { off } else { off + (t - c.timeline_start) };
                 // ONE pool.get per stream: a second get in the same compose sees the
                 // instance as busy-this-frame and OPENS A SPARE (~50ms + an empty texture)
                 // — that was 110ms/frame of the pop-out scrub cost
@@ -492,7 +492,7 @@ fn compose(
                 continue;
             }
             let pv_draw = (|pool: &mut media::VideoPool, comp: &mut compositor::Compositor, used: &mut Vec<String>| -> anyhow::Result<()> {
-                let src_t = off + (t - c.timeline_start);
+                let src_t = if c.is_freeze() { off } else { off + (t - c.timeline_start) };
                 const COLOR: u32 = 1; // MF enumerates this pv's 2 video tracks in reverse mux order
                 const MATTE: u32 = 0;
                 let (ctex, cwh) = {

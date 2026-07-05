@@ -422,17 +422,31 @@ pub fn freeze_frame(raw: &mut Value, id: &str, t: f64, dur: f64, salt: u64) {
         }
     }
     let Some((aid, src)) = info else { return };
+    // FULL CLONE of the source clip: position / size / pop-out effect / crop / volume /
+    // style all survive the freeze — only the identity and the time fields change
+    // (a bare {asset,time} clip snapped pop-outs back to full frame: the reported bug)
+    let mut template: Option<Value> = None;
+    if let Some(tracks) = tracks_ref(raw) {
+        for tr in tracks {
+            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                if sid(c) == id {
+                    template = Some(c.clone());
+                }
+            }
+        }
+    }
     let ids = expand_links(raw, &[id.to_string()]);
     split_clips(raw, &ids, t, salt);
     ripple_open(raw, t, dur);
-    let clip = serde_json::json!({
-        "id": format!("fz_{salt}_{}", &aid[..8.min(aid.len())]),
-        "asset_id": aid,
-        "timeline_start": (t * 1000.0).round() / 1000.0,
-        "timeline_end": ((t + dur) * 1000.0).round() / 1000.0,
-        "source_start": (src * 1000.0).round() / 1000.0,
-        "source_end": (src * 1000.0).round() / 1000.0,
-    });
+    let mut clip = template.unwrap_or_else(|| serde_json::json!({"asset_id": aid}));
+    clip["id"] = Value::from(format!("fz_{salt}_{}", &aid[..8.min(aid.len())]));
+    setf(&mut clip, "timeline_start", t);
+    setf(&mut clip, "timeline_end", t + dur);
+    setf(&mut clip, "source_start", src);
+    setf(&mut clip, "source_end", src);
+    if let Some(o) = clip.as_object_mut() {
+        o.remove("link_id"); // no linked audio: a freeze is silent
+    }
     if let (Some(tracks), Some(ti)) = (tracks_mut(raw), track_idx) {
         if let Some(cs) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
             cs.push(clip);
