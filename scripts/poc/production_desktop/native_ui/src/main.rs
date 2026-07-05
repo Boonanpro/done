@@ -2680,6 +2680,55 @@ impl App {
         self.toast("素材を挿入しました（後ろは右にシフト）");
     }
 
+    /// Load (and lazily generate) library thumbnails — used by the library grid AND the
+    /// editor's ＋素材 menu.
+    fn ensure_lib_thumbs(&mut self, ctx: &egui::Context) {
+        let room_dir = self.doc.asset_dir.clone();
+        let ids: Vec<String> = self
+            .lib
+            .assets
+            .iter()
+            .filter_map(|a| a.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+        for id in ids {
+            if self.lib.thumbs.contains_key(&id) {
+                continue;
+            }
+            let p = format!("{room_dir}/{id}_thumb.jpg");
+            if !std::path::Path::new(&p).exists() && !self.lib.thumb_tried.contains(&id) {
+                // missing thumb: spawn ffmpeg once against the proxy (or original)
+                self.lib.thumb_tried.insert(id.clone());
+                let src = [format!("{room_dir}/{id}_proxy.mp4"), format!("{room_dir}/{id}.mp4")]
+                    .into_iter()
+                    .find(|f| std::fs::metadata(f).map(|m| m.len() > 0).unwrap_or(false));
+                if let Some(src) = src {
+                    let ff = ["ffmpeg", "C:/Users/Owner/ffmpeg/bin/ffmpeg.exe", "C:/ffmpeg/bin/ffmpeg.exe"]
+                        .into_iter()
+                        .find(|f| *f == "ffmpeg" || std::path::Path::new(f).exists())
+                        .unwrap_or("ffmpeg");
+                    let _ = std::process::Command::new(ff)
+                        .args(["-y", "-ss", "0.5", "-i", &src, "-frames:v", "1", "-vf", "scale=320:-2", &p])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(&p) {
+                if let Ok(img) = image::load_from_memory(&bytes) {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+                    let tex = ctx.load_texture(
+                        format!("lib_{id}"),
+                        egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.lib.thumbs.insert(id, tex);
+                }
+            }
+        }
+    }
+
     fn lib_get(&self, tag: &str, path: String) {
         let sink = self.lib_sink.clone();
         let tag = tag.to_string();
@@ -3810,9 +3859,9 @@ impl App {
             p.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(90, 160, 255, 24));
             p.rect_stroke(r, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 180, 255)));
         }
-        // edge auto-scroll: dragging (playhead/clip/marquee) against the view edge slides
-        // the timeline; anywhere else the view stays put
-        if self.drag != Drag::None {
+        // edge auto-scroll: ONLY while the playhead is actively held (Scrub drag with the
+        // button down) — clip drags and a merely-hovering mouse never move the view
+        if matches!(self.drag, Drag::Scrub) && ui.input(|i| i.pointer.primary_down()) {
             if let Some(pt) = ui.input(|i| i.pointer.interact_pos()) {
                 const EDGE: f32 = 26.0;
                 let speed = |d: f32| ((EDGE - d) / EDGE * 14.0).clamp(2.0, 14.0);
@@ -3839,7 +3888,8 @@ impl App {
                 self.lane_reorder = None;
             }
         }
-        if resp.drag_stopped() {
+        let released_now = ui.input(|i| i.pointer.any_released());
+        if resp.drag_stopped() || (released_now && self.drag != Drag::None) {
             let prev = std::mem::replace(&mut self.drag, Drag::None);
             if let Drag::Marquee { anchor } = &prev {
                 let moved = self
@@ -4083,51 +4133,7 @@ impl App {
                 self.start_generation();
             }
         }
-        // thumbnails from the room dir ({id}_thumb.jpg) — decoded once, cached
-        let room_dir = self.doc.asset_dir.clone();
-        let ids: Vec<String> = self
-            .lib
-            .assets
-            .iter()
-            .filter_map(|a| a.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .collect();
-        for id in ids {
-            if self.lib.thumbs.contains_key(&id) {
-                continue;
-            }
-            let p = format!("{room_dir}/{id}_thumb.jpg");
-            if !std::path::Path::new(&p).exists() && !self.lib.thumb_tried.contains(&id) {
-                // missing thumb: spawn ffmpeg once against the proxy (or original)
-                self.lib.thumb_tried.insert(id.clone());
-                let src = [format!("{room_dir}/{id}_proxy.mp4"), format!("{room_dir}/{id}.mp4")]
-                    .into_iter()
-                    .find(|f| std::fs::metadata(f).map(|m| m.len() > 0).unwrap_or(false));
-                if let Some(src) = src {
-                    let ff = ["ffmpeg", "C:/Users/Owner/ffmpeg/bin/ffmpeg.exe", "C:/ffmpeg/bin/ffmpeg.exe"]
-                        .into_iter()
-                        .find(|f| *f == "ffmpeg" || std::path::Path::new(f).exists())
-                        .unwrap_or("ffmpeg");
-                    let _ = std::process::Command::new(ff)
-                        .args(["-y", "-ss", "0.5", "-i", &src, "-frames:v", "1", "-vf", "scale=320:-2", &p])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .spawn();
-                }
-                continue;
-            }
-            if let Ok(bytes) = std::fs::read(&p) {
-                if let Ok(img) = image::load_from_memory(&bytes) {
-                    let rgba = img.to_rgba8();
-                    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-                    let tex = ctx.load_texture(
-                        format!("lib_{id}"),
-                        egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
-                        egui::TextureOptions::LINEAR,
-                    );
-                    self.lib.thumbs.insert(id, tex);
-                }
-            }
-        }
+        self.ensure_lib_thumbs(ctx);
         egui::SidePanel::right("gen_panel").exact_width(360.0).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(10.0);
@@ -4629,12 +4635,13 @@ impl eframe::App for App {
                     self.blur_drag = None;
                 }
                 ui.menu_button("＋素材", |ui| {
-                    ui.set_min_width(240.0);
+                    ui.set_min_width(260.0);
                     ui.label(egui::RichText::new("再生ヘッドの位置に挿入（後ろは右へ）").weak().small());
                     if self.lib.assets.is_empty() {
                         self.lib_refresh();
                         ui.label("読み込み中…");
                     }
+                    self.ensure_lib_thumbs(ui.ctx());
                     let assets: Vec<serde_json::Value> = self
                         .lib
                         .assets
@@ -4642,18 +4649,68 @@ impl eframe::App for App {
                         .filter(|a| a.get("source_type").and_then(|v| v.as_str()) != Some("generated"))
                         .cloned()
                         .collect();
-                    for a in &assets {
-                        let name = a
-                            .get("filename")
-                            .or_else(|| a.get("name"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("(無名)");
-                        let short: String = name.chars().take(24).collect();
-                        if ui.button(format!("🎞 {short}")).clicked() {
-                            self.insert_asset_at_playhead(a);
-                            ui.close_menu();
+                    egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                        for a in &assets {
+                            let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            let name = a
+                                .get("filename")
+                                .or_else(|| a.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("(無名)");
+                            let dur = a
+                                .get("metadata")
+                                .and_then(|m| m.get("duration"))
+                                .and_then(|d| d.as_f64())
+                                .unwrap_or(0.0);
+                            let (rect, resp) =
+                                ui.allocate_exact_size(egui::vec2(250.0, 60.0), egui::Sense::click());
+                            let pp = ui.painter_at(rect);
+                            let hov = resp.hovered();
+                            pp.rect_filled(
+                                rect,
+                                6.0,
+                                if hov { egui::Color32::from_rgb(46, 46, 52) } else { egui::Color32::from_rgb(32, 32, 37) },
+                            );
+                            let img_r = egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), egui::vec2(92.0, 52.0));
+                            if let Some(t) = self.lib.thumbs.get(&id) {
+                                pp.image(
+                                    t.id(),
+                                    img_r,
+                                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                    egui::Color32::WHITE,
+                                );
+                            } else {
+                                pp.rect_filled(img_r, 4.0, egui::Color32::from_rgb(18, 18, 21));
+                                pp.text(img_r.center(), egui::Align2::CENTER_CENTER, "🎞", egui::FontId::proportional(18.0), egui::Color32::from_gray(80));
+                            }
+                            let short: String = name.chars().take(18).collect();
+                            pp.text(
+                                egui::pos2(img_r.right() + 8.0, rect.top() + 20.0),
+                                egui::Align2::LEFT_CENTER,
+                                short,
+                                egui::FontId::proportional(11.5),
+                                egui::Color32::from_gray(225),
+                            );
+                            if dur > 0.0 {
+                                pp.text(
+                                    egui::pos2(img_r.right() + 8.0, rect.bottom() - 15.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    format!("{:.0}:{:02}", dur as i64 / 60, dur as i64 % 60),
+                                    egui::FontId::proportional(10.0),
+                                    egui::Color32::from_gray(140),
+                                );
+                            }
+                            if hov {
+                                pp.rect_stroke(rect, 6.0, egui::Stroke::new(1.2, UI_ACCENT));
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            }
+                            if resp.clicked() {
+                                self.insert_asset_at_playhead(a);
+                                ui.close_menu();
+                            }
+                            ui.add_space(3.0);
                         }
-                    }
+                    });
                 });
                 if ui
                     .selectable_label(self.revise_open, "🤖 ダンに指示")
