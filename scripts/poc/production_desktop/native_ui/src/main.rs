@@ -580,31 +580,36 @@ fn prime_upcoming(
     }
     ups.sort_by(|a, b| a.timeline_start.partial_cmp(&b.timeline_start).unwrap());
     for c in ups {
-        let worked = if let Some((key, off)) = c.popout_key() {
-            let live = masks.get(&key).map_or(false, |o| o.is_some());
-            if live {
-                let mt = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
-                let orig = c
-                    .asset_id
-                    .as_deref()
-                    .map(|aid| doc.asset_path_q(aid, original));
-                orig.map(|p| pool.prime_spare(d3d, &p, 0, false, c.source_start).unwrap_or(false))
-                    .unwrap_or(false)
-                    || pool.prime_spare(d3d, &mt, MT_PERSON, true, off).unwrap_or(false)
-                    || pool.prime_spare(d3d, &mt, MT_SHADOW, true, off).unwrap_or(false)
+        let mut step = |pool: &mut media::VideoPool| -> bool {
+            if let Some((key, off)) = c.popout_key() {
+                let live = masks.get(&key).map_or(false, |o| o.is_some());
+                if live {
+                    let mt = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
+                    let orig = c
+                        .asset_id
+                        .as_deref()
+                        .map(|aid| doc.asset_path_q(aid, original));
+                    orig.map(|p| pool.prime_spare(d3d, &p, 0, false, c.source_start).unwrap_or(false))
+                        .unwrap_or(false)
+                        || pool.prime_spare(d3d, &mt, MT_PERSON, true, off).unwrap_or(false)
+                        || pool.prime_spare(d3d, &mt, MT_SHADOW, true, off).unwrap_or(false)
+                } else {
+                    let path = doc.rel_path(&format!("popout-cache/{key}.pv.mp4"));
+                    pool.prime_spare(d3d, &path, 0, true, off).unwrap_or(false)
+                        || pool.prime_spare(d3d, &path, 1, false, off).unwrap_or(false)
+                }
+            } else if let Some(aid) = c.asset_id.as_deref() {
+                let path = doc.asset_path_q(aid, original);
+                pool.prime_spare(d3d, &path, 0, false, c.source_start).unwrap_or(false)
             } else {
-                let path = doc.rel_path(&format!("popout-cache/{key}.pv.mp4"));
-                pool.prime_spare(d3d, &path, 0, true, off).unwrap_or(false)
-                    || pool.prime_spare(d3d, &path, 1, false, off).unwrap_or(false)
+                false
             }
-        } else if let Some(aid) = c.asset_id.as_deref() {
-            let path = doc.asset_path_q(aid, original);
-            pool.prime_spare(d3d, &path, 0, false, c.source_start).unwrap_or(false)
-        } else {
-            false
         };
-        if worked {
-            return; // one slice per loop — the ring keeps breathing
+        if step(pool) {
+            // strictly ONE decode-read per producer slice: a faster budgeted walk was
+            // tried and it GAP-stormed — aggressive priming keeps re-seating the spare
+            // the next compose is about to claim, so every join walked cold
+            return;
         }
     }
 }
@@ -1132,7 +1137,11 @@ fn media_thread(shared: Arc<Shared>) {
                             }
                             prev_was_compose = !from_cache;
                             ms_push = p0.elapsed().as_secs_f32() * 1000.0;
-                            if len >= 8 {
+                            // prime whenever we can afford it: a shallow ring is USUALLY
+                            // the rapid-boundary case (0.2-2s clips) that needs priming the
+                            // most — the old len>=8 gate starved exactly those boundaries
+                            // (measured as 200-500ms GAPs at clip joins)
+                            if len >= 4 || ms_comp < 15.0 {
                                 let p1 = Instant::now();
                                 prime_upcoming(&doc, &d3d, &mut pool, &masks, next_t, true, &used);
                                 ms_prime = p1.elapsed().as_secs_f32() * 1000.0;
