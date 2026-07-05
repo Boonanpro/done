@@ -380,6 +380,7 @@ fn draw_plain_pip(
     if c.is_freeze() {
         // freeze PiP: asset-keyed still, baked only from an exact ORIGINAL decode
         let key = (format!("fz:{aid}"), (src_t * 1000.0).round() as i64);
+        let _ = load_freeze_png(doc, d3d, comp, c, &key);
         let got = comp.still_get(&key);
         let (tex, wh) = if let Some(x) = got {
             x
@@ -411,6 +412,27 @@ fn draw_plain_pip(
     let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
     comp.draw_cropped(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), true, None, c.crop_ltrb())?;
     Ok(Some(p2))
+}
+
+/// Load a freeze clip's materialized PNG into the still cache (once). Returns whether
+/// the still is now available under `key`.
+fn load_freeze_png(
+    doc: &model::Doc,
+    d3d: &media::D3d,
+    comp: &compositor::Compositor,
+    c: &model::Clip,
+    key: &(String, i64),
+) -> bool {
+    if comp.still_get(key).is_some() {
+        return true;
+    }
+    let Some(rel) = c.freeze_still.as_deref() else { return false };
+    let p = doc.rel_path(rel);
+    let Ok(bytes) = std::fs::read(&p) else { return false };
+    let Ok(img) = image::load_from_memory(&bytes) else { return false };
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    comp.still_put_rgba(d3d, key.clone(), w, h, rgba.as_raw()).is_ok()
 }
 
 fn compose(
@@ -469,6 +491,9 @@ fn compose(
                 } else {
                     None
                 };
+                if let Some((ko, _, _)) = fz_keys.as_ref() {
+                    let _ = load_freeze_png(doc, d3d, comp, c, ko);
+                }
                 let cached = fz_keys.as_ref().and_then(|(ko, kp, ks)| {
                     Some((comp.still_get(ko)?, comp.still_get(kp)?, comp.still_get(ks)?))
                 });
@@ -600,6 +625,7 @@ fn compose(
                 // original-quality stills that visibly swapped), baked ONLY from an exact
                 // ORIGINAL decode. Until it exists, live frames show WITHOUT being cached.
                 let key = (format!("fz:{aid}"), (src_t * 1000.0).round() as i64);
+                let _ = load_freeze_png(doc, d3d, comp, c, &key);
                 let got = comp.still_get(&key);
                 let (tex, wh) = if let Some(x) = got {
                     x
@@ -2865,9 +2891,57 @@ impl App {
         let t = t + snap_delta; // shift the split point so src lands ON the frame
         let salt = self.salt;
         self.salt += 1;
-        self.apply_edit(true, move |raw| edits::freeze_frame(raw, &id, t, 2.0, salt));
+        // Filmora-style: write the frozen frame to a REAL image file right now and let the
+        // clip display that file — a materialized still cannot wander, ever
+        let still_rel = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .find(|c| c.id == id)
+            .and_then(|c| {
+                let aid = c.asset_id.as_deref()?;
+                let src = c.source_start + (t - c.timeline_start);
+                let dir = format!("{}/stills", self.doc.asset_dir);
+                let _ = std::fs::create_dir_all(&dir);
+                let rel = format!("stills/fz_{salt}.png");
+                let out = format!("{}/{rel}", self.doc.asset_dir);
+                let srcp = self.doc.asset_path_q(aid, true);
+                let ff = ["C:/Users/Owner/ffmpeg/bin/ffmpeg.exe", "C:/ffmpeg/bin/ffmpeg.exe"]
+                    .into_iter()
+                    .find(|f| std::path::Path::new(f).exists())
+                    .unwrap_or("ffmpeg");
+                let ok = std::process::Command::new(ff)
+                    .args([
+                        "-y",
+                        "-ss",
+                        &format!("{:.4}", (src - 0.0002).max(0.0)),
+                        "-i",
+                        &srcp,
+                        "-frames:v",
+                        "1",
+                        &out,
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|st| st.success())
+                    .unwrap_or(false);
+                let good = ok
+                    && std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false);
+                good.then_some(rel)
+            });
+        let has_png = still_rel.is_some();
+        self.apply_edit(true, move |raw| {
+            edits::freeze_frame_with_still(raw, &id, t, 2.0, salt, still_rel)
+        });
         self.push_req(false);
-        self.toast("フリーズフレームを挿入しました（2秒）");
+        self.toast(if has_png {
+            "フリーズフレームを挿入しました（2秒・静止画ファイル生成済み）"
+        } else {
+            "フリーズフレームを挿入しました（2秒）"
+        });
     }
 
     /// Insert a library asset at the playhead on the main video lane (ripple insert).
@@ -2919,9 +2993,9 @@ impl App {
                     .into_iter()
                     .find(|f| std::fs::metadata(f).map(|m| m.len() > 0).unwrap_or(false));
                 if let Some(src) = src {
-                    let ff = ["ffmpeg", "C:/Users/Owner/ffmpeg/bin/ffmpeg.exe", "C:/ffmpeg/bin/ffmpeg.exe"]
+                    let ff = ["C:/Users/Owner/ffmpeg/bin/ffmpeg.exe", "C:/ffmpeg/bin/ffmpeg.exe"]
                         .into_iter()
-                        .find(|f| *f == "ffmpeg" || std::path::Path::new(f).exists())
+                        .find(|f| std::path::Path::new(f).exists())
                         .unwrap_or("ffmpeg");
                     let _ = std::process::Command::new(ff)
                         .args(["-y", "-ss", "0.5", "-i", &src, "-frames:v", "1", "-vf", "scale=320:-2", &p])
@@ -4582,6 +4656,13 @@ impl eframe::App for App {
             return;
         }
         self.caption_cache_pass();
+        if let Ok(v) = std::env::var("NATIVE_FREEZE_AT") {
+            if let Ok(t) = v.parse::<f64>() {
+                std::env::set_var("NATIVE_FREEZE_AT", "");
+                self.t = t;
+                self.freeze_at_playhead();
+            }
+        }
         if let Ok(v) = std::env::var("NATIVE_SELECT") {
             if !v.is_empty() {
                 std::env::set_var("NATIVE_SELECT", "");

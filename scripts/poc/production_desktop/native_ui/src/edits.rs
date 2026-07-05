@@ -405,6 +405,21 @@ fn ripple_open(raw: &mut Value, t: f64, d: f64) {
 /// Freeze-frame: split `id` at `t`, open a `dur`-second hole, and drop in a clip that
 /// holds the frame (exporter convention: source_start >= source_end = freeze).
 pub fn freeze_frame(raw: &mut Value, id: &str, t: f64, dur: f64, salt: u64) {
+    freeze_frame_with_still(raw, id, t, dur, salt, None)
+}
+
+pub fn freeze_frame_with_still(
+    raw: &mut Value,
+    id: &str,
+    t: f64,
+    dur: f64,
+    salt: u64,
+    still_rel: Option<String>,
+) {
+    // Round ONCE to the same 3dp grid setf writes: the snap offset (+0.0002) put the
+    // ripple threshold 0.2ms ABOVE the rounded split point, so the right piece of the
+    // split escaped the shift and kept playing under the freeze.
+    let t = (t * 1000.0).round() / 1000.0;
     // capture BEFORE splitting: the source time under the playhead + the track/asset
     let mut info: Option<(String, f64)> = None; // (asset_id, src_at)
     let mut track_idx: Option<usize> = None;
@@ -435,7 +450,20 @@ pub fn freeze_frame(raw: &mut Value, id: &str, t: f64, dur: f64, salt: u64) {
             }
         }
     }
-    let ids = expand_links(raw, &[id.to_string()]);
+    // split EVERY clip straddling t (all lanes): a straddler that merely shifted kept
+    // playing UNDER the frozen span (video + still at once). Strict 映像→静止画→映像.
+    let mut straddlers: Vec<String> = Vec::new();
+    if let Some(tracks) = tracks_ref(raw) {
+        for tr in tracks {
+            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
+                if t > ts + 0.05 && t < te - 0.05 {
+                    straddlers.push(sid(c));
+                }
+            }
+        }
+    }
+    let ids = expand_links(raw, &straddlers);
     split_clips(raw, &ids, t, salt);
     ripple_open(raw, t, dur);
     let mut clip = template.unwrap_or_else(|| serde_json::json!({"asset_id": aid}));
@@ -446,6 +474,9 @@ pub fn freeze_frame(raw: &mut Value, id: &str, t: f64, dur: f64, salt: u64) {
     setf(&mut clip, "source_end", src);
     if let Some(o) = clip.as_object_mut() {
         o.remove("link_id"); // no linked audio: a freeze is silent
+        if let Some(p) = still_rel {
+            o.insert("freeze_still".into(), Value::from(p));
+        }
     }
     if let (Some(tracks), Some(ti)) = (tracks_mut(raw), track_idx) {
         if let Some(cs) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {

@@ -550,6 +550,50 @@ impl Compositor {
         }
     }
 
+    /// Build a still texture directly from CPU RGBA pixels (a decoded PNG) — the
+    /// deterministic path: no video decoder involved at all.
+    pub fn still_put_rgba(
+        &self,
+        d3d: &D3d,
+        key: (String, i64),
+        w: u32,
+        h: u32,
+        rgba: &[u8],
+    ) -> Result<()> {
+        unsafe {
+            // engine textures are BGRA — swizzle once on upload
+            let mut bgra = rgba.to_vec();
+            for px in bgra.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: w,
+                Height: h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_IMMUTABLE,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let init = D3D11_SUBRESOURCE_DATA {
+                pSysMem: bgra.as_ptr() as _,
+                SysMemPitch: w * 4,
+                SysMemSlicePitch: 0,
+            };
+            let mut tex: Option<ID3D11Texture2D> = None;
+            d3d.device.CreateTexture2D(&desc, Some(&init), Some(&mut tex))?;
+            let mut st = self.stills.borrow_mut();
+            if st.len() > 24 {
+                st.clear();
+            }
+            st.insert(key, (tex.unwrap(), (w, h)));
+            Ok(())
+        }
+    }
+
     pub fn still_get(&self, key: &(String, i64)) -> Option<(ID3D11Texture2D, (u32, u32))> {
         self.stills.borrow().get(key).cloned()
     }

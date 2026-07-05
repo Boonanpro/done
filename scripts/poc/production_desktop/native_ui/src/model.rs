@@ -43,6 +43,10 @@ pub struct Clip {
     pub crop: Option<serde_json::Value>,
     #[serde(default)]
     pub region: Option<serde_json::Value>,
+    // freeze-frame: room-relative path of the materialized PNG (Filmora-style: the still
+    // IS an image file — no decoder is ever consulted, so it cannot wander)
+    #[serde(default)]
+    pub freeze_still: Option<String>,
     #[serde(default)]
     pub style: Option<serde_json::Value>,
     #[serde(default)]
