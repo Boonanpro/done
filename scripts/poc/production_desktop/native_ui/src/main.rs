@@ -171,6 +171,7 @@ enum Drag {
     Move { ids: Vec<String>, grab: f64, orig: f64, applied: f64 },
     Trim { ids: Vec<String>, left: bool },
     Marquee { anchor: egui::Pos2 },
+    Volume { ids: Vec<String>, start_y: f32, start_vol: f64 },
 }
 
 /// Olive-style composed-frame cache: finished timeline frames (ORIGINAL quality, 30fps
@@ -2090,6 +2091,16 @@ impl App {
         let mag = if mag.is_empty() { mag } else { edits::expand_links(&self.doc.raw, &mag) };
         let plain: Vec<String> = plain.into_iter().filter(|i| !mag.contains(i)).collect();
         self.apply_edit(true, move |raw| {
+            // attached clips (head-under rule, any lane in front) go with EVERY deletion
+            let mut all: Vec<String> = mag.iter().chain(plain.iter()).cloned().collect();
+            let attached = edits::attached_to(raw, &all);
+            if !attached.is_empty() {
+                let att = edits::expand_links(raw, &attached);
+                edits::delete_clips(raw, &att);
+                all.retain(|i| !att.contains(i));
+            }
+            let plain: Vec<String> = all.iter().filter(|i| plain.contains(i)).cloned().collect();
+            let mag: Vec<String> = all.iter().filter(|i| mag.contains(i)).cloned().collect();
             if !plain.is_empty() {
                 edits::delete_clips(raw, &plain);
             }
@@ -3109,7 +3120,7 @@ impl App {
                             })
                             .unwrap_or(16.0 / 9.0);
                         let tile_w = (film_h * aspect).max(8.0);
-                        let mut x = x0.max(rect.left()); // start at the clip's true left edge
+                        let mut x = x0.max(body.left()); // clip's left edge, never into the header gutter
                         while x < r.right() {
                             let tt = c.source_start
                                 + (((x - x0) / self.pps) as f64).max(0.0);
@@ -3226,6 +3237,14 @@ impl App {
                         && ((pt.x - r.left()).abs() < 6.0 || (pt.x - r.right()).abs() < 6.0)
                     {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    } else if r.contains(pt)
+                        && pt.y > r.bottom() - 14.0
+                        && r.height() >= 40.0
+                        && c.link_id.is_some()
+                        && c.asset_id.is_some()
+                    {
+                        // waveform ribbon = volume zone
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                     }
                 }
                 if !tr.locked {
@@ -3320,7 +3339,31 @@ impl App {
                         let ids = edits::expand_links(&self.doc.raw, &self.selected);
                         if self.drag == Drag::None {
                             self.pending_undo = Some(self.doc.raw.clone());
-                            if (pos.x - r.left()).abs() < 6.0 {
+                            let vol_zone = pos.y > r.bottom() - 14.0
+                                && r.height() >= 40.0
+                                && (pos.x - r.left()).abs() >= 6.0
+                                && (pos.x - r.right()).abs() >= 6.0
+                                && self
+                                    .doc
+                                    .seq
+                                    .tracks
+                                    .iter()
+                                    .flat_map(|tr| tr.clips.iter())
+                                    .find(|c| c.id == *id)
+                                    .map(|c| c.link_id.is_some() && c.asset_id.is_some())
+                                    .unwrap_or(false);
+                            if vol_zone {
+                                let v0 = self
+                                    .doc
+                                    .seq
+                                    .tracks
+                                    .iter()
+                                    .flat_map(|tr| tr.clips.iter())
+                                    .find(|c| c.id == *id)
+                                    .map(|c| c.volume)
+                                    .unwrap_or(1.0);
+                                self.drag = Drag::Volume { ids, start_y: pos.y, start_vol: v0 };
+                            } else if (pos.x - r.left()).abs() < 6.0 {
                                 self.drag = Drag::Trim { ids, left: true };
                             } else if (pos.x - r.right()).abs() < 6.0 {
                                 self.drag = Drag::Trim { ids, left: false };
@@ -3422,6 +3465,18 @@ impl App {
                         self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
                         self.apply_edit(false, |raw| edits::trim_clip(raw, &ids, left, nt));
                     }
+                    Drag::Volume { ids, start_y, start_vol } => {
+                        let vol = (start_vol + ((start_y - pos.y) as f64) / 90.0).clamp(0.0, 2.0);
+                        self.apply_edit(false, |raw| edits::set_volume(raw, &ids, vol));
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                        p.text(
+                            pos + egui::vec2(12.0, -14.0),
+                            egui::Align2::LEFT_CENTER,
+                            format!("音量 {:.0}%", vol * 100.0),
+                            egui::FontId::proportional(11.0),
+                            egui::Color32::WHITE,
+                        );
+                    }
                     Drag::Marquee { anchor } => {
                         let r = egui::Rect::from_two_pos(anchor, pos);
                         self.marquee = Some(r);
@@ -3439,6 +3494,20 @@ impl App {
         if let Some(r) = self.marquee {
             p.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(90, 160, 255, 24));
             p.rect_stroke(r, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 180, 255)));
+        }
+        // edge auto-scroll: dragging (playhead/clip/marquee) against the view edge slides
+        // the timeline; anywhere else the view stays put
+        if self.drag != Drag::None {
+            if let Some(pt) = ui.input(|i| i.pointer.interact_pos()) {
+                const EDGE: f32 = 26.0;
+                let speed = |d: f32| ((EDGE - d) / EDGE * 14.0).clamp(2.0, 14.0);
+                if pt.x < body.left() + EDGE {
+                    self.scroll_x = (self.scroll_x - speed(pt.x - body.left())).max(0.0);
+                } else if pt.x > body.right() - EDGE {
+                    let max_sx = ((self.dur as f32) * self.pps - body.width()).max(0.0);
+                    self.scroll_x = (self.scroll_x + speed(body.right() - pt.x)).min(max_sx);
+                }
+            }
         }
         // lane reorder: while a header is being dragged, dropping over another lane's
         // row moves the track there (live on release)
@@ -3475,6 +3544,7 @@ impl App {
                     Drag::Move { .. } => "move",
                     Drag::Trim { .. } => "trim",
                     Drag::Marquee { .. } => "marquee",
+                    Drag::Volume { .. } => "volume",
                 },
                 self.hover_lane
             );
@@ -5015,6 +5085,12 @@ fn main() -> eframe::Result<()> {
             .collect();
         let ids = edits::expand_links(&doc.raw, &[vid.clone()]);
         let mut raw = doc.raw.clone();
+        // same sequence the Del key runs: generic attached pass, then magnet ripple
+        let attached = edits::attached_to(&raw, &ids);
+        if !attached.is_empty() {
+            let att = edits::expand_links(&raw, &attached);
+            edits::delete_clips(&mut raw, &att);
+        }
         edits::magnet_delete(&mut raw, &ids);
         let nd = model::Doc::from_raw(raw, &doc.contents_path, &doc.asset_dir).expect("redoc");
         let alive: std::collections::HashSet<&str> = nd

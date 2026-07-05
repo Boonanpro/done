@@ -325,6 +325,46 @@ pub fn set_track_flag(raw: &mut Value, ti: usize, key: &str, val: bool) {
     }
 }
 
+/// Clips ATTACHED to the given (about to be deleted) clips: a clip is attached when its
+/// HEAD sits over a deleted clip's span on a lane IN FRONT of it (higher stack index) —
+/// captions/effects riding a video, per Filmora/DaVinci. Locked lanes are left alone.
+/// Audio lanes are excluded (linked audio follows via expand_links; BGM is independent).
+pub fn attached_to(raw: &Value, ids: &[String]) -> Vec<String> {
+    let mut spans: Vec<(usize, f64, f64)> = Vec::new(); // (lane, ts, te)
+    if let Some(tracks) = tracks_ref(raw) {
+        for (ti, tr) in tracks.iter().enumerate() {
+            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                if ids.contains(&sid(c)) {
+                    spans.push((ti, f(c, "timeline_start"), f(c, "timeline_end")));
+                }
+            }
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    if let Some(tracks) = tracks_ref(raw) {
+        for (ti, tr) in tracks.iter().enumerate() {
+            let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if kind == "audio" || tr.get("locked").and_then(|v| v.as_bool()).unwrap_or(false) {
+                continue;
+            }
+            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                let id = sid(c);
+                if ids.contains(&id) || out.contains(&id) {
+                    continue;
+                }
+                let head = f(c, "timeline_start");
+                if spans
+                    .iter()
+                    .any(|&(si, ts, te)| ti > si && head >= ts - 1e-6 && head < te - 1e-6)
+                {
+                    out.push(id);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Magnet-lane delete: remove the clips, remove clips ATTACHED to them (a clip is attached
 /// to whichever deleted clip its HEAD sits on — Filmora/DaVinci rule; audio lanes excluded,
 /// BGM is independent), then close the gaps (ripple). `ids` should already be link-expanded.
@@ -344,30 +384,9 @@ pub fn magnet_delete(raw: &mut Value, ids: &[String]) {
             }
         }
     }
-    // attached = head inside a deleted span, on a non-audio lane other than the source lanes
-    let mut attached: Vec<String> = Vec::new();
-    if let Some(tracks) = tracks_ref(raw) {
-        for (ti, tr) in tracks.iter().enumerate() {
-            let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if kind == "audio" || src_tracks.contains(&ti) {
-                continue;
-            }
-            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
-                let id = sid(c);
-                if ids.contains(&id) {
-                    continue;
-                }
-                let head = f(c, "timeline_start");
-                if spans.iter().any(|&(ts, te)| head >= ts - 1e-6 && head < te - 1e-6) {
-                    attached.push(id);
-                }
-            }
-        }
-    }
-    if !attached.is_empty() {
-        let all = expand_links(raw, &attached); // pull their linked audio along
-        delete_clips(raw, &all);
-    }
+    // attached clips are handled generically by the caller (attached_to) for every
+    // deletion; here we only close the gap
+    let _ = src_tracks;
     ripple_delete(raw, ids);
 }
 
