@@ -171,6 +171,11 @@ pub struct Compositor {
     ps_popout_live: ID3D11PixelShader,
     ps_mosaic: ID3D11PixelShader,
     scratch: std::cell::RefCell<Option<ID3D11Texture2D>>,
+    // freeze-frame stills: (source path, src ms) -> a private copy of the decoded frame.
+    // A freeze clip re-requesting the SAME source time every frame kept fighting the
+    // ping-pong decoder instances with its neighbours (measured as stutter around the
+    // freeze) — one decode, one copy, zero pool traffic afterwards.
+    stills: std::cell::RefCell<std::collections::HashMap<(String, i64), (ID3D11Texture2D, (u32, u32))>>,
     cb: ID3D11Buffer,
     sampler: ID3D11SamplerState,
     blend: ID3D11BlendState,
@@ -274,6 +279,7 @@ impl Compositor {
                 ps_popout_live: ps_popout_live.unwrap(),
                 ps_mosaic: ps_mosaic.unwrap(),
                 scratch: std::cell::RefCell::new(None),
+                stills: std::cell::RefCell::new(Default::default()),
                 cb: cb.unwrap(),
                 sampler: sampler.unwrap(),
                 blend: blend.unwrap(),
@@ -542,6 +548,32 @@ impl Compositor {
             d3d.ctx.Draw(4, 0);
             Ok(())
         }
+    }
+
+    pub fn still_get(&self, key: &(String, i64)) -> Option<(ID3D11Texture2D, (u32, u32))> {
+        self.stills.borrow().get(key).cloned()
+    }
+
+    /// Store a private copy of `tex` for a freeze frame (bounded cache).
+    pub fn still_put(&self, d3d: &D3d, key: (String, i64), tex: &ID3D11Texture2D, wh: (u32, u32)) -> Result<()> {
+        unsafe {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            tex.GetDesc(&mut desc);
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.CPUAccessFlags = 0;
+            desc.MiscFlags = 0;
+            let mut copy: Option<ID3D11Texture2D> = None;
+            d3d.device.CreateTexture2D(&desc, None, Some(&mut copy))?;
+            let copy = copy.unwrap();
+            d3d.ctx.CopyResource(&copy, tex);
+            let mut st = self.stills.borrow_mut();
+            if st.len() > 24 {
+                st.clear();
+            }
+            st.insert(key, (copy, wh));
+        }
+        Ok(())
     }
 
     pub fn readback(&mut self, d3d: &D3d) -> Result<()> {
