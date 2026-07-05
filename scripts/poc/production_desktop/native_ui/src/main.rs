@@ -362,7 +362,7 @@ fn draw_plain_pip(
     let Some(aid) = c.asset_id.as_deref() else { return Ok(None) };
     let bb = c.popout_card_box().unwrap_or(b);
     let p2 = doc.asset_path_q(aid, original);
-    let src_t = c.source_start + (t - c.timeline_start);
+    let src_t = c.src_at(t);
     let vs = pool.get(d3d, &p2, 0, false, src_t)?;
     if fast {
         let _ = vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
@@ -413,7 +413,7 @@ fn compose(
             let live = masks.get(&key).and_then(|o| o.clone());
             if let (Some((meta, mask)), Some(aid)) = (live, c.asset_id.as_deref()) {
                 let opath = doc.asset_path_q(aid, original);
-                let src_t = c.source_start + (t - c.timeline_start);
+                let src_t = c.src_at(t);
                 let mt_path = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
                 let mt_t = off + (t - c.timeline_start);
                 // ONE pool.get per stream: a second get in the same compose sees the
@@ -518,7 +518,7 @@ fn compose(
             }
         } else if let Some(aid) = c.asset_id.as_deref() {
             let path = doc.asset_path_q(aid, original);
-            let mut src_t = c.source_start + (t - c.timeline_start);
+            let mut src_t = c.src_at(t);
             if !fast && original {
                 src_t = snap_src_t(pts_maps, aid, src_t);
             }
@@ -2564,6 +2564,62 @@ impl App {
         });
     }
 
+    /// F: freeze-frame — hold the frame under the playhead for 2s inside the selected
+    /// (or hit) clip; everything after shifts right (ripple insert).
+    fn freeze_at_playhead(&mut self) {
+        let t = self.t;
+        let target = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .filter(|tr| tr.kind != "audio")
+            .flat_map(|tr| tr.clips.iter())
+            .find(|c| {
+                c.asset_id.is_some()
+                    && t > c.timeline_start + 0.05
+                    && t < c.timeline_end - 0.05
+                    && (self.selected.is_empty() || self.selected.contains(&c.id))
+            })
+            .map(|c| c.id.clone());
+        let Some(id) = target else {
+            self.toast("フリーズ: 再生ヘッドを映像クリップの上に置いてください");
+            return;
+        };
+        let salt = self.salt;
+        self.salt += 1;
+        self.apply_edit(true, move |raw| edits::freeze_frame(raw, &id, t, 2.0, salt));
+        self.push_req(false);
+        self.toast("フリーズフレームを挿入しました（2秒）");
+    }
+
+    /// Insert a library asset at the playhead on the main video lane (ripple insert).
+    fn insert_asset_at_playhead(&mut self, asset: &serde_json::Value) {
+        let aid = asset.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if aid.is_empty() {
+            return;
+        }
+        let meta = asset.get("metadata").and_then(|m| m.as_object());
+        let dur = meta
+            .and_then(|m| m.get("duration"))
+            .and_then(|d| d.as_f64())
+            .unwrap_or(5.0)
+            .max(0.5);
+        let has_audio = meta
+            .and_then(|m| m.get("audio_codec"))
+            .and_then(|a| a.as_str())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        let t = self.t;
+        let salt = self.salt;
+        self.salt += 1;
+        self.apply_edit(true, move |raw| {
+            edits::insert_asset(raw, t, dur, &aid, has_audio, salt)
+        });
+        self.push_req(false);
+        self.toast("素材を挿入しました（後ろは右にシフト）");
+    }
+
     fn lib_get(&self, tag: &str, path: String) {
         let sink = self.lib_sink.clone();
         let tag = tag.to_string();
@@ -4262,6 +4318,9 @@ impl eframe::App for App {
         if ctx.input(|i| i.key_pressed(egui::Key::S) && !i.modifiers.ctrl) {
             self.split_at_playhead();
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.ctrl) {
+            self.freeze_at_playhead();
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::E) && !i.modifiers.ctrl) {
             self.toggle_popout();
         }
@@ -4491,6 +4550,33 @@ impl eframe::App for App {
                 {
                     self.recut_open = !self.recut_open;
                 }
+                ui.menu_button("＋素材", |ui| {
+                    ui.set_min_width(240.0);
+                    ui.label(egui::RichText::new("再生ヘッドの位置に挿入（後ろは右へ）").weak().small());
+                    if self.lib.assets.is_empty() {
+                        self.lib_refresh();
+                        ui.label("読み込み中…");
+                    }
+                    let assets: Vec<serde_json::Value> = self
+                        .lib
+                        .assets
+                        .iter()
+                        .filter(|a| a.get("source_type").and_then(|v| v.as_str()) != Some("generated"))
+                        .cloned()
+                        .collect();
+                    for a in &assets {
+                        let name = a
+                            .get("filename")
+                            .or_else(|| a.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("(無名)");
+                        let short: String = name.chars().take(24).collect();
+                        if ui.button(format!("🎞 {short}")).clicked() {
+                            self.insert_asset_at_playhead(a);
+                            ui.close_menu();
+                        }
+                    }
+                });
                 if ui
                     .selectable_label(self.revise_open, "🤖 ダンに指示")
                     .on_hover_text("この動画への修正指示を言葉で送る（例: 冒頭をもっとテンポ良く）")
@@ -4848,6 +4934,7 @@ impl eframe::App for App {
                         ("+ / -", "ズーム"),
                         ("S", "分割"),
                         ("E", "飛び出し 適用/解除"),
+                        ("F", "フリーズフレーム挿入（2秒）"),
                         ("Del", "削除（メインレーンは左詰め+付随クリップも削除）"),
                         ("Shift+Del", "削除して左詰め（全レーン強制）"),
                         ("ヘッダアイコン", "🔒ロック / 👁表示 / 🔇ミュート / Sソロ / 磁マグネット"),
@@ -5337,6 +5424,78 @@ fn main() -> eframe::Result<()> {
             if ok { "PASS" } else { "FAIL" },
             attached.iter().filter(|id| !alive.contains(id.as_str())).count(),
             attached.len()
+        );
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+    // --selftest-fzins: freeze-frame + asset insert on a doc clone — machine checks
+    if args.iter().any(|a| a == "--selftest-fzins") {
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
+        let doc = model::Doc::load(&contents, &dir).expect("doc");
+        let v = doc
+            .seq
+            .tracks
+            .iter()
+            .filter(|t| t.kind == "video")
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.asset_id.is_some() && c.dur() > 2.0)
+            .expect("clip");
+        let (vid, ts, te) = (v.id.clone(), v.timeline_start, v.timeline_end);
+        let t = (ts + te) / 2.0;
+        let before: usize = doc.seq.tracks.iter().map(|t| t.clips.len()).sum();
+        // freeze
+        let mut raw = doc.raw.clone();
+        edits::freeze_frame(&mut raw, &vid, t, 2.0, 42);
+        let nd = model::Doc::from_raw(raw, &doc.contents_path, &doc.asset_dir).expect("redoc");
+        let fz = nd
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .find(|c| c.id.starts_with("fz_42"))
+            .expect("freeze clip");
+        let fz_ok = fz.is_freeze()
+            && (fz.timeline_start - t).abs() < 0.01
+            && (fz.dur() - 2.0).abs() < 0.01;
+        // the clip after the original end must have shifted +2.0
+        let shifted_ok = {
+            let old_next = doc
+                .seq
+                .tracks
+                .iter()
+                .flat_map(|tr| tr.clips.iter())
+                .filter(|c| c.timeline_start >= te - 1e-6 && c.id != vid)
+                .min_by(|a, b| a.timeline_start.partial_cmp(&b.timeline_start).unwrap());
+            old_next
+                .map(|c| {
+                    nd.seq
+                        .tracks
+                        .iter()
+                        .flat_map(|tr| tr.clips.iter())
+                        .find(|n| n.id == c.id)
+                        .map(|n| (n.timeline_start - (c.timeline_start + 2.0)).abs() < 0.01)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(true)
+        };
+        // insert
+        let aid = doc.asset_names.keys().next().cloned().unwrap_or_default();
+        let mut raw2 = doc.raw.clone();
+        edits::insert_asset(&mut raw2, t, 3.0, &aid, true, 43);
+        let nd2 = model::Doc::from_raw(raw2, &doc.contents_path, &doc.asset_dir).expect("redoc2");
+        let after2: usize = nd2.seq.tracks.iter().map(|t| t.clips.len()).sum();
+        let ins = nd2
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .find(|c| c.id == "ins_v_43")
+            .expect("inserted");
+        let ins_ok = after2 == before + 2 && (ins.timeline_start - t).abs() < 0.01 && ins.link_id.is_some();
+        let ok = fz_ok && shifted_ok && ins_ok;
+        println!(
+            "FZINS {} freeze_ok={fz_ok} shift_ok={shifted_ok} insert_ok={ins_ok}",
+            if ok { "PASS" } else { "FAIL" }
         );
         std::process::exit(if ok { 0 } else { 1 });
     }
