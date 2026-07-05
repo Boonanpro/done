@@ -363,6 +363,23 @@ fn draw_plain_pip(
     let bb = c.popout_card_box().unwrap_or(b);
     let p2 = doc.asset_path_q(aid, original);
     let src_t = c.src_at(t);
+    if c.is_freeze() {
+        // freeze PiP renders from the still cache too — zero pool traffic after the
+        // first decode (same contention fix as the base lane)
+        let key = (p2.clone(), (src_t * 1000.0).round() as i64);
+        let got = comp.still_get(&key);
+        let (tex, wh) = if let Some(x) = got {
+            x
+        } else {
+            let vs = pool.get(d3d, &p2, 0, false, src_t)?;
+            vs.ensure_frame(d3d, src_t)?;
+            let tw = (vs.bgra.clone(), (vs.width, vs.height));
+            comp.still_put(d3d, key, &tw.0, tw.1)?;
+            tw
+        };
+        comp.draw_cropped(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), true, None, c.crop_ltrb())?;
+        return Ok(None);
+    }
     let vs = pool.get(d3d, &p2, 0, false, src_t)?;
     if fast {
         let _ = vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
