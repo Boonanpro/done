@@ -365,16 +365,23 @@ fn draw_plain_pip(
     let src_t = c.src_at(t);
     if c.is_freeze() {
         // freeze PiP renders from the still cache too — zero pool traffic after the
-        // first decode (same contention fix as the base lane)
+        // first decode; the still is only baked from an EXACT frame
         let key = (p2.clone(), (src_t * 1000.0).round() as i64);
         let got = comp.still_get(&key);
         let (tex, wh) = if let Some(x) = got {
             x
         } else {
             let vs = pool.get(d3d, &p2, 0, false, src_t)?;
-            vs.ensure_frame(d3d, src_t)?;
+            let is_exact = if fast {
+                vs.ensure_frame_scrub(d3d, src_t, 12.0)?
+            } else {
+                vs.ensure_frame(d3d, src_t)?;
+                true
+            };
             let tw = (vs.bgra.clone(), (vs.width, vs.height));
-            comp.still_put(d3d, key, &tw.0, tw.1)?;
+            if is_exact {
+                comp.still_put(d3d, key, &tw.0, tw.1)?;
+            }
             tw
         };
         comp.draw_cropped(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), true, None, c.crop_ltrb())?;
@@ -436,37 +443,68 @@ fn compose(
                 // ONE pool.get per stream: a second get in the same compose sees the
                 // instance as busy-this-frame and OPENS A SPARE (~50ms + an empty texture)
                 // — that was 110ms/frame of the pop-out scrub cost
-                let otex = {
-                    let s = pool.get(d3d, &opath, 0, false, src_t)?;
-                    if fast {
-                        if Instant::now() < f_deadline {
-                            exact &= s.ensure_frame_scrub(d3d, src_t, 12.0)?;
-                        } else {
-                            exact = false; // out of budget — stale person, refined at rest
-                        }
-                    } else {
-                        s.ensure_frame(d3d, src_t)
-                            .map_err(|e| e.context(format!("live-orig {} src_t={src_t:.2}", s.name)))?;
-                    }
-                    s.bgra.clone()
+                // FREEZE: bake original+mattes ONCE (exact), then serve the stills forever.
+                // Re-decoding per scrub tick made the cutout visibly change inside a frozen
+                // clip (budgeted approximations differ per position) and fought the pool.
+                let fz_keys = if c.is_freeze() {
+                    Some((
+                        (opath.clone(), (src_t * 1000.0).round() as i64),
+                        (format!("{mt_path}#0"), (mt_t * 1000.0).round() as i64),
+                        (format!("{mt_path}#1"), (mt_t * 1000.0).round() as i64),
+                    ))
+                } else {
+                    None
                 };
-                let mut mt_tex = Vec::with_capacity(2);
-                for stream in [MT_PERSON, MT_SHADOW] {
-                    let s = pool.get(d3d, &mt_path, stream, true, mt_t)?;
-                    if fast {
-                        if Instant::now() < f_deadline {
-                            exact &= s.ensure_frame_scrub(d3d, mt_t, 8.0)?;
+                let cached = fz_keys.as_ref().and_then(|(ko, kp, ks)| {
+                    Some((comp.still_get(ko)?, comp.still_get(kp)?, comp.still_get(ks)?))
+                });
+                let (otex, ptex, stex);
+                if let Some(((o, _), (pp, _), (ss, _))) = cached {
+                    otex = o;
+                    ptex = pp;
+                    stex = ss;
+                } else {
+                    let o = {
+                        let sdec = pool.get(d3d, &opath, 0, false, src_t)?;
+                        if fast && fz_keys.is_none() {
+                            if Instant::now() < f_deadline {
+                                exact &= sdec.ensure_frame_scrub(d3d, src_t, 12.0)?;
+                            } else {
+                                exact = false; // out of budget — stale person, refined at rest
+                            }
                         } else {
-                            exact = false;
+                            // freeze bakes want the EXACT frame even mid-scrub (one-time cost)
+                            sdec.ensure_frame(d3d, src_t)
+                                .map_err(|e| e.context(format!("live-orig {} src_t={src_t:.2}", sdec.name)))?;
                         }
-                    } else {
-                        s.ensure_frame(d3d, mt_t)
-                            .map_err(|e| e.context(format!("live-mt {} src_t={mt_t:.2}", s.name)))?;
+                        (sdec.bgra.clone(), (sdec.width, sdec.height))
+                    };
+                    let mut mt_tex = Vec::with_capacity(2);
+                    for stream in [MT_PERSON, MT_SHADOW] {
+                        let sdec = pool.get(d3d, &mt_path, stream, true, mt_t)?;
+                        if fast && fz_keys.is_none() {
+                            if Instant::now() < f_deadline {
+                                exact &= sdec.ensure_frame_scrub(d3d, mt_t, 8.0)?;
+                            } else {
+                                exact = false;
+                            }
+                        } else {
+                            sdec.ensure_frame(d3d, mt_t)
+                                .map_err(|e| e.context(format!("live-mt {} src_t={mt_t:.2}", sdec.name)))?;
+                        }
+                        mt_tex.push((sdec.bgra.clone(), (sdec.width, sdec.height)));
                     }
-                    mt_tex.push(s.bgra.clone());
+                    let ss = mt_tex.pop().unwrap();
+                    let pp = mt_tex.pop().unwrap();
+                    if let Some((ko, kp, ks)) = fz_keys {
+                        let _ = comp.still_put(d3d, ko, &o.0, o.1);
+                        let _ = comp.still_put(d3d, kp, &pp.0, pp.1);
+                        let _ = comp.still_put(d3d, ks, &ss.0, ss.1);
+                    }
+                    otex = o.0;
+                    ptex = pp.0;
+                    stex = ss.0;
                 }
-                let stex = mt_tex.pop().unwrap();
-                let ptex = mt_tex.pop().unwrap();
                 let (cw, ch) = (meta.canvas[0] as f32, meta.canvas[1] as f32);
                 let aff = [
                     meta.src_x as f32 / cw,
@@ -542,16 +580,28 @@ fn compose(
             if c.is_freeze() {
                 // freeze frames render from a private still — no pool traffic, so the
                 // neighbouring clips keep their ping-pong decoder instances (the stutter
-                // around a freeze was this exact contention)
+                // around a freeze was this exact contention). The still is baked from an
+                // EXACT frame only; a mid-scrub tick before it exists shows the budget
+                // frame WITHOUT caching it (a cached approximation would freeze the wrong
+                // picture forever).
                 let key = (path.clone(), (src_t * 1000.0).round() as i64);
                 let got = comp.still_get(&key);
                 let (tex, wh) = if let Some(x) = got {
                     x
                 } else {
                     let vs = pool.get(d3d, &path, 0, false, src_t)?;
-                    vs.ensure_frame(d3d, src_t)?;
+                    let is_exact = if fast {
+                        vs.ensure_frame_scrub(d3d, src_t, 12.0)?
+                    } else {
+                        vs.ensure_frame(d3d, src_t)?;
+                        true
+                    };
                     let tw = (vs.bgra.clone(), (vs.width, vs.height));
-                    comp.still_put(d3d, key, &tw.0, tw.1)?;
+                    if is_exact {
+                        comp.still_put(d3d, key, &tw.0, tw.1)?;
+                    } else {
+                        exact = false; // refine loop will come back and bake it properly
+                    }
                     tw
                 };
                 let b = c.display_box();
