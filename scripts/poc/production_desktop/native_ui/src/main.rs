@@ -66,6 +66,9 @@ struct AuxOut {
 }
 
 struct Shared {
+    // min timeline time affected by pending edits (f64 bits; INFINITY = untouched).
+    // The producer consumes it to invalidate only the dirty suffix of the frame cache.
+    dirty_from_bits: AtomicU64,
     req: Mutex<Req>,
     frame: Mutex<FrameOut>,
     clock_bits: AtomicU64,
@@ -203,6 +206,17 @@ impl FrameCache {
     fn clear(&mut self) {
         self.frames.clear();
         self.bytes = 0;
+    }
+    /// Drop only frames at/after `t` — an edit at 60s must not throw away the first
+    /// minute of finished frames (the whole-cache clear was the post-edit heaviness).
+    fn invalidate_from(&mut self, t: f64) {
+        let cut = Self::idx(t) - 1;
+        let dead: Vec<i64> = self.frames.keys().copied().filter(|k| *k >= cut).collect();
+        for k in dead {
+            if let Some(z) = self.frames.remove(&k) {
+                self.bytes -= z.len();
+            }
+        }
     }
     fn get(&mut self, t: f64, out: &mut Vec<u8>) -> bool {
         if let Some(z) = self.frames.get(&Self::idx(t)) {
@@ -1137,7 +1151,17 @@ fn media_thread(shared: Arc<Shared>) {
             if ptr != last_doc_ptr {
                 last_doc_ptr = ptr;
                 warm_done = false;
-                fcache.clear(); // edited: NEVER show a stale composed frame
+                // edited: never show a stale composed frame — but only the frames at/after
+                // the earliest change are stale; everything before survives (Filmora keeps
+                // its render cache across local edits, the full clear was our post-edit lag)
+                let df = f64::from_bits(
+                    shared.dirty_from_bits.swap(f64::INFINITY.to_bits(), Ordering::Relaxed),
+                );
+                if df.is_finite() {
+                    fcache.invalidate_from((df - 0.2).max(0.0));
+                } else {
+                    fcache.clear(); // unknown provenance (open/undo/redo): full reset
+                }
             }
             let dur = doc.duration();
             let r = shared.req.lock().unwrap().clone();
@@ -1206,7 +1230,7 @@ fn media_thread(shared: Arc<Shared>) {
                     let res = if from_cache {
                         Ok((Vec::new(), true))
                     } else {
-                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, true, false, false)
+                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, false)
                     };
                     ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
                     match res {
@@ -1414,7 +1438,7 @@ fn media_thread(shared: Arc<Shared>) {
                     rg.back().map(|(ft, _)| ft + STEP).unwrap_or_else(|| (t / STEP).floor() * STEP)
                 };
                 if next_t <= dur {
-                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, true, false, false) {
+                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, false) {
                         let mut rg = shared.ring.lock().unwrap();
                         rg.push_back((next_t, comp.rgba.clone()));
                         shared.ring_level.store(rg.len(), Ordering::Relaxed);
@@ -1642,6 +1666,7 @@ impl App {
             }),
             clock_bits: AtomicU64::new(0f64.to_bits()),
             underruns: AtomicU64::new(0),
+            dirty_from_bits: AtomicU64::new(f64::INFINITY.to_bits()),
             ring_level: std::sync::atomic::AtomicUsize::new(0),
             ring: Mutex::new(Default::default()),
             ring_gen: AtomicU64::new(0),
@@ -1740,6 +1765,66 @@ impl App {
 
     /// Apply an edit to the RAW document, re-derive the typed view, hand it to the media
     /// thread, and schedule a debounced save. Undo = raw snapshots.
+    /// Earliest timeline time whose composed frames may differ between two docs: any
+    /// added / removed / retimed / retracked / restyled clip contributes min(old_ts, new_ts).
+    fn dirty_from(old_doc: &model::Doc, new_doc: &model::Doc) -> f64 {
+        use std::collections::HashMap;
+        let snap = |d: &model::Doc| -> HashMap<String, String> {
+            let mut m = HashMap::new();
+            for (ti, tr) in d.seq.tracks.iter().enumerate() {
+                for c in &tr.clips {
+                    // any field that changes the rendered output participates
+                    let sig = format!(
+                        "{ti}|{:.3}|{:.3}|{:.3}|{:?}|{:?}|{:?}|{:?}|{:?}|{:.3}|{}|{}|{}|{}",
+                        c.timeline_start,
+                        c.timeline_end,
+                        c.source_start,
+                        c.source_end,
+                        c.position,
+                        c.crop,
+                        c.region,
+                        c.text,
+                        c.volume,
+                        c.effects.len(),
+                        tr.hidden,
+                        tr.muted,
+                        tr.solo
+                    );
+                    m.insert(c.id.clone(), sig);
+                }
+            }
+            m
+        };
+        let (a, b) = (snap(old_doc), snap(new_doc));
+        let mut min_t = f64::INFINITY;
+        let start_of = |d: &model::Doc, id: &str| -> Option<f64> {
+            d.seq
+                .tracks
+                .iter()
+                .flat_map(|tr| tr.clips.iter())
+                .find(|c| c.id == id)
+                .map(|c| c.timeline_start)
+        };
+        for (id, sig) in &a {
+            if b.get(id) != Some(sig) {
+                if let Some(t) = start_of(old_doc, id) {
+                    min_t = min_t.min(t);
+                }
+                if let Some(t) = start_of(new_doc, id) {
+                    min_t = min_t.min(t);
+                }
+            }
+        }
+        for id in b.keys() {
+            if !a.contains_key(id) {
+                if let Some(t) = start_of(new_doc, id) {
+                    min_t = min_t.min(t);
+                }
+            }
+        }
+        min_t
+    }
+
     fn apply_edit(&mut self, snapshot: bool, f: impl FnOnce(&mut serde_json::Value)) {
         if snapshot {
             self.pending_undo = None;
@@ -1760,6 +1845,14 @@ impl App {
         f(&mut raw);
         match model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             Ok(nd) => {
+                let df = Self::dirty_from(&self.doc, &nd);
+                if df.is_finite() {
+                    // accumulate the MIN across rapid edits until the producer consumes it
+                    let cur = f64::from_bits(self.shared.dirty_from_bits.load(Ordering::Relaxed));
+                    self.shared
+                        .dirty_from_bits
+                        .store(df.min(cur).to_bits(), Ordering::Relaxed);
+                }
                 let nd = Arc::new(nd);
                 self.doc = nd.clone();
                 *self.shared.doc.lock().unwrap() = nd;
