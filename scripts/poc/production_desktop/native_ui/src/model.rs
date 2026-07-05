@@ -42,6 +42,10 @@ pub struct Clip {
     #[serde(default)]
     pub crop: Option<serde_json::Value>,
     #[serde(default)]
+    pub region: Option<serde_json::Value>,
+    #[serde(default)]
+    pub style: Option<serde_json::Value>,
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub asset_id: Option<String>,
@@ -122,6 +126,17 @@ impl PopMeta {
 }
 
 impl Clip {
+    /// Effect-clip region (x, y, w, h canvas fractions), when this is a region effect.
+    pub fn region_xywh(&self) -> Option<(f64, f64, f64, f64)> {
+        let r = self.region.as_ref()?;
+        let g = |k: &str| r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let (w, h) = (g("width"), g("height"));
+        if w > 1e-3 && h > 1e-3 {
+            Some((g("x").clamp(0.0, 1.0), g("y").clamp(0.0, 1.0), w.min(1.0), h.min(1.0)))
+        } else {
+            None
+        }
+    }
     /// Freeze-frame clip? (exporter convention: source_start >= source_end)
     pub fn is_freeze(&self) -> bool {
         self.source_end.map(|se| se <= self.source_start + 1e-6).unwrap_or(false)

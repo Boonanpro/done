@@ -44,6 +44,12 @@ float4 ps_popout(VOut i) : SV_Target {
 // static mask texture (t3: R=rounded card, G=rim band, B=drop shadow). The 5 composite
 // steps are popout_overlay.py's, evaluated per pixel. uv = bake canvas space;
 // aff = (src0.xy, srcsize.zw) maps canvas uv -> original uv.
+float4 ps_mosaic(VOut i) : SV_Target {
+  // aff.xy = mosaic cell counts; uv is the REGION-local 0..1, uvr maps into the frame
+  float2 cell = floor(i.uv * aff.xy) / max(aff.xy, 1.0);
+  float2 fuv = uvr.xy + (cell + 0.5 / max(aff.xy, 1.0)) * uvr.zw;
+  return float4(tex0.Sample(smp, fuv).rgb, 1.0);
+}
 float4 ps_popout_live(VOut i) : SV_Target {
   float3 msk = tex3.Sample(smp, i.uv).rgb;
   float ca = msk.r, bf = msk.g, drop = msk.b;
@@ -163,6 +169,8 @@ pub struct Compositor {
     ps_plain: ID3D11PixelShader,
     ps_popout: ID3D11PixelShader,
     ps_popout_live: ID3D11PixelShader,
+    ps_mosaic: ID3D11PixelShader,
+    scratch: std::cell::RefCell<Option<ID3D11Texture2D>>,
     cb: ID3D11Buffer,
     sampler: ID3D11SamplerState,
     blend: ID3D11BlendState,
@@ -202,8 +210,11 @@ impl Compositor {
             let vsb = compile("vs", "vs_5_0")?;
             let psb1 = compile("ps_plain", "ps_5_0")?;
             let psb2 = compile("ps_popout", "ps_5_0")?;
+            let psb4 = compile("ps_mosaic", "ps_5_0")?;
             let psb3 = compile("ps_popout_live", "ps_5_0")?;
             let bytes = |b: &ID3DBlob| std::slice::from_raw_parts(b.GetBufferPointer() as *const u8, b.GetBufferSize());
+            let mut ps_mosaic: Option<ID3D11PixelShader> = None;
+            d3d.device.CreatePixelShader(bytes(&psb4), None, Some(&mut ps_mosaic))?;
             let mut vs: Option<ID3D11VertexShader> = None;
             d3d.device.CreateVertexShader(bytes(&vsb), None, Some(&mut vs))?;
             let mut ps_plain: Option<ID3D11PixelShader> = None;
@@ -261,6 +272,8 @@ impl Compositor {
                 ps_plain: ps_plain.unwrap(),
                 ps_popout: ps_popout.unwrap(),
                 ps_popout_live: ps_popout_live.unwrap(),
+                ps_mosaic: ps_mosaic.unwrap(),
+                scratch: std::cell::RefCell::new(None),
                 cb: cb.unwrap(),
                 sampler: sampler.unwrap(),
                 blend: blend.unwrap(),
@@ -491,6 +504,46 @@ impl Compositor {
     /// staging[i-1] (last frame). Mapping the just-copied one stalls on the whole in-flight
     /// GPU frame (measured 30-85ms); mapping the previous is a pure memcpy for +1 frame of
     /// preview latency.
+    /// Region mosaic: copy the composed canvas, then redraw the region sampling the
+    /// copy on a coarse grid (the live stand-in for the exporter's blur/mosaic pass).
+    pub fn apply_mosaic(&self, d3d: &D3d, region: (f64, f64, f64, f64), cell_px: f64) -> Result<()> {
+        unsafe {
+            // lazy scratch copy of the canvas
+            {
+                let mut sc = self.scratch.borrow_mut();
+                if sc.is_none() {
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    self.canvas.GetDesc(&mut desc);
+                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
+                    desc.Usage = D3D11_USAGE_DEFAULT;
+                    desc.CPUAccessFlags = 0;
+                    desc.MiscFlags = 0;
+                    let mut t: Option<ID3D11Texture2D> = None;
+                    d3d.device.CreateTexture2D(&desc, None, Some(&mut t))?;
+                    *sc = t;
+                }
+                d3d.ctx.CopyResource(sc.as_ref().unwrap(), &self.canvas);
+            }
+            let sc = self.scratch.borrow();
+            let scratch = sc.as_ref().unwrap();
+            let mut srv: Option<ID3D11ShaderResourceView> = None;
+            d3d.device.CreateShaderResourceView(scratch, None, Some(&mut srv))?;
+            let (x, y, w, h) = region;
+            let cells_x = ((w * self.width as f64) / cell_px).max(2.0) as f32;
+            let cells_y = ((h * self.height as f64) / cell_px).max(2.0) as f32;
+            let cbv = Cb {
+                dst: [x as f32, y as f32, w as f32, h as f32],
+                uvr: [x as f32, y as f32, w as f32, h as f32],
+                aff: [cells_x, cells_y, 0.0, 0.0],
+            };
+            d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
+            d3d.ctx.PSSetShaderResources(0, Some(&[srv]));
+            d3d.ctx.PSSetShader(&self.ps_mosaic, None);
+            d3d.ctx.Draw(4, 0);
+            Ok(())
+        }
+    }
+
     pub fn readback(&mut self, d3d: &D3d) -> Result<()> {
         self.readback_inner(d3d, false)
     }
