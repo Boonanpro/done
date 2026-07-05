@@ -490,6 +490,60 @@ pub fn insert_asset(raw: &mut Value, t: f64, dur: f64, asset_id: &str, has_audio
     }
 }
 
+/// Add a region effect clip (blur/mosaic) on the effect lane (created when missing).
+pub fn add_effect_clip(
+    raw: &mut Value,
+    t: f64,
+    dur: f64,
+    region: (f64, f64, f64, f64),
+    style: &str,
+    salt: u64,
+) {
+    let clip = serde_json::json!({
+        "id": format!("fx_{salt}"),
+        "timeline_start": (t * 1000.0).round() / 1000.0,
+        "timeline_end": ((t + dur) * 1000.0).round() / 1000.0,
+        "style": style,
+        "region": {
+            "x": (region.0 * 10000.0).round() / 10000.0,
+            "y": (region.1 * 10000.0).round() / 10000.0,
+            "width": (region.2 * 10000.0).round() / 10000.0,
+            "height": (region.3 * 10000.0).round() / 10000.0,
+        },
+    });
+    let Some(tracks) = tracks_mut(raw) else { return };
+    match tracks
+        .iter()
+        .position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("effect"))
+    {
+        Some(ti) => {
+            if let Some(cs) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
+                cs.push(clip);
+            }
+        }
+        None => tracks.push(serde_json::json!({"id": "effects_1", "type": "effect", "clips": [clip]})),
+    }
+}
+
+/// Set a clip's style string (effect clips: gaussian / mosaic).
+pub fn set_style(raw: &mut Value, id: &str, style: &str) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) == Some(id) {
+            c["style"] = Value::from(style);
+        }
+    });
+}
+
+/// Set a clip's timeline span directly (inspector numeric edit).
+pub fn set_span(raw: &mut Value, id: &str, ts: f64, te: f64) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) == Some(id) {
+            setf(c, "timeline_start", ts.max(0.0));
+            setf(c, "timeline_end", te.max(ts + 0.1));
+        }
+    });
+}
+
 fn tracks_ref(root: &Value) -> Option<&Vec<Value>> {
     root.get(0)?
         .get("timeline")?

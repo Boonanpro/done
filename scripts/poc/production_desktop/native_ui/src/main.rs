@@ -538,6 +538,20 @@ fn compose(
             used.push(path);
         }
     }
+    // region effects (blur/mosaic clips on effect lanes): live mosaic stand-in — the
+    // export runs the real gaussian/mosaic chain over the same regions
+    for tr in doc.seq.tracks.iter().filter(|tr| tr.kind == "effect" && !tr.hidden) {
+        for c in &tr.clips {
+            if t < c.timeline_start || t >= c.timeline_end {
+                continue;
+            }
+            if let Some(rg) = c.region_xywh() {
+                let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+                let cell = if style.contains("mosaic") { 14.0 } else { 9.0 };
+                let _ = comp.apply_mosaic(d3d, rg, cell);
+            }
+        }
+    }
     _ms_ov = _t.elapsed().as_secs_f64() * 1000.0;
     let _t = Instant::now();
     if exact_rb {
@@ -1456,6 +1470,8 @@ struct App {
     lib_gen_stash: Option<serde_json::Value>,
     marquee: Option<egui::Rect>,
     insp_text: String,
+    blur_mode: bool,
+    blur_drag: Option<egui::Pos2>,
     insp_for: String,
     cap_keys: std::collections::HashMap<String, String>, // caption clip id -> render key
     cap_tex: std::collections::HashMap<String, egui::TextureHandle>, // key -> texture
@@ -1573,6 +1589,8 @@ impl App {
             lib_gen_stash: None,
             marquee: None,
             insp_text: String::new(),
+            blur_mode: false,
+            blur_drag: None,
             insp_for: String::new(),
             cap_keys: Default::default(),
             cap_tex: Default::default(),
@@ -2433,6 +2451,48 @@ impl App {
                     .small(),
                 );
                 ui.separator();
+                // ---- region effect (blur/mosaic) ----
+                if clip.region.is_some() && clip.asset_id.is_none() {
+                    ui.label(egui::RichText::new("種類").strong());
+                    let cur = clip.style.as_ref().and_then(|v| v.as_str()).unwrap_or("mosaic").to_string();
+                    ui.horizontal(|ui| {
+                        for (label, val) in [("モザイク", "mosaic"), ("ぼかし", "gaussian")] {
+                            if ui.selectable_label(cur.contains(val), label).clicked() {
+                                let cid = id.clone();
+                                self.apply_edit(true, move |raw| edits::set_style(raw, &cid, val));
+                                self.push_req(false);
+                            }
+                        }
+                    });
+                    ui.label(egui::RichText::new("※プレビューはモザイク表示。書き出しで指定の種類が適用されます").small().weak());
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("時間（秒）").strong());
+                    let mut span = [clip.timeline_start, clip.timeline_end];
+                    let mut sp_changed = false;
+                    ui.horizontal(|ui| {
+                        for i in 0..2 {
+                            let r = ui.add(egui::DragValue::new(&mut span[i]).speed(0.05).range(0.0..=self.dur));
+                            if r.drag_started() || r.gained_focus() {
+                                self.pending_undo = Some(self.doc.raw.clone());
+                            }
+                            sp_changed |= r.changed();
+                        }
+                    });
+                    if sp_changed {
+                        let cid = id.clone();
+                        let (a, b2) = (span[0], span[1]);
+                        self.apply_edit(false, move |raw| edits::set_span(raw, &cid, a, b2));
+                        self.push_req(false);
+                    }
+                    ui.add_space(6.0);
+                    if ui.button("🗑 このぼかしを削除").clicked() {
+                        let cid = vec![id.clone()];
+                        self.apply_edit(true, move |raw| edits::delete_clips(raw, &cid));
+                        self.selected.clear();
+                        self.push_req(false);
+                    }
+                    return;
+                }
                 // ---- caption: edit the text right here ----
                 if clip.text.is_some() && clip.asset_id.is_none() {
                     if self.insp_for != id {
@@ -3295,6 +3355,16 @@ impl App {
                     }
                 } else {
                     p.rect_filled(r, 4.0, color.gamma_multiply(0.55));
+                    if c.region.is_some() && r.width() > 26.0 {
+                        let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+                        p.text(
+                            egui::pos2(r.left() + 6.0, r.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            if style.contains("mosaic") { "モザイク" } else { "ぼかし" },
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_gray(220),
+                        );
+                    }
                 }
                 // effect state ON the clip, without killing the "what is this clip"
                 // read: thin orange effect strip on top + translucent progress veil
@@ -4550,6 +4620,14 @@ impl eframe::App for App {
                 {
                     self.recut_open = !self.recut_open;
                 }
+                if ui
+                    .selectable_label(self.blur_mode, "◱ ぼかし")
+                    .on_hover_text("プレビュー上をドラッグしてぼかし/モザイクの範囲を指定")
+                    .clicked()
+                {
+                    self.blur_mode = !self.blur_mode;
+                    self.blur_drag = None;
+                }
                 ui.menu_button("＋素材", |ui| {
                     ui.set_min_width(240.0);
                     ui.label(egui::RichText::new("再生ヘッドの位置に挿入（後ろは右へ）").weak().small());
@@ -4656,7 +4734,48 @@ impl eframe::App for App {
                         let resp = ui
                             .add(egui::Image::new((tex.id(), size)))
                             .interact(egui::Sense::click_and_drag());
-                        self.preview_inspector(ui, &resp);
+                        if self.blur_mode {
+                            let vid = egui::Rect::from_center_size(resp.rect.center(), size);
+                            let pp = ui.painter_at(vid);
+                            pp.rect_stroke(vid, 0.0, egui::Stroke::new(1.0, UI_ACCENT));
+                            pp.text(
+                                egui::pos2(vid.center().x, vid.top() + 14.0),
+                                egui::Align2::CENTER_CENTER,
+                                "ぼかす範囲をドラッグで指定",
+                                egui::FontId::proportional(13.0),
+                                UI_ACCENT,
+                            );
+                            if resp.drag_started() {
+                                self.blur_drag = resp.interact_pointer_pos();
+                            }
+                            if let (Some(a), Some(p)) = (self.blur_drag, resp.interact_pointer_pos()) {
+                                let r = egui::Rect::from_two_pos(a, p);
+                                pp.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(0, 190, 150, 40));
+                                pp.rect_stroke(r, 0.0, egui::Stroke::new(1.5, UI_ACCENT));
+                            }
+                            if resp.drag_stopped() {
+                                if let (Some(a), Some(p)) = (self.blur_drag.take(), resp.interact_pointer_pos()) {
+                                    let rr = egui::Rect::from_two_pos(a, p);
+                                    if rr.width() > 8.0 && rr.height() > 8.0 {
+                                        let fx = ((rr.left() - vid.left()) / vid.width()).clamp(0.0, 1.0) as f64;
+                                        let fy = ((rr.top() - vid.top()) / vid.height()).clamp(0.0, 1.0) as f64;
+                                        let fw = (rr.width() / vid.width()).min(1.0) as f64;
+                                        let fh = (rr.height() / vid.height()).min(1.0) as f64;
+                                        let t = self.t;
+                                        let salt = self.salt;
+                                        self.salt += 1;
+                                        self.apply_edit(true, move |raw| {
+                                            edits::add_effect_clip(raw, t, 3.0, (fx, fy, fw, fh), "mosaic", salt)
+                                        });
+                                        self.push_req(false);
+                                        self.blur_mode = false;
+                                        self.toast("モザイクを追加しました（右パネルで種類・時間を調整）");
+                                    }
+                                }
+                            }
+                        } else {
+                            self.preview_inspector(ui, &resp);
+                        }
                         // captions: active caption clips drawn over the frame (white bold with
                         // dark outline, bottom-centre — the export bakes the full styling
                         // server-side; this is the live view)
