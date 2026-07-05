@@ -570,6 +570,15 @@ pub fn add_effect_clip(
     }
 }
 
+/// Record a freeze clip's materialized still path.
+pub fn set_freeze_still(raw: &mut Value, id: &str, rel: &str) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) == Some(id) {
+            c["freeze_still"] = Value::from(rel);
+        }
+    });
+}
+
 /// Set a clip's style string (effect clips: gaussian / mosaic).
 pub fn set_style(raw: &mut Value, id: &str, style: &str) {
     for_each_clip(raw, |c| {
