@@ -662,6 +662,25 @@ pub fn set_position(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f6
 }
 
 /// Set a caption clip's text.
+/// Per-edge crop (fractions 0..0.9). All-zero removes the crop entirely.
+pub fn set_crop(raw: &mut serde_json::Value, id: &str, l: f64, t: f64, r: f64, b: f64) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) != Some(id) {
+            return;
+        }
+        let o = c.as_object_mut().unwrap();
+        if l + t + r + b < 1e-4 {
+            o.insert("crop".into(), serde_json::Value::Null);
+        } else {
+            let cl = |v: f64| ((v.clamp(0.0, 0.9)) * 1000.0).round() / 1000.0;
+            o.insert(
+                "crop".into(),
+                serde_json::json!({"left": cl(l), "top": cl(t), "right": cl(r), "bottom": cl(b)}),
+            );
+        }
+    });
+}
+
 pub fn set_text(raw: &mut serde_json::Value, id: &str, text: &str) {
     for_each_clip(raw, |c| {
         if c.get("id").and_then(|v| v.as_str()) == Some(id) {

@@ -299,6 +299,23 @@ impl Compositor {
         cover: bool,
         matte: Option<&ID3D11Texture2D>,
     ) -> Result<()> {
+        self.draw_cropped(d3d, tex, src_wh, dst, cover, matte, None)
+    }
+
+    /// draw() plus a per-edge MASK crop (l,t,r,b fractions): trimmed strips reveal the
+    /// background; the kept pixels do not move or scale — parity with the exporter.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_cropped(
+        &self,
+        d3d: &D3d,
+        tex: &ID3D11Texture2D,
+        src_wh: (u32, u32),
+        dst: (f64, f64, f64, f64),
+        cover: bool,
+        matte: Option<&ID3D11Texture2D>,
+        crop: Option<(f64, f64, f64, f64)>,
+    ) -> Result<()> {
+        let mut dst = dst;
         unsafe {
             let mut srv0: Option<ID3D11ShaderResourceView> = None;
             d3d.device.CreateShaderResourceView(tex, None, Some(&mut srv0))?;
@@ -326,6 +343,19 @@ impl Compositor {
                         vh = keep as f32;
                     }
                 }
+            }
+            if let Some((l, t, r, b)) = crop {
+                // shrink the uv window INSIDE the cover window and the dest box in step
+                u0 += uw * l as f32;
+                v0 += vh * t as f32;
+                uw *= (1.0 - l - r).max(0.02) as f32;
+                vh *= (1.0 - t - b).max(0.02) as f32;
+                dst = (
+                    dst.0 + dst.2 * l,
+                    dst.1 + dst.3 * t,
+                    dst.2 * (1.0 - l - r).max(0.02),
+                    dst.3 * (1.0 - t - b).max(0.02),
+                );
             }
             let cbv = Cb {
                 dst: [dst.0 as f32, dst.1 as f32, dst.2 as f32, dst.3 as f32],

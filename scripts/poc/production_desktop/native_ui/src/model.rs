@@ -40,6 +40,8 @@ pub struct Track {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Clip {
     #[serde(default)]
+    pub crop: Option<serde_json::Value>,
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub asset_id: Option<String>,
@@ -118,6 +120,17 @@ impl PopMeta {
 }
 
 impl Clip {
+    /// Per-edge crop fractions (left, top, right, bottom), clamped like the exporter.
+    pub fn crop_ltrb(&self) -> Option<(f64, f64, f64, f64)> {
+        let c = self.crop.as_ref()?;
+        let g = |k: &str| c.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0).clamp(0.0, 0.9);
+        let (l, t, r, b) = (g("left"), g("top"), g("right"), g("bottom"));
+        if l + t + r + b > 1e-4 {
+            Some((l, t, r, b))
+        } else {
+            None
+        }
+    }
     pub fn dur(&self) -> f64 {
         self.timeline_end - self.timeline_start
     }

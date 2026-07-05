@@ -371,7 +371,7 @@ fn draw_plain_pip(
             .map_err(|e| e.context(format!("plain-pip {} src_t={src_t:.2}", vs.name)))?;
     }
     let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
-    comp.draw(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), true, None)?;
+    comp.draw_cropped(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), true, None, c.crop_ltrb())?;
     Ok(Some(p2))
 }
 
@@ -534,7 +534,7 @@ fn compose(
                     .map_err(|e| e.context(format!("overlay {} src_t={src_t:.2}", vs.name)))?;
             }
             let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
-            comp.draw(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None)?;
+            comp.draw_cropped(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None, c.crop_ltrb())?;
             used.push(path);
         }
     }
@@ -1455,6 +1455,8 @@ struct App {
     lib_sink: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
     lib_gen_stash: Option<serde_json::Value>,
     marquee: Option<egui::Rect>,
+    insp_text: String,
+    insp_for: String,
     cap_keys: std::collections::HashMap<String, String>, // caption clip id -> render key
     cap_tex: std::collections::HashMap<String, egui::TextureHandle>, // key -> texture
     cap_probe: std::collections::HashMap<String, Instant>, // key -> last disk check
@@ -1570,6 +1572,8 @@ impl App {
             lib_sink: Default::default(),
             lib_gen_stash: None,
             marquee: None,
+            insp_text: String::new(),
+            insp_for: String::new(),
             cap_keys: Default::default(),
             cap_tex: Default::default(),
             cap_probe: Default::default(),
@@ -2382,6 +2386,182 @@ impl App {
                 self.lib.selected_assets.push(id.clone());
             }
         }
+    }
+
+    /// Inspector: properties panel for the selected clip (single selection). Numeric
+    /// position/size, volume, per-edge crop, popout toggle; captions edit in place.
+    fn inspector_ui(&mut self, ctx: &egui::Context) {
+        if self.selected.len() != 1 {
+            return;
+        }
+        let id = self.selected[0].clone();
+        let Some((clip, kind)) = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter().map(move |c| (c, tr.kind.clone())))
+            .find(|(c, _)| c.id == id)
+            .map(|(c, k)| (c.clone(), k))
+        else {
+            return;
+        };
+        egui::SidePanel::right("inspector").exact_width(250.0).show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_space(8.0);
+                let title = if clip.text.is_some() && clip.asset_id.is_none() {
+                    "テロップ".to_string()
+                } else {
+                    clip.asset_id
+                        .as_ref()
+                        .and_then(|a| self.doc.asset_names.get(a))
+                        .cloned()
+                        .unwrap_or_else(|| "クリップ".into())
+                };
+                ui.heading(egui::RichText::new(title).size(15.0));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}  {:02}:{:02} - {:02}:{:02}（{:.1}秒）",
+                        kind,
+                        clip.timeline_start as i64 / 60,
+                        clip.timeline_start as i64 % 60,
+                        clip.timeline_end as i64 / 60,
+                        clip.timeline_end as i64 % 60,
+                        clip.dur()
+                    ))
+                    .weak()
+                    .small(),
+                );
+                ui.separator();
+                // ---- caption: edit the text right here ----
+                if clip.text.is_some() && clip.asset_id.is_none() {
+                    if self.insp_for != id {
+                        self.insp_for = id.clone();
+                        self.insp_text = clip.text.clone().unwrap_or_default();
+                    }
+                    ui.label(egui::RichText::new("本文").strong());
+                    let r = ui.add(
+                        egui::TextEdit::multiline(&mut self.insp_text)
+                            .desired_rows(4)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if r.gained_focus() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let txt = self.insp_text.clone();
+                        let cid = id.clone();
+                        self.apply_edit(false, move |raw| edits::set_text(raw, &cid, &txt));
+                        self.push_req(false);
+                    }
+                    return;
+                }
+                if clip.asset_id.is_none() {
+                    return;
+                }
+                // ---- position & size (canvas %) ----
+                ui.label(egui::RichText::new("位置とサイズ（%）").strong());
+                let b = clip.display_box();
+                let mut vals = [b.x * 100.0, b.y * 100.0, b.width * 100.0, b.height * 100.0];
+                let mut changed = false;
+                for (row, pair) in [("X / Y", [0usize, 1]), ("幅 / 高さ", [2, 3])] {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(row).weak().small());
+                        for &i in &pair {
+                            let rng = if i < 2 { -50.0..=100.0 } else { 1.0..=100.0 };
+                            let r = ui.add(
+                                egui::DragValue::new(&mut vals[i]).speed(0.5).range(rng).suffix("%"),
+                            );
+                            if r.drag_started() || r.gained_focus() {
+                                self.pending_undo = Some(self.doc.raw.clone());
+                            }
+                            changed |= r.changed();
+                        }
+                    });
+                }
+                if changed {
+                    let cid = id.clone();
+                    let (x, y, w, h) =
+                        (vals[0] / 100.0, vals[1] / 100.0, vals[2] / 100.0, vals[3] / 100.0);
+                    self.apply_edit(false, move |raw| edits::set_position(raw, &cid, x, y, w, h));
+                    self.push_req(false);
+                }
+                if ui.small_button("全画面に戻す").clicked() {
+                    let cid = id.clone();
+                    self.apply_edit(true, move |raw| edits::set_position(raw, &cid, 0.0, 0.0, 1.0, 1.0));
+                    self.push_req(false);
+                }
+                ui.add_space(6.0);
+                // ---- volume ----
+                if clip.link_id.is_some() {
+                    ui.label(egui::RichText::new("音量").strong());
+                    let mut vol = (clip.volume * 100.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut vol, 0.0..=200.0).suffix("%"));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edits::expand_links(&self.doc.raw, &[id.clone()]);
+                        let v = (vol / 100.0) as f64;
+                        self.apply_edit(false, move |raw| edits::set_volume(raw, &ids, v));
+                    }
+                    ui.add_space(6.0);
+                }
+                // ---- crop ----
+                ui.label(egui::RichText::new("クロップ（端を切る %）").strong());
+                let (l, t, r_, bm) = clip.crop_ltrb().unwrap_or((0.0, 0.0, 0.0, 0.0));
+                let mut cr = [l * 100.0, t * 100.0, r_ * 100.0, bm * 100.0];
+                let mut cchanged = false;
+                for (row, pair, names) in [
+                    ("左 / 右", [0usize, 2], true),
+                    ("上 / 下", [1, 3], true),
+                ] {
+                    let _ = names;
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(row).weak().small());
+                        for &i in &pair {
+                            let r = ui.add(
+                                egui::DragValue::new(&mut cr[i]).speed(0.5).range(0.0..=90.0).suffix("%"),
+                            );
+                            if r.drag_started() || r.gained_focus() {
+                                self.pending_undo = Some(self.doc.raw.clone());
+                            }
+                            cchanged |= r.changed();
+                        }
+                    });
+                }
+                if cchanged {
+                    let cid = id.clone();
+                    let (cl, ct, crr, cb) =
+                        (cr[0] / 100.0, cr[1] / 100.0, cr[2] / 100.0, cr[3] / 100.0);
+                    self.apply_edit(false, move |raw| edits::set_crop(raw, &cid, cl, ct, crr, cb));
+                    self.push_req(false);
+                }
+                if clip.crop_ltrb().is_some() && ui.small_button("クロップ解除").clicked() {
+                    let cid = id.clone();
+                    self.apply_edit(true, move |raw| edits::set_crop(raw, &cid, 0.0, 0.0, 0.0, 0.0));
+                    self.push_req(false);
+                }
+                ui.add_space(6.0);
+                // ---- popout ----
+                if kind != "audio" {
+                    ui.label(egui::RichText::new("飛び出し").strong());
+                    let has = clip.effects.iter().any(|e| e.kind == "popout");
+                    if ui
+                        .button(if has { "解除する" } else { "適用する (E)" })
+                        .clicked()
+                    {
+                        self.toggle_popout();
+                    }
+                }
+                ui.add_space(10.0);
+                ui.label(
+                    egui::RichText::new("ヒント: プレビュー上でも直接ドラッグ移動・四隅でリサイズできます")
+                        .small()
+                        .weak(),
+                );
+            });
+        });
     }
 
     fn lib_get(&self, tag: &str, path: String) {
@@ -4053,6 +4233,26 @@ impl eframe::App for App {
             return;
         }
         self.caption_cache_pass();
+        if let Ok(v) = std::env::var("NATIVE_SELECT") {
+            if !v.is_empty() {
+                std::env::set_var("NATIVE_SELECT", "");
+                let want_caption = v == "caption";
+                let pick = self
+                    .doc
+                    .seq
+                    .tracks
+                    .iter()
+                    .filter(|t| {
+                        if want_caption { t.kind == "caption" } else { t.kind == "video" }
+                    })
+                    .flat_map(|t| t.clips.iter())
+                    .nth(2)
+                    .map(|c| c.id.clone());
+                if let Some(id) = pick {
+                    self.selected = vec![id];
+                }
+            }
+        }
         let now = Instant::now();
         self.last_frames.push(now);
         self.last_frames.retain(|t| now.duration_since(*t).as_secs_f32() < 1.0);
@@ -4341,7 +4541,7 @@ impl eframe::App for App {
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new("F1: ショートカット一覧 | クリップをダブルクリック=テロップ編集 | 番号ヘッダをドラッグ=レーン並べ替え").weak().small());
+                    ui.label(egui::RichText::new("F1: ショートカット一覧 | クリップ選択=右に調整パネル | 番号ヘッダをドラッグ=レーン並べ替え").weak().small());
                 });
             });
         });
@@ -4357,6 +4557,7 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("transport")
             .exact_height(44.0)
             .show(ctx, |ui| self.transport_ui(ui));
+        self.inspector_ui(ctx);
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::from_gray(10)))
             .show(ctx, |ui| {
