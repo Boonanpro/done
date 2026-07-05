@@ -2012,8 +2012,16 @@ def _build_dan_plan(
     except Exception:
         edit_policy = ""
 
+    user_brief = str(instruction.get("brief") or timeline.get("brief") or "").strip()
+    brief_banner = (
+        "ユーザーの指示（このジョブで最優先。既定の作り方・テンプレより必ずこちらに従う）:\n"
+        + user_brief
+        + "\n\n"
+        if user_brief
+        else ""
+    )
     prompt = f"""
-You are DAN, a video editor. Your deliverable is EDITING DECISIONS for a timeline — NOT a rendered video, and NOT a timeline JSON with exact numbers. Do NOT run ffmpeg. Do NOT render anything. A program will assemble the exact timeline from your decisions and the word-level transcript below, and the user will fine-tune it and export to MP4 later.
+{brief_banner}You are DAN, a video editor. Your deliverable is EDITING DECISIONS for a timeline — NOT a rendered video, and NOT a timeline JSON with exact numbers. Do NOT run ffmpeg. Do NOT render anything. A program will assemble the exact timeline from your decisions and the word-level transcript below, and the user will fine-tune it and export to MP4 later.
 
 Work in TWO steps, in this order:
 
@@ -2023,7 +2031,8 @@ STEP 2 — AFTER your reasoning, output ONE json object (and nothing after it) w
 
 DECISIONS schema:
 {{
-  "spine": [ {{"segment_id": "a1_s03", "caption": "整えたテロップ文字列 or null=発話そのまま"}} ],
+  "spine": [ {{"segment_id": "a1_s03", "caption": "整えたテロップ文字列 | null=発話をそのまま表示 | \"\"(空文字)=このセグメントはテロップ無し"}} ],
+  "no_captions": false,
   "cuts": [ {{"asset_id": "<asset id>", "start": <sec>, "end": <sec>, "reason": "restatement|filler"}} ],
   "screen_overlays": [ {{"screen_asset_id": "<asset id>", "screen_source_start": <sec>, "screen_source_end": <sec>, "from_segment": "a1_s06", "to_segment": "a1_s12", "main_as_pip": true}} ],
   "blur": [ {{"target_text": "<exact on-screen text to hide; follows it as it moves>", "pattern": "email|phone|key", "asset_id": "<id>", "region": {{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}}, "source_start": <sec>, "source_end": <sec>, "style": "mosaic|soft"}} ],
@@ -2031,6 +2040,7 @@ DECISIONS schema:
 }}
 
 Rules:
+- CAPTIONS ARE OPTIONAL: if the user's brief asks for no captions (テロップ不要/入れるな 等), set "no_captions": true — then NO caption clips are generated at all, regardless of per-segment values. For selective omission use caption: "" on those segments. Follow the user's instruction over any default.
 - spine = the kept talking segments in final order. Anything not listed is cut. Drop the earlier take of a CROSS-segment restatement by omitting that segment.
 - cuts = WORD-LEVEL removals WITHIN kept segments. The transcript below has word-level timestamps; use cuts (in the asset's own seconds) to remove a 言い直し/stutter that happens INSIDE a single segment (e.g. the segment says "スタイル名や…スタイル名や…" — cut the first occurrence) or an obvious repeated filler run. The assembler trims exactly those spans. This is how you remove duplicates that survive the spine — listen via the transcript and cut them.
 - Never cut a sentence end. The assembler AUTO-compresses internal silence longer than silence_threshold seconds, so do NOT list silence in cuts. Set silence_threshold lower (e.g. 0.3) for tighter pacing or higher for relaxed, following the user's request; omit it to use the default (0.45).
@@ -2325,7 +2335,10 @@ def _assemble_sequence_from_decisions(
             continue
         seg_span[sid] = {
             "timeline_start": seg_ts, "timeline_end": seg_te,
-            "caption": (cap.strip() if cap else str(s.get("text") or "").strip()),
+            # caption: explicit string = styled text, None = fall back to the spoken text,
+            # EMPTY string = no caption for this segment (the user can opt out — a null
+            # fallback used to make captions structurally mandatory)
+            "caption": ("" if (isinstance(cap, str) and not cap.strip()) else (cap.strip() if cap else str(s.get("text") or "").strip())),
         }
         order.append(sid)
     if not pieces:
@@ -2395,7 +2408,7 @@ def _assemble_sequence_from_decisions(
         if sid in covered:
             continue
         sp = seg_span[sid]
-        if sp["caption"]:
+        if sp["caption"] and not decisions.get("no_captions"):
             clip: dict[str, Any] = {"id": _cid("c"), "text": sp["caption"], "track": "caption",
                                     "timeline_start": sp["timeline_start"], "timeline_end": sp["timeline_end"]}
             words = _caption_words_timeline(seg_by_id.get(sid) or {}, pieces_by_sid.get(sid, []))

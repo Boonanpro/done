@@ -522,6 +522,26 @@ fn compose(
             if !fast && original {
                 src_t = snap_src_t(pts_maps, aid, src_t);
             }
+            if c.is_freeze() {
+                // freeze frames render from a private still — no pool traffic, so the
+                // neighbouring clips keep their ping-pong decoder instances (the stutter
+                // around a freeze was this exact contention)
+                let key = (path.clone(), (src_t * 1000.0).round() as i64);
+                let got = comp.still_get(&key);
+                let (tex, wh) = if let Some(x) = got {
+                    x
+                } else {
+                    let vs = pool.get(d3d, &path, 0, false, src_t)?;
+                    vs.ensure_frame(d3d, src_t)?;
+                    let tw = (vs.bgra.clone(), (vs.width, vs.height));
+                    comp.still_put(d3d, key, &tw.0, tw.1)?;
+                    tw
+                };
+                let b = c.display_box();
+                comp.draw_cropped(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None, c.crop_ltrb())?;
+                used.push(path);
+                continue;
+            }
             let vs = pool.get(d3d, &path, 0, false, src_t)?;
             if fast {
                 if Instant::now() < f_deadline {
