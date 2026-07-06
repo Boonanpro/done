@@ -96,73 +96,122 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
             .iter()
             .position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("video"))
     });
+    {
+        let Some(tracks) = tracks_mut(root) else { return };
+        for (ti, tr) in tracks.iter_mut().enumerate() {
+            let explicit_magnet = tr.get("magnet").and_then(|v| v.as_bool());
+            let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let magnetic = explicit_magnet.unwrap_or(kind == "video" && main_video == Some(ti));
+            let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else {
+                continue;
+            };
+
+            let old_start = clips
+                .iter()
+                .filter(|c| ids.contains(&sid(c)))
+                .map(|c| f(c, "timeline_start"))
+                .fold(f64::MAX, f64::min);
+            let old_end = clips
+                .iter()
+                .filter(|c| ids.contains(&sid(c)))
+                .map(|c| f(c, "timeline_end"))
+                .fold(f64::MIN, f64::max);
+            if old_start == f64::MAX || old_end == f64::MIN {
+                continue;
+            }
+
+            for c in clips.iter_mut() {
+                if !ids.contains(&sid(c)) {
+                    continue;
+                }
+                trim_one_clip(c, left, new_t);
+            }
+
+            let new_start = clips
+                .iter()
+                .filter(|c| ids.contains(&sid(c)))
+                .map(|c| f(c, "timeline_start"))
+                .fold(f64::MAX, f64::min);
+            let new_end = clips
+                .iter()
+                .filter(|c| ids.contains(&sid(c)))
+                .map(|c| f(c, "timeline_end"))
+                .fold(f64::MIN, f64::max);
+            let delta_start = if new_start == f64::MAX { 0.0 } else { new_start - old_start };
+            let delta_end = if new_end == f64::MIN { 0.0 } else { new_end - old_end };
+
+            // Magnetic left trim keeps the dragged edge under the cursor. When the head is
+            // shortened, extend the previous same-lane clip to fill the gap; when it is
+            // extended left, trim the previous clip's tail so no overlap remains.
+            if left && magnetic && delta_start.abs() > 1e-6 {
+                adjust_previous_for_left_trim(clips, ids, old_start, new_start);
+            }
+
+            // Main/magnetic lanes stay packed when the right edge shrinks or grows.
+            // Non-magnetic lanes may leave a gap on shrink, but right-growth still pushes
+            // same-lane neighbours instead of creating an invisible overlap.
+            if !left && (magnetic || delta_end > 0.0) && delta_end.abs() > 1e-6 {
+                for c in clips.iter_mut() {
+                    if ids.contains(&sid(c)) {
+                        continue;
+                    }
+                    let cs = f(c, "timeline_start");
+                    if cs >= old_end - 1e-6 {
+                        let ce = f(c, "timeline_end");
+                        setf(c, "timeline_start", (cs + delta_end).max(0.0));
+                        setf(c, "timeline_end", (ce + delta_end).max(0.05));
+                    }
+                }
+            }
+            remove_same_lane_overlaps(clips);
+        }
+    }
+    normalize_linked_audio(root);
+}
+
+pub fn normalize_linked_audio(root: &mut Value) {
+    use std::collections::HashMap;
+    let mut visual: HashMap<String, (f64, f64, f64, Option<f64>)> = HashMap::new();
+    if let Some(tracks) = tracks_ref(root) {
+        for tr in tracks {
+            if tr.get("type").and_then(|v| v.as_str()) == Some("audio") {
+                continue;
+            }
+            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                if let Some(l) = link(c) {
+                    if c.get("asset_id").is_some() {
+                        visual.insert(
+                            l,
+                            (
+                                f(c, "timeline_start"),
+                                f(c, "timeline_end"),
+                                f(c, "source_start"),
+                                c.get("source_end").and_then(|v| v.as_f64()),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
     let Some(tracks) = tracks_mut(root) else { return };
-    for (ti, tr) in tracks.iter_mut().enumerate() {
-        let explicit_magnet = tr.get("magnet").and_then(|v| v.as_bool());
-        let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let magnetic = explicit_magnet.unwrap_or(kind == "video" && main_video == Some(ti));
+    for tr in tracks {
+        if tr.get("type").and_then(|v| v.as_str()) != Some("audio") {
+            continue;
+        }
         let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else {
             continue;
         };
-
-        let old_start = clips
-            .iter()
-            .filter(|c| ids.contains(&sid(c)))
-            .map(|c| f(c, "timeline_start"))
-            .fold(f64::MAX, f64::min);
-        let old_end = clips
-            .iter()
-            .filter(|c| ids.contains(&sid(c)))
-            .map(|c| f(c, "timeline_end"))
-            .fold(f64::MIN, f64::max);
-        if old_start == f64::MAX || old_end == f64::MIN {
-            continue;
-        }
-
-        for c in clips.iter_mut() {
-            if !ids.contains(&sid(c)) {
-                continue;
-            }
-            trim_one_clip(c, left, new_t);
-        }
-
-        let new_start = clips
-            .iter()
-            .filter(|c| ids.contains(&sid(c)))
-            .map(|c| f(c, "timeline_start"))
-            .fold(f64::MAX, f64::min);
-        let new_end = clips
-            .iter()
-            .filter(|c| ids.contains(&sid(c)))
-            .map(|c| f(c, "timeline_end"))
-            .fold(f64::MIN, f64::max);
-        let delta_start = if new_start == f64::MAX { 0.0 } else { new_start - old_start };
-        let delta_end = if new_end == f64::MIN { 0.0 } else { new_end - old_end };
-
-        // Magnetic left trim keeps the dragged edge under the cursor. When the head is
-        // shortened, extend the previous same-lane clip to fill the gap; when it is
-        // extended left, trim the previous clip's tail so no overlap remains.
-        if left && magnetic && delta_start.abs() > 1e-6 {
-            adjust_previous_for_left_trim(clips, ids, old_start, new_start);
-        }
-
-        // Main/magnetic lanes stay packed when the right edge shrinks or grows.
-        // Non-magnetic lanes may leave a gap on shrink, but right-growth still pushes
-        // same-lane neighbours instead of creating an invisible overlap.
-        if !left && (magnetic || delta_end > 0.0) && delta_end.abs() > 1e-6 {
-            for c in clips.iter_mut() {
-                if ids.contains(&sid(c)) {
-                    continue;
-                }
-                let cs = f(c, "timeline_start");
-                if cs >= old_end - 1e-6 {
-                    let ce = f(c, "timeline_end");
-                    setf(c, "timeline_start", (cs + delta_end).max(0.0));
-                    setf(c, "timeline_end", (ce + delta_end).max(0.05));
-                }
+        for c in clips {
+            let Some(l) = link(c) else { continue };
+            let Some((ts, te, ss, se)) = visual.get(&l).copied() else { continue };
+            setf(c, "timeline_start", ts);
+            setf(c, "timeline_end", te);
+            setf(c, "source_start", ss);
+            if let Some(se) = se {
+                setf(c, "source_end", se);
             }
         }
-        remove_same_lane_overlaps(clips);
     }
 }
 

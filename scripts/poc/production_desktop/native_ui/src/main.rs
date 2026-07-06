@@ -2191,6 +2191,7 @@ impl App {
         }
         let mut raw = self.doc.raw.clone();
         f(&mut raw);
+        edits::normalize_linked_audio(&mut raw);
         match model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             Ok(nd) => {
                 let df = Self::dirty_from(&self.doc, &nd);
@@ -6410,6 +6411,7 @@ fn main() -> eframe::Result<()> {
         for (name, check_ov, op) in ops {
             let mut raw = doc.raw.clone();
             op(&mut raw);
+            edits::normalize_linked_audio(&mut raw);
             match model::Doc::from_raw(raw, &doc.contents_path, &doc.asset_dir) {
                 Ok(nd) => {
                     let dov = overlaps(&nd) - ov0;
@@ -6609,13 +6611,18 @@ fn main() -> eframe::Result<()> {
         let base = serde_json::json!([{
             "timeline": {"sequence": {"tracks": [
                 {"id":"v0","type":"video","clips":[
-                    {"id":"a","asset_id":"aa","timeline_start":0.0,"timeline_end":4.0,"source_start":0.0,"source_end":4.0},
-                    {"id":"b","asset_id":"bb","timeline_start":4.0,"timeline_end":8.0,"source_start":0.0,"source_end":4.0},
-                    {"id":"e","asset_id":"ee","timeline_start":8.0,"timeline_end":10.0,"source_start":0.0,"source_end":2.0}
+                    {"id":"a","asset_id":"aa","link_id":"la","timeline_start":0.0,"timeline_end":4.0,"source_start":0.0,"source_end":4.0},
+                    {"id":"b","asset_id":"bb","link_id":"lb","timeline_start":4.0,"timeline_end":8.0,"source_start":0.0,"source_end":4.0},
+                    {"id":"e","asset_id":"ee","link_id":"le","timeline_start":8.0,"timeline_end":10.0,"source_start":0.0,"source_end":2.0}
                 ]},
                 {"id":"ov0","type":"overlay","magnet":false,"clips":[
                     {"id":"c","asset_id":"cc","timeline_start":0.0,"timeline_end":4.0,"source_start":0.0,"source_end":4.0},
                     {"id":"d","asset_id":"dd","timeline_start":4.0,"timeline_end":8.0,"source_start":0.0,"source_end":4.0}
+                ]},
+                {"id":"au0","type":"audio","clips":[
+                    {"id":"aaud","asset_id":"aa","link_id":"la","timeline_start":0.0,"timeline_end":4.0,"source_start":0.0,"source_end":4.0},
+                    {"id":"baud","asset_id":"bb","link_id":"lb","timeline_start":4.0,"timeline_end":8.0,"source_start":0.0,"source_end":4.0},
+                    {"id":"eaud","asset_id":"ee","link_id":"le","timeline_start":8.0,"timeline_end":10.0,"source_start":0.0,"source_end":2.0}
                 ]}
             ]}}
         }]);
@@ -6637,7 +6644,9 @@ fn main() -> eframe::Result<()> {
         let mut magnetic_shrink = base.clone();
         edits::trim_clip(&mut magnetic_shrink, &["a".to_string()], false, 3.0);
         let ok_mag_shrink = (clip(&magnetic_shrink, "a", "timeline_end") - 3.0).abs() < 0.001
-            && (clip(&magnetic_shrink, "b", "timeline_start") - 3.0).abs() < 0.001;
+            && (clip(&magnetic_shrink, "b", "timeline_start") - 3.0).abs() < 0.001
+            && (clip(&magnetic_shrink, "aaud", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&magnetic_shrink, "baud", "timeline_start") - 3.0).abs() < 0.001;
 
         let mut magnetic_left_shrink = base.clone();
         edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0);
@@ -6645,12 +6654,18 @@ fn main() -> eframe::Result<()> {
             && (clip(&magnetic_left_shrink, "b", "timeline_start") - 5.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "source_start") - 1.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 8.0).abs() < 0.001;
+            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 8.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 5.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 5.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "source_start") - 1.0).abs() < 0.001;
 
         edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0);
         let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "source_start") - 0.0).abs() < 0.001;
+            && (clip(&magnetic_left_shrink, "b", "source_start") - 0.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "source_start") - 0.0).abs() < 0.001;
 
         let mut free_shrink = base.clone();
         edits::trim_clip(&mut free_shrink, &["c".to_string()], false, 3.0);
