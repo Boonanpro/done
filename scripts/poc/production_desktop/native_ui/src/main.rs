@@ -6680,31 +6680,49 @@ fn main() -> eframe::Result<()> {
 
         let mut live_left_drag = base.clone();
         edits::trim_clip_live(&mut live_left_drag, &["b".to_string()], true, 5.0);
-        let ok_live_left_drag = (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
+        let ok_live_left_drag = (clip(&live_left_drag, "a", "timeline_end") - 5.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "timeline_start") - 5.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "source_start") - 1.0).abs() < 0.001;
 
+        edits::trim_clip_live(&mut live_left_drag, &["b".to_string()], true, 4.0);
+        let ok_live_left_grow = (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "timeline_end") - 8.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "source_start") - 0.0).abs() < 0.001;
+
         let mut magnetic_left_shrink = base.clone();
         edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0);
-        let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 7.0).abs() < 0.001
+        let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_end") - 5.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 5.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "source_start") - 1.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 7.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "g", "timeline_start") - 7.2).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 7.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 8.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "g", "timeline_start") - 8.2).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 5.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 5.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "baud", "source_start") - 1.0).abs() < 0.001;
 
-        edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 3.0);
-        let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_end") - 3.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 3.0).abs() < 0.001
+        edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0);
+        let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "source_start") - 0.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 3.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 3.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 4.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "baud", "source_start") - 0.0).abs() < 0.001;
+
+        let mut main_magnet_off = base.clone();
+        main_magnet_off[0]["timeline"]["sequence"]["tracks"][0]["magnet"] = serde_json::Value::Bool(false);
+        edits::trim_clip_live(&mut main_magnet_off, &["b".to_string()], true, 5.0);
+        let ok_main_off_left_shrink_gap = (clip(&main_magnet_off, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&main_magnet_off, "b", "timeline_start") - 5.0).abs() < 0.001
+            && (clip(&main_magnet_off, "b", "source_start") - 1.0).abs() < 0.001;
+
+        edits::trim_clip_live(&mut main_magnet_off, &["b".to_string()], true, 4.0);
+        let ok_main_off_left_grow_packed = (clip(&main_magnet_off, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&main_magnet_off, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&main_magnet_off, "b", "source_start") - 0.0).abs() < 0.001;
 
         let mut free_shrink = base.clone();
         edits::trim_clip(&mut free_shrink, &["c".to_string()], false, 3.0);
@@ -6716,9 +6734,17 @@ fn main() -> eframe::Result<()> {
         let ok_free_grow = (clip(&free_grow, "c", "timeline_end") - 5.0).abs() < 0.001
             && (clip(&free_grow, "d", "timeline_start") - 5.0).abs() < 0.001;
 
-        let ok = ok_mag_shrink && ok_live_left_drag && ok_mag_left_shrink && ok_mag_left_restore && ok_free_shrink && ok_free_grow;
+        let ok = ok_mag_shrink
+            && ok_live_left_drag
+            && ok_live_left_grow
+            && ok_mag_left_shrink
+            && ok_mag_left_restore
+            && ok_main_off_left_shrink_gap
+            && ok_main_off_left_grow_packed
+            && ok_free_shrink
+            && ok_free_grow;
         println!(
-            "TRIM {} magnetic_shrink={ok_mag_shrink} live_left_drag={ok_live_left_drag} magnetic_left_shrink={ok_mag_left_shrink} magnetic_left_restore={ok_mag_left_restore} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
+            "TRIM {} magnetic_shrink={ok_mag_shrink} live_left_drag={ok_live_left_drag} live_left_grow={ok_live_left_grow} magnetic_left_shrink={ok_mag_left_shrink} magnetic_left_restore={ok_mag_left_restore} main_off_left_shrink_gap={ok_main_off_left_shrink_gap} main_off_left_grow_packed={ok_main_off_left_grow_packed} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
             if ok { "PASS" } else { "FAIL" }
         );
         std::process::exit(if ok { 0 } else { 1 });
