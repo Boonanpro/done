@@ -437,6 +437,141 @@ fn near_freeze(doc: &model::Doc, t: f64) -> bool {
         .any(|c| t > c.timeline_start - 1.2 && t < c.timeline_end + 1.2)
 }
 
+// ---------------- frame-accurate stepping ----------------
+// Arrow keys move by SOURCE frames of the clip under the playhead, landing on frame
+// MIDPOINTS. The old global 1/30 grid skipped/repeated frames whenever a clip start
+// drifted off-grid (every ripple edit does that), and could never land on a frame that
+// occupies less than one grid cell — e.g. the freeze contract's "right clip starts on
+// the displayed frame" window (measured: the first grid point after a freeze jumped
+// straight to the SECOND frame of the continuation).
+
+type PtsCache = std::collections::HashMap<String, Option<std::sync::Arc<Vec<f64>>>>;
+
+fn cached_pts(doc: &model::Doc, cache: &mut PtsCache, aid: &str) -> Option<std::sync::Arc<Vec<f64>>> {
+    if let Some(hit) = cache.get(aid) {
+        return hit.clone();
+    }
+    let load = || -> Option<Vec<f64>> {
+        let p = format!("{}/{aid}_proxy.pts.json", doc.asset_dir);
+        let txt = std::fs::read_to_string(p).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+        let pts: Vec<f64> = v.get("pts")?.as_array()?.iter().filter_map(|x| x.as_f64()).collect();
+        (!pts.is_empty()).then_some(pts)
+    };
+    let arc = load().map(std::sync::Arc::new);
+    cache.insert(aid.to_string(), arc.clone());
+    arc
+}
+
+/// The frame index the engine DISPLAYS for `src` (nearest pts — measured semantics).
+fn nearest_idx(pts: &[f64], src: f64) -> usize {
+    let i = pts.partition_point(|p| *p <= src);
+    if i == 0 {
+        return 0;
+    }
+    if i >= pts.len() {
+        return pts.len() - 1;
+    }
+    if (src - pts[i - 1]).abs() <= (pts[i] - src).abs() { i - 1 } else { i }
+}
+
+fn local_fd(pts: &[f64], k: usize) -> f64 {
+    pts.get(k + 1)
+        .map(|n| n - pts[k])
+        .filter(|d| *d > 1e-4 && *d < 1.0)
+        .or_else(|| (k > 0).then(|| pts[k] - pts[k - 1]).filter(|d| *d > 1e-4 && *d < 1.0))
+        .unwrap_or(1.0 / 30.0)
+}
+
+/// Landing point inside frame `k`: 30% past its pts. NOT the midpoint — the midpoint
+/// is EQUIDISTANT between neighbouring pts, so nearest-frame display becomes a float
+/// coin-flip (measured: landing dead-center showed the NEXT frame). 30% is decisively
+/// inside for both nearest and floor semantics.
+fn frame_mid(pts: &[f64], k: usize) -> Option<f64> {
+    let p = *pts.get(k)?;
+    Some(p + 0.3 * local_fd(pts, k))
+}
+
+/// First (dir>0) or last (dir<0) frame whose MIDPOINT falls inside the clip starting/
+/// ending at source time `src_edge` — i.e. frames actually shown for at least half
+/// their duration. Robust against 3dp-rounded source fields sitting a hair off a pts.
+fn edge_frame(pts: &[f64], src_edge: f64, dir: f64) -> usize {
+    let mut k = nearest_idx(pts, src_edge);
+    if dir > 0.0 {
+        while k + 1 < pts.len() && frame_mid(pts, k).unwrap_or(f64::MAX) < src_edge {
+            k += 1;
+        }
+    } else {
+        while k > 0 && frame_mid(pts, k).unwrap_or(f64::MIN) > src_edge {
+            k -= 1;
+        }
+    }
+    k
+}
+
+/// The clip whose frames stepping follows: first non-audio lane, asset-bearing.
+fn step_clip_under(doc: &model::Doc, t: f64) -> Option<model::Clip> {
+    doc.seq
+        .tracks
+        .iter()
+        .filter(|tr| tr.kind != "audio")
+        .flat_map(|tr| tr.clips.iter())
+        .find(|c| c.asset_id.is_some() && t >= c.timeline_start - 1e-9 && t < c.timeline_end - 1e-9)
+        .cloned()
+}
+
+/// Land just inside `edge` (in step direction `dir`) on a WHOLE frame midpoint.
+fn step_enter(doc: &model::Doc, cache: &mut PtsCache, edge: f64, dir: f64) -> Option<f64> {
+    let c = step_clip_under(doc, edge + dir * 1e-4)?;
+    if c.is_freeze() {
+        // a still: any point shows the same picture — sit just inside the boundary
+        return Some(if dir > 0.0 {
+            (edge + 0.01).min(c.timeline_end - 1e-3)
+        } else {
+            (edge - 0.01).max(c.timeline_start)
+        });
+    }
+    let aid = c.asset_id.clone()?;
+    let pts = cached_pts(doc, cache, &aid)?;
+    let src_edge = c.source_start + (edge.clamp(c.timeline_start, c.timeline_end) - c.timeline_start);
+    let k = edge_frame(&pts, src_edge, dir);
+    let nt = c.timeline_start + (frame_mid(&pts, k)? - c.source_start);
+    Some(nt.clamp(c.timeline_start, (c.timeline_end - 1e-3).max(c.timeline_start)))
+}
+
+/// Where one frame-step from `t` lands. None = no clip/sidecar (caller grid-steps).
+fn step_target(doc: &model::Doc, cache: &mut PtsCache, t: f64, dir: f64) -> Option<f64> {
+    const G: f64 = 1.0 / 30.0;
+    let c = step_clip_under(doc, t)?;
+    if c.is_freeze() {
+        // inside the still the picture never changes: step the timeline grid, and hop
+        // onto the neighbour clip's first/last whole frame when crossing out
+        let grid = (t / G).round() * G + dir * G;
+        if dir > 0.0 && grid >= c.timeline_end - 1e-9 {
+            return step_enter(doc, cache, c.timeline_end, 1.0);
+        }
+        if dir < 0.0 && grid < c.timeline_start {
+            return step_enter(doc, cache, c.timeline_start, -1.0);
+        }
+        return Some(grid);
+    }
+    let aid = c.asset_id.clone()?;
+    let pts = cached_pts(doc, cache, &aid)?;
+    let src = c.source_start + (t - c.timeline_start);
+    let k2 = nearest_idx(&pts, src) as i64 + dir as i64;
+    if k2 < 0 {
+        return step_enter(doc, cache, c.timeline_start, -1.0);
+    }
+    let nt = c.timeline_start + (frame_mid(&pts, k2 as usize)? - c.source_start);
+    if nt >= c.timeline_end - 1e-6 {
+        return step_enter(doc, cache, c.timeline_end, 1.0);
+    }
+    if nt < c.timeline_start {
+        return step_enter(doc, cache, c.timeline_start, -1.0);
+    }
+    Some(nt)
+}
+
 fn fz_log(msg: &str) {
     thread_local! {
         static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
@@ -1798,6 +1933,8 @@ struct App {
     last_seq: u64,
     playing: bool,
     show_help: bool,
+    // pts sidecars cached for frame-accurate stepping (None = sidecar missing)
+    step_pts: PtsCache,
     toast: Option<(String, Instant)>,
     snap_line: Option<f64>,
     hover_lane: Option<usize>,
@@ -1915,6 +2052,7 @@ impl App {
             last_seq: 0,
             playing: false,
             show_help: false,
+            step_pts: Default::default(),
             toast: None,
             snap_line: None,
             hover_lane: None,
@@ -5081,16 +5219,21 @@ impl eframe::App for App {
         if ctx.input(|i| i.key_pressed(egui::Key::F1) || i.key_pressed(egui::Key::Questionmark)) {
             self.show_help = !self.show_help;
         }
-        // frame step while paused (Filmora parity: arrow keys = +-1 frame)
+        // frame step while paused (Filmora parity: arrow keys = +-1 SOURCE frame of the
+        // clip under the playhead; global-grid fallback when no clip/sidecar)
         if !self.playing {
             const FSTEP: f64 = 1.0 / 30.0;
+            let mut step = |app: &mut App, dir: f64| {
+                let grid = (app.t / FSTEP).round() * FSTEP + dir * FSTEP;
+                let nt = step_target(&app.doc, &mut app.step_pts, app.t, dir).unwrap_or(grid);
+                app.t = nt.clamp(0.0, app.dur);
+                app.push_req(false);
+            };
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-                self.t = ((self.t / FSTEP).round() * FSTEP + FSTEP).min(self.dur);
-                self.push_req(false);
+                step(self, 1.0);
             }
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-                self.t = ((self.t / FSTEP).round() * FSTEP - FSTEP).max(0.0);
-                self.push_req(false);
+                step(self, -1.0);
             }
         }
         self.underruns = self.shared.underruns.load(Ordering::Relaxed);
@@ -6361,6 +6504,152 @@ fn main() -> eframe::Result<()> {
         edits::duplicate_clips(&mut r6, &[fz.id.clone()], 78);
         check("fz-duplicate", r6, base_fz + 1);
         println!("FZOPS {}", if fails == 0 { "ALL PASS" } else { "FAILURES" });
+        std::process::exit(if fails == 0 { 0 } else { 1 });
+    }
+    // --selftest-step: frame stepping must visit EVERY source frame exactly once, and
+    // stepping out of a freeze must land on the SAME frame the still holds
+    if args.iter().any(|a| a == "--selftest-step") {
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
+        let doc = model::Doc::load(&contents, &dir).expect("doc");
+        let mut cache: PtsCache = Default::default();
+        let mut fails = 0;
+        let mut check = |name: &str, ok: bool, detail: String| {
+            if !ok {
+                fails += 1;
+            }
+            println!("STEP {name:<18} {} {detail}", if ok { "PASS" } else { "FAIL" });
+        };
+        // pick a freeze that has a non-freeze video clip right after it on the same
+        // lane — preferring a NEW-CONTRACT freeze (right piece rewound onto the still's
+        // frame, PR#491); legacy freezes keep the old +1 semantics in their data
+        let pairs: Vec<_> = doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| {
+                tr.clips.iter().filter_map(move |fz| {
+                    if !fz.is_freeze() {
+                        return None;
+                    }
+                    let nx = tr.clips.iter().find(|n| {
+                        !n.is_freeze()
+                            && n.asset_id.is_some()
+                            && (n.timeline_start - fz.timeline_end).abs() < 0.02
+                            && n.dur() > 1.0
+                    })?;
+                    Some((fz.clone(), nx.clone()))
+                })
+            })
+            .collect();
+        // new-contract discriminator: the left neighbour's out-point sits one frame
+        // PAST the still's source (split at frame end); legacy has them equal
+        let left_of = |fz: &model::Clip| {
+            doc.seq
+                .tracks
+                .iter()
+                .flat_map(|tr| tr.clips.iter())
+                .find(|c| {
+                    !c.is_freeze()
+                        && c.asset_id == fz.asset_id
+                        && (c.timeline_end - fz.timeline_start).abs() < 0.02
+                })
+                .cloned()
+        };
+        let is_new = |fz: &model::Clip| {
+            left_of(fz)
+                .and_then(|lc| lc.source_end)
+                .map(|se| se - fz.source_start > 0.005)
+                .unwrap_or(false)
+        };
+        let pick = pairs
+            .iter()
+            .find(|(fz, _)| is_new(fz))
+            .or_else(|| pairs.first())
+            .cloned();
+        if let Some((fz, nx)) = pick {
+            let new_contract = is_new(&fz);
+            println!("STEP pair fz={} new_contract={new_contract}", fz.id);
+            let aid = nx.asset_id.clone().unwrap();
+            let pts = cached_pts(&doc, &mut cache, &aid).expect("pts sidecar");
+            // 1) step right out of the freeze: must land on the freeze's OWN frame
+            //    (the still) as shown by the right clip = nearest frame of fz.source_start
+            let mut t = fz.timeline_end - 0.02;
+            t = step_target(&doc, &mut cache, t, 1.0).expect("step out");
+            let src = nx.source_start + (t - nx.timeline_start);
+            let got = nearest_idx(&pts, src);
+            // landing correctness: the right clip's FIRST whole frame, always
+            let first = edge_frame(&pts, nx.source_start, 1.0);
+            check(
+                "fz-exit-first-frame",
+                t > fz.timeline_end && got == first,
+                format!("t={t:.4} frame={got} want={first}"),
+            );
+            // same-frame contract: on new freezes that first frame IS the still's frame
+            let want = nearest_idx(&pts, fz.source_start + 1e-4);
+            if new_contract {
+                check(
+                    "fz-exit-same-frame",
+                    got == want,
+                    format!("frame={got} still={want}"),
+                );
+            } else {
+                println!("STEP fz-exit-same-frame SKIP (legacy freeze in doc)");
+            }
+            // 2) 30 more right steps: every step advances by EXACTLY one frame
+            let mut prev = got;
+            let mut ok = true;
+            let mut detail = String::new();
+            for i in 0..30 {
+                t = step_target(&doc, &mut cache, t, 1.0).expect("step");
+                if t >= nx.timeline_end {
+                    break;
+                }
+                let k = nearest_idx(&pts, nx.source_start + (t - nx.timeline_start));
+                if k != prev + 1 {
+                    ok = false;
+                    detail = format!("step{i}: {prev} -> {k}");
+                    break;
+                }
+                prev = k;
+            }
+            check("fwd-one-by-one", ok, detail);
+            // 3) same walk backwards
+            let mut ok = true;
+            let mut detail = String::new();
+            for i in 0..25 {
+                t = step_target(&doc, &mut cache, t, -1.0).expect("back");
+                if t <= nx.timeline_start {
+                    break;
+                }
+                let k = nearest_idx(&pts, nx.source_start + (t - nx.timeline_start));
+                if k != prev - 1 {
+                    ok = false;
+                    detail = format!("step{i}: {prev} -> {k}");
+                    break;
+                }
+                prev = k;
+            }
+            check("back-one-by-one", ok, detail);
+            // 4) stepping LEFT into the clip before the freeze lands on ITS last frame,
+            //    which by the same-frame contract is ALSO the still's frame
+            if let Some(lc) = left_of(&fz) {
+                let t2 = step_target(&doc, &mut cache, fz.timeline_start + 0.01, -1.0)
+                    .expect("step left out");
+                let k = nearest_idx(&pts, lc.source_start + (t2 - lc.timeline_start));
+                // the left clip's LAST whole frame; on new freezes == the still's frame
+                let se = lc.source_end.unwrap_or(lc.source_start + lc.dur());
+                let last = edge_frame(&pts, se, -1.0);
+                check(
+                    "fz-left-last-frame",
+                    t2 < fz.timeline_start && k == last && (!new_contract || k == want),
+                    format!("t={t2:.4} frame={k} last={last} still={want}"),
+                );
+            }
+        } else {
+            println!("STEP no freeze+next pair in doc — skipped boundary checks");
+        }
+        println!("STEP {}", if fails == 0 { "ALL PASS" } else { "FAILURES" });
         std::process::exit(if fails == 0 { 0 } else { 1 });
     }
     // --selftest-dup: headless duplicate — both placement branches on a doc CLONE:
