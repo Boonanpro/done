@@ -586,8 +586,12 @@ impl Compositor {
             let mut tex: Option<ID3D11Texture2D> = None;
             d3d.device.CreateTexture2D(&desc, Some(&init), Some(&mut tex))?;
             let mut st = self.stills.borrow_mut();
-            if st.len() > 24 {
-                st.clear();
+            if st.len() >= 32 {
+                // evict ONE entry — a clear-all forced every still to reload (and the
+                // freeze showed a decode fallback while it did)
+                if let Some(k) = st.keys().next().cloned() {
+                    st.remove(&k);
+                }
             }
             st.insert(key, (tex.unwrap(), (w, h)));
             Ok(())
@@ -612,8 +616,10 @@ impl Compositor {
             let copy = copy.unwrap();
             d3d.ctx.CopyResource(&copy, tex);
             let mut st = self.stills.borrow_mut();
-            if st.len() > 24 {
-                st.clear();
+            if st.len() >= 32 {
+                if let Some(k) = st.keys().next().cloned() {
+                    st.remove(&k);
+                }
             }
             st.insert(key, (copy, wh));
         }
