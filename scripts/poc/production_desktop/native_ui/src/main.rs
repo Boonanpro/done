@@ -6642,7 +6642,8 @@ fn main() -> eframe::Result<()> {
                 ]},
                 {"id":"ov0","type":"overlay","magnet":false,"clips":[
                     {"id":"c","asset_id":"cc","timeline_start":0.0,"timeline_end":4.0,"source_start":0.0,"source_end":4.0},
-                    {"id":"d","asset_id":"dd","timeline_start":4.0,"timeline_end":8.0,"source_start":0.0,"source_end":4.0}
+                    {"id":"d","asset_id":"dd","timeline_start":4.0,"timeline_end":5.0,"source_start":0.0,"source_end":1.0},
+                    {"id":"g","asset_id":"gg","timeline_start":8.2,"timeline_end":9.0,"source_start":0.0,"source_end":0.8}
                 ]},
                 {"id":"au0","type":"audio","clips":[
                     {"id":"aaud","asset_id":"aa","link_id":"la","timeline_start":0.0,"timeline_end":4.0,"source_start":0.0,"source_end":4.0},
@@ -6671,25 +6672,28 @@ fn main() -> eframe::Result<()> {
         let ok_mag_shrink = (clip(&magnetic_shrink, "a", "timeline_end") - 3.0).abs() < 0.001
             && (clip(&magnetic_shrink, "b", "timeline_start") - 3.0).abs() < 0.001
             && (clip(&magnetic_shrink, "aaud", "timeline_end") - 3.0).abs() < 0.001
-            && (clip(&magnetic_shrink, "baud", "timeline_start") - 3.0).abs() < 0.001;
+            && (clip(&magnetic_shrink, "baud", "timeline_start") - 3.0).abs() < 0.001
+            && (clip(&magnetic_shrink, "d", "timeline_start") - 3.0).abs() < 0.001;
 
         let mut magnetic_left_shrink = base.clone();
         edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0);
-        let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_end") - 5.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 5.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 8.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "source_start") - 1.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 8.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 5.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 5.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "baud", "source_start") - 1.0).abs() < 0.001;
-
-        edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0);
-        let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
+        let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "source_start") - 0.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 7.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "source_start") - 1.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 7.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "g", "timeline_start") - 7.2).abs() < 0.001
             && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 7.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "source_start") - 1.0).abs() < 0.001;
+
+        edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 3.0);
+        let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 3.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "source_start") - 0.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 3.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "baud", "source_start") - 0.0).abs() < 0.001;
 
         let mut free_shrink = base.clone();

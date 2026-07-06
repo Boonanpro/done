@@ -89,6 +89,14 @@ pub fn move_clips(root: &mut Value, ids: &[String], dt: f64) {
     }
 }
 
+#[derive(Clone, Copy)]
+struct AttachShift {
+    src_track: usize,
+    span_start: f64,
+    span_end: f64,
+    dt: f64,
+}
+
 /// Trim one edge. left=true drags timeline_start (source in-point follows); else the end.
 pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
     let main_video = tracks_ref(root).and_then(|tracks| {
@@ -96,6 +104,7 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
             .iter()
             .position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("video"))
     });
+    let mut attach_shifts: Vec<AttachShift> = Vec::new();
     {
         let Some(tracks) = tracks_mut(root) else { return };
         for (ti, tr) in tracks.iter_mut().enumerate() {
@@ -140,10 +149,24 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
             let delta_start = if new_start == f64::MAX { 0.0 } else { new_start - old_start };
             let delta_end = if new_end == f64::MIN { 0.0 } else { new_end - old_end };
 
-            // Magnetic left trim keeps the dragged edge under the cursor. When the head is
-            // shortened, extend the previous same-lane clip to fill the gap; when it is
-            // extended left, trim the previous clip's tail so no overlap remains.
-            if left && magnetic && delta_start.abs() > 1e-6 {
+            // Magnetic left-shrink closes the gap by pulling this clip and the right-side
+            // block left. The previous clip's length must not be changed just to fill space.
+            if left && magnetic && delta_start > 1e-6 {
+                let dt = -delta_start;
+                for c in clips.iter_mut() {
+                    let id = sid(c);
+                    let cs = f(c, "timeline_start");
+                    let ce = f(c, "timeline_end");
+                    if ids.contains(&id) || cs >= old_end - 1e-6 {
+                        if !ids.contains(&id) {
+                            attach_shifts.push(AttachShift { src_track: ti, span_start: cs, span_end: ce, dt });
+                        }
+                        setf(c, "timeline_start", (cs + dt).max(0.0));
+                        setf(c, "timeline_end", (ce + dt).max(0.05));
+                    }
+                }
+            } else if left && magnetic && delta_start < -1e-6 {
+                // Left-growth consumes any overlap from the previous same-lane clip.
                 adjust_previous_for_left_trim(clips, ids, old_start, new_start);
             }
 
@@ -158,6 +181,7 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
                     let cs = f(c, "timeline_start");
                     if cs >= old_end - 1e-6 {
                         let ce = f(c, "timeline_end");
+                        attach_shifts.push(AttachShift { src_track: ti, span_start: cs, span_end: ce, dt: delta_end });
                         setf(c, "timeline_start", (cs + delta_end).max(0.0));
                         setf(c, "timeline_end", (ce + delta_end).max(0.05));
                     }
@@ -166,6 +190,7 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
             remove_same_lane_overlaps(clips);
         }
     }
+    shift_attached_clips(root, &attach_shifts);
     normalize_linked_audio(root);
 }
 
@@ -282,6 +307,35 @@ fn adjust_previous_for_left_trim(clips: &mut Vec<Value>, ids: &[String], old_sta
     if let Some(i) = prev {
         if !set_clip_tail(&mut clips[i], new_start) {
             clips[i]["__native_drop"] = Value::from(true);
+        }
+    }
+}
+
+fn shift_attached_clips(root: &mut Value, shifts: &[AttachShift]) {
+    if shifts.is_empty() {
+        return;
+    }
+    let Some(tracks) = tracks_mut(root) else { return };
+    for (ti, tr) in tracks.iter_mut().enumerate() {
+        let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if kind == "audio" || tr.get("locked").and_then(|v| v.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
+        for c in clips {
+            let head = f(c, "timeline_start");
+            let Some(shift) = shifts
+                .iter()
+                .find(|s| ti > s.src_track && head >= s.span_start - 1e-6 && head < s.span_end - 1e-6)
+                .copied()
+            else {
+                continue;
+            };
+            let (cs, ce) = (f(c, "timeline_start"), f(c, "timeline_end"));
+            setf(c, "timeline_start", (cs + shift.dt).max(0.0));
+            setf(c, "timeline_end", (ce + shift.dt).max(0.05));
         }
     }
 }
