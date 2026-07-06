@@ -178,6 +178,21 @@ impl VideoStream {
                 };
                 d3d.vctx.VideoProcessorSetStreamRotation(&vp, 0, true, r);
             }
+            // SOURCE RECT = the DISPLAY area of the decoder surface. Without it the VP
+            // samples the codec's alignment padding too (a 1080-wide proxy decodes on a
+            // 1088-wide surface): the picture squeezed ~0.7% and 8 junk columns landed on
+            // the right edge — measured as the play(proxy)/pause(original) width breathing.
+            d3d.vctx.VideoProcessorSetStreamSourceRect(
+                &vp,
+                0,
+                true,
+                Some(&windows::Win32::Foundation::RECT {
+                    left: 0,
+                    top: 0,
+                    right: src_w as i32,
+                    bottom: src_h as i32,
+                }),
+            );
             let mut ov: Option<ID3D11VideoProcessorOutputView> = None;
             d3d.vdev.CreateVideoProcessorOutputView(
                 &bgra,

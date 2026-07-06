@@ -417,6 +417,16 @@ fn draw_plain_pip(
 
 /// Throttled diagnostics for the freeze paths (at most one line per 500ms) — cheap
 /// enough to stay on permanently; %TEMP%/native_ui.log captures real user sessions.
+/// Within ±1.2s of any freeze clip (diagnostic scope guard).
+fn near_freeze(doc: &model::Doc, t: f64) -> bool {
+    doc.seq
+        .tracks
+        .iter()
+        .flat_map(|tr| tr.clips.iter())
+        .filter(|c| c.is_freeze())
+        .any(|c| t > c.timeline_start - 1.2 && t < c.timeline_end + 1.2)
+}
+
 fn fz_log(msg: &str) {
     thread_local! {
         static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
@@ -1244,6 +1254,7 @@ fn media_thread(shared: Arc<Shared>) {
         let mut pts_maps: PtsMap = Default::default();
         let mut fcache = FrameCache::new();
         let mut prev_was_compose = false;
+        let mut prev_compose_t = f64::NAN;
         // Look-ahead ring: timeline frames composed AHEAD of the playhead on a fixed 30fps
         // grid. Presentation picks from the ring and NEVER waits for a decode — GOP walks
         // and source switches are paid in the ring's future (the Filmora mechanism).
@@ -1365,9 +1376,21 @@ fn media_thread(shared: Arc<Shared>) {
                                 // the content belongs to next_t - STEP — keying it at
                                 // next_t poisoned the cache with shifted frames (the
                                 // "ちらちら" flicker on jumps into cached spans)
+                                // PROVENANCE CHECK: the compensation assumes the previous
+                                // compose was exactly one STEP earlier — log when it wasn't
+                                // (jump seams would cache WRONG-time pixels)
+                                if (prev_compose_t - (next_t - STEP)).abs() > 1e-4 {
+                                    eprintln!(
+                                        "CACHE_PUT_WRONG key={:.3} pixels_from={prev_compose_t:.3}",
+                                        next_t - STEP
+                                    );
+                                } else if near_freeze(&doc, next_t) {
+                                    eprintln!("CACHE_PUT key={:.3} ok", next_t - STEP);
+                                }
                                 fcache.insert(next_t - STEP, &comp.rgba, t);
                             }
                             prev_was_compose = !from_cache;
+                            prev_compose_t = next_t;
                             ms_push = p0.elapsed().as_secs_f32() * 1000.0;
                             // prime whenever we can afford it: a shallow ring is USUALLY
                             // the rapid-boundary case (0.2-2s clips) that needs priming the
@@ -1441,6 +1464,9 @@ fn media_thread(shared: Arc<Shared>) {
                 // ORIGINAL-quality frame in ~5ms without touching a decoder
                 let mut buf = Vec::new();
                 if fcache.get(t, &mut buf) {
+                    if near_freeze(&doc, t) {
+                        eprintln!("SERVE t={t:.3} src=cache");
+                    }
                     seq += 1;
                     let mut f = shared.frame.lock().unwrap();
                     f.rgba = buf;
@@ -1508,6 +1534,9 @@ fn media_thread(shared: Arc<Shared>) {
                 if r.scrubbing && !scrub_exact && resting {
                     let mut buf = Vec::new();
                     if fcache.get(t, &mut buf) {
+                        if near_freeze(&doc, t) {
+                            eprintln!("SERVE t={t:.3} src=cache-rest");
+                        }
                         seq += 1;
                         let mut f = shared.frame.lock().unwrap();
                         f.rgba = buf;
@@ -2986,6 +3015,26 @@ impl App {
                 Some((src, srcp))
             });
         let still_rel = bake.as_ref().map(|_| format!("stills/fz_{salt}.png"));
+        // capture what the user was LOOKING AT when F was pressed (symptom-B ground truth):
+        // the presented frame buffer, saved next to the still for later pixel comparison
+        {
+            let shown = {
+                let f = self.shared.frame.lock().unwrap();
+                (!f.rgba.is_empty()).then(|| f.rgba.clone())
+            };
+            if let Some(rgba) = shown {
+                let out = format!("{}/stills/debug_press_{salt}.png", self.doc.asset_dir);
+                let dir = format!("{}/stills", self.doc.asset_dir);
+                std::thread::spawn(move || {
+                    let _ = std::fs::create_dir_all(&dir);
+                    let (w, h) = (CANVAS_W, CANVAS_H);
+                    if rgba.len() == (w * h * 4) as usize {
+                        let _ = image::save_buffer(&out, &rgba, w, h, image::ColorType::Rgba8);
+                        eprintln!("PRESS_FRAME saved {out}");
+                    }
+                });
+            }
+        }
         if let (Some((src, srcp)), Some(rel)) = (bake, still_rel.clone()) {
             let dir = format!("{}/stills", self.doc.asset_dir);
             let out = format!("{}/{rel}", self.doc.asset_dir);
@@ -5642,7 +5691,8 @@ fn main() -> eframe::Result<()> {
             while mask_build_pass(&doc, &d3d, &mut masks) {}
             let mut pts_maps: PtsMap = Default::default();
             while pts_load_pass(&doc, &mut pts_maps) {}
-            compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, false, true)
+            let orig_q = std::env::var("NATIVE_DUMP_PROXY").map(|v| v.is_empty()).unwrap_or(true);
+            compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, orig_q, false, true)
                 .context("compose")?;
             let mut ppm = format!("P6\n{CANVAS_W} {CANVAS_H}\n255\n").into_bytes();
             for px in comp.rgba.chunks(4) {
