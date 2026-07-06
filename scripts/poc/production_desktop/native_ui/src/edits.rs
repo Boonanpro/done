@@ -91,42 +91,135 @@ pub fn move_clips(root: &mut Value, ids: &[String], dt: f64) {
 
 /// Trim one edge. left=true drags timeline_start (source in-point follows); else the end.
 pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
-    for c in clips_iter_mut(root) {
-        if !ids.contains(&sid(c)) {
+    let main_video = tracks_ref(root).and_then(|tracks| {
+        tracks
+            .iter()
+            .position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("video"))
+    });
+    let Some(tracks) = tracks_mut(root) else { return };
+    for (ti, tr) in tracks.iter_mut().enumerate() {
+        let explicit_magnet = tr.get("magnet").and_then(|v| v.as_bool());
+        let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let magnetic = explicit_magnet.unwrap_or(kind == "video" && main_video == Some(ti));
+        let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
+
+        let old_end = clips
+            .iter()
+            .filter(|c| ids.contains(&sid(c)))
+            .map(|c| f(c, "timeline_end"))
+            .fold(f64::MIN, f64::max);
+        if old_end == f64::MIN {
             continue;
         }
-        let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
-        let ss = f(c, "source_start");
-        let has_se = c.get("source_end").map(|v| v.is_number()).unwrap_or(false);
-        if is_freeze_v(c) {
-            // a freeze's length is TIMELINE-only: never touch its source fields.
-            // (the old video math turned an extended freeze back into moving video)
-            if left {
-                setf(c, "timeline_start", new_t.clamp(0.0, te - 0.05));
-            } else {
-                setf(c, "timeline_end", new_t.max(ts + 0.05));
+
+        for c in clips.iter_mut() {
+            if !ids.contains(&sid(c)) {
+                continue;
             }
-            continue;
+            trim_one_clip(c, left, new_t);
         }
+
+        let new_end = clips
+            .iter()
+            .filter(|c| ids.contains(&sid(c)))
+            .map(|c| f(c, "timeline_end"))
+            .fold(f64::MIN, f64::max);
+        let delta_end = if new_end == f64::MIN { 0.0 } else { new_end - old_end };
+
+        // Main/magnetic lanes stay packed when the right edge shrinks or grows.
+        // Non-magnetic lanes may leave a gap on shrink, but right-growth still pushes
+        // same-lane neighbours instead of creating an invisible overlap.
+        if !left && (magnetic || delta_end > 0.0) && delta_end.abs() > 1e-6 {
+            for c in clips.iter_mut() {
+                if ids.contains(&sid(c)) {
+                    continue;
+                }
+                let cs = f(c, "timeline_start");
+                if cs >= old_end - 1e-6 {
+                    let ce = f(c, "timeline_end");
+                    setf(c, "timeline_start", (cs + delta_end).max(0.0));
+                    setf(c, "timeline_end", (ce + delta_end).max(0.05));
+                }
+            }
+        }
+        remove_same_lane_overlaps(clips);
+    }
+}
+
+fn trim_one_clip(c: &mut Value, left: bool, new_t: f64) {
+    let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
+    let ss = f(c, "source_start");
+    let has_se = c.get("source_end").map(|v| v.is_number()).unwrap_or(false);
+    if is_freeze_v(c) {
+        // a freeze's length is TIMELINE-only: never touch its source fields.
+        // (the old video math turned an extended freeze back into moving video)
         if left {
-            let nt = new_t.clamp(0.0, te - 0.05);
-            let mut d = nt - ts;
-            if has_se {
-                // never push the in-point past the out-point (that flipped the clip
-                // into an accidental freeze by the implicit se<=ss convention)
-                let se = f(c, "source_end");
-                d = d.min(se - ss - 0.05);
-            }
-            setf(c, "timeline_start", (ts + d).max(0.0));
-            setf(c, "source_start", (ss + d).max(0.0));
+            setf(c, "timeline_start", new_t.clamp(0.0, te - 0.05));
         } else {
-            let nt = new_t.max(ts + 0.05);
-            setf(c, "timeline_end", nt);
-            if has_se {
-                let se = f(c, "source_end");
-                // clamp: the out-point stays after the in-point
-                setf(c, "source_end", (se + (nt - te)).max(ss + 0.05));
-            }
+            setf(c, "timeline_end", new_t.max(ts + 0.05));
+        }
+        return;
+    }
+    if left {
+        let nt = new_t.clamp(0.0, te - 0.05);
+        let mut d = nt - ts;
+        if has_se {
+            // never push the in-point past the out-point (that flipped the clip
+            // into an accidental freeze by the implicit se<=ss convention)
+            let se = f(c, "source_end");
+            d = d.min(se - ss - 0.05);
+        }
+        setf(c, "timeline_start", (ts + d).max(0.0));
+        setf(c, "source_start", (ss + d).max(0.0));
+    } else {
+        let nt = new_t.max(ts + 0.05);
+        setf(c, "timeline_end", nt);
+        if has_se {
+            let se = f(c, "source_end");
+            // clamp: the out-point stays after the in-point
+            setf(c, "source_end", (se + (nt - te)).max(ss + 0.05));
+        }
+    }
+}
+
+fn cut_clip_head(c: &mut Value, new_start: f64) -> bool {
+    let ts = f(c, "timeline_start");
+    let te = f(c, "timeline_end");
+    if new_start <= ts + 1e-6 {
+        return true;
+    }
+    let d = new_start - ts;
+    if te - new_start < 0.05 {
+        return false;
+    }
+    if !is_freeze_v(c) && c.get("source_start").map(|v| v.is_number()).unwrap_or(false) {
+        setf(c, "source_start", f(c, "source_start") + d);
+    }
+    setf(c, "timeline_start", new_start);
+    true
+}
+
+fn remove_same_lane_overlaps(clips: &mut Vec<Value>) {
+    clips.sort_by(|a, b| {
+        f(a, "timeline_start")
+            .partial_cmp(&f(b, "timeline_start"))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut prev_end = 0.0;
+    for c in clips.iter_mut() {
+        let ts = f(c, "timeline_start");
+        if ts < prev_end - 1e-6 && !cut_clip_head(c, prev_end) {
+            c["__native_drop"] = Value::from(true);
+            continue;
+        }
+        prev_end = prev_end.max(f(c, "timeline_end"));
+    }
+    clips.retain(|c| !c.get("__native_drop").and_then(|v| v.as_bool()).unwrap_or(false));
+    for c in clips {
+        if let Some(o) = c.as_object_mut() {
+            o.remove("__native_drop");
         }
     }
 }

@@ -4460,8 +4460,9 @@ impl App {
                     }
                 }
                 if let Some(pt) = pointer {
-                    if r.expand2(egui::vec2(5.0, 0.0)).contains(pt)
-                        && ((pt.x - r.left()).abs() < 6.0 || (pt.x - r.right()).abs() < 6.0)
+                    let edge_hit = if sel { 14.0 } else { 10.0 };
+                    if r.expand2(egui::vec2(edge_hit, 0.0)).contains(pt)
+                        && ((pt.x - r.left()).abs() <= edge_hit || (pt.x - r.right()).abs() <= edge_hit)
                     {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                     } else if r.contains(pt)
@@ -4539,9 +4540,34 @@ impl App {
                 self.push_req(false);
             }
             if let Some(pos) = resp.interact_pointer_pos() {
-                let hit = hits.iter().find(|(r, _)| r.expand2(egui::vec2(4.0, 0.0)).contains(pos));
+                let edge_hit = hits
+                    .iter()
+                    .filter_map(|(r, id)| {
+                        let selected = self.selected.contains(id);
+                        let edge_px = if selected { 14.0 } else { 10.0 };
+                        if !r.expand2(egui::vec2(edge_px, 0.0)).contains(pos) {
+                            return None;
+                        }
+                        let dl = (pos.x - r.left()).abs();
+                        let dr = (pos.x - r.right()).abs();
+                        let dist = dl.min(dr);
+                        if dist <= edge_px {
+                            Some((if selected { 0 } else { 1 }, dist, *r, id.clone(), dl <= dr))
+                        } else {
+                            None
+                        }
+                    })
+                    .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)))
+                    .map(|(_, _, r, id, left)| (r, id, Some(left)));
+                let body_hit = edge_hit.clone().or_else(|| {
+                    hits.iter()
+                        .rev()
+                        .find(|(r, _)| r.expand2(egui::vec2(4.0, 0.0)).contains(pos))
+                        .map(|(r, id)| (*r, id.clone(), None))
+                });
+                let hit = body_hit;
                 match hit {
-                    Some((r, id)) => {
+                    Some((r, id, edge)) => {
                         if resp.double_clicked() {
                             if let Some(c) = self
                                 .doc
@@ -4556,7 +4582,7 @@ impl App {
                                 }
                             }
                         }
-                        if !self.selected.contains(id) {
+                        if !self.selected.contains(&id) {
                             if ui.input(|i| i.modifiers.ctrl) {
                                 self.selected.push(id.clone());
                             } else {
@@ -4568,8 +4594,9 @@ impl App {
                             self.pending_undo = Some(self.doc.raw.clone());
                             let vol_zone = pos.y > r.bottom() - 14.0
                                 && r.height() >= 40.0
-                                && (pos.x - r.left()).abs() >= 6.0
-                                && (pos.x - r.right()).abs() >= 6.0
+                                && edge.is_none()
+                                && (pos.x - r.left()).abs() >= 10.0
+                                && (pos.x - r.right()).abs() >= 10.0
                                 && self
                                     .doc
                                     .seq
@@ -4590,10 +4617,8 @@ impl App {
                                     .map(|c| c.volume)
                                     .unwrap_or(1.0);
                                 self.drag = Drag::Volume { ids, start_y: pos.y, start_vol: v0 };
-                            } else if (pos.x - r.left()).abs() < 6.0 {
-                                self.drag = Drag::Trim { ids, left: true };
-                            } else if (pos.x - r.right()).abs() < 6.0 {
-                                self.drag = Drag::Trim { ids, left: false };
+                            } else if let Some(left) = edge {
+                                self.drag = Drag::Trim { ids, left };
                             } else {
                                 let ts = self
                                     .doc
@@ -6573,6 +6598,59 @@ fn main() -> eframe::Result<()> {
         let ok = fz_ok && shifted_ok && ins_ok;
         println!(
             "FZINS {} freeze_ok={fz_ok} shift_ok={shifted_ok} insert_ok={ins_ok}",
+            if ok { "PASS" } else { "FAIL" }
+        );
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+    // --selftest-trim: trim handles keep same-lane clips usable: selected right-trim
+    // pushes neighbours on growth, magnetic lanes close gaps on shrink, non-magnetic
+    // lanes keep shrink gaps.
+    if args.iter().any(|a| a == "--selftest-trim") {
+        let base = serde_json::json!([{
+            "timeline": {"sequence": {"tracks": [
+                {"id":"v0","type":"video","clips":[
+                    {"id":"a","asset_id":"aa","timeline_start":0.0,"timeline_end":4.0,"source_start":0.0,"source_end":4.0},
+                    {"id":"b","asset_id":"bb","timeline_start":4.0,"timeline_end":8.0,"source_start":0.0,"source_end":4.0}
+                ]},
+                {"id":"ov0","type":"overlay","magnet":false,"clips":[
+                    {"id":"c","asset_id":"cc","timeline_start":0.0,"timeline_end":4.0,"source_start":0.0,"source_end":4.0},
+                    {"id":"d","asset_id":"dd","timeline_start":4.0,"timeline_end":8.0,"source_start":0.0,"source_end":4.0}
+                ]}
+            ]}}
+        }]);
+        let clip = |raw: &serde_json::Value, id: &str, key: &str| -> f64 {
+            raw.get(0)
+                .and_then(|r| r.get("timeline"))
+                .and_then(|t| t.get("sequence"))
+                .and_then(|s| s.get("tracks"))
+                .and_then(|t| t.as_array())
+                .into_iter()
+                .flatten()
+                .flat_map(|tr| tr.get("clips").and_then(|c| c.as_array()).into_iter().flatten())
+                .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(id))
+                .and_then(|c| c.get(key))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(-999.0)
+        };
+
+        let mut magnetic_shrink = base.clone();
+        edits::trim_clip(&mut magnetic_shrink, &["a".to_string()], false, 3.0);
+        let ok_mag_shrink = (clip(&magnetic_shrink, "a", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&magnetic_shrink, "b", "timeline_start") - 3.0).abs() < 0.001;
+
+        let mut free_shrink = base.clone();
+        edits::trim_clip(&mut free_shrink, &["c".to_string()], false, 3.0);
+        let ok_free_shrink = (clip(&free_shrink, "c", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&free_shrink, "d", "timeline_start") - 4.0).abs() < 0.001;
+
+        let mut free_grow = base.clone();
+        edits::trim_clip(&mut free_grow, &["c".to_string()], false, 5.0);
+        let ok_free_grow = (clip(&free_grow, "c", "timeline_end") - 5.0).abs() < 0.001
+            && (clip(&free_grow, "d", "timeline_start") - 5.0).abs() < 0.001;
+
+        let ok = ok_mag_shrink && ok_free_shrink && ok_free_grow;
+        println!(
+            "TRIM {} magnetic_shrink={ok_mag_shrink} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
             if ok { "PASS" } else { "FAIL" }
         );
         std::process::exit(if ok { 0 } else { 1 });
