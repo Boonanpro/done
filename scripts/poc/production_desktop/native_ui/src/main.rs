@@ -182,7 +182,7 @@ enum Drag {
     None,
     Scrub,
     Move { ids: Vec<String>, grab: f64, orig: f64, applied: f64 },
-    Trim { ids: Vec<String>, left: bool },
+    Trim { ids: Vec<String>, left: bool, last_t: f64 },
     Marquee { anchor: egui::Pos2 },
     Volume { ids: Vec<String>, start_y: f32, start_vol: f64 },
 }
@@ -4625,7 +4625,17 @@ impl App {
                                     .unwrap_or(1.0);
                                 self.drag = Drag::Volume { ids, start_y: pos.y, start_vol: v0 };
                             } else if let Some(left) = edge {
-                                self.drag = Drag::Trim { ids, left };
+                                let edges = self
+                                    .doc
+                                    .seq
+                                    .tracks
+                                    .iter()
+                                    .flat_map(|tr| tr.clips.iter())
+                                    .filter(|c| ids.contains(&c.id))
+                                    .map(|c| if left { c.timeline_start } else { c.timeline_end });
+                                let last_t = if left { edges.fold(f64::MAX, f64::min) } else { edges.fold(f64::MIN, f64::max) };
+                                let last_t = if last_t.is_finite() { last_t } else { to_t(self.scroll_x, self.pps, pos.x) };
+                                self.drag = Drag::Trim { ids, left, last_t };
                             } else {
                                 let ts = self
                                     .doc
@@ -4718,11 +4728,14 @@ impl App {
                             }
                         }
                     }
-                    Drag::Trim { ids, left } => {
+                    Drag::Trim { ids, left, last_t } => {
                         let raw_t = to_t(self.scroll_x, self.pps, pos.x);
                         let nt = self.snap(raw_t, &ids);
                         self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
-                        self.apply_edit(false, |raw| edits::trim_clip_live(raw, &ids, left, nt));
+                        self.apply_edit(false, |raw| edits::trim_clip_live_from(raw, &ids, left, last_t, nt));
+                        if let Drag::Trim { last_t, .. } = &mut self.drag {
+                            *last_t = nt;
+                        }
                     }
                     Drag::Volume { ids, start_y, start_vol } => {
                         let vol = (start_vol + ((start_y - pos.y) as f64) / 90.0).clamp(0.0, 2.0);
@@ -4808,7 +4821,7 @@ impl App {
                 },
                 self.hover_lane
             );
-            if let Drag::Trim { ids, left: true } = &prev {
+            if let Drag::Trim { ids, left: true, .. } = &prev {
                 self.apply_edit(false, |raw| edits::settle_left_trim(raw, ids));
             }
             let _ = &prev; // lane moves happen LIVE during the drag now
@@ -6683,17 +6696,19 @@ fn main() -> eframe::Result<()> {
             && (clip(&magnetic_shrink, "d", "timeline_start") - 3.0).abs() < 0.001;
 
         let mut live_left_drag = base.clone();
-        edits::trim_clip_live(&mut live_left_drag, &["b".to_string()], true, 5.0);
-        let ok_live_left_drag = (clip(&live_left_drag, "a", "timeline_end") - 5.0).abs() < 0.001
-            && (clip(&live_left_drag, "b", "timeline_start") - 5.0).abs() < 0.001
-            && (clip(&live_left_drag, "b", "timeline_end") - 8.0).abs() < 0.001
+        edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 4.0, 5.0);
+        let ok_live_left_drag = (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "timeline_end") - 7.0).abs() < 0.001
+            && (clip(&live_left_drag, "e", "timeline_start") - 7.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "source_start") - 1.0).abs() < 0.001;
 
-        edits::trim_clip_live(&mut live_left_drag, &["b".to_string()], true, 4.0);
-        let ok_live_left_grow = (clip(&live_left_drag, "a", "timeline_start") - -1.0).abs() < 0.001
+        edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 5.0, 4.0);
+        let ok_live_left_grow = (clip(&live_left_drag, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "timeline_start") - 4.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "timeline_end") - 8.0).abs() < 0.001
+            && (clip(&live_left_drag, "e", "timeline_start") - 8.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "source_start") - 0.0).abs() < 0.001;
 
         let mut live_left_grow_from_handle = base.clone();
@@ -6701,45 +6716,62 @@ fn main() -> eframe::Result<()> {
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][0]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
-        edits::trim_clip_live(&mut live_left_grow_from_handle, &["b".to_string()], true, 3.0);
-        let ok_live_left_grow_no_erode = (clip(&live_left_grow_from_handle, "a", "timeline_start") - -1.0).abs() < 0.001
-            && (clip(&live_left_grow_from_handle, "a", "timeline_end") - 3.0).abs() < 0.001
-            && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 3.0).abs() < 0.001
+        edits::trim_clip_live_from(&mut live_left_grow_from_handle, &["b".to_string()], true, 4.0, 3.0);
+        let ok_live_left_grow_no_erode = (clip(&live_left_grow_from_handle, "a", "timeline_start") - 0.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "b", "timeline_end") - 9.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "e", "timeline_start") - 9.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "b", "source_start") - 0.0).abs() < 0.001;
 
         let mut magnetic_left_shrink = base.clone();
-        edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0);
-        let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_end") - 5.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 5.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 8.0).abs() < 0.001
+        edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0, 5.0);
+        edits::settle_left_trim(&mut magnetic_left_shrink, &["b".to_string()]);
+        let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 7.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "source_start") - 1.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 8.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "g", "timeline_start") - 8.2).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 5.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 5.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 8.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 7.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "g", "timeline_start") - 7.2).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 7.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "baud", "source_start") - 1.0).abs() < 0.001;
 
-        edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0);
-        let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_start") - -1.0).abs() < 0.001
+        edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0, 4.0);
+        edits::settle_left_trim(&mut magnetic_left_shrink, &["b".to_string()]);
+        let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 8.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 8.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "source_start") - 0.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "baud", "source_start") - 0.0).abs() < 0.001;
 
         let mut main_magnet_off = base.clone();
         main_magnet_off[0]["timeline"]["sequence"]["tracks"][0]["magnet"] = serde_json::Value::Bool(false);
-        edits::trim_clip_live(&mut main_magnet_off, &["b".to_string()], true, 5.0);
+        edits::trim_clip_live_from(&mut main_magnet_off, &["b".to_string()], true, 4.0, 5.0);
         let ok_main_off_left_shrink_gap = (clip(&main_magnet_off, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&main_magnet_off, "b", "timeline_start") - 5.0).abs() < 0.001
+            && (clip(&main_magnet_off, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&main_magnet_off, "b", "timeline_end") - 7.0).abs() < 0.001
+            && (clip(&main_magnet_off, "e", "timeline_start") - 8.0).abs() < 0.001
             && (clip(&main_magnet_off, "b", "source_start") - 1.0).abs() < 0.001;
 
-        edits::trim_clip_live(&mut main_magnet_off, &["b".to_string()], true, 4.0);
-        let ok_main_off_left_grow_packed = (clip(&main_magnet_off, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&main_magnet_off, "b", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&main_magnet_off, "b", "source_start") - 0.0).abs() < 0.001;
+        let mut main_off_left_grow = base.clone();
+        main_off_left_grow[0]["timeline"]["sequence"]["tracks"][0]["magnet"] = serde_json::Value::Bool(false);
+        main_off_left_grow[0]["timeline"]["sequence"]["tracks"][0]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
+        main_off_left_grow[0]["timeline"]["sequence"]["tracks"][0]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
+        main_off_left_grow[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
+        main_off_left_grow[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
+        edits::trim_clip_live_from(&mut main_off_left_grow, &["b".to_string()], true, 4.0, 3.0);
+        let ok_main_off_left_grow_packed = (clip(&main_off_left_grow, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "b", "timeline_end") - 9.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "e", "timeline_start") - 9.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "b", "source_start") - 0.0).abs() < 0.001;
 
         let mut free_shrink = base.clone();
         edits::trim_clip(&mut free_shrink, &["c".to_string()], false, 3.0);
