@@ -97,8 +97,18 @@ struct AttachShift {
     dt: f64,
 }
 
-/// Trim one edge. left=true drags timeline_start (source in-point follows); else the end.
+/// Trim one edge and apply the settled magnetic-left behavior. left=true drags
+/// timeline_start (source in-point follows); else the end.
 pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
+    trim_clip_live(root, ids, left, new_t);
+    if left {
+        settle_left_trim(root, ids);
+    }
+}
+
+/// Live trim during a mouse drag. Magnetic left-trim packing is intentionally deferred
+/// until release so the dragged edge can follow the cursor for fine adjustment.
+pub fn trim_clip_live(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
     let main_video = tracks_ref(root).and_then(|tracks| {
         tracks
             .iter()
@@ -136,39 +146,12 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
                 trim_one_clip(c, left, new_t);
             }
 
-            let new_start = clips
-                .iter()
-                .filter(|c| ids.contains(&sid(c)))
-                .map(|c| f(c, "timeline_start"))
-                .fold(f64::MAX, f64::min);
             let new_end = clips
                 .iter()
                 .filter(|c| ids.contains(&sid(c)))
                 .map(|c| f(c, "timeline_end"))
                 .fold(f64::MIN, f64::max);
-            let delta_start = if new_start == f64::MAX { 0.0 } else { new_start - old_start };
             let delta_end = if new_end == f64::MIN { 0.0 } else { new_end - old_end };
-
-            // Magnetic left-shrink closes the gap by pulling this clip and the right-side
-            // block left. The previous clip's length must not be changed just to fill space.
-            if left && magnetic && delta_start > 1e-6 {
-                let dt = -delta_start;
-                for c in clips.iter_mut() {
-                    let id = sid(c);
-                    let cs = f(c, "timeline_start");
-                    let ce = f(c, "timeline_end");
-                    if ids.contains(&id) || cs >= old_end - 1e-6 {
-                        if !ids.contains(&id) {
-                            attach_shifts.push(AttachShift { src_track: ti, span_start: cs, span_end: ce, dt });
-                        }
-                        setf(c, "timeline_start", (cs + dt).max(0.0));
-                        setf(c, "timeline_end", (ce + dt).max(0.05));
-                    }
-                }
-            } else if left && magnetic && delta_start < -1e-6 {
-                // Left-growth consumes any overlap from the previous same-lane clip.
-                adjust_previous_for_left_trim(clips, ids, old_start, new_start);
-            }
 
             // Main/magnetic lanes stay packed when the right edge shrinks or grows.
             // Non-magnetic lanes may leave a gap on shrink, but right-growth still pushes
@@ -184,6 +167,68 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
                         attach_shifts.push(AttachShift { src_track: ti, span_start: cs, span_end: ce, dt: delta_end });
                         setf(c, "timeline_start", (cs + delta_end).max(0.0));
                         setf(c, "timeline_end", (ce + delta_end).max(0.05));
+                    }
+                }
+            }
+            if !left {
+                remove_same_lane_overlaps(clips);
+            }
+        }
+    }
+    shift_attached_clips(root, &attach_shifts);
+    normalize_linked_audio(root);
+}
+
+pub fn settle_left_trim(root: &mut Value, ids: &[String]) {
+    let main_video = tracks_ref(root).and_then(|tracks| {
+        tracks
+            .iter()
+            .position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("video"))
+    });
+    let mut attach_shifts: Vec<AttachShift> = Vec::new();
+    {
+        let Some(tracks) = tracks_mut(root) else { return };
+        for (ti, tr) in tracks.iter_mut().enumerate() {
+            let explicit_magnet = tr.get("magnet").and_then(|v| v.as_bool());
+            let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let magnetic = explicit_magnet.unwrap_or(kind == "video" && main_video == Some(ti));
+            if !magnetic {
+                continue;
+            }
+            let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else {
+                continue;
+            };
+            let sel_start = clips
+                .iter()
+                .filter(|c| ids.contains(&sid(c)))
+                .map(|c| f(c, "timeline_start"))
+                .fold(f64::MAX, f64::min);
+            let sel_end = clips
+                .iter()
+                .filter(|c| ids.contains(&sid(c)))
+                .map(|c| f(c, "timeline_end"))
+                .fold(f64::MIN, f64::max);
+            if sel_start == f64::MAX || sel_end == f64::MIN {
+                continue;
+            }
+
+            if let Some(i) = previous_overlapping_index(clips, ids, sel_start) {
+                if !set_clip_tail(&mut clips[i], sel_start) {
+                    clips[i]["__native_drop"] = Value::from(true);
+                }
+            } else if let Some(prev_end) = previous_end_before(clips, ids, sel_start) {
+                let gap = sel_start - prev_end;
+                if gap > 1e-6 {
+                    let dt = -gap;
+                    for c in clips.iter_mut() {
+                        let id = sid(c);
+                        let cs = f(c, "timeline_start");
+                        let ce = f(c, "timeline_end");
+                        if ids.contains(&id) || cs >= sel_end - 1e-6 {
+                            attach_shifts.push(AttachShift { src_track: ti, span_start: cs, span_end: ce, dt });
+                            setf(c, "timeline_start", (cs + dt).max(0.0));
+                            setf(c, "timeline_end", (ce + dt).max(0.05));
+                        }
                     }
                 }
             }
@@ -291,24 +336,27 @@ fn set_clip_tail(c: &mut Value, new_end: f64) -> bool {
     true
 }
 
-fn adjust_previous_for_left_trim(clips: &mut Vec<Value>, ids: &[String], old_start: f64, new_start: f64) {
-    let need_end = if new_start >= old_start { old_start } else { new_start };
-    let prev = clips
+fn previous_overlapping_index(clips: &[Value], ids: &[String], sel_start: f64) -> Option<usize> {
+    clips
         .iter()
         .enumerate()
         .filter(|(_, c)| !ids.contains(&sid(c)))
-        .filter(|(_, c)| f(c, "timeline_start") < old_start - 1e-6 && f(c, "timeline_end") > need_end - 1e-6)
+        .filter(|(_, c)| f(c, "timeline_start") < sel_start - 1e-6 && f(c, "timeline_end") > sel_start + 1e-6)
         .max_by(|(_, a), (_, b)| {
             f(a, "timeline_end")
                 .partial_cmp(&f(b, "timeline_end"))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
-        .map(|(i, _)| i);
-    if let Some(i) = prev {
-        if !set_clip_tail(&mut clips[i], new_start) {
-            clips[i]["__native_drop"] = Value::from(true);
-        }
-    }
+        .map(|(i, _)| i)
+}
+
+fn previous_end_before(clips: &[Value], ids: &[String], sel_start: f64) -> Option<f64> {
+    clips
+        .iter()
+        .filter(|c| !ids.contains(&sid(c)))
+        .map(|c| f(c, "timeline_end"))
+        .filter(|&te| te <= sel_start + 1e-6)
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 fn shift_attached_clips(root: &mut Value, shifts: &[AttachShift]) {

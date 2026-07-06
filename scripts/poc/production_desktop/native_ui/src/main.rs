@@ -4720,7 +4720,7 @@ impl App {
                         let raw_t = to_t(self.scroll_x, self.pps, pos.x);
                         let nt = self.snap(raw_t, &ids);
                         self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
-                        self.apply_edit(false, |raw| edits::trim_clip(raw, &ids, left, nt));
+                        self.apply_edit(false, |raw| edits::trim_clip_live(raw, &ids, left, nt));
                     }
                     Drag::Volume { ids, start_y, start_vol } => {
                         let vol = (start_vol + ((start_y - pos.y) as f64) / 90.0).clamp(0.0, 2.0);
@@ -4806,6 +4806,9 @@ impl App {
                 },
                 self.hover_lane
             );
+            if let Drag::Trim { ids, left: true } = &prev {
+                self.apply_edit(false, |raw| edits::settle_left_trim(raw, ids));
+            }
             let _ = &prev; // lane moves happen LIVE during the drag now
             self.hover_lane = None;
             self.snap_line = None;
@@ -6675,6 +6678,13 @@ fn main() -> eframe::Result<()> {
             && (clip(&magnetic_shrink, "baud", "timeline_start") - 3.0).abs() < 0.001
             && (clip(&magnetic_shrink, "d", "timeline_start") - 3.0).abs() < 0.001;
 
+        let mut live_left_drag = base.clone();
+        edits::trim_clip_live(&mut live_left_drag, &["b".to_string()], true, 5.0);
+        let ok_live_left_drag = (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "timeline_start") - 5.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "timeline_end") - 8.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "source_start") - 1.0).abs() < 0.001;
+
         let mut magnetic_left_shrink = base.clone();
         edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0);
         let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
@@ -6706,9 +6716,9 @@ fn main() -> eframe::Result<()> {
         let ok_free_grow = (clip(&free_grow, "c", "timeline_end") - 5.0).abs() < 0.001
             && (clip(&free_grow, "d", "timeline_start") - 5.0).abs() < 0.001;
 
-        let ok = ok_mag_shrink && ok_mag_left_shrink && ok_mag_left_restore && ok_free_shrink && ok_free_grow;
+        let ok = ok_mag_shrink && ok_live_left_drag && ok_mag_left_shrink && ok_mag_left_restore && ok_free_shrink && ok_free_grow;
         println!(
-            "TRIM {} magnetic_shrink={ok_mag_shrink} magnetic_left_shrink={ok_mag_left_shrink} magnetic_left_restore={ok_mag_left_restore} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
+            "TRIM {} magnetic_shrink={ok_mag_shrink} live_left_drag={ok_live_left_drag} magnetic_left_shrink={ok_mag_left_shrink} magnetic_left_restore={ok_mag_left_restore} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
             if ok { "PASS" } else { "FAIL" }
         );
         std::process::exit(if ok { 0 } else { 1 });
