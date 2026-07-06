@@ -139,18 +139,11 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
         let delta_start = if new_start == f64::MAX { 0.0 } else { new_start - old_start };
         let delta_end = if new_end == f64::MIN { 0.0 } else { new_end - old_end };
 
-        // Magnetic left-shrink is a ripple trim: cut the selected clip's head, then
-        // move that clip and everything after it left by the removed duration so no
-        // gap opens before the clip.
-        if left && magnetic && delta_start > 1e-6 {
-            for c in clips.iter_mut() {
-                let cs = f(c, "timeline_start");
-                if cs >= new_start - 1e-6 {
-                    let ce = f(c, "timeline_end");
-                    setf(c, "timeline_start", (cs - delta_start).max(0.0));
-                    setf(c, "timeline_end", (ce - delta_start).max(0.05));
-                }
-            }
+        // Magnetic left trim keeps the dragged edge under the cursor. When the head is
+        // shortened, extend the previous same-lane clip to fill the gap; when it is
+        // extended left, trim the previous clip's tail so no overlap remains.
+        if left && magnetic && delta_start.abs() > 1e-6 {
+            adjust_previous_for_left_trim(clips, ids, old_start, new_start);
         }
 
         // Main/magnetic lanes stay packed when the right edge shrinks or grows.
@@ -190,6 +183,7 @@ fn trim_one_clip(c: &mut Value, left: bool, new_t: f64) {
     if left {
         let nt = new_t.clamp(0.0, te - 0.05);
         let mut d = nt - ts;
+        d = d.max(-ss);
         if has_se {
             // never push the in-point past the out-point (that flipped the clip
             // into an accidental freeze by the implicit se<=ss convention)
@@ -205,6 +199,40 @@ fn trim_one_clip(c: &mut Value, left: bool, new_t: f64) {
             let se = f(c, "source_end");
             // clamp: the out-point stays after the in-point
             setf(c, "source_end", (se + (nt - te)).max(ss + 0.05));
+        }
+    }
+}
+
+fn set_clip_tail(c: &mut Value, new_end: f64) -> bool {
+    let ts = f(c, "timeline_start");
+    let te = f(c, "timeline_end");
+    if new_end - ts < 0.05 {
+        return false;
+    }
+    if !is_freeze_v(c) && c.get("source_end").map(|v| v.is_number()).unwrap_or(false) {
+        let ss = f(c, "source_start");
+        setf(c, "source_end", (f(c, "source_end") + (new_end - te)).max(ss + 0.05));
+    }
+    setf(c, "timeline_end", new_end);
+    true
+}
+
+fn adjust_previous_for_left_trim(clips: &mut Vec<Value>, ids: &[String], old_start: f64, new_start: f64) {
+    let need_end = if new_start >= old_start { old_start } else { new_start };
+    let prev = clips
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !ids.contains(&sid(c)))
+        .filter(|(_, c)| f(c, "timeline_start") < old_start - 1e-6 && f(c, "timeline_end") > need_end - 1e-6)
+        .max_by(|(_, a), (_, b)| {
+            f(a, "timeline_end")
+                .partial_cmp(&f(b, "timeline_end"))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i);
+    if let Some(i) = prev {
+        if !set_clip_tail(&mut clips[i], new_start) {
+            clips[i]["__native_drop"] = Value::from(true);
         }
     }
 }

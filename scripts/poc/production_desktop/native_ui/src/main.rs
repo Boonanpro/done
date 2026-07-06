@@ -6641,10 +6641,16 @@ fn main() -> eframe::Result<()> {
 
         let mut magnetic_left_shrink = base.clone();
         edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0);
-        let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 7.0).abs() < 0.001
+        let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_end") - 5.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 5.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "source_start") - 1.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 7.0).abs() < 0.001;
+            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 8.0).abs() < 0.001;
+
+        edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0);
+        let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "source_start") - 0.0).abs() < 0.001;
 
         let mut free_shrink = base.clone();
         edits::trim_clip(&mut free_shrink, &["c".to_string()], false, 3.0);
@@ -6656,9 +6662,9 @@ fn main() -> eframe::Result<()> {
         let ok_free_grow = (clip(&free_grow, "c", "timeline_end") - 5.0).abs() < 0.001
             && (clip(&free_grow, "d", "timeline_start") - 5.0).abs() < 0.001;
 
-        let ok = ok_mag_shrink && ok_mag_left_shrink && ok_free_shrink && ok_free_grow;
+        let ok = ok_mag_shrink && ok_mag_left_shrink && ok_mag_left_restore && ok_free_shrink && ok_free_grow;
         println!(
-            "TRIM {} magnetic_shrink={ok_mag_shrink} magnetic_left_shrink={ok_mag_left_shrink} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
+            "TRIM {} magnetic_shrink={ok_mag_shrink} magnetic_left_shrink={ok_mag_left_shrink} magnetic_left_restore={ok_mag_left_restore} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
             if ok { "PASS" } else { "FAIL" }
         );
         std::process::exit(if ok { 0 } else { 1 });
