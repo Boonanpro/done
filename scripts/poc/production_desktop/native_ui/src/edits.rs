@@ -35,6 +35,16 @@ fn setf(v: &mut Value, k: &str, val: f64) {
 fn sid(v: &Value) -> String {
     v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
+fn is_freeze_v(v: &Value) -> bool {
+    if let Some(f) = v.get("freeze").and_then(|x| x.as_bool()) {
+        return f;
+    }
+    match (v.get("source_start").and_then(|x| x.as_f64()), v.get("source_end").and_then(|x| x.as_f64())) {
+        (Some(ss), Some(se)) => se <= ss + 1e-6,
+        _ => false,
+    }
+}
+
 fn link(v: &Value) -> Option<String> {
     v.get("link_id").and_then(|x| x.as_str()).map(|s| s.to_string())
 }
@@ -88,17 +98,34 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
         let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
         let ss = f(c, "source_start");
         let has_se = c.get("source_end").map(|v| v.is_number()).unwrap_or(false);
+        if is_freeze_v(c) {
+            // a freeze's length is TIMELINE-only: never touch its source fields.
+            // (the old video math turned an extended freeze back into moving video)
+            if left {
+                setf(c, "timeline_start", new_t.clamp(0.0, te - 0.05));
+            } else {
+                setf(c, "timeline_end", new_t.max(ts + 0.05));
+            }
+            continue;
+        }
         if left {
             let nt = new_t.clamp(0.0, te - 0.05);
-            let d = nt - ts;
-            setf(c, "timeline_start", nt);
+            let mut d = nt - ts;
+            if has_se {
+                // never push the in-point past the out-point (that flipped the clip
+                // into an accidental freeze by the implicit se<=ss convention)
+                let se = f(c, "source_end");
+                d = d.min(se - ss - 0.05);
+            }
+            setf(c, "timeline_start", (ts + d).max(0.0));
             setf(c, "source_start", (ss + d).max(0.0));
         } else {
             let nt = new_t.max(ts + 0.05);
             setf(c, "timeline_end", nt);
             if has_se {
                 let se = f(c, "source_end");
-                setf(c, "source_end", se + (nt - te));
+                // clamp: the out-point stays after the in-point
+                setf(c, "source_end", (se + (nt - te)).max(ss + 0.05));
             }
         }
     }
@@ -145,10 +172,11 @@ pub fn split_clips(root: &mut Value, ids: &[String], t: f64, salt: u64) {
                         continue;
                     }
                     let d = t - ts;
+                    let fz = is_freeze_v(&c);
                     let has_se = c.get("source_end").map(|v| v.is_number()).unwrap_or(false);
                     let mut leftv = c.clone();
                     setf(&mut leftv, "timeline_end", t);
-                    if has_se {
+                    if has_se && !fz {
                         let ss = f(&c, "source_start");
                         setf(&mut leftv, "source_end", ss + d);
                     }
@@ -156,7 +184,7 @@ pub fn split_clips(root: &mut Value, ids: &[String], t: f64, salt: u64) {
                     n += 1;
                     rightv["id"] = Value::from(format!("{}__ns_{}_{}", sid(&c), salt, n));
                     setf(&mut rightv, "timeline_start", t);
-                    if has_se {
+                    if has_se && !fz {
                         let ss = f(&c, "source_start");
                         setf(&mut rightv, "source_start", ss + d);
                     }
@@ -474,6 +502,7 @@ pub fn freeze_frame_with_still(
     setf(&mut clip, "source_end", src);
     if let Some(o) = clip.as_object_mut() {
         o.remove("link_id"); // no linked audio: a freeze is silent
+        o.insert("freeze".into(), Value::from(true));
         if let Some(p) = still_rel {
             o.insert("freeze_still".into(), Value::from(p));
         }
