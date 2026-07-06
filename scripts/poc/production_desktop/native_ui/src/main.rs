@@ -1998,7 +1998,11 @@ struct App {
 
 impl App {
     fn new(contents: &str, dir: &str) -> anyhow::Result<Self> {
-        let doc = Arc::new(model::Doc::load(contents, dir)?);
+        let mut raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(contents)?)?;
+        let before_norm = serde_json::to_string(&raw).unwrap_or_default();
+        edits::normalize_linked_audio(&mut raw);
+        let normalized_on_load = serde_json::to_string(&raw).unwrap_or_default() != before_norm;
+        let doc = Arc::new(model::Doc::from_raw(raw, contents, dir)?);
         let dur = doc.duration();
         let shared = Arc::new(Shared {
             req: Mutex::new(Req { t: 0.0, playing: false, scrubbing: false, gen: 0 }),
@@ -2069,7 +2073,7 @@ impl App {
             undo: Vec::new(),
             pending_undo: None,
             redo: Vec::new(),
-            save_at: None,
+            save_at: normalized_on_load.then(|| Instant::now() + std::time::Duration::from_millis(1200)),
             thumbs: Default::default(),
             peaks: Default::default(),
             aux_ver: 0,
@@ -6067,6 +6071,27 @@ fn main() -> eframe::Result<()> {
     }
     let args: Vec<String> = std::env::args().collect();
     load_api_token(&args);
+    // --repair-linked-audio: normalize saved A/V link pairs in-place. This repairs
+    // projects saved before the editor enforced linked audio as derived-from-video.
+    if args.iter().any(|a| a == "--repair-linked-audio") {
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let r = (|| -> anyhow::Result<bool> {
+            let mut raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&contents)?)?;
+            let before = serde_json::to_string(&raw)?;
+            edits::normalize_linked_audio(&mut raw);
+            let changed = serde_json::to_string(&raw)? != before;
+            if changed {
+                edits::save(&raw, &contents)?;
+            }
+            Ok(changed)
+        })();
+        match r {
+            Ok(true) => println!("REPAIR linked-audio updated {contents}"),
+            Ok(false) => println!("REPAIR linked-audio no changes {contents}"),
+            Err(e) => println!("REPAIR ERR {e:#}"),
+        }
+        std::process::exit(0);
+    }
     // --dump-frame <t> <out.ppm>: headless compose of one timeline frame — deterministic
     // A/B verification (live matte path vs pv fallback) with no window and no user input
     if let Some(i) = args.iter().position(|a| a == "--dump-frame") {
