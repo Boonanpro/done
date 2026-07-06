@@ -6603,14 +6603,15 @@ fn main() -> eframe::Result<()> {
         std::process::exit(if ok { 0 } else { 1 });
     }
     // --selftest-trim: trim handles keep same-lane clips usable: selected right-trim
-    // pushes neighbours on growth, magnetic lanes close gaps on shrink, non-magnetic
-    // lanes keep shrink gaps.
+    // pushes neighbours on growth, magnetic lanes close gaps on both edge shrinks,
+    // non-magnetic lanes keep shrink gaps.
     if args.iter().any(|a| a == "--selftest-trim") {
         let base = serde_json::json!([{
             "timeline": {"sequence": {"tracks": [
                 {"id":"v0","type":"video","clips":[
                     {"id":"a","asset_id":"aa","timeline_start":0.0,"timeline_end":4.0,"source_start":0.0,"source_end":4.0},
-                    {"id":"b","asset_id":"bb","timeline_start":4.0,"timeline_end":8.0,"source_start":0.0,"source_end":4.0}
+                    {"id":"b","asset_id":"bb","timeline_start":4.0,"timeline_end":8.0,"source_start":0.0,"source_end":4.0},
+                    {"id":"e","asset_id":"ee","timeline_start":8.0,"timeline_end":10.0,"source_start":0.0,"source_end":2.0}
                 ]},
                 {"id":"ov0","type":"overlay","magnet":false,"clips":[
                     {"id":"c","asset_id":"cc","timeline_start":0.0,"timeline_end":4.0,"source_start":0.0,"source_end":4.0},
@@ -6638,6 +6639,13 @@ fn main() -> eframe::Result<()> {
         let ok_mag_shrink = (clip(&magnetic_shrink, "a", "timeline_end") - 3.0).abs() < 0.001
             && (clip(&magnetic_shrink, "b", "timeline_start") - 3.0).abs() < 0.001;
 
+        let mut magnetic_left_shrink = base.clone();
+        edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0);
+        let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 7.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "source_start") - 1.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 7.0).abs() < 0.001;
+
         let mut free_shrink = base.clone();
         edits::trim_clip(&mut free_shrink, &["c".to_string()], false, 3.0);
         let ok_free_shrink = (clip(&free_shrink, "c", "timeline_end") - 3.0).abs() < 0.001
@@ -6648,9 +6656,9 @@ fn main() -> eframe::Result<()> {
         let ok_free_grow = (clip(&free_grow, "c", "timeline_end") - 5.0).abs() < 0.001
             && (clip(&free_grow, "d", "timeline_start") - 5.0).abs() < 0.001;
 
-        let ok = ok_mag_shrink && ok_free_shrink && ok_free_grow;
+        let ok = ok_mag_shrink && ok_mag_left_shrink && ok_free_shrink && ok_free_grow;
         println!(
-            "TRIM {} magnetic_shrink={ok_mag_shrink} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
+            "TRIM {} magnetic_shrink={ok_mag_shrink} magnetic_left_shrink={ok_mag_left_shrink} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
             if ok { "PASS" } else { "FAIL" }
         );
         std::process::exit(if ok { 0 } else { 1 });

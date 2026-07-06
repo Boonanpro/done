@@ -105,12 +105,17 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
             continue;
         };
 
+        let old_start = clips
+            .iter()
+            .filter(|c| ids.contains(&sid(c)))
+            .map(|c| f(c, "timeline_start"))
+            .fold(f64::MAX, f64::min);
         let old_end = clips
             .iter()
             .filter(|c| ids.contains(&sid(c)))
             .map(|c| f(c, "timeline_end"))
             .fold(f64::MIN, f64::max);
-        if old_end == f64::MIN {
+        if old_start == f64::MAX || old_end == f64::MIN {
             continue;
         }
 
@@ -121,12 +126,32 @@ pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
             trim_one_clip(c, left, new_t);
         }
 
+        let new_start = clips
+            .iter()
+            .filter(|c| ids.contains(&sid(c)))
+            .map(|c| f(c, "timeline_start"))
+            .fold(f64::MAX, f64::min);
         let new_end = clips
             .iter()
             .filter(|c| ids.contains(&sid(c)))
             .map(|c| f(c, "timeline_end"))
             .fold(f64::MIN, f64::max);
+        let delta_start = if new_start == f64::MAX { 0.0 } else { new_start - old_start };
         let delta_end = if new_end == f64::MIN { 0.0 } else { new_end - old_end };
+
+        // Magnetic left-shrink is a ripple trim: cut the selected clip's head, then
+        // move that clip and everything after it left by the removed duration so no
+        // gap opens before the clip.
+        if left && magnetic && delta_start > 1e-6 {
+            for c in clips.iter_mut() {
+                let cs = f(c, "timeline_start");
+                if cs >= new_start - 1e-6 {
+                    let ce = f(c, "timeline_end");
+                    setf(c, "timeline_start", (cs - delta_start).max(0.0));
+                    setf(c, "timeline_end", (ce - delta_start).max(0.05));
+                }
+            }
+        }
 
         // Main/magnetic lanes stay packed when the right edge shrinks or grows.
         // Non-magnetic lanes may leave a gap on shrink, but right-growth still pushes
