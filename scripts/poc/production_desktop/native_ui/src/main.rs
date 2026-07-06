@@ -453,11 +453,27 @@ fn load_freeze_png(
         fz_log(&format!("FZ_ERR png-decode-failed {rel}"));
         return false;
     };
+    // Normalize to the PROXY resolution (long side 1920): playback neighbours are proxy
+    // frames, so a 4K still made the seam jump in sharpness (measured: proxy-dec
+    // 1080x1920 -> png 2160x3840, identical boxes). Same size = seam is invisible.
+    // Bonus: 33MB -> 8MB VRAM per still.
+    let (ow, oh) = (img.width(), img.height());
+    let long = ow.max(oh);
+    let img = if long > 1920 {
+        let sc = 1920.0 / long as f32;
+        img.resize(
+            ((ow as f32 * sc).round() as u32).max(2),
+            ((oh as f32 * sc).round() as u32).max(2),
+            image::imageops::FilterType::CatmullRom,
+        )
+    } else {
+        img
+    };
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
     let ok = comp.still_put_rgba(d3d, key.clone(), w, h, rgba.as_raw()).is_ok();
     eprintln!(
-        "STILL_LOAD {}ms {rel} {w}x{h} ok={ok}",
+        "STILL_LOAD {}ms {rel} {ow}x{oh}->{w}x{h} ok={ok}",
         t0.elapsed().as_millis()
     );
     ok
