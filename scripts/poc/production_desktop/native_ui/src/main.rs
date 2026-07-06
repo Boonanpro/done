@@ -2001,6 +2001,7 @@ impl App {
         let mut raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(contents)?)?;
         let before_norm = serde_json::to_string(&raw).unwrap_or_default();
         edits::normalize_linked_audio(&mut raw);
+        edits::remove_orphan_linked_audio(&mut raw);
         let normalized_on_load = serde_json::to_string(&raw).unwrap_or_default() != before_norm;
         let doc = Arc::new(model::Doc::from_raw(raw, contents, dir)?);
         let dur = doc.duration();
@@ -2196,6 +2197,7 @@ impl App {
         let mut raw = self.doc.raw.clone();
         f(&mut raw);
         edits::normalize_linked_audio(&mut raw);
+        edits::remove_orphan_linked_audio(&mut raw);
         match model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             Ok(nd) => {
                 let df = Self::dirty_from(&self.doc, &nd);
@@ -6082,6 +6084,7 @@ fn main() -> eframe::Result<()> {
             let mut raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&contents)?)?;
             let before = serde_json::to_string(&raw)?;
             edits::normalize_linked_audio(&mut raw);
+            edits::remove_orphan_linked_audio(&mut raw);
             let changed = serde_json::to_string(&raw)? != before;
             if changed {
                 edits::save(&raw, &contents)?;
@@ -6440,6 +6443,7 @@ fn main() -> eframe::Result<()> {
             let mut raw = doc.raw.clone();
             op(&mut raw);
             edits::normalize_linked_audio(&mut raw);
+            edits::remove_orphan_linked_audio(&mut raw);
             match model::Doc::from_raw(raw, &doc.contents_path, &doc.asset_dir) {
                 Ok(nd) => {
                     let dov = overlaps(&nd) - ov0;
@@ -6686,10 +6690,22 @@ fn main() -> eframe::Result<()> {
             && (clip(&live_left_drag, "b", "source_start") - 1.0).abs() < 0.001;
 
         edits::trim_clip_live(&mut live_left_drag, &["b".to_string()], true, 4.0);
-        let ok_live_left_grow = (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
+        let ok_live_left_grow = (clip(&live_left_drag, "a", "timeline_start") - -1.0).abs() < 0.001
+            && (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "timeline_start") - 4.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "source_start") - 0.0).abs() < 0.001;
+
+        let mut live_left_grow_from_handle = base.clone();
+        live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][0]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
+        live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][0]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
+        live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
+        live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
+        edits::trim_clip_live(&mut live_left_grow_from_handle, &["b".to_string()], true, 3.0);
+        let ok_live_left_grow_no_erode = (clip(&live_left_grow_from_handle, "a", "timeline_start") - -1.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "a", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 3.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "b", "source_start") - 0.0).abs() < 0.001;
 
         let mut magnetic_left_shrink = base.clone();
         edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0);
@@ -6705,7 +6721,8 @@ fn main() -> eframe::Result<()> {
             && (clip(&magnetic_left_shrink, "baud", "source_start") - 1.0).abs() < 0.001;
 
         edits::trim_clip(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0);
-        let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
+        let ok_mag_left_restore = (clip(&magnetic_left_shrink, "a", "timeline_start") - -1.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "source_start") - 0.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 4.0).abs() < 0.001
@@ -6737,6 +6754,7 @@ fn main() -> eframe::Result<()> {
         let ok = ok_mag_shrink
             && ok_live_left_drag
             && ok_live_left_grow
+            && ok_live_left_grow_no_erode
             && ok_mag_left_shrink
             && ok_mag_left_restore
             && ok_main_off_left_shrink_gap
@@ -6744,7 +6762,7 @@ fn main() -> eframe::Result<()> {
             && ok_free_shrink
             && ok_free_grow;
         println!(
-            "TRIM {} magnetic_shrink={ok_mag_shrink} live_left_drag={ok_live_left_drag} live_left_grow={ok_live_left_grow} magnetic_left_shrink={ok_mag_left_shrink} magnetic_left_restore={ok_mag_left_restore} main_off_left_shrink_gap={ok_main_off_left_shrink_gap} main_off_left_grow_packed={ok_main_off_left_grow_packed} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
+            "TRIM {} magnetic_shrink={ok_mag_shrink} live_left_drag={ok_live_left_drag} live_left_grow={ok_live_left_grow} live_left_grow_no_erode={ok_live_left_grow_no_erode} magnetic_left_shrink={ok_mag_left_shrink} magnetic_left_restore={ok_mag_left_restore} main_off_left_shrink_gap={ok_main_off_left_shrink_gap} main_off_left_grow_packed={ok_main_off_left_grow_packed} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
             if ok { "PASS" } else { "FAIL" }
         );
         std::process::exit(if ok { 0 } else { 1 });

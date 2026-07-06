@@ -161,7 +161,9 @@ pub fn trim_clip_live(root: &mut Value, ids: &[String], left: bool, new_t: f64) 
             let delta_start = if new_start == f64::MAX { 0.0 } else { new_start - old_start };
             let delta_end = if new_end == f64::MIN { 0.0 } else { new_end - old_end };
 
-            if left && main_lane && new_start != f64::MAX && (magnetic || delta_start < -1e-6) {
+            if left && main_lane && delta_start < -1e-6 {
+                shift_main_left_group_for_boundary(clips, ids, old_start, new_start, ti, &mut attach_shifts);
+            } else if left && main_lane && new_start != f64::MAX && magnetic && delta_start > 1e-6 {
                 adjust_previous_tail_to_boundary(clips, ids, new_start);
             }
 
@@ -189,6 +191,7 @@ pub fn trim_clip_live(root: &mut Value, ids: &[String], left: bool, new_t: f64) 
     }
     shift_attached_clips(root, &attach_shifts);
     normalize_linked_audio(root);
+    remove_orphan_linked_audio(root);
 }
 
 pub fn settle_left_trim(root: &mut Value, ids: &[String]) {
@@ -256,6 +259,7 @@ pub fn settle_left_trim(root: &mut Value, ids: &[String]) {
     }
     shift_attached_clips(root, &attach_shifts);
     normalize_linked_audio(root);
+    remove_orphan_linked_audio(root);
 }
 
 pub fn normalize_linked_audio(root: &mut Value) {
@@ -355,6 +359,69 @@ fn set_clip_tail(c: &mut Value, new_end: f64) -> bool {
     true
 }
 
+fn shift_main_left_group_for_boundary(
+    clips: &mut Vec<Value>,
+    ids: &[String],
+    old_start: f64,
+    new_start: f64,
+    src_track: usize,
+    attach_shifts: &mut Vec<AttachShift>,
+) {
+    let Some(prev_end) = clips
+        .iter()
+        .filter(|c| !ids.contains(&sid(c)))
+        .map(|c| f(c, "timeline_end"))
+        .filter(|&te| te <= old_start + 1e-6)
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    else {
+        return;
+    };
+    let dt = new_start - prev_end;
+    if dt >= -1e-6 {
+        return;
+    }
+    for c in clips.iter_mut() {
+        if ids.contains(&sid(c)) {
+            continue;
+        }
+        let cs = f(c, "timeline_start");
+        let ce = f(c, "timeline_end");
+        if ce <= old_start + 1e-6 {
+            attach_shifts.push(AttachShift { src_track, span_start: cs, span_end: ce, dt });
+            setf(c, "timeline_start", cs + dt);
+            setf(c, "timeline_end", ce + dt);
+        }
+    }
+}
+
+pub fn remove_orphan_linked_audio(root: &mut Value) {
+    let mut visual_links: Vec<String> = Vec::new();
+    if let Some(tracks) = tracks_ref(root) {
+        for tr in tracks {
+            if tr.get("type").and_then(|v| v.as_str()) == Some("audio") {
+                continue;
+            }
+            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                if let Some(l) = link(c) {
+                    if !visual_links.contains(&l) {
+                        visual_links.push(l);
+                    }
+                }
+            }
+        }
+    }
+    let Some(tracks) = tracks_mut(root) else { return };
+    for tr in tracks {
+        if tr.get("type").and_then(|v| v.as_str()) != Some("audio") {
+            continue;
+        }
+        let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
+        clips.retain(|c| link(c).map(|l| visual_links.contains(&l)).unwrap_or(true));
+    }
+}
+
 fn adjust_previous_tail_to_boundary(clips: &mut Vec<Value>, ids: &[String], boundary: f64) {
     let prev = clips
         .iter()
@@ -449,7 +516,7 @@ fn remove_same_lane_overlaps(clips: &mut Vec<Value>) {
             .partial_cmp(&f(b, "timeline_start"))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let mut prev_end = 0.0;
+    let mut prev_end = f64::NEG_INFINITY;
     for c in clips.iter_mut() {
         let ts = f(c, "timeline_start");
         if ts < prev_end - 1e-6 && !cut_clip_head(c, prev_end) {
