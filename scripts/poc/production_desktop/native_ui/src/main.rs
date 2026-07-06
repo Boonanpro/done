@@ -491,6 +491,15 @@ fn compose(
     // budget lasts and land exactly at rest via the refine loop — original pixels always,
     // never a proxy
     let f_deadline = Instant::now() + std::time::Duration::from_millis(30);
+    // seam diagnostics: within ±0.6s of a freeze boundary, log exactly what every layer
+    // draws (texture size / quality / box) — the ground truth for the "width grows" report
+    let near_fz = doc
+        .seq
+        .tracks
+        .iter()
+        .flat_map(|tr| tr.clips.iter())
+        .filter(|c| c.is_freeze())
+        .any(|c| (t - c.timeline_start).abs() < 0.6 || (t - c.timeline_end).abs() < 0.6);
     let _t = Instant::now();
     for c in &layers {
         let b = c.display_box();
@@ -656,6 +665,7 @@ fn compose(
                 let key = (format!("fz:{aid}"), (src_t * 1000.0).round() as i64);
                 let _ = load_freeze_png(doc, d3d, comp, c, &key);
                 let got = comp.still_get(&key);
+                let got_was_still = got.is_some();
                 let (tex, wh) = if let Some(x) = got {
                     x
                 } else {
@@ -682,6 +692,14 @@ fn compose(
                     tw
                 };
                 let b = c.display_box();
+                if near_fz {
+                    eprintln!(
+                        "FZ_SEAM t={t:.3} clip={} q={} tex={}x{} box={:.4},{:.4},{:.4},{:.4}",
+                        c.id,
+                        if got_was_still { "png" } else if original { "orig-dec" } else { "proxy-dec" },
+                        wh.0, wh.1, b.x, b.y, b.width, b.height
+                    );
+                }
                 comp.draw_cropped(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None, c.crop_ltrb())?;
                 used.push(path);
                 continue;
@@ -698,6 +716,14 @@ fn compose(
                     .map_err(|e| e.context(format!("overlay {} src_t={src_t:.2}", vs.name)))?;
             }
             let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
+            if near_fz {
+                eprintln!(
+                    "FZ_SEAM t={t:.3} clip={} q={} tex={}x{} box={:.4},{:.4},{:.4},{:.4}",
+                    c.id,
+                    if original { "orig-dec" } else { "proxy-dec" },
+                    wh.0, wh.1, b.x, b.y, b.width, b.height
+                );
+            }
             comp.draw_cropped(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None, c.crop_ltrb())?;
             used.push(path);
         }
