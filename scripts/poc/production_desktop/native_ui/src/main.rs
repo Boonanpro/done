@@ -2375,6 +2375,28 @@ impl App {
         self.lib_post("capcache", "/api/v1/production-assets/caption-cache".into(), body);
     }
 
+    /// The playhead time the user is LOOKING AT. While playing, self.t is stale (it only
+    /// syncs on pause) — playhead-anchored edits (F/S/mosaic/insert) that used self.t
+    /// landed up to ±0.3s away from the displayed frame, with a SIGN that depended on
+    /// history: the measured "freeze captures a different scene, inconsistently".
+    fn displayed_t(&self) -> f64 {
+        if self.playing {
+            f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed))
+        } else {
+            self.t
+        }
+    }
+
+    /// Sync + pause at the displayed frame (for edits that imply inspecting a frame).
+    fn pause_at_displayed(&mut self) {
+        if self.playing {
+            self.t = self.displayed_t();
+            self.playing = false;
+            self.resume_pending = None;
+            self.push_req(false);
+        }
+    }
+
     fn toggle_play(&mut self) {
         if self.playing {
             // freeze the playhead where the audible clock actually was
@@ -2386,7 +2408,7 @@ impl App {
     }
 
     fn split_at_playhead(&mut self) {
-        let t = self.t;
+        let t = self.displayed_t();
         let base: Vec<String> = if self.selected.is_empty() {
             self.doc
                 .seq
@@ -2939,6 +2961,7 @@ impl App {
     /// F: freeze-frame — hold the frame under the playhead for 2s inside the selected
     /// (or hit) clip; everything after shifts right (ripple insert).
     fn freeze_at_playhead(&mut self) {
+        self.pause_at_displayed();
         let t = self.t;
         let target = self
             .doc
@@ -3095,6 +3118,7 @@ impl App {
             .and_then(|a| a.as_str())
             .map(|a| !a.is_empty())
             .unwrap_or(false);
+        self.pause_at_displayed();
         let t = self.t;
         let salt = self.salt;
         self.salt += 1;
@@ -5322,7 +5346,7 @@ impl eframe::App for App {
                                         let fy = ((rr.top() - vid.top()) / vid.height()).clamp(0.0, 1.0) as f64;
                                         let fw = (rr.width() / vid.width()).min(1.0) as f64;
                                         let fh = (rr.height() / vid.height()).min(1.0) as f64;
-                                        let t = self.t;
+                                        let t = self.displayed_t();
                                         let salt = self.salt;
                                         self.salt += 1;
                                         self.apply_edit(true, move |raw| {
