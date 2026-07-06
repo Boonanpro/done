@@ -3032,10 +3032,12 @@ impl App {
             self.toast("フリーズ: 再生ヘッドを映像クリップの上に置いてください");
             return;
         };
-        // Snap the captured SOURCE time to a real frame start (pts sidecar) — the paused
-        // preview shows the snapped frame, so an unsnapped capture froze a picture up to
-        // one frame away from what the user was looking at.
-        let snap_delta = self
+        // Snap the split to the END of the displayed frame (pts sidecar), and remember
+        // the frame's duration. User contract (2026-07-06): left clip's LAST frame, the
+        // still, and the right clip's FIRST frame are all the SAME frame — the one on
+        // screen when F was pressed. Splitting at the frame's end keeps that frame inside
+        // the left piece; `frame_back` rewinds the still + right pieces onto it.
+        let (snap_delta, frame_back) = self
             .doc
             .seq
             .tracks
@@ -3060,11 +3062,29 @@ impl App {
                 let i = pts.partition_point(|p| *p <= src);
                 let lo = if i > 0 { pts[i - 1] } else { pts[0] };
                 let hi = *pts.get(i).unwrap_or(&lo);
-                let chosen = if (src - lo).abs() <= (hi - src).abs() { lo } else { hi };
-                Some(chosen + 0.0002 - src)
+                // the frame the paused preview is showing (verified by press-frame diff)
+                let (chosen, j) = if (src - lo).abs() <= (hi - src).abs() {
+                    (lo, i.saturating_sub(1))
+                } else {
+                    (hi, i)
+                };
+                // its end = the next frame's pts; fall back to the local gap / 30fps
+                let fd = pts
+                    .get(j + 1)
+                    .map(|n| n - chosen)
+                    .filter(|d| *d > 1e-4 && *d < 1.0)
+                    .or_else(|| (j > 0).then(|| chosen - pts[j - 1]).filter(|d| *d > 1e-4))
+                    .unwrap_or(1.0 / 30.0);
+                // split at the frame's end — but never past the clip's own tail (a VFR
+                // hole near the end could otherwise push the split outside the clip and
+                // leave a gap). When clamped, `back` shrinks so the rewind still lands
+                // exactly on the displayed frame's pts.
+                let tn = (t + (chosen + fd + 0.0002 - src)).min(c.timeline_end - 0.05);
+                let new_src = c.source_start + (tn - c.timeline_start);
+                Some((tn - t, (new_src - chosen).max(0.0)))
             })
-            .unwrap_or(0.0);
-        let t = t + snap_delta; // shift the split point so src lands ON the frame
+            .unwrap_or((0.0, 0.0));
+        let t = t + snap_delta; // split lands at the displayed frame's END
         let salt = self.salt;
         self.salt += 1;
         // Filmora-style materialized still — but NEVER on the UI thread (the sync call
@@ -3080,7 +3100,7 @@ impl App {
             .find(|c| c.id == id)
             .and_then(|c| {
                 let aid = c.asset_id.as_deref()?;
-                let src = c.source_start + (t - c.timeline_start);
+                let src = (c.source_start + (t - c.timeline_start) - frame_back).max(0.0);
                 let srcp = self.doc.asset_path_q(aid, false);
                 Some((src, srcp))
             });
@@ -3146,7 +3166,7 @@ impl App {
             });
         }
         self.apply_edit(true, move |raw| {
-            edits::freeze_frame_with_still(raw, &id, t, 2.0, salt, still_rel)
+            edits::freeze_frame_with_still(raw, &id, t, 2.0, salt, still_rel, frame_back)
         });
         self.push_req(false);
         self.toast("フリーズフレームを挿入しました（2秒・静止画は数秒で確定します）");
