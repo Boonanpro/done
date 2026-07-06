@@ -395,7 +395,7 @@ fn draw_plain_pip(
                 true
             };
             let tw = (vs.bgra.clone(), (vs.width, vs.height));
-            if is_exact && original {
+            if is_exact {
                 comp.still_put(d3d, key, &tw.0, tw.1)?;
             }
             tw
@@ -603,7 +603,7 @@ fn compose(
                     }
                     let ss = mt_tex.pop().unwrap();
                     let pp = mt_tex.pop().unwrap();
-                    if let (Some((ko, kp, ks)), true) = (fz_keys, original && !fast) {
+                    if let (Some((ko, kp, ks)), true) = (fz_keys, !fast) {
                         let _ = comp.still_put(d3d, ko, &o.0, o.1);
                         let _ = comp.still_put(d3d, kp, &pp.0, pp.1);
                         let _ = comp.still_put(d3d, ks, &ss.0, ss.1);
@@ -700,9 +700,6 @@ fn compose(
                         c.id
                     ));
                     let vs = pool.get(d3d, &path, 0, false, src_t)?;
-                    if !original {
-                        exact = false; // proxy frame is provisional — settle bakes the still
-                    }
                     let is_exact = if fast {
                         exact = false; // still not baked yet — settle must come back
                         vs.ensure_frame_scrub(d3d, src_t, 12.0)?;
@@ -712,7 +709,7 @@ fn compose(
                         true
                     };
                     let tw = (vs.bgra.clone(), (vs.width, vs.height));
-                    if is_exact && original {
+                    if is_exact {
                         comp.still_put(d3d, key, &tw.0, tw.1)?;
                     }
                     tw
@@ -1212,7 +1209,7 @@ fn presenter_thread(shared: Arc<Shared>) {
             let mut f = shared.frame.lock().unwrap();
             f.rgba = rgba;
             f.seq = seq_hi;
-            f.quality = "original";
+            f.quality = "proxy";
             if let Some(lp) = last_pub {
                 let gms = now.duration_since(lp).as_secs_f32() * 1000.0;
                 if gms > session_gap_max {
@@ -1314,13 +1311,13 @@ fn media_thread(shared: Arc<Shared>) {
                         // the ring rebuilds — no more seconds of frozen video chasing a
                         // running clock
                         jump_to = Some(r.t);
-                        if let Ok(_snap) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, r.t, true, true, true) {
+                        if let Ok(_snap) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, r.t, false, true, true) {
                             seq += 1;
                             let mut f = shared.frame.lock().unwrap();
                             f.rgba.clear();
                             f.rgba.extend_from_slice(&comp.rgba);
                             f.seq = seq;
-                            f.quality = "original";
+                            f.quality = "proxy";
                         }
                     }
                 }
@@ -1472,7 +1469,7 @@ fn media_thread(shared: Arc<Shared>) {
                     f.rgba = buf;
                     f.seq = seq;
                     f.comp_ms = 0.0;
-                    f.quality = "original";
+                    f.quality = "proxy";
                     scrub_exact = true;
                     last_gen = r.gen;
                     last_t = t;
@@ -1481,12 +1478,11 @@ fn media_thread(shared: Arc<Shared>) {
                     true
                 }
             } {
-                // Scrub decodes the HIGH-QUALITY proxy (long side 1920, CRF19, GOP15 —
-                // indistinguishable from the original at pane size, seeks in ~20ms so the
-                // preview stays glued to the finger); the settle/refine pass and playback
-                // use the original. This is Filmora's actual mechanism — its 4K scrubbing
-                // runs on auto-proxies too, ours were just 406x720 CRF28 mush before.
-                let original = !r.scrubbing;
+                // ONE pipeline, ONE quality: everything (play, scrub, pause, cache,
+                // stills) renders from the HIGH-QUALITY proxy. The old settle-to-original
+                // pass made every source switch a visible seam (quality/geometry deltas);
+                // Filmora's preview is uniformly proxy too — that IS its stability.
+                let original = false;
                 let t0 = Instant::now();
                 match compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, original, r.scrubbing, true) {
                     Ok((used, exact)) => {
@@ -1503,7 +1499,7 @@ fn media_thread(shared: Arc<Shared>) {
                             comp_hist.retain(|(t2, _)| now.duration_since(*t2).as_secs_f32() < 1.0);
                             f.comp_max = comp_hist.iter().map(|(_, v)| *v).fold(0.0, f32::max);
                             last_pub = Some(now);
-                            f.quality = "original";
+                            f.quality = "proxy";
                         }
                         let _ = used;
                     }
@@ -1541,7 +1537,7 @@ fn media_thread(shared: Arc<Shared>) {
                         let mut f = shared.frame.lock().unwrap();
                         f.rgba = buf;
                         f.seq = seq;
-                        f.quality = "original";
+                        f.quality = "proxy";
                         scrub_exact = true;
                         std::thread::sleep(std::time::Duration::from_millis(2));
                         continue;
@@ -1549,14 +1545,14 @@ fn media_thread(shared: Arc<Shared>) {
                     // finger resting mid-drag on a long-GOP spot: keep refining toward the
                     // exact frame, one budget slice per pass (converges like Filmora's
                     // "stop and the picture sharpens to the real frame")
-                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, true, true) {
+                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, true) {
                         scrub_exact = ex;
                         seq += 1;
                         let mut f = shared.frame.lock().unwrap();
                         f.rgba.clear();
                         f.rgba.extend_from_slice(&comp.rgba);
                         f.seq = seq;
-                        f.quality = "original";
+                        f.quality = "proxy";
                     } else {
                         scrub_exact = true; // failed — stop hammering
                     }
@@ -1615,7 +1611,7 @@ fn media_thread(shared: Arc<Shared>) {
                     }
                 }
                 if let Some(ft) = target {
-                    if let Ok(_) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, true, false, true) {
+                    if let Ok(_) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, false, false, true) {
                         fcache.insert(ft, &comp.rgba, t);
                     }
                     if fcache.frames.len() % 300 == 0 {
@@ -3011,7 +3007,7 @@ impl App {
             .and_then(|c| {
                 let aid = c.asset_id.as_deref()?;
                 let src = c.source_start + (t - c.timeline_start);
-                let srcp = self.doc.asset_path_q(aid, true);
+                let srcp = self.doc.asset_path_q(aid, false);
                 Some((src, srcp))
             });
         let still_rel = bake.as_ref().map(|_| format!("stills/fz_{salt}.png"));
@@ -3203,7 +3199,7 @@ impl App {
             .map(|c| {
                 (
                     c.id.clone(),
-                    self.doc.asset_path_q(c.asset_id.as_deref().unwrap(), true),
+                    self.doc.asset_path_q(c.asset_id.as_deref().unwrap(), false),
                     c.source_start,
                 )
             })
@@ -6183,6 +6179,68 @@ fn main() -> eframe::Result<()> {
             if ok { "PASS" } else { "FAIL" }
         );
         std::process::exit(if ok { 0 } else { 1 });
+    }
+    // --selftest-fzops: freeze clips must SURVIVE every edit op, and video clips must
+    // never silently BECOME freezes (the trim-crossing bug class)
+    if args.iter().any(|a| a == "--selftest-fzops") {
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
+        let doc = model::Doc::load(&contents, &dir).expect("doc");
+        let count_fz = |d: &model::Doc| -> usize {
+            d.seq.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| c.is_freeze()).count()
+        };
+        let fz = doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.is_freeze())
+            .expect("freeze clip in doc");
+        let vid = doc
+            .seq
+            .tracks
+            .iter()
+            .filter(|t| t.kind == "video")
+            .flat_map(|t| t.clips.iter())
+            .find(|c| c.asset_id.is_some() && !c.is_freeze() && c.dur() > 1.0)
+            .expect("video clip");
+        let base_fz = count_fz(&doc);
+        let mut fails = 0;
+        let mut check = |name: &str, raw: serde_json::Value, want_fz: usize| {
+            let nd = model::Doc::from_raw(raw, &doc.contents_path, &doc.asset_dir).expect("redoc");
+            let n = count_fz(&nd);
+            let ok = n == want_fz;
+            if !ok {
+                fails += 1;
+            }
+            println!("FZOPS {name:<22} {} freezes={n} want={want_fz}", if ok { "PASS" } else { "FAIL" });
+        };
+        // freeze extend right (+2s): stays a freeze
+        let mut r1 = doc.raw.clone();
+        edits::trim_clip(&mut r1, &[fz.id.clone()], false, fz.timeline_end + 2.0);
+        check("fz-extend-right", r1, base_fz);
+        // freeze shrink left: stays a freeze
+        let mut r2 = doc.raw.clone();
+        edits::trim_clip(&mut r2, &[fz.id.clone()], true, fz.timeline_start + 0.5);
+        check("fz-shrink-left", r2, base_fz);
+        // video right-trim WAY past its source span: must NOT become a freeze
+        let mut r3 = doc.raw.clone();
+        edits::trim_clip(&mut r3, &[vid.id.clone()], false, vid.timeline_start + 0.06);
+        check("vid-hard-shrink", r3, base_fz);
+        // video left-trim past its out-point: must NOT become a freeze
+        let mut r4 = doc.raw.clone();
+        edits::trim_clip(&mut r4, &[vid.id.clone()], true, vid.timeline_end - 0.06);
+        check("vid-hard-lefttrim", r4, base_fz);
+        // split a freeze: BOTH halves stay freezes
+        let mut r5 = doc.raw.clone();
+        edits::split_clips(&mut r5, &[fz.id.clone()], (fz.timeline_start + fz.timeline_end) / 2.0, 77);
+        check("fz-split", r5, base_fz + 1);
+        // duplicate a freeze: the copy is a freeze
+        let mut r6 = doc.raw.clone();
+        edits::duplicate_clips(&mut r6, &[fz.id.clone()], 78);
+        check("fz-duplicate", r6, base_fz + 1);
+        println!("FZOPS {}", if fails == 0 { "ALL PASS" } else { "FAILURES" });
+        std::process::exit(if fails == 0 { 0 } else { 1 });
     }
     // --selftest-dup: headless duplicate — both placement branches on a doc CLONE:
     //   A) LAST clip (space after) -> contiguous copy right after, nothing else moves

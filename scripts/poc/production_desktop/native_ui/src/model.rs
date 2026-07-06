@@ -47,6 +47,10 @@ pub struct Clip {
     // IS an image file — no decoder is ever consulted, so it cannot wander)
     #[serde(default)]
     pub freeze_still: Option<String>,
+    // EXPLICIT freeze marker. The old implicit encoding (source_end <= source_start)
+    // let ordinary trim math silently convert clips between video and freeze.
+    #[serde(default)]
+    pub freeze: Option<bool>,
     #[serde(default)]
     pub style: Option<serde_json::Value>,
     #[serde(default)]
@@ -141,8 +145,12 @@ impl Clip {
             None
         }
     }
-    /// Freeze-frame clip? (exporter convention: source_start >= source_end)
+    /// Freeze-frame clip? Explicit flag first; the exporter's implicit convention
+    /// (source_start >= source_end) still recognizes legacy clips.
     pub fn is_freeze(&self) -> bool {
+        if let Some(f) = self.freeze {
+            return f;
+        }
         self.source_end.map(|se| se <= self.source_start + 1e-6).unwrap_or(false)
     }
     /// Source time shown at timeline time t — a freeze clip holds its one frame.
