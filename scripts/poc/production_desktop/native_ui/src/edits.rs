@@ -433,9 +433,13 @@ fn ripple_open(raw: &mut Value, t: f64, d: f64) {
 /// Freeze-frame: split `id` at `t`, open a `dur`-second hole, and drop in a clip that
 /// holds the frame (exporter convention: source_start >= source_end = freeze).
 pub fn freeze_frame(raw: &mut Value, id: &str, t: f64, dur: f64, salt: u64) {
-    freeze_frame_with_still(raw, id, t, dur, salt, None)
+    freeze_frame_with_still(raw, id, t, dur, salt, None, 0.0)
 }
 
+/// `back` = one source-frame duration (seconds). The split lands at the END of the
+/// displayed frame, so `back` rewinds the freeze still AND the right-hand pieces of the
+/// frozen clip's link group by exactly one frame. Net user-visible contract:
+/// left clip's LAST frame == the still == right clip's FIRST frame == what was on screen.
 pub fn freeze_frame_with_still(
     raw: &mut Value,
     id: &str,
@@ -443,6 +447,7 @@ pub fn freeze_frame_with_still(
     dur: f64,
     salt: u64,
     still_rel: Option<String>,
+    back: f64,
 ) {
     // Round ONCE to the same 3dp grid setf writes: the snap offset (+0.0002) put the
     // ripple threshold 0.2ms ABOVE the rounded split point, so the right piece of the
@@ -493,13 +498,27 @@ pub fn freeze_frame_with_still(
     }
     let ids = expand_links(raw, &straddlers);
     split_clips(raw, &ids, t, salt);
+    if back > 1e-6 {
+        let group = expand_links(raw, &[id.to_string()]);
+        for c in clips_iter_mut(raw) {
+            let cid = sid(c);
+            let is_right_piece = group
+                .iter()
+                .any(|g| cid.starts_with(&format!("{g}__ns_{salt}_")));
+            if is_right_piece && !is_freeze_v(c) {
+                let ss = f(c, "source_start");
+                setf(c, "source_start", (ss - back).max(0.0));
+            }
+        }
+    }
     ripple_open(raw, t, dur);
     let mut clip = template.unwrap_or_else(|| serde_json::json!({"asset_id": aid}));
     clip["id"] = Value::from(format!("fz_{salt}_{}", &aid[..8.min(aid.len())]));
     setf(&mut clip, "timeline_start", t);
     setf(&mut clip, "timeline_end", t + dur);
-    setf(&mut clip, "source_start", src);
-    setf(&mut clip, "source_end", src);
+    let fsrc = (src - back).max(0.0);
+    setf(&mut clip, "source_start", fsrc);
+    setf(&mut clip, "source_end", fsrc);
     if let Some(o) = clip.as_object_mut() {
         o.remove("link_id"); // no linked audio: a freeze is silent
         o.insert("freeze".into(), Value::from(true));
