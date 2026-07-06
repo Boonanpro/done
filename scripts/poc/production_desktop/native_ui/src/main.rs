@@ -101,10 +101,20 @@ fn audio_thread(shared: Arc<Shared>) {
         let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
         if playing != was_playing {
             if playing {
+                // hold the clock until the video ring is REBUILT AT THE PLAY POSITION —
+                // level alone was satisfied by leftover frames, and the 400ms cap gave up
+                // exactly when a post-edit cold start needed longer (audio ran, video froze)
                 let t0 = std::time::Instant::now();
-                while shared.ring_level.load(Ordering::Relaxed) < 4
-                    && t0.elapsed().as_millis() < 400
-                {
+                loop {
+                    let rt = f64::from_bits(shared.ring_target_bits.load(Ordering::Relaxed));
+                    let lvl = shared.ring_level.load(Ordering::Relaxed);
+                    if ((rt - t_req).abs() < 0.5 && lvl >= 4) || t0.elapsed().as_millis() > 900 {
+                        break;
+                    }
+                    let r2 = shared.req.lock().unwrap().clone();
+                    if !r2.playing {
+                        break;
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 let _ = audio.start_at(t_req);
@@ -1252,6 +1262,8 @@ fn media_thread(shared: Arc<Shared>) {
         let mut fcache = FrameCache::new();
         let mut prev_was_compose = false;
         let mut prev_compose_t = f64::NAN;
+        let mut prev_playing = false;
+        let mut play_started: Option<Instant> = None;
         // Look-ahead ring: timeline frames composed AHEAD of the playhead on a fixed 30fps
         // grid. Presentation picks from the ring and NEVER waits for a decode — GOP walks
         // and source switches are paid in the ring's future (the Filmora mechanism).
@@ -1270,12 +1282,24 @@ fn media_thread(shared: Arc<Shared>) {
                 let df = f64::from_bits(
                     shared.dirty_from_bits.swap(f64::INFINITY.to_bits(), Ordering::Relaxed),
                 );
+                let cut = if df.is_finite() { (df - 0.2).max(0.0) } else { 0.0 };
                 if df.is_finite() {
                     eprintln!("CACHE_INVAL from={df:.2}");
-                    fcache.invalidate_from((df - 0.2).max(0.0));
+                    fcache.invalidate_from(cut);
                 } else {
                     eprintln!("CACHE_CLEAR full");
                     fcache.clear(); // unknown provenance (open/undo/redo): full reset
+                }
+                // the RING holds composed frames too: time-aligned entries survived the
+                // doc swap and briefly played PRE-EDIT content after every edit
+                {
+                    let mut rg = shared.ring.lock().unwrap();
+                    let before = rg.len();
+                    rg.retain(|(ft, _)| *ft < cut);
+                    if rg.len() != before {
+                        shared.ring_gen.fetch_add(1, Ordering::Relaxed);
+                    }
+                    shared.ring_level.store(rg.len(), Ordering::Relaxed);
                 }
             }
             let dur = doc.duration();
@@ -1288,6 +1312,22 @@ fn media_thread(shared: Arc<Shared>) {
             } else {
                 r.t
             };
+            // play-start latency: time from the play request to a healthy ring — the
+            // measured "video freezes right after an edit while audio runs"
+            if r.playing && !prev_playing {
+                play_started = Some(Instant::now());
+                eprintln!("PLAY_START t={t:.2}");
+            }
+            prev_playing = r.playing;
+            if let Some(ps) = play_started {
+                if shared.ring_level.load(Ordering::Relaxed) >= 4 {
+                    eprintln!("PLAY_READY {}ms", ps.elapsed().as_millis());
+                    play_started = None;
+                } else if ps.elapsed().as_secs() > 8 {
+                    eprintln!("PLAY_STARVED >8000ms ring={}", shared.ring_level.load(Ordering::Relaxed));
+                    play_started = None;
+                }
+            }
             if r.playing {
                 if r.gen != last_gen {
                     last_gen = r.gen;
@@ -1579,7 +1619,14 @@ fn media_thread(shared: Arc<Shared>) {
                 } else {
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
-            } else if mask_build_pass(&doc, &d3d, &mut masks) {
+            } else if {
+                let p0 = Instant::now();
+                let r2 = mask_build_pass(&doc, &d3d, &mut masks);
+                if p0.elapsed().as_millis() > 80 {
+                    eprintln!("PASS mask {}ms", p0.elapsed().as_millis());
+                }
+                r2
+            } {
                 // pop-out card masks for the live matte path — one σ26 blur per slice.
                 // BEFORE the warm pass: few and quick, and without them pop-outs render
                 // from the stale pv twin
@@ -1588,7 +1635,11 @@ fn media_thread(shared: Arc<Shared>) {
             } else if !warm_done {
                 // THEN: open every decoder the rest of the timeline needs (a cold open
                 // mid-play is a 100-200ms media-thread stall = visible gap)
+                let p0 = Instant::now();
                 warm_done = warm_open_pass(&doc, &d3d, &mut pool, &masks);
+                if p0.elapsed().as_millis() > 80 {
+                    eprintln!("PASS warm {}ms", p0.elapsed().as_millis());
+                }
             } else if shared.aux_req.lock().unwrap().is_empty() && {
                 // Olive-style background fill: compose ORIGINAL-quality frames outward
                 // from the playhead into the frame cache (one per idle slice). AFTER
@@ -5950,6 +6001,12 @@ fn main() -> eframe::Result<()> {
                         if a.timeline_start < b.timeline_end - 0.002
                             && b.timeline_start < a.timeline_end - 0.002
                         {
+                            if std::env::var("INV_DEBUG").is_ok() {
+                                eprintln!(
+                                    "OVL {} {} [{:.3},{:.3}] x {} [{:.3},{:.3}]",
+                                    tr.kind, a.id, a.timeline_start, a.timeline_end, b.id, b.timeline_start, b.timeline_end
+                                );
+                            }
                             n += 1;
                         }
                     }
@@ -6040,6 +6097,26 @@ fn main() -> eframe::Result<()> {
                     let ok = (!check_ov || dov <= 0) && dav <= 0 && dng <= 0;
                     if !ok {
                         fail += 1;
+                        // name the NEW pairs (id-keyed, coordinate independent)
+                        let pairs = |d: &model::Doc| -> std::collections::HashSet<(String, String)> {
+                            let mut out = std::collections::HashSet::new();
+                            for tr in &d.seq.tracks {
+                                for (i, a) in tr.clips.iter().enumerate() {
+                                    for b in tr.clips.iter().skip(i + 1) {
+                                        if a.timeline_start < b.timeline_end - 0.002
+                                            && b.timeline_start < a.timeline_end - 0.002
+                                        {
+                                            out.insert((a.id.clone(), b.id.clone()));
+                                        }
+                                    }
+                                }
+                            }
+                            out
+                        };
+                        let before = pairs(&doc);
+                        for p in pairs(&nd).difference(&before) {
+                            println!("  NEWPAIR {} x {}", p.0, p.1);
+                        }
                     }
                     println!(
                         "INV {name:<14} {} new_overlaps={dov} av_broken={dav} negative={dng}",
@@ -6543,9 +6620,13 @@ fn main() -> eframe::Result<()> {
             // boundary/dup debugging with full engine logs, no synthetic input needed
             if let Some(i) = args.iter().position(|a| a == "--play-probe") {
                 let t0: f64 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+                let delay: u64 = std::env::var("NATIVE_PROBE_DELAY")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(4000);
                 let sh = app.shared.clone();
                 std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(4000));
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
                     eprintln!("PLAYPROBE start t={t0}");
                     {
                         let mut r = sh.req.lock().unwrap();
