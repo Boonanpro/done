@@ -193,7 +193,12 @@ enum Drag {
 /// clears the whole cache — a stale frame is structurally impossible. Filled during
 /// paused idle (playhead outward) and opportunistically from playback production.
 struct FrameCache {
-    frames: std::collections::HashMap<i64, Vec<u8>>,
+    // key: 1/30 bucket; value: (EXACT compose time, lz4 pixels). The exact time is the
+    // honesty check: a bucket spans 33ms — up to two different source frames — and
+    // serving "whatever the bucket holds" showed the NEIGHBOUR frame when a paused
+    // inspection landed 12ms away from the cached compose (the freeze-boundary bug the
+    // dump-frame verification missed because it bypasses this cache).
+    frames: std::collections::HashMap<i64, (f64, Vec<u8>)>,
     bytes: usize,
     budget: usize,
     hits: u64,
@@ -223,18 +228,23 @@ impl FrameCache {
         let cut = Self::idx(t) - 1;
         let dead: Vec<i64> = self.frames.keys().copied().filter(|k| *k >= cut).collect();
         for k in dead {
-            if let Some(z) = self.frames.remove(&k) {
+            if let Some((_, z)) = self.frames.remove(&k) {
                 self.bytes -= z.len();
             }
         }
     }
-    fn get(&mut self, t: f64, out: &mut Vec<u8>) -> bool {
-        if let Some(z) = self.frames.get(&Self::idx(t)) {
-            if let Ok(raw) = lz4_flex::decompress_size_prepended(z) {
-                out.clear();
-                out.extend_from_slice(&raw);
-                self.hits += 1;
-                return true;
+    /// Serve only when the cached pixels were composed within `tol` seconds of `t`.
+    /// Playback reuse passes a whole tick (~17ms); paused/scrub inspection passes 5ms
+    /// so a neighbouring source frame can never impersonate the requested one.
+    fn get(&mut self, t: f64, tol: f64, out: &mut Vec<u8>) -> bool {
+        if let Some((ct, z)) = self.frames.get(&Self::idx(t)) {
+            if (ct - t).abs() <= tol {
+                if let Ok(raw) = lz4_flex::decompress_size_prepended(z) {
+                    out.clear();
+                    out.extend_from_slice(&raw);
+                    self.hits += 1;
+                    return true;
+                }
             }
         }
         self.misses += 1;
@@ -250,14 +260,14 @@ impl FrameCache {
         }
         let z = lz4_flex::compress_prepend_size(rgba);
         self.bytes += z.len();
-        self.frames.insert(key, z);
+        self.frames.insert(key, (t, z));
         // over budget: evict farthest-from-playhead first
         while self.bytes > self.budget {
             let ph = Self::idx(playhead);
             let Some((&far, _)) = self.frames.iter().max_by_key(|(k, _)| (**k - ph).abs()) else {
                 break;
             };
-            if let Some(z) = self.frames.remove(&far) {
+            if let Some((_, z)) = self.frames.remove(&far) {
                 self.bytes -= z.len();
             }
         }
@@ -514,7 +524,7 @@ fn step_clip_under(doc: &model::Doc, t: f64) -> Option<model::Clip> {
     doc.seq
         .tracks
         .iter()
-        .filter(|tr| tr.kind != "audio")
+        .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
         .flat_map(|tr| tr.clips.iter())
         .find(|c| c.asset_id.is_some() && t >= c.timeline_start - 1e-9 && t < c.timeline_end - 1e-9)
         .cloned()
@@ -1389,6 +1399,7 @@ fn media_thread(shared: Arc<Shared>) {
         let mut warm_done = false;
         let mut last_doc_ptr: usize = 0;
         let mut settle = Instant::now(); // last user interaction (scrub/edit/seek)
+        let mut edit_cooldown_until = Instant::now();
         let mut scrub_win: Vec<f32> = Vec::new();
         let mut scrub_t0 = Instant::now();
         let mut scrub_exact = true; // last scrub compose reached the exact frame
@@ -1404,6 +1415,12 @@ fn media_thread(shared: Arc<Shared>) {
         // and source switches are paid in the ring's future (the Filmora mechanism).
         const STEP: f64 = 1.0 / 30.0;
         const RING_DEPTH: usize = 12; // ~400ms of slack
+        // Speculative paused-idle cache fill is too expensive for structural edits:
+        // it composes arbitrary surrounding frames even when the user only needs the
+        // current preview and a short play-ahead ring. Keep the cache as an
+        // opportunistic playback/scrub accelerator, but do not let it compete with
+        // interactive work in the background.
+        const IDLE_FRAME_CACHE_FILL: bool = false;
         loop {
             let hb0 = Instant::now();
             let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
@@ -1411,6 +1428,7 @@ fn media_thread(shared: Arc<Shared>) {
             if ptr != last_doc_ptr {
                 last_doc_ptr = ptr;
                 warm_done = false;
+                edit_cooldown_until = Instant::now() + std::time::Duration::from_millis(1500);
                 // edited: never show a stale composed frame — but only the frames at/after
                 // the earliest change are stale; everything before survives (Filmora keeps
                 // its render cache across local edits, the full clear was our post-edit lag)
@@ -1516,7 +1534,7 @@ fn media_thread(shared: Arc<Shared>) {
                     let t0 = Instant::now();
                     // cache hit = decompress instead of compose (jump refills become ~instant)
                     let mut cached_buf: Vec<u8> = Vec::new();
-                    let from_cache = fcache.get(next_t, &mut cached_buf);
+                    let from_cache = fcache.get(next_t, 0.017, &mut cached_buf);
                     let res = if from_cache {
                         Ok((Vec::new(), true))
                     } else {
@@ -1635,7 +1653,7 @@ fn media_thread(shared: Arc<Shared>) {
                 // composed-frame cache first: scrub/settle over a cached span shows the
                 // ORIGINAL-quality frame in ~5ms without touching a decoder
                 let mut buf = Vec::new();
-                if fcache.get(t, &mut buf) {
+                if fcache.get(t, 0.005, &mut buf) {
                     if near_freeze(&doc, t) {
                         eprintln!("SERVE t={t:.3} src=cache");
                     }
@@ -1704,7 +1722,7 @@ fn media_thread(shared: Arc<Shared>) {
                 let resting = settle.elapsed().as_secs_f32() > 0.12;
                 if r.scrubbing && !scrub_exact && resting {
                     let mut buf = Vec::new();
-                    if fcache.get(t, &mut buf) {
+                    if fcache.get(t, 0.005, &mut buf) {
                         if near_freeze(&doc, t) {
                             eprintln!("SERVE t={t:.3} src=cache-rest");
                         }
@@ -1736,6 +1754,12 @@ fn media_thread(shared: Arc<Shared>) {
                     // starts the instant it arrives
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
+            } else if Instant::now() < edit_cooldown_until {
+                // Right after a structural edit (freeze/ripple/split), the user needs the
+                // current frame back more than speculative ring/cache/mask warming. Let the
+                // required settle compose above run, then give the UI/decoder queues a short
+                // quiet window before background work resumes.
+                std::thread::sleep(std::time::Duration::from_millis(8));
             } else if shared.ring.lock().unwrap().len() < RING_DEPTH {
                 // FIRST: pre-build the ring ahead of the frozen playhead so pressing play
                 // is instant — compose opens the decoders it needs on demand, so this must
@@ -1775,7 +1799,7 @@ fn media_thread(shared: Arc<Shared>) {
                 if p0.elapsed().as_millis() > 80 {
                     eprintln!("PASS warm {}ms", p0.elapsed().as_millis());
                 }
-            } else if shared.aux_req.lock().unwrap().is_empty() && {
+            } else if IDLE_FRAME_CACHE_FILL && shared.aux_req.lock().unwrap().is_empty() && {
                 // Olive-style background fill: compose ORIGINAL-quality frames outward
                 // from the playhead into the frame cache (one per idle slice). AFTER
                 // thumbnails/waveforms (visible UI beats invisible cache warmth).
@@ -1935,6 +1959,8 @@ struct App {
     show_help: bool,
     // pts sidecars cached for frame-accurate stepping (None = sidecar missing)
     step_pts: PtsCache,
+    // NATIVE_STEP_PROBE state machine: (phase, phase entry time)
+    step_probe: Option<(u8, Instant)>,
     toast: Option<(String, Instant)>,
     snap_line: Option<f64>,
     hover_lane: Option<usize>,
@@ -2053,6 +2079,7 @@ impl App {
             playing: false,
             show_help: false,
             step_pts: Default::default(),
+            step_probe: None,
             toast: None,
             snap_line: None,
             hover_lane: None,
@@ -2331,7 +2358,7 @@ impl App {
             .seq
             .tracks
             .iter()
-            .filter(|tr| tr.kind != "audio")
+            .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
             .flat_map(|tr| tr.clips.iter())
             .filter(|c| self.selected.contains(&c.id) && c.asset_id.is_some())
             .map(|c| (c.id.clone(), c.clone()))
@@ -2505,7 +2532,7 @@ impl App {
             .seq
             .tracks
             .iter()
-            .filter(|tr| tr.kind != "audio")
+            .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
             .flat_map(|tr| tr.clips.iter())
             .filter(|c| ids.contains(&c.id))
             .map(|c| c.id.clone())
@@ -2573,6 +2600,112 @@ impl App {
             f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed))
         } else {
             self.t
+        }
+    }
+
+    /// One arrow-key frame step (exactly what the key handler runs).
+    fn step_once(&mut self, dir: f64) {
+        const FSTEP: f64 = 1.0 / 30.0;
+        let grid = (self.t / FSTEP).round() * FSTEP + dir * FSTEP;
+        let nt = step_target(&self.doc, &mut self.step_pts, self.t, dir).unwrap_or(grid);
+        self.t = nt.clamp(0.0, self.dur);
+        self.push_req(false);
+    }
+
+    /// NATIVE_STEP_PROBE: drive the REAL user path end-to-end — play across a freeze
+    /// (fills the frame cache exactly like a session does), pause, frame-step across
+    /// both freeze boundaries, and save what the ENGINE SERVED (shared.frame — the very
+    /// pixels the pane paints) at each landing. This is the verification the compose-
+    /// only --dump-frame could not give: it includes the cache serve path.
+    fn step_probe_drive(&mut self) {
+        let Some((phase, since)) = self.step_probe else { return };
+        let out_dir = std::env::var("NATIVE_PROBE_OUT")
+            .unwrap_or_else(|_| format!("{}/stills", self.doc.asset_dir));
+        let ms = since.elapsed().as_millis();
+        let fz = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| c.is_freeze() && c.freeze_still.is_some())
+            .max_by(|a, b| a.timeline_start.total_cmp(&b.timeline_start))
+            .cloned();
+        let Some(fz) = fz else {
+            eprintln!("STEPPROBE no freeze — abort");
+            std::process::exit(2);
+        };
+        let snap = |app: &App, name: &str| {
+            let f = app.shared.frame.lock().unwrap();
+            if f.rgba.len() == (CANVAS_W * CANVAS_H * 4) as usize {
+                let p = format!("{out_dir}/{name}.png");
+                let _ = std::fs::create_dir_all(&out_dir);
+                let _ = image::save_buffer(&p, &f.rgba, CANVAS_W, CANVAS_H, image::ColorType::Rgba8);
+                eprintln!("STEPPROBE snap {name} t={:.4} seq={}", app.t, f.seq);
+            } else {
+                eprintln!("STEPPROBE snap {name} EMPTY");
+            }
+        };
+        let mut goto = |app: &mut App, p: u8| {
+            app.step_probe = Some((p, Instant::now()));
+        };
+        match phase {
+            // warm up, then play from 2s before the freeze (fills the cache/ring the
+            // way a real session does)
+            0 if ms > 2500 => {
+                self.t = (fz.timeline_start - 2.0).max(0.0);
+                self.playing = true;
+                self.push_req(false);
+                eprintln!("STEPPROBE play from {:.3}", self.t);
+                goto(self, 1);
+            }
+            // once the clock is inside the freeze, pause exactly like the user does
+            1 => {
+                let c = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
+                if c > fz.timeline_start + 0.4 {
+                    self.pause_at_displayed();
+                    goto(self, 2);
+                } else if ms > 15000 {
+                    eprintln!("STEPPROBE play never reached freeze — abort");
+                    std::process::exit(2);
+                }
+            }
+            // settle, snap the still as served
+            2 if ms > 900 => {
+                snap(self, "probe_still");
+                // scrub near the freeze tail (a user positioning before stepping out)
+                self.t = fz.timeline_end - 0.02;
+                self.push_req(false);
+                goto(self, 3);
+            }
+            3 if ms > 900 => {
+                snap(self, "probe_still_tail");
+                self.step_once(1.0); // step OUT across the right boundary
+                goto(self, 4);
+            }
+            4 if ms > 900 => {
+                snap(self, "probe_right_first");
+                self.step_once(1.0);
+                goto(self, 5);
+            }
+            5 if ms > 900 => {
+                snap(self, "probe_right_second");
+                // over to the left boundary
+                self.t = fz.timeline_start + 0.02;
+                self.push_req(false);
+                goto(self, 6);
+            }
+            6 if ms > 900 => {
+                snap(self, "probe_still_head");
+                self.step_once(-1.0); // step OUT across the left boundary
+                goto(self, 7);
+            }
+            7 if ms > 900 => {
+                snap(self, "probe_left_last");
+                eprintln!("STEPPROBE done fz={} span=[{:.4},{:.4}]", fz.id, fz.timeline_start, fz.timeline_end);
+                std::process::exit(0);
+            }
+            _ => {}
         }
     }
 
@@ -3157,7 +3290,7 @@ impl App {
             .seq
             .tracks
             .iter()
-            .filter(|tr| tr.kind != "audio")
+            .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
             .flat_map(|tr| tr.clips.iter())
             .find(|c| {
                 c.asset_id.is_some()
@@ -3764,7 +3897,7 @@ impl App {
             .seq
             .tracks
             .iter()
-            .filter(|tr| tr.kind != "audio")
+            .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
             .flat_map(|tr| tr.clips.iter())
             .filter(|c| self.selected.contains(&c.id) && c.asset_id.is_some())
             .cloned()
@@ -3961,7 +4094,7 @@ impl App {
                 .seq
                 .tracks
                 .iter()
-                .filter(|tr| tr.kind != "audio")
+                .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
                 .flat_map(|tr| tr.clips.iter())
                 .filter_map(|c| c.link_id.as_deref())
                 .collect();
@@ -4532,7 +4665,7 @@ impl App {
                                     .seq
                                     .tracks
                                     .iter()
-                                    .filter(|tr| tr.kind != "audio")
+                                    .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
                                     .flat_map(|tr| tr.clips.iter())
                                     .filter(|c| ids.contains(&c.id))
                                     .map(|c| c.id.clone())
@@ -5102,6 +5235,13 @@ impl eframe::App for App {
                 self.freeze_at_playhead();
             }
         }
+        if std::env::var("NATIVE_STEP_PROBE").map(|v| !v.is_empty()).unwrap_or(false) {
+            if self.step_probe.is_none() {
+                self.step_probe = Some((0, Instant::now()));
+            }
+            self.step_probe_drive();
+            ctx.request_repaint_after(std::time::Duration::from_millis(80));
+        }
         if let Ok(v) = std::env::var("NATIVE_SELECT") {
             if !v.is_empty() {
                 std::env::set_var("NATIVE_SELECT", "");
@@ -5222,18 +5362,11 @@ impl eframe::App for App {
         // frame step while paused (Filmora parity: arrow keys = +-1 SOURCE frame of the
         // clip under the playhead; global-grid fallback when no clip/sidecar)
         if !self.playing {
-            const FSTEP: f64 = 1.0 / 30.0;
-            let mut step = |app: &mut App, dir: f64| {
-                let grid = (app.t / FSTEP).round() * FSTEP + dir * FSTEP;
-                let nt = step_target(&app.doc, &mut app.step_pts, app.t, dir).unwrap_or(grid);
-                app.t = nt.clamp(0.0, app.dur);
-                app.push_req(false);
-            };
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
-                step(self, 1.0);
+                self.step_once(1.0);
             }
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
-                step(self, -1.0);
+                self.step_once(-1.0);
             }
         }
         self.underruns = self.shared.underruns.load(Ordering::Relaxed);
