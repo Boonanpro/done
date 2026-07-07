@@ -282,7 +282,7 @@ type PtsMap = std::collections::HashMap<String, Option<std::sync::Arc<Vec<f64>>>
 /// Load ONE missing pts table per idle slice (a 43k-frame table parses in ~50ms).
 fn pts_load_pass(doc: &model::Doc, maps: &mut PtsMap) -> bool {
     for tr in &doc.seq.tracks {
-        if tr.kind != "video" && tr.kind != "overlay" {
+        if tr.kind == "audio" {
             continue;
         }
         for c in &tr.clips {
@@ -341,7 +341,7 @@ const MT_SHADOW: u32 = 0;
 /// this session; the effect-clip migration re-keys everything anyway.
 fn mask_build_pass(doc: &model::Doc, d3d: &media::D3d, masks: &mut MaskMap) -> bool {
     for tr in &doc.seq.tracks {
-        if tr.kind != "video" && tr.kind != "overlay" {
+        if tr.kind == "audio" {
             continue;
         }
         for c in &tr.clips {
@@ -524,7 +524,7 @@ fn step_clip_under(doc: &model::Doc, t: f64) -> Option<model::Clip> {
     doc.seq
         .tracks
         .iter()
-        .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
+        .filter(|tr| tr.kind != "audio")
         .flat_map(|tr| tr.clips.iter())
         .find(|c| c.asset_id.is_some() && t >= c.timeline_start - 1e-9 && t < c.timeline_end - 1e-9)
         .cloned()
@@ -951,7 +951,7 @@ fn prime_upcoming(
     // boundary it was supposed to protect.
     let mut ups: Vec<&model::Clip> = Vec::new();
     for tr in &doc.seq.tracks {
-        if tr.kind != "video" && tr.kind != "overlay" {
+        if tr.kind == "audio" {
             continue;
         }
         for c in &tr.clips {
@@ -1013,7 +1013,7 @@ fn warm_upcoming(
     };
     let mut uses: std::collections::HashMap<String, usize> = Default::default();
     for tr in &doc.seq.tracks {
-        if tr.kind != "video" && tr.kind != "overlay" {
+        if tr.kind == "audio" {
             continue;
         }
         for c in &tr.clips {
@@ -1027,7 +1027,7 @@ fn warm_upcoming(
     }
     let mut ups: Vec<&model::Clip> = Vec::new();
     for tr in &doc.seq.tracks {
-        if tr.kind != "video" && tr.kind != "overlay" {
+        if tr.kind == "audio" {
             continue;
         }
         for c in &tr.clips {
@@ -1211,7 +1211,7 @@ fn warm_open_pass(
     let mut spans: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
     let mut pops: Vec<(String, bool)> = Vec::new(); // (path, is_matte_twin)
     for tr in &doc.seq.tracks {
-        if tr.kind != "video" && tr.kind != "overlay" {
+        if tr.kind == "audio" {
             continue;
         }
         for c in &tr.clips {
@@ -1275,7 +1275,7 @@ fn warm_open_pass(
     // visible hitch
     let mut proxies: Vec<String> = Vec::new();
     for tr in &doc.seq.tracks {
-        if tr.kind != "video" && tr.kind != "overlay" {
+        if tr.kind == "audio" {
             continue;
         }
         for c in &tr.clips {
@@ -2367,7 +2367,7 @@ impl App {
             .seq
             .tracks
             .iter()
-            .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
+            .filter(|tr| tr.kind != "audio")
             .flat_map(|tr| tr.clips.iter())
             .filter(|c| self.selected.contains(&c.id) && c.asset_id.is_some())
             .map(|c| (c.id.clone(), c.clone()))
@@ -2541,7 +2541,7 @@ impl App {
             .seq
             .tracks
             .iter()
-            .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
+            .filter(|tr| tr.kind != "audio")
             .flat_map(|tr| tr.clips.iter())
             .filter(|c| ids.contains(&c.id))
             .map(|c| c.id.clone())
@@ -3299,7 +3299,7 @@ impl App {
             .seq
             .tracks
             .iter()
-            .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
+            .filter(|tr| tr.kind != "audio")
             .flat_map(|tr| tr.clips.iter())
             .find(|c| {
                 c.asset_id.is_some()
@@ -3906,7 +3906,7 @@ impl App {
             .seq
             .tracks
             .iter()
-            .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
+            .filter(|tr| tr.kind != "audio")
             .flat_map(|tr| tr.clips.iter())
             .filter(|c| self.selected.contains(&c.id) && c.asset_id.is_some())
             .cloned()
@@ -4103,7 +4103,7 @@ impl App {
                 .seq
                 .tracks
                 .iter()
-                .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
+                .filter(|tr| tr.kind != "audio")
                 .flat_map(|tr| tr.clips.iter())
                 .filter_map(|c| c.link_id.as_deref())
                 .collect();
@@ -4709,7 +4709,7 @@ impl App {
                                     .seq
                                     .tracks
                                     .iter()
-                                    .filter(|tr| matches!(tr.kind.as_str(), "video" | "overlay"))
+                                    .filter(|tr| tr.kind != "audio")
                                     .flat_map(|tr| tr.clips.iter())
                                     .filter(|c| ids.contains(&c.id))
                                     .map(|c| c.id.clone())
@@ -7105,6 +7105,32 @@ fn main() -> eframe::Result<()> {
         let a = run("last", true);
         let b = run("middle", false);
         std::process::exit(if a && b { 0 } else { 1 });
+    }
+    // --selftest-layer-order: asset-backed clips on any non-audio lane render by stack order.
+    if args.iter().any(|a| a == "--selftest-layer-order") {
+        let raw = serde_json::json!([{
+            "timeline": {
+                "sequence": {
+                    "tracks": [
+                        {"type": "video", "clips": [
+                            {"id": "base", "asset_id": "a", "timeline_start": 0.0, "timeline_end": 5.0, "source_start": 0.0}
+                        ]},
+                        {"type": "caption", "clips": [
+                            {"id": "top", "asset_id": "b", "timeline_start": 0.0, "timeline_end": 5.0, "source_start": 0.0}
+                        ]},
+                        {"type": "audio", "clips": [
+                            {"id": "aud", "asset_id": "c", "timeline_start": 0.0, "timeline_end": 5.0, "source_start": 0.0}
+                        ]}
+                    ]
+                }
+            }
+        }]);
+        let doc = model::Doc::from_raw(raw, "", "").expect("doc");
+        let (base, overlays) = doc.active_video(1.0);
+        let ok = base.map(|c| c.id.as_str()) == Some("base")
+            && overlays.iter().map(|c| c.id.as_str()).collect::<Vec<_>>() == vec!["top"];
+        println!("LAYER_ORDER {}", if ok { "PASS" } else { "FAIL" });
+        std::process::exit(if ok { 0 } else { 1 });
     }
     // --selftest-move: headless lane-move — move an overlay clip to the video track
     if args.iter().any(|a| a == "--selftest-move") {

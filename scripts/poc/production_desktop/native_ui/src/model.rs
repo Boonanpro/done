@@ -302,8 +302,8 @@ impl Doc {
     pub fn active_video(&self, t: f64) -> (Option<&Clip>, Vec<&Clip>) {
         let mut layers: Vec<&Clip> = Vec::new();
         for tr in &self.seq.tracks {
-            if !matches!(tr.kind.as_str(), "video" | "overlay") || tr.hidden {
-                continue; // captions/effects are drawn by their own paths, not as media layers
+            if tr.kind == "audio" || tr.hidden {
+                continue;
             }
             for c in &tr.clips {
                 if c.asset_id.is_none() || t < c.timeline_start || t >= c.timeline_end {
