@@ -92,7 +92,6 @@ pub fn move_clips(root: &mut Value, ids: &[String], dt: f64) {
                 setf(c, "timeline_start", ts + dt);
                 setf(c, "timeline_end", te + dt);
             }
-            erase_same_lane_overlaps_by_ids(clips, ids);
         }
     }
     normalize_linked_audio(root);
@@ -103,17 +102,15 @@ pub fn move_clips(root: &mut Value, ids: &[String], dt: f64) {
 /// else the end. Same-lane overlap is resolved with the edited clip winning.
 pub fn trim_clip(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
     trim_clip_live(root, ids, left, new_t);
-    if left {
-        settle_left_trim(root, ids);
-    }
+    settle_overlaps(root, ids);
 }
 
 pub fn trim_clip_live_from(root: &mut Value, ids: &[String], left: bool, from_t: f64, new_t: f64) {
     trim_clip_live_impl(root, ids, left, Some(from_t), new_t);
 }
 
-/// Live trim during a mouse drag. Only the selected clip changes shape; if that
-/// creates same-lane overlap, the non-selected covered side is erased.
+/// Live trim during a mouse drag. Only the selected clip changes shape; overlap
+/// erasure is settled on mouse release so covered clips do not disappear mid-drag.
 pub fn trim_clip_live(root: &mut Value, ids: &[String], left: bool, new_t: f64) {
     trim_clip_live_impl(root, ids, left, None, new_t);
 }
@@ -151,7 +148,6 @@ fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Opt
                         trim_one_clip(c, left, f(c, "timeline_start") + d);
                     }
                 }
-                erase_same_lane_overlaps_by_ids(clips, ids);
                 continue;
             }
 
@@ -166,14 +162,13 @@ fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Opt
                 }
                 trim_one_clip(c, left, new_t);
             }
-            erase_same_lane_overlaps_by_ids(clips, ids);
         }
     }
     normalize_linked_audio(root);
     remove_orphan_linked_audio(root);
 }
 
-pub fn settle_left_trim(root: &mut Value, ids: &[String]) {
+pub fn settle_overlaps(root: &mut Value, ids: &[String]) {
     {
         let Some(tracks) = tracks_mut(root) else { return };
         for tr in tracks.iter_mut() {
@@ -185,6 +180,10 @@ pub fn settle_left_trim(root: &mut Value, ids: &[String]) {
     }
     normalize_linked_audio(root);
     remove_orphan_linked_audio(root);
+}
+
+pub fn settle_left_trim(root: &mut Value, ids: &[String]) {
+    settle_overlaps(root, ids);
 }
 
 pub fn normalize_linked_audio(root: &mut Value) {
@@ -1155,8 +1154,13 @@ pub fn move_to_track(raw: &mut serde_json::Value, ids: &[String], target: usize)
 
 /// Set a clip's display position (canvas fractions) — the preview inspector drag.
 pub fn set_position(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f64, h: f64) {
+    set_position_many(raw, &[id.to_string()], x, y, w, h);
+}
+
+pub fn set_position_many(raw: &mut serde_json::Value, ids: &[String], x: f64, y: f64, w: f64, h: f64) {
     for_each_clip(raw, |c| {
-        if c.get("id").and_then(|v| v.as_str()) != Some(id) {
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !ids.iter().any(|i| i == id) {
             return;
         }
         c.as_object_mut().unwrap().insert(
@@ -1171,11 +1175,11 @@ pub fn set_position(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f6
     });
 }
 
-/// Set a caption clip's text.
 /// Per-edge crop (fractions 0..0.9). All-zero removes the crop entirely.
-pub fn set_crop(raw: &mut serde_json::Value, id: &str, l: f64, t: f64, r: f64, b: f64) {
+pub fn set_crop_many(raw: &mut serde_json::Value, ids: &[String], l: f64, t: f64, r: f64, b: f64) {
     for_each_clip(raw, |c| {
-        if c.get("id").and_then(|v| v.as_str()) != Some(id) {
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !ids.iter().any(|i| i == id) {
             return;
         }
         let o = c.as_object_mut().unwrap();

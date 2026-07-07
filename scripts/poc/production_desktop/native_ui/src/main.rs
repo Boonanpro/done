@@ -45,6 +45,7 @@ struct Req {
 struct FrameOut {
     rgba: Vec<u8>,
     seq: u64,
+    t: f64,
     comp_ms: f32,
     comp_max: f32,  // worst compose over the last second
     gap_max: f32,   // worst wall-clock gap between published frames (what the eye sees)
@@ -1372,6 +1373,7 @@ fn presenter_thread(shared: Arc<Shared>) {
             let mut f = shared.frame.lock().unwrap();
             f.rgba = rgba;
             f.seq = seq_hi;
+            f.t = ft;
             f.quality = "proxy";
             if let Some(lp) = last_pub {
                 let gms = now.duration_since(lp).as_secs_f32() * 1000.0;
@@ -1518,6 +1520,7 @@ fn media_thread(shared: Arc<Shared>) {
                             f.rgba.clear();
                             f.rgba.extend_from_slice(&comp.rgba);
                             f.seq = seq;
+                            f.t = r.t;
                             f.quality = "proxy";
                         }
                     }
@@ -1676,6 +1679,7 @@ fn media_thread(shared: Arc<Shared>) {
                     let mut f = shared.frame.lock().unwrap();
                     f.rgba = buf;
                     f.seq = seq;
+                    f.t = t;
                     f.comp_ms = 0.0;
                     f.quality = "proxy";
                     scrub_exact = true;
@@ -1701,6 +1705,7 @@ fn media_thread(shared: Arc<Shared>) {
                             f.rgba.clear();
                             f.rgba.extend_from_slice(&comp.rgba);
                             f.seq = seq;
+                            f.t = t;
                             f.comp_ms = t0.elapsed().as_secs_f32() * 1000.0;
                             let now = Instant::now();
                             comp_hist.push((now, f.comp_ms));
@@ -1745,6 +1750,7 @@ fn media_thread(shared: Arc<Shared>) {
                         let mut f = shared.frame.lock().unwrap();
                         f.rgba = buf;
                         f.seq = seq;
+                        f.t = t;
                         f.quality = "proxy";
                         scrub_exact = true;
                         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -1760,6 +1766,7 @@ fn media_thread(shared: Arc<Shared>) {
                         f.rgba.clear();
                         f.rgba.extend_from_slice(&comp.rgba);
                         f.seq = seq;
+                        f.t = t;
                         f.quality = "proxy";
                     } else {
                         scrub_exact = true; // failed — stop hammering
@@ -2029,13 +2036,14 @@ struct App {
     show_help: bool,
     // pts sidecars cached for frame-accurate stepping (None = sidecar missing)
     step_pts: PtsCache,
+    step_settle_at: Option<Instant>,
     // NATIVE_STEP_PROBE state machine: (phase, phase entry time)
     step_probe: Option<(u8, Instant)>,
     toast: Option<(String, Instant)>,
     snap_line: Option<f64>,
     hover_lane: Option<usize>,
-    /// preview inspector: (clip id, drag kind, pointer at start, box at start)
-    inspect_drag: Option<(String, u8, egui::Pos2, model::Pos)>,
+    /// preview inspector: (clip ids with start boxes, drag kind, pointer at start, primary box)
+    inspect_drag: Option<(Vec<(String, model::Pos)>, u8, egui::Pos2, model::Pos)>,
     caption_edit: Option<(String, String)>,
     lane_reorder: Option<usize>,
     export_result: std::sync::Arc<Mutex<Option<Result<serde_json::Value, String>>>>,
@@ -2080,6 +2088,7 @@ impl App {
             frame: Mutex::new(FrameOut {
                 rgba: vec![0; (CANVAS_W * CANVAS_H * 4) as usize],
                 seq: 0,
+                t: 0.0,
                 comp_ms: 0.0,
                 comp_max: 0.0,
                 gap_max: 0.0,
@@ -2162,6 +2171,7 @@ impl App {
             preview_fullscreen: false,
             show_help: false,
             step_pts: Default::default(),
+            step_settle_at: None,
             step_probe: None,
             toast: None,
             snap_line: None,
@@ -2694,7 +2704,8 @@ impl App {
         let grid = (self.t / FSTEP).round() * FSTEP + dir * FSTEP;
         let nt = step_target(&self.doc, &mut self.step_pts, self.t, dir).unwrap_or(grid);
         self.t = nt.clamp(0.0, self.dur);
-        self.push_req(false);
+        self.step_settle_at = Some(Instant::now() + std::time::Duration::from_millis(90));
+        self.push_req(true);
     }
 
     /// NATIVE_STEP_PROBE: drive the REAL user path end-to-end — play across a freeze
@@ -3161,28 +3172,39 @@ impl App {
         }
     }
 
-    /// Inspector: properties panel for the selected clip (single selection). Numeric
-    /// position/size, volume, per-edge crop, popout toggle; captions edit in place.
+    /// Inspector: properties panel. Multiple selected media clips can be edited together.
     fn inspector_ui(&mut self, ctx: &egui::Context) {
-        if self.selected.len() != 1 {
+        if self.selected.is_empty() {
             return;
         }
-        let id = self.selected[0].clone();
-        let Some((clip, kind)) = self
+        let selected: Vec<(model::Clip, String)> = self
             .doc
             .seq
             .tracks
             .iter()
             .flat_map(|tr| tr.clips.iter().map(move |c| (c, tr.kind.clone())))
-            .find(|(c, _)| c.id == id)
+            .filter(|(c, _)| self.selected.contains(&c.id))
             .map(|(c, k)| (c.clone(), k))
-        else {
+            .collect();
+        if selected.is_empty() {
             return;
-        };
+        }
+        let multi = selected.len() > 1;
+        let same_media = selected
+            .iter()
+            .all(|(c, k)| k != "audio" && c.asset_id.is_some() && c.text.is_none() && c.region.is_none());
+        if multi && !same_media {
+            return;
+        }
+        let (clip, kind) = selected[0].clone();
+        let id = clip.id.clone();
+        let edit_ids: Vec<String> = selected.iter().map(|(c, _)| c.id.clone()).collect();
         egui::SidePanel::right("inspector").exact_width(250.0).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(8.0);
-                let title = if clip.text.is_some() && clip.asset_id.is_none() {
+                let title = if multi {
+                    format!("{} clips", selected.len())
+                } else if clip.text.is_some() && clip.asset_id.is_none() {
                     "テロップ".to_string()
                 } else {
                     clip.asset_id
@@ -3207,7 +3229,7 @@ impl App {
                 );
                 ui.separator();
                 // ---- region effect (blur/mosaic) ----
-                if clip.region.is_some() && clip.asset_id.is_none() {
+                if !multi && clip.region.is_some() && clip.asset_id.is_none() {
                     ui.label(egui::RichText::new("種類").strong());
                     let cur = clip.style.as_ref().and_then(|v| v.as_str()).unwrap_or("mosaic").to_string();
                     ui.horizontal(|ui| {
@@ -3249,7 +3271,7 @@ impl App {
                     return;
                 }
                 // ---- caption: edit the text right here ----
-                if clip.text.is_some() && clip.asset_id.is_none() {
+                if !multi && clip.text.is_some() && clip.asset_id.is_none() {
                     if self.insp_for != id {
                         self.insp_for = id.clone();
                         self.insp_text = clip.text.clone().unwrap_or_default();
@@ -3295,20 +3317,20 @@ impl App {
                     });
                 }
                 if changed {
-                    let cid = id.clone();
+                    let ids = edit_ids.clone();
                     let (x, y, w, h) =
                         (vals[0] / 100.0, vals[1] / 100.0, vals[2] / 100.0, vals[3] / 100.0);
-                    self.apply_edit(false, move |raw| edits::set_position(raw, &cid, x, y, w, h));
+                    self.apply_edit(false, move |raw| edits::set_position_many(raw, &ids, x, y, w, h));
                     self.push_req(false);
                 }
                 if ui.small_button("全画面に戻す").clicked() {
-                    let cid = id.clone();
-                    self.apply_edit(true, move |raw| edits::set_position(raw, &cid, 0.0, 0.0, 1.0, 1.0));
+                    let ids = edit_ids.clone();
+                    self.apply_edit(true, move |raw| edits::set_position_many(raw, &ids, 0.0, 0.0, 1.0, 1.0));
                     self.push_req(false);
                 }
                 ui.add_space(6.0);
                 // ---- volume ----
-                if clip.link_id.is_some() {
+                if selected.iter().any(|(c, _)| c.link_id.is_some()) {
                     ui.label(egui::RichText::new("音量").strong());
                     let mut vol = (clip.volume * 100.0) as f32;
                     let r = ui.add(egui::Slider::new(&mut vol, 0.0..=200.0).suffix("%"));
@@ -3316,7 +3338,7 @@ impl App {
                         self.pending_undo = Some(self.doc.raw.clone());
                     }
                     if r.changed() {
-                        let ids = edits::expand_links(&self.doc.raw, &[id.clone()]);
+                        let ids = edits::expand_links(&self.doc.raw, &edit_ids);
                         let v = (vol / 100.0) as f64;
                         self.apply_edit(false, move |raw| edits::set_volume(raw, &ids, v));
                     }
@@ -3346,20 +3368,20 @@ impl App {
                     });
                 }
                 if cchanged {
-                    let cid = id.clone();
+                    let ids = edit_ids.clone();
                     let (cl, ct, crr, cb) =
                         (cr[0] / 100.0, cr[1] / 100.0, cr[2] / 100.0, cr[3] / 100.0);
-                    self.apply_edit(false, move |raw| edits::set_crop(raw, &cid, cl, ct, crr, cb));
+                    self.apply_edit(false, move |raw| edits::set_crop_many(raw, &ids, cl, ct, crr, cb));
                     self.push_req(false);
                 }
                 if clip.crop_ltrb().is_some() && ui.small_button("クロップ解除").clicked() {
-                    let cid = id.clone();
-                    self.apply_edit(true, move |raw| edits::set_crop(raw, &cid, 0.0, 0.0, 0.0, 0.0));
+                    let ids = edit_ids.clone();
+                    self.apply_edit(true, move |raw| edits::set_crop_many(raw, &ids, 0.0, 0.0, 0.0, 0.0));
                     self.push_req(false);
                 }
                 ui.add_space(6.0);
                 // ---- popout ----
-                if kind != "audio" {
+                if !multi && kind != "audio" {
                     ui.label(egui::RichText::new("飛び出し").strong());
                     let has = clip.effects.iter().any(|e| e.kind == "popout");
                     if ui
@@ -3990,7 +4012,6 @@ impl App {
     /// can be MOVED (drag inside) or RESIZED (corner handles, aspect kept) directly.
     fn preview_inspector(&mut self, ui: &mut egui::Ui, resp: &egui::Response) {
         let img = resp.rect;
-        // exactly one selected visual clip
         let sel: Vec<model::Clip> = self
             .doc
             .seq
@@ -4001,10 +4022,20 @@ impl App {
             .filter(|c| self.selected.contains(&c.id) && c.asset_id.is_some())
             .cloned()
             .collect();
-        if sel.len() != 1 {
+        if sel.is_empty() {
             return;
         }
-        let c = &sel[0];
+        let same_kind = sel.iter().all(|c| c.text.is_none() && c.asset_id.is_some());
+        if !same_kind {
+            return;
+        }
+        let Some(c) = sel
+            .iter()
+            .find(|c| self.t >= c.timeline_start && self.t < c.timeline_end)
+            .or_else(|| sel.first())
+        else {
+            return;
+        };
         // only meaningful while the clip is on screen
         if self.t < c.timeline_start || self.t >= c.timeline_end {
             return;
@@ -4035,24 +4066,27 @@ impl App {
         if resp.drag_started() {
             if let Some(pt) = resp.interact_pointer_pos() {
                 let corner = corners.iter().position(|cp| cp.distance(pt) < 10.0);
+                let starts: Vec<(String, model::Pos)> = sel
+                    .iter()
+                    .map(|c| (c.id.clone(), c.display_box()))
+                    .collect();
                 if let Some(ci) = corner {
                     self.pending_undo = Some(self.doc.raw.clone());
-                    self.inspect_drag = Some((c.id.clone(), ci as u8 + 1, pt, b));
+                    self.inspect_drag = Some((starts, ci as u8 + 1, pt, b));
                 } else if bx.contains(pt) {
                     self.pending_undo = Some(self.doc.raw.clone());
-                    self.inspect_drag = Some((c.id.clone(), 0, pt, b));
+                    self.inspect_drag = Some((starts, 0, pt, b));
                 }
             }
         }
         if resp.dragged() {
-            if let (Some((id, mode, start, ob)), Some(pt)) = (self.inspect_drag.clone(), resp.interact_pointer_pos()) {
+            if let (Some((starts, mode, start, ob)), Some(pt)) = (self.inspect_drag.clone(), resp.interact_pointer_pos()) {
                 let dx = ((pt.x - start.x) / img.width()) as f64;
                 let dy = ((pt.y - start.y) / img.height()) as f64;
-                let (nx, ny, nw, nh) = if mode == 0 {
-                    (ob.x + dx, ob.y + dy, ob.width, ob.height)
+                let scale = if mode == 0 {
+                    1.0
                 } else {
-                    // corner resize, aspect kept, anchored at the OPPOSITE corner
-                    let (ax, ay, sxs, sys) = match mode {
+                    let (_, _, sxs, sys) = match mode {
                         1 => (ob.x + ob.width, ob.y + ob.height, -1.0, -1.0),
                         2 => (ob.x, ob.y + ob.height, 1.0, -1.0),
                         3 => (ob.x + ob.width, ob.y, -1.0, 1.0),
@@ -4060,13 +4094,27 @@ impl App {
                     };
                     let scale_w = (ob.width + dx * sxs).max(0.03) / ob.width;
                     let scale_h = (ob.height + dy * sys).max(0.03) / ob.height;
-                    let sc = scale_w.max(scale_h);
-                    let (nw, nh) = (ob.width * sc, ob.height * sc);
-                    let nx = if sxs < 0.0 { ax - nw } else { ax };
-                    let ny = if sys < 0.0 { ay - nh } else { ay };
-                    (nx, ny, nw, nh)
+                    scale_w.max(scale_h)
                 };
-                self.apply_edit(false, move |raw| edits::set_position(raw, &id, nx, ny, nw, nh));
+                self.apply_edit(false, move |raw| {
+                    for (id, sb) in &starts {
+                        let (nx, ny, nw, nh) = if mode == 0 {
+                            (sb.x + dx, sb.y + dy, sb.width, sb.height)
+                        } else {
+                            let (ax, ay, sxs, sys) = match mode {
+                                1 => (sb.x + sb.width, sb.y + sb.height, -1.0, -1.0),
+                                2 => (sb.x, sb.y + sb.height, 1.0, -1.0),
+                                3 => (sb.x + sb.width, sb.y, -1.0, 1.0),
+                                _ => (sb.x, sb.y, 1.0, 1.0),
+                            };
+                            let (nw, nh) = (sb.width * scale, sb.height * scale);
+                            let nx = if sxs < 0.0 { ax - nw } else { ax };
+                            let ny = if sys < 0.0 { ay - nh } else { ay };
+                            (nx, ny, nw, nh)
+                        };
+                        edits::set_position(raw, id, nx, ny, nw, nh);
+                    }
+                });
             }
         }
         if resp.drag_stopped() {
@@ -4921,8 +4969,11 @@ impl App {
                 },
                 self.hover_lane
             );
-            if let Drag::Trim { ids, left: true, .. } = &prev {
-                self.apply_edit(false, |raw| edits::settle_left_trim(raw, ids));
+            match &prev {
+                Drag::Move { ids, .. } | Drag::Trim { ids, .. } => {
+                    self.apply_edit(false, |raw| edits::settle_overlaps(raw, ids));
+                }
+                _ => {}
             }
             let _ = &prev; // lane moves happen LIVE during the drag now
             self.hover_lane = None;
@@ -5525,6 +5576,18 @@ impl eframe::App for App {
                 self.step_once(-1.0);
             }
         }
+        if !self.playing
+            && self.step_settle_at.is_some()
+            && ctx.input(|i| i.key_down(egui::Key::ArrowRight) || i.key_down(egui::Key::ArrowLeft))
+        {
+            self.step_settle_at = Some(Instant::now() + std::time::Duration::from_millis(90));
+        }
+        if let Some(at) = self.step_settle_at {
+            if !self.playing && Instant::now() >= at {
+                self.step_settle_at = None;
+                self.push_req(false);
+            }
+        }
         self.underruns = self.shared.underruns.load(Ordering::Relaxed);
         if self.playing {
             let c = f64::from_bits(self.shared.clock_bits.load(Ordering::Relaxed));
@@ -5542,7 +5605,8 @@ impl eframe::App for App {
         // upload the newest published frame (the media thread never blocks on us)
         {
             let f = self.shared.frame.lock().unwrap();
-            if f.seq != self.last_seq && f.rgba.len() == (CANVAS_W * CANVAS_H * 4) as usize {
+            let stale_paused_frame = !self.playing && (f.t - self.t).abs() > 0.002;
+            if f.seq != self.last_seq && !stale_paused_frame && f.rgba.len() == (CANVAS_W * CANVAS_H * 4) as usize {
                 self.last_seq = f.seq;
                 self.comp_ms = f.comp_ms;
                 self.comp_max = f.comp_max;
@@ -5559,6 +5623,8 @@ impl eframe::App for App {
                             Some(ctx.load_texture("preview", img, egui::TextureOptions::LINEAR))
                     }
                 }
+            } else if stale_paused_frame {
+                ctx.request_repaint();
             }
         }
 
@@ -6865,12 +6931,15 @@ fn main() -> eframe::Result<()> {
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
         edits::trim_clip_live_from(&mut live_left_grow_from_handle, &["b".to_string()], true, 4.0, 3.0);
-        let ok_live_left_grow_erases_overlap = (clip(&live_left_grow_from_handle, "a", "timeline_start") - 0.0).abs() < 0.001
-            && (clip(&live_left_grow_from_handle, "a", "timeline_end") - 3.0).abs() < 0.001
+        let ok_live_left_grow_keeps_overlap = (clip(&live_left_grow_from_handle, "a", "timeline_start") - 0.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 3.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "b", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "e", "timeline_start") - 8.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "b", "source_start") - 0.0).abs() < 0.001;
+        edits::settle_overlaps(&mut live_left_grow_from_handle, &["b".to_string()]);
+        let ok_left_grow_settle_erases_overlap = (clip(&live_left_grow_from_handle, "a", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 3.0).abs() < 0.001;
 
         let mut magnetic_left_shrink = base.clone();
         edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0, 5.0);
@@ -6915,11 +6984,14 @@ fn main() -> eframe::Result<()> {
         main_off_left_grow[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
         main_off_left_grow[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
         edits::trim_clip_live_from(&mut main_off_left_grow, &["b".to_string()], true, 4.0, 3.0);
-        let ok_main_off_left_grow_erases_overlap = (clip(&main_off_left_grow, "a", "timeline_end") - 3.0).abs() < 0.001
+        let ok_main_off_left_grow_keeps_overlap = (clip(&main_off_left_grow, "a", "timeline_end") - 4.0).abs() < 0.001
             && (clip(&main_off_left_grow, "b", "timeline_start") - 3.0).abs() < 0.001
             && (clip(&main_off_left_grow, "b", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&main_off_left_grow, "e", "timeline_start") - 8.0).abs() < 0.001
             && (clip(&main_off_left_grow, "b", "source_start") - 0.0).abs() < 0.001;
+        edits::settle_overlaps(&mut main_off_left_grow, &["b".to_string()]);
+        let ok_main_off_left_grow_settle_erases_overlap = (clip(&main_off_left_grow, "a", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "b", "timeline_start") - 3.0).abs() < 0.001;
 
         let mut free_shrink = base.clone();
         edits::trim_clip(&mut free_shrink, &["c".to_string()], false, 3.0);
@@ -6934,15 +7006,17 @@ fn main() -> eframe::Result<()> {
         let ok = ok_right_shrink_gap
             && ok_live_left_drag
             && ok_live_left_grow
-            && ok_live_left_grow_erases_overlap
+            && ok_live_left_grow_keeps_overlap
+            && ok_left_grow_settle_erases_overlap
             && ok_mag_left_shrink
             && ok_mag_left_restore
             && ok_main_off_left_shrink_gap
-            && ok_main_off_left_grow_erases_overlap
+            && ok_main_off_left_grow_keeps_overlap
+            && ok_main_off_left_grow_settle_erases_overlap
             && ok_free_shrink
             && ok_free_grow;
         println!(
-            "TRIM {} right_shrink_gap={ok_right_shrink_gap} live_left_drag={ok_live_left_drag} live_left_grow={ok_live_left_grow} live_left_grow_erases_overlap={ok_live_left_grow_erases_overlap} magnetic_left_shrink={ok_mag_left_shrink} magnetic_left_restore={ok_mag_left_restore} main_off_left_shrink_gap={ok_main_off_left_shrink_gap} main_off_left_grow_erases_overlap={ok_main_off_left_grow_erases_overlap} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
+            "TRIM {} right_shrink_gap={ok_right_shrink_gap} live_left_drag={ok_live_left_drag} live_left_grow={ok_live_left_grow} live_left_grow_keeps_overlap={ok_live_left_grow_keeps_overlap} left_grow_settle_erases_overlap={ok_left_grow_settle_erases_overlap} magnetic_left_shrink={ok_mag_left_shrink} magnetic_left_restore={ok_mag_left_restore} main_off_left_shrink_gap={ok_main_off_left_shrink_gap} main_off_left_grow_keeps_overlap={ok_main_off_left_grow_keeps_overlap} main_off_left_grow_settle_erases_overlap={ok_main_off_left_grow_settle_erases_overlap} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
             if ok { "PASS" } else { "FAIL" }
         );
         std::process::exit(if ok { 0 } else { 1 });

@@ -479,16 +479,32 @@ impl VideoStream {
     }
 
     fn ensure_jump(&mut self, d3d: &D3d, t: f64) -> Result<bool> {
-        {
-            self.seek(t)?;
-            // present the first frame at/after t immediately (scrub shows something NOW)
-            if let Some((pts, s)) = self.pending.take() {
-                self.blit(d3d, &s)?;
-                self.last_pts = pts;
-                self.pending = self.read_next()?;
-            }
-            Ok(self.has_frame)
+        let start = self.clamp_t((t - 0.35).max(0.0));
+        unsafe {
+            let pv = PROPVARIANT::from((start * HNS) as i64);
+            self.reader.SetCurrentPosition(&GUID::zeroed(), &pv)?;
         }
+        self.eos = false;
+        self.pending = None;
+        let mut newest: Option<(f64, IMFSample)> = None;
+        loop {
+            let nx = self.read_next()?;
+            let Some((pts, s)) = nx else { break };
+            if pts > t + 0.0005 {
+                self.pending = Some((pts, s));
+                break;
+            }
+            newest = Some((pts, s));
+        }
+        if let Some((pts, s)) = newest {
+            self.blit(d3d, &s)?;
+            self.last_pts = pts;
+        } else if let Some((pts, s)) = self.pending.take() {
+            self.blit(d3d, &s)?;
+            self.last_pts = pts;
+            self.pending = self.read_next()?;
+        }
+        Ok(self.has_frame)
     }
 
     fn ensure_advance(&mut self, d3d: &D3d, t: f64) -> Result<bool> {
