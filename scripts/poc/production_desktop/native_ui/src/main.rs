@@ -1956,6 +1956,7 @@ struct App {
     tex: Option<egui::TextureHandle>,
     last_seq: u64,
     playing: bool,
+    preview_fullscreen: bool,
     show_help: bool,
     // pts sidecars cached for frame-accurate stepping (None = sidecar missing)
     step_pts: PtsCache,
@@ -2082,6 +2083,7 @@ impl App {
             tex: None,
             last_seq: 0,
             playing: false,
+            preview_fullscreen: false,
             show_help: false,
             step_pts: Default::default(),
             step_probe: None,
@@ -5325,6 +5327,11 @@ impl eframe::App for App {
         if ctx.input(|i| i.key_pressed(egui::Key::E) && !i.modifiers.ctrl) {
             self.toggle_popout();
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::P) && !i.modifiers.ctrl) && !ctx.wants_keyboard_input() {
+            self.preview_fullscreen = !self.preview_fullscreen;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.preview_fullscreen));
+            self.push_req(false);
+        }
         self.poll_popout_bakes();
         if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
             let force_ripple = ctx.input(|i| i.modifiers.shift);
@@ -5533,8 +5540,9 @@ impl eframe::App for App {
         }
 
         self.poll_export();
-        egui::TopBottomPanel::top("toolbar").exact_height(38.0).show(ctx, |ui| {
-            ui.horizontal_centered(|ui| {
+        if !self.preview_fullscreen {
+            egui::TopBottomPanel::top("toolbar").exact_height(38.0).show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
                 if ui.button("📚 ライブラリ").clicked() {
                     self.playing = false;
                     self.push_req(false);
@@ -5687,21 +5695,22 @@ impl eframe::App for App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new("F1: ショートカット一覧 | クリップ選択=右に調整パネル | 番号ヘッダをドラッグ=レーン並べ替え").weak().small());
                 });
+                });
             });
-        });
-        egui::TopBottomPanel::bottom("timeline")
-            .resizable(true)
-            .default_height(260.0)
-            .height_range(140.0..=700.0)
-            .show(ctx, |ui| {
-                self.timeline_toolbar(ui);
-                ui.add_space(2.0);
-                self.timeline_ui(ui);
-            });
-        egui::TopBottomPanel::bottom("transport")
-            .exact_height(44.0)
-            .show(ctx, |ui| self.transport_ui(ui));
-        self.inspector_ui(ctx);
+            egui::TopBottomPanel::bottom("timeline")
+                .resizable(true)
+                .default_height(260.0)
+                .height_range(140.0..=700.0)
+                .show(ctx, |ui| {
+                    self.timeline_toolbar(ui);
+                    ui.add_space(2.0);
+                    self.timeline_ui(ui);
+                });
+            egui::TopBottomPanel::bottom("transport")
+                .exact_height(44.0)
+                .show(ctx, |ui| self.transport_ui(ui));
+            self.inspector_ui(ctx);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::from_gray(10)))
             .show(ctx, |ui| {
