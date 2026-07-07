@@ -1905,6 +1905,59 @@ fn media_thread(shared: Arc<Shared>) {
     }
 }
 
+fn aux_thread(shared: Arc<Shared>) {
+    let run = || -> anyhow::Result<()> {
+        let d3d = media::D3d::new()?;
+        let mut peak_scan: Option<(String, media::PeakScan)> = None;
+        loop {
+            let job = { shared.aux_req.lock().unwrap().first().cloned() };
+            match job {
+                Some(AuxJob::Thumb { asset_id, path, bucket }) => {
+                    let tt = bucket as f64 * THUMB_BUCKET_S + THUMB_BUCKET_S * 0.5;
+                    let got = media::thumbnail(&d3d, &path, tt, 96).ok();
+                    {
+                        let mut a = shared.aux.lock().unwrap();
+                        if let Some(t) = got {
+                            a.thumbs.insert((asset_id.clone(), bucket), t);
+                        } else {
+                            a.thumbs.insert((asset_id.clone(), bucket), (1, 1, vec![40, 40, 40, 255]));
+                        }
+                        a.ver += 1;
+                    }
+                    shared.aux_req.lock().unwrap().retain(
+                        |j| !matches!(j, AuxJob::Thumb { asset_id: a2, bucket: b2, .. } if *a2 == asset_id && *b2 == bucket),
+                    );
+                }
+                Some(AuxJob::Peaks { asset_id, path }) => {
+                    if peak_scan.as_ref().map(|(id, _)| id != &asset_id).unwrap_or(true) {
+                        peak_scan = media::PeakScan::new(&path).ok().map(|p| (asset_id.clone(), p));
+                    }
+                    let mut finished = false;
+                    if let Some((_, sc)) = peak_scan.as_mut() {
+                        let _ = sc.step();
+                        if sc.done {
+                            let mut a = shared.aux.lock().unwrap();
+                            a.peaks.insert(asset_id.clone(), (sc.spb(), std::mem::take(&mut sc.peaks)));
+                            a.ver += 1;
+                            finished = true;
+                        }
+                    } else {
+                        finished = true;
+                    }
+                    if finished {
+                        peak_scan = None;
+                        shared.aux_req.lock().unwrap().retain(|j| !matches!(j, AuxJob::Peaks { asset_id: a2, .. } if *a2 == asset_id));
+                    }
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(3)),
+            }
+        }
+    };
+    if let Err(e) = run() {
+        eprintln!("aux thread died: {e:#}");
+    }
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum Screen {
     Library,
@@ -2054,6 +2107,12 @@ impl App {
             std::thread::Builder::new()
                 .name("audio".into())
                 .spawn(move || audio_thread(shared))?;
+        }
+        {
+            let shared = shared.clone();
+            std::thread::Builder::new()
+                .name("aux".into())
+                .spawn(move || aux_thread(shared))?;
         }
         {
             let shared = shared.clone();
@@ -5533,7 +5592,7 @@ impl eframe::App for App {
         // request thumbs/peaks for assets on the timeline that lack them
         {
             let mut req = self.shared.aux_req.lock().unwrap();
-            if req.len() < 4 {
+            if req.len() < 64 {
                 let mut want: Vec<AuxJob> = Vec::new();
                 for tr in &self.doc.seq.tracks {
                     for c in &tr.clips {
@@ -5557,8 +5616,20 @@ impl eframe::App for App {
                         }
                     }
                 }
+                let focus = self.displayed_t();
+                want.sort_by(|a, b| {
+                    let ta = match a {
+                        AuxJob::Thumb { bucket, .. } => *bucket as f64 * THUMB_BUCKET_S,
+                        AuxJob::Peaks { .. } => f64::INFINITY,
+                    };
+                    let tb = match b {
+                        AuxJob::Thumb { bucket, .. } => *bucket as f64 * THUMB_BUCKET_S,
+                        AuxJob::Peaks { .. } => f64::INFINITY,
+                    };
+                    (ta - focus).abs().total_cmp(&(tb - focus).abs())
+                });
                 for j in want {
-                    if !req.contains(&j) && req.len() < 4 {
+                    if !req.contains(&j) && req.len() < 64 {
                         req.push(j);
                     }
                 }

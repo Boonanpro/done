@@ -873,17 +873,6 @@ impl AudioDecoder {
     }
 }
 
-fn fast_pitch_preserve_src_offset(out_clip_t: f64, speed: f64, rate: u32) -> f64 {
-    if speed <= 1.01 {
-        return out_clip_t.max(0.0);
-    }
-    let grain_s = (rate as f64 / 25.0).round() / rate as f64; // about 40ms
-    let out_clip_t = out_clip_t.max(0.0);
-    let grain = (out_clip_t / grain_s).floor();
-    let within = out_clip_t - grain * grain_s;
-    grain * grain_s * speed + within
-}
-
 /// WASAPI shared render + per-asset decoders. `clock()` (frames played) is the master
 /// clock while playing. `fill()` pulls PCM according to the document's audio track.
 pub struct AudioOut {
@@ -910,6 +899,9 @@ struct ClipStream {
     dec: AudioDecoder,
     next_src_t: f64,
     last_used: u64,
+    stretch: Option<timestretch::StreamProcessor>,
+    stretch_speed: f64,
+    stretch_fifo: VecDeque<f32>,
 }
 
 impl AudioOut {
@@ -962,6 +954,10 @@ impl AudioOut {
         self.speed = speed.max(0.1);
         for st in self.streams.values_mut() {
             st.next_src_t = f64::NAN; // force a re-seek on the next fill
+            if let Some(proc_) = st.stretch.as_mut() {
+                proc_.reset();
+            }
+            st.stretch_fifo.clear();
         }
         Ok(())
     }
@@ -1042,7 +1038,14 @@ impl AudioOut {
                         Ok(dec) => {
                             self.streams.insert(
                                 c.id.clone(),
-                                ClipStream { dec, next_src_t: f64::NAN, last_used: fills },
+                                ClipStream {
+                                    dec,
+                                    next_src_t: f64::NAN,
+                                    last_used: fills,
+                                    stretch: None,
+                                    stretch_speed: 1.0,
+                                    stretch_fifo: VecDeque::new(),
+                                },
                             );
                         }
                         Err(_) => continue, // asset without a decodable audio stream
@@ -1050,30 +1053,63 @@ impl AudioOut {
                 }
                 let st = self.streams.get_mut(&c.id).unwrap();
                 st.last_used = fills;
-                let out_clip_t0 = ((t0 - c.timeline_start) / speed + s0 as f64 / rate as f64).max(0.0);
-                let src_off0 = fast_pitch_preserve_src_offset(out_clip_t0, speed, rate);
-                let src_t = c.source_start + src_off0;
-                if !st.next_src_t.is_finite() || (st.next_src_t - src_t).abs() > 0.03 {
+                let src_t = c.source_start + (t0 + s0 as f64 / rate as f64 * speed) - c.timeline_start;
+                let buffered_stretch = speed > 1.01 && !st.stretch_fifo.is_empty();
+                let discontinuity = !st.next_src_t.is_finite()
+                    || (!buffered_stretch && (st.next_src_t - src_t).abs() > 0.08);
+                if discontinuity {
                     if st.dec.seek(src_t, rate, ch).is_err() {
                         continue;
                     }
+                    st.next_src_t = src_t;
+                    if let Some(proc_) = st.stretch.as_mut() {
+                        proc_.reset();
+                    }
+                    st.stretch_fifo.clear();
                 }
                 let out_frames = s1 - s0;
-                let out_clip_t1 = out_clip_t0 + out_frames.saturating_sub(1) as f64 / rate as f64;
-                let src_off1 = fast_pitch_preserve_src_offset(out_clip_t1, speed, rate);
-                let src_frames = (((src_off1 - src_off0).max(0.0) * rate as f64).ceil() as usize + 2).max(1);
-                let n = src_frames * ch;
-                scratch.clear();
-                scratch.resize(n, 0.0);
-                if st.dec.pull(&mut scratch[..n], rate, ch).is_err() {
-                    continue;
-                }
-                st.next_src_t = src_t + src_frames as f64 / rate as f64;
-                for j in 0..out_frames {
-                    let src_off = fast_pitch_preserve_src_offset(out_clip_t0 + j as f64 / rate as f64, speed, rate);
-                    let src_j = (((src_off - src_off0).max(0.0) * rate as f64).round() as usize).min(src_frames - 1);
-                    for cc in 0..ch {
-                        out[(s0 + j) * ch + cc] += scratch[src_j * ch + cc] * vol;
+                if speed <= 1.01 {
+                    let n = out_frames * ch;
+                    scratch.clear();
+                    scratch.resize(n, 0.0);
+                    if st.dec.pull(&mut scratch[..n], rate, ch).is_err() {
+                        continue;
+                    }
+                    st.next_src_t = src_t + out_frames as f64 / rate as f64;
+                    for (o, sv) in out[s0 * ch..s1 * ch].iter_mut().zip(scratch.iter()) {
+                        *o += *sv * vol;
+                    }
+                } else {
+                    if st.stretch.is_none() || (st.stretch_speed - speed).abs() > 0.01 {
+                        let params = timestretch::StretchParams::new(1.0 / speed)
+                            .with_sample_rate(rate)
+                            .with_channels(ch as u32)
+                            .with_preset(timestretch::EdmPreset::VocalChop)
+                            .with_quality_mode(timestretch::QualityMode::Balanced);
+                        st.stretch = Some(timestretch::StreamProcessor::new(params));
+                        st.stretch_speed = speed;
+                        st.stretch_fifo.clear();
+                    }
+                    let need = out_frames * ch;
+                    let mut guard = 0usize;
+                    while st.stretch_fifo.len() < need && guard < 4 {
+                        guard += 1;
+                        let src_frames = ((out_frames as f64 * speed).ceil() as usize + 1024).max(1024);
+                        let n = src_frames * ch;
+                        scratch.clear();
+                        scratch.resize(n, 0.0);
+                        if st.dec.pull(&mut scratch[..n], rate, ch).is_err() {
+                            break;
+                        }
+                        st.next_src_t += src_frames as f64 / rate as f64;
+                        let mut stretched = Vec::with_capacity(need + 65_536);
+                        if let Some(proc_) = st.stretch.as_mut() {
+                            let _ = proc_.process_into(&scratch, &mut stretched);
+                        }
+                        st.stretch_fifo.extend(stretched);
+                    }
+                    for o in out[s0 * ch..s1 * ch].iter_mut() {
+                        *o += st.stretch_fifo.pop_front().unwrap_or(0.0) * vol;
                     }
                 }
                 mixed += 1;
