@@ -38,6 +38,7 @@ struct Req {
     t: f64,
     playing: bool,
     scrubbing: bool,
+    speed: f64,
     gen: u64,
 }
 
@@ -93,12 +94,15 @@ fn audio_thread(shared: Arc<Shared>) {
     let mut was_playing = false;
     let mut last_gen = u64::MAX;
     let mut last_tick = Instant::now();
+    let mut last_speed = 1.0f64;
+    let mut fast_wall = Instant::now();
     loop {
-        let (playing, t_req, gen) = {
+        let (playing, t_req, speed, gen) = {
             let r = shared.req.lock().unwrap();
-            (r.playing, r.t, r.gen)
+            (r.playing, r.t, r.speed, r.gen)
         };
         let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
+        let fast = speed > 1.01;
         if playing != was_playing {
             if playing {
                 // hold the clock until the video ring is REBUILT AT THE PLAY POSITION —
@@ -117,17 +121,23 @@ fn audio_thread(shared: Arc<Shared>) {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
-                let _ = audio.start_at(t_req);
+                if fast {
+                    audio.stop();
+                    fast_wall = Instant::now();
+                } else {
+                    let _ = audio.start_at(t_req);
+                }
                 shared.clock_bits.store(t_req.to_bits(), Ordering::Relaxed);
             } else {
                 audio.stop();
             }
             was_playing = playing;
             last_gen = gen;
+            last_speed = speed;
         } else if playing && gen != last_gen {
             last_gen = gen;
             let cur = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
-            if (t_req - cur).abs() > 0.3 {
+            if fast || (t_req - cur).abs() > 0.3 {
                 // playhead jumped mid-play: WAIT for the video ring to rebuild at the new
                 // position before restarting the clock (same gate as play start). Restarting
                 // instantly made production chase a running clock — audio played while the
@@ -148,19 +158,42 @@ fn audio_thread(shared: Arc<Shared>) {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 if !aborted {
-                    let _ = audio.start_at(t_req);
+                    if fast {
+                        audio.stop();
+                        fast_wall = Instant::now();
+                    } else {
+                        let _ = audio.start_at(t_req);
+                    }
                     shared.clock_bits.store(t_req.to_bits(), Ordering::Relaxed);
                     eprintln!(
-                        "JUMPGATE {:.0}ms ring={}",
+                        "JUMPGATE {:.0}ms ring={} speed={speed:.1}x",
                         t0.elapsed().as_secs_f32() * 1000.0,
                         shared.ring_level.load(Ordering::Relaxed)
                     );
                 }
             }
+            last_speed = speed;
+        } else if playing && (speed - last_speed).abs() > 0.01 {
+            let cur = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
+            if fast {
+                audio.stop();
+                fast_wall = Instant::now();
+            } else {
+                let _ = audio.start_at(cur);
+            }
+            last_speed = speed;
         }
         if playing {
-            let _ = audio.fill(&doc);
-            let c = audio.clock();
+            let c = if fast {
+                let prev = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
+                let now = Instant::now();
+                let dt = now.duration_since(fast_wall).as_secs_f64();
+                fast_wall = now;
+                (prev + dt * speed).min(doc.duration())
+            } else {
+                let _ = audio.fill(&doc);
+                audio.clock()
+            };
             let prev = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
             if (c - prev).abs() > 0.3 {
                 eprintln!("CLOCK-JUMP {prev:.2} -> {c:.2}");
@@ -1530,7 +1563,14 @@ fn media_thread(shared: Arc<Shared>) {
                 };
                 let (mut ms_comp, mut ms_push, mut ms_prime) = (0f32, 0f32, 0f32);
                 let mut slept = false;
-                if len < RING_DEPTH && next_t <= dur {
+                let target_depth = if r.speed >= 3.0 {
+                    RING_DEPTH * 4
+                } else if r.speed >= 1.5 {
+                    RING_DEPTH * 2
+                } else {
+                    RING_DEPTH
+                };
+                if len < target_depth && next_t <= dur {
                     let t0 = Instant::now();
                     // cache hit = decompress instead of compose (jump refills become ~instant)
                     let mut cached_buf: Vec<u8> = Vec::new();
@@ -1956,6 +1996,7 @@ struct App {
     tex: Option<egui::TextureHandle>,
     last_seq: u64,
     playing: bool,
+    playback_speed: f64,
     preview_fullscreen: bool,
     show_help: bool,
     // pts sidecars cached for frame-accurate stepping (None = sidecar missing)
@@ -2007,7 +2048,7 @@ impl App {
         let doc = Arc::new(model::Doc::from_raw(raw, contents, dir)?);
         let dur = doc.duration();
         let shared = Arc::new(Shared {
-            req: Mutex::new(Req { t: 0.0, playing: false, scrubbing: false, gen: 0 }),
+            req: Mutex::new(Req { t: 0.0, playing: false, scrubbing: false, speed: 1.0, gen: 0 }),
             frame: Mutex::new(FrameOut {
                 rgba: vec![0; (CANVAS_W * CANVAS_H * 4) as usize],
                 seq: 0,
@@ -2083,6 +2124,7 @@ impl App {
             tex: None,
             last_seq: 0,
             playing: false,
+            playback_speed: 1.0,
             preview_fullscreen: false,
             show_help: false,
             step_pts: Default::default(),
@@ -2735,6 +2777,20 @@ impl App {
         }
         self.playing = !self.playing;
         self.resume_pending = None;
+        self.push_req(false);
+    }
+
+    fn cycle_playback_speed(&mut self) {
+        if self.playing {
+            self.t = self.displayed_t().clamp(0.0, self.dur);
+        }
+        self.playback_speed = if self.playback_speed < 1.5 {
+            2.0
+        } else if self.playback_speed < 3.0 {
+            4.0
+        } else {
+            1.0
+        };
         self.push_req(false);
     }
 
@@ -3989,7 +4045,7 @@ impl App {
         let mut r = self.shared.req.lock().unwrap();
         self.gen += 1;
         self.last_push = Instant::now();
-        *r = Req { t: self.t, playing: self.playing, scrubbing, gen: self.gen };
+        *r = Req { t: self.t, playing: self.playing, scrubbing, speed: self.playback_speed, gen: self.gen };
     }
 
     fn timeline_ui(&mut self, ui: &mut egui::Ui) {
@@ -4356,29 +4412,37 @@ impl App {
                             })
                             .unwrap_or(16.0 / 9.0);
                         let tile_w = (film_h * aspect).max(8.0);
-                        let mut x = x0.max(body.left()); // clip's left edge, never into the header gutter
+                        let px_per_src = self.pps.max(0.001) as f64;
+                        let tile_src = tile_w as f64 / px_per_src;
+                        let mut tile_i = (c.source_start / tile_src).floor() as i64;
+                        let mut x = x0 + ((tile_i as f64 * tile_src - c.source_start) as f32) * self.pps;
                         while x < r.right() {
-                            let tt = c.source_start
-                                + (((x - x0) / self.pps) as f64).max(0.0);
+                            let tt = (tile_i as f64 * tile_src).max(0.0);
                             let b = (tt / THUMB_BUCKET_S) as i64;
                             let th = self
                                 .thumbs
                                 .get(&(aid.clone(), b))
                                 .or_else(|| self.thumbs.get(&(aid.clone(), 0)));
                             if let Some(th) = th {
-                                let tr2 = egui::Rect::from_min_max(
-                                    egui::pos2(x, film_top),
-                                    egui::pos2((x + tile_w).min(r.right()), r.bottom()),
-                                );
-                                let frac = tr2.width() / tile_w;
-                                p.image(
-                                    th.id(),
-                                    tr2,
-                                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(frac, 1.0)),
-                                    egui::Color32::from_white_alpha(210),
-                                );
+                                let left = x.max(r.left()).max(body.left());
+                                let right = (x + tile_w).min(r.right());
+                                if right > left {
+                                    let tr2 = egui::Rect::from_min_max(
+                                        egui::pos2(left, film_top),
+                                        egui::pos2(right, r.bottom()),
+                                    );
+                                    let u0 = ((left - x) / tile_w).clamp(0.0, 1.0);
+                                    let u1 = ((right - x) / tile_w).clamp(0.0, 1.0);
+                                    p.image(
+                                        th.id(),
+                                        tr2,
+                                        egui::Rect::from_min_max(egui::pos2(u0, 0.0), egui::pos2(u1, 1.0)),
+                                        egui::Color32::from_white_alpha(210),
+                                    );
+                                }
                             }
                             x += tile_w;
+                            tile_i += 1;
                         }
                     }
                 }
@@ -5331,6 +5395,9 @@ impl eframe::App for App {
             self.preview_fullscreen = !self.preview_fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.preview_fullscreen));
             self.push_req(false);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::L) && !i.modifiers.ctrl) && !ctx.wants_keyboard_input() {
+            self.cycle_playback_speed();
         }
         self.poll_popout_bakes();
         if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
