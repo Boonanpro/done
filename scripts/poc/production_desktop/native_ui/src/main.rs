@@ -95,14 +95,12 @@ fn audio_thread(shared: Arc<Shared>) {
     let mut last_gen = u64::MAX;
     let mut last_tick = Instant::now();
     let mut last_speed = 1.0f64;
-    let mut fast_wall = Instant::now();
     loop {
         let (playing, t_req, speed, gen) = {
             let r = shared.req.lock().unwrap();
             (r.playing, r.t, r.speed, r.gen)
         };
         let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
-        let fast = speed > 1.01;
         if playing != was_playing {
             if playing {
                 // hold the clock until the video ring is REBUILT AT THE PLAY POSITION —
@@ -121,12 +119,7 @@ fn audio_thread(shared: Arc<Shared>) {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
-                if fast {
-                    audio.stop();
-                    fast_wall = Instant::now();
-                } else {
-                    let _ = audio.start_at(t_req);
-                }
+                let _ = audio.start_at(t_req, speed);
                 shared.clock_bits.store(t_req.to_bits(), Ordering::Relaxed);
             } else {
                 audio.stop();
@@ -137,7 +130,7 @@ fn audio_thread(shared: Arc<Shared>) {
         } else if playing && gen != last_gen {
             last_gen = gen;
             let cur = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
-            if fast || (t_req - cur).abs() > 0.3 {
+            if (speed - last_speed).abs() > 0.01 || (t_req - cur).abs() > 0.3 {
                 // playhead jumped mid-play: WAIT for the video ring to rebuild at the new
                 // position before restarting the clock (same gate as play start). Restarting
                 // instantly made production chase a running clock — audio played while the
@@ -158,12 +151,7 @@ fn audio_thread(shared: Arc<Shared>) {
                     std::thread::sleep(std::time::Duration::from_millis(5));
                 }
                 if !aborted {
-                    if fast {
-                        audio.stop();
-                        fast_wall = Instant::now();
-                    } else {
-                        let _ = audio.start_at(t_req);
-                    }
+                    let _ = audio.start_at(t_req, speed);
                     shared.clock_bits.store(t_req.to_bits(), Ordering::Relaxed);
                     eprintln!(
                         "JUMPGATE {:.0}ms ring={} speed={speed:.1}x",
@@ -175,25 +163,12 @@ fn audio_thread(shared: Arc<Shared>) {
             last_speed = speed;
         } else if playing && (speed - last_speed).abs() > 0.01 {
             let cur = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
-            if fast {
-                audio.stop();
-                fast_wall = Instant::now();
-            } else {
-                let _ = audio.start_at(cur);
-            }
+            let _ = audio.start_at(cur, speed);
             last_speed = speed;
         }
         if playing {
-            let c = if fast {
-                let prev = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
-                let now = Instant::now();
-                let dt = now.duration_since(fast_wall).as_secs_f64();
-                fast_wall = now;
-                (prev + dt * speed).min(doc.duration())
-            } else {
-                let _ = audio.fill(&doc);
-                audio.clock()
-            };
+            let _ = audio.fill(&doc, speed);
+            let c = audio.clock().min(doc.duration());
             let prev = f64::from_bits(shared.clock_bits.load(Ordering::Relaxed));
             if (c - prev).abs() > 0.3 {
                 eprintln!("CLOCK-JUMP {prev:.2} -> {c:.2}");

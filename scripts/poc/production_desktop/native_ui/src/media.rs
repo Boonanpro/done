@@ -885,6 +885,7 @@ pub struct AudioOut {
     buffer_frames: u32,
     frames_written: u64,
     base_t: f64, // timeline time at frames_written==0 (set on play/seek)
+    speed: f64,
     streams: HashMap<String, ClipStream>, // keyed by CLIP id — overlapping clips mix
     scratch: Vec<f32>,
     fills: u64,
@@ -927,6 +928,7 @@ impl AudioOut {
                 buffer_frames,
                 frames_written: 0,
                 base_t: 0.0,
+                speed: 1.0,
                 streams: HashMap::new(),
                 scratch: Vec::new(),
                 fills: 0,
@@ -936,7 +938,7 @@ impl AudioOut {
         }
     }
 
-    pub fn start_at(&mut self, t: f64) -> Result<()> {
+    pub fn start_at(&mut self, t: f64, speed: f64) -> Result<()> {
         unsafe {
             if self.started {
                 let _ = self.client.Stop();
@@ -946,6 +948,7 @@ impl AudioOut {
         }
         self.frames_written = 0;
         self.base_t = t;
+        self.speed = speed.max(0.1);
         for st in self.streams.values_mut() {
             st.next_src_t = f64::NAN; // force a re-seek on the next fill
         }
@@ -964,13 +967,18 @@ impl AudioOut {
 
     pub fn clock(&self) -> f64 {
         let padding = unsafe { self.client.GetCurrentPadding().unwrap_or(0) } as u64;
-        (self.base_t + self.frames_written.saturating_sub(padding) as f64 / self.rate as f64
+        (self.base_t + self.frames_written.saturating_sub(padding) as f64 / self.rate as f64 * self.speed
             - self.latency_s)
             .max(self.base_t)
     }
 
-    pub fn fill(&mut self, doc: &crate::model::Doc) -> Result<()> {
+    pub fn fill(&mut self, doc: &crate::model::Doc, speed: f64) -> Result<()> {
         unsafe {
+            let speed = speed.max(0.1);
+            if (speed - self.speed).abs() > 0.01 {
+                let cur = self.clock();
+                self.start_at(cur, speed)?;
+            }
             let padding = self.client.GetCurrentPadding()?;
             if self.started && padding == 0 {
                 self.underruns += 1; // the device ran dry — this is an audible break
@@ -991,8 +999,8 @@ impl AudioOut {
             }
             // MIX every audible audio-lane clip overlapping this buffer window — stacked
             // clips all play (an NLE mixes; it does not pick one), volume 0 = silent
-            let t0 = self.base_t + self.frames_written as f64 / rate as f64;
-            let t1 = t0 + avail as f64 / rate as f64;
+            let t0 = self.base_t + self.frames_written as f64 / rate as f64 * speed;
+            let t1 = t0 + avail as f64 / rate as f64 * speed;
             self.fills += 1;
             let fills = self.fills;
             let mut scratch = std::mem::take(&mut self.scratch);
@@ -1011,8 +1019,8 @@ impl AudioOut {
                 if vol <= 0.001 {
                     continue;
                 }
-                let s0 = (((c.timeline_start - t0).max(0.0)) * rate as f64).round() as usize;
-                let s1 = ((((c.timeline_end.min(t1)) - t0) * rate as f64).round() as usize)
+                let s0 = (((c.timeline_start - t0).max(0.0) / speed) * rate as f64).round() as usize;
+                let s1 = ((((c.timeline_end.min(t1)) - t0) / speed * rate as f64).round() as usize)
                     .min(avail as usize);
                 if s1 <= s0 {
                     continue;
@@ -1031,21 +1039,26 @@ impl AudioOut {
                 }
                 let st = self.streams.get_mut(&c.id).unwrap();
                 st.last_used = fills;
-                let src_t = c.source_start + (t0 + s0 as f64 / rate as f64) - c.timeline_start;
+                let src_t = c.source_start + (t0 + s0 as f64 / rate as f64 * speed) - c.timeline_start;
                 if !st.next_src_t.is_finite() || (st.next_src_t - src_t).abs() > 0.03 {
                     if st.dec.seek(src_t, rate, ch).is_err() {
                         continue;
                     }
                 }
-                let n = (s1 - s0) * ch;
+                let out_frames = s1 - s0;
+                let src_frames = ((out_frames as f64 * speed).ceil() as usize + 1).max(1);
+                let n = src_frames * ch;
                 scratch.clear();
                 scratch.resize(n, 0.0);
                 if st.dec.pull(&mut scratch[..n], rate, ch).is_err() {
                     continue;
                 }
-                st.next_src_t = src_t + (s1 - s0) as f64 / rate as f64;
-                for (o, sv) in out[s0 * ch..s1 * ch].iter_mut().zip(scratch.iter()) {
-                    *o += *sv * vol;
+                st.next_src_t = src_t + out_frames as f64 * speed / rate as f64;
+                for j in 0..out_frames {
+                    let src_j = ((j as f64 * speed).floor() as usize).min(src_frames - 1);
+                    for cc in 0..ch {
+                        out[(s0 + j) * ch + cc] += scratch[src_j * ch + cc] * vol;
+                    }
                 }
                 mixed += 1;
             }
