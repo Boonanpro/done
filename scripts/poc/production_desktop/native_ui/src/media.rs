@@ -902,6 +902,7 @@ struct ClipStream {
     stretch: Option<timestretch::StreamProcessor>,
     stretch_speed: f64,
     stretch_fifo: VecDeque<f32>,
+    stretch_last: Vec<f32>,
 }
 
 impl AudioOut {
@@ -958,6 +959,7 @@ impl AudioOut {
                 proc_.reset();
             }
             st.stretch_fifo.clear();
+            st.stretch_last.clear();
         }
         Ok(())
     }
@@ -1045,6 +1047,7 @@ impl AudioOut {
                                     stretch: None,
                                     stretch_speed: 1.0,
                                     stretch_fifo: VecDeque::new(),
+                                    stretch_last: Vec::new(),
                                 },
                             );
                         }
@@ -1066,6 +1069,7 @@ impl AudioOut {
                         proc_.reset();
                     }
                     st.stretch_fifo.clear();
+                    st.stretch_last.clear();
                 }
                 let out_frames = s1 - s0;
                 if speed <= 1.01 {
@@ -1089,12 +1093,16 @@ impl AudioOut {
                         st.stretch = Some(timestretch::StreamProcessor::new(params));
                         st.stretch_speed = speed;
                         st.stretch_fifo.clear();
+                        st.stretch_last.clear();
                     }
                     let need = out_frames * ch;
+                    let target_fifo = need + ((rate as usize / 4).max(2048) * ch);
                     let mut guard = 0usize;
-                    while st.stretch_fifo.len() < need && guard < 4 {
+                    while st.stretch_fifo.len() < target_fifo && guard < 4 {
                         guard += 1;
-                        let src_frames = ((out_frames as f64 * speed).ceil() as usize + 1024).max(1024);
+                        let missing_frames = ((target_fifo - st.stretch_fifo.len()) / ch).max(out_frames);
+                        let src_frames = ((missing_frames as f64 * speed).ceil() as usize + rate as usize / 8)
+                            .clamp(4096, rate as usize);
                         let n = src_frames * ch;
                         scratch.clear();
                         scratch.resize(n, 0.0);
@@ -1108,8 +1116,18 @@ impl AudioOut {
                         }
                         st.stretch_fifo.extend(stretched);
                     }
-                    for o in out[s0 * ch..s1 * ch].iter_mut() {
-                        *o += st.stretch_fifo.pop_front().unwrap_or(0.0) * vol;
+                    if st.stretch_last.len() != ch {
+                        st.stretch_last.resize(ch, 0.0);
+                    }
+                    for (idx, o) in out[s0 * ch..s1 * ch].iter_mut().enumerate() {
+                        let cc = idx % ch;
+                        let sv = if let Some(v) = st.stretch_fifo.pop_front() {
+                            st.stretch_last[cc] = v;
+                            v
+                        } else {
+                            st.stretch_last[cc]
+                        };
+                        *o += sv * vol;
                     }
                 }
                 mixed += 1;
