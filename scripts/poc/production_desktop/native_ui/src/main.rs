@@ -2040,6 +2040,7 @@ struct App {
     // NATIVE_STEP_PROBE state machine: (phase, phase entry time)
     step_probe: Option<(u8, Instant)>,
     toast: Option<(String, Instant)>,
+    playhead_snap: bool,
     snap_line: Option<f64>,
     hover_lane: Option<usize>,
     /// preview inspector: (clip ids with start boxes, drag kind, pointer at start, primary box)
@@ -2174,6 +2175,7 @@ impl App {
             step_settle_at: None,
             step_probe: None,
             toast: None,
+            playhead_snap: false,
             snap_line: None,
             hover_lane: None,
             inspect_drag: None,
@@ -2332,6 +2334,31 @@ impl App {
                     continue;
                 }
                 for e in [c.timeline_start, c.timeline_end] {
+                    let d = (e - t).abs();
+                    if d < bd {
+                        bd = d;
+                        best = e;
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    fn snap_playhead(&self, t: f64) -> f64 {
+        if !self.playhead_snap {
+            return t.clamp(0.0, self.dur);
+        }
+        let tol = (8.0 / self.pps) as f64;
+        let mut best = t.clamp(0.0, self.dur);
+        let mut bd = tol;
+        for tr in &self.doc.seq.tracks {
+            if tr.hidden {
+                continue;
+            }
+            for c in &tr.clips {
+                for e in [c.timeline_start, c.timeline_end] {
+                    let e = e.clamp(0.0, self.dur);
                     let d = (e - t).abs();
                     if d < bd {
                         bd = d;
@@ -3065,6 +3092,25 @@ impl App {
             }
             if ibtn(ui, "🗑", "削除 (Del)", !self.selected.is_empty()) {
                 self.delete_selected(false);
+            }
+            ui.separator();
+            let snap_fill = if self.playhead_snap {
+                UI_ACCENT
+            } else {
+                egui::Color32::from_rgb(34, 34, 39)
+            };
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new("SNAP").size(12.0))
+                        .min_size(egui::vec2(48.0, 26.0))
+                        .frame(true)
+                        .fill(snap_fill),
+                )
+                .on_hover_text("Snap playhead to clip edges")
+                .clicked()
+            {
+                self.playhead_snap = !self.playhead_snap;
+                self.snap_line = None;
             }
             ui.separator();
             ui.label(
@@ -4809,7 +4855,10 @@ impl App {
                         if pos.y <= body.top() + 18.0 {
                             self.selected.clear();
                             self.drag = Drag::Scrub;
-                            self.t = to_t(self.scroll_x, self.pps, pos.x).min(self.dur);
+                            let raw_t = to_t(self.scroll_x, self.pps, pos.x);
+                            let nt = self.snap_playhead(raw_t);
+                            self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
+                            self.t = nt;
                             self.push_req(false);
                         } else {
                             if !ui.input(|i| i.modifiers.ctrl) {
@@ -4825,7 +4874,10 @@ impl App {
             if let Some(pos) = resp.interact_pointer_pos() {
                 match self.drag.clone() {
                     Drag::Scrub => {
-                        self.t = to_t(self.scroll_x, self.pps, pos.x).min(self.dur);
+                        let raw_t = to_t(self.scroll_x, self.pps, pos.x);
+                        let nt = self.snap_playhead(raw_t);
+                        self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
+                        self.t = nt;
                         self.push_req(true);
                     }
                     Drag::Move { ids, grab, orig, applied } => {
