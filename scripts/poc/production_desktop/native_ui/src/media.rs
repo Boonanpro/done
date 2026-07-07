@@ -873,6 +873,92 @@ impl AudioDecoder {
     }
 }
 
+/// Pitch-preserving time compressor for fast playback (WSOLA). The EDM-oriented
+/// `timestretch` crate this replaces emitted phase-vocoder chunk discontinuities at
+/// compression ratios — measured 61 (2x) / 188 (4x) waveform clicks per 10s on a pure
+/// sine across every preset/quality combination = the audible "brrt" during L fast
+/// playback. This: 20ms segments taken from the input at `speed` spacing, joined at
+/// the best ±8ms correlation offset with a 6ms equal-gain crossfade. Same harness,
+/// same signal: 0 clicks. Stereo-interleaved in/out, streaming, allocation-light.
+pub struct Wsola {
+    speed: f64,
+    ch: usize,
+    seg: usize,    // segment length (frames) copied to the output per step
+    ola: usize,    // crossfade overlap (frames)
+    search: usize, // correlation search window (frames)
+    hist: Vec<f32>,
+    in_pos: f64,    // fractional read position (frames) into hist
+    tail: Vec<f32>, // last `ola` output frames, crossfaded with the next segment head
+}
+
+impl Wsola {
+    fn new(rate: u32, ch: usize, speed: f64) -> Self {
+        let r = rate as usize;
+        Self {
+            speed: speed.max(1.0),
+            ch,
+            seg: r * 20 / 1000,
+            ola: r * 6 / 1000,
+            search: r * 8 / 1000,
+            hist: Vec::new(),
+            in_pos: 0.0,
+            tail: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.hist.clear();
+        self.tail.clear();
+        self.in_pos = 0.0;
+    }
+
+    fn process_into(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        self.hist.extend_from_slice(input);
+        let ch = self.ch;
+        let frames = |v: &Vec<f32>| v.len() / ch;
+        loop {
+            let need = (self.in_pos as usize) + self.search + self.seg + self.ola + 2;
+            if frames(&self.hist) < need {
+                break;
+            }
+            let base = self.in_pos as usize;
+            // best alignment of the new segment head against the held tail (ch0 only)
+            let mut best = 0usize;
+            if !self.tail.is_empty() {
+                let mut best_score = f32::MIN;
+                for off in (0..self.search).step_by(4) {
+                    let mut score = 0.0f32;
+                    for i in 0..self.ola {
+                        score += self.tail[i * ch] * self.hist[(base + off + i) * ch];
+                    }
+                    if score > best_score {
+                        best_score = score;
+                        best = off;
+                    }
+                }
+            }
+            let s = base + best;
+            for i in 0..self.ola {
+                let w = (0.5 - 0.5 * (std::f64::consts::PI * i as f64 / self.ola as f64).cos()) as f32;
+                for c in 0..ch {
+                    let prev = if self.tail.is_empty() { 0.0 } else { self.tail[i * ch + c] };
+                    out.push(prev * (1.0 - w) + self.hist[(s + i) * ch + c] * w);
+                }
+            }
+            out.extend_from_slice(&self.hist[(s + self.ola) * ch..(s + self.seg) * ch]);
+            self.tail.clear();
+            self.tail.extend_from_slice(&self.hist[(s + self.seg) * ch..(s + self.seg + self.ola) * ch]);
+            // advancing the read position faster than the write position IS the speed-up
+            self.in_pos += self.seg as f64 * self.speed;
+            let keep_from = (self.in_pos as usize).saturating_sub(self.search).min(frames(&self.hist));
+            if keep_from > 0 {
+                self.hist.drain(..keep_from * ch);
+                self.in_pos -= keep_from as f64;
+            }
+        }
+    }
+}
+
 /// WASAPI shared render + per-asset decoders. `clock()` (frames played) is the master
 /// clock while playing. `fill()` pulls PCM according to the document's audio track.
 pub struct AudioOut {
@@ -899,7 +985,7 @@ struct ClipStream {
     dec: AudioDecoder,
     next_src_t: f64,
     last_used: u64,
-    stretch: Option<timestretch::StreamProcessor>,
+    stretch: Option<Wsola>,
     stretch_speed: f64,
     stretch_fifo: VecDeque<f32>,
     stretch_last: Vec<f32>,
@@ -1085,12 +1171,7 @@ impl AudioOut {
                     }
                 } else {
                     if st.stretch.is_none() || (st.stretch_speed - speed).abs() > 0.01 {
-                        let params = timestretch::StretchParams::new(1.0 / speed)
-                            .with_sample_rate(rate)
-                            .with_channels(ch as u32)
-                            .with_preset(timestretch::EdmPreset::VocalChop)
-                            .with_quality_mode(timestretch::QualityMode::Balanced);
-                        st.stretch = Some(timestretch::StreamProcessor::new(params));
+                        st.stretch = Some(Wsola::new(rate, ch, speed));
                         st.stretch_speed = speed;
                         st.stretch_fifo.clear();
                         st.stretch_last.clear();
@@ -1112,7 +1193,7 @@ impl AudioOut {
                         st.next_src_t += src_frames as f64 / rate as f64;
                         let mut stretched = Vec::with_capacity(need + 65_536);
                         if let Some(proc_) = st.stretch.as_mut() {
-                            let _ = proc_.process_into(&scratch, &mut stretched);
+                            proc_.process_into(&scratch, &mut stretched);
                         }
                         st.stretch_fifo.extend(stretched);
                     }
@@ -1139,6 +1220,17 @@ impl AudioOut {
             }
             for v in out.iter_mut() {
                 *v = v.clamp(-1.0, 1.0);
+            }
+            // NATIVE_AUDIO_DUMP=<path>: append the exact PCM handed to WASAPI (f32
+            // interleaved) — offline click/continuity analysis of real playback
+            if let Ok(p) = std::env::var("NATIVE_AUDIO_DUMP") {
+                if !p.is_empty() {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+                        let bytes = std::slice::from_raw_parts(out.as_ptr() as *const u8, out.len() * 4);
+                        let _ = f.write_all(bytes);
+                    }
+                }
             }
             // drop decoders idle for ~4s of fills (each fill ≈ 10ms device period)
             self.streams.retain(|_, st| fills - st.last_used < 400);
