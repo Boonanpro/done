@@ -7462,15 +7462,21 @@ fn main() -> eframe::Result<()> {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(4000);
+                // NATIVE_PLAY_SPEED: probe fast playback (the L key path) headlessly
+                let speed: f64 = std::env::var("NATIVE_PLAY_SPEED")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1.0);
                 let sh = app.shared.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(delay));
-                    eprintln!("PLAYPROBE start t={t0}");
+                    eprintln!("PLAYPROBE start t={t0} speed={speed}");
                     {
                         let mut r = sh.req.lock().unwrap();
                         r.t = t0;
                         r.playing = true;
                         r.scrubbing = false;
+                        r.speed = speed;
                         r.gen += 1;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(12000));
