@@ -6690,9 +6690,24 @@ fn main() -> eframe::Result<()> {
                     .unwrap_or(false)
             })
             .unwrap_or(true);
-        let ok = attached_gone && main_gone && gap_closed;
+        let synthetic = serde_json::json!([{
+            "timeline": {"sequence": {"tracks": [
+                {"id":"v0","type":"video","clips":[
+                    {"id":"main","asset_id":"m","timeline_start":0.0,"timeline_end":10.0,"source_start":0.0,"source_end":10.0}
+                ]},
+                {"id":"ov1","type":"overlay","clips":[
+                    {"id":"mid","asset_id":"x","timeline_start":2.0,"timeline_end":6.0,"source_start":0.0,"source_end":4.0}
+                ]},
+                {"id":"ov2","type":"overlay","clips":[
+                    {"id":"top","asset_id":"y","timeline_start":3.0,"timeline_end":5.0,"source_start":0.0,"source_end":2.0}
+                ]}
+            ]}}
+        }]);
+        let main_attach_ok = edits::attached_to(&synthetic, &["main".to_string()]) == vec!["mid".to_string(), "top".to_string()];
+        let non_main_attach_ok = edits::attached_to(&synthetic, &["mid".to_string()]).is_empty();
+        let ok = attached_gone && main_gone && gap_closed && main_attach_ok && non_main_attach_ok;
         println!(
-            "MAGNET {} main_gone={main_gone} attached={}/{} gone gap_closed={gap_closed}",
+            "MAGNET {} main_gone={main_gone} attached={}/{} gone gap_closed={gap_closed} main_attach_ok={main_attach_ok} non_main_attach_ok={non_main_attach_ok}",
             if ok { "PASS" } else { "FAIL" },
             attached.iter().filter(|id| !alive.contains(id.as_str())).count(),
             attached.len()
@@ -6808,21 +6823,32 @@ fn main() -> eframe::Result<()> {
                 .and_then(|v| v.as_f64())
                 .unwrap_or(-999.0)
         };
+        let exists = |raw: &serde_json::Value, id: &str| -> bool {
+            raw.get(0)
+                .and_then(|r| r.get("timeline"))
+                .and_then(|t| t.get("sequence"))
+                .and_then(|s| s.get("tracks"))
+                .and_then(|t| t.as_array())
+                .into_iter()
+                .flatten()
+                .flat_map(|tr| tr.get("clips").and_then(|c| c.as_array()).into_iter().flatten())
+                .any(|c| c.get("id").and_then(|v| v.as_str()) == Some(id))
+        };
 
-        let mut magnetic_shrink = base.clone();
-        edits::trim_clip(&mut magnetic_shrink, &["a".to_string()], false, 3.0);
-        let ok_mag_shrink = (clip(&magnetic_shrink, "a", "timeline_end") - 3.0).abs() < 0.001
-            && (clip(&magnetic_shrink, "b", "timeline_start") - 3.0).abs() < 0.001
-            && (clip(&magnetic_shrink, "aaud", "timeline_end") - 3.0).abs() < 0.001
-            && (clip(&magnetic_shrink, "baud", "timeline_start") - 3.0).abs() < 0.001
-            && (clip(&magnetic_shrink, "d", "timeline_start") - 3.0).abs() < 0.001;
+        let mut right_shrink = base.clone();
+        edits::trim_clip(&mut right_shrink, &["a".to_string()], false, 3.0);
+        let ok_right_shrink_gap = (clip(&right_shrink, "a", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&right_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&right_shrink, "aaud", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&right_shrink, "baud", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&right_shrink, "d", "timeline_start") - 4.0).abs() < 0.001;
 
         let mut live_left_drag = base.clone();
         edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 4.0, 5.0);
         let ok_live_left_drag = (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&live_left_drag, "b", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&live_left_drag, "b", "timeline_end") - 7.0).abs() < 0.001
-            && (clip(&live_left_drag, "e", "timeline_start") - 7.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "timeline_start") - 5.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "timeline_end") - 8.0).abs() < 0.001
+            && (clip(&live_left_drag, "e", "timeline_start") - 8.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "source_start") - 1.0).abs() < 0.001;
 
         edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 5.0, 4.0);
@@ -6839,25 +6865,25 @@ fn main() -> eframe::Result<()> {
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
         live_left_grow_from_handle[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
         edits::trim_clip_live_from(&mut live_left_grow_from_handle, &["b".to_string()], true, 4.0, 3.0);
-        let ok_live_left_grow_no_erode = (clip(&live_left_grow_from_handle, "a", "timeline_start") - 0.0).abs() < 0.001
-            && (clip(&live_left_grow_from_handle, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&live_left_grow_from_handle, "b", "timeline_end") - 9.0).abs() < 0.001
-            && (clip(&live_left_grow_from_handle, "e", "timeline_start") - 9.0).abs() < 0.001
+        let ok_live_left_grow_erases_overlap = (clip(&live_left_grow_from_handle, "a", "timeline_start") - 0.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "a", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 3.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "b", "timeline_end") - 8.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "e", "timeline_start") - 8.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "b", "source_start") - 0.0).abs() < 0.001;
 
         let mut magnetic_left_shrink = base.clone();
         edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0, 5.0);
         edits::settle_left_trim(&mut magnetic_left_shrink, &["b".to_string()]);
         let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 7.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 5.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "source_start") - 1.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 7.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "g", "timeline_start") - 7.2).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 8.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "g", "timeline_start") - 8.2).abs() < 0.001
             && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 7.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 5.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "baud", "source_start") - 1.0).abs() < 0.001;
 
         edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0, 4.0);
@@ -6877,8 +6903,8 @@ fn main() -> eframe::Result<()> {
         main_magnet_off[0]["timeline"]["sequence"]["tracks"][0]["magnet"] = serde_json::Value::Bool(false);
         edits::trim_clip_live_from(&mut main_magnet_off, &["b".to_string()], true, 4.0, 5.0);
         let ok_main_off_left_shrink_gap = (clip(&main_magnet_off, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&main_magnet_off, "b", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&main_magnet_off, "b", "timeline_end") - 7.0).abs() < 0.001
+            && (clip(&main_magnet_off, "b", "timeline_start") - 5.0).abs() < 0.001
+            && (clip(&main_magnet_off, "b", "timeline_end") - 8.0).abs() < 0.001
             && (clip(&main_magnet_off, "e", "timeline_start") - 8.0).abs() < 0.001
             && (clip(&main_magnet_off, "b", "source_start") - 1.0).abs() < 0.001;
 
@@ -6889,10 +6915,10 @@ fn main() -> eframe::Result<()> {
         main_off_left_grow[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_start"] = serde_json::Value::from(1.0);
         main_off_left_grow[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
         edits::trim_clip_live_from(&mut main_off_left_grow, &["b".to_string()], true, 4.0, 3.0);
-        let ok_main_off_left_grow_packed = (clip(&main_off_left_grow, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&main_off_left_grow, "b", "timeline_start") - 4.0).abs() < 0.001
-            && (clip(&main_off_left_grow, "b", "timeline_end") - 9.0).abs() < 0.001
-            && (clip(&main_off_left_grow, "e", "timeline_start") - 9.0).abs() < 0.001
+        let ok_main_off_left_grow_erases_overlap = (clip(&main_off_left_grow, "a", "timeline_end") - 3.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "b", "timeline_start") - 3.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "b", "timeline_end") - 8.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "e", "timeline_start") - 8.0).abs() < 0.001
             && (clip(&main_off_left_grow, "b", "source_start") - 0.0).abs() < 0.001;
 
         let mut free_shrink = base.clone();
@@ -6903,20 +6929,20 @@ fn main() -> eframe::Result<()> {
         let mut free_grow = base.clone();
         edits::trim_clip(&mut free_grow, &["c".to_string()], false, 5.0);
         let ok_free_grow = (clip(&free_grow, "c", "timeline_end") - 5.0).abs() < 0.001
-            && (clip(&free_grow, "d", "timeline_start") - 5.0).abs() < 0.001;
+            && !exists(&free_grow, "d");
 
-        let ok = ok_mag_shrink
+        let ok = ok_right_shrink_gap
             && ok_live_left_drag
             && ok_live_left_grow
-            && ok_live_left_grow_no_erode
+            && ok_live_left_grow_erases_overlap
             && ok_mag_left_shrink
             && ok_mag_left_restore
             && ok_main_off_left_shrink_gap
-            && ok_main_off_left_grow_packed
+            && ok_main_off_left_grow_erases_overlap
             && ok_free_shrink
             && ok_free_grow;
         println!(
-            "TRIM {} magnetic_shrink={ok_mag_shrink} live_left_drag={ok_live_left_drag} live_left_grow={ok_live_left_grow} live_left_grow_no_erode={ok_live_left_grow_no_erode} magnetic_left_shrink={ok_mag_left_shrink} magnetic_left_restore={ok_mag_left_restore} main_off_left_shrink_gap={ok_main_off_left_shrink_gap} main_off_left_grow_packed={ok_main_off_left_grow_packed} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
+            "TRIM {} right_shrink_gap={ok_right_shrink_gap} live_left_drag={ok_live_left_drag} live_left_grow={ok_live_left_grow} live_left_grow_erases_overlap={ok_live_left_grow_erases_overlap} magnetic_left_shrink={ok_mag_left_shrink} magnetic_left_restore={ok_mag_left_restore} main_off_left_shrink_gap={ok_main_off_left_shrink_gap} main_off_left_grow_erases_overlap={ok_main_off_left_grow_erases_overlap} free_shrink={ok_free_shrink} free_grow={ok_free_grow}",
             if ok { "PASS" } else { "FAIL" }
         );
         std::process::exit(if ok { 0 } else { 1 });
