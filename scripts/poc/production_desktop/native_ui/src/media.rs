@@ -873,6 +873,17 @@ impl AudioDecoder {
     }
 }
 
+fn fast_pitch_preserve_src_offset(out_clip_t: f64, speed: f64, rate: u32) -> f64 {
+    if speed <= 1.01 {
+        return out_clip_t.max(0.0);
+    }
+    let grain_s = (rate as f64 / 25.0).round() / rate as f64; // about 40ms
+    let out_clip_t = out_clip_t.max(0.0);
+    let grain = (out_clip_t / grain_s).floor();
+    let within = out_clip_t - grain * grain_s;
+    grain * grain_s * speed + within
+}
+
 /// WASAPI shared render + per-asset decoders. `clock()` (frames played) is the master
 /// clock while playing. `fill()` pulls PCM according to the document's audio track.
 pub struct AudioOut {
@@ -1039,23 +1050,28 @@ impl AudioOut {
                 }
                 let st = self.streams.get_mut(&c.id).unwrap();
                 st.last_used = fills;
-                let src_t = c.source_start + (t0 + s0 as f64 / rate as f64 * speed) - c.timeline_start;
+                let out_clip_t0 = ((t0 - c.timeline_start) / speed + s0 as f64 / rate as f64).max(0.0);
+                let src_off0 = fast_pitch_preserve_src_offset(out_clip_t0, speed, rate);
+                let src_t = c.source_start + src_off0;
                 if !st.next_src_t.is_finite() || (st.next_src_t - src_t).abs() > 0.03 {
                     if st.dec.seek(src_t, rate, ch).is_err() {
                         continue;
                     }
                 }
                 let out_frames = s1 - s0;
-                let src_frames = ((out_frames as f64 * speed).ceil() as usize + 1).max(1);
+                let out_clip_t1 = out_clip_t0 + out_frames.saturating_sub(1) as f64 / rate as f64;
+                let src_off1 = fast_pitch_preserve_src_offset(out_clip_t1, speed, rate);
+                let src_frames = (((src_off1 - src_off0).max(0.0) * rate as f64).ceil() as usize + 2).max(1);
                 let n = src_frames * ch;
                 scratch.clear();
                 scratch.resize(n, 0.0);
                 if st.dec.pull(&mut scratch[..n], rate, ch).is_err() {
                     continue;
                 }
-                st.next_src_t = src_t + out_frames as f64 * speed / rate as f64;
+                st.next_src_t = src_t + src_frames as f64 / rate as f64;
                 for j in 0..out_frames {
-                    let src_j = ((j as f64 * speed).floor() as usize).min(src_frames - 1);
+                    let src_off = fast_pitch_preserve_src_offset(out_clip_t0 + j as f64 / rate as f64, speed, rate);
+                    let src_j = (((src_off - src_off0).max(0.0) * rate as f64).round() as usize).min(src_frames - 1);
                     for cc in 0..ch {
                         out[(s0 + j) * ch + cc] += scratch[src_j * ch + cc] * vol;
                     }
