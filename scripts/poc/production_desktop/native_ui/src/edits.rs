@@ -116,6 +116,11 @@ pub fn trim_clip_live(root: &mut Value, ids: &[String], left: bool, new_t: f64) 
 }
 
 fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Option<f64>, new_t: f64) {
+    if trim_main_lane_live(root, ids, left, from_t, new_t) {
+        normalize_linked_audio(root);
+        remove_orphan_linked_audio(root);
+        return;
+    }
     {
         let Some(tracks) = tracks_mut(root) else { return };
         for tr in tracks.iter_mut() {
@@ -168,6 +173,155 @@ fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Opt
     remove_orphan_linked_audio(root);
 }
 
+fn main_video_track(root: &Value) -> Option<usize> {
+    tracks_ref(root)?
+        .iter()
+        .position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("video"))
+}
+
+fn track_magnet(root: &Value, ti: usize) -> bool {
+    let Some(tracks) = tracks_ref(root) else { return false };
+    let Some(tr) = tracks.get(ti) else { return false };
+    if let Some(m) = tr.get("magnet").and_then(|v| v.as_bool()) {
+        return m;
+    }
+    tr.get("type").and_then(|v| v.as_str()) == Some("video") && main_video_track(root) == Some(ti)
+}
+
+fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Option<f64>, new_t: f64) -> bool {
+    let Some(main_ti) = main_video_track(root) else { return false };
+    let magnet = track_magnet(root, main_ti);
+    let Some(tracks) = tracks_mut(root) else { return false };
+    let Some(clips) = tracks
+        .get_mut(main_ti)
+        .and_then(|tr| tr.get_mut("clips"))
+        .and_then(|c| c.as_array_mut())
+    else {
+        return false;
+    };
+    let selected: Vec<usize> = clips
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| ids.contains(&sid(c)) && c.get("asset_id").is_some() && !is_freeze_v(c))
+        .map(|(i, _)| i)
+        .collect();
+    if selected.len() != 1 {
+        return false;
+    }
+    let idx = selected[0];
+    let ts = f(&clips[idx], "timeline_start");
+    let te = f(&clips[idx], "timeline_end");
+    let ss = f(&clips[idx], "source_start");
+    let has_se = clips[idx].get("source_end").map(|v| v.is_number()).unwrap_or(false);
+    let se = f(&clips[idx], "source_end");
+    let old_edge = if left { from_t.unwrap_or(ts) } else { from_t.unwrap_or(te) };
+    let mut d = new_t - old_edge;
+    if d.abs() < 1e-6 {
+        return true;
+    }
+
+    let shift_block = |clips: &mut Vec<Value>, side_left: bool, pivot: f64, delta: f64, skip: usize| {
+        if delta.abs() < 1e-6 {
+            return;
+        }
+        for (i, c) in clips.iter_mut().enumerate() {
+            if i == skip {
+                continue;
+            }
+            let cs = f(c, "timeline_start");
+            let ce = f(c, "timeline_end");
+            let belongs = if side_left {
+                ce <= pivot + 0.002
+            } else {
+                cs >= pivot - 0.002
+            };
+            if belongs {
+                setf(c, "timeline_start", cs + delta);
+                setf(c, "timeline_end", ce + delta);
+            }
+        }
+    };
+    let pin_start_to_zero = |clips: &mut Vec<Value>| {
+        let min_start = clips
+            .iter()
+            .map(|c| f(c, "timeline_start"))
+            .fold(f64::MAX, f64::min);
+        if min_start.is_finite() && min_start > 1e-6 {
+            for c in clips.iter_mut() {
+                let cs = f(c, "timeline_start");
+                let ce = f(c, "timeline_end");
+                setf(c, "timeline_start", cs - min_start);
+                setf(c, "timeline_end", ce - min_start);
+            }
+        }
+    };
+
+    if !left {
+        d = d.max(-(te - ts - 0.05));
+        if has_se {
+            d = d.max(ss + 0.05 - se);
+        }
+        if d.abs() < 1e-6 {
+            return true;
+        }
+        setf(&mut clips[idx], "timeline_end", te + d);
+        if has_se {
+            setf(&mut clips[idx], "source_end", se + d);
+        }
+        if d > 0.0 || magnet {
+            shift_block(clips, false, te, d, idx);
+        }
+        return true;
+    }
+
+    if d > 0.0 {
+        d = d.min(te - ts - 0.05);
+        if has_se {
+            d = d.min(se - ss - 0.05);
+        }
+        if d.abs() < 1e-6 {
+            return true;
+        }
+        if magnet {
+            shift_block(clips, true, ts, d, idx);
+        }
+        setf(&mut clips[idx], "timeline_start", ts + d);
+        setf(&mut clips[idx], "source_start", ss + d);
+        if magnet {
+            pin_start_to_zero(clips);
+        }
+        return true;
+    }
+
+    let mut grow = (-d).min(ss);
+    if grow <= 1e-6 {
+        return true;
+    }
+    if magnet {
+        let left_min_start = clips
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| *i != idx && f(c, "timeline_end") <= ts + 0.002)
+            .map(|(_, c)| f(c, "timeline_start"))
+            .fold(f64::MAX, f64::min);
+        let restore = if left_min_start.is_finite() { grow.min(left_min_start) } else { 0.0 };
+        if restore > 1e-6 {
+            shift_block(clips, true, ts, -restore, idx);
+            setf(&mut clips[idx], "timeline_start", ts - restore);
+            setf(&mut clips[idx], "source_start", ss - restore);
+            grow -= restore;
+        }
+    }
+    if grow > 1e-6 {
+        let cur_end = f(&clips[idx], "timeline_end");
+        let cur_ss = f(&clips[idx], "source_start");
+        setf(&mut clips[idx], "source_start", (cur_ss - grow).max(0.0));
+        setf(&mut clips[idx], "timeline_end", cur_end + grow);
+        shift_block(clips, false, cur_end, grow, idx);
+    }
+    true
+}
+
 pub fn settle_overlaps(root: &mut Value, ids: &[String]) {
     {
         let Some(tracks) = tracks_mut(root) else { return };
@@ -188,15 +342,42 @@ pub fn settle_left_trim(root: &mut Value, ids: &[String]) {
 
 pub fn normalize_linked_audio(root: &mut Value) {
     use std::collections::HashMap;
-    let mut visual: HashMap<String, (f64, f64, f64, Option<f64>)> = HashMap::new();
+    let mut visual: HashMap<String, (f64, f64, f64, Option<f64>, String)> = HashMap::new();
+    let mut audio_links: Vec<String> = Vec::new();
+    let mut audio_assets: Vec<String> = Vec::new();
+    let mut used_ids: Vec<String> = Vec::new();
     if let Some(tracks) = tracks_ref(root) {
         for tr in tracks {
             if tr.get("type").and_then(|v| v.as_str()) == Some("audio") {
+                for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                    if let Some(l) = link(c) {
+                        if !audio_links.contains(&l) {
+                            audio_links.push(l);
+                        }
+                    }
+                    if let Some(aid) = c.get("asset_id").and_then(|v| v.as_str()) {
+                        let aid = aid.to_string();
+                        if !audio_assets.contains(&aid) {
+                            audio_assets.push(aid);
+                        }
+                    }
+                    let id = sid(c);
+                    if !id.is_empty() && !used_ids.contains(&id) {
+                        used_ids.push(id);
+                    }
+                }
                 continue;
             }
             for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                let id = sid(c);
+                if !id.is_empty() && !used_ids.contains(&id) {
+                    used_ids.push(id);
+                }
                 if let Some(l) = link(c) {
-                    if c.get("asset_id").is_some() {
+                    if let Some(aid) = c.get("asset_id").and_then(|v| v.as_str()) {
+                        if is_freeze_v(c) {
+                            continue;
+                        }
                         visual.insert(
                             l,
                             (
@@ -204,6 +385,7 @@ pub fn normalize_linked_audio(root: &mut Value) {
                                 f(c, "timeline_end"),
                                 f(c, "source_start"),
                                 c.get("source_end").and_then(|v| v.as_f64()),
+                                aid.to_string(),
                             ),
                         );
                     }
@@ -212,6 +394,41 @@ pub fn normalize_linked_audio(root: &mut Value) {
         }
     }
     let Some(tracks) = tracks_mut(root) else { return };
+    let mut missing = Vec::new();
+    for (l, (ts, te, ss, se, aid)) in &visual {
+        if audio_links.contains(l) || !audio_assets.contains(aid) {
+            continue;
+        }
+        let mut id = format!("clip_a_{}", l);
+        let mut n = 1usize;
+        while used_ids.contains(&id) {
+            id = format!("clip_a_{}_{}", l, n);
+            n += 1;
+        }
+        used_ids.push(id.clone());
+        missing.push(serde_json::json!({
+            "id": id,
+            "track": "audio",
+            "asset_id": aid,
+            "link_id": l,
+            "timeline_start": ts,
+            "timeline_end": te,
+            "source_start": ss,
+            "source_end": se.unwrap_or(*ss + (*te - *ts))
+        }));
+    }
+    if !missing.is_empty() {
+        let ai = tracks.iter().position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("audio"));
+        match ai {
+            Some(i) => {
+                if let Some(clips) = tracks[i].get_mut("clips").and_then(|c| c.as_array_mut()) {
+                    clips.extend(missing);
+                    clips.sort_by(|a, b| f(a, "timeline_start").total_cmp(&f(b, "timeline_start")));
+                }
+            }
+            None => tracks.push(serde_json::json!({"id": "audio_repair", "type": "audio", "clips": missing})),
+        }
+    }
     for tr in tracks {
         if tr.get("type").and_then(|v| v.as_str()) != Some("audio") {
             continue;
@@ -221,11 +438,11 @@ pub fn normalize_linked_audio(root: &mut Value) {
         };
         for c in clips {
             let Some(l) = link(c) else { continue };
-            let Some((ts, te, ss, se)) = visual.get(&l).copied() else { continue };
-            setf(c, "timeline_start", ts);
-            setf(c, "timeline_end", te);
-            setf(c, "source_start", ss);
-            if let Some(se) = se {
+            let Some((ts, te, ss, se, _)) = visual.get(&l) else { continue };
+            setf(c, "timeline_start", *ts);
+            setf(c, "timeline_end", *te);
+            setf(c, "source_start", *ss);
+            if let Some(se) = *se {
                 setf(c, "source_end", se);
             }
         }
@@ -889,6 +1106,48 @@ pub fn set_style(raw: &mut Value, id: &str, style: &str) {
     });
 }
 
+fn merge_object(dst: &mut Value, patch: &Value) {
+    let Some(src) = patch.as_object() else { return };
+    if !dst.is_object() {
+        *dst = serde_json::json!({});
+    }
+    let Some(out) = dst.as_object_mut() else { return };
+    for (k, v) in src {
+        if v.is_null() {
+            out.remove(k);
+        } else {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+/// Merge a designed-caption style object into selected caption clips.
+pub fn patch_caption_style(raw: &mut Value, ids: &[String], patch: Value) {
+    for_each_clip(raw, |c| {
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !ids.iter().any(|want| want == id) {
+            return;
+        }
+        let o = c.as_object_mut().unwrap();
+        let style = o.entry("style").or_insert_with(|| serde_json::json!({}));
+        merge_object(style, &patch);
+    });
+}
+
+/// Merge a designed-caption style object into every caption clip.
+pub fn patch_all_caption_style(raw: &mut Value, patch: Value) {
+    for_each_clip(raw, |c| {
+        let is_caption = c.get("track").and_then(|v| v.as_str()) == Some("caption")
+            || c.get("text").and_then(|v| v.as_str()).is_some();
+        if !is_caption {
+            return;
+        }
+        let o = c.as_object_mut().unwrap();
+        let style = o.entry("style").or_insert_with(|| serde_json::json!({}));
+        merge_object(style, &patch);
+    });
+}
+
 /// Set a clip's timeline span directly (inspector numeric edit).
 pub fn set_span(raw: &mut Value, id: &str, ts: f64, te: f64) {
     for_each_clip(raw, |c| {
@@ -1191,6 +1450,23 @@ pub fn set_crop_many(raw: &mut serde_json::Value, ids: &[String], l: f64, t: f64
                 "crop".into(),
                 serde_json::json!({"left": cl(l), "top": cl(t), "right": cl(r), "bottom": cl(b)}),
             );
+        }
+    });
+}
+
+/// Attach / update / remove the SAM tracked-blur binding on a region-effect clip.
+pub fn set_blur_track(raw: &mut serde_json::Value, id: &str, value: Option<serde_json::Value>) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) == Some(id) {
+            let o = c.as_object_mut().unwrap();
+            match &value {
+                Some(v) => {
+                    o.insert("blur_track".into(), v.clone());
+                }
+                None => {
+                    o.remove("blur_track");
+                }
+            }
         }
     });
 }

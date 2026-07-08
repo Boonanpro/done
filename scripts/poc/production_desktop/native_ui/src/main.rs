@@ -92,6 +92,15 @@ struct Shared {
 /// master clock and restarts the stream when the playhead jumps (scrub while playing).
 fn audio_thread(shared: Arc<Shared>) {
     let Ok(mut audio) = media::AudioOut::new() else { return };
+    let min_ready = |speed: f64| -> usize {
+        if speed >= 3.0 {
+            20
+        } else if speed >= 1.5 {
+            12
+        } else {
+            8
+        }
+    };
     let mut was_playing = false;
     let mut last_gen = u64::MAX;
     let mut last_tick = Instant::now();
@@ -111,7 +120,7 @@ fn audio_thread(shared: Arc<Shared>) {
                 loop {
                     let rt = f64::from_bits(shared.ring_target_bits.load(Ordering::Relaxed));
                     let lvl = shared.ring_level.load(Ordering::Relaxed);
-                    if ((rt - t_req).abs() < 0.5 && lvl >= 4) || t0.elapsed().as_millis() > 900 {
+                    if ((rt - t_req).abs() < 0.5 && lvl >= min_ready(speed)) || t0.elapsed().as_millis() > 1200 {
                         break;
                     }
                     let r2 = shared.req.lock().unwrap().clone();
@@ -141,7 +150,7 @@ fn audio_thread(shared: Arc<Shared>) {
                 loop {
                     let rt = f64::from_bits(shared.ring_target_bits.load(Ordering::Relaxed));
                     let lvl = shared.ring_level.load(Ordering::Relaxed);
-                    if ((rt - t_req).abs() < 0.5 && lvl >= 4) || t0.elapsed().as_millis() > 600 {
+                    if ((rt - t_req).abs() < 0.5 && lvl >= min_ready(speed)) || t0.elapsed().as_millis() > 900 {
                         break;
                     }
                     let r2 = shared.req.lock().unwrap().clone();
@@ -925,8 +934,75 @@ fn compose(
             if let Some(rg) = c.region_xywh() {
                 let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
                 let cell = if style.contains("mosaic") { 14.0 } else { 9.0 };
-                let _ = comp.apply_mosaic(d3d, rg, cell);
+                // SAM tracked blur: the baked mask video (blur-cache/{key}.mask.mp4)
+                // follows the object; blur = canvas × pixelated canvas weighted by the
+                // mask frame. Mask time = base clip source time − bake window start.
+                // Until the bake lands (or if the base footage changed) the static
+                // rectangle below remains the honest stand-in.
+                let mut applied = false;
+                if let Some(bt) = c.blur_track.as_ref() {
+                    let key = bt.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                    let bs = bt.get("bake_start").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let baid = bt.get("asset_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let mpath = doc.rel_path(&format!("blur-cache/{key}.mask.mp4"));
+                    let base_src = doc
+                        .active_video(t)
+                        .0
+                        .filter(|b| b.asset_id.as_deref() == Some(baid))
+                        .map(|b| b.src_at(t));
+                    let mask_ok = !key.is_empty()
+                        && std::fs::metadata(&mpath).map(|m| m.len() > 0).unwrap_or(false);
+                    if let (Some(src_t), true) = (base_src, mask_ok) {
+                        let mt = (src_t - bs).max(0.0);
+                        if let Ok(vs) = pool.get(d3d, &mpath, 0, false, mt) {
+                            let ok = if fast {
+                                if Instant::now() < f_deadline {
+                                    vs.ensure_frame_scrub(d3d, mt, 8.0).unwrap_or(false)
+                                } else {
+                                    exact = false;
+                                    false
+                                }
+                            } else {
+                                vs.ensure_frame(d3d, mt).is_ok()
+                            };
+                            if ok {
+                                let tex = vs.bgra.clone();
+                                if comp.apply_blur_masked(d3d, &tex, cell).is_ok() {
+                                    applied = true;
+                                    used.push(mpath);
+                                }
+                            } else if fast {
+                                exact = false;
+                            }
+                        }
+                    }
+                }
+                if !applied {
+                    let _ = comp.apply_mosaic(d3d, rg, cell);
+                }
             }
+        }
+    }
+    for tr in doc.seq.tracks.iter().filter(|tr| tr.kind == "caption" && !tr.hidden) {
+        for c in &tr.clips {
+            if t < c.timeline_start || t >= c.timeline_end {
+                continue;
+            }
+            let Some(text) = c.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let style = c.style.as_ref().unwrap_or(&serde_json::Value::Null);
+            let key = caption_cache_key(c, text, style);
+            let (tex, wh, dst) = if let Some(x) = comp.caption_get(&key) {
+                x
+            } else {
+                ensure_caption_texture_from_doc(doc, d3d, comp, c)?;
+                let Some(x) = comp.caption_get(&key) else {
+                    continue;
+                };
+                x
+            };
+            comp.draw_alpha(d3d, &tex, wh, dst)?;
         }
     }
     _ms_ov = _t.elapsed().as_secs_f64() * 1000.0;
@@ -942,6 +1018,69 @@ fn compose(
         eprintln!("slow compose t={t:.2}: base={_ms_base:.0} ov={_ms_ov:.0} rb={_ms_rb:.0} total={total:.0}");
     }
     Ok((used, exact))
+}
+
+fn py_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "null".into(),
+        serde_json::Value::Bool(b) => {
+            if *b { "true".into() } else { "false".into() }
+        }
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into()),
+        serde_json::Value::Array(a) => {
+            let parts: Vec<String> = a.iter().map(py_json).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        serde_json::Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .into_iter()
+                .map(|k| format!("{}: {}", serde_json::to_string(k).unwrap(), py_json(&m[k])))
+                .collect();
+            format!("{{{}}}", parts.join(", "))
+        }
+    }
+}
+
+fn caption_cache_key(c: &model::Clip, text: &str, style: &serde_json::Value) -> String {
+    use sha1::{Digest, Sha1};
+    let design = if style.is_object() { style.clone() } else { serde_json::json!({}) };
+    let words = if c.words.is_array() { c.words.clone() } else { serde_json::json!([]) };
+    let spec = serde_json::json!({
+        "w": CANVAS_W,
+        "h": CANVAS_H,
+        "t": text,
+        "d": design,
+        "words": words,
+    });
+    let mut hasher = Sha1::new();
+    hasher.update(py_json(&spec).as_bytes());
+    format!("{:x}", hasher.finalize())[..16].to_string()
+}
+
+fn ensure_caption_texture_from_doc(
+    doc: &model::Doc,
+    d3d: &media::D3d,
+    comp: &mut compositor::Compositor,
+    c: &model::Clip,
+) -> anyhow::Result<()> {
+    let Some(text) = c.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let style = c.style.as_ref().unwrap_or(&serde_json::Value::Null);
+    let key = caption_cache_key(c, text, style);
+    if comp.caption_get(&key).is_some() {
+        return Ok(());
+    }
+    let png = std::path::Path::new(&doc.asset_dir).join("caption-cache").join(format!("{key}.png"));
+    if !png.exists() || std::fs::metadata(&png).map(|m| m.len() == 0).unwrap_or(true) {
+        return Ok(());
+    }
+    let img = image::open(&png)?;
+    let rgba = img.to_rgba8();
+    comp.caption_put_rgba(d3d, key, rgba.width(), rgba.height(), rgba.as_raw(), (0.0, 0.0, 1.0, 1.0))
 }
 
 /// Pre-seek decoders for clips starting soon so entering them costs nothing.
@@ -1556,7 +1695,7 @@ fn media_thread(shared: Arc<Shared>) {
                     let res = if from_cache {
                         Ok((Vec::new(), true))
                     } else {
-                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, false)
+                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, true, false)
                     };
                     ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
                     match res {
@@ -2055,6 +2194,10 @@ struct App {
     pop_states: std::collections::HashMap<String, PopState>,
     bake_results: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
     last_pop_poll: Instant,
+    /// clip_id -> SAM tracked-blur bake state (same cache-dir polling pattern as popout)
+    blur_states: std::collections::HashMap<String, PopState>,
+    blur_bake_results: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
+    last_blur_poll: Instant,
     last_push: Instant,
     // Filmora semantics (observed in its logs: Pause -> seek -> auto Play): any timeline
     // interaction while playing pauses first; playback auto-resumes once the video ring
@@ -2188,6 +2331,9 @@ impl App {
             pop_states: Default::default(),
             bake_results: Default::default(),
             last_pop_poll: Instant::now(),
+            blur_states: Default::default(),
+            blur_bake_results: Default::default(),
+            last_blur_poll: Instant::now(),
             last_push: Instant::now(),
             resume_pending: None,
             resume_on_release: false,
@@ -2302,6 +2448,8 @@ impl App {
                 self.doc = nd.clone();
                 *self.shared.doc.lock().unwrap() = nd;
                 self.dur = self.doc.duration();
+                self.cap_keys.clear();
+                self.cap_sig = 0;
                 self.save_at = Some(Instant::now() + std::time::Duration::from_millis(1200));
                 // mid-drag edits (move/trim) count as scrubbing: the media thread must stay
                 // free for the next tick, and the preview uses the budgeted scrub seek
@@ -2365,6 +2513,12 @@ impl App {
                         best = e;
                     }
                 }
+            }
+        }
+        if self.playhead_snap {
+            let d = (self.t - t).abs();
+            if d < bd {
+                best = self.t;
             }
         }
         best
@@ -2635,6 +2789,125 @@ impl App {
             }
             for (cid, m) in finalize {
                 self.apply_edit(false, move |raw| edits::finalize_popout(raw, &cid, &m));
+            }
+        }
+    }
+
+    /// Bake a SAM tracked-blur for one region-effect clip: resolve the base video clip
+    /// under the effect window, POST /blur-mask (box = the drawn rectangle) and bind the
+    /// pending bake to the clip — the mask then FOLLOWS the object inside the rectangle.
+    fn apply_blur_bake(&mut self, id: &str) {
+        let Some(c) = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .find(|c| c.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(rg) = c.region_xywh() else { return };
+        let mid = (c.timeline_start + c.timeline_end) * 0.5;
+        let base = self.doc.active_video(mid).0.cloned();
+        let Some(b) = base.filter(|b| b.asset_id.is_some() && !b.is_freeze()) else {
+            self.toast = Some(("追従ベイクには下に通常の映像クリップが必要です".into(), Instant::now()));
+            return;
+        };
+        let aid = b.asset_id.clone().unwrap();
+        // mask window = the base clip's source range under the effect clip
+        let ss = b.src_at(c.timeline_start.max(b.timeline_start));
+        let se = b.src_at(c.timeline_end.min(b.timeline_end)).max(ss + 0.1);
+        let room = self.room_id();
+        // bind immediately (shows 0%); the cache key arrives async from the POST
+        let pending = serde_json::json!({ "asset_id": aid });
+        let cid = id.to_string();
+        self.apply_edit(true, move |raw| edits::set_blur_track(raw, &cid, Some(pending)));
+        self.blur_states.insert(id.to_string(), PopState::Baking(0));
+        let payload = serde_json::json!({
+            "room_id": room, "asset_id": aid,
+            "source_start": ss, "source_end": se,
+            "box": [rg.0, rg.1, rg.2, rg.3],
+        })
+        .to_string();
+        let sink = self.blur_bake_results.clone();
+        let cid = id.to_string();
+        std::thread::spawn(move || {
+            let res = http_local("POST", "/api/v1/production-assets/blur-mask", Some(&payload))
+                .and_then(|txt| Ok(serde_json::from_str::<serde_json::Value>(&txt)?))
+                .map_err(|e| format!("{e:#}"));
+            sink.lock().unwrap().push((cid, res));
+        });
+    }
+
+    /// Absorb async blur-bake POST results into the clip binding and poll mask progress
+    /// straight off the cache dir (same machine — no server round trip).
+    fn poll_blur_bakes(&mut self) {
+        {
+            let results: Vec<(String, Result<serde_json::Value, String>)> =
+                std::mem::take(&mut *self.blur_bake_results.lock().unwrap());
+            for (cid, res) in results {
+                match res {
+                    Ok(v) => {
+                        let key = v.get("key").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        let bs = v.get("bake_start").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                        if key.is_empty() {
+                            self.blur_states.insert(cid, PopState::Failed);
+                            continue;
+                        }
+                        let cur = self
+                            .doc
+                            .seq
+                            .tracks
+                            .iter()
+                            .flat_map(|tr| tr.clips.iter())
+                            .find(|c| c.id == cid)
+                            .and_then(|c| c.blur_track.clone());
+                        if let Some(mut bt) = cur {
+                            if let Some(o) = bt.as_object_mut() {
+                                o.insert("key".into(), serde_json::json!(key));
+                                o.insert("bake_start".into(), serde_json::json!(bs));
+                            }
+                            let cid2 = cid.clone();
+                            self.apply_edit(false, move |raw| edits::set_blur_track(raw, &cid2, Some(bt)));
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("blur bake request failed: {e}");
+                        self.blur_states.insert(cid, PopState::Failed);
+                    }
+                }
+            }
+        }
+        if self.last_blur_poll.elapsed().as_millis() > 700 {
+            self.last_blur_poll = Instant::now();
+            let cache = format!("{}/blur-cache", self.doc.asset_dir);
+            for tr in &self.doc.seq.tracks {
+                for c in &tr.clips {
+                    let Some(bt) = c.blur_track.as_ref() else { continue };
+                    let Some(key) = bt.get("key").and_then(|k| k.as_str()) else { continue };
+                    if std::fs::metadata(format!("{cache}/{key}.mask.mp4"))
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false)
+                    {
+                        self.blur_states.insert(c.id.clone(), PopState::Ready);
+                        continue;
+                    }
+                    let prog = std::fs::read_to_string(format!("{cache}/{key}.progress.json"))
+                        .ok()
+                        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+                    let state = match prog {
+                        Some(j) if j.get("error").is_some() => PopState::Failed,
+                        // blur_mask_bake.py writes {"stage", "progress": 0..1}
+                        Some(j) => PopState::Baking(
+                            ((j.get("progress").and_then(|v| v.as_f64()).unwrap_or(0.0)) * 100.0)
+                                .clamp(0.0, 99.0) as u8,
+                        ),
+                        None => PopState::Baking(0),
+                    };
+                    self.blur_states.insert(c.id.clone(), state);
+                }
             }
         }
     }
@@ -3094,21 +3367,38 @@ impl App {
                 self.delete_selected(false);
             }
             ui.separator();
-            let snap_fill = if self.playhead_snap {
+            let (mr, mresp) = ui.allocate_exact_size(egui::vec2(32.0, 26.0), egui::Sense::click());
+            let bg = if self.playhead_snap {
                 UI_ACCENT
+            } else if mresp.hovered() {
+                egui::Color32::from_rgb(46, 46, 52)
             } else {
                 egui::Color32::from_rgb(34, 34, 39)
             };
-            if ui
-                .add(
-                    egui::Button::new(egui::RichText::new("SNAP").size(12.0))
-                        .min_size(egui::vec2(48.0, 26.0))
-                        .frame(true)
-                        .fill(snap_fill),
-                )
-                .on_hover_text("Snap playhead to clip edges")
-                .clicked()
-            {
+            ui.painter().rect_filled(mr, 4.0, bg);
+            let col = if self.playhead_snap { egui::Color32::WHITE } else { egui::Color32::from_gray(190) };
+            let cx = mr.center().x;
+            let top = mr.top() + 7.0;
+            let bot = mr.bottom() - 6.0;
+            let left = cx - 7.0;
+            let right = cx + 7.0;
+            let stroke = egui::Stroke::new(2.0, col);
+            ui.painter().line_segment([egui::pos2(left, top), egui::pos2(left, bot)], stroke);
+            ui.painter().line_segment([egui::pos2(right, top), egui::pos2(right, bot)], stroke);
+            ui.painter().line_segment([egui::pos2(left, bot), egui::pos2(cx - 3.0, bot + 3.0)], stroke);
+            ui.painter().line_segment([egui::pos2(right, bot), egui::pos2(cx + 3.0, bot + 3.0)], stroke);
+            ui.painter().line_segment([egui::pos2(cx - 3.0, bot + 3.0), egui::pos2(cx + 3.0, bot + 3.0)], stroke);
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(egui::pos2(left - 2.0, top - 2.0), egui::pos2(left + 3.0, top + 2.0)),
+                1.0,
+                egui::Color32::from_rgb(245, 80, 80),
+            );
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(egui::pos2(right - 3.0, top - 2.0), egui::pos2(right + 2.0, top + 2.0)),
+                1.0,
+                egui::Color32::from_rgb(80, 150, 255),
+            );
+            if mresp.on_hover_text("Snap playhead and clips to edges").clicked() {
                 self.playhead_snap = !self.playhead_snap;
                 self.snap_line = None;
             }
@@ -3289,6 +3579,36 @@ impl App {
                     });
                     ui.label(egui::RichText::new("※プレビューはモザイク表示。書き出しで指定の種類が適用されます").small().weak());
                     ui.add_space(6.0);
+                    // ---- SAM tracked blur: the rectangle picks the OBJECT; the baked
+                    // mask then follows it (pixel silhouette), replacing the static rect
+                    ui.label(egui::RichText::new("AI追従（SAM）").strong());
+                    let has_track = clip.blur_track.is_some();
+                    ui.horizontal(|ui| {
+                        let blabel = if has_track { "再ベイク" } else { "囲んだ物体を追従ぼかし" };
+                        if ui.button(blabel).clicked() {
+                            let cid = id.clone();
+                            self.apply_blur_bake(&cid);
+                        }
+                        if has_track && ui.button("追従解除").clicked() {
+                            let cid = id.clone();
+                            self.apply_edit(true, move |raw| edits::set_blur_track(raw, &cid, None));
+                            self.blur_states.remove(&id);
+                            self.push_req(false);
+                        }
+                    });
+                    match self.blur_states.get(&id).copied() {
+                        Some(PopState::Baking(pct)) => {
+                            ui.label(egui::RichText::new(format!("追従ベイク中 {pct}%")).small());
+                        }
+                        Some(PopState::Failed) => {
+                            ui.label(egui::RichText::new("ベイク失敗 — もう一度お試しください").small().color(egui::Color32::from_rgb(230, 90, 90)));
+                        }
+                        Some(PopState::Ready) => {
+                            ui.label(egui::RichText::new("追従中（マスク適用済み）").small().color(egui::Color32::from_rgb(90, 200, 140)));
+                        }
+                        None => {}
+                    }
+                    ui.add_space(6.0);
                     ui.label(egui::RichText::new("時間（秒）").strong());
                     let mut span = [clip.timeline_start, clip.timeline_end];
                     let mut sp_changed = false;
@@ -3335,6 +3655,50 @@ impl App {
                         let txt = self.insp_text.clone();
                         let cid = id.clone();
                         self.apply_edit(false, move |raw| edits::set_text(raw, &cid, &txt));
+                        self.push_req(false);
+                    }
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new("デザイン").strong());
+                    let style = clip.style.clone().unwrap_or_else(|| serde_json::json!({}));
+                    let font_size = style.get("fontSize").and_then(|v| v.as_f64()).unwrap_or(1.04);
+                    let y_pos = style.get("y").and_then(|v| v.as_f64()).unwrap_or(0.14);
+                    let outline = style.get("outlineWidth").and_then(|v| v.as_f64()).unwrap_or(1.25);
+                    if ui.button("白文字・黒フチ・ゴシック").clicked() {
+                        let ids = vec![id.clone()];
+                        let patch = serde_json::json!({
+                            "font": "noto-sans", "color": "#ffffff", "outlineColor": "#000000",
+                            "outlineWidth": 1.65, "fontSize": font_size, "y": y_pos,
+                            "bg": null, "gradient": null, "highlightColor": null, "highlightScale": null,
+                            "shadow": {"color":"rgba(0,0,0,0.85)","blur":10,"dy":3},
+                            "animation": "none"
+                        });
+                        self.apply_edit(true, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                        self.push_req(false);
+                    }
+                    let mut fs = font_size;
+                    if ui.add(egui::Slider::new(&mut fs, 0.6..=2.2).text("大きさ")).changed() {
+                        let ids = vec![id.clone()];
+                        let patch = serde_json::json!({"fontSize": (fs * 100.0).round() / 100.0});
+                        self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                        self.push_req(false);
+                    }
+                    let mut yv = y_pos;
+                    if ui.add(egui::Slider::new(&mut yv, 0.0..=0.92).text("上下")).changed() {
+                        let ids = vec![id.clone()];
+                        let patch = serde_json::json!({"y": (yv * 100.0).round() / 100.0});
+                        self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                        self.push_req(false);
+                    }
+                    let mut ow = outline;
+                    if ui.add(egui::Slider::new(&mut ow, 0.0..=3.0).text("フチ")).changed() {
+                        let ids = vec![id.clone()];
+                        let patch = serde_json::json!({"outlineWidth": (ow * 100.0).round() / 100.0});
+                        self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                        self.push_req(false);
+                    }
+                    if ui.button("この見た目を全テロップに適用").clicked() {
+                        let patch = clip.style.clone().unwrap_or_else(|| serde_json::json!({}));
+                        self.apply_edit(true, move |raw| edits::patch_all_caption_style(raw, patch));
                         self.push_req(false);
                     }
                     return;
@@ -4257,6 +4621,18 @@ impl App {
             .filter(|&i| self.doc.seq.tracks[i].kind == "audio")
             .collect();
         let order: Vec<usize> = visual.into_iter().chain(audio).collect();
+        let mut lane_labels: std::collections::HashMap<usize, String> = Default::default();
+        let mut visual_no = 1usize;
+        let mut audio_no = 1usize;
+        for &i in &order {
+            if self.doc.seq.tracks[i].kind == "audio" {
+                lane_labels.insert(i, format!("A{audio_no}"));
+                audio_no += 1;
+            } else {
+                lane_labels.insert(i, visual_no.to_string());
+                visual_no += 1;
+            }
+        }
         let kind_h = |kind: &str| match kind {
             "video" => 54.0f32,
             "overlay" => 46.0,
@@ -4332,11 +4708,7 @@ impl App {
             p.text(
                 egui::pos2(rect.left() + 4.0, y0 + lane_h * 0.5),
                 egui::Align2::LEFT_CENTER,
-                if tr.kind == "audio" {
-                    format!("A{}", ti + 1)
-                } else {
-                    format!("{}", ti + 1)
-                },
+                lane_labels.get(&ti).cloned().unwrap_or_else(|| (ti + 1).to_string()),
                 egui::FontId::proportional(11.0),
                 egui::Color32::from_gray(140),
             );
@@ -4436,7 +4808,15 @@ impl App {
                     egui::pos2(x1.min(body.right()), y0 + lane_h),
                 );
                 let is_pop = c.effects.iter().any(|e| e.kind == "popout");
-                let pop_state = if is_pop { self.pop_states.get(&c.id).copied() } else { None };
+                let is_blur_bake = c.blur_track.is_some();
+                let pop_state = if is_pop {
+                    self.pop_states.get(&c.id).copied()
+                } else if is_blur_bake {
+                    // SAM tracked-blur bakes reuse the same progress dressing
+                    self.blur_states.get(&c.id).copied()
+                } else {
+                    None
+                };
                 let is_caption = c.text.is_some() && c.asset_id.is_none();
                 if is_caption {
                     // caption clip: dark slate body + mustard accent edge + the TEXT itself
@@ -4490,7 +4870,11 @@ impl App {
                         );
                         p.rect_filled(bar, 2.0, egui::Color32::from_rgb(255, 150, 60));
                         let label = if r.width() > 90.0 {
-                            format!("飛び出し生成中 {pct}%")
+                            if is_pop {
+                                format!("飛び出し生成中 {pct}%")
+                            } else {
+                                format!("追従ベイク中 {pct}%")
+                            }
                         } else {
                             format!("{pct}%")
                         };
@@ -4661,7 +5045,7 @@ impl App {
                     }
                 }
                 if let Some(pt) = pointer {
-                    let edge_hit = if sel { 14.0 } else { 10.0 };
+                    let edge_hit = if sel { 10.0 } else { 5.0 };
                     if r.expand2(egui::vec2(edge_hit, 0.0)).contains(pt)
                         && ((pt.x - r.left()).abs() <= edge_hit || (pt.x - r.right()).abs() <= edge_hit)
                     {
@@ -4741,11 +5125,13 @@ impl App {
                 self.push_req(false);
             }
             if let Some(pos) = resp.interact_pointer_pos() {
-                let edge_hit = hits
+                let selected_edge_hit = hits
                     .iter()
                     .filter_map(|(r, id)| {
-                        let selected = self.selected.contains(id);
-                        let edge_px = if selected { 14.0 } else { 10.0 };
+                        if !self.selected.contains(id) {
+                            return None;
+                        }
+                        let edge_px = 10.0;
                         if !r.expand2(egui::vec2(edge_px, 0.0)).contains(pos) {
                             return None;
                         }
@@ -4753,18 +5139,32 @@ impl App {
                         let dr = (pos.x - r.right()).abs();
                         let dist = dl.min(dr);
                         if dist <= edge_px {
-                            Some((if selected { 0 } else { 1 }, dist, *r, id.clone(), dl <= dr))
+                            Some((dist, *r, id.clone(), dl <= dr))
                         } else {
                             None
                         }
                     })
-                    .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)))
-                    .map(|(_, _, r, id, left)| (r, id, Some(left)));
-                let body_hit = edge_hit.clone().or_else(|| {
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, r, id, left)| (r, id, Some(left)));
+                let body_hit = selected_edge_hit.clone().or_else(|| {
                     hits.iter()
                         .rev()
                         .find(|(r, _)| r.expand2(egui::vec2(4.0, 0.0)).contains(pos))
                         .map(|(r, id)| (*r, id.clone(), None))
+                }).or_else(|| {
+                    hits.iter()
+                        .filter_map(|(r, id)| {
+                            let edge_px = 5.0;
+                            if !r.expand2(egui::vec2(edge_px, 0.0)).contains(pos) {
+                                return None;
+                            }
+                            let dl = (pos.x - r.left()).abs();
+                            let dr = (pos.x - r.right()).abs();
+                            let dist = dl.min(dr);
+                            (dist <= edge_px).then_some((dist, *r, id.clone(), dl <= dr))
+                        })
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|(_, r, id, left)| (r, id, Some(left)))
                 });
                 let hit = body_hit;
                 match hit {
@@ -5472,7 +5872,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.absorb_lib();
         if self.screen == Screen::Library {
             self.library_ui(ctx);
@@ -5537,6 +5937,7 @@ impl eframe::App for App {
             self.cycle_playback_speed();
         }
         self.poll_popout_bakes();
+        self.poll_blur_bakes();
         if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
             let force_ripple = ctx.input(|i| i.modifiers.shift);
             self.delete_selected(force_ripple);
@@ -5585,7 +5986,14 @@ impl eframe::App for App {
                 self.resume_pending = None;
             } else if self.drag == Drag::None && !self.resume_on_release {
                 let lvl = self.shared.ring_level.load(Ordering::Relaxed);
-                if lvl >= 4 || t0.elapsed().as_millis() > 700 {
+                let need = if self.playback_speed >= 3.0 {
+                    20
+                } else if self.playback_speed >= 1.5 {
+                    12
+                } else {
+                    8
+                };
+                if lvl >= need || t0.elapsed().as_millis() > 900 {
                     self.resume_pending = None;
                     self.playing = true;
                     self.push_req(false);
@@ -5999,84 +6407,7 @@ impl eframe::App for App {
                         // captions: active caption clips drawn over the frame (white bold with
                         // dark outline, bottom-centre — the export bakes the full styling
                         // server-side; this is the live view)
-                        let t = self.t;
-                        let active: Vec<(String, String)> = self
-                            .doc
-                            .seq
-                            .tracks
-                            .iter()
-                            .filter(|tr| tr.kind == "caption" && !tr.hidden)
-                            .flat_map(|tr| tr.clips.iter())
-                            .filter(|c| t >= c.timeline_start && t < c.timeline_end)
-                            .filter_map(|c| c.text.clone().map(|txt| (c.id.clone(), txt)))
-                            .collect();
-                        // designed captions: draw the server-rendered PNG (export parity);
-                        // fall back to plain outlined text until it lands on disk
-                        let mut texts: Vec<String> = Vec::new();
-                        for (cid, txt) in &active {
-                            let Some(key) = self.cap_keys.get(cid).cloned() else {
-                                texts.push(txt.clone());
-                                continue;
-                            };
-                            if !self.cap_tex.contains_key(&key) {
-                                let due = self
-                                    .cap_probe
-                                    .get(&key)
-                                    .map(|at| at.elapsed().as_millis() > 1000)
-                                    .unwrap_or(true);
-                                if due {
-                                    self.cap_probe.insert(key.clone(), Instant::now());
-                                    let p = format!("{}/caption-cache/{key}.png", self.doc.asset_dir);
-                                    if let Ok(bytes) = std::fs::read(&p) {
-                                        if let Ok(img) = image::load_from_memory(&bytes) {
-                                            let rgba = img.to_rgba8();
-                                            let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-                                            let tex = ui.ctx().load_texture(
-                                                format!("cap_{key}"),
-                                                egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba),
-                                                egui::TextureOptions::LINEAR,
-                                            );
-                                            self.cap_tex.insert(key.clone(), tex);
-                                        }
-                                    }
-                                }
-                            }
-                            match self.cap_tex.get(&key) {
-                                Some(tex) => {
-                                    // the PNG is canvas-sized: map it onto the letterboxed
-                                    // VIDEO rect, not the whole panel
-                                    let vid = egui::Rect::from_center_size(resp.rect.center(), size);
-                                    let p = ui.painter_at(vid);
-                                    p.image(
-                                        tex.id(),
-                                        vid,
-                                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                        egui::Color32::WHITE,
-                                    );
-                                }
-                                None => texts.push(txt.clone()),
-                            }
-                        }
-                        if !texts.is_empty() {
-                            let p = ui.painter_at(resp.rect);
-                            let fsz = (size.y * 0.032).max(12.0);
-                            let pos = egui::pos2(
-                                resp.rect.center().x,
-                                resp.rect.bottom() - size.y * 0.10,
-                            );
-                            let text = texts.join(chr_nl());
-                            let font = egui::FontId::proportional(fsz);
-                            for (dx, dy) in [(-1.5, 0.0), (1.5, 0.0), (0.0, -1.5), (0.0, 1.5)] {
-                                p.text(
-                                    pos + egui::vec2(dx, dy),
-                                    egui::Align2::CENTER_BOTTOM,
-                                    &text,
-                                    font.clone(),
-                                    egui::Color32::BLACK,
-                                );
-                            }
-                            p.text(pos, egui::Align2::CENTER_BOTTOM, &text, font, egui::Color32::WHITE);
-                        }
+                        // Captions are part of the composed video frame now, not a UI overlay.
                     });
                 }
             });
@@ -6956,17 +7287,21 @@ fn main() -> eframe::Result<()> {
         let mut right_shrink = base.clone();
         edits::trim_clip(&mut right_shrink, &["a".to_string()], false, 3.0);
         let ok_right_shrink_gap = (clip(&right_shrink, "a", "timeline_end") - 3.0).abs() < 0.001
-            && (clip(&right_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&right_shrink, "b", "timeline_start") - 3.0).abs() < 0.001
+            && (clip(&right_shrink, "b", "timeline_end") - 7.0).abs() < 0.001
+            && (clip(&right_shrink, "e", "timeline_start") - 7.0).abs() < 0.001
             && (clip(&right_shrink, "aaud", "timeline_end") - 3.0).abs() < 0.001
-            && (clip(&right_shrink, "baud", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&right_shrink, "baud", "timeline_start") - 3.0).abs() < 0.001
+            && (clip(&right_shrink, "baud", "timeline_end") - 7.0).abs() < 0.001
             && (clip(&right_shrink, "d", "timeline_start") - 4.0).abs() < 0.001;
 
         let mut live_left_drag = base.clone();
         edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 4.0, 5.0);
-        let ok_live_left_drag = (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&live_left_drag, "b", "timeline_start") - 5.0).abs() < 0.001
-            && (clip(&live_left_drag, "b", "timeline_end") - 8.0).abs() < 0.001
-            && (clip(&live_left_drag, "e", "timeline_start") - 8.0).abs() < 0.001
+        let ok_live_left_drag = (clip(&live_left_drag, "a", "timeline_start") - 0.0).abs() < 0.001
+            && (clip(&live_left_drag, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&live_left_drag, "b", "timeline_end") - 7.0).abs() < 0.001
+            && (clip(&live_left_drag, "e", "timeline_start") - 7.0).abs() < 0.001
             && (clip(&live_left_drag, "b", "source_start") - 1.0).abs() < 0.001;
 
         edits::trim_clip_live_from(&mut live_left_drag, &["b".to_string()], true, 5.0, 4.0);
@@ -6985,26 +7320,30 @@ fn main() -> eframe::Result<()> {
         edits::trim_clip_live_from(&mut live_left_grow_from_handle, &["b".to_string()], true, 4.0, 3.0);
         let ok_live_left_grow_keeps_overlap = (clip(&live_left_grow_from_handle, "a", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 3.0).abs() < 0.001
-            && (clip(&live_left_grow_from_handle, "b", "timeline_end") - 8.0).abs() < 0.001
-            && (clip(&live_left_grow_from_handle, "e", "timeline_start") - 8.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "b", "timeline_end") - 9.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "e", "timeline_start") - 9.0).abs() < 0.001
             && (clip(&live_left_grow_from_handle, "b", "source_start") - 0.0).abs() < 0.001;
         edits::settle_overlaps(&mut live_left_grow_from_handle, &["b".to_string()]);
-        let ok_left_grow_settle_erases_overlap = (clip(&live_left_grow_from_handle, "a", "timeline_end") - 3.0).abs() < 0.001
-            && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 3.0).abs() < 0.001;
+        let ok_left_grow_settle_erases_overlap = (clip(&live_left_grow_from_handle, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "b", "timeline_end") - 9.0).abs() < 0.001
+            && (clip(&live_left_grow_from_handle, "e", "timeline_start") - 9.0).abs() < 0.001;
 
         let mut magnetic_left_shrink = base.clone();
         edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 4.0, 5.0);
         edits::settle_left_trim(&mut magnetic_left_shrink, &["b".to_string()]);
-        let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 5.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 8.0).abs() < 0.001
+        let ok_mag_left_shrink = (clip(&magnetic_left_shrink, "a", "timeline_start") - 0.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "b", "timeline_end") - 7.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "b", "source_start") - 1.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 8.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "e", "timeline_start") - 7.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "g", "timeline_start") - 8.2).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "aaud", "timeline_start") - 0.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "aaud", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 5.0).abs() < 0.001
-            && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 8.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&magnetic_left_shrink, "baud", "timeline_end") - 7.0).abs() < 0.001
             && (clip(&magnetic_left_shrink, "baud", "source_start") - 1.0).abs() < 0.001;
 
         edits::trim_clip_live_from(&mut magnetic_left_shrink, &["b".to_string()], true, 5.0, 4.0);
@@ -7037,13 +7376,15 @@ fn main() -> eframe::Result<()> {
         main_off_left_grow[0]["timeline"]["sequence"]["tracks"][2]["clips"][1]["source_end"] = serde_json::Value::from(5.0);
         edits::trim_clip_live_from(&mut main_off_left_grow, &["b".to_string()], true, 4.0, 3.0);
         let ok_main_off_left_grow_keeps_overlap = (clip(&main_off_left_grow, "a", "timeline_end") - 4.0).abs() < 0.001
-            && (clip(&main_off_left_grow, "b", "timeline_start") - 3.0).abs() < 0.001
-            && (clip(&main_off_left_grow, "b", "timeline_end") - 8.0).abs() < 0.001
-            && (clip(&main_off_left_grow, "e", "timeline_start") - 8.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "b", "timeline_end") - 9.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "e", "timeline_start") - 9.0).abs() < 0.001
             && (clip(&main_off_left_grow, "b", "source_start") - 0.0).abs() < 0.001;
         edits::settle_overlaps(&mut main_off_left_grow, &["b".to_string()]);
-        let ok_main_off_left_grow_settle_erases_overlap = (clip(&main_off_left_grow, "a", "timeline_end") - 3.0).abs() < 0.001
-            && (clip(&main_off_left_grow, "b", "timeline_start") - 3.0).abs() < 0.001;
+        let ok_main_off_left_grow_settle_erases_overlap = (clip(&main_off_left_grow, "a", "timeline_end") - 4.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "b", "timeline_start") - 4.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "b", "timeline_end") - 9.0).abs() < 0.001
+            && (clip(&main_off_left_grow, "e", "timeline_start") - 9.0).abs() < 0.001;
 
         let mut free_shrink = base.clone();
         edits::trim_clip(&mut free_shrink, &["c".to_string()], false, 3.0);

@@ -1855,6 +1855,7 @@ dependencies = [
  "lz4_flex",
  "serde",
  "serde_json",
+ "sha1",
  "windows 0.58.0",
 ]
 

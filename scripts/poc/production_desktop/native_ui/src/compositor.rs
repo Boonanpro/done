@@ -34,6 +34,10 @@ float4 ps_plain(VOut i) : SV_Target {
   float4 c = tex0.Sample(smp, i.uv);
   return float4(c.rgb, 1.0);
 }
+float4 ps_alpha(VOut i) : SV_Target {
+  float4 c = tex0.Sample(smp, i.uv);
+  return float4(c.rgb * c.a, c.a);
+}
 float4 ps_popout(VOut i) : SV_Target {
   float3 c = tex0.Sample(smp, i.uv).rgb;
   float a = tex1.Sample(smp, i.uv).r;
@@ -49,6 +53,17 @@ float4 ps_mosaic(VOut i) : SV_Target {
   float2 cell = floor(i.uv * aff.xy) / max(aff.xy, 1.0);
   float2 fuv = uvr.xy + (cell + 0.5 / max(aff.xy, 1.0)) * uvr.zw;
   return float4(tex0.Sample(smp, fuv).rgb, 1.0);
+}
+// SAM tracked blur: full-canvas pass. t0 = canvas scratch copy, t1 = the baked mask
+// video frame (blur weight in luma; feathered edges arrive as gray). aff.xy = pixelate
+// cell counts. Pixels keep the canvas color where the mask is 0 — one draw, no branches.
+float4 ps_blur_masked(VOut i) : SV_Target {
+  float m = tex1.Sample(smp, i.uv).r;
+  float2 cell = floor(i.uv * aff.xy) / max(aff.xy, 1.0);
+  float2 fuv = (cell + 0.5 / max(aff.xy, 1.0));
+  float3 blurc = tex0.Sample(smp, fuv).rgb;
+  float3 base = tex0.Sample(smp, i.uv).rgb;
+  return float4(lerp(base, blurc, saturate(m)), 1.0);
 }
 float4 ps_popout_live(VOut i) : SV_Target {
   float3 msk = tex3.Sample(smp, i.uv).rgb;
@@ -162,20 +177,23 @@ pub struct Compositor {
     pub height: u32,
     canvas: ID3D11Texture2D,
     rtv: ID3D11RenderTargetView,
-    staging: [ID3D11Texture2D; 2],
+    staging: [ID3D11Texture2D; 3],
     staging_i: usize,
-    staging_warm: bool,
+    staging_filled: usize,
     vs: ID3D11VertexShader,
     ps_plain: ID3D11PixelShader,
+    ps_alpha: ID3D11PixelShader,
     ps_popout: ID3D11PixelShader,
     ps_popout_live: ID3D11PixelShader,
     ps_mosaic: ID3D11PixelShader,
+    ps_blur_masked: ID3D11PixelShader,
     scratch: std::cell::RefCell<Option<ID3D11Texture2D>>,
     // freeze-frame stills: (source path, src ms) -> a private copy of the decoded frame.
     // A freeze clip re-requesting the SAME source time every frame kept fighting the
     // ping-pong decoder instances with its neighbours (measured as stutter around the
     // freeze) — one decode, one copy, zero pool traffic afterwards.
     stills: std::cell::RefCell<std::collections::HashMap<(String, i64), (ID3D11Texture2D, (u32, u32))>>,
+    caption_stills: std::cell::RefCell<std::collections::HashMap<String, (ID3D11Texture2D, (u32, u32), (f64, f64, f64, f64))>>,
     cb: ID3D11Buffer,
     sampler: ID3D11SamplerState,
     blend: ID3D11BlendState,
@@ -211,19 +229,27 @@ impl Compositor {
             d3d.device.CreateTexture2D(&sdesc, None, Some(&mut staging0))?;
             let mut staging1: Option<ID3D11Texture2D> = None;
             d3d.device.CreateTexture2D(&sdesc, None, Some(&mut staging1))?;
+            let mut staging2: Option<ID3D11Texture2D> = None;
+            d3d.device.CreateTexture2D(&sdesc, None, Some(&mut staging2))?;
 
             let vsb = compile("vs", "vs_5_0")?;
             let psb1 = compile("ps_plain", "ps_5_0")?;
+            let psba = compile("ps_alpha", "ps_5_0")?;
             let psb2 = compile("ps_popout", "ps_5_0")?;
             let psb4 = compile("ps_mosaic", "ps_5_0")?;
             let psb3 = compile("ps_popout_live", "ps_5_0")?;
             let bytes = |b: &ID3DBlob| std::slice::from_raw_parts(b.GetBufferPointer() as *const u8, b.GetBufferSize());
             let mut ps_mosaic: Option<ID3D11PixelShader> = None;
             d3d.device.CreatePixelShader(bytes(&psb4), None, Some(&mut ps_mosaic))?;
+            let psb5 = compile("ps_blur_masked", "ps_5_0")?;
+            let mut ps_blur_masked: Option<ID3D11PixelShader> = None;
+            d3d.device.CreatePixelShader(bytes(&psb5), None, Some(&mut ps_blur_masked))?;
             let mut vs: Option<ID3D11VertexShader> = None;
             d3d.device.CreateVertexShader(bytes(&vsb), None, Some(&mut vs))?;
             let mut ps_plain: Option<ID3D11PixelShader> = None;
             d3d.device.CreatePixelShader(bytes(&psb1), None, Some(&mut ps_plain))?;
+            let mut ps_alpha: Option<ID3D11PixelShader> = None;
+            d3d.device.CreatePixelShader(bytes(&psba), None, Some(&mut ps_alpha))?;
             let mut ps_popout: Option<ID3D11PixelShader> = None;
             d3d.device.CreatePixelShader(bytes(&psb2), None, Some(&mut ps_popout))?;
             let mut ps_popout_live: Option<ID3D11PixelShader> = None;
@@ -270,16 +296,19 @@ impl Compositor {
                 height,
                 canvas,
                 rtv: rtv.unwrap(),
-                staging: [staging0.unwrap(), staging1.unwrap()],
+                staging: [staging0.unwrap(), staging1.unwrap(), staging2.unwrap()],
                 staging_i: 0,
-                staging_warm: false,
+                staging_filled: 0,
                 vs: vs.unwrap(),
                 ps_plain: ps_plain.unwrap(),
+                ps_alpha: ps_alpha.unwrap(),
                 ps_popout: ps_popout.unwrap(),
                 ps_popout_live: ps_popout_live.unwrap(),
                 ps_mosaic: ps_mosaic.unwrap(),
+                ps_blur_masked: ps_blur_masked.unwrap(),
                 scratch: std::cell::RefCell::new(None),
                 stills: std::cell::RefCell::new(Default::default()),
+                caption_stills: std::cell::RefCell::new(Default::default()),
                 cb: cb.unwrap(),
                 sampler: sampler.unwrap(),
                 blend: blend.unwrap(),
@@ -321,6 +350,16 @@ impl Compositor {
         self.draw_cropped(d3d, tex, src_wh, dst, cover, matte, None)
     }
 
+    pub fn draw_alpha(
+        &self,
+        d3d: &D3d,
+        tex: &ID3D11Texture2D,
+        src_wh: (u32, u32),
+        dst: (f64, f64, f64, f64),
+    ) -> Result<()> {
+        self.draw_with_shader(d3d, tex, src_wh, dst, false, None, None, Some(&self.ps_alpha))
+    }
+
     /// draw() plus a per-edge MASK crop (l,t,r,b fractions): trimmed strips reveal the
     /// background; the kept pixels do not move or scale — parity with the exporter.
     #[allow(clippy::too_many_arguments)]
@@ -333,6 +372,21 @@ impl Compositor {
         cover: bool,
         matte: Option<&ID3D11Texture2D>,
         crop: Option<(f64, f64, f64, f64)>,
+    ) -> Result<()> {
+        self.draw_with_shader(d3d, tex, src_wh, dst, cover, matte, crop, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_with_shader(
+        &self,
+        d3d: &D3d,
+        tex: &ID3D11Texture2D,
+        src_wh: (u32, u32),
+        dst: (f64, f64, f64, f64),
+        cover: bool,
+        matte: Option<&ID3D11Texture2D>,
+        crop: Option<(f64, f64, f64, f64)>,
+        shader: Option<&ID3D11PixelShader>,
     ) -> Result<()> {
         let mut dst = dst;
         unsafe {
@@ -383,8 +437,8 @@ impl Compositor {
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&views));
-            d3d.ctx
-                .PSSetShader(if matte.is_some() { &self.ps_popout } else { &self.ps_plain }, None);
+            let ps = shader.unwrap_or(if matte.is_some() { &self.ps_popout } else { &self.ps_plain });
+            d3d.ctx.PSSetShader(ps, None);
             d3d.ctx.Draw(4, 0);
             Ok(())
         }
@@ -506,10 +560,10 @@ impl Compositor {
         }
     }
 
-    /// Read the canvas back as RGBA — DOUBLE-BUFFERED: copy into staging[i], map
-    /// staging[i-1] (last frame). Mapping the just-copied one stalls on the whole in-flight
-    /// GPU frame (measured 30-85ms); mapping the previous is a pure memcpy for +1 frame of
-    /// preview latency.
+    /// Read the canvas back as RGBA. Live playback is triple-buffered: copy into
+    /// staging[i], then map the oldest completed staging texture. Mapping the
+    /// just-copied texture stalls on the in-flight GPU frame; mapping an older texture
+    /// is usually a pure memcpy for a small preview-latency tradeoff.
     /// Region mosaic: copy the composed canvas, then redraw the region sampling the
     /// copy on a coarse grid (the live stand-in for the exporter's blur/mosaic pass).
     pub fn apply_mosaic(&self, d3d: &D3d, region: (f64, f64, f64, f64), cell_px: f64) -> Result<()> {
@@ -545,6 +599,48 @@ impl Compositor {
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv]));
             d3d.ctx.PSSetShader(&self.ps_mosaic, None);
+            d3d.ctx.Draw(4, 0);
+            Ok(())
+        }
+    }
+
+    /// SAM tracked blur: one full-canvas pass mixing the canvas with its pixelated copy,
+    /// weighted per pixel by the baked mask video frame (255 = fully blurred). The mask
+    /// covers the base clip's SOURCE frame; for the (v1) full-frame base clip that space
+    /// equals canvas space, so both are sampled with the same uv.
+    pub fn apply_blur_masked(&self, d3d: &D3d, mask: &ID3D11Texture2D, cell_px: f64) -> Result<()> {
+        unsafe {
+            {
+                let mut sc = self.scratch.borrow_mut();
+                if sc.is_none() {
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    self.canvas.GetDesc(&mut desc);
+                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
+                    desc.Usage = D3D11_USAGE_DEFAULT;
+                    desc.CPUAccessFlags = 0;
+                    desc.MiscFlags = 0;
+                    let mut t: Option<ID3D11Texture2D> = None;
+                    d3d.device.CreateTexture2D(&desc, None, Some(&mut t))?;
+                    *sc = t;
+                }
+                d3d.ctx.CopyResource(sc.as_ref().unwrap(), &self.canvas);
+            }
+            let sc = self.scratch.borrow();
+            let scratch = sc.as_ref().unwrap();
+            let mut srv0: Option<ID3D11ShaderResourceView> = None;
+            d3d.device.CreateShaderResourceView(scratch, None, Some(&mut srv0))?;
+            let mut srv1: Option<ID3D11ShaderResourceView> = None;
+            d3d.device.CreateShaderResourceView(mask, None, Some(&mut srv1))?;
+            let cells_x = (self.width as f64 / cell_px).max(2.0) as f32;
+            let cells_y = (self.height as f64 / cell_px).max(2.0) as f32;
+            let cbv = Cb {
+                dst: [0.0, 0.0, 1.0, 1.0],
+                uvr: [0.0, 0.0, 1.0, 1.0],
+                aff: [cells_x, cells_y, 0.0, 0.0],
+            };
+            d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
+            d3d.ctx.PSSetShaderResources(0, Some(&[srv0, srv1]));
+            d3d.ctx.PSSetShader(&self.ps_blur_masked, None);
             d3d.ctx.Draw(4, 0);
             Ok(())
         }
@@ -586,7 +682,7 @@ impl Compositor {
             let mut tex: Option<ID3D11Texture2D> = None;
             d3d.device.CreateTexture2D(&desc, Some(&init), Some(&mut tex))?;
             let mut st = self.stills.borrow_mut();
-            if st.len() >= 32 {
+            if st.len() >= 256 {
                 // evict ONE entry — a clear-all forced every still to reload (and the
                 // freeze showed a decode fallback while it did)
                 if let Some(k) = st.keys().next().cloned() {
@@ -600,6 +696,54 @@ impl Compositor {
 
     pub fn still_get(&self, key: &(String, i64)) -> Option<(ID3D11Texture2D, (u32, u32))> {
         self.stills.borrow().get(key).cloned()
+    }
+
+    pub fn caption_get(&self, key: &str) -> Option<(ID3D11Texture2D, (u32, u32), (f64, f64, f64, f64))> {
+        self.caption_stills.borrow().get(key).cloned()
+    }
+
+    pub fn caption_put_rgba(
+        &self,
+        d3d: &D3d,
+        key: String,
+        w: u32,
+        h: u32,
+        rgba: &[u8],
+        dst: (f64, f64, f64, f64),
+    ) -> Result<()> {
+        unsafe {
+            let mut bgra = rgba.to_vec();
+            for px in bgra.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: w,
+                Height: h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_IMMUTABLE,
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let init = D3D11_SUBRESOURCE_DATA {
+                pSysMem: bgra.as_ptr() as _,
+                SysMemPitch: w * 4,
+                SysMemSlicePitch: 0,
+            };
+            let mut tex: Option<ID3D11Texture2D> = None;
+            d3d.device.CreateTexture2D(&desc, Some(&init), Some(&mut tex))?;
+            let mut caps = self.caption_stills.borrow_mut();
+            if caps.len() >= 512 {
+                if let Some(k) = caps.keys().next().cloned() {
+                    caps.remove(&k);
+                }
+            }
+            caps.insert(key, (tex.unwrap(), (w, h), dst));
+            Ok(())
+        }
     }
 
     /// Store a private copy of `tex` for a freeze frame (bounded cache).
@@ -616,7 +760,7 @@ impl Compositor {
             let copy = copy.unwrap();
             d3d.ctx.CopyResource(&copy, tex);
             let mut st = self.stills.borrow_mut();
-            if st.len() >= 32 {
+            if st.len() >= 256 {
                 if let Some(k) = st.keys().next().cloned() {
                     st.remove(&k);
                 }
@@ -641,20 +785,21 @@ impl Compositor {
     fn readback_inner(&mut self, d3d: &D3d, sync: bool) -> Result<()> {
         unsafe {
             let cur = self.staging_i;
-            let prev = 1 - cur;
             d3d.ctx.CopyResource(&self.staging[cur], &self.canvas);
-            self.staging_i = prev;
+            let n = self.staging.len();
             let map_src = if sync {
                 cur
-            } else if self.staging_warm {
-                prev
             } else {
-                // first frame: map the JUST-copied staging synchronously (one-time GPU
-                // sync) — returning empty here left the paused preview black until the
-                // second user interaction
-                self.staging_warm = true;
-                cur
+                // During warm-up, map the just-copied texture so the preview is never
+                // blank. Once all staging textures have content, map the oldest frame.
+                if self.staging_filled + 1 >= n {
+                    (cur + 1) % n
+                } else {
+                    cur
+                }
             };
+            self.staging_i = (cur + 1) % n;
+            self.staging_filled = (self.staging_filled + 1).min(n);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             d3d.ctx.Map(&self.staging[map_src], 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
             let pitch = mapped.RowPitch as usize;

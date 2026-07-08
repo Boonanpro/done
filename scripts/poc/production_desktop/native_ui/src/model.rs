@@ -43,6 +43,10 @@ pub struct Clip {
     pub crop: Option<serde_json::Value>,
     #[serde(default)]
     pub region: Option<serde_json::Value>,
+    // SAM tracked-blur bake bound to this region-effect clip:
+    // {asset_id, key, bake_start} — mask video = {asset_dir}/blur-cache/{key}.mask.mp4
+    #[serde(default)]
+    pub blur_track: Option<serde_json::Value>,
     // freeze-frame: room-relative path of the materialized PNG (Filmora-style: the still
     // IS an image file — no decoder is ever consulted, so it cannot wander)
     #[serde(default)]
@@ -73,6 +77,8 @@ pub struct Clip {
     pub effects: Vec<Effect>,
     #[serde(default)]
     pub text: Option<String>,
+    #[serde(default)]
+    pub words: serde_json::Value,
     #[serde(default)]
     pub link_id: Option<String>,
     #[serde(default = "one")]
