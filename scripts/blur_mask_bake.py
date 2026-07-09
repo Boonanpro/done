@@ -29,6 +29,7 @@ Used by app/api/production_asset_routes.py for effect clips [{type:'blur', track
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -192,6 +193,10 @@ def main() -> int:
     ap.add_argument("--ckpt", default=str(DEFAULT_CKPT))
     ap.add_argument("--grounding-batch", type=int, default=4,
                     help="detector frames per batched pass (16 = paper default; small = fits 8GB VRAM)")
+    ap.add_argument("--prob-thresh", type=float, default=0.0,
+                    help="detection score threshold; 0 = AUTO (try 0.5/0.35/0.2 on the anchor "
+                         "frame and keep the highest that detects — attribute phrases like "
+                         "'person wearing a white shirt' score far below plain nouns)")
     ap.add_argument("--probe", action="store_true", help="detect on anchor frame only; no propagation")
     ap.add_argument("--overlay-dir", default="")
     ap.add_argument("--overlay-every", type=int, default=15)
@@ -225,6 +230,7 @@ def main() -> int:
         t_model = time.time()
         union0 = None
         boxes0: dict = {}
+        used_prompt, used_thresh = a.prompt, 0.5
         keep = {int(v) for v in a.keep_ids.split(",") if v.strip()} if a.keep_ids else None
         if not single:
             predictor = load_predictor(a.ckpt, a.grounding_batch)
@@ -256,8 +262,45 @@ def main() -> int:
                 req["point_labels"] = torch.tensor(labs, dtype=torch.int32)
 
             _progress(a.progress_file, "detect", 0.08)
-            resp = predictor.handle_request(request=req)
-            out0 = resp["outputs"]
+            # Two rescue axes when the anchor frame detects nothing (both MEASURED):
+            # 1. phrase form — "person wearing a white shirt" detects ZERO at any
+            #    threshold while "person in white shirt" detects fine; mechanically
+            #    rewrite 'wearing (a/an)' -> 'in' and drop leading articles.
+            # 2. score — attribute phrases can score below the 0.5 default; step the
+            #    threshold down and keep the HIGHEST one that detects (selectivity).
+            def _variants(p: str) -> list[str]:
+                seen, out = set(), []
+                for v in (
+                    p,
+                    re.sub(r"\bwearing an?\b", "in", p),
+                    re.sub(r"\bwearing\b", "in", p),
+                    re.sub(r"\b(a|an|the)\b\s*", "", re.sub(r"\bwearing an?\b", "in", p)).strip(),
+                ):
+                    v = re.sub(r"\s+", " ", v).strip()
+                    if v and v not in seen:
+                        seen.add(v)
+                        out.append(v)
+                return out
+            thresholds = [a.prob_thresh] if a.prob_thresh > 0 else ([0.5] if not a.prompt else [0.5, 0.35, 0.2])
+            out0 = None
+            used_thresh, used_prompt = thresholds[0], a.prompt
+            tries = [(ph, th) for ph in (_variants(a.prompt) if a.prompt else [None]) for th in thresholds]
+            for i, (ph, th) in enumerate(tries):
+                if ph is not None:
+                    req["text"] = ph
+                req["output_prob_thresh"] = th
+                resp = predictor.handle_request(request=req)
+                out0 = resp["outputs"]
+                used_thresh, used_prompt = th, (ph or a.prompt)
+                u, _b = _mask_union(out0, keep)
+                if u is not None:
+                    break
+                if i != len(tries) - 1:
+                    predictor.handle_request(request=dict(type="reset_session", session_id=session_id))
+                    print(f"no detection (prompt={ph!r} thresh={th}); retrying", flush=True)
+            predictor.default_output_prob_thresh = used_thresh  # propagation uses the same bar
+            if used_prompt != a.prompt:
+                print(f"prompt rescued: {a.prompt!r} -> {used_prompt!r}", flush=True)
             union0, boxes0 = _mask_union(out0, keep)
 
         out_path = Path(a.out)
@@ -371,6 +414,7 @@ def main() -> int:
         meta = {
             "src": str(a.src), "start": a.start, "duration": a.duration, "fps": a.fps,
             "w": W, "h": H, "n_frames": n_frames, "prompt": a.prompt, "box": a.box,
+            "prompt_used": used_prompt, "thresh_used": used_thresh,
             "keep_ids": sorted(keep) if keep else None, "object_ids": all_ids,
             "boxes_by_frame": frames_meta,
             "timing": {"total_s": round(time.time() - t0, 1),
