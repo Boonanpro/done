@@ -736,6 +736,80 @@ def _clip_source_range(clip: dict[str, Any], metadata: dict[str, Any]) -> tuple[
     return source_start, source_start + 0.04, max(0.05, tl_dur or 2.0), 0.0, True
 
 
+def _blur_style_proc(style: str, w: int, h: int) -> str:
+    style = (style or "").lower()
+    if "mosaic" in style:
+        return f"scale={max(2, w // 12)}:{max(2, h // 12)}:flags=neighbor,scale={w}:{h}:flags=neighbor"
+    return "gblur=sigma=20"
+
+
+def _blur_chain_masked(video_in: str, idx: int, mask_path: Path, bt: dict[str, Any],
+                       clip: dict[str, Any], base_clips: list[dict[str, Any]],
+                       w: int, h: int, style: str) -> tuple[str, str] | None:
+    """Tracked blur for the EXPORT: blur the full frame, alpha it by the baked SAM mask
+    video, overlay back — per base-cut segment so mask time (source-anchored) aligns with
+    output time. Mirrors what ps_blur_masked does live in the editor. Returns None when
+    no segment of the effect window is covered (caller falls back to the static rect)."""
+    ts = float(clip.get("timeline_start") or 0)
+    te = float(clip.get("timeline_end") or 0)
+    bs = float(bt.get("bake_start") or 0)
+    be = float(bt.get("bake_end") or 0) or float("inf")
+    baid = str(bt.get("asset_id") or "")
+    segs: list[tuple[float, float, float]] = []  # (out t0, out t1, mask m0)
+    for bc in base_clips:
+        if str(bc.get("asset_id") or "") != baid:
+            continue
+        bts = float(bc.get("timeline_start") or 0)
+        bte = float(bc.get("timeline_end") or 0)
+        bss = float(bc.get("source_start") or 0)
+        bse = float(bc.get("source_end") or 0)
+        if bse <= bss:  # freeze clips: static mask would be wrong more often than right
+            continue
+        t0, t1 = max(ts, bts), min(te, bte)
+        if t1 - t0 < 0.05:
+            continue
+        s0 = bss + (t0 - bts)
+        s1 = bss + (t1 - bts)
+        # clamp to the baked window (outside it there is no mask data)
+        lo, hi = max(s0, bs), min(s1, be)
+        if hi - lo < 0.05:
+            continue
+        t0 += lo - s0
+        t1 -= s1 - hi
+        segs.append((round(t0, 3), round(t1, 3), round(lo - bs, 3)))
+    if not segs:
+        return None
+    proc = _blur_style_proc(style, w, h)
+    n = len(segs)
+    fsplit = "".join(f"[tf{idx}_{j}]" for j in range(n))
+    parts = [f"[{video_in}]split={n + 1}[tb{idx}]{fsplit}"]
+    cur = f"tb{idx}"
+    for j, (t0, t1, m0) in enumerate(segs):
+        d = t1 - t0
+        # blurred picture for this segment (30fps so alphamerge's frame zip matches the mask)
+        parts.append(
+            f"[tf{idx}_{j}]fps=30,trim=start={t0:.3f}:end={t1:.3f},setpts=PTS-STARTPTS,{proc}[tfb{idx}_{j}]"
+        )
+        # mask frames for the same span (mask video timeline = bake window, CFR 30).
+        # The mask lives in SOURCE-frame space: run it through the SAME cover-crop the
+        # base video gets (plain scale=W:H stretched it and the blur landed offset).
+        parts.append(
+            f"{_movie_input(mask_path, max(0.0, m0 - 0.6))},fps=30,"
+            f"trim=start={m0:.3f}:end={m0 + d:.3f},setpts=PTS-STARTPTS,"
+            f"format=gray,scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h}[tmk{idx}_{j}]"
+        )
+        parts.append(
+            f"[tfb{idx}_{j}][tmk{idx}_{j}]alphamerge,setpts=PTS+{t0:.3f}/TB[tov{idx}_{j}]"
+        )
+        nxt = f"tc{idx}_{j}"
+        parts.append(
+            f"[{cur}][tov{idx}_{j}]overlay=0:0:enable='between(t\\,{t0:.3f}\\,{t1:.3f})':eof_action=pass[{nxt}]"
+        )
+        cur = nxt
+    return ";\n".join(parts), cur
+
+
 def _blur_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int, start: float, end: float, style: str) -> tuple[str, str]:
     """Return (filter_string, out_label) for a time-gated regional blur/mosaic overlay."""
     out = f"vblur{idx}"
@@ -1045,6 +1119,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         blur_specs.append({
             "x": region.get("x"), "y": region.get("y"), "width": region.get("width"), "height": region.get("height"),
             "start": clip.get("timeline_start"), "end": clip.get("timeline_end"), "style": clip.get("style"),
+            "clip": clip,  # carries blur_track for the SAM-tracked export path
         })
     for annotation in _blur_annotations(instruction):
         data = annotation.get("data") or {}
@@ -1054,6 +1129,20 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             "style": data.get("blur_style") or data.get("style"),
         })
     for bi, spec in enumerate(blur_specs, start=1):
+        # SAM-tracked clip: blur follows the baked mask video (what the preview shows);
+        # the static rectangle below stays the fallback when no mask covers the window
+        eclip = spec.get("clip") if isinstance(spec.get("clip"), dict) else None
+        bt = (eclip or {}).get("blur_track") if isinstance((eclip or {}).get("blur_track"), dict) else None
+        if bt and bt.get("key"):
+            mask_path = _blur_cache_dir(room_id) / f"{re.sub(r'[^0-9a-f]', '', str(bt['key']))[:16]}.mask.mp4"
+            if mask_path.exists() and mask_path.stat().st_size > 0:
+                masked = _blur_chain_masked(
+                    video_out, bi, mask_path, bt, eclip, base_clips,
+                    output_width, output_height, str(spec.get("style") or ""))
+                if masked:
+                    filt, video_out = masked
+                    filters.append(filt)
+                    continue
         x = max(0, min(output_width - 2, round(float(spec.get("x") or 0) * output_width)))
         y = max(0, min(output_height - 2, round(float(spec.get("y") or 0) * output_height)))
         w = max(2, min(output_width - x, round(float(spec.get("width") or 0) * output_width)))
