@@ -30,10 +30,15 @@ MANIFEST
 
 # Virtual Environment
 venv/
+venv_sam3/
 env/
 ENV/
 env.bak/
 venv.bak/
+
+# Local model weights / vendored third-party repos (SAM 3.1 etc.)
+models/
+vendor/
 
 # Environment Variables
 .env

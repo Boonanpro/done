@@ -776,6 +776,51 @@ impl Compositor {
 
 }
 
+/// Forward mapping SOURCE-frame box -> CANVAS box (the cover-crop the base draw uses).
+/// Used to place the tracked-object outline where the blur currently is.
+pub fn source_box_to_canvas(
+    canvas_wh: (u32, u32),
+    src_wh: (u32, u32),
+    dst: (f64, f64, f64, f64),
+    crop: Option<(f64, f64, f64, f64)>,
+    src_box: (f64, f64, f64, f64),
+) -> (f64, f64, f64, f64) {
+    let mut dst = dst;
+    let (mut u0, mut v0, mut uw, mut vh) = (0.0f64, 0.0f64, 1.0f64, 1.0f64);
+    let box_px_w = dst.2 * canvas_wh.0 as f64;
+    let box_px_h = dst.3 * canvas_wh.1 as f64;
+    if box_px_w > 1.0 && box_px_h > 1.0 && src_wh.0 > 0 && src_wh.1 > 0 {
+        let sa = src_wh.0 as f64 / src_wh.1 as f64;
+        let da = box_px_w / box_px_h;
+        if sa > da {
+            uw = da / sa;
+            u0 = (1.0 - uw) / 2.0;
+        } else {
+            vh = sa / da;
+            v0 = (1.0 - vh) / 2.0;
+        }
+    }
+    if let Some((l, t, r, b)) = crop {
+        u0 += uw * l;
+        v0 += vh * t;
+        uw *= (1.0 - l - r).max(0.02);
+        vh *= (1.0 - t - b).max(0.02);
+        dst = (
+            dst.0 + dst.2 * l,
+            dst.1 + dst.3 * t,
+            dst.2 * (1.0 - l - r).max(0.02),
+            dst.3 * (1.0 - t - b).max(0.02),
+        );
+    }
+    let fx = |sx: f64| dst.0 + ((sx - u0) / uw.max(1e-6)) * dst.2;
+    let fy = |sy: f64| dst.1 + ((sy - v0) / vh.max(1e-6)) * dst.3;
+    let x0 = fx(src_box.0);
+    let y0 = fy(src_box.1);
+    let x1 = fx(src_box.0 + src_box.2);
+    let y1 = fy(src_box.1 + src_box.3);
+    (x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+}
+
 /// Map a CANVAS-space box into the base clip's SOURCE-frame space (inverse of the
 /// cover-crop mapping in draw_with_shader) — used to hand the user's drawn rectangle
 /// to the SAM bake, which works on source pixels. Returns (x, y, w, h) normalized.
