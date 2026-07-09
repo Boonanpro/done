@@ -2370,6 +2370,8 @@ struct App {
     /// froze the outline on its pre-bake state forever.
     blur_meta_cache: std::collections::HashMap<String, (Option<serde_json::Value>, Instant)>,
     blur_out_log_at: Instant,
+    /// prompt buffer for the "blur by words" bake (concept mode: ALL instances)
+    blur_prompt: String,
     last_push: Instant,
     // Filmora semantics (observed in its logs: Pause -> seek -> auto Play): any timeline
     // interaction while playing pauses first; playback auto-resumes once the video ring
@@ -2508,6 +2510,7 @@ impl App {
             last_blur_poll: Instant::now(),
             blur_meta_cache: Default::default(),
             blur_out_log_at: Instant::now(),
+            blur_prompt: String::new(),
             last_push: Instant::now(),
             resume_pending: None,
             resume_on_release: false,
@@ -2971,6 +2974,14 @@ impl App {
     /// under the effect window, POST /blur-mask (box = the drawn rectangle) and bind the
     /// pending bake to the clip — the mask then FOLLOWS the object inside the rectangle.
     fn apply_blur_bake(&mut self, id: &str) {
+        self.apply_blur_bake_with(id, None)
+    }
+
+    /// prompt = Some("person in red shirt" / 日本語OK, server translates): concept mode —
+    /// SAM detects and tracks EVERY instance of the phrase; the drawn rectangle is ignored
+    /// for targeting (it stays as the stand-in area). None: box mode (the drawn rectangle
+    /// picks one object).
+    fn apply_blur_bake_with(&mut self, id: &str, prompt: Option<String>) {
         let Some(c) = self
             .doc
             .seq
@@ -3046,13 +3057,17 @@ impl App {
         let cid = id.to_string();
         self.apply_edit(true, move |raw| edits::set_blur_track(raw, &cid, Some(pending)));
         self.blur_states.insert(id.to_string(), PopState::Baking(0));
-        let payload = serde_json::json!({
+        let mut pj = serde_json::json!({
             "room_id": room, "asset_id": aid,
             "source_start": ss, "source_end": se,
             "anchor": anchor_src,
-            "box": [sbox.0, sbox.1, sbox.2, sbox.3],
-        })
-        .to_string();
+        });
+        if let Some(p) = prompt.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            pj["prompt"] = serde_json::json!(p);
+        } else {
+            pj["box"] = serde_json::json!([sbox.0, sbox.1, sbox.2, sbox.3]);
+        }
+        let payload = pj.to_string();
         let sink = self.blur_bake_results.clone();
         let cid = id.to_string();
         std::thread::spawn(move || {
@@ -3879,6 +3894,26 @@ impl App {
                             self.push_req(false);
                         }
                     });
+                    ui.add_space(4.0);
+                    // concept mode: words pick the target(s) — ALL matching objects get
+                    // tracked (e.g. 通行人 / 赤い服の人). Japanese is translated server-side.
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.blur_prompt)
+                                .hint_text("言葉で対象指定（例: 通行人 / 赤い服の人）")
+                                .desired_width(168.0),
+                        );
+                        let ptxt = self.blur_prompt.trim().to_string();
+                        if ui.add_enabled(!ptxt.is_empty(), egui::Button::new("言葉でベイク")).clicked() {
+                            let cid = id.clone();
+                            self.apply_blur_bake_with(&cid, Some(ptxt));
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new("※言葉指定は該当する物すべてをぼかします（矩形指定より処理が遅い）")
+                            .small()
+                            .weak(),
+                    );
                     match self.blur_states.get(&id).copied() {
                         Some(PopState::Baking(pct)) => {
                             ui.label(egui::RichText::new(format!("追従ベイク中 {pct}%")).small());

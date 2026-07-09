@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
 import asyncio
 import hashlib
@@ -2124,7 +2125,7 @@ DECISIONS schema:
   "no_captions": false,
   "cuts": [ {{"asset_id": "<asset id>", "start": <sec>, "end": <sec>, "reason": "restatement|filler"}} ],
   "screen_overlays": [ {{"screen_asset_id": "<asset id>", "screen_source_start": <sec>, "screen_source_end": <sec>, "from_segment": "a1_s06", "to_segment": "a1_s12", "main_as_pip": true}} ],
-  "blur": [ {{"target_text": "<exact on-screen text to hide; follows it as it moves>", "pattern": "email|phone|key", "asset_id": "<id>", "region": {{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}}, "source_start": <sec>, "source_end": <sec>, "style": "mosaic|soft"}} ],
+  "blur": [ {{"target_text": "<exact on-screen text to hide; follows it as it moves>", "pattern": "email|phone|key", "target_object": "<SHORT ENGLISH noun phrase for a VISUAL object to blur. Use '<noun> in <attribute>' form, e.g. 'person in red shirt', 'license plate', 'face' — NEVER the word 'wearing'>", "asset_id": "<id>", "region": {{"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}}, "source_start": <sec>, "source_end": <sec>, "style": "mosaic|soft"}} ],
   "silence_threshold": 0.45
 }}
 
@@ -2135,12 +2136,17 @@ Rules:
 - Never cut a sentence end. The assembler AUTO-compresses internal silence longer than silence_threshold seconds, so do NOT list silence in cuts. Set silence_threshold lower (e.g. 0.3) for tighter pacing or higher for relaxed, following the user's request; omit it to use the default (0.45).
 - During screen_overlays the screen recording is the background and the main camera is the small wipe; captions are auto-suppressed there (do not add captions to those segments).
 - All audio comes from the main-camera spine segments automatically.
-- blur = hide something on screen. If the user asks to hide specific info (認証情報/メール/電話/
-  ID/口座/氏名/個人情報 など) — ESPECIALLY in a screen recording where it scrolls or moves — emit a
-  blur entry with "target_text" (the exact text you see) and/or "pattern" ("email"/"phone"/"key").
-  Those are detected per-frame at export and FOLLOW the text so it never leaks. Use a static
-  "region" ONLY for a fixed visual object that does not move. region/source coords are 0..1
-  normalized in the screen asset's own seconds. Do NOT blur unless the user asked to hide something.
+- blur = hide something on screen. Pick the field by WHAT is hidden:
+  * specific TEXT/info (認証情報/メール/電話/ID/口座/氏名 など) — ESPECIALLY in a screen recording
+    where it scrolls — emit "target_text" (the exact text you see) and/or "pattern"
+    ("email"/"phone"/"key"). Detected per-frame at export and FOLLOWS the text.
+  * a VISUAL object/person (「赤い服の人」「通行人」「顔」「ナンバープレート」「商品」など) — emit
+    "target_object" as a SHORT ENGLISH noun phrase + "asset_id" + "source_start"/"source_end"
+    (the asset's own seconds where it appears). An AI tracker (SAM) segments EVERY instance of
+    that concept and the blur follows their pixel silhouettes. Prefer this over "region"
+    whenever the thing can move.
+  * a fixed area that never moves — static "region" (0..1 normalized).
+  Do NOT blur unless the user asked to hide something.
 - Output the json LAST, after the reasoning. It must be valid JSON.
 
 EDITING POLICY (必読):
@@ -2537,6 +2543,68 @@ def _assemble_sequence_from_decisions(
             if pat:
                 sb_patterns.append(_PAT.get(pat, pat))
             continue
+        tobj = str(b.get("target_object") or "").strip()
+        if tobj:
+            # VISUAL object ("person in red shirt") -> SAM-tracked blur: find where the
+            # (asset, source range) lands on the FINAL timeline, start one mask bake over
+            # the whole needed source span, and bind blur_track effect clips — the same
+            # data the editor's 追従ぼかし produces, so preview/export/re-bake all work.
+            tobj = _blur_prompt_to_english(tobj)
+            baid = str(b.get("asset_id") or "")
+            b_ss = float(b.get("source_start") or 0)
+            b_se = float(b.get("source_end") or 0)
+            runs: list[list[float]] = []  # [tl0, tl1, src0, src1]
+            for vc in video_clips + overlay_clips:
+                if str(vc.get("asset_id")) != baid:
+                    continue
+                v_ss = float(vc.get("source_start") or 0)
+                v_se = float(vc.get("source_end") or 0)
+                v_ts = float(vc.get("timeline_start") or 0)
+                if v_se <= v_ss:
+                    continue
+                lo = max(v_ss, b_ss) if b_se > b_ss else v_ss
+                hi = min(v_se, b_se) if b_se > b_ss else v_se
+                if hi - lo < 0.05:
+                    continue
+                runs.append([v_ts + (lo - v_ss), v_ts + (hi - v_ss), lo, hi])
+            if not runs:
+                logger.info("target_object %r: asset %s range not on final timeline", tobj, baid)
+                continue
+            runs.sort()
+            merged: list[list[float]] = []
+            for r in runs:
+                if merged and r[0] - merged[-1][1] < 0.25:
+                    merged[-1][1] = max(merged[-1][1], r[1])
+                    merged[-1][3] = max(merged[-1][3], r[3])
+                else:
+                    merged.append(list(r))
+            bake = None
+            try:
+                t_asset = _assets_by_id(room_id).get(baid)
+                if t_asset:
+                    bake = _ensure_blur_mask_started(
+                        room_id, t_asset,
+                        {"prompt": tobj, "box": None, "points": None, "keep_ids": None,
+                         "feather": None, "dilate": None, "anchor": None},
+                        min(r[2] for r in runs), max(r[3] for r in runs))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("target_object bake start failed (%r): %s", tobj, exc)
+            for m in merged:
+                clip_e: dict[str, Any] = {
+                    "id": _cid("e"), "track": "effect",
+                    # stand-in rectangle until the mask lands (center field of view)
+                    "region": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+                    "style": str(b.get("style") or "soft"),
+                    "timeline_start": round(m[0], 3), "timeline_end": round(m[1], 3),
+                }
+                if bake:
+                    clip_e["blur_track"] = {
+                        "asset_id": baid, "key": bake["key"],
+                        "bake_start": bake["bake_start"], "bake_end": bake["bake_end"],
+                        "prompt": tobj,
+                    }
+                effect_clips.append(clip_e)
+            continue
         region = b.get("region") if isinstance(b.get("region"), dict) else None
         if not region:
             continue
@@ -2688,6 +2756,79 @@ def _merge_revision_patch(sequence: dict[str, Any], patch: dict[str, Any], allow
     return seq2
 
 
+def _apply_blur_objects(sequence: dict[str, Any], blur_objects: list[dict[str, Any]], room_id: str) -> int:
+    """「〜をぼかして」(dan_revise): for each visual-target entry, start SAM mask bakes for
+    every asset shown in the requested timeline range and add blur_track effect clips —
+    the exact data the editor's 追従ぼかし produces (preview/export/re-bake all work).
+    Mutates `sequence`; returns the number of effect clips added."""
+    tracks = sequence.get("tracks") or []
+    fx_track = next((t for t in tracks if t.get("type") == "effect"), None)
+    if fx_track is None:
+        fx_track = {"id": "effects_1", "type": "effect", "label": "Blur/Effects", "clips": []}
+        tracks.append(fx_track)
+    fx_clips = fx_track.setdefault("clips", [])
+    assets = _assets_by_id(room_id)
+    seq_dur = max((float(c.get("timeline_end") or 0)
+                   for t in tracks for c in (t.get("clips") or [])), default=0.0)
+    added = 0
+    for bo in blur_objects:
+        target = _blur_prompt_to_english(str(bo.get("target") or "").strip())
+        if not target:
+            continue
+        ts = max(0.0, float(bo.get("timeline_start") or 0.0))
+        te = float(bo.get("timeline_end") or 0.0) or seq_dur
+        te = min(max(te, ts + 0.1), seq_dur or (ts + 0.1))
+        # visual clips per asset inside [ts, te] -> merged timeline runs + union source window
+        by_asset: dict[str, list[list[float]]] = {}
+        for t in tracks:
+            if t.get("type") not in {"video", "overlay"} or t.get("hidden"):
+                continue
+            for c in t.get("clips") or []:
+                aid = str(c.get("asset_id") or "")
+                v_ss = float(c.get("source_start") or 0)
+                v_se = float(c.get("source_end") or 0)
+                v_ts = float(c.get("timeline_start") or 0)
+                v_te = float(c.get("timeline_end") or 0)
+                if not aid or v_se <= v_ss or v_te <= max(ts, v_ts) or min(te, v_te) <= v_ts:
+                    continue
+                t0, t1 = max(ts, v_ts), min(te, v_te)
+                by_asset.setdefault(aid, []).append(
+                    [t0, t1, v_ss + (t0 - v_ts), v_ss + (t1 - v_ts)])
+        for aid, runs in by_asset.items():
+            asset = assets.get(aid)
+            if not asset or asset.get("kind") != "video":
+                continue
+            runs.sort()
+            merged: list[list[float]] = []
+            for r in runs:
+                if merged and r[0] - merged[-1][1] < 0.25:
+                    merged[-1][1] = max(merged[-1][1], r[1])
+                    merged[-1][3] = max(merged[-1][3], r[3])
+                else:
+                    merged.append(list(r))
+            try:
+                bake = _ensure_blur_mask_started(
+                    room_id, asset,
+                    {"prompt": target, "box": None, "points": None, "keep_ids": None,
+                     "feather": None, "dilate": None, "anchor": None},
+                    min(r[2] for r in runs), max(r[3] for r in runs))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("blur_objects bake start failed (%r/%s): %s", target, aid, exc)
+                continue
+            for m in merged:
+                fx_clips.append({
+                    "id": f"fxo_{uuid.uuid4().hex[:8]}", "track": "effect",
+                    "region": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
+                    "style": "soft",
+                    "timeline_start": round(m[0], 3), "timeline_end": round(m[1], 3),
+                    "blur_track": {"asset_id": aid, "key": bake["key"],
+                                   "bake_start": bake["bake_start"],
+                                   "bake_end": bake["bake_end"], "prompt": target},
+                })
+                added += 1
+    return added
+
+
 def _build_dan_revision(
     room_id: str, user_id: str, job_id: str, instruction: dict[str, Any], instruction_path: Path,
 ) -> dict[str, Any] | None:
@@ -2738,9 +2879,14 @@ Return ONE json object with your edits (and nothing after it). Only reference id
   "edits": [
     {{"id": "<clip id>", "text": "新しいテロップ or 省略", "style": {{"color":"#RRGGBB","fontSize":1.2,"position":"top|center|bottom","bold":true,"outlineColor":"#RRGGBB","outlineWidth":1.0}}, "timeline_start": <sec or 省略>, "timeline_end": <sec or 省略>, "remove": true/false}}
   ],
-  "new_captions": [ {{"text": "...", "timeline_start": <sec>, "timeline_end": <sec>}} ]
+  "new_captions": [ {{"text": "...", "timeline_start": <sec>, "timeline_end": <sec>}} ],
+  "blur_objects": [ {{"target": "<SHORT ENGLISH noun phrase for the VISUAL thing to blur. Use '<noun> in <attribute>' form, e.g. 'person in red shirt', 'license plate', 'face' — NEVER the word 'wearing'>", "timeline_start": <sec>, "timeline_end": <sec>}} ]
 }}
 Rules:
+- 「〜をぼかして/隠して」で見た目の物体（人・顔・服装で特定された人・ナンバー・商品など）を指され
+  たら "blur_objects" を出す。target はあなたが英語の短い名詞句に翻訳する。timeline_start/end は
+  ユーザーが範囲を指定していればその範囲、なければタイムライン全体。AIトラッカーが該当する物体を
+  全部追跡してぼかす（blur_objects は視覚的な物体専用。特定の文字列はここでは扱わない）。
 - Caption text/style/position/size: edit the caption clip's fields.
 - IMPORTANT — style is MERGED, not replaced: only include the style fields you are CHANGING.
   The clip's other existing style fields (shown above) are kept automatically. e.g. to move a
@@ -2772,6 +2918,15 @@ Rules:
     if not isinstance(patch, dict):
         return None
     merged = _merge_revision_patch(sequence, patch, allowed)
+    # visual-object blur requests ride the same patch: start SAM bakes + bind effect clips
+    blur_objects = patch.get("blur_objects") if isinstance(patch.get("blur_objects"), list) else []
+    if merged and blur_objects:
+        n_blur = _apply_blur_objects(merged, blur_objects, room_id)
+        if n_blur:
+            _append_job_event(room_id, job_id, {
+                "type": "status",
+                "text": f"追従ぼかしを{n_blur}箇所に適用（AIが対象を追跡中。ベイク完了までプレビューは仮矩形）。",
+            })
     _append_job_event(room_id, job_id, {"type": "status", "text": f"部分編集を適用（対象クリップ {len(allowed)}個・範囲外は保持）。"})
     return merged
 
@@ -3534,32 +3689,35 @@ def _blur_mask_bake_sync(source_path: Path, out_mask: Path, spec: dict[str, Any]
     os.replace(part, out_mask)
 
 
-@router.post("/blur-mask")
-async def generate_blur_mask(payload: dict = Body(...)):
-    """Start (or reuse) a tracked blur-mask bake for one clip window and return immediately
-    with the cache key; the editor polls /blur-mask/status. Target = box (fast single-object)
-    or prompt (English noun phrase -> all instances) or points; combinable with keep_ids."""
-    room_id = str(payload.get("room_id") or "")
-    asset_id = str(payload.get("asset_id") or "")
-    if not room_id or not asset_id:
-        raise HTTPException(status_code=400, detail="room_id and asset_id required")
-    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    spec = {
-        "prompt": str(payload.get("prompt") or "") or None,
-        "box": payload.get("box"),
-        "points": payload.get("points"),
-        "keep_ids": payload.get("keep_ids"),
-        "feather": payload.get("feather"),
-        "dilate": payload.get("dilate"),
-        "anchor": payload.get("anchor"),
-    }
-    if not spec["prompt"] and not spec["box"] and not spec["points"]:
-        raise HTTPException(status_code=400, detail="prompt, box or points required")
+def _blur_prompt_to_english(prompt: str) -> str:
+    """SAM 3's text encoder is trained on ENGLISH noun phrases — translate non-ASCII
+    prompts via the flat-rate CLI (never the metered API). Blocking; call in a thread."""
+    p = (prompt or "").strip()
+    if not p or all(ord(ch) < 128 for ch in p):
+        return p
+    try:
+        from app.agent.cli_runner import run_oneshot_cli
+        out = run_oneshot_cli(
+            "Translate this Japanese description of a VISUAL object into a SHORT English "
+            "noun phrase for an open-vocabulary object detector (examples: 'person in red "
+            "shirt', 'license plate', 'coffee cup'). Use the pattern '<noun> in <attribute>' "
+            "for clothing/appearance — NEVER the word 'wearing' (it breaks the detector). "
+            "Reply with the noun phrase ONLY.\n\n" + p,
+            "haiku", 45)
+        out = (out or "").strip().strip('"').strip()
+        return out or p
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("blur prompt translation failed (%s); using raw prompt", exc)
+        return p
+
+
+def _ensure_blur_mask_started(room_id: str, asset: dict[str, Any], spec: dict[str, Any],
+                              ss: float, se: float) -> dict[str, Any]:
+    """Start (or reuse) a tracked blur-mask bake. Sync-safe: usable from the async endpoint
+    AND from the Dan assembler (plain thread, no event loop needed). Returns the same shape
+    the endpoint responds with; the mask lands in blur-cache/{key}.mask.mp4."""
     source_path = _asset_hires_path(asset)
-    ss = max(0.0, float(payload.get("source_start") or 0.0))
-    se = max(ss + 0.1, float(payload.get("source_end") or (ss + 4.0)))
+    asset_id = str(asset.get("id"))
     bs = max(0.0, ss - BLUR_BAKE_PAD_S)
     be = se + BLUR_BAKE_PAD_S
     meta = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
@@ -3567,7 +3725,7 @@ async def generate_blur_mask(payload: dict = Body(...)):
     if dur > 0:
         be = min(be, dur)
     bs, be = round(bs, 3), round(max(be, bs + 0.1), 3)
-    key_src = f"v1|{asset_id}|{bs:.3f}|{be:.3f}|{json.dumps(spec, sort_keys=True)}"
+    key_src = f"v2|{asset_id}|{bs:.3f}|{be:.3f}|{json.dumps(spec, sort_keys=True)}"
     key = hashlib.sha1(key_src.encode()).hexdigest()[:16]
     cache_dir = _blur_cache_dir(room_id)
     out_mask = cache_dir / f"{key}.mask.mp4"
@@ -3582,10 +3740,9 @@ async def generate_blur_mask(payload: dict = Body(...)):
     if _BLUR_BAKING.get(flight_key):
         return {**resp, "ready": False, "progress": int(prog.get("pct") or 0)}
 
-    async def _bake() -> None:
+    def _bake() -> None:
         try:
-            await asyncio.to_thread(
-                _blur_mask_bake_sync, source_path, out_mask, spec, bs, be, progress_file)
+            _blur_mask_bake_sync(source_path, out_mask, spec, bs, be, progress_file)
         except Exception as exc:  # noqa: BLE001
             logger.warning("blur mask bake failed (%s): %s", key, exc)
             try:
@@ -3597,8 +3754,40 @@ async def generate_blur_mask(payload: dict = Body(...)):
             _BLUR_BAKING.pop(flight_key, None)
 
     _BLUR_BAKING[flight_key] = True
-    asyncio.create_task(_bake())
+    threading.Thread(target=_bake, daemon=True, name=f"blur-bake-{key}").start()
     return {**resp, "ready": False, "progress": 0}
+
+
+@router.post("/blur-mask")
+async def generate_blur_mask(payload: dict = Body(...)):
+    """Start (or reuse) a tracked blur-mask bake for one clip window and return immediately
+    with the cache key; the editor polls /blur-mask/status. Target = box (fast single-object)
+    or prompt (noun phrase -> ALL instances; Japanese is auto-translated) or points."""
+    room_id = str(payload.get("room_id") or "")
+    asset_id = str(payload.get("asset_id") or "")
+    if not room_id or not asset_id:
+        raise HTTPException(status_code=400, detail="room_id and asset_id required")
+    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    prompt = str(payload.get("prompt") or "").strip() or None
+    if prompt:
+        prompt = await asyncio.to_thread(_blur_prompt_to_english, prompt)
+    spec = {
+        "prompt": prompt,
+        "box": payload.get("box"),
+        "points": payload.get("points"),
+        "keep_ids": payload.get("keep_ids"),
+        "feather": payload.get("feather"),
+        "dilate": payload.get("dilate"),
+        "anchor": payload.get("anchor"),
+    }
+    if not spec["prompt"] and not spec["box"] and not spec["points"]:
+        raise HTTPException(status_code=400, detail="prompt, box or points required")
+    ss = max(0.0, float(payload.get("source_start") or 0.0))
+    se = max(ss + 0.1, float(payload.get("source_end") or (ss + 4.0)))
+    resp = _ensure_blur_mask_started(room_id, asset, spec, ss, se)
+    return {**resp, "prompt_used": prompt} if prompt else resp
 
 
 @router.get("/blur-mask/status")

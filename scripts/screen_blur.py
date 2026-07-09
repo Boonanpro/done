@@ -109,54 +109,8 @@ def detect(src: str, targets, patterns, regex, fps: float, pad: float, start: fl
     return boxes_by_t, vfps, w, h, total
 
 
-def track(src: str, box01: tuple[float, float, float, float], start: float, end: float, fps: float):
-    """Follow a user-drawn region across [start,end] with lightweight template matching (base
-    OpenCV, no extra deps). box01 = (x,y,w,h) normalized at `start`. Returns boxes_by_t {t:[(x,y,w,h)px]}
-    that render() can consume directly. Drift is expected on hard motion — the editor lets the
-    human fix keyframes; this is the auto first pass."""
-    cap = cv2.VideoCapture(src)
-    W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    vfps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    bx = int(box01[0] * W); by = int(box01[1] * H)
-    bw = max(8, int(box01[2] * W)); bh = max(8, int(box01[3] * H))
-    interval = 1.0 / max(0.5, fps)
-    boxes_by_t: dict[float, list] = {}
-    template = None
-    last = (bx, by, bw, bh)
-    next_s = start
-    while True:
-        t = (cap.get(cv2.CAP_PROP_POS_MSEC) or 0.0) / 1000.0
-        ok, frame = cap.read()
-        if not ok:
-            break
-        if end > 0 and t > end:
-            break
-        if t + 1e-6 < (start if start > 0 else 0.0) or t + 1e-6 < next_s:
-            continue
-        x, y, w, h = last
-        if template is None:
-            template = frame[max(0, y):y + h, max(0, x):x + w].copy()
-            boxes_by_t[round(t, 3)] = [(x, y, w, h)]
-            next_s = t + interval
-            continue
-        # search a window around the last position (±h, ±w) for the template
-        pad_x, pad_y = w, h
-        sx0 = max(0, x - pad_x); sy0 = max(0, y - pad_y)
-        sx1 = min(W, x + w + pad_x); sy1 = min(H, y + h + pad_y)
-        roi = frame[sy0:sy1, sx0:sx1]
-        if roi.shape[0] >= h and roi.shape[1] >= w and template.shape[0] == h and template.shape[1] == w:
-            res = cv2.matchTemplate(roi, template, cv2.TM_CCOEFF_NORMED)
-            _minv, maxv, _minl, maxl = cv2.minMaxLoc(res)
-            nx, ny = sx0 + maxl[0], sy0 + maxl[1]
-            if maxv > 0.4:  # confident enough -> move; else keep last (occlusion)
-                last = (nx, ny, w, h)
-                # slowly adapt the template to appearance changes
-                template = cv2.addWeighted(template, 0.8,
-                                           frame[ny:ny + h, nx:nx + w], 0.2, 0) if frame[ny:ny + h, nx:nx + w].shape == template.shape else template
-        boxes_by_t[round(t, 3)] = [last]
-        next_s = t + interval
-    cap.release()
-    return boxes_by_t, vfps
+# (the old template-matching box tracker lived here; object tracking is SAM 3 now —
+#  scripts/blur_mask_bake.py — and no server path called --track-spec/--track-probe anymore)
 
 
 def _rect_overlap(a, b) -> float:
@@ -402,8 +356,6 @@ def main() -> int:
     ap.add_argument("--dump", default="")  # optional: write boxes json
     ap.add_argument("--probe", action="store_true")  # detect-only: print matched texts as JSON
     ap.add_argument("--probe-frames", type=int, default=24)
-    ap.add_argument("--track-spec", default="")  # json: manual tracked blur(s)
-    ap.add_argument("--track-probe", action="store_true")  # follow ONE box, print normalized boxes JSON (for preview)
     ap.add_argument("--ocr-track", action="store_true")  # follow the TEXT in a box (OCR); print path + time range
     ap.add_argument("--render-spec", default="")  # json {tracks:[{boxes:{t:[x,y,w,h] norm}, style}]} -> bake blur
     ap.add_argument("--box", default="")  # x,y,w,h normalized (for --track-probe / --ocr-track)
@@ -416,21 +368,6 @@ def main() -> int:
     targets = [t.strip() for t in a.targets.split(",") if t.strip()]
     patterns = {p.strip() for p in a.patterns.split(",") if p.strip()}
     regex = re.compile(a.regex) if a.regex else None
-    if a.track_spec:
-        # Manual tracked blur: each spec track = a user-drawn box (normalized) + time range; follow
-        # it on this (final) video and gaussian-blur the moving region.
-        spec = json.loads(Path(a.track_spec).read_text(encoding="utf-8"))
-        fps = float(spec.get("fps") or 8)
-        tracks = []
-        vfps = 30.0
-        for tr in spec.get("tracks") or []:
-            box01 = (float(tr["x"]), float(tr["y"]), float(tr["w"]), float(tr["h"]))
-            boxes_by_t, vfps = track(a.src, box01, float(tr.get("start") or 0), float(tr.get("end") or 0), fps)
-            tracks.append({"boxes_by_t": boxes_by_t, "style": str(tr.get("style") or "gaussian")})
-        if tracks:
-            render_tracks(a.src, a.out, tracks, vfps, a.ffmpeg)
-        print("tracked-rendered:", a.out)
-        return 0
     if a.render_spec:
         # Bake blur along PRE-COMPUTED normalized paths (from OCR tracking) — no re-tracking. The
         # nearest-sample gating in render_tracks (±0.4s) naturally limits blur to the tracked range.
@@ -465,26 +402,6 @@ def main() -> int:
                         a.fps if a.fps > 0 else 4.0, out_w=a.out_w, out_h=a.out_h,
                         clip_rect=(cr[0], cr[1], cr[2], cr[3]), t_offset=a.t_offset, ff=a.ffmpeg)
         print(json.dumps(out, ensure_ascii=True))
-        return 0
-    if a.track_probe:
-        # Run the tracker on a SINGLE drawn box and return its position over time, NORMALIZED
-        # (0-1), so the editor can animate the blur box on the preview = real tracking, not an
-        # approximation. Same lightweight template tracking the export post-pass uses.
-        bx = [float(v) for v in a.box.split(",") if v.strip() != ""]
-        if len(bx) < 4:
-            print(json.dumps({"boxes": {}, "error": "bad box"}))
-            return 0
-        cap = cv2.VideoCapture(a.src)
-        W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1
-        H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 1
-        cap.release()
-        boxes_by_t, vfps = track(a.src, (bx[0], bx[1], bx[2], bx[3]), a.start, a.end, a.fps if a.fps > 0 else 6.0)
-        norm: dict[str, list] = {}
-        for t, boxes in boxes_by_t.items():
-            if boxes:
-                x, y, w, h = boxes[0]
-                norm[f"{float(t):.3f}"] = [round(x / W, 5), round(y / H, 5), round(w / W, 5), round(h / H, 5)]
-        print(json.dumps({"boxes": norm, "w": W, "h": H, "fps": vfps}, ensure_ascii=True))
         return 0
     if a.probe:
         # ensure_ascii so Japanese text can't crash print() on a cp932 (Windows) stdout; the
