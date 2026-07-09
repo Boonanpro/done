@@ -934,16 +934,18 @@ fn compose(
             }
             if let Some(rg) = c.region_xywh() {
                 let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-                let cell = if style.contains("mosaic") { 14.0 } else { 9.0 };
+                let is_mosaic = style.contains("mosaic");
                 // SAM tracked blur: the baked mask video (blur-cache/{key}.mask.mp4)
-                // follows the object; blur = canvas × pixelated canvas weighted by the
-                // mask frame. Mask time = base clip source time − bake window start.
-                // Until the bake lands (or if the base footage changed) the static
-                // rectangle below remains the honest stand-in.
+                // follows the object; blur = soft haze weighted by the mask frame.
+                // Mask time = base clip source time − bake window start. Until the bake
+                // lands, or wherever the base's source time falls OUTSIDE the baked
+                // window, the static stand-in below applies (pinning to mask frame 0
+                // out of range showed a misplaced frozen blur).
                 let mut applied = false;
                 if let Some(bt) = c.blur_track.as_ref() {
                     let key = bt.get("key").and_then(|v| v.as_str()).unwrap_or("");
                     let bs = bt.get("bake_start").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let be = bt.get("bake_end").and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
                     let baid = bt.get("asset_id").and_then(|v| v.as_str()).unwrap_or("");
                     let mpath = doc.rel_path(&format!("blur-cache/{key}.mask.mp4"));
                     let base_info = doc
@@ -954,43 +956,54 @@ fn compose(
                     let mask_ok = !key.is_empty()
                         && std::fs::metadata(&mpath).map(|m| m.len() > 0).unwrap_or(false);
                     if let (Some((src_t, bb, bcrop)), true) = (base_info, mask_ok) {
+                        let in_window = src_t >= bs - 0.05 && src_t <= be + 0.05;
                         let mt = (src_t - bs).max(0.0);
-                        if let Ok(vs) = pool.get(d3d, &mpath, 0, false, mt) {
+                        if !in_window {
+                            // fall through to the static stand-in below
+                        } else if let Ok(vs) = pool.get(d3d, &mpath, 0, false, mt) {
                             let ok = if fast {
                                 if Instant::now() < f_deadline {
                                     vs.ensure_frame_scrub(d3d, mt, 8.0).unwrap_or(false)
                                 } else {
-                                    exact = false;
                                     false
                                 }
                             } else {
                                 vs.ensure_frame(d3d, mt).is_ok()
                             };
-                            if ok {
-                                let tex = vs.bgra.clone();
-                                let wh = (vs.width, vs.height);
-                                if comp
-                                    .apply_blur_masked(
-                                        d3d,
-                                        &tex,
-                                        wh,
-                                        (bb.x, bb.y, bb.width, bb.height),
-                                        bcrop,
-                                        cell,
-                                    )
-                                    .is_ok()
-                                {
-                                    applied = true;
-                                    used.push(mpath);
-                                }
-                            } else if fast {
-                                exact = false;
+                            if !ok {
+                                exact = false; // settle pass will land the exact mask frame
+                            }
+                            // draw with the decoder's LAST frame even when the budgeted
+                            // seek missed: a frame-stale tracked mask beats flashing to
+                            // the static stand-in (visible as soft->blocky mode flicker
+                            // on play/pause transitions)
+                            let tex = vs.bgra.clone();
+                            let wh = (vs.width, vs.height);
+                            if comp
+                                .apply_blur_masked(
+                                    d3d,
+                                    &tex,
+                                    wh,
+                                    (bb.x, bb.y, bb.width, bb.height),
+                                    bcrop,
+                                    16.0, // soft-blur radius px
+                                )
+                                .is_ok()
+                            {
+                                applied = true;
+                                used.push(mpath);
                             }
                         }
                     }
                 }
                 if !applied {
-                    let _ = comp.apply_mosaic(d3d, rg, cell);
+                    // a clip WITH a tracked bake never shows the blocky grid: style only
+                    // picks the look for pure static region clips
+                    if is_mosaic && c.blur_track.is_none() {
+                        let _ = comp.apply_mosaic(d3d, rg, 14.0);
+                    } else {
+                        let _ = comp.apply_blur_rect(d3d, rg, 16.0);
+                    }
                 }
             }
         }
@@ -2352,6 +2365,11 @@ struct App {
     blur_states: std::collections::HashMap<String, PopState>,
     blur_bake_results: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
     last_blur_poll: Instant,
+    /// bake key -> (parsed boxes_by_frame from the mask meta, last load attempt).
+    /// A miss is RETRIED after 1s — permanently caching "not there yet" during a bake
+    /// froze the outline on its pre-bake state forever.
+    blur_meta_cache: std::collections::HashMap<String, (Option<serde_json::Value>, Instant)>,
+    blur_out_log_at: Instant,
     last_push: Instant,
     // Filmora semantics (observed in its logs: Pause -> seek -> auto Play): any timeline
     // interaction while playing pauses first; playback auto-resumes once the video ring
@@ -2488,6 +2506,8 @@ impl App {
             blur_states: Default::default(),
             blur_bake_results: Default::default(),
             last_blur_poll: Instant::now(),
+            blur_meta_cache: Default::default(),
+            blur_out_log_at: Instant::now(),
             last_push: Instant::now(),
             resume_pending: None,
             resume_on_release: false,
@@ -2970,9 +2990,44 @@ impl App {
             return;
         };
         let aid = b.asset_id.clone().unwrap();
-        // mask window = the base clip's source range under the effect clip
-        let ss = b.src_at(c.timeline_start.max(b.timeline_start));
-        let se = b.src_at(c.timeline_end.min(b.timeline_end)).max(ss + 0.1);
+        // mask window = the union of the source ranges of ALL base cuts of this asset
+        // under the effect clip. Dan timelines are strings of short cuts — covering only
+        // the middle cut left the other cuts mask-less (the "tracks only sometimes" bug).
+        // Tracking runs CONTINUOUSLY through unseen gaps, so cut-crossing identity holds.
+        let (mut ss, mut se) = (f64::MAX, f64::MIN);
+        for tr in self.doc.seq.tracks.iter().filter(|tr| {
+            tr.kind != "audio" && tr.kind != "effect" && tr.kind != "caption" && !tr.hidden
+        }) {
+            for bc in &tr.clips {
+                if bc.asset_id.as_deref() != Some(aid.as_str()) || bc.is_freeze() {
+                    continue;
+                }
+                if bc.timeline_end <= c.timeline_start || bc.timeline_start >= c.timeline_end {
+                    continue;
+                }
+                ss = ss.min(bc.src_at(c.timeline_start.max(bc.timeline_start)));
+                se = se.max(bc.src_at(c.timeline_end.min(bc.timeline_end)));
+            }
+        }
+        if !ss.is_finite() || se <= ss {
+            ss = b.src_at(c.timeline_start.max(b.timeline_start));
+            se = b.src_at(c.timeline_end.min(b.timeline_end)).max(ss + 0.1);
+        }
+        let se = se.max(ss + 0.1);
+        // the object to track = whatever the rectangle covers on the frame the user is
+        // LOOKING AT: playhead if it sits inside the effect window (over this asset),
+        // else the effect start. Anchoring at the padded window start silently picked
+        // whatever happened to be in the box 1.5s earlier.
+        let anchor_src = if self.t >= c.timeline_start && self.t < c.timeline_end {
+            self.doc
+                .active_video(self.t)
+                .0
+                .filter(|bc| bc.asset_id.as_deref() == Some(aid.as_str()))
+                .map(|bc| bc.src_at(self.t))
+        } else {
+            None
+        }
+        .unwrap_or_else(|| b.src_at(c.timeline_start.max(b.timeline_start)));
         // the rectangle was drawn in CANVAS space; SAM works on SOURCE pixels — map it
         // through the inverse of the base clip's cover-crop (aspect mismatch shifted the
         // box onto the wrong object before this)
@@ -2994,6 +3049,7 @@ impl App {
         let payload = serde_json::json!({
             "room_id": room, "asset_id": aid,
             "source_start": ss, "source_end": se,
+            "anchor": anchor_src,
             "box": [sbox.0, sbox.1, sbox.2, sbox.3],
         })
         .to_string();
@@ -4667,6 +4723,144 @@ impl App {
     /// can be MOVED (drag inside) or RESIZED (corner handles, aspect kept) directly.
     fn preview_inspector(&mut self, ui: &mut egui::Ui, resp: &egui::Response) {
         let img = resp.rect;
+        // selected region-effect clip while the playhead is inside its range: a plain
+        // rectangle around the blur area. Mapped to the VIDEO rect (canvas-aspect fit,
+        // centered) — resp.rect is the whole justified panel and drawing into it put
+        // the outline outside the picture (same letterbox trap as the caption PNGs).
+        let vid = {
+            let (cw, ch) = (CANVAS_W as f32, CANVAS_H as f32);
+            let scale = (img.width() / cw).min(img.height() / ch);
+            egui::Rect::from_center_size(img.center(), egui::vec2(cw * scale, ch * scale))
+        };
+        let outlines: Vec<(String, (f64, f64, f64, f64), bool, Option<serde_json::Value>)> = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| {
+                self.selected.contains(&c.id)
+                    && c.region.is_some()
+                    && c.asset_id.is_none()
+                    && self.t >= c.timeline_start
+                    && self.t < c.timeline_end
+            })
+            .filter_map(|c| c.region_xywh().map(|rg| {
+                (
+                    c.id.clone(),
+                    rg,
+                    matches!(self.blur_states.get(&c.id), Some(PopState::Ready)),
+                    c.blur_track.clone(),
+                )
+            }))
+            .collect();
+        for (_cid, rg, tracked, bt) in outlines {
+            // while a bake is live, the outline FOLLOWS the tracked object: the mask
+            // meta records the object's box per mask frame — look up the box for the
+            // frame the preview is showing and map it source -> canvas
+            let mut draw_box = rg;
+            let mut following = false;
+            if tracked {
+                if let Some(bt) = bt.as_ref() {
+                    let key = bt.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let bs = bt.get("bake_start").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let baid = bt.get("asset_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let meta_path = format!("{}/blur-cache/{}.mask.mp4.meta.json", self.doc.asset_dir, key);
+                    let load = || {
+                        std::fs::read_to_string(&meta_path)
+                            .ok()
+                            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                            .and_then(|j| j.get("boxes_by_frame").cloned())
+                    };
+                    let meta = match self.blur_meta_cache.get_mut(&key) {
+                        Some((Some(v), _)) => Some(v.clone()),
+                        Some((slot @ None, at)) if at.elapsed().as_secs() >= 1 => {
+                            *slot = load();
+                            if slot.is_none() {
+                                eprintln!("BLUROUT meta retry miss key={key}");
+                            }
+                            *at = Instant::now();
+                            slot.clone()
+                        }
+                        Some((None, _)) => None,
+                        None => {
+                            let v = load();
+                            if v.is_none() {
+                                eprintln!("BLUROUT meta first miss key={key} path={meta_path}");
+                            }
+                            self.blur_meta_cache.insert(key.clone(), (v.clone(), Instant::now()));
+                            v
+                        }
+                    };
+                    let base = self
+                        .doc
+                        .active_video(self.t)
+                        .0
+                        .filter(|b| b.asset_id.as_deref() == Some(baid.as_str()));
+                    if meta.is_none() || base.is_none() {
+                        if self.blur_out_log_at.elapsed().as_secs() >= 1 {
+                            self.blur_out_log_at = Instant::now();
+                            eprintln!(
+                                "BLUROUT fallback: meta={} base={} key={key}",
+                                meta.is_some(),
+                                base.is_some()
+                            );
+                        }
+                    }
+                    if let (Some(bf), Some(b)) = (meta, base) {
+                        let fi = ((b.src_at(self.t) - bs) * 30.0).round() as i64;
+                        // nearest recorded frame within ±4 (propagation can skip a few)
+                        let hit = (0..=4).find_map(|d| {
+                            [fi - d, fi + d].into_iter().find_map(|f| {
+                                bf.get(f.to_string()).filter(|v| {
+                                    v.as_object().map(|o| !o.is_empty()).unwrap_or(false)
+                                })
+                            })
+                        });
+                        if hit.is_none() && self.blur_out_log_at.elapsed().as_secs() >= 1 {
+                            self.blur_out_log_at = Instant::now();
+                            eprintln!("BLUROUT no box at mask frame {fi} key={key}");
+                        }
+                        if let Some(objs) = hit.and_then(|v| v.as_object()) {
+                            let (mut x0, mut y0, mut x1, mut y1) = (1.0f64, 1.0f64, 0.0f64, 0.0f64);
+                            for bx in objs.values() {
+                                let g = |i: usize| bx.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                x0 = x0.min(g(0));
+                                y0 = y0.min(g(1));
+                                x1 = x1.max(g(0) + g(2));
+                                y1 = y1.max(g(1) + g(3));
+                            }
+                            if x1 > x0 && y1 > y0 {
+                                let dims = self.doc.asset_dims.get(&baid).copied().unwrap_or((0, 0));
+                                let bb = b.display_box();
+                                draw_box = compositor::source_box_to_canvas(
+                                    (CANVAS_W, CANVAS_H),
+                                    dims,
+                                    (bb.x, bb.y, bb.width, bb.height),
+                                    b.crop_ltrb(),
+                                    (x0, y0, x1 - x0, y1 - y0),
+                                );
+                                following = true;
+                            }
+                        }
+                    }
+                }
+            }
+            let (x, y, w, h) = draw_box;
+            let r = egui::Rect::from_min_size(
+                egui::pos2(
+                    vid.left() + x as f32 * vid.width(),
+                    vid.top() + y as f32 * vid.height(),
+                ),
+                egui::vec2(w as f32 * vid.width(), h as f32 * vid.height()),
+            );
+            let col = if following {
+                egui::Color32::from_rgb(90, 220, 150)
+            } else {
+                egui::Color32::from_rgb(255, 170, 60)
+            };
+            ui.painter_at(vid).rect_stroke(r, 2.0, egui::Stroke::new(2.0, col));
+        }
         let sel: Vec<model::Clip> = self
             .doc
             .seq
@@ -6656,11 +6850,11 @@ impl eframe::App for App {
                                         let salt = self.salt;
                                         self.salt += 1;
                                         self.apply_edit(true, move |raw| {
-                                            edits::add_effect_clip(raw, t, 3.0, (fx, fy, fw, fh), "mosaic", salt)
+                                            edits::add_effect_clip(raw, t, 3.0, (fx, fy, fw, fh), "gaussian", salt)
                                         });
                                         self.push_req(false);
                                         self.blur_mode = false;
-                                        self.toast("モザイクを追加しました（右パネルで種類・時間を調整）");
+                                        self.toast("ぼかしを追加しました（右パネルで追従ベイク・種類・時間を調整）");
                                     }
                                 }
                             }

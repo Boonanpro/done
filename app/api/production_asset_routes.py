@@ -3382,6 +3382,167 @@ async def get_popout_overlay(request: Request, room_id: str = Query(...), key: s
     return _range_file_response(remux.resolve(), request)
 
 
+# --- SAM 3 tracked blur-mask bake ------------------------------------------------------------
+# One bake per (asset, padded source range, target spec) produces `{key}.mask.mp4` — a
+# grayscale H.264 mask video (255 = blur here), CFR 30, aligned to the padded window.
+# scripts/blur_mask_bake.py runs in the dedicated venv_sam3 env (SAM 3.1 needs py3.12+;
+# the sandbox is py3.10). Two engines inside the script: box/points-only -> fast
+# tracker-only (~0.5s/frame), text concept -> multiplex PCS (~4s/frame/object).
+# The native editor and export consume the mask directly (mask x blur / maskedmerge).
+BLUR_BAKE_PAD_S = 1.5
+_BLUR_BAKING: dict[str, bool] = {}  # f"{room_id}/{key}" -> in-flight (this process)
+VENV_SAM3_PY = PROJECT_ROOT / "venv_sam3" / "Scripts" / "python.exe"
+
+
+def _blur_cache_dir(room_id: str) -> Path:
+    d = ASSET_ROOT / room_id / "blur-cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _blur_read_progress(progress_file: Path) -> dict[str, Any]:
+    """blur_mask_bake.py writes {"stage": str, "progress": 0..1}."""
+    try:
+        with open(progress_file, encoding="utf-8") as f:
+            p = json.load(f) or {}
+        return {"pct": int(float(p.get("progress") or 0) * 100), "stage": p.get("stage")}
+    except (OSError, ValueError):
+        return {}
+
+
+def _blur_mask_bake_sync(source_path: Path, out_mask: Path, spec: dict[str, Any],
+                         bs: float, be: float, progress_file: Path) -> None:
+    """Run the SAM bake to a temp file, then atomically publish. Blocking — call in a thread."""
+    part = out_mask.with_suffix(".part.mp4")
+    script = PROJECT_ROOT / "scripts" / "blur_mask_bake.py"
+    if not VENV_SAM3_PY.exists():
+        raise RuntimeError(f"venv_sam3 missing ({VENV_SAM3_PY}) — see scripts/blur_mask_bake.py header")
+    args = [str(VENV_SAM3_PY), "-u", str(script), str(source_path), "--out", str(part),
+            "--start", f"{bs:.3f}", "--duration", f"{max(0.1, be - bs):.3f}",
+            "--fps", "30", "--feather", str(int(spec.get("feather") or 3)),
+            "--dilate", str(int(spec.get("dilate") or 2)),
+            "--progress-file", str(progress_file)]
+    # anchor = the SOURCE second whose frame defines "the object inside the box"
+    # (the editor sends the playhead frame the user was looking at). Script wants it
+    # relative to the window start.
+    if spec.get("anchor") is not None:
+        rel = min(max(0.0, float(spec["anchor"]) - bs), max(0.0, be - bs - 0.05))
+        args += ["--anchor", f"{rel:.3f}"]
+    if spec.get("prompt"):
+        args += ["--prompt", str(spec["prompt"])]
+    if spec.get("box"):
+        x, y, w, h = [float(v) for v in spec["box"]]
+        args += ["--box", f"{x:.4f},{y:.4f},{w:.4f},{h:.4f}"]
+    for p in spec.get("points") or []:
+        args += ["--point", f"{float(p[0]):.4f},{float(p[1]):.4f},{'+' if int(p[2]) else '-'}"]
+    if spec.get("keep_ids"):
+        args += ["--keep-ids", ",".join(str(int(v)) for v in spec["keep_ids"])]
+    subprocess.run(args, check=True)
+    # publish mask + meta under the final names
+    part_meta = Path(str(part) + ".meta.json")
+    if part_meta.exists():
+        os.replace(part_meta, Path(str(out_mask) + ".meta.json"))
+    os.replace(part, out_mask)
+
+
+@router.post("/blur-mask")
+async def generate_blur_mask(payload: dict = Body(...)):
+    """Start (or reuse) a tracked blur-mask bake for one clip window and return immediately
+    with the cache key; the editor polls /blur-mask/status. Target = box (fast single-object)
+    or prompt (English noun phrase -> all instances) or points; combinable with keep_ids."""
+    room_id = str(payload.get("room_id") or "")
+    asset_id = str(payload.get("asset_id") or "")
+    if not room_id or not asset_id:
+        raise HTTPException(status_code=400, detail="room_id and asset_id required")
+    asset = next((a for a in _read_assets(room_id) if a.get("id") == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    spec = {
+        "prompt": str(payload.get("prompt") or "") or None,
+        "box": payload.get("box"),
+        "points": payload.get("points"),
+        "keep_ids": payload.get("keep_ids"),
+        "feather": payload.get("feather"),
+        "dilate": payload.get("dilate"),
+        "anchor": payload.get("anchor"),
+    }
+    if not spec["prompt"] and not spec["box"] and not spec["points"]:
+        raise HTTPException(status_code=400, detail="prompt, box or points required")
+    source_path = _asset_hires_path(asset)
+    ss = max(0.0, float(payload.get("source_start") or 0.0))
+    se = max(ss + 0.1, float(payload.get("source_end") or (ss + 4.0)))
+    bs = max(0.0, ss - BLUR_BAKE_PAD_S)
+    be = se + BLUR_BAKE_PAD_S
+    meta = asset.get("metadata") if isinstance(asset.get("metadata"), dict) else {}
+    dur = float(meta.get("duration") or 0)
+    if dur > 0:
+        be = min(be, dur)
+    bs, be = round(bs, 3), round(max(be, bs + 0.1), 3)
+    key_src = f"v1|{asset_id}|{bs:.3f}|{be:.3f}|{json.dumps(spec, sort_keys=True)}"
+    key = hashlib.sha1(key_src.encode()).hexdigest()[:16]
+    cache_dir = _blur_cache_dir(room_id)
+    out_mask = cache_dir / f"{key}.mask.mp4"
+    progress_file = cache_dir / f"{key}.progress.json"
+    resp = {"key": key, "bake_start": bs, "bake_end": be, "fps": 30,
+            "path": str(out_mask),
+            "url": f"/api/v1/production-assets/blur-mask/media?room_id={room_id}&key={key}"}
+    if out_mask.exists() and out_mask.stat().st_size > 0:
+        return {**resp, "ready": True, "progress": 100, "cached": True}
+    flight_key = f"{room_id}/{key}"
+    prog = _blur_read_progress(progress_file)
+    if _BLUR_BAKING.get(flight_key):
+        return {**resp, "ready": False, "progress": int(prog.get("pct") or 0)}
+
+    async def _bake() -> None:
+        try:
+            await asyncio.to_thread(
+                _blur_mask_bake_sync, source_path, out_mask, spec, bs, be, progress_file)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("blur mask bake failed (%s): %s", key, exc)
+            try:
+                with open(progress_file, "w", encoding="utf-8") as f:
+                    json.dump({"stage": "error", "progress": 0, "error": str(exc)}, f)
+            except OSError:
+                pass
+        finally:
+            _BLUR_BAKING.pop(flight_key, None)
+
+    _BLUR_BAKING[flight_key] = True
+    asyncio.create_task(_bake())
+    return {**resp, "ready": False, "progress": 0}
+
+
+@router.get("/blur-mask/status")
+async def get_blur_mask_status(room_id: str = Query(...), key: str = Query(...)):
+    safe = re.sub(r"[^0-9a-f]", "", key)[:16]
+    cache_dir = ASSET_ROOT / room_id / "blur-cache"
+    out_mask = cache_dir / f"{safe}.mask.mp4"
+    if out_mask.exists() and out_mask.stat().st_size > 0:
+        return {"ready": True, "progress": 100, "path": str(out_mask)}
+    prog = _blur_read_progress(cache_dir / f"{safe}.progress.json")
+    try:
+        with open(cache_dir / f"{safe}.progress.json", encoding="utf-8") as f:
+            err = (json.load(f) or {}).get("error")
+    except (OSError, ValueError):
+        err = None
+    if err:
+        return {"ready": False, "progress": 0, "error": str(err)}
+    running = _BLUR_BAKING.get(f"{room_id}/{safe}", False)
+    if not running and prog:
+        return {"ready": False, "progress": int(prog.get("pct") or 0), "stale": True}
+    return {"ready": False, "progress": int(prog.get("pct") or 0),
+            "stage": prog.get("stage"), "running": running}
+
+
+@router.get("/blur-mask/media")
+async def get_blur_mask_media(request: Request, room_id: str = Query(...), key: str = Query(...)):
+    safe = re.sub(r"[^0-9a-f]", "", key)[:16]
+    out_mask = (ASSET_ROOT / room_id / "blur-cache" / f"{safe}.mask.mp4").resolve()
+    if not out_mask.exists():
+        raise HTTPException(status_code=404, detail="mask not found")
+    return _range_file_response(out_mask, request)
+
+
 @router.post("/upload", response_model=ProductionAsset)
 async def upload_asset(
     background_tasks: BackgroundTasks,
