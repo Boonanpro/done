@@ -945,14 +945,14 @@ fn compose(
                     let bs = bt.get("bake_start").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let baid = bt.get("asset_id").and_then(|v| v.as_str()).unwrap_or("");
                     let mpath = doc.rel_path(&format!("blur-cache/{key}.mask.mp4"));
-                    let base_src = doc
+                    let base_info = doc
                         .active_video(t)
                         .0
                         .filter(|b| b.asset_id.as_deref() == Some(baid))
-                        .map(|b| b.src_at(t));
+                        .map(|b| (b.src_at(t), b.display_box(), b.crop_ltrb()));
                     let mask_ok = !key.is_empty()
                         && std::fs::metadata(&mpath).map(|m| m.len() > 0).unwrap_or(false);
-                    if let (Some(src_t), true) = (base_src, mask_ok) {
+                    if let (Some((src_t, bb, bcrop)), true) = (base_info, mask_ok) {
                         let mt = (src_t - bs).max(0.0);
                         if let Ok(vs) = pool.get(d3d, &mpath, 0, false, mt) {
                             let ok = if fast {
@@ -967,7 +967,18 @@ fn compose(
                             };
                             if ok {
                                 let tex = vs.bgra.clone();
-                                if comp.apply_blur_masked(d3d, &tex, cell).is_ok() {
+                                let wh = (vs.width, vs.height);
+                                if comp
+                                    .apply_blur_masked(
+                                        d3d,
+                                        &tex,
+                                        wh,
+                                        (bb.x, bb.y, bb.width, bb.height),
+                                        bcrop,
+                                        cell,
+                                    )
+                                    .is_ok()
+                                {
                                     applied = true;
                                     used.push(mpath);
                                 }
@@ -993,15 +1004,15 @@ fn compose(
             };
             let style = c.style.as_ref().unwrap_or(&serde_json::Value::Null);
             let key = caption_cache_key(c, text, style);
-            let (tex, wh, dst) = if let Some(x) = comp.caption_get(&key) {
-                x
+            let Some((tex, wh, dst, cached_font_size)) = (if let Some(x) = comp.caption_get(&key) {
+                Some(x)
             } else {
                 ensure_caption_texture_from_doc(doc, d3d, comp, c)?;
-                let Some(x) = comp.caption_get(&key) else {
-                    continue;
-                };
-                x
+                comp.caption_get(&key).or_else(|| comp.caption_get_for_clip(&c.id))
+            }) else {
+                continue;
             };
+            let dst = caption_runtime_dst(c, dst, cached_font_size);
             comp.draw_alpha(d3d, &tex, wh, dst)?;
         }
     }
@@ -1044,7 +1055,36 @@ fn py_json(v: &serde_json::Value) -> String {
     }
 }
 
+fn caption_style_num(style: &serde_json::Value, key: &str, default: f64) -> f64 {
+    style.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
+}
+
+fn caption_render_style(style: &serde_json::Value) -> serde_json::Value {
+    let mut design = if style.is_object() { style.clone() } else { serde_json::json!({}) };
+    if let Some(o) = design.as_object_mut() {
+        o.remove("x");
+        o.remove("y");
+    }
+    design
+}
+
 fn caption_cache_key(c: &model::Clip, text: &str, style: &serde_json::Value) -> String {
+    use sha1::{Digest, Sha1};
+    let design = caption_render_style(style);
+    let words = if c.words.is_array() { c.words.clone() } else { serde_json::json!([]) };
+    let spec = serde_json::json!({
+        "w": CANVAS_W,
+        "h": CANVAS_H,
+        "t": text,
+        "d": design,
+        "words": words,
+    });
+    let mut hasher = Sha1::new();
+    hasher.update(py_json(&spec).as_bytes());
+    format!("{:x}", hasher.finalize())[..16].to_string()
+}
+
+fn caption_legacy_cache_key(c: &model::Clip, text: &str, style: &serde_json::Value) -> String {
     use sha1::{Digest, Sha1};
     let design = if style.is_object() { style.clone() } else { serde_json::json!({}) };
     let words = if c.words.is_array() { c.words.clone() } else { serde_json::json!([]) };
@@ -1058,6 +1098,58 @@ fn caption_cache_key(c: &model::Clip, text: &str, style: &serde_json::Value) -> 
     let mut hasher = Sha1::new();
     hasher.update(py_json(&spec).as_bytes());
     format!("{:x}", hasher.finalize())[..16].to_string()
+}
+
+fn caption_runtime_dst(c: &model::Clip, cached_dst: (f64, f64, f64, f64), cached_font_size: f64) -> (f64, f64, f64, f64) {
+    let style = c.style.as_ref().unwrap_or(&serde_json::Value::Null);
+    let y_frac = caption_style_num(style, "y", 0.08).clamp(0.0, 0.92);
+    let x_frac = caption_style_num(style, "x", 0.0);
+    let cur_font = caption_style_num(style, "fontSize", 1.0).max(0.05);
+    let scale = (cur_font / cached_font_size.max(0.05)).clamp(0.25, 4.0);
+    let default_y = 0.08;
+    let (x, y, w, h) = cached_dst;
+    let nw = w * scale;
+    let nh = h * scale;
+    let cx = x + w * 0.5 + x_frac;
+    let bottom = y + h - (y_frac - default_y);
+    let mut out = (cx - nw * 0.5, bottom - nh, nw, nh);
+    if out.2.is_finite() && out.3.is_finite() && out.2 > 0.0 && out.3 > 0.0 {
+        if out.2 <= 1.0 {
+            out.0 = out.0.clamp(0.0, 1.0 - out.2);
+        }
+        if out.3 <= 1.0 {
+            out.1 = out.1.clamp(0.0, 1.0 - out.3);
+        }
+    }
+    out
+}
+
+fn crop_alpha_rgba(rgba: &image::RgbaImage) -> Option<(Vec<u8>, u32, u32, (u32, u32, u32, u32))> {
+    let (w, h) = rgba.dimensions();
+    let (mut min_x, mut min_y) = (w, h);
+    let (mut max_x, mut max_y) = (0u32, 0u32);
+    for y in 0..h {
+        for x in 0..w {
+            if rgba.get_pixel(x, y).0[3] != 0 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    if min_x > max_x || min_y > max_y {
+        return None;
+    }
+    let cw = max_x - min_x + 1;
+    let ch = max_y - min_y + 1;
+    let mut out = vec![0u8; (cw * ch * 4) as usize];
+    for yy in 0..ch {
+        let src = (((min_y + yy) * w + min_x) * 4) as usize;
+        let dst = (yy * cw * 4) as usize;
+        out[dst..dst + (cw * 4) as usize].copy_from_slice(&rgba.as_raw()[src..src + (cw * 4) as usize]);
+    }
+    Some((out, cw, ch, (min_x, min_y, cw, ch)))
 }
 
 fn ensure_caption_texture_from_doc(
@@ -1074,13 +1166,39 @@ fn ensure_caption_texture_from_doc(
     if comp.caption_get(&key).is_some() {
         return Ok(());
     }
-    let png = std::path::Path::new(&doc.asset_dir).join("caption-cache").join(format!("{key}.png"));
+    let cache_dir = std::path::Path::new(&doc.asset_dir).join("caption-cache");
+    let mut png = cache_dir.join(format!("{key}.png"));
+    let mut legacy_positioned = false;
+    if !png.exists() || std::fs::metadata(&png).map(|m| m.len() == 0).unwrap_or(true) {
+        let legacy = caption_legacy_cache_key(c, text, style);
+        let legacy_png = cache_dir.join(format!("{legacy}.png"));
+        if !legacy_png.exists() || std::fs::metadata(&legacy_png).map(|m| m.len() == 0).unwrap_or(true) {
+            return Ok(());
+        }
+        png = legacy_png;
+        legacy_positioned = true;
+    }
     if !png.exists() || std::fs::metadata(&png).map(|m| m.len() == 0).unwrap_or(true) {
         return Ok(());
     }
     let img = image::open(&png)?;
     let rgba = img.to_rgba8();
-    comp.caption_put_rgba(d3d, key, rgba.width(), rgba.height(), rgba.as_raw(), (0.0, 0.0, 1.0, 1.0))
+    let Some((cropped, cw, ch, (x, y, bw, bh))) = crop_alpha_rgba(&rgba) else {
+        return Ok(());
+    };
+    let mut base_dst = (
+        x as f64 / rgba.width() as f64,
+        y as f64 / rgba.height() as f64,
+        bw as f64 / rgba.width() as f64,
+        bh as f64 / rgba.height() as f64,
+    );
+    if legacy_positioned {
+        let y_frac = caption_style_num(style, "y", 0.08).clamp(0.0, 0.92);
+        base_dst.1 += y_frac - 0.08;
+        base_dst.0 -= caption_style_num(style, "x", 0.0);
+    }
+    let font_size = caption_style_num(style, "fontSize", 1.0).max(0.05);
+    comp.caption_put_rgba(d3d, key, &c.id, cw, ch, &cropped, base_dst, font_size)
 }
 
 /// Pre-seek decoders for clips starting soon so entering them costs nothing.
@@ -2819,6 +2937,18 @@ impl App {
         // mask window = the base clip's source range under the effect clip
         let ss = b.src_at(c.timeline_start.max(b.timeline_start));
         let se = b.src_at(c.timeline_end.min(b.timeline_end)).max(ss + 0.1);
+        // the rectangle was drawn in CANVAS space; SAM works on SOURCE pixels — map it
+        // through the inverse of the base clip's cover-crop (aspect mismatch shifted the
+        // box onto the wrong object before this)
+        let dims = self.doc.asset_dims.get(&aid).copied().unwrap_or((0, 0));
+        let bb = b.display_box();
+        let sbox = compositor::canvas_box_to_source(
+            (CANVAS_W, CANVAS_H),
+            dims,
+            (bb.x, bb.y, bb.width, bb.height),
+            b.crop_ltrb(),
+            rg,
+        );
         let room = self.room_id();
         // bind immediately (shows 0%); the cache key arrives async from the POST
         let pending = serde_json::json!({ "asset_id": aid });
@@ -2828,7 +2958,7 @@ impl App {
         let payload = serde_json::json!({
             "room_id": room, "asset_id": aid,
             "source_start": ss, "source_end": se,
-            "box": [rg.0, rg.1, rg.2, rg.3],
+            "box": [sbox.0, sbox.1, sbox.2, sbox.3],
         })
         .to_string();
         let sink = self.blur_bake_results.clone();
@@ -2947,6 +3077,7 @@ impl App {
     fn caption_cache_pass(&mut self) {
         use std::hash::{Hash, Hasher};
         let mut specs: Vec<(String, serde_json::Value)> = Vec::new();
+        let mut missing_cache = false;
         let tracks = self.doc.raw.get(0).and_then(|c| c.get("timeline")).and_then(|t| t.get("sequence")).and_then(|sq| sq.get("tracks")).and_then(|t| t.as_array());
         if let Some(tracks) = tracks {
             for tr in tracks {
@@ -2956,11 +3087,29 @@ impl App {
                         continue;
                     }
                     let id = cl.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let design = caption_render_style(cl.get("style").unwrap_or(&serde_json::Value::Null));
                     let spec = serde_json::json!({
                         "text": text,
-                        "design": cl.get("style").cloned().unwrap_or(serde_json::json!({})),
+                        "design": design,
                         "words": cl.get("words").cloned().unwrap_or(serde_json::json!([])),
                     });
+                    let key_src = serde_json::json!({
+                        "w": CANVAS_W,
+                        "h": CANVAS_H,
+                        "t": text,
+                        "d": spec.get("design").cloned().unwrap_or_else(|| serde_json::json!({})),
+                        "words": spec.get("words").cloned().unwrap_or_else(|| serde_json::json!([])),
+                    });
+                    let key = {
+                        use sha1::{Digest, Sha1};
+                        let mut hasher = Sha1::new();
+                        hasher.update(py_json(&key_src).as_bytes());
+                        format!("{:x}", hasher.finalize())[..16].to_string()
+                    };
+                    let png = std::path::Path::new(&self.doc.asset_dir).join("caption-cache").join(format!("{key}.png"));
+                    if !png.exists() || std::fs::metadata(&png).map(|m| m.len() == 0).unwrap_or(true) {
+                        missing_cache = true;
+                    }
                     specs.push((id, spec));
                 }
             }
@@ -2971,8 +3120,23 @@ impl App {
             sp.to_string().hash(&mut h);
         }
         let sig = h.finish();
-        if sig == self.cap_sig || specs.is_empty() {
+        if specs.is_empty() {
             return;
+        }
+        if sig == self.cap_sig {
+            if !missing_cache {
+                return;
+            }
+            let retry_key = "__caption_cache_retry__".to_string();
+            if self
+                .cap_probe
+                .get(&retry_key)
+                .map(|t| t.elapsed().as_secs_f32() < 2.5)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            self.cap_probe.insert(retry_key, Instant::now());
         }
         self.cap_sig = sig;
         self.cap_req_ids = specs.iter().map(|(id, _)| id.clone()).collect();
@@ -3529,7 +3693,10 @@ impl App {
         let same_media = selected
             .iter()
             .all(|(c, k)| k != "audio" && c.asset_id.is_some() && c.text.is_none() && c.region.is_none());
-        if multi && !same_media {
+        let same_caption = selected
+            .iter()
+            .all(|(c, k)| k == "caption" || (c.text.is_some() && c.asset_id.is_none() && c.region.is_none()));
+        if multi && !same_media && !same_caption {
             return;
         }
         let (clip, kind) = selected[0].clone();
@@ -3637,7 +3804,8 @@ impl App {
                     return;
                 }
                 // ---- caption: edit the text right here ----
-                if !multi && clip.text.is_some() && clip.asset_id.is_none() {
+                if clip.text.is_some() && clip.asset_id.is_none() {
+                    if !multi {
                     if self.insp_for != id {
                         self.insp_for = id.clone();
                         self.insp_text = clip.text.clone().unwrap_or_default();
@@ -3657,6 +3825,9 @@ impl App {
                         self.apply_edit(false, move |raw| edits::set_text(raw, &cid, &txt));
                         self.push_req(false);
                     }
+                    } else {
+                        ui.label(egui::RichText::new(format!("{} captions", selected.len())).weak().small());
+                    }
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("デザイン").strong());
                     let style = clip.style.clone().unwrap_or_else(|| serde_json::json!({}));
@@ -3664,7 +3835,7 @@ impl App {
                     let y_pos = style.get("y").and_then(|v| v.as_f64()).unwrap_or(0.14);
                     let outline = style.get("outlineWidth").and_then(|v| v.as_f64()).unwrap_or(1.25);
                     if ui.button("白文字・黒フチ・ゴシック").clicked() {
-                        let ids = vec![id.clone()];
+                        let ids = edit_ids.clone();
                         let patch = serde_json::json!({
                             "font": "noto-sans", "color": "#ffffff", "outlineColor": "#000000",
                             "outlineWidth": 1.65, "fontSize": font_size, "y": y_pos,
@@ -3677,21 +3848,21 @@ impl App {
                     }
                     let mut fs = font_size;
                     if ui.add(egui::Slider::new(&mut fs, 0.6..=2.2).text("大きさ")).changed() {
-                        let ids = vec![id.clone()];
+                        let ids = edit_ids.clone();
                         let patch = serde_json::json!({"fontSize": (fs * 100.0).round() / 100.0});
                         self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                         self.push_req(false);
                     }
                     let mut yv = y_pos;
                     if ui.add(egui::Slider::new(&mut yv, 0.0..=0.92).text("上下")).changed() {
-                        let ids = vec![id.clone()];
+                        let ids = edit_ids.clone();
                         let patch = serde_json::json!({"y": (yv * 100.0).round() / 100.0});
                         self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                         self.push_req(false);
                     }
                     let mut ow = outline;
                     if ui.add(egui::Slider::new(&mut ow, 0.0..=3.0).text("フチ")).changed() {
-                        let ids = vec![id.clone()];
+                        let ids = edit_ids.clone();
                         let patch = serde_json::json!({"outlineWidth": (ow * 100.0).round() / 100.0});
                         self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                         self.push_req(false);
@@ -4541,7 +4712,8 @@ impl App {
     }
 
     fn timeline_ui(&mut self, ui: &mut egui::Ui) {
-        const GUTTER: f32 = 112.0; // lane headers (number + lock/eye/mute/solo/magnet icons)
+        const NEW_TOP_LANE: usize = usize::MAX;
+        const GUTTER: f32 = 112.0; // lane headers (lock/eye/mute/solo/magnet icons)
         const BOTTOM: f32 = 24.0; // zoom slider + scrollbar
         let h = ui.available_height() - BOTTOM;
         let w = ui.available_width();
@@ -4621,18 +4793,6 @@ impl App {
             .filter(|&i| self.doc.seq.tracks[i].kind == "audio")
             .collect();
         let order: Vec<usize> = visual.into_iter().chain(audio).collect();
-        let mut lane_labels: std::collections::HashMap<usize, String> = Default::default();
-        let mut visual_no = 1usize;
-        let mut audio_no = 1usize;
-        for &i in &order {
-            if self.doc.seq.tracks[i].kind == "audio" {
-                lane_labels.insert(i, format!("A{audio_no}"));
-                audio_no += 1;
-            } else {
-                lane_labels.insert(i, visual_no.to_string());
-                visual_no += 1;
-            }
-        }
         let kind_h = |kind: &str| match kind {
             "video" => 54.0f32,
             "overlay" => 46.0,
@@ -4654,6 +4814,12 @@ impl App {
         }
         let mut clips_drawn = 0usize;
         let mut hits: Vec<(egui::Rect, String)> = Vec::new();
+        let new_top_drop = lane_tops.first().map(|&(_, y0, _)| {
+            egui::Rect::from_min_max(
+                egui::pos2(body.left(), (y0 - 18.0).max(body.top() + ruler_h)),
+                egui::pos2(body.right(), y0),
+            )
+        });
         // Filmora-style unified A/V clips: audio linked to a video/overlay clip is DRAWN
         // as part of that clip (waveform strip along its bottom) instead of duplicating a
         // clip on the audio lane. Standalone audio (BGM etc.) stays on the audio lane.
@@ -4703,15 +4869,8 @@ impl App {
                     egui::Color32::from_rgba_unmultiplied(120, 170, 255, 22),
                 );
             }
-            // lane header: layer number + standard NLE toggles (lock / eye / mute / solo,
+            // lane header: standard NLE toggles (lock / eye / mute / solo,
             // magnet on the main video lane). Lanes still have no fixed roles.
-            p.text(
-                egui::pos2(rect.left() + 4.0, y0 + lane_h * 0.5),
-                egui::Align2::LEFT_CENTER,
-                lane_labels.get(&ti).cloned().unwrap_or_else(|| (ti + 1).to_string()),
-                egui::FontId::proportional(11.0),
-                egui::Color32::from_gray(140),
-            );
             {
                 let is_audio = tr.kind == "audio";
                 let magnet_here = !is_audio
@@ -4727,7 +4886,7 @@ impl App {
                 if magnet_here {
                     icons.push(("magnet", "磁", self.doc.is_magnet(ti)));
                 }
-                let mut x = rect.left() + 24.0;
+                let mut x = rect.left() + 4.0;
                 for (key, glyph, on) in icons {
                     let r = egui::Rect::from_min_size(
                         egui::pos2(x, y0 + lane_h * 0.5 - 9.0),
@@ -5067,6 +5226,16 @@ impl App {
             }
         }
 
+        if self.hover_lane == Some(NEW_TOP_LANE) && matches!(self.drag, Drag::Move { .. }) {
+            if let Some(r) = new_top_drop {
+                p.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(120, 170, 255, 34));
+                p.line_segment(
+                    [egui::pos2(r.left(), r.bottom()), egui::pos2(r.right(), r.bottom())],
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 180, 255)),
+                );
+            }
+        }
+
         let hx = body.left() + (self.t as f32) * self.pps - self.scroll_x;
         if hx >= body.left() && hx <= body.right() {
             p.line_segment(
@@ -5282,11 +5451,30 @@ impl App {
                     }
                     Drag::Move { ids, grab, orig, applied } => {
                         // vertical: the clip FOLLOWS the pointer's lane live (not on release)
-                        self.hover_lane = lane_tops
-                            .iter()
-                            .find(|&&(_, y0, lh)| pos.y >= y0 && pos.y <= y0 + lh)
-                            .map(|&(ti, _, _)| ti);
+                        self.hover_lane = if new_top_drop.map(|r| r.contains(pos)).unwrap_or(false) {
+                            Some(NEW_TOP_LANE)
+                        } else {
+                            lane_tops
+                                .iter()
+                                .find(|&&(_, y0, lh)| pos.y >= y0 && pos.y <= y0 + lh)
+                                .map(|&(ti, _, _)| ti)
+                        };
                         if let Some(target) = self.hover_lane {
+                            if target == NEW_TOP_LANE {
+                                let vids: Vec<String> = self
+                                    .doc
+                                    .seq
+                                    .tracks
+                                    .iter()
+                                    .filter(|tr| tr.kind != "audio")
+                                    .flat_map(|tr| tr.clips.iter())
+                                    .filter(|c| ids.contains(&c.id))
+                                    .map(|c| c.id.clone())
+                                    .collect();
+                                if !vids.is_empty() {
+                                    self.apply_edit(false, move |raw| edits::move_to_new_top_track(raw, &vids));
+                                }
+                            } else {
                             let tk_ok = self
                                 .doc
                                 .seq
@@ -5315,6 +5503,7 @@ impl App {
                                 if !vids.is_empty() {
                                     self.apply_edit(false, move |raw| edits::move_to_track(raw, &vids, target));
                                 }
+                            }
                             }
                         }
                         let raw_t = orig + (to_t(self.scroll_x, self.pps, pos.x) - grab);

@@ -13,6 +13,8 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 
 use crate::media::D3d;
 
+pub type CaptionTex = (ID3D11Texture2D, (u32, u32), (f64, f64, f64, f64), f64);
+
 const HLSL: &str = r#"
 cbuffer CB : register(b0) { float4 dst; float4 uvr; float4 aff; };
 struct VOut { float4 pos: SV_Position; float2 uv: TEXCOORD0; };
@@ -54,15 +56,18 @@ float4 ps_mosaic(VOut i) : SV_Target {
   float2 fuv = uvr.xy + (cell + 0.5 / max(aff.xy, 1.0)) * uvr.zw;
   return float4(tex0.Sample(smp, fuv).rgb, 1.0);
 }
-// SAM tracked blur: full-canvas pass. t0 = canvas scratch copy, t1 = the baked mask
-// video frame (blur weight in luma; feathered edges arrive as gray). aff.xy = pixelate
-// cell counts. Pixels keep the canvas color where the mask is 0 — one draw, no branches.
+// SAM tracked blur: quad over the BASE clip's dest box. t0 = canvas scratch copy,
+// t1 = the baked mask video frame (SOURCE-frame space; blur weight in luma). uv (via
+// uvr) walks the source/mask cover-crop window — the same mapping the base draw used —
+// while the canvas is sampled by pixel position (aff.zw = canvas size). aff.xy =
+// pixelate cell counts. Where the mask is 0 the canvas color passes through unchanged.
 float4 ps_blur_masked(VOut i) : SV_Target {
   float m = tex1.Sample(smp, i.uv).r;
-  float2 cell = floor(i.uv * aff.xy) / max(aff.xy, 1.0);
+  float2 cuv = i.pos.xy / aff.zw;
+  float2 cell = floor(cuv * aff.xy) / max(aff.xy, 1.0);
   float2 fuv = (cell + 0.5 / max(aff.xy, 1.0));
   float3 blurc = tex0.Sample(smp, fuv).rgb;
-  float3 base = tex0.Sample(smp, i.uv).rgb;
+  float3 base = tex0.Sample(smp, cuv).rgb;
   return float4(lerp(base, blurc, saturate(m)), 1.0);
 }
 float4 ps_popout_live(VOut i) : SV_Target {
@@ -193,7 +198,8 @@ pub struct Compositor {
     // ping-pong decoder instances with its neighbours (measured as stutter around the
     // freeze) — one decode, one copy, zero pool traffic afterwards.
     stills: std::cell::RefCell<std::collections::HashMap<(String, i64), (ID3D11Texture2D, (u32, u32))>>,
-    caption_stills: std::cell::RefCell<std::collections::HashMap<String, (ID3D11Texture2D, (u32, u32), (f64, f64, f64, f64))>>,
+    caption_stills: std::cell::RefCell<std::collections::HashMap<String, CaptionTex>>,
+    caption_by_clip: std::cell::RefCell<std::collections::HashMap<String, String>>,
     cb: ID3D11Buffer,
     sampler: ID3D11SamplerState,
     blend: ID3D11BlendState,
@@ -309,6 +315,7 @@ impl Compositor {
                 scratch: std::cell::RefCell::new(None),
                 stills: std::cell::RefCell::new(Default::default()),
                 caption_stills: std::cell::RefCell::new(Default::default()),
+                caption_by_clip: std::cell::RefCell::new(Default::default()),
                 cb: cb.unwrap(),
                 sampler: sampler.unwrap(),
                 blend: blend.unwrap(),
@@ -604,11 +611,20 @@ impl Compositor {
         }
     }
 
-    /// SAM tracked blur: one full-canvas pass mixing the canvas with its pixelated copy,
-    /// weighted per pixel by the baked mask video frame (255 = fully blurred). The mask
-    /// covers the base clip's SOURCE frame; for the (v1) full-frame base clip that space
-    /// equals canvas space, so both are sampled with the same uv.
-    pub fn apply_blur_masked(&self, d3d: &D3d, mask: &ID3D11Texture2D, cell_px: f64) -> Result<()> {
+    /// SAM tracked blur over the base clip's area: mixes the canvas with its pixelated
+    /// copy, weighted per pixel by the baked mask video frame (255 = fully blurred).
+    /// The mask lives in the base clip's SOURCE-frame space, so the quad re-derives the
+    /// same cover-crop uv window the base draw used (`mask_wh` carries the source aspect;
+    /// `dst`/`crop` are the base clip's display box and crop).
+    pub fn apply_blur_masked(
+        &self,
+        d3d: &D3d,
+        mask: &ID3D11Texture2D,
+        mask_wh: (u32, u32),
+        dst: (f64, f64, f64, f64),
+        crop: Option<(f64, f64, f64, f64)>,
+        cell_px: f64,
+    ) -> Result<()> {
         unsafe {
             {
                 let mut sc = self.scratch.borrow_mut();
@@ -631,12 +647,42 @@ impl Compositor {
             d3d.device.CreateShaderResourceView(scratch, None, Some(&mut srv0))?;
             let mut srv1: Option<ID3D11ShaderResourceView> = None;
             d3d.device.CreateShaderResourceView(mask, None, Some(&mut srv1))?;
+            // identical cover-crop window math to draw_with_shader (the base clip's draw)
+            let mut dst = dst;
+            let (mut u0, mut v0, mut uw, mut vh) = (0.0f32, 0.0f32, 1.0f32, 1.0f32);
+            let box_px_w = dst.2 * self.width as f64;
+            let box_px_h = dst.3 * self.height as f64;
+            if box_px_w > 1.0 && box_px_h > 1.0 {
+                let sa = mask_wh.0 as f64 / mask_wh.1 as f64;
+                let da = box_px_w / box_px_h;
+                if sa > da {
+                    let keep = da / sa;
+                    u0 = ((1.0 - keep) / 2.0) as f32;
+                    uw = keep as f32;
+                } else {
+                    let keep = sa / da;
+                    v0 = ((1.0 - keep) / 2.0) as f32;
+                    vh = keep as f32;
+                }
+            }
+            if let Some((l, t, r, b)) = crop {
+                u0 += uw * l as f32;
+                v0 += vh * t as f32;
+                uw *= (1.0 - l - r).max(0.02) as f32;
+                vh *= (1.0 - t - b).max(0.02) as f32;
+                dst = (
+                    dst.0 + dst.2 * l,
+                    dst.1 + dst.3 * t,
+                    dst.2 * (1.0 - l - r).max(0.02),
+                    dst.3 * (1.0 - t - b).max(0.02),
+                );
+            }
             let cells_x = (self.width as f64 / cell_px).max(2.0) as f32;
             let cells_y = (self.height as f64 / cell_px).max(2.0) as f32;
             let cbv = Cb {
-                dst: [0.0, 0.0, 1.0, 1.0],
-                uvr: [0.0, 0.0, 1.0, 1.0],
-                aff: [cells_x, cells_y, 0.0, 0.0],
+                dst: [dst.0 as f32, dst.1 as f32, dst.2 as f32, dst.3 as f32],
+                uvr: [u0, v0, uw, vh],
+                aff: [cells_x, cells_y, self.width as f32, self.height as f32],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv0, srv1]));
@@ -646,6 +692,57 @@ impl Compositor {
         }
     }
 
+}
+
+/// Map a CANVAS-space box into the base clip's SOURCE-frame space (inverse of the
+/// cover-crop mapping in draw_with_shader) — used to hand the user's drawn rectangle
+/// to the SAM bake, which works on source pixels. Returns (x, y, w, h) normalized.
+pub fn canvas_box_to_source(
+    canvas_wh: (u32, u32),
+    src_wh: (u32, u32),
+    dst: (f64, f64, f64, f64),
+    crop: Option<(f64, f64, f64, f64)>,
+    canvas_box: (f64, f64, f64, f64),
+) -> (f64, f64, f64, f64) {
+    {
+        let mut dst = dst;
+        let (mut u0, mut v0, mut uw, mut vh) = (0.0f64, 0.0f64, 1.0f64, 1.0f64);
+        let box_px_w = dst.2 * canvas_wh.0 as f64;
+        let box_px_h = dst.3 * canvas_wh.1 as f64;
+        if box_px_w > 1.0 && box_px_h > 1.0 && src_wh.0 > 0 && src_wh.1 > 0 {
+            let sa = src_wh.0 as f64 / src_wh.1 as f64;
+            let da = box_px_w / box_px_h;
+            if sa > da {
+                uw = da / sa;
+                u0 = (1.0 - uw) / 2.0;
+            } else {
+                vh = sa / da;
+                v0 = (1.0 - vh) / 2.0;
+            }
+        }
+        if let Some((l, t, r, b)) = crop {
+            u0 += uw * l;
+            v0 += vh * t;
+            uw *= (1.0 - l - r).max(0.02);
+            vh *= (1.0 - t - b).max(0.02);
+            dst = (
+                dst.0 + dst.2 * l,
+                dst.1 + dst.3 * t,
+                dst.2 * (1.0 - l - r).max(0.02),
+                dst.3 * (1.0 - t - b).max(0.02),
+            );
+        }
+        let fx = |cx: f64| u0 + ((cx - dst.0) / dst.2.max(1e-6)) * uw;
+        let fy = |cy: f64| v0 + ((cy - dst.1) / dst.3.max(1e-6)) * vh;
+        let x0 = fx(canvas_box.0).clamp(0.0, 1.0);
+        let y0 = fy(canvas_box.1).clamp(0.0, 1.0);
+        let x1 = fx(canvas_box.0 + canvas_box.2).clamp(0.0, 1.0);
+        let y1 = fy(canvas_box.1 + canvas_box.3).clamp(0.0, 1.0);
+        ((x0), (y0), (x1 - x0).max(0.005), (y1 - y0).max(0.005))
+    }
+}
+
+impl Compositor {
     /// Build a still texture directly from CPU RGBA pixels (a decoded PNG) — the
     /// deterministic path: no video decoder involved at all.
     pub fn still_put_rgba(
@@ -698,18 +795,25 @@ impl Compositor {
         self.stills.borrow().get(key).cloned()
     }
 
-    pub fn caption_get(&self, key: &str) -> Option<(ID3D11Texture2D, (u32, u32), (f64, f64, f64, f64))> {
+    pub fn caption_get(&self, key: &str) -> Option<CaptionTex> {
         self.caption_stills.borrow().get(key).cloned()
+    }
+
+    pub fn caption_get_for_clip(&self, clip_id: &str) -> Option<CaptionTex> {
+        let key = self.caption_by_clip.borrow().get(clip_id).cloned()?;
+        self.caption_get(&key)
     }
 
     pub fn caption_put_rgba(
         &self,
         d3d: &D3d,
         key: String,
+        clip_id: &str,
         w: u32,
         h: u32,
         rgba: &[u8],
         dst: (f64, f64, f64, f64),
+        font_size: f64,
     ) -> Result<()> {
         unsafe {
             let mut bgra = rgba.to_vec();
@@ -741,7 +845,8 @@ impl Compositor {
                     caps.remove(&k);
                 }
             }
-            caps.insert(key, (tex.unwrap(), (w, h), dst));
+            caps.insert(key.clone(), (tex.unwrap(), (w, h), dst, font_size));
+            self.caption_by_clip.borrow_mut().insert(clip_id.to_string(), key);
             Ok(())
         }
     }

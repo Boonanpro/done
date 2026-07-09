@@ -1412,6 +1412,67 @@ pub fn move_to_track(raw: &mut serde_json::Value, ids: &[String], target: usize)
 }
 
 /// Set a clip's display position (canvas fractions) — the preview inspector drag.
+pub fn move_to_new_top_track(raw: &mut serde_json::Value, ids: &[String]) {
+    let Some(tracks) = raw
+        .get_mut(0)
+        .and_then(|r| r.get_mut("timeline"))
+        .and_then(|x| x.get_mut("sequence"))
+        .and_then(|x| x.get_mut("tracks"))
+        .and_then(|x| x.as_array_mut())
+    else {
+        return;
+    };
+    let mut moved: Vec<serde_json::Value> = Vec::new();
+    let mut lane_kind: Option<String> = None;
+    let mut src_track: Option<usize> = None;
+    for (ti, tr) in tracks.iter_mut().enumerate() {
+        let tkind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if tkind == "audio" {
+            continue;
+        }
+        if let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) {
+            let mut i = 0;
+            while i < clips.len() {
+                let id = clips[i].get("id").and_then(|v| v.as_str()).unwrap_or("");
+                if ids.iter().any(|x| x == id) {
+                    if lane_kind.is_none() {
+                        lane_kind = Some(tkind.clone());
+                        src_track = Some(ti);
+                    }
+                    moved.push(clips.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    if moved.is_empty() {
+        return;
+    }
+    let front = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, tr)| tr.get("type").and_then(|v| v.as_str()) != Some("audio"))
+        .map(|(i, _)| i)
+        .max();
+    if src_track == front {
+        if let Some(ti) = src_track {
+            if let Some(arr) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
+                arr.extend(moved);
+            }
+        }
+        return;
+    }
+    let tkind = lane_kind.unwrap_or_else(|| "overlay".to_string());
+    for c in &mut moved {
+        if let Some(o) = c.as_object_mut() {
+            o.insert("track".into(), serde_json::json!(tkind));
+        }
+    }
+    let insert_at = front.map(|i| i + 1).unwrap_or(tracks.len());
+    tracks.insert(insert_at, serde_json::json!({"type": tkind, "clips": moved}));
+}
+
 pub fn set_position(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f64, h: f64) {
     set_position_many(raw, &[id.to_string()], x, y, w, h);
 }

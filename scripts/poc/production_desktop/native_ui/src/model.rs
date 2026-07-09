@@ -233,6 +233,9 @@ pub struct Doc {
     /// asset_id -> ORIGINAL file path (from assets.json local_path), when it exists on disk.
     pub originals: std::collections::HashMap<String, String>,
     pub asset_names: std::collections::HashMap<String, String>,
+    /// asset_id -> source pixel dimensions (from assets.json metadata) — used to map
+    /// canvas-space rectangles into source-frame space for the SAM blur bake.
+    pub asset_dims: std::collections::HashMap<String, (u32, u32)>,
 }
 
 impl Doc {
@@ -255,6 +258,7 @@ impl Doc {
         // falling back to the proxy when the original is missing
         let mut originals = std::collections::HashMap::new();
         let mut asset_names = std::collections::HashMap::new();
+        let mut asset_dims = std::collections::HashMap::new();
         if let Ok(txt) = std::fs::read_to_string(format!("{dir}/assets.json")) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
                 for a in v.as_array().cloned().unwrap_or_default() {
@@ -265,6 +269,14 @@ impl Doc {
                     ) {
                         asset_names.insert(id.to_string(), name.to_string());
                     }
+                    if let Some(id) = id {
+                        let m = a.get("metadata");
+                        let g = |k: &str| m.and_then(|m| m.get(k)).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                        let (w, h) = (g("width"), g("height"));
+                        if w > 0 && h > 0 {
+                            asset_dims.insert(id.to_string(), (w, h));
+                        }
+                    }
                     let lp = a.get("local_path").and_then(|x| x.as_str());
                     if let (Some(id), Some(lp)) = (id, lp) {
                         if std::path::Path::new(lp).exists() {
@@ -274,7 +286,7 @@ impl Doc {
                 }
             }
         }
-        Ok(Self { raw, contents_path: contents_path.to_string(), seq, asset_dir: dir, originals, asset_names })
+        Ok(Self { raw, contents_path: contents_path.to_string(), seq, asset_dir: dir, originals, asset_names, asset_dims })
     }
 
     /// Best source for QUALITY (original when available) vs SPEED (proxy: small, short GOP).
