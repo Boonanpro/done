@@ -51,24 +51,55 @@ float4 ps_popout(VOut i) : SV_Target {
 // steps are popout_overlay.py's, evaluated per pixel. uv = bake canvas space;
 // aff = (src0.xy, srcsize.zw) maps canvas uv -> original uv.
 float4 ps_mosaic(VOut i) : SV_Target {
-  // aff.xy = mosaic cell counts; uv is the REGION-local 0..1, uvr maps into the frame
-  float2 cell = floor(i.uv * aff.xy) / max(aff.xy, 1.0);
+  // i.uv is FRAME-space (uvr window applied by the VS) — convert to region-local before
+  // quantizing, then map back. Quantizing frame-space uv directly re-applied the uvr
+  // window twice and showed a ZOOMED sub-window of the region instead of a mosaic.
+  float2 local = (i.uv - uvr.xy) / max(uvr.zw, 1e-6);
+  float2 cell = floor(local * aff.xy) / max(aff.xy, 1.0);
   float2 fuv = uvr.xy + (cell + 0.5 / max(aff.xy, 1.0)) * uvr.zw;
   return float4(tex0.Sample(smp, fuv).rgb, 1.0);
+}
+// Soft blur: 13-tap poisson disk over the canvas scratch — a smooth haze rather than a
+// hard pixel grid. aff.xy = blur radius in CANVAS uv units (x, y).
+float3 soft_blur(float2 cuv, float2 r) {
+  static const float2 taps[12] = {
+    float2(-0.326,-0.406), float2(-0.840,-0.074), float2(-0.696, 0.457),
+    float2(-0.203, 0.621), float2( 0.962,-0.195), float2( 0.473,-0.480),
+    float2( 0.519, 0.767), float2( 0.185,-0.893), float2( 0.507, 0.064),
+    float2( 0.896, 0.412), float2(-0.322,-0.933), float2(-0.792,-0.598)
+  };
+  float3 acc = tex0.Sample(smp, cuv).rgb;
+  [unroll] for (int k = 0; k < 12; k++) {
+    acc += tex0.Sample(smp, cuv + taps[k] * r).rgb;         // outer ring
+    acc += tex0.Sample(smp, cuv + taps[k] * r * 0.45).rgb;  // inner ring
+  }
+  return acc / 25.0;
 }
 // SAM tracked blur: quad over the BASE clip's dest box. t0 = canvas scratch copy,
 // t1 = the baked mask video frame (SOURCE-frame space; blur weight in luma). uv (via
 // uvr) walks the source/mask cover-crop window — the same mapping the base draw used —
-// while the canvas is sampled by pixel position (aff.zw = canvas size). aff.xy =
-// pixelate cell counts. Where the mask is 0 the canvas color passes through unchanged.
+// while the canvas is sampled by pixel position (aff.zw = canvas size).
 float4 ps_blur_masked(VOut i) : SV_Target {
   float m = tex1.Sample(smp, i.uv).r;
   float2 cuv = i.pos.xy / aff.zw;
-  float2 cell = floor(cuv * aff.xy) / max(aff.xy, 1.0);
-  float2 fuv = (cell + 0.5 / max(aff.xy, 1.0));
-  float3 blurc = tex0.Sample(smp, fuv).rgb;
   float3 base = tex0.Sample(smp, cuv).rgb;
+  if (m < 0.004) return float4(base, 1.0);
+  float3 blurc = soft_blur(cuv, aff.xy);
   return float4(lerp(base, blurc, saturate(m)), 1.0);
+}
+// Static-rectangle soft blur (the un-baked stand-in and the "gaussian" style preview):
+// same haze, gated to the region quad, with the strength FADING OUT toward the edges
+// (dst carries the region) — a soft cloud, never a hard-edged box.
+float4 ps_blur_rect(VOut i) : SV_Target {
+  float2 cuv = i.pos.xy / aff.zw;
+  float2 local = (cuv - dst.xy) / max(dst.zw, 1e-6);
+  float2 e = min(local, 1.0 - local);            // distance to the nearest edge (0..0.5)
+  float fe = 0.22;                                // feather width as a fraction of the box
+  float m = smoothstep(0.0, fe, e.x) * smoothstep(0.0, fe, e.y);
+  float3 base = tex0.Sample(smp, cuv).rgb;
+  if (m < 0.004) return float4(base, 1.0);
+  float3 blurc = soft_blur(cuv, aff.xy);
+  return float4(lerp(base, blurc, m), 1.0);
 }
 float4 ps_popout_live(VOut i) : SV_Target {
   float3 msk = tex3.Sample(smp, i.uv).rgb;
@@ -192,6 +223,7 @@ pub struct Compositor {
     ps_popout_live: ID3D11PixelShader,
     ps_mosaic: ID3D11PixelShader,
     ps_blur_masked: ID3D11PixelShader,
+    ps_blur_rect: ID3D11PixelShader,
     scratch: std::cell::RefCell<Option<ID3D11Texture2D>>,
     // freeze-frame stills: (source path, src ms) -> a private copy of the decoded frame.
     // A freeze clip re-requesting the SAME source time every frame kept fighting the
@@ -250,6 +282,9 @@ impl Compositor {
             let psb5 = compile("ps_blur_masked", "ps_5_0")?;
             let mut ps_blur_masked: Option<ID3D11PixelShader> = None;
             d3d.device.CreatePixelShader(bytes(&psb5), None, Some(&mut ps_blur_masked))?;
+            let psb6 = compile("ps_blur_rect", "ps_5_0")?;
+            let mut ps_blur_rect: Option<ID3D11PixelShader> = None;
+            d3d.device.CreatePixelShader(bytes(&psb6), None, Some(&mut ps_blur_rect))?;
             let mut vs: Option<ID3D11VertexShader> = None;
             d3d.device.CreateVertexShader(bytes(&vsb), None, Some(&mut vs))?;
             let mut ps_plain: Option<ID3D11PixelShader> = None;
@@ -312,6 +347,7 @@ impl Compositor {
                 ps_popout_live: ps_popout_live.unwrap(),
                 ps_mosaic: ps_mosaic.unwrap(),
                 ps_blur_masked: ps_blur_masked.unwrap(),
+                ps_blur_rect: ps_blur_rect.unwrap(),
                 scratch: std::cell::RefCell::new(None),
                 stills: std::cell::RefCell::new(Default::default()),
                 caption_stills: std::cell::RefCell::new(Default::default()),
@@ -677,16 +713,62 @@ impl Compositor {
                     dst.3 * (1.0 - t - b).max(0.02),
                 );
             }
-            let cells_x = (self.width as f64 / cell_px).max(2.0) as f32;
-            let cells_y = (self.height as f64 / cell_px).max(2.0) as f32;
             let cbv = Cb {
                 dst: [dst.0 as f32, dst.1 as f32, dst.2 as f32, dst.3 as f32],
                 uvr: [u0, v0, uw, vh],
-                aff: [cells_x, cells_y, self.width as f32, self.height as f32],
+                // aff.xy = soft-blur radius in canvas uv, aff.zw = canvas pixel size
+                aff: [
+                    (cell_px / self.width as f64) as f32,
+                    (cell_px / self.height as f64) as f32,
+                    self.width as f32,
+                    self.height as f32,
+                ],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv0, srv1]));
             d3d.ctx.PSSetShader(&self.ps_blur_masked, None);
+            d3d.ctx.Draw(4, 0);
+            Ok(())
+        }
+    }
+
+    /// Static-rectangle SOFT blur (the un-baked stand-in / "gaussian" style): same haze
+    /// as the tracked path, gated to the drawn region.
+    pub fn apply_blur_rect(&self, d3d: &D3d, region: (f64, f64, f64, f64), radius_px: f64) -> Result<()> {
+        unsafe {
+            {
+                let mut sc = self.scratch.borrow_mut();
+                if sc.is_none() {
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    self.canvas.GetDesc(&mut desc);
+                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
+                    desc.Usage = D3D11_USAGE_DEFAULT;
+                    desc.CPUAccessFlags = 0;
+                    desc.MiscFlags = 0;
+                    let mut t: Option<ID3D11Texture2D> = None;
+                    d3d.device.CreateTexture2D(&desc, None, Some(&mut t))?;
+                    *sc = t;
+                }
+                d3d.ctx.CopyResource(sc.as_ref().unwrap(), &self.canvas);
+            }
+            let sc = self.scratch.borrow();
+            let scratch = sc.as_ref().unwrap();
+            let mut srv: Option<ID3D11ShaderResourceView> = None;
+            d3d.device.CreateShaderResourceView(scratch, None, Some(&mut srv))?;
+            let (x, y, w, h) = region;
+            let cbv = Cb {
+                dst: [x as f32, y as f32, w as f32, h as f32],
+                uvr: [x as f32, y as f32, w as f32, h as f32],
+                aff: [
+                    (radius_px / self.width as f64) as f32,
+                    (radius_px / self.height as f64) as f32,
+                    self.width as f32,
+                    self.height as f32,
+                ],
+            };
+            d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
+            d3d.ctx.PSSetShaderResources(0, Some(&[srv]));
+            d3d.ctx.PSSetShader(&self.ps_blur_rect, None);
             d3d.ctx.Draw(4, 0);
             Ok(())
         }

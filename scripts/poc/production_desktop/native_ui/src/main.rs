@@ -19,6 +19,7 @@ mod model;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use eframe::egui;
@@ -1059,6 +1060,11 @@ fn caption_style_num(style: &serde_json::Value, key: &str, default: f64) -> f64 
     style.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
 }
 
+fn caption_fallbacks() -> &'static Mutex<std::collections::HashMap<String, (String, f64)>> {
+    static FALLBACKS: OnceLock<Mutex<std::collections::HashMap<String, (String, f64)>>> = OnceLock::new();
+    FALLBACKS.get_or_init(|| Mutex::new(Default::default()))
+}
+
 fn caption_render_style(style: &serde_json::Value) -> serde_json::Value {
     let mut design = if style.is_object() { style.clone() } else { serde_json::json!({}) };
     if let Some(o) = design.as_object_mut() {
@@ -1173,6 +1179,36 @@ fn ensure_caption_texture_from_doc(
         let legacy = caption_legacy_cache_key(c, text, style);
         let legacy_png = cache_dir.join(format!("{legacy}.png"));
         if !legacy_png.exists() || std::fs::metadata(&legacy_png).map(|m| m.len() == 0).unwrap_or(true) {
+            if let Some((fallback_key, fallback_font_size)) = caption_fallbacks()
+                .lock()
+                .ok()
+                .and_then(|m| m.get(&c.id).cloned())
+            {
+                let fallback_png = cache_dir.join(format!("{fallback_key}.png"));
+                if fallback_png.exists() && std::fs::metadata(&fallback_png).map(|m| m.len() > 0).unwrap_or(false) {
+                    let img = image::open(&fallback_png)?;
+                    let rgba = img.to_rgba8();
+                    let Some((cropped, cw, ch, (x, y, bw, bh))) = crop_alpha_rgba(&rgba) else {
+                        return Ok(());
+                    };
+                    let base_dst = (
+                        x as f64 / rgba.width() as f64,
+                        y as f64 / rgba.height() as f64,
+                        bw as f64 / rgba.width() as f64,
+                        bh as f64 / rgba.height() as f64,
+                    );
+                    return comp.caption_put_rgba(
+                        d3d,
+                        fallback_key,
+                        &c.id,
+                        cw,
+                        ch,
+                        &cropped,
+                        base_dst,
+                        fallback_font_size.max(0.05),
+                    );
+                }
+            }
             return Ok(());
         }
         png = legacy_png;
@@ -3071,6 +3107,30 @@ impl App {
         }
     }
 
+    fn remember_caption_fallbacks(&self, ids: &[String]) {
+        let Ok(mut map) = caption_fallbacks().lock() else {
+            return;
+        };
+        for tr in &self.doc.seq.tracks {
+            for c in &tr.clips {
+                if !ids.iter().any(|id| id == &c.id) {
+                    continue;
+                }
+                let Some(text) = c.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                let style = c.style.as_ref().unwrap_or(&serde_json::Value::Null);
+                let key = caption_cache_key(c, text, style);
+                let png = std::path::Path::new(&self.doc.asset_dir).join("caption-cache").join(format!("{key}.png"));
+                if !png.exists() || std::fs::metadata(&png).map(|m| m.len() == 0).unwrap_or(true) {
+                    continue;
+                }
+                let font_size = caption_style_num(style, "fontSize", 1.0).max(0.05);
+                map.insert(c.id.clone(), (key, font_size));
+            }
+        }
+    }
+
     /// Designed captions: when the caption set changes, ask the server for the SAME
     /// /caption-frame PNGs the export burns in (cached server-side); the preview then
     /// shows the real design instead of plain text.
@@ -3836,6 +3896,7 @@ impl App {
                     let outline = style.get("outlineWidth").and_then(|v| v.as_f64()).unwrap_or(1.25);
                     if ui.button("白文字・黒フチ・ゴシック").clicked() {
                         let ids = edit_ids.clone();
+                        self.remember_caption_fallbacks(&ids);
                         let patch = serde_json::json!({
                             "font": "noto-sans", "color": "#ffffff", "outlineColor": "#000000",
                             "outlineWidth": 1.65, "fontSize": font_size, "y": y_pos,
@@ -3849,6 +3910,7 @@ impl App {
                     let mut fs = font_size;
                     if ui.add(egui::Slider::new(&mut fs, 0.6..=2.2).text("大きさ")).changed() {
                         let ids = edit_ids.clone();
+                        self.remember_caption_fallbacks(&ids);
                         let patch = serde_json::json!({"fontSize": (fs * 100.0).round() / 100.0});
                         self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                         self.push_req(false);
@@ -3856,6 +3918,7 @@ impl App {
                     let mut yv = y_pos;
                     if ui.add(egui::Slider::new(&mut yv, 0.0..=0.92).text("上下")).changed() {
                         let ids = edit_ids.clone();
+                        self.remember_caption_fallbacks(&ids);
                         let patch = serde_json::json!({"y": (yv * 100.0).round() / 100.0});
                         self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                         self.push_req(false);
@@ -3863,11 +3926,22 @@ impl App {
                     let mut ow = outline;
                     if ui.add(egui::Slider::new(&mut ow, 0.0..=3.0).text("フチ")).changed() {
                         let ids = edit_ids.clone();
+                        self.remember_caption_fallbacks(&ids);
                         let patch = serde_json::json!({"outlineWidth": (ow * 100.0).round() / 100.0});
                         self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                         self.push_req(false);
                     }
                     if ui.button("この見た目を全テロップに適用").clicked() {
+                        let ids: Vec<String> = self
+                            .doc
+                            .seq
+                            .tracks
+                            .iter()
+                            .flat_map(|tr| tr.clips.iter())
+                            .filter(|c| c.text.is_some() && c.asset_id.is_none())
+                            .map(|c| c.id.clone())
+                            .collect();
+                        self.remember_caption_fallbacks(&ids);
                         let patch = clip.style.clone().unwrap_or_else(|| serde_json::json!({}));
                         self.apply_edit(true, move |raw| edits::patch_all_caption_style(raw, patch));
                         self.push_req(false);
