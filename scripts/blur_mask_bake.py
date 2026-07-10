@@ -319,6 +319,7 @@ def bake(a: argparse.Namespace) -> int:
                     labs.append(1 if sign.strip() == "+" else 0)
                 req["points"] = torch.tensor(pts, dtype=torch.float32)
                 req["point_labels"] = torch.tensor(labs, dtype=torch.int32)
+                req["obj_id"] = 1  # SAM2-style instance prompts need an explicit object id
 
             _progress(a.progress_file, "detect", 0.08)
             # Two rescue axes when the anchor frame detects nothing (both MEASURED):
