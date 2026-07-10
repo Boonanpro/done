@@ -86,10 +86,41 @@ def extract_window(src: str, start: float, duration: float, fps: float, long_sid
     return seg
 
 
+# ---- model cache (the resident worker's whole point) ----------------------------------
+# ONE engine lives on the GPU at a time: multiplex (concept/text) and tracker-only (box)
+# are each ~3.4GB of weights — both at once + activations would blow an 8GB card. Switching
+# engines drops the other and reloads (~24s); repeated same-engine bakes pay ZERO load.
+_ENGINE_CACHE: dict = {"kind": None, "key": None, "obj": None}
+
+
+def _cache_get(kind: str, key: str, builder):
+    if _ENGINE_CACHE["kind"] == kind and _ENGINE_CACHE["key"] == key and _ENGINE_CACHE["obj"] is not None:
+        return _ENGINE_CACHE["obj"], True
+    unload_models()
+    obj = builder()
+    _ENGINE_CACHE.update({"kind": kind, "key": key, "obj": obj})
+    return obj, False
+
+
+def unload_models() -> None:
+    if _ENGINE_CACHE["obj"] is not None:
+        _ENGINE_CACHE.update({"kind": None, "key": None, "obj": None})
+        try:
+            import gc
+            import torch
+            gc.collect()
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def load_predictor(ckpt: str, grounding_batch: int = 4):
-    from sam3.model_builder import build_sam3_multiplex_video_predictor
-    # use_fa3=False: flash-attn-3 is not installable on Windows; the SDPA path is used instead.
-    pred = build_sam3_multiplex_video_predictor(checkpoint_path=ckpt, use_fa3=False)
+    def _build():
+        from sam3.model_builder import build_sam3_multiplex_video_predictor
+        # use_fa3=False: flash-attn-3 is not installable on Windows; SDPA path instead.
+        return build_sam3_multiplex_video_predictor(checkpoint_path=ckpt, use_fa3=False)
+
+    pred, _cached = _cache_get("multiplex", ckpt, _build)
     # The default 16-frame batched detector pass spikes VRAM far past 8GB consumer cards;
     # Windows' sysmem fallback then turns each spike into a multi-minute stall. Smaller
     # batches trade a little throughput for staying inside VRAM (identical outputs).
@@ -104,11 +135,16 @@ def load_tracker_only(ckpt: str):
     single-object jobs this is an order of magnitude faster than the multiplex
     (PCS) pipeline, which re-runs exemplar detection through the whole window.
     Needs the non-multiplex sam3.pt (the 3.1 multiplex ckpt has a different neck)."""
-    from sam3.model_builder import build_sam3_video_model
-    model = build_sam3_video_model(checkpoint_path=ckpt, load_from_HF=False, device="cuda")
-    predictor = model.tracker
-    predictor.backbone = model.detector.backbone
-    return predictor
+
+    def _build():
+        from sam3.model_builder import build_sam3_video_model
+        model = build_sam3_video_model(checkpoint_path=ckpt, load_from_HF=False, device="cuda")
+        predictor = model.tracker
+        predictor.backbone = model.detector.backbone
+        return predictor
+
+    pred, _cached = _cache_get("tracker", ckpt, _build)
+    return pred
 
 
 def run_tracker_only(a, seg, W, H, n_frames, anchor_idx):
@@ -177,7 +213,7 @@ def _mask_union(out: dict, keep: set[int] | None) -> tuple[np.ndarray | None, di
     return union, boxes
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("src")
     ap.add_argument("--out", required=True, help="output mask mp4 path")
@@ -203,13 +239,36 @@ def main() -> int:
     ap.add_argument("--dilate", type=int, default=0, help="grow mask by N px (edge-leak guard)")
     ap.add_argument("--feather", type=int, default=0, help="gaussian soften mask edge by N px")
     ap.add_argument("--progress-file", default="")
-    a = ap.parse_args()
+    return ap
 
+
+def main() -> int:
+    return bake(build_parser().parse_args())
+
+
+def bake(a: argparse.Namespace) -> int:
+    """One bake job. Callable in-process (blur_mask_worker keeps the models cached and
+    calls this repeatedly) or via main() as the classic one-shot subprocess."""
     import cv2  # after argparse so --help stays fast
 
     t0 = time.time()
     _progress(a.progress_file, "extract", 0.0)
     tmpd = Path(tempfile.mkdtemp(prefix="blurmask_"))
+    session_id = None
+    predictor = None
+    # bf16 autocast for the WHOLE bake: upstream runs both engines under it (the
+    # multiplex predictor even enters one in __init__ — but autocast is THREAD-local,
+    # so a resident worker serving each job on a fresh thread lost it and warm re-use
+    # tripped "mat1 BFloat16 / mat2 Float"). Explicit per-bake autocast makes cold,
+    # warm and either engine run under identical numerics.
+    _ac = None
+    try:
+        import torch
+        if torch.cuda.is_available():
+            _ac = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            _ac.__enter__()
+    except Exception:  # noqa: BLE001
+        _ac = None
     try:
         seg = extract_window(a.src, a.start, a.duration, a.fps, a.long_side, tmpd)
         cap = cv2.VideoCapture(str(seg))
@@ -304,6 +363,7 @@ def main() -> int:
             union0, boxes0 = _mask_union(out0, keep)
 
         out_path = Path(a.out)
+        out_part = out_path.with_name(out_path.name + ".part.mp4")
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         if a.probe:
@@ -343,7 +403,7 @@ def main() -> int:
              # short GOP (like the proxies): the editor random-seeks this file per frame;
              # the x264 default 250-frame GOP made mid-window seeks walk seconds of frames
              "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-g", "15",
-             "-pix_fmt", "yuv420p", "-color_range", "pc", str(out_path)],
+             "-pix_fmt", "yuv420p", "-color_range", "pc", str(out_part)],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=ff_log,
         )
         frames_meta = {}
@@ -421,12 +481,25 @@ def main() -> int:
                        "model_load_s": round(t_model - t0, 1),
                        "track_s": round(time.time() - t_model, 1)},
         }
+        # atomic publish: meta first, then the mask (the server treats "mask file exists"
+        # as ready — a crash mid-write must never leave a ready-looking half file)
         Path(str(out_path) + ".meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        os.replace(out_part, out_path)
         _progress(a.progress_file, "done", 1.0)
         print(f"baked: {out_path} objects={all_ids} frames={n_frames} "
               f"({meta['timing']['track_s']}s track / {meta['timing']['total_s']}s total)")
         return 0
     finally:
+        try:
+            if session_id is not None and predictor is not None:
+                predictor.handle_request(request=dict(type="close_session", session_id=session_id))
+        except Exception:  # noqa: BLE001
+            pass
+        if _ac is not None:
+            try:
+                _ac.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
         shutil.rmtree(tmpd, ignore_errors=True)
 
 

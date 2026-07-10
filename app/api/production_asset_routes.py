@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 import asyncio
 import hashlib
@@ -3668,39 +3669,121 @@ def _blur_read_progress(progress_file: Path) -> dict[str, Any]:
         return {}
 
 
-def _blur_mask_bake_sync(source_path: Path, out_mask: Path, spec: dict[str, Any],
-                         bs: float, be: float, progress_file: Path) -> None:
-    """Run the SAM bake to a temp file, then atomically publish. Blocking — call in a thread."""
-    part = out_mask.with_suffix(".part.mp4")
-    script = PROJECT_ROOT / "scripts" / "blur_mask_bake.py"
-    if not VENV_SAM3_PY.exists():
-        raise RuntimeError(f"venv_sam3 missing ({VENV_SAM3_PY}) — see scripts/blur_mask_bake.py header")
-    args = [str(VENV_SAM3_PY), "-u", str(script), str(source_path), "--out", str(part),
-            "--start", f"{bs:.3f}", "--duration", f"{max(0.1, be - bs):.3f}",
-            "--fps", "30", "--feather", str(int(spec.get("feather") or 3)),
-            "--dilate", str(int(spec.get("dilate") or 2)),
-            "--progress-file", str(progress_file)]
+BLUR_WORKER_PORT = 8876
+
+
+def _blur_job_payload(source_path: Path, out_mask: Path, spec: dict[str, Any],
+                      bs: float, be: float, progress_file: Path) -> dict[str, Any]:
+    """The bake job in blur_mask_bake CLI vocabulary (shared by the resident worker and
+    the classic one-shot subprocess)."""
+    job: dict[str, Any] = {
+        "src": str(source_path), "out": str(out_mask),
+        "start": round(bs, 3), "duration": round(max(0.1, be - bs), 3), "fps": 30,
+        "feather": int(spec.get("feather") or 3), "dilate": int(spec.get("dilate") or 2),
+        "progress_file": str(progress_file),
+    }
     # anchor = the SOURCE second whose frame defines "the object inside the box"
     # (the editor sends the playhead frame the user was looking at). Script wants it
     # relative to the window start.
     if spec.get("anchor") is not None:
-        rel = min(max(0.0, float(spec["anchor"]) - bs), max(0.0, be - bs - 0.05))
-        args += ["--anchor", f"{rel:.3f}"]
+        job["anchor"] = round(min(max(0.0, float(spec["anchor"]) - bs), max(0.0, be - bs - 0.05)), 3)
     if spec.get("prompt"):
-        args += ["--prompt", str(spec["prompt"])]
+        job["prompt"] = str(spec["prompt"])
     if spec.get("box"):
         x, y, w, h = [float(v) for v in spec["box"]]
-        args += ["--box", f"{x:.4f},{y:.4f},{w:.4f},{h:.4f}"]
-    for p in spec.get("points") or []:
-        args += ["--point", f"{float(p[0]):.4f},{float(p[1]):.4f},{'+' if int(p[2]) else '-'}"]
+        job["box"] = f"{x:.4f},{y:.4f},{w:.4f},{h:.4f}"
+    pts = [f"{float(p[0]):.4f},{float(p[1]):.4f},{'+' if int(p[2]) else '-'}"
+           for p in (spec.get("points") or [])]
+    if pts:
+        job["point"] = pts
     if spec.get("keep_ids"):
-        args += ["--keep-ids", ",".join(str(int(v)) for v in spec["keep_ids"])]
+        job["keep_ids"] = ",".join(str(int(v)) for v in spec["keep_ids"])
+    return job
+
+
+def _blur_worker_post(path: str, payload: dict[str, Any], timeout: float) -> dict[str, Any] | None:
+    """POST to the resident worker; None when it is not reachable (spawn or fall back)."""
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{BLUR_WORKER_PORT}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        # worker reached but the bake failed — surface it, don't silently re-run cold
+        try:
+            detail = json.loads(e.read() or b"{}").get("error")
+        except ValueError:
+            detail = str(e)
+        raise RuntimeError(f"blur worker bake failed: {detail}")
+    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+        return None
+
+
+def _ensure_blur_worker() -> bool:
+    """Spawn the resident worker DETACHED (it must survive sandbox restarts) and wait for
+    /health. Returns False when it cannot be started (caller falls back to one-shot)."""
+    import urllib.request
+    script = PROJECT_ROOT / "scripts" / "blur_mask_worker.py"
+    if not VENV_SAM3_PY.exists() or not script.exists():
+        return False
+    try:
+        # `cmd /c start` breaks the parent-child chain: the sandbox restarts with
+        # taskkill /T (tree kill) and a directly-spawned worker died with it every time.
+        # cmd exits immediately, the worker is orphaned, the tree walk can't reach it.
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.Popen(
+            ["cmd", "/c", "start", "/b", "", str(VENV_SAM3_PY), "-u", str(script)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=flags, close_fds=True)
+    except OSError as exc:
+        logger.warning("blur worker spawn failed: %s", exc)
+        return False
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{BLUR_WORKER_PORT}/health", timeout=2):
+                return True
+        except OSError:
+            time.sleep(0.5)
+    return False
+
+
+def _blur_mask_bake_sync(source_path: Path, out_mask: Path, spec: dict[str, Any],
+                         bs: float, be: float, progress_file: Path) -> None:
+    """Blocking bake — call in a thread. Three rungs: resident worker (models stay on the
+    GPU, ~0s start) -> spawn the worker then retry -> classic one-shot subprocess (pays
+    the ~24s model load). Files are published atomically by the bake itself."""
+    job = _blur_job_payload(source_path, out_mask, spec, bs, be, progress_file)
+    r = _blur_worker_post("/bake", job, timeout=3600)
+    if r is None and _ensure_blur_worker():
+        r = _blur_worker_post("/bake", job, timeout=3600)
+    if r is not None:
+        if not r.get("ok"):
+            raise RuntimeError(f"blur worker bake failed: rc={r.get('rc')}")
+        return
+    logger.warning("blur worker unavailable — one-shot subprocess fallback (cold load)")
+    script = PROJECT_ROOT / "scripts" / "blur_mask_bake.py"
+    if not VENV_SAM3_PY.exists():
+        raise RuntimeError(f"venv_sam3 missing ({VENV_SAM3_PY}) — see scripts/blur_mask_bake.py header")
+    args = [str(VENV_SAM3_PY), "-u", str(script), job["src"], "--out", job["out"],
+            "--start", str(job["start"]), "--duration", str(job["duration"]),
+            "--fps", "30", "--feather", str(job["feather"]), "--dilate", str(job["dilate"]),
+            "--progress-file", job["progress_file"]]
+    if "anchor" in job:
+        args += ["--anchor", str(job["anchor"])]
+    if job.get("prompt"):
+        args += ["--prompt", job["prompt"]]
+    if job.get("box"):
+        args += ["--box", job["box"]]
+    for p in job.get("point") or []:
+        args += ["--point", p]
+    if job.get("keep_ids"):
+        args += ["--keep-ids", job["keep_ids"]]
     subprocess.run(args, check=True)
-    # publish mask + meta under the final names
-    part_meta = Path(str(part) + ".meta.json")
-    if part_meta.exists():
-        os.replace(part_meta, Path(str(out_mask) + ".meta.json"))
-    os.replace(part, out_mask)
 
 
 def _blur_prompt_to_english(prompt: str) -> str:
