@@ -3793,9 +3793,6 @@ impl App {
 
     /// Inspector: properties panel. Multiple selected media clips can be edited together.
     fn inspector_ui(&mut self, ctx: &egui::Context) {
-        if self.selected.is_empty() {
-            return;
-        }
         let selected: Vec<(model::Clip, String)> = self
             .doc
             .seq
@@ -3805,7 +3802,18 @@ impl App {
             .filter(|(c, _)| self.selected.contains(&c.id))
             .map(|(c, k)| (c.clone(), k))
             .collect();
+        // the panel is ALWAYS rendered at its fixed width — appearing/disappearing with
+        // the selection resized the central area and made the preview jump every time a
+        // clip was selected or created ("パネルが出るたびプレビューの位置が変わる")
         if selected.is_empty() {
+            egui::SidePanel::right("inspector").exact_width(250.0).show(ctx, |ui| {
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new("クリップを選択すると\nここに編集パネルが出ます")
+                        .small()
+                        .weak(),
+                );
+            });
             return;
         }
         let multi = selected.len() > 1;
