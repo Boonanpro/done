@@ -1075,16 +1075,46 @@ pub fn add_effect_clip(
         },
     });
     let Some(tracks) = tracks_mut(raw) else { return };
-    match tracks
-        .iter()
-        .position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("effect"))
-    {
+    // Place on the FRONT-most (display top) non-audio lane whose [t, t+dur) span is
+    // free — never on top of existing clips. Lanes are just layers (no effect-lane
+    // special casing); when every lane is occupied, open a new top lane.
+    let (t0, t1) = (t, t + dur);
+    let free_lane = (0..tracks.len()).rev().find(|&ti| {
+        let tr = &tracks[ti];
+        let kind = tr.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if kind == "audio"
+            || tr.get("locked").and_then(|v| v.as_bool()).unwrap_or(false)
+            || tr.get("hidden").and_then(|v| v.as_bool()).unwrap_or(false)
+        {
+            return false;
+        }
+        tr.get("clips")
+            .and_then(|c| c.as_array())
+            .map(|cs| {
+                cs.iter().all(|c| {
+                    let cs_ = c.get("timeline_start").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let ce = c.get("timeline_end").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    ce <= t0 + 0.001 || cs_ >= t1 - 0.001
+                })
+            })
+            .unwrap_or(true)
+    });
+    match free_lane {
         Some(ti) => {
             if let Some(cs) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
                 cs.push(clip);
             }
         }
-        None => tracks.push(serde_json::json!({"id": "effects_1", "type": "effect", "clips": [clip]})),
+        None => {
+            let front = tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, tr)| tr.get("type").and_then(|v| v.as_str()) != Some("audio"))
+                .map(|(i, _)| i)
+                .max();
+            let insert_at = front.map(|i| i + 1).unwrap_or(tracks.len());
+            tracks.insert(insert_at, serde_json::json!({"type": "overlay", "clips": [clip]}));
+        }
     }
 }
 
