@@ -8238,6 +8238,46 @@ fn main() -> eframe::Result<()> {
         );
         std::process::exit(0);
     }
+    // --selftest-newlane: headless "drag above the top lane" — new provisional lane is
+    // created (even from the front lane), repeat is idempotent, moving back dissolves it
+    if args.iter().any(|a| a == "--selftest-newlane") {
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
+        let mut app = App::new(&contents, &dir).expect("app");
+        let n0 = app.doc.seq.tracks.len();
+        // front-most non-audio lane with >= 2 clips exercises the old blanket early-return
+        let (src_ti, cid) = app
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, tr)| tr.kind != "audio" && tr.clips.len() >= 2)
+            .flat_map(|(ti, tr)| tr.clips.iter().map(move |c| (ti, c.id.clone())))
+            .next()
+            .expect("no multi-clip visual lane");
+        let ids = vec![cid.clone()];
+        let ids2 = ids.clone();
+        app.apply_edit(true, move |raw| edits::move_to_new_top_track(raw, &ids2));
+        let n1 = app.doc.seq.tracks.len();
+        let front = app.doc.seq.tracks.iter().rposition(|tr| tr.kind != "audio").unwrap();
+        let on_front = app.doc.seq.tracks[front].clips.iter().any(|c| c.id == cid);
+        let alone = app.doc.seq.tracks[front].clips.len() == 1;
+        println!("NEWLANE create {} (tracks {n0}->{n1}, on_front={on_front}, alone={alone})",
+                 if n1 == n0 + 1 && on_front && alone { "PASS" } else { "FAIL" });
+        let ids3 = ids.clone();
+        app.apply_edit(false, move |raw| edits::move_to_new_top_track(raw, &ids3));
+        let n2 = app.doc.seq.tracks.len();
+        println!("NEWLANE idempotent {} (tracks {n2})", if n2 == n1 { "PASS" } else { "FAIL" });
+        let ids4 = ids.clone();
+        app.apply_edit(false, move |raw| edits::move_to_track(raw, &ids4, src_ti));
+        let n3 = app.doc.seq.tracks.len();
+        let back = app.doc.seq.tracks[src_ti].clips.iter().any(|c| c.id == cid);
+        println!("NEWLANE dissolve {} (tracks {n3}, back_on_src={back})",
+                 if n3 == n0 && back { "PASS" } else { "FAIL" });
+        std::process::exit(0);
+    }
     // --probe-open <path> <stream> [full_range]: open one decoder standalone and report
     if let Some(i) = args.iter().position(|a| a == "--probe-open") {
         let path = args.get(i + 1).cloned().unwrap_or_default();
