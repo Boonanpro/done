@@ -428,6 +428,12 @@ impl VideoStream {
     }
 
     /// Ensure `bgra` holds the newest frame with pts <= t. Seeks on backward/far-forward jumps.
+    /// PTS of the frame currently sitting in `bgra` (diagnostics: which SOURCE frame
+    /// actually landed for a requested time).
+    pub fn shown_pts(&self) -> f64 {
+        self.last_pts
+    }
+
     pub fn ensure_frame(&mut self, d3d: &D3d, t: f64) -> Result<bool> {
         let t = self.clamp_t(t);
         if self.eos && self.pending.is_none() && self.has_frame && t >= self.last_pts {
@@ -463,9 +469,19 @@ impl VideoStream {
         // pending.is_none() here made that walk EVERY frame to t — the 4.5s stall.)
         let far = t > self.last_pts + 1.5
             && self.pending_pts().map(|p| p < t - 1.5).unwrap_or(true);
+        // shown frame is FROM THE FUTURE relative to the request and the lookahead can't
+        // reach t either (decoders only move forward). The VFR-hold slop ("pending ahead
+        // of t = keep the frame") was written for frames that STARTED BEFORE t and must
+        // never hold a frame that starts after it — a prefetch-advanced decoder otherwise
+        // served a ~0.33s-late frame forever after a cache invalidation recomposed an
+        // earlier time (the ◱ "preview shows a different moment" bug).
+        let stuck_future = self.last_pts >= 0.0
+            && self.last_pts > t + 0.02
+            && self.pending_pts().map(|p| p > t + 0.0005).unwrap_or(true);
         self.last_req = t;
-        let jump = (back || cold || far)
-            && !self.pending_pts().map(|p| (p - t).abs() < 0.6).unwrap_or(false);
+        let jump = stuck_future
+            || ((back || cold || far)
+                && !self.pending_pts().map(|p| (p - t).abs() < 0.6).unwrap_or(false));
         if jump {
             let _jt = std::time::Instant::now();
             let r = self.ensure_jump(d3d, t);

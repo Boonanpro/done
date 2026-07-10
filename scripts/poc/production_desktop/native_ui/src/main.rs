@@ -43,6 +43,10 @@ struct Req {
     gen: u64,
 }
 
+/// BLUR jump diagnostics: while true, compose logs the base layer's landed source frame
+/// and the producer logs cache/live serve decisions (armed around ◱ interactions).
+static BLUR_DBG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 struct FrameOut {
     rgba: Vec<u8>,
     seq: u64,
@@ -858,6 +862,7 @@ fn compose(
             if !fast && original {
                 src_t = snap_src_t(pts_maps, aid, src_t);
             }
+            let blur_dbg = BLUR_DBG.load(Ordering::Relaxed);
             if c.is_freeze() {
                 // Freeze still: keyed by ASSET (a path key forked into separate proxy- and
                 // original-quality stills that visibly swapped), baked ONLY from an exact
@@ -911,6 +916,13 @@ fn compose(
             } else {
                 vs.ensure_frame(d3d, src_t)
                     .map_err(|e| e.context(format!("overlay {} src_t={src_t:.2}", vs.name)))?;
+            }
+            if blur_dbg {
+                eprintln!(
+                    "BLURBASE t={t:.3} clip={} req_src={src_t:.3} landed={:.3} fast={fast}",
+                    c.id,
+                    vs.shown_pts()
+                );
             }
             let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
             if near_fz {
@@ -1981,6 +1993,9 @@ fn media_thread(shared: Arc<Shared>) {
                     if near_freeze(&doc, t) {
                         eprintln!("SERVE t={t:.3} src=cache");
                     }
+                    if BLUR_DBG.load(Ordering::Relaxed) {
+                        eprintln!("BLURSERVE t={t:.3} src=cache");
+                    }
                     seq += 1;
                     let mut f = shared.frame.lock().unwrap();
                     f.rgba = buf;
@@ -2371,6 +2386,9 @@ struct App {
     blur_meta_cache: std::collections::HashMap<String, (Option<serde_json::Value>, Instant)>,
     /// dragging a region-effect rectangle on the preview: (clip id, mode 0=move/1..4=NW,NE,SW,SE corner, grab pos, orig region)
     region_drag: Option<(String, u8, egui::Pos2, (f64, f64, f64, f64))>,
+    /// BLURSHIFT diagnostics: watch the presented-frame time for 2s after a ◱ drop
+    blur_debug_until: Option<Instant>,
+    blur_debug_last_t: f64,
     blur_out_log_at: Instant,
     last_push: Instant,
     // Filmora semantics (observed in its logs: Pause -> seek -> auto Play): any timeline
@@ -2510,6 +2528,8 @@ impl App {
             last_blur_poll: Instant::now(),
             blur_meta_cache: Default::default(),
             region_drag: None,
+            blur_debug_until: None,
+            blur_debug_last_t: 0.0,
             blur_out_log_at: Instant::now(),
             last_push: Instant::now(),
             resume_pending: None,
@@ -6491,6 +6511,26 @@ impl eframe::App for App {
         }
         self.poll_popout_bakes();
         self.poll_blur_bakes();
+        // BLURSHIFT: after a ◱ drop, log every presented-frame time change for 2s —
+        // the ground truth for "リリースした瞬間プレビューが別の場所に変わる"
+        if let Some(until) = self.blur_debug_until {
+            if Instant::now() > until {
+                self.blur_debug_until = None;
+                BLUR_DBG.store(false, Ordering::Relaxed);
+            } else {
+                let (ft, fq) = {
+                    let f = self.shared.frame.lock().unwrap();
+                    (f.t, f.quality)
+                };
+                if (ft - self.blur_debug_last_t).abs() > 0.03 {
+                    eprintln!(
+                        "BLURSHIFT shown {:.3} -> {:.3} (self.t={:.3} q={} playing={})",
+                        self.blur_debug_last_t, ft, self.t, fq, self.playing
+                    );
+                    self.blur_debug_last_t = ft;
+                }
+            }
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
             let force_ripple = ctx.input(|i| i.modifiers.shift);
             self.delete_selected(force_ripple);
@@ -6761,6 +6801,12 @@ impl eframe::App for App {
                         // the frame the user aimed at ("描いた瞬間に別の場所が映る") —
                         // freeze the preview on the displayed frame first, like F/S do
                         self.pause_at_displayed();
+                        // arm the jump diagnostics + force one re-serve so the log shows
+                        // WHERE the currently displayed frame comes from (cache or live)
+                        BLUR_DBG.store(true, Ordering::Relaxed);
+                        self.blur_debug_until =
+                            Some(Instant::now() + std::time::Duration::from_secs(20));
+                        self.push_req(false);
                     }
                 }
                 ui.menu_button("＋素材", |ui| {
@@ -6953,6 +6999,16 @@ impl eframe::App for App {
                                         self.pause_at_displayed();
                                         let t = self.displayed_t();
                                         self.t = t;
+                                        {
+                                            let f = self.shared.frame.lock().unwrap();
+                                            eprintln!(
+                                                "BLURDROP self.t={t:.3} shown_t={:.3} q={} playing={}",
+                                                f.t, f.quality, self.playing
+                                            );
+                                            self.blur_debug_last_t = f.t;
+                                        }
+                                        self.blur_debug_until =
+                                            Some(Instant::now() + std::time::Duration::from_secs(2));
                                         let salt = self.salt;
                                         self.salt += 1;
                                         self.apply_edit(true, move |raw| {
@@ -8377,6 +8433,30 @@ fn main() -> eframe::Result<()> {
         println!("NEWLANE dissolve {} (tracks {n3}, back_on_src={back})",
                  if n3 == n0 && back { "PASS" } else { "FAIL" });
         std::process::exit(0);
+    }
+    // --selftest-backseek <path>: prefetch forward then request an EARLIER frame — the
+    // decoder must land back-near it, not hold the future frame (the ◱ preview-jump bug)
+    if let Some(i) = args.iter().position(|a| a == "--selftest-backseek") {
+        let path = args.get(i + 1).cloned().unwrap_or_default();
+        let d3d = media::D3d::new().expect("d3d");
+        let mut vs = media::VideoStream::open(&d3d, &path, 0, false).expect("open");
+        vs.ensure_frame(&d3d, 464.436).expect("seed");
+        let seeded = vs.shown_pts();
+        // simulate the prefetch walk that advanced the decoder ~0.35s ahead
+        let mut t = 464.436;
+        while t < 464.80 {
+            t += 0.0333;
+            let _ = vs.ensure_frame(&d3d, t);
+        }
+        let advanced = vs.shown_pts();
+        vs.ensure_frame(&d3d, 464.436).expect("backseek");
+        let landed = vs.shown_pts();
+        let ok = (landed - 464.436).abs() < 0.05;
+        println!(
+            "BACKSEEK {} seeded={seeded:.3} advanced={advanced:.3} re-request=464.436 landed={landed:.3}",
+            if ok { "PASS" } else { "FAIL" }
+        );
+        std::process::exit(if ok { 0 } else { 1 });
     }
     // --probe-open <path> <stream> [full_range]: open one decoder standalone and report
     if let Some(i) = args.iter().position(|a| a == "--probe-open") {
