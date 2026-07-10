@@ -5082,9 +5082,14 @@ impl App {
         }
         let mut clips_drawn = 0usize;
         let mut hits: Vec<(egui::Rect, String)> = Vec::new();
+        // drop zone for "drag above the top lane -> new lane". The first lane starts a
+        // mere 3px under the ruler, so clamping the zone below the ruler left a 3px
+        // target nobody could hit ("レーンが増えない"). While a Move-drag is active the
+        // ruler is not scrubbing, so the WHOLE band above lane 1 (ruler included) is the
+        // drop zone.
         let new_top_drop = lane_tops.first().map(|&(_, y0, _)| {
             egui::Rect::from_min_max(
-                egui::pos2(body.left(), (y0 - 18.0).max(body.top() + ruler_h)),
+                egui::pos2(body.left(), (y0 - 40.0).max(body.top())),
                 egui::pos2(body.right(), y0),
             )
         });
@@ -5740,6 +5745,7 @@ impl App {
                                     .map(|c| c.id.clone())
                                     .collect();
                                 if !vids.is_empty() {
+                                    eprintln!("NEWLANE drop fired for {} clip(s)", vids.len());
                                     self.apply_edit(false, move |raw| edits::move_to_new_top_track(raw, &vids));
                                 }
                             } else {
