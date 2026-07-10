@@ -1582,6 +1582,20 @@ pub fn set_crop_many(raw: &mut serde_json::Value, ids: &[String], l: f64, t: f64
     });
 }
 
+/// Move/resize a region-effect clip's rectangle (canvas fractions).
+pub fn set_region(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f64, h: f64) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) == Some(id) {
+            let q = |v: f64| (v * 10000.0).round() / 10000.0;
+            c.as_object_mut().unwrap().insert(
+                "region".into(),
+                serde_json::json!({"x": q(x.clamp(0.0, 0.98)), "y": q(y.clamp(0.0, 0.98)),
+                                    "width": q(w.clamp(0.01, 1.0)), "height": q(h.clamp(0.01, 1.0))}),
+            );
+        }
+    });
+}
+
 /// Attach / update / remove the SAM tracked-blur binding on a region-effect clip.
 pub fn set_blur_track(raw: &mut serde_json::Value, id: &str, value: Option<serde_json::Value>) {
     for_each_clip(raw, |c| {
