@@ -1439,6 +1439,10 @@ pub fn move_to_track(raw: &mut serde_json::Value, ids: &[String], target: usize)
             .and_then(|c| c.as_array_mut())
             .map(|arr| arr.push(c));
     }
+    // dragging back DOWN dissolves the provisional lane the same gesture created above
+    // (pruning only empty id-less lanes, which nothing else produces). Runs after the
+    // move so `target` (resolved against pre-edit lanes) stayed valid.
+    prune_empty_unnamed_tracks_impl(tracks);
 }
 
 /// Set a clip's display position (canvas fractions) — the preview inspector drag.
@@ -1485,13 +1489,23 @@ pub fn move_to_new_top_track(raw: &mut serde_json::Value, ids: &[String]) {
         .filter(|(_, tr)| tr.get("type").and_then(|v| v.as_str()) != Some("audio"))
         .map(|(i, _)| i)
         .max();
+    // Already ALONE on the front lane -> that lane IS the (provisional) new lane; adding
+    // another would stack empties. But a clip dragged up FROM a front lane that still
+    // holds other clips must get its own new lane — the old blanket "src == front"
+    // early-return silently ate exactly that case (発火するのにレーンが増えない).
     if src_track == front {
-        if let Some(ti) = src_track {
-            if let Some(arr) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
-                arr.extend(moved);
+        let front_empty = front
+            .and_then(|i| tracks[i].get("clips").and_then(|c| c.as_array()))
+            .map(|cs| cs.is_empty())
+            .unwrap_or(false);
+        if front_empty {
+            if let Some(ti) = src_track {
+                if let Some(arr) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
+                    arr.extend(moved);
+                }
             }
+            return;
         }
-        return;
     }
     let tkind = lane_kind.unwrap_or_else(|| "overlay".to_string());
     for c in &mut moved {
@@ -1501,6 +1515,29 @@ pub fn move_to_new_top_track(raw: &mut serde_json::Value, ids: &[String]) {
     }
     let insert_at = front.map(|i| i + 1).unwrap_or(tracks.len());
     tracks.insert(insert_at, serde_json::json!({"type": tkind, "clips": moved}));
+    prune_empty_unnamed_tracks_impl(tracks);
+}
+
+/// Remove PROVISIONAL lanes that ended up empty: tracks created by drag-to-new-lane carry
+/// no "id" (every persisted lane has one), so an empty id-less lane is a leftover of the
+/// current gesture — e.g. the user dragged into the new-lane zone and then back down.
+fn prune_empty_unnamed_tracks_impl(tracks: &mut Vec<serde_json::Value>) {
+    tracks.retain(|tr| {
+        let unnamed = tr.get("id").and_then(|v| v.as_str()).map(str::is_empty).unwrap_or(true);
+        let audio = tr.get("type").and_then(|v| v.as_str()) == Some("audio");
+        let empty = tr
+            .get("clips")
+            .and_then(|c| c.as_array())
+            .map(|cs| cs.is_empty())
+            .unwrap_or(true);
+        !(unnamed && empty && !audio)
+    });
+}
+
+pub fn prune_empty_unnamed_tracks(raw: &mut serde_json::Value) {
+    if let Some(tracks) = tracks_mut(raw) {
+        prune_empty_unnamed_tracks_impl(tracks);
+    }
 }
 
 pub fn set_position(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f64, h: f64) {
