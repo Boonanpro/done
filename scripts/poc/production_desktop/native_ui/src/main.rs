@@ -5477,8 +5477,11 @@ impl App {
                     }
                 }
                 if let Some(pt) = pointer {
-                    let edge_hit = if sel { 10.0 } else { 5.0 };
-                    if r.expand2(egui::vec2(edge_hit, 0.0)).contains(pt)
+                    // matches the selection-independent trim hit: inside zone scales with
+                    // clip width, outside capture 10px
+                    let inner = (r.width() * 0.33).clamp(4.0, 10.0);
+                    let edge_hit = if r.contains(pt) { inner } else { 10.0 };
+                    if r.expand2(egui::vec2(10.0, 0.0)).contains(pt)
                         && ((pt.x - r.left()).abs() <= edge_hit || (pt.x - r.right()).abs() <= edge_hit)
                     {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
@@ -5567,46 +5570,35 @@ impl App {
                 self.push_req(false);
             }
             if let Some(pos) = resp.interact_pointer_pos() {
-                let selected_edge_hit = hits
+                // edge grab = trim, SELECTION-INDEPENDENT (requiring pre-selection made a
+                // fresh clip's edge read as Move — "広げようとすると全体が動く"). Inside
+                // zone scales with clip width so narrow clips keep a grabbable body;
+                // outside capture (widening) reaches 10px past the edge unless the
+                // pointer is inside a NEIGHBOUR clip's body (that body wins).
+                let edge_hit = hits
                     .iter()
                     .filter_map(|(r, id)| {
-                        if !self.selected.contains(id) {
+                        if !r.expand2(egui::vec2(10.0, 0.0)).contains(pos) {
                             return None;
                         }
-                        let edge_px = 10.0;
-                        if !r.expand2(egui::vec2(edge_px, 0.0)).contains(pos) {
-                            return None;
+                        let inside = r.contains(pos);
+                        if !inside && hits.iter().any(|(rb, _)| rb.contains(pos)) {
+                            return None; // pointer is in another clip's body
                         }
+                        let edge_px = (r.width() * 0.33).clamp(4.0, 10.0);
                         let dl = (pos.x - r.left()).abs();
                         let dr = (pos.x - r.right()).abs();
                         let dist = dl.min(dr);
-                        if dist <= edge_px {
-                            Some((dist, *r, id.clone(), dl <= dr))
-                        } else {
-                            None
-                        }
+                        let hit_edge = if inside { dist <= edge_px } else { dist <= 10.0 };
+                        hit_edge.then_some((dist, *r, id.clone(), dl <= dr))
                     })
                     .min_by(|a, b| a.0.total_cmp(&b.0))
                     .map(|(_, r, id, left)| (r, id, Some(left)));
-                let body_hit = selected_edge_hit.clone().or_else(|| {
+                let body_hit = edge_hit.or_else(|| {
                     hits.iter()
                         .rev()
                         .find(|(r, _)| r.expand2(egui::vec2(4.0, 0.0)).contains(pos))
                         .map(|(r, id)| (*r, id.clone(), None))
-                }).or_else(|| {
-                    hits.iter()
-                        .filter_map(|(r, id)| {
-                            let edge_px = 5.0;
-                            if !r.expand2(egui::vec2(edge_px, 0.0)).contains(pos) {
-                                return None;
-                            }
-                            let dl = (pos.x - r.left()).abs();
-                            let dr = (pos.x - r.right()).abs();
-                            let dist = dl.min(dr);
-                            (dist <= edge_px).then_some((dist, *r, id.clone(), dl <= dr))
-                        })
-                        .min_by(|a, b| a.0.total_cmp(&b.0))
-                        .map(|(_, r, id, left)| (r, id, Some(left)))
                 });
                 let hit = body_hit;
                 match hit {
