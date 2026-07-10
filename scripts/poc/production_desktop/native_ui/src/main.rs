@@ -925,11 +925,11 @@ fn compose(
             used.push(path);
         }
     }
-    // region effects (blur/mosaic clips on effect lanes): live mosaic stand-in — the
-    // export runs the real gaussian/mosaic chain over the same regions
-    for tr in doc.seq.tracks.iter().filter(|tr| tr.kind == "effect" && !tr.hidden) {
+    // region effects (blur/mosaic clips): lanes are just layers — a region clip works
+    // from ANY non-audio lane, not only an "effect" one (種別で可否を決めない)
+    for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
         for c in &tr.clips {
-            if t < c.timeline_start || t >= c.timeline_end {
+            if c.asset_id.is_some() || t < c.timeline_start || t >= c.timeline_end {
                 continue;
             }
             if let Some(rg) = c.region_xywh() {

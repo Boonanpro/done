@@ -697,14 +697,16 @@ def _sequence_audio_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any
 
 
 def _sequence_effect_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Region-bearing clips from ANY non-audio lane — lanes are just layers; the editor
+    places blur clips wherever there is free space (no effect-lane special casing)."""
     if not isinstance(sequence, dict):
         return []
     clips: list[dict[str, Any]] = []
     for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("type") != "effect" or track.get("hidden"):
+        if not isinstance(track, dict) or track.get("type") == "audio" or track.get("hidden"):
             continue
         for clip in track.get("clips") or []:
-            if isinstance(clip, dict) and isinstance(clip.get("region"), dict):
+            if isinstance(clip, dict) and isinstance(clip.get("region"), dict) and not clip.get("asset_id"):
                 clips.append(clip)
     return clips
 
@@ -2762,11 +2764,23 @@ def _apply_blur_objects(sequence: dict[str, Any], blur_objects: list[dict[str, A
     the exact data the editor's 追従ぼかし produces (preview/export/re-bake all work).
     Mutates `sequence`; returns the number of effect clips added."""
     tracks = sequence.get("tracks") or []
-    fx_track = next((t for t in tracks if t.get("type") == "effect"), None)
-    if fx_track is None:
-        fx_track = {"id": "effects_1", "type": "effect", "label": "Blur/Effects", "clips": []}
-        tracks.append(fx_track)
-    fx_clips = fx_track.setdefault("clips", [])
+
+    def _place_on_free_lane(clip: dict[str, Any]) -> None:
+        """Front-most (display top) non-audio lane with free span; else a new top lane —
+        the same no-overlap placement the editor's ◱ uses."""
+        t0, t1 = float(clip["timeline_start"]), float(clip["timeline_end"])
+        for tr in reversed(tracks):
+            if tr.get("type") == "audio" or tr.get("hidden") or tr.get("locked"):
+                continue
+            cs = tr.get("clips") or []
+            if all(float(c.get("timeline_end") or 0) <= t0 + 1e-3
+                   or float(c.get("timeline_start") or 0) >= t1 - 1e-3 for c in cs):
+                tr.setdefault("clips", []).append(clip)
+                return
+        idx = max((i for i, tr in enumerate(tracks) if tr.get("type") != "audio"),
+                  default=len(tracks) - 1) + 1
+        tracks.insert(idx, {"type": "overlay", "clips": [clip]})
+
     assets = _assets_by_id(room_id)
     seq_dur = max((float(c.get("timeline_end") or 0)
                    for t in tracks for c in (t.get("clips") or [])), default=0.0)
@@ -2816,8 +2830,8 @@ def _apply_blur_objects(sequence: dict[str, Any], blur_objects: list[dict[str, A
                 logger.warning("blur_objects bake start failed (%r/%s): %s", target, aid, exc)
                 continue
             for m in merged:
-                fx_clips.append({
-                    "id": f"fxo_{uuid.uuid4().hex[:8]}", "track": "effect",
+                _place_on_free_lane({
+                    "id": f"fxo_{uuid.uuid4().hex[:8]}",
                     "region": {"x": 0.1, "y": 0.1, "width": 0.8, "height": 0.8},
                     "style": "soft",
                     "timeline_start": round(m[0], 3), "timeline_end": round(m[1], 3),
