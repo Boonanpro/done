@@ -2369,6 +2369,8 @@ struct App {
     /// A miss is RETRIED after 1s — permanently caching "not there yet" during a bake
     /// froze the outline on its pre-bake state forever.
     blur_meta_cache: std::collections::HashMap<String, (Option<serde_json::Value>, Instant)>,
+    /// dragging a region-effect rectangle on the preview: (clip id, mode 0=move/1..4=NW,NE,SW,SE corner, grab pos, orig region)
+    region_drag: Option<(String, u8, egui::Pos2, (f64, f64, f64, f64))>,
     blur_out_log_at: Instant,
     last_push: Instant,
     // Filmora semantics (observed in its logs: Pause -> seek -> auto Play): any timeline
@@ -2507,6 +2509,7 @@ impl App {
             blur_bake_results: Default::default(),
             last_blur_poll: Instant::now(),
             blur_meta_cache: Default::default(),
+            region_drag: None,
             blur_out_log_at: Instant::now(),
             last_push: Instant::now(),
             resume_pending: None,
@@ -4721,6 +4724,18 @@ impl App {
 
     /// Preview inspector: the selected clip's display box is drawn over the preview and
     /// can be MOVED (drag inside) or RESIZED (corner handles, aspect kept) directly.
+    /// Current region rectangle of a clip (canvas fractions).
+    fn region_of(&self, id: &str) -> (f64, f64, f64, f64) {
+        self.doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .find(|c| c.id == id)
+            .and_then(|c| c.region_xywh())
+            .unwrap_or((0.25, 0.25, 0.5, 0.5))
+    }
+
     fn preview_inspector(&mut self, ui: &mut egui::Ui, resp: &egui::Response) {
         let img = resp.rect;
         // selected region-effect clip while the playhead is inside its range: a plain
@@ -4754,6 +4769,7 @@ impl App {
                 )
             }))
             .collect();
+        let mut editable: Vec<(String, egui::Rect)> = Vec::new();
         for (_cid, rg, tracked, bt) in outlines {
             // while a bake is live, the outline FOLLOWS the tracked object: the mask
             // meta records the object's box per mask frame — look up the box for the
@@ -4859,7 +4875,81 @@ impl App {
             } else {
                 egui::Color32::from_rgb(255, 170, 60)
             };
-            ui.painter_at(vid).rect_stroke(r, 2.0, egui::Stroke::new(2.0, col));
+            let p = ui.painter_at(vid);
+            p.rect_stroke(r, 2.0, egui::Stroke::new(2.0, col));
+            // the ORANGE (static/anchor) rect is hand-editable: corner handles + body
+            // drag. A green following box is the TRACKED object, not the region — its
+            // rect is not draggable (解除 first to hand-adjust).
+            if !following {
+                for c4 in [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()] {
+                    p.rect_filled(egui::Rect::from_center_size(c4, egui::vec2(8.0, 8.0)), 1.0, col);
+                }
+                editable.push((_cid.clone(), r));
+            }
+        }
+        // --- region rect editing: corners = resize, inside = move (shape preserved) ---
+        if resp.drag_started() && self.region_drag.is_none() {
+            if let Some(pt) = resp.interact_pointer_pos() {
+                'hit: for (cid, r) in &editable {
+                    let corners = [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()];
+                    for (ci, cp) in corners.iter().enumerate() {
+                        if cp.distance(pt) <= 10.0 {
+                            self.pending_undo = Some(self.doc.raw.clone());
+                            self.region_drag = Some((cid.clone(), ci as u8 + 1, pt, self.region_of(cid)));
+                            break 'hit;
+                        }
+                    }
+                    if r.contains(pt) {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                        self.region_drag = Some((cid.clone(), 0, pt, self.region_of(cid)));
+                        break 'hit;
+                    }
+                }
+            }
+        }
+        if let Some((cid, mode, grab, orig)) = self.region_drag.clone() {
+            if let Some(pt) = resp.interact_pointer_pos() {
+                let dx = ((pt.x - grab.x) / vid.width()) as f64;
+                let dy = ((pt.y - grab.y) / vid.height()) as f64;
+                let (mut x, mut y, mut w, mut h) = orig;
+                match mode {
+                    0 => {
+                        x += dx;
+                        y += dy;
+                    }
+                    1 => {
+                        x += dx;
+                        y += dy;
+                        w -= dx;
+                        h -= dy;
+                    }
+                    2 => {
+                        y += dy;
+                        w += dx;
+                        h -= dy;
+                    }
+                    3 => {
+                        x += dx;
+                        w -= dx;
+                        h += dy;
+                    }
+                    _ => {
+                        w += dx;
+                        h += dy;
+                    }
+                }
+                w = w.clamp(0.02, 1.0);
+                h = h.clamp(0.02, 1.0);
+                x = x.clamp(0.0, 1.0 - w);
+                y = y.clamp(0.0, 1.0 - h);
+                let cid2 = cid.clone();
+                self.apply_edit(false, move |raw| edits::set_region(raw, &cid2, x, y, w, h));
+            }
+            if ui.input(|i| i.pointer.any_released()) {
+                self.region_drag = None;
+                self.push_req(false);
+            }
+            return; // the gesture owns the pointer — skip the asset-clip inspector below
         }
         let sel: Vec<model::Clip> = self
             .doc
@@ -6658,6 +6748,12 @@ impl eframe::App for App {
                 {
                     self.blur_mode = !self.blur_mode;
                     self.blur_drag = None;
+                    if self.blur_mode {
+                        // drawing over a RUNNING video meant the clip landed seconds past
+                        // the frame the user aimed at ("描いた瞬間に別の場所が映る") —
+                        // freeze the preview on the displayed frame first, like F/S do
+                        self.pause_at_displayed();
+                    }
                 }
                 ui.menu_button("＋素材", |ui| {
                     ui.set_min_width(260.0);
@@ -6844,7 +6940,11 @@ impl eframe::App for App {
                                         let fy = ((rr.top() - vid.top()) / vid.height()).clamp(0.0, 1.0) as f64;
                                         let fw = (rr.width() / vid.width()).min(1.0) as f64;
                                         let fh = (rr.height() / vid.height()).min(1.0) as f64;
+                                        // belt & braces: land exactly on the frame being
+                                        // shown, and pin the preview clock to it too
+                                        self.pause_at_displayed();
                                         let t = self.displayed_t();
+                                        self.t = t;
                                         let salt = self.salt;
                                         self.salt += 1;
                                         self.apply_edit(true, move |raw| {
