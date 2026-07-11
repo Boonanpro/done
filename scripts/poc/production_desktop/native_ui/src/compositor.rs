@@ -821,6 +821,18 @@ pub fn source_box_to_canvas(
     (x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
 }
 
+/// Point variant of canvas_box_to_source (correction clicks land on source pixels).
+pub fn canvas_point_to_source(
+    canvas_wh: (u32, u32),
+    src_wh: (u32, u32),
+    dst: (f64, f64, f64, f64),
+    crop: Option<(f64, f64, f64, f64)>,
+    p: (f64, f64),
+) -> (f64, f64) {
+    let b = canvas_box_to_source(canvas_wh, src_wh, dst, crop, (p.0, p.1, 0.0, 0.0));
+    (b.0, b.1)
+}
+
 /// Map a CANVAS-space box into the base clip's SOURCE-frame space (inverse of the
 /// cover-crop mapping in draw_with_shader) — used to hand the user's drawn rectangle
 /// to the SAM bake, which works on source pixels. Returns (x, y, w, h) normalized.
