@@ -2394,6 +2394,11 @@ struct App {
     blur_meta_cache: std::collections::HashMap<String, (Option<serde_json::Value>, Instant)>,
     /// dragging a region-effect rectangle on the preview: (clip id, mode 0=move/1..4=NW,NE,SW,SE corner, grab pos, orig region)
     region_drag: Option<(String, u8, egui::Pos2, (f64, f64, f64, f64))>,
+    /// 追従修正モード: clip id being corrected; clicks on the preview collect +/- points
+    corr_mode: Option<String>,
+    /// correction points in SOURCE coords (x, y, positive) — all on corr_anchor_src's frame
+    corr_points: Vec<(f64, f64, bool)>,
+    corr_anchor_src: Option<f64>,
     /// BLURSHIFT diagnostics: watch the presented-frame time for 2s after a ◱ drop
     blur_debug_until: Option<Instant>,
     blur_debug_last_t: f64,
@@ -2536,6 +2541,9 @@ impl App {
             last_blur_poll: Instant::now(),
             blur_meta_cache: Default::default(),
             region_drag: None,
+            corr_mode: None,
+            corr_points: Vec::new(),
+            corr_anchor_src: None,
             blur_debug_until: None,
             blur_debug_last_t: 0.0,
             blur_out_log_at: Instant::now(),
@@ -3002,6 +3010,27 @@ impl App {
     /// under the effect window, POST /blur-mask (box = the drawn rectangle) and bind the
     /// pending bake to the clip — the mask then FOLLOWS the object inside the rectangle.
     fn apply_blur_bake(&mut self, id: &str) {
+        self.apply_blur_bake_ex(id, None, None)
+    }
+
+    /// 追従修正: re-bake THIS clip's window anchored by the collected +/- clicks. The
+    /// splice contract comes from clip bounds — neighbours (split-off spans) keep their
+    /// own mask keys untouched, so everything outside this clip stays bit-identical.
+    fn apply_blur_correction(&mut self, id: &str) {
+        if self.corr_points.is_empty() {
+            self.toast("先にプレビューで対象をクリックしてください（左=＋ / 右=−）");
+            return;
+        }
+        let pts = self.corr_points.clone();
+        let anchor = self.corr_anchor_src;
+        eprintln!("CORRBAKE clip={id} points={} anchor={anchor:?}", pts.len());
+        self.apply_blur_bake_ex(id, Some(pts), anchor);
+        self.corr_mode = None;
+        self.corr_points.clear();
+        self.corr_anchor_src = None;
+    }
+
+    fn apply_blur_bake_ex(&mut self, id: &str, points: Option<Vec<(f64, f64, bool)>>, anchor_override: Option<f64>) {
         let Some(c) = self
             .doc
             .seq
@@ -3077,13 +3106,21 @@ impl App {
         let cid = id.to_string();
         self.apply_edit(true, move |raw| edits::set_blur_track(raw, &cid, Some(pending)));
         self.blur_states.insert(id.to_string(), PopState::Baking(0));
-        let payload = serde_json::json!({
+        let mut pj = serde_json::json!({
             "room_id": room, "asset_id": aid,
             "source_start": ss, "source_end": se,
-            "anchor": anchor_src,
-            "box": [sbox.0, sbox.1, sbox.2, sbox.3],
-        })
-        .to_string();
+            "anchor": anchor_override.unwrap_or(anchor_src),
+        });
+        if let Some(pts) = points.as_ref().filter(|p| !p.is_empty()) {
+            // correction clicks: SAM point prompts (fast tracker engine)
+            pj["points"] = serde_json::json!(pts
+                .iter()
+                .map(|(x, y, pos)| serde_json::json!([x, y, if *pos { 1 } else { 0 }]))
+                .collect::<Vec<_>>());
+        } else {
+            pj["box"] = serde_json::json!([sbox.0, sbox.1, sbox.2, sbox.3]);
+        }
+        let payload = pj.to_string();
         let sink = self.blur_bake_results.clone();
         let cid = id.to_string();
         std::thread::spawn(move || {
@@ -3918,6 +3955,52 @@ impl App {
                             self.push_req(false);
                         }
                     });
+                    if has_track {
+                        let in_corr = self.corr_mode.as_deref() == Some(id.as_str());
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(in_corr, "追従修正")
+                                .on_hover_text(
+                                    "外れているフレームで対象を左クリック（＋=これを追え）/\n右クリック（−=これは違う）→ 修正ベイク。\n直したい区間はSで分割して切り出してから",
+                                )
+                                .clicked()
+                            {
+                                if in_corr {
+                                    self.corr_mode = None;
+                                    self.corr_points.clear();
+                                    self.corr_anchor_src = None;
+                                } else {
+                                    self.corr_mode = Some(id.clone());
+                                    self.corr_points.clear();
+                                    self.corr_anchor_src = None;
+                                    self.pause_at_displayed();
+                                }
+                            }
+                            if in_corr {
+                                if ui
+                                    .add_enabled(!self.corr_points.is_empty(), egui::Button::new("修正ベイク"))
+                                    .clicked()
+                                {
+                                    let cid = id.clone();
+                                    self.apply_blur_correction(&cid);
+                                }
+                                if ui.button("点クリア").clicked() {
+                                    self.corr_points.clear();
+                                    self.corr_anchor_src = None;
+                                }
+                            }
+                        });
+                        if in_corr {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "点 {}個（左=＋含める / 右=−除外。別フレームでクリックすると打ち直し）",
+                                    self.corr_points.len()
+                                ))
+                                .small()
+                                .weak(),
+                            );
+                        }
+                    }
                     match self.blur_states.get(&id).copied() {
                         Some(PopState::Baking(pct)) => {
                             ui.label(egui::RichText::new(format!("追従ベイク中 {pct}%")).small());
@@ -4805,6 +4888,103 @@ impl App {
                 )
             }))
             .collect();
+        // --- 追従修正モード: clicks collect +/- points; owns the pointer entirely ---
+        if let Some(cid) = self.corr_mode.clone() {
+            let clip = self
+                .doc
+                .seq
+                .tracks
+                .iter()
+                .flat_map(|tr| tr.clips.iter())
+                .find(|c| c.id == cid)
+                .cloned();
+            let Some(c) = clip else {
+                self.corr_mode = None;
+                return;
+            };
+            let inside_time = self.t >= c.timeline_start && self.t < c.timeline_end;
+            let baid = c
+                .blur_track
+                .as_ref()
+                .and_then(|bt| bt.get("asset_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let base = self
+                .doc
+                .active_video(self.t)
+                .0
+                .filter(|b| b.asset_id.as_deref() == Some(baid.as_str()))
+                .cloned();
+            if let (true, Some(b)) = (inside_time, base) {
+                let dims = self.doc.asset_dims.get(&baid).copied().unwrap_or((0, 0));
+                let bb = b.display_box();
+                let src_now = b.src_at(self.t);
+                // markers (source -> canvas)
+                let p = ui.painter_at(vid);
+                for (sx, sy, pos) in &self.corr_points {
+                    let cb = compositor::source_box_to_canvas(
+                        (CANVAS_W, CANVAS_H),
+                        dims,
+                        (bb.x, bb.y, bb.width, bb.height),
+                        b.crop_ltrb(),
+                        (*sx, *sy, 0.0, 0.0),
+                    );
+                    let cp = egui::pos2(
+                        vid.left() + cb.0 as f32 * vid.width(),
+                        vid.top() + cb.1 as f32 * vid.height(),
+                    );
+                    let col = if *pos {
+                        egui::Color32::from_rgb(60, 230, 120)
+                    } else {
+                        egui::Color32::from_rgb(240, 70, 70)
+                    };
+                    p.circle_stroke(cp, 8.0, egui::Stroke::new(3.0, col));
+                    p.circle_filled(cp, 2.5, col);
+                }
+                p.text(
+                    egui::pos2(vid.center().x, vid.top() + 14.0),
+                    egui::Align2::CENTER_CENTER,
+                    "追従修正: 対象を左クリック＋ / 右クリック−",
+                    egui::FontId::proportional(13.0),
+                    egui::Color32::from_rgb(60, 230, 120),
+                );
+                let lclick = resp.clicked();
+                let rclick = resp.secondary_clicked();
+                if lclick || rclick {
+                    if let Some(pt) = resp.interact_pointer_pos() {
+                        if vid.contains(pt) {
+                            // clicks belong to ONE anchor frame; clicking on a different
+                            // frame starts the point set over there
+                            if self.corr_anchor_src.map(|a| (a - src_now).abs() > 0.05).unwrap_or(false) {
+                                self.corr_points.clear();
+                                self.toast("別のフレームなので点を打ち直します");
+                            }
+                            self.corr_anchor_src = Some(src_now);
+                            let cx = ((pt.x - vid.left()) / vid.width()) as f64;
+                            let cy = ((pt.y - vid.top()) / vid.height()) as f64;
+                            let (sx, sy) = compositor::canvas_point_to_source(
+                                (CANVAS_W, CANVAS_H),
+                                dims,
+                                (bb.x, bb.y, bb.width, bb.height),
+                                b.crop_ltrb(),
+                                (cx, cy),
+                            );
+                            self.corr_points.push((sx, sy, lclick));
+                        }
+                    }
+                }
+            } else {
+                ui.painter_at(vid).text(
+                    egui::pos2(vid.center().x, vid.top() + 14.0),
+                    egui::Align2::CENTER_CENTER,
+                    "追従修正: 再生ヘッドをこのぼかしクリップの範囲内に",
+                    egui::FontId::proportional(13.0),
+                    egui::Color32::from_rgb(255, 170, 60),
+                );
+            }
+            return;
+        }
         let mut editable: Vec<(String, egui::Rect)> = Vec::new();
         for (_cid, rg, tracked, bt) in outlines {
             // while a bake is live, the outline FOLLOWS the tracked object: the mask
