@@ -985,6 +985,14 @@ fn compose(
                             if !ok {
                                 exact = false; // settle pass will land the exact mask frame
                             }
+                            if BLUR_DBG.load(Ordering::Relaxed) {
+                                eprintln!(
+                                    "BLURMASK t={t:.3} clip={} req_mt={mt:.3} landed={:.3} ok={ok} fast={fast} (mask_frame≈{})",
+                                    c.id,
+                                    vs.shown_pts(),
+                                    (vs.shown_pts() * 30.0).round() as i64
+                                );
+                            }
                             // draw with the decoder's LAST frame even when the budgeted
                             // seek missed: a frame-stale tracked mask beats flashing to
                             // the static stand-in (visible as soft->blocky mode flicker
