@@ -47,6 +47,10 @@ pub struct Clip {
     // {asset_id, key, bake_start} — mask video = {asset_dir}/blur-cache/{key}.mask.mp4
     #[serde(default)]
     pub blur_track: Option<serde_json::Value>,
+    // manual POSITION keyframes for the region rect: [{t: clip-relative sec, x, y}, ...]
+    // sorted by t; size stays the base region's. Linear interp, clamped at the ends.
+    #[serde(default)]
+    pub region_keys: Option<serde_json::Value>,
     // freeze-frame: room-relative path of the materialized PNG (Filmora-style: the still
     // IS an image file — no decoder is ever consulted, so it cannot wander)
     #[serde(default)]
@@ -151,6 +155,42 @@ impl Clip {
             None
         }
     }
+    /// Region rect at timeline time `t` — the base rect, with POSITION keyframes
+    /// (region_keys) linearly interpolated when present. Size never animates.
+    pub fn region_at(&self, t: f64) -> Option<(f64, f64, f64, f64)> {
+        let (bx, by, w, h) = self.region_xywh()?;
+        let Some(keys) = self.region_keys.as_ref().and_then(|v| v.as_array()) else {
+            return Some((bx, by, w, h));
+        };
+        let mut ks: Vec<(f64, f64, f64)> = keys
+            .iter()
+            .filter_map(|k| {
+                Some((
+                    k.get("t")?.as_f64()?,
+                    k.get("x")?.as_f64()?,
+                    k.get("y")?.as_f64()?,
+                ))
+            })
+            .collect();
+        if ks.is_empty() {
+            return Some((bx, by, w, h));
+        }
+        ks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let rel = t - self.timeline_start;
+        let (x, y) = if rel <= ks[0].0 {
+            (ks[0].1, ks[0].2)
+        } else if rel >= ks[ks.len() - 1].0 {
+            let l = &ks[ks.len() - 1];
+            (l.1, l.2)
+        } else {
+            let i = ks.iter().position(|k| k.0 > rel).unwrap();
+            let (a, b) = (&ks[i - 1], &ks[i]);
+            let f = ((rel - a.0) / (b.0 - a.0).max(1e-9)).clamp(0.0, 1.0);
+            (a.1 + (b.1 - a.1) * f, a.2 + (b.2 - a.2) * f)
+        };
+        Some((x.clamp(0.0, 1.0), y.clamp(0.0, 1.0), w, h))
+    }
+
     /// Freeze-frame clip? Explicit flag first; the exporter's implicit convention
     /// (source_start >= source_end) still recognizes legacy clips.
     pub fn is_freeze(&self) -> bool {
