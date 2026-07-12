@@ -4015,7 +4015,7 @@ impl App {
                         let kts = clip.region_key_times();
                         let nkeys = kts.len();
                         let rel = self.t - clip.timeline_start;
-                        let on_key = kts.iter().any(|kt| (kt - rel).abs() <= 1.0 / 60.0);
+                        let on_key = kts.iter().any(|kt| (kt - rel).abs() <= edits::KEY_REPLACE_EPS);
                         ui.horizontal(|ui| {
                             if nkeys == 0 {
                                 // キーがまだ無い: トグルON中のドラッグが最初のキーを打つ
@@ -5003,7 +5003,7 @@ impl App {
                 let on_key = c
                     .region_key_times()
                     .iter()
-                    .any(|kt| (kt - rel).abs() <= 1.0 / 60.0);
+                    .any(|kt| (kt - rel).abs() <= edits::KEY_REPLACE_EPS);
                 (
                     c.id.clone(),
                     rg,
@@ -5799,7 +5799,7 @@ impl App {
                             if kx < r.left() - 4.0 || kx > r.right() + 4.0 {
                                 continue;
                             }
-                            let hot = (kt - rel_now).abs() <= 1.0 / 60.0;
+                            let hot = (kt - rel_now).abs() <= edits::KEY_REPLACE_EPS;
                             let (sz, kc) = if hot {
                                 (5.0, egui::Color32::from_rgb(240, 80, 80))
                             } else {
@@ -8837,14 +8837,30 @@ fn main() -> eframe::Result<()> {
             && (x_at(&c, 9.0) - 0.1).abs() < 1e-6
             && (x_at(&c, 15.0) - 0.6).abs() < 1e-6;
         println!("KF interp     {}", if ok1 { "PASS" } else { "FAIL" });
-        edits::set_region_key(&mut raw, "fx1", 0.01, 0.2, 0.35);
+        edits::set_region_key(&mut raw, "fx1", 0.003, 0.2, 0.35);
         let c = clip_of(&raw);
         let ok2 = c.region_key_times().len() == 2 && (x_at(&c, 10.0) - 0.2).abs() < 1e-6;
         println!("KF replace    {} (keys={})", if ok2 { "PASS" } else { "FAIL" }, c.region_key_times().len());
-        edits::remove_region_key(&mut raw, "fx1", 0.01);
+        // 60fps VFR: keys one real frame apart (~16ms) must ALL survive — the old
+        // 1/60s replace window silently deleted the previous frame's key
+        edits::set_region_key(&mut raw, "fx1", 0.016, 0.25, 0.35);
+        edits::set_region_key(&mut raw, "fx1", 0.033, 0.3, 0.35);
+        edits::set_region_key(&mut raw, "fx1", 0.049, 0.35, 0.35);
+        let c = clip_of(&raw);
+        let ok2b = c.region_key_times().len() == 5;
+        println!("KF 60fps-adj  {} (keys={} want 5)", if ok2b { "PASS" } else { "FAIL" }, c.region_key_times().len());
+        // deleting the middle key must not swallow its 16ms neighbours
+        edits::remove_region_key(&mut raw, "fx1", 0.033);
+        let c = clip_of(&raw);
+        let ok3a = c.region_key_times().len() == 4 && !c.region_key_times().contains(&0.033);
+        println!("KF del-narrow {} (keys={})", if ok3a { "PASS" } else { "FAIL" }, c.region_key_times().len());
+        for t in [0.003, 0.016, 0.049] {
+            edits::remove_region_key(&mut raw, "fx1", t);
+        }
         let c = clip_of(&raw);
         let ok3 = c.region_key_times() == vec![4.0];
         println!("KF remove-one {}", if ok3 { "PASS" } else { "FAIL" });
+        let ok2 = ok2 && ok2b && ok3a;
         edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3);
         let before_x = x_at(&clip_of(&raw), 12.0);
         let ids: Vec<String> = vec!["fx1".into()];
