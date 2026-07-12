@@ -191,6 +191,18 @@ impl Clip {
         Some((x.clamp(0.0, 1.0), y.clamp(0.0, 1.0), w, h))
     }
 
+    /// Sorted clip-relative times of the position keyframes (empty when none).
+    pub fn region_key_times(&self) -> Vec<f64> {
+        let mut v: Vec<f64> = self
+            .region_keys
+            .as_ref()
+            .and_then(|k| k.as_array())
+            .map(|a| a.iter().filter_map(|k| k.get("t").and_then(|t| t.as_f64())).collect())
+            .unwrap_or_default();
+        v.sort_by(|a, b| a.total_cmp(b));
+        v
+    }
+
     /// Freeze-frame clip? Explicit flag first; the exporter's implicit convention
     /// (source_start >= source_end) still recognizes legacy clips.
     pub fn is_freeze(&self) -> bool {
