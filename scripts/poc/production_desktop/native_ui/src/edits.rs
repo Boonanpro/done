@@ -129,19 +129,26 @@ fn trim_clip_live_impl(root: &mut Value, ids: &[String], left: bool, from_t: Opt
             };
 
             if from_t.is_some() && left {
+                if !clips.iter().any(|c| ids.contains(&sid(c))) {
+                    continue;
+                }
+                // source-less clips (region effects) have no in-point: no left-extension limit
                 let min_source_room = clips
                     .iter()
                     .filter(|c| ids.contains(&sid(c)))
-                    .map(|c| f(c, "source_start"))
-                    .fold(f64::MAX, f64::min);
+                    .map(|c| {
+                        if c.get("source_start").map(|v| v.is_number()).unwrap_or(false) {
+                            f(c, "source_start")
+                        } else {
+                            f64::INFINITY
+                        }
+                    })
+                    .fold(f64::INFINITY, f64::min);
                 let min_duration = clips
                     .iter()
                     .filter(|c| ids.contains(&sid(c)))
                     .map(|c| f(c, "timeline_end") - f(c, "timeline_start"))
-                    .fold(f64::MAX, f64::min);
-                if min_source_room == f64::MAX || min_duration == f64::MAX {
-                    continue;
-                }
+                    .fold(f64::INFINITY, f64::min);
                 let mut d = new_t - from_t.unwrap();
                 d = d.max(-min_source_room);
                 d = d.min(min_duration - 0.05);
@@ -452,12 +459,15 @@ pub fn normalize_linked_audio(root: &mut Value) {
 fn trim_one_clip(c: &mut Value, left: bool, new_t: f64) {
     let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
     let ss = f(c, "source_start");
+    let has_ss = c.get("source_start").map(|v| v.is_number()).unwrap_or(false);
     let has_se = c.get("source_end").map(|v| v.is_number()).unwrap_or(false);
     if is_freeze_v(c) {
         // a freeze's length is TIMELINE-only: never touch its source fields.
         // (the old video math turned an extended freeze back into moving video)
         if left {
-            setf(c, "timeline_start", new_t.clamp(0.0, te - 0.05));
+            let nts = new_t.clamp(0.0, te - 0.05);
+            setf(c, "timeline_start", nts);
+            shift_region_keys(c, ts - nts);
         } else {
             setf(c, "timeline_end", new_t.max(ts + 0.05));
         }
@@ -466,15 +476,25 @@ fn trim_one_clip(c: &mut Value, left: bool, new_t: f64) {
     if left {
         let nt = new_t.clamp(0.0, te - 0.05);
         let mut d = nt - ts;
-        d = d.max(-ss);
+        if has_ss {
+            // real media: can't extend before the source's first frame. Source-less
+            // clips (region effects) have no such limit — they extend freely.
+            d = d.max(-ss);
+        }
         if has_se {
             // never push the in-point past the out-point (that flipped the clip
             // into an accidental freeze by the implicit se<=ss convention)
             let se = f(c, "source_end");
             d = d.min(se - ss - 0.05);
         }
-        setf(c, "timeline_start", (ts + d).max(0.0));
-        setf(c, "source_start", (ss + d).max(0.0));
+        let nts = (ts + d).max(0.0);
+        setf(c, "timeline_start", nts);
+        if has_ss {
+            setf(c, "source_start", (ss + d).max(0.0));
+        }
+        // position keyframes are clip-relative: keep each pinned to the same
+        // TIMELINE moment when the clip's left edge moves
+        shift_region_keys(c, ts - nts);
     } else {
         let nt = new_t.max(ts + 0.05);
         setf(c, "timeline_end", nt);
@@ -482,6 +502,24 @@ fn trim_one_clip(c: &mut Value, left: bool, new_t: f64) {
             let se = f(c, "source_end");
             // clamp: the out-point stays after the in-point
             setf(c, "source_end", (se + (nt - te)).max(ss + 0.05));
+        }
+    }
+}
+
+/// Shift every position keyframe by dt seconds (used when the clip's left edge
+/// moves: rel times must keep pointing at the same absolute timeline moment).
+fn shift_region_keys(c: &mut Value, dt: f64) {
+    if dt.abs() < 1e-9 {
+        return;
+    }
+    let Some(keys) = c.get_mut("region_keys").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for k in keys.iter_mut() {
+        if let Some(t) = k.get("t").and_then(|v| v.as_f64()) {
+            if let Some(o) = k.as_object_mut() {
+                o.insert("t".into(), serde_json::json!(((t + dt) * 1000.0).round() / 1000.0));
+            }
         }
     }
 }
@@ -1622,6 +1660,28 @@ pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: 
             let tb = b.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);
             ta.total_cmp(&tb)
         });
+    });
+}
+
+/// Remove the position keyframe nearest to clip-relative time t (within one frame).
+pub fn remove_region_key(raw: &mut serde_json::Value, id: &str, t: f64) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) != Some(id) {
+            return;
+        }
+        let o = c.as_object_mut().unwrap();
+        let Some(keys) = o.get_mut("region_keys").and_then(|v| v.as_array_mut()) else {
+            return;
+        };
+        keys.retain(|k| {
+            k.get("t")
+                .and_then(|v| v.as_f64())
+                .map(|kt| (kt - t).abs() > 1.0 / 30.0)
+                .unwrap_or(false)
+        });
+        if keys.is_empty() {
+            o.remove("region_keys");
+        }
     });
 }
 

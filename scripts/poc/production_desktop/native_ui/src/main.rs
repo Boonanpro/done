@@ -2396,6 +2396,9 @@ struct App {
     region_drag: Option<(String, u8, egui::Pos2, (f64, f64, f64, f64))>,
     /// 位置キーフレームモード: ON中は矩形の移動ドラッグが現在時刻のキーを打つ
     kf_mode: bool,
+    /// KFドラッグ中に固定するキー時刻（クリップ相対）。ドラッグ開始時に一度だけ
+    /// 決めて指を離すまで変えない＝再生ヘッドが動いてもキーが散らばらない
+    kf_drag_rel: Option<f64>,
     /// 追従修正モード: clip id being corrected; clicks on the preview collect +/- points
     corr_mode: Option<String>,
     /// correction points in SOURCE coords (x, y, positive) — all on corr_anchor_src's frame
@@ -2544,6 +2547,7 @@ impl App {
             blur_meta_cache: Default::default(),
             region_drag: None,
             kf_mode: false,
+            kf_drag_rel: None,
             corr_mode: None,
             corr_points: Vec::new(),
             corr_anchor_src: None,
@@ -4008,17 +4012,15 @@ impl App {
                         // ---- 手動: 位置キーフレーム（AI追従なしの矩形をダビンチ流に手で追わせる）----
                         ui.add_space(6.0);
                         ui.label(egui::RichText::new("手動追従（キーフレーム）").strong());
-                        let nkeys = clip
-                            .region_keys
-                            .as_ref()
-                            .and_then(|v| v.as_array())
-                            .map(|a| a.len())
-                            .unwrap_or(0);
+                        let kts = clip.region_key_times();
+                        let nkeys = kts.len();
+                        let rel = self.t - clip.timeline_start;
+                        let on_key = kts.iter().any(|kt| (kt - rel).abs() <= 1.0 / 60.0);
                         ui.horizontal(|ui| {
                             if ui
                                 .selectable_label(self.kf_mode, "位置キーフレーム")
                                 .on_hover_text(
-                                    "ON中: 再生ヘッドを動かして矩形をドラッグ→その時刻に位置キーを打つ。\nキー間は直線補間で移動（大きさは固定）",
+                                    "ON中: 再生ヘッドを動かして矩形をドラッグ→その時刻に位置キーを打つ。\nキー間は直線補間で移動（大きさは固定）。\n枠が赤=キー上（ドラッグで打ち直し）、オレンジ=補間中（ドラッグで新規キー）",
                                 )
                                 .clicked()
                             {
@@ -4034,11 +4036,71 @@ impl App {
                             }
                         });
                         if self.kf_mode || nkeys > 0 {
-                            ui.label(
-                                egui::RichText::new(format!("キー {nkeys}個"))
-                                    .small()
-                                    .weak(),
-                            );
+                            ui.horizontal(|ui| {
+                                // ← 前のキーへ / このフレームにキー / このキーを削除 / 次のキーへ →
+                                let prev = kts.iter().rev().find(|kt| **kt < rel - 1e-3).copied();
+                                let next = kts.iter().find(|kt| **kt > rel + 1e-3).copied();
+                                if ui
+                                    .add_enabled(prev.is_some(), egui::Button::new("◀"))
+                                    .on_hover_text("前のキーへ")
+                                    .clicked()
+                                {
+                                    self.playing = false;
+                                    self.t = clip.timeline_start + prev.unwrap();
+                                    self.push_req(false);
+                                }
+                                if on_key {
+                                    if ui
+                                        .button("◆削除")
+                                        .on_hover_text("再生ヘッド位置のキーだけ削除")
+                                        .clicked()
+                                    {
+                                        let cid = id.clone();
+                                        self.apply_edit(true, move |raw| {
+                                            edits::remove_region_key(raw, &cid, rel)
+                                        });
+                                        self.push_req(false);
+                                    }
+                                } else if ui
+                                    .add_enabled(
+                                        rel >= 0.0 && rel <= clip.dur(),
+                                        egui::Button::new("◆＋"),
+                                    )
+                                    .on_hover_text("このフレームの今の位置にキーを打つ（動かさず固定したい時に）")
+                                    .clicked()
+                                {
+                                    if let Some((kx, ky, _, _)) = clip.region_at(self.t) {
+                                        let cid = id.clone();
+                                        self.apply_edit(true, move |raw| {
+                                            edits::set_region_key(raw, &cid, rel, kx, ky)
+                                        });
+                                        self.push_req(false);
+                                    }
+                                }
+                                if ui
+                                    .add_enabled(next.is_some(), egui::Button::new("▶"))
+                                    .on_hover_text("次のキーへ")
+                                    .clicked()
+                                {
+                                    self.playing = false;
+                                    self.t = clip.timeline_start + next.unwrap();
+                                    self.push_req(false);
+                                }
+                                let status = if on_key {
+                                    format!("キー{nkeys}個・キー上")
+                                } else {
+                                    format!("キー{nkeys}個")
+                                };
+                                ui.label(
+                                    egui::RichText::new(status)
+                                        .small()
+                                        .color(if on_key {
+                                            egui::Color32::from_rgb(240, 100, 100)
+                                        } else {
+                                            egui::Color32::GRAY
+                                        }),
+                                );
+                            });
                         }
                     }
                     match self.blur_states.get(&id).copied() {
@@ -4906,7 +4968,9 @@ impl App {
             let scale = (img.width() / cw).min(img.height() / ch);
             egui::Rect::from_center_size(img.center(), egui::vec2(cw * scale, ch * scale))
         };
-        let outlines: Vec<(String, (f64, f64, f64, f64), bool, Option<serde_json::Value>)> = self
+        // (id, rect, baked, blur_track, on_key) — on_key = playhead sits on a position
+        // keyframe of this clip (within half a frame)
+        let outlines: Vec<(String, (f64, f64, f64, f64), bool, Option<serde_json::Value>, bool)> = self
             .doc
             .seq
             .tracks
@@ -4920,11 +4984,17 @@ impl App {
                     && self.t < c.timeline_end
             })
             .filter_map(|c| c.region_at(self.t).map(|rg| {
+                let rel = self.t - c.timeline_start;
+                let on_key = c
+                    .region_key_times()
+                    .iter()
+                    .any(|kt| (kt - rel).abs() <= 1.0 / 60.0);
                 (
                     c.id.clone(),
                     rg,
                     matches!(self.blur_states.get(&c.id), Some(PopState::Ready)),
                     c.blur_track.clone(),
+                    on_key,
                 )
             }))
             .collect();
@@ -5026,7 +5096,7 @@ impl App {
             return;
         }
         let mut editable: Vec<(String, egui::Rect)> = Vec::new();
-        for (_cid, rg, tracked, bt) in outlines {
+        for (_cid, rg, tracked, bt, on_key) in outlines {
             // while a bake is live, the outline FOLLOWS the tracked object: the mask
             // meta records the object's box per mask frame — look up the box for the
             // frame the preview is showing and map it source -> canvas
@@ -5128,11 +5198,28 @@ impl App {
             );
             let col = if following {
                 egui::Color32::from_rgb(90, 220, 150)
+            } else if on_key {
+                // playhead ON a position keyframe: DaVinci-red = "this drag re-writes THIS key"
+                egui::Color32::from_rgb(240, 80, 80)
             } else {
                 egui::Color32::from_rgb(255, 170, 60)
             };
             let p = ui.painter_at(vid);
             p.rect_stroke(r, 2.0, egui::Stroke::new(2.0, col));
+            if on_key && !following {
+                // small key diamond on the rect's top edge so the state reads at a glance
+                let cpt = egui::pos2(r.center().x, r.top());
+                p.add(egui::Shape::convex_polygon(
+                    vec![
+                        cpt + egui::vec2(0.0, -5.0),
+                        cpt + egui::vec2(5.0, 0.0),
+                        cpt + egui::vec2(0.0, 5.0),
+                        cpt + egui::vec2(-5.0, 0.0),
+                    ],
+                    col,
+                    egui::Stroke::NONE,
+                ));
+            }
             // the ORANGE (static/anchor) rect is hand-editable: corner handles + body
             // drag. A green following box is the TRACKED object, not the region — its
             // rect is not draggable (解除 first to hand-adjust).
@@ -5157,6 +5244,24 @@ impl App {
                     }
                     if r.contains(pt) {
                         self.pending_undo = Some(self.doc.raw.clone());
+                        // KFモード: キー時刻はドラッグ開始時に一度だけ決める（再生中なら
+                        // 表示フレームで停止してから）＝ドラッグ中にキーが散らばらない
+                        self.kf_drag_rel = None;
+                        if self.kf_mode {
+                            if self.playing {
+                                self.pause_at_displayed();
+                            }
+                            if let Some(c) = self
+                                .doc
+                                .seq
+                                .tracks
+                                .iter()
+                                .flat_map(|tr| tr.clips.iter())
+                                .find(|c| c.id == *cid && c.blur_track.is_none())
+                            {
+                                self.kf_drag_rel = Some(self.t - c.timeline_start);
+                            }
+                        }
                         self.region_drag = Some((cid.clone(), 0, pt, self.region_of(cid)));
                         break 'hit;
                     }
@@ -5199,19 +5304,8 @@ impl App {
                 x = x.clamp(0.0, 1.0 - w);
                 y = y.clamp(0.0, 1.0 - h);
                 let cid2 = cid.clone();
-                // KFモード中の移動ドラッグは矩形本体でなく現在時刻の位置キーを打つ
-                let kf_rel = (self.kf_mode && mode == 0)
-                    .then(|| {
-                        self.doc
-                            .seq
-                            .tracks
-                            .iter()
-                            .flat_map(|tr| tr.clips.iter())
-                            .find(|c| c.id == cid)
-                            .map(|c| self.t - c.timeline_start)
-                    })
-                    .flatten();
-                if let Some(rel) = kf_rel {
+                // KFモード中の移動ドラッグは矩形本体でなくドラッグ開始時刻の位置キーを打つ
+                if let (0, Some(rel)) = (mode, self.kf_drag_rel) {
                     self.apply_edit(false, move |raw| edits::set_region_key(raw, &cid2, rel, x, y));
                 } else {
                     self.apply_edit(false, move |raw| edits::set_region(raw, &cid2, x, y, w, h));
@@ -5219,6 +5313,7 @@ impl App {
             }
             if ui.input(|i| i.pointer.any_released()) {
                 self.region_drag = None;
+                self.kf_drag_rel = None;
                 self.push_req(false);
             }
             return; // the gesture owns the pointer — skip the asset-clip inspector below
@@ -5643,6 +5738,36 @@ impl App {
                             egui::FontId::proportional(10.0),
                             egui::Color32::from_gray(220),
                         );
+                    }
+                    // position keyframes: diamond per key on the clip's lower half;
+                    // the one under the playhead lights up red (DaVinci-style)
+                    if c.region.is_some() {
+                        let rel_now = self.t - c.timeline_start;
+                        for kt in c.region_key_times() {
+                            let kx = body.left()
+                                + ((c.timeline_start + kt) as f32) * self.pps
+                                - self.scroll_x;
+                            if kx < r.left() - 4.0 || kx > r.right() + 4.0 {
+                                continue;
+                            }
+                            let hot = (kt - rel_now).abs() <= 1.0 / 60.0;
+                            let (sz, kc) = if hot {
+                                (5.0, egui::Color32::from_rgb(240, 80, 80))
+                            } else {
+                                (4.0, egui::Color32::from_gray(235))
+                            };
+                            let cpt = egui::pos2(kx, r.bottom() - 8.0);
+                            p.add(egui::Shape::convex_polygon(
+                                vec![
+                                    cpt + egui::vec2(0.0, -sz),
+                                    cpt + egui::vec2(sz, 0.0),
+                                    cpt + egui::vec2(0.0, sz),
+                                    cpt + egui::vec2(-sz, 0.0),
+                                ],
+                                kc,
+                                egui::Stroke::new(1.0, egui::Color32::from_gray(40)),
+                            ));
+                        }
                     }
                 }
                 // effect state ON the clip, without killing the "what is this clip"
@@ -8640,10 +8765,63 @@ fn main() -> eframe::Result<()> {
     }
     // --selftest-newlane: headless "drag above the top lane" — new provisional lane is
     // created (even from the front lane), repeat is idempotent, moving back dissolves it
+    // --selftest-kf: position-keyframe engine — set/replace/remove/clear, linear
+    // interpolation, and trim keeping keys pinned to absolute timeline moments
+    if args.iter().any(|a| a == "--selftest-kf") {
+        use serde_json::json;
+        let mut raw = json!([{ "timeline": { "sequence": { "tracks": [
+            { "type": "effect", "clips": [
+                { "id": "fx1", "region": {"x": 0.1, "y": 0.3, "width": 0.2, "height": 0.1},
+                  "style": "gaussian", "timeline_start": 10.0, "timeline_end": 14.0 }
+            ]}
+        ]}}}]);
+        let clip_of = |raw: &serde_json::Value| -> model::Clip {
+            serde_json::from_value(raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0].clone())
+                .expect("clip parse")
+        };
+        edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3);
+        edits::set_region_key(&mut raw, "fx1", 4.0, 0.6, 0.3);
+        let c = clip_of(&raw);
+        let x_at = |c: &model::Clip, t: f64| c.region_at(t).unwrap().0;
+        let ok1 = (x_at(&c, 11.0) - 0.225).abs() < 1e-6
+            && (x_at(&c, 13.0) - 0.475).abs() < 1e-6
+            && (x_at(&c, 9.0) - 0.1).abs() < 1e-6
+            && (x_at(&c, 15.0) - 0.6).abs() < 1e-6;
+        println!("KF interp     {}", if ok1 { "PASS" } else { "FAIL" });
+        edits::set_region_key(&mut raw, "fx1", 0.01, 0.2, 0.35);
+        let c = clip_of(&raw);
+        let ok2 = c.region_key_times().len() == 2 && (x_at(&c, 10.0) - 0.2).abs() < 1e-6;
+        println!("KF replace    {} (keys={})", if ok2 { "PASS" } else { "FAIL" }, c.region_key_times().len());
+        edits::remove_region_key(&mut raw, "fx1", 0.01);
+        let c = clip_of(&raw);
+        let ok3 = c.region_key_times() == vec![4.0];
+        println!("KF remove-one {}", if ok3 { "PASS" } else { "FAIL" });
+        edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3);
+        let before_x = x_at(&clip_of(&raw), 12.0);
+        let ids: Vec<String> = vec!["fx1".into()];
+        edits::trim_clip_live_from(&mut raw, &ids, true, 10.0, 11.0);
+        let c = clip_of(&raw);
+        let ok4 = (c.timeline_start - 11.0).abs() < 1e-6 && (x_at(&c, 12.0) - before_x).abs() < 1e-3;
+        println!("KF trim-pin   {} (ts={} x@12={:.4} want {:.4})",
+                 if ok4 { "PASS" } else { "FAIL" }, c.timeline_start, x_at(&c, 12.0), before_x);
+        edits::trim_clip_live_from(&mut raw, &ids, true, 11.0, 9.0);
+        let c = clip_of(&raw);
+        let ok5 = (c.timeline_start - 9.0).abs() < 1e-6 && (x_at(&c, 12.0) - before_x).abs() < 1e-3;
+        println!("KF extend-pin {} (ts={} x@12={:.4})", if ok5 { "PASS" } else { "FAIL" }, c.timeline_start, x_at(&c, 12.0));
+        edits::clear_region_keys(&mut raw, "fx1");
+        let ok6 = clip_of(&raw).region_key_times().is_empty();
+        println!("KF clear      {}", if ok6 { "PASS" } else { "FAIL" });
+        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6;
+        println!("KF ALL {}", if all { "PASS" } else { "FAIL" });
+        std::process::exit(if all { 0 } else { 1 });
+    }
     if args.iter().any(|a| a == "--selftest-newlane") {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
         let mut app = App::new(&contents, &dir).expect("app");
+        // normalize first: a pre-existing empty unnamed lane in the room would be swept
+        // by the dissolve-side prune and skew the track-count assertions
+        app.apply_edit(false, |raw| edits::prune_empty_unnamed_tracks(raw));
         let n0 = app.doc.seq.tracks.len();
         // front-most non-audio lane with >= 2 clips exercises the old blanket early-return
         let (src_ti, cid) = app
