@@ -4017,17 +4017,31 @@ impl App {
                         let rel = self.t - clip.timeline_start;
                         let on_key = kts.iter().any(|kt| (kt - rel).abs() <= 1.0 / 60.0);
                         ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(self.kf_mode, "位置キーフレーム")
-                                .on_hover_text(
-                                    "ON中: 再生ヘッドを動かして矩形をドラッグ→その時刻に位置キーを打つ。\nキー間は直線補間で移動（大きさは固定）。\n枠が赤=キー上（ドラッグで打ち直し）、オレンジ=補間中（ドラッグで新規キー）",
-                                )
-                                .clicked()
-                            {
-                                self.kf_mode = !self.kf_mode;
-                                if self.kf_mode {
-                                    self.pause_at_displayed();
+                            if nkeys == 0 {
+                                // キーがまだ無い: トグルON中のドラッグが最初のキーを打つ
+                                if ui
+                                    .selectable_label(self.kf_mode, "位置キーフレーム")
+                                    .on_hover_text(
+                                        "ON中: 再生ヘッドを動かして矩形をドラッグ→その時刻に位置キーを打つ。\nキー間は直線補間で移動（大きさは固定）。\n一度キーを打てば以降はトグル不要＝ドラッグが常にキー打ちになります",
+                                    )
+                                    .clicked()
+                                {
+                                    self.kf_mode = !self.kf_mode;
+                                    if self.kf_mode {
+                                        self.pause_at_displayed();
+                                    }
                                 }
+                            } else {
+                                // キーが1個でもあれば位置はキー駆動＝ドラッグは常にキー打ち
+                                // （モード不要。基準矩形の位置編集はもう画に効かないため）
+                                ui.label(
+                                    egui::RichText::new("キー追従中（ドラッグ＝キー打ち）")
+                                        .color(egui::Color32::from_rgb(120, 200, 255))
+                                        .small(),
+                                )
+                                .on_hover_text(
+                                    "再生ヘッドを動かして矩形をドラッグ→その時刻にキー。\n枠が赤=キー上（ドラッグで打ち直し）、オレンジ=補間中（ドラッグで新規キー）",
+                                );
                             }
                             if nkeys > 0 && ui.button("キー全消し").clicked() {
                                 let cid = id.clone();
@@ -4067,6 +4081,7 @@ impl App {
                                         egui::Button::new("◆＋"),
                                     )
                                     .on_hover_text("このフレームの今の位置にキーを打つ（動かさず固定したい時に）")
+                                    .on_disabled_hover_text("再生ヘッドをこのぼかしクリップの範囲内に置いてください")
                                     .clicked()
                                 {
                                     if let Some((kx, ky, _, _)) = clip.region_at(self.t) {
@@ -5234,34 +5249,58 @@ impl App {
         if resp.drag_started() && self.region_drag.is_none() {
             if let Some(pt) = resp.interact_pointer_pos() {
                 'hit: for (cid, r) in &editable {
+                    // (timeline_start, already-keyed?) of a keyframe-able clip (no AI track)
+                    let key_info = self
+                        .doc
+                        .seq
+                        .tracks
+                        .iter()
+                        .flat_map(|tr| tr.clips.iter())
+                        .find(|c| c.id == *cid && c.blur_track.is_none())
+                        .map(|c| (c.timeline_start, !c.region_key_times().is_empty()));
+                    // キー時刻はドラッグ開始時に一度だけ決める（再生中なら表示フレームで
+                    // 停止してから）＝ドラッグ中にキーが散らばらない。
+                    // 打つ条件: 移動=KFモード or 既にキーあり（キーが1個でもあれば基準矩形の
+                    // 位置は画に効かないので、常にキー打ちに自動切替=袋小路を作らない）。
+                    // 角リサイズ=既にキーがある時だけ位置キーも更新。
+                    let mut arm_kf = |app: &mut App, want: bool| {
+                        app.kf_drag_rel = None;
+                        if want {
+                            if app.playing {
+                                app.pause_at_displayed();
+                            }
+                            if let Some((ts, _)) = key_info {
+                                app.kf_drag_rel = Some(app.t - ts);
+                            }
+                        }
+                    };
+                    let has_keys = key_info.map(|(_, k)| k).unwrap_or(false);
+                    // corner hit zones shrink with the rect so a small rect keeps a
+                    // grabbable BODY (10px corners used to swallow short rects whole)
+                    let cr = 10.0f32.min(r.width() / 3.0).min(r.height() / 3.0).max(4.0);
                     let corners = [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()];
                     for (ci, cp) in corners.iter().enumerate() {
-                        if cp.distance(pt) <= 10.0 {
+                        if cp.distance(pt) <= cr {
                             self.pending_undo = Some(self.doc.raw.clone());
+                            arm_kf(self, has_keys);
+                            eprintln!(
+                                "KFDRAG start mode={} rel={:?} kf_mode={} has_keys={has_keys}",
+                                ci + 1,
+                                self.kf_drag_rel,
+                                self.kf_mode
+                            );
                             self.region_drag = Some((cid.clone(), ci as u8 + 1, pt, self.region_of(cid)));
                             break 'hit;
                         }
                     }
                     if r.contains(pt) {
                         self.pending_undo = Some(self.doc.raw.clone());
-                        // KFモード: キー時刻はドラッグ開始時に一度だけ決める（再生中なら
-                        // 表示フレームで停止してから）＝ドラッグ中にキーが散らばらない
-                        self.kf_drag_rel = None;
-                        if self.kf_mode {
-                            if self.playing {
-                                self.pause_at_displayed();
-                            }
-                            if let Some(c) = self
-                                .doc
-                                .seq
-                                .tracks
-                                .iter()
-                                .flat_map(|tr| tr.clips.iter())
-                                .find(|c| c.id == *cid && c.blur_track.is_none())
-                            {
-                                self.kf_drag_rel = Some(self.t - c.timeline_start);
-                            }
-                        }
+                        arm_kf(self, self.kf_mode || has_keys);
+                        eprintln!(
+                            "KFDRAG start mode=0 rel={:?} kf_mode={} has_keys={has_keys}",
+                            self.kf_drag_rel,
+                            self.kf_mode
+                        );
                         self.region_drag = Some((cid.clone(), 0, pt, self.region_of(cid)));
                         break 'hit;
                     }
@@ -5304,11 +5343,21 @@ impl App {
                 x = x.clamp(0.0, 1.0 - w);
                 y = y.clamp(0.0, 1.0 - h);
                 let cid2 = cid.clone();
-                // KFモード中の移動ドラッグは矩形本体でなくドラッグ開始時刻の位置キーを打つ
-                if let (0, Some(rel)) = (mode, self.kf_drag_rel) {
-                    self.apply_edit(false, move |raw| edits::set_region_key(raw, &cid2, rel, x, y));
-                } else {
-                    self.apply_edit(false, move |raw| edits::set_region(raw, &cid2, x, y, w, h));
+                // キー打ちが武装済みなら位置はキーへ。角リサイズはサイズを基準矩形に
+                // 書きつつ、位置キーも現在時刻で更新（キー駆動クリップの位置整合）
+                match (mode, self.kf_drag_rel) {
+                    (0, Some(rel)) => {
+                        self.apply_edit(false, move |raw| edits::set_region_key(raw, &cid2, rel, x, y));
+                    }
+                    (_, Some(rel)) => {
+                        self.apply_edit(false, move |raw| {
+                            edits::set_region(raw, &cid2, x, y, w, h);
+                            edits::set_region_key(raw, &cid2, rel, x, y);
+                        });
+                    }
+                    _ => {
+                        self.apply_edit(false, move |raw| edits::set_region(raw, &cid2, x, y, w, h));
+                    }
                 }
             }
             if ui.input(|i| i.pointer.any_released()) {
