@@ -686,6 +686,12 @@ fn compose(
         let (b, o) = doc.active_video(t);
         b.into_iter().chain(o).cloned().collect()
     };
+    // The timeline moment the BASE video layer actually landed on (budgeted scrub
+    // seeks may stop a frame short of t). Region effects evaluate their keyframes at
+    // THIS time so the blur stays glued to the picture that is really on screen —
+    // "video one frame behind, blur at the new spot" was the momentary uncover.
+    let base_id = doc.active_video(t).0.map(|b| b.id.clone());
+    let mut base_eff_t: Option<f64> = None;
     let _t_begin = Instant::now();
     comp.begin(d3d);
     let _ms_base = 0f64;
@@ -924,6 +930,13 @@ fn compose(
                     vs.shown_pts()
                 );
             }
+            if base_id.as_deref() == Some(c.id.as_str()) && vs.shown_pts() >= 0.0 {
+                let eff = c.timeline_start + (vs.shown_pts() - c.source_start);
+                // sanity: decoder slop is bounded (±0.6s windows); reject wild values
+                if (eff - t).abs() < 0.75 {
+                    base_eff_t = Some(eff);
+                }
+            }
             let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
             if near_fz {
                 eprintln!(
@@ -939,12 +952,15 @@ fn compose(
     }
     // region effects (blur/mosaic clips): lanes are just layers — a region clip works
     // from ANY non-audio lane, not only an "effect" one (種別で可否を決めない)
+    // Keyframed rects follow the DISPLAYED base frame's time, not the request time:
+    // that is what keeps the cover glued to the picture during budgeted scrubs.
+    let t_fx = base_eff_t.unwrap_or(t);
     for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
         for c in &tr.clips {
             if c.asset_id.is_some() || t < c.timeline_start || t >= c.timeline_end {
                 continue;
             }
-            if let Some(rg) = c.region_at(t) {
+            if let Some(rg) = c.region_at(t_fx) {
                 let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
                 let is_mosaic = style.contains("mosaic");
                 // SAM tracked blur: the baked mask video (blur-cache/{key}.mask.mp4)
@@ -2583,8 +2599,11 @@ impl App {
             for (ti, tr) in d.seq.tracks.iter().enumerate() {
                 for c in &tr.clips {
                     // any field that changes the rendered output participates
+                    // (region_keys was missing here — key edits left STALE cached frames
+                    // that served the old blur position for a beat before the fresh
+                    // compose replaced them: the "blur lags the frame" report)
                     let sig = format!(
-                        "{ti}|{:.3}|{:.3}|{:.3}|{:?}|{:?}|{:?}|{:?}|{:?}|{:.3}|{}|{}|{}|{}",
+                        "{ti}|{:.3}|{:.3}|{:.3}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:.3}|{}|{}|{}|{}",
                         c.timeline_start,
                         c.timeline_end,
                         c.source_start,
@@ -2592,6 +2611,8 @@ impl App {
                         c.position,
                         c.crop,
                         c.region,
+                        c.region_keys,
+                        c.blur_track,
                         c.text,
                         c.volume,
                         c.effects.len(),
@@ -8876,7 +8897,15 @@ fn main() -> eframe::Result<()> {
         edits::clear_region_keys(&mut raw, "fx1");
         let ok6 = clip_of(&raw).region_key_times().is_empty();
         println!("KF clear      {}", if ok6 { "PASS" } else { "FAIL" });
-        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6;
+        // key edits must invalidate the composed-frame cache: dirty_from has to see
+        // region_keys (it didn't — stale cached frames served the OLD blur position)
+        let d_before = model::Doc::from_raw(raw.clone(), "", "").expect("doc a");
+        edits::set_region_key(&mut raw, "fx1", 1.0, 0.5, 0.5);
+        let d_after = model::Doc::from_raw(raw.clone(), "", "").expect("doc b");
+        let df = App::dirty_from(&d_before, &d_after);
+        let ok7 = df.is_finite() && (df - d_after.seq.tracks[0].clips[0].timeline_start).abs() < 1e-6;
+        println!("KF cache-inval {} (dirty_from={df})", if ok7 { "PASS" } else { "FAIL" });
+        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7;
         println!("KF ALL {}", if all { "PASS" } else { "FAIL" });
         std::process::exit(if all { 0 } else { 1 });
     }
