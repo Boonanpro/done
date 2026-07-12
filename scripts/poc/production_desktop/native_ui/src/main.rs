@@ -944,7 +944,7 @@ fn compose(
             if c.asset_id.is_some() || t < c.timeline_start || t >= c.timeline_end {
                 continue;
             }
-            if let Some(rg) = c.region_xywh() {
+            if let Some(rg) = c.region_at(t) {
                 let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
                 let is_mosaic = style.contains("mosaic");
                 // SAM tracked blur: the baked mask video (blur-cache/{key}.mask.mp4)
@@ -2394,6 +2394,8 @@ struct App {
     blur_meta_cache: std::collections::HashMap<String, (Option<serde_json::Value>, Instant)>,
     /// dragging a region-effect rectangle on the preview: (clip id, mode 0=move/1..4=NW,NE,SW,SE corner, grab pos, orig region)
     region_drag: Option<(String, u8, egui::Pos2, (f64, f64, f64, f64))>,
+    /// 位置キーフレームモード: ON中は矩形の移動ドラッグが現在時刻のキーを打つ
+    kf_mode: bool,
     /// 追従修正モード: clip id being corrected; clicks on the preview collect +/- points
     corr_mode: Option<String>,
     /// correction points in SOURCE coords (x, y, positive) — all on corr_anchor_src's frame
@@ -2541,6 +2543,7 @@ impl App {
             last_blur_poll: Instant::now(),
             blur_meta_cache: Default::default(),
             region_drag: None,
+            kf_mode: false,
             corr_mode: None,
             corr_points: Vec::new(),
             corr_anchor_src: None,
@@ -3023,7 +3026,7 @@ impl App {
         }
         let pts = self.corr_points.clone();
         let anchor = self.corr_anchor_src;
-        eprintln!("CORRBAKE clip={id} points={} anchor={anchor:?}", pts.len());
+        eprintln!("CORRBAKE clip={id} anchor={anchor:?} points={pts:?}");
         self.apply_blur_bake_ex(id, Some(pts), anchor);
         self.corr_mode = None;
         self.corr_points.clear();
@@ -4001,6 +4004,43 @@ impl App {
                             );
                         }
                     }
+                    if !has_track {
+                        // ---- 手動: 位置キーフレーム（AI追従なしの矩形をダビンチ流に手で追わせる）----
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("手動追従（キーフレーム）").strong());
+                        let nkeys = clip
+                            .region_keys
+                            .as_ref()
+                            .and_then(|v| v.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(self.kf_mode, "位置キーフレーム")
+                                .on_hover_text(
+                                    "ON中: 再生ヘッドを動かして矩形をドラッグ→その時刻に位置キーを打つ。\nキー間は直線補間で移動（大きさは固定）",
+                                )
+                                .clicked()
+                            {
+                                self.kf_mode = !self.kf_mode;
+                                if self.kf_mode {
+                                    self.pause_at_displayed();
+                                }
+                            }
+                            if nkeys > 0 && ui.button("キー全消し").clicked() {
+                                let cid = id.clone();
+                                self.apply_edit(true, move |raw| edits::clear_region_keys(raw, &cid));
+                                self.push_req(false);
+                            }
+                        });
+                        if self.kf_mode || nkeys > 0 {
+                            ui.label(
+                                egui::RichText::new(format!("キー {nkeys}個"))
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                    }
                     match self.blur_states.get(&id).copied() {
                         Some(PopState::Baking(pct)) => {
                             ui.label(egui::RichText::new(format!("追従ベイク中 {pct}%")).small());
@@ -4851,7 +4891,7 @@ impl App {
             .iter()
             .flat_map(|tr| tr.clips.iter())
             .find(|c| c.id == id)
-            .and_then(|c| c.region_xywh())
+            .and_then(|c| c.region_at(self.t))
             .unwrap_or((0.25, 0.25, 0.5, 0.5))
     }
 
@@ -4879,7 +4919,7 @@ impl App {
                     && self.t >= c.timeline_start
                     && self.t < c.timeline_end
             })
-            .filter_map(|c| c.region_xywh().map(|rg| {
+            .filter_map(|c| c.region_at(self.t).map(|rg| {
                 (
                     c.id.clone(),
                     rg,
@@ -5159,7 +5199,23 @@ impl App {
                 x = x.clamp(0.0, 1.0 - w);
                 y = y.clamp(0.0, 1.0 - h);
                 let cid2 = cid.clone();
-                self.apply_edit(false, move |raw| edits::set_region(raw, &cid2, x, y, w, h));
+                // KFモード中の移動ドラッグは矩形本体でなく現在時刻の位置キーを打つ
+                let kf_rel = (self.kf_mode && mode == 0)
+                    .then(|| {
+                        self.doc
+                            .seq
+                            .tracks
+                            .iter()
+                            .flat_map(|tr| tr.clips.iter())
+                            .find(|c| c.id == cid)
+                            .map(|c| self.t - c.timeline_start)
+                    })
+                    .flatten();
+                if let Some(rel) = kf_rel {
+                    self.apply_edit(false, move |raw| edits::set_region_key(raw, &cid2, rel, x, y));
+                } else {
+                    self.apply_edit(false, move |raw| edits::set_region(raw, &cid2, x, y, w, h));
+                }
             }
             if ui.input(|i| i.pointer.any_released()) {
                 self.region_drag = None;

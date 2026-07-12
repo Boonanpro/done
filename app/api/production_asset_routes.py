@@ -834,6 +834,40 @@ def _blur_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int, start: 
     return filt, out
 
 
+def _kf_expr(keys: list[tuple[float, float]], scale: int, maxv: int) -> str:
+    """Piecewise-linear ffmpeg expression over absolute timeline time `t` from
+    (abs_time, normalized_value) keyframes. Ends clamp to the first/last key."""
+    def px(v: float) -> int:
+        return max(0, min(maxv, round(v * scale)))
+    if len(keys) == 1:
+        return str(px(keys[0][1]))
+    expr = str(px(keys[-1][1]))
+    for (t0, v0), (t1, v1) in reversed(list(zip(keys, keys[1:]))):
+        seg = f"lerp({px(v0)}\\,{px(v1)}\\,(t-{t0:.3f})/{max(t1 - t0, 1e-6):.3f})"
+        expr = f"if(lt(t\\,{t1:.3f})\\,{seg}\\,{expr})"
+    return f"if(lt(t\\,{keys[0][0]:.3f})\\,{px(keys[0][1])}\\,{expr})"
+
+
+def _blur_chain_kf(video_in: str, idx: int, xe: str, ye: str, w: int, h: int,
+                   frame_w: int, frame_h: int, start: float, end: float, style: str) -> tuple[str, str]:
+    """Keyframed regional blur: blur the whole frame once, then crop+overlay it at a
+    MOVING position (piecewise-linear x/y expressions). Mirrors Clip::region_at live."""
+    out = f"vblur{idx}"
+    base, full, blurred = f"bbase{idx}", f"bfull{idx}", f"bblur{idx}"
+    style = (style or "").lower()
+    if "mosaic" in style:
+        block = max(2, w // 12)
+        proc = f"scale={max(2, frame_w // block)}:{max(2, frame_h // block)}:flags=neighbor,scale={frame_w}:{frame_h}:flags=neighbor"
+    else:
+        proc = "gblur=sigma=20"
+    filt = (
+        f"[{video_in}]split[{base}][{full}];"
+        f"[{full}]{proc},crop={w}:{h}:x='{xe}':y='{ye}'[{blurred}];"
+        f"[{base}][{blurred}]overlay=x='{xe}':y='{ye}':enable='between(t\\,{start:.3f}\\,{end:.3f})'[{out}]"
+    )
+    return filt, out
+
+
 def _apply_screen_blur(out_path: Path, spec: dict[str, Any], job_dir: Path) -> bool:
     """Post-pass: blur sensitive on-screen text (credentials etc.) in the FINAL rendered video by
     OCR-detecting it per frame (scripts/screen_blur.py). Runs ON THE OUTPUT, so it follows whatever
@@ -1153,7 +1187,24 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         h = max(2, min(output_height - y, round(float(spec.get("height") or 0) * output_height)))
         start = max(0.0, float(spec.get("start") or 0))
         end = max(start + 0.01, float(spec.get("end") or (start + 0.5)))
-        filt, video_out = _blur_chain(video_out, bi, x, y, w, h, start, end, str(spec.get("style") or ""))
+        # 位置キーフレーム（手動追従）: crop/overlay を区分線形式で動かす
+        kf: list[tuple[float, float, float]] = []
+        if eclip and isinstance(eclip.get("region_keys"), list):
+            ts0 = float(eclip.get("timeline_start") or 0)
+            for k in eclip["region_keys"]:
+                try:
+                    kf.append((ts0 + float(k["t"]), float(k["x"]), float(k["y"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            kf.sort(key=lambda p: p[0])
+        if kf:
+            xe = _kf_expr([(t, vx) for t, vx, _ in kf], output_width, output_width - w)
+            ye = _kf_expr([(t, vy) for t, _, vy in kf], output_height, output_height - h)
+            filt, video_out = _blur_chain_kf(video_out, bi, xe, ye, w, h,
+                                             output_width, output_height, start, end,
+                                             str(spec.get("style") or ""))
+        else:
+            filt, video_out = _blur_chain(video_out, bi, x, y, w, h, start, end, str(spec.get("style") or ""))
         filters.append(filt)
 
     # --- overlay / PiP (wipe): composite on top, ascending layer = closer to front ---

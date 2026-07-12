@@ -475,6 +475,7 @@ def bake(a: argparse.Namespace) -> int:
         meta = {
             "src": str(a.src), "start": a.start, "duration": a.duration, "fps": a.fps,
             "w": W, "h": H, "n_frames": n_frames, "prompt": a.prompt, "box": a.box,
+            "points": list(a.point or []), "anchor_rel": a.anchor,
             "prompt_used": used_prompt, "thresh_used": used_thresh,
             "keep_ids": sorted(keep) if keep else None, "object_ids": all_ids,
             "boxes_by_frame": frames_meta,

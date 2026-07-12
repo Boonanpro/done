@@ -1596,6 +1596,44 @@ pub fn set_region(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f64,
     });
 }
 
+/// Insert/replace a POSITION keyframe on a region clip (t = clip-relative seconds;
+/// keys within one frame of t are replaced).
+pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: f64) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) != Some(id) {
+            return;
+        }
+        let o = c.as_object_mut().unwrap();
+        let arr = o
+            .entry("region_keys")
+            .or_insert_with(|| serde_json::Value::Array(vec![]));
+        let Some(keys) = arr.as_array_mut() else { return };
+        let q = |v: f64| (v * 10000.0).round() / 10000.0;
+        keys.retain(|k| {
+            k.get("t")
+                .and_then(|v| v.as_f64())
+                .map(|kt| (kt - t).abs() > 1.0 / 30.0)
+                .unwrap_or(false)
+        });
+        keys.push(serde_json::json!({"t": (t * 1000.0).round() / 1000.0,
+                                      "x": q(x.clamp(0.0, 0.98)), "y": q(y.clamp(0.0, 0.98))}));
+        keys.sort_by(|a, b| {
+            let ta = a.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let tb = b.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            ta.total_cmp(&tb)
+        });
+    });
+}
+
+/// Remove all position keyframes from a region clip.
+pub fn clear_region_keys(raw: &mut serde_json::Value, id: &str) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) == Some(id) {
+            c.as_object_mut().unwrap().remove("region_keys");
+        }
+    });
+}
+
 /// Attach / update / remove the SAM tracked-blur binding on a region-effect clip.
 pub fn set_blur_track(raw: &mut serde_json::Value, id: &str, value: Option<serde_json::Value>) {
     for_each_clip(raw, |c| {
