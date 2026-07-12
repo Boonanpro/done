@@ -1634,9 +1634,15 @@ pub fn set_region(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f64,
     });
 }
 
+/// Same-key window for insert/replace: must be SMALLER than any real frame interval
+/// (60fps VFR sources have ~16ms gaps — the old 1/60s window silently ate the
+/// previous frame's key on every step-and-drag) yet larger than the 1ms storage
+/// rounding. The UI's "on this key" paint uses the same value.
+pub const KEY_REPLACE_EPS: f64 = 0.004;
+
 /// Insert/replace a POSITION keyframe on a region clip (t = clip-relative seconds;
-/// keys within HALF a frame are replaced — the same window the UI paints as
-/// "on this key", so a red-frame drag re-writes and an orange-frame drag adds).
+/// only a key at the SAME frame instant — within KEY_REPLACE_EPS — is replaced;
+/// a key on the neighbouring frame is always kept as its own key).
 pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: f64) {
     for_each_clip(raw, |c| {
         if c.get("id").and_then(|v| v.as_str()) != Some(id) {
@@ -1651,7 +1657,7 @@ pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: 
         keys.retain(|k| {
             k.get("t")
                 .and_then(|v| v.as_f64())
-                .map(|kt| (kt - t).abs() > 1.0 / 60.0)
+                .map(|kt| (kt - t).abs() > KEY_REPLACE_EPS)
                 .unwrap_or(false)
         });
         keys.push(serde_json::json!({"t": (t * 1000.0).round() / 1000.0,
@@ -1664,7 +1670,9 @@ pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: 
     });
 }
 
-/// Remove the position keyframe nearest to clip-relative time t (within one frame).
+/// Remove the position keyframe at clip-relative time t. Window = twice the
+/// replace epsilon — still far below a 60fps frame gap, so deleting one key can
+/// never swallow the NEIGHBOURING frame's key with it.
 pub fn remove_region_key(raw: &mut serde_json::Value, id: &str, t: f64) {
     for_each_clip(raw, |c| {
         if c.get("id").and_then(|v| v.as_str()) != Some(id) {
@@ -1677,7 +1685,7 @@ pub fn remove_region_key(raw: &mut serde_json::Value, id: &str, t: f64) {
         keys.retain(|k| {
             k.get("t")
                 .and_then(|v| v.as_f64())
-                .map(|kt| (kt - t).abs() > 1.0 / 30.0)
+                .map(|kt| (kt - t).abs() > KEY_REPLACE_EPS * 2.0)
                 .unwrap_or(false)
         });
         if keys.is_empty() {
