@@ -1635,7 +1635,8 @@ pub fn set_region(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f64,
 }
 
 /// Insert/replace a POSITION keyframe on a region clip (t = clip-relative seconds;
-/// keys within one frame of t are replaced).
+/// keys within HALF a frame are replaced — the same window the UI paints as
+/// "on this key", so a red-frame drag re-writes and an orange-frame drag adds).
 pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: f64) {
     for_each_clip(raw, |c| {
         if c.get("id").and_then(|v| v.as_str()) != Some(id) {
@@ -1650,7 +1651,7 @@ pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: 
         keys.retain(|k| {
             k.get("t")
                 .and_then(|v| v.as_f64())
-                .map(|kt| (kt - t).abs() > 1.0 / 30.0)
+                .map(|kt| (kt - t).abs() > 1.0 / 60.0)
                 .unwrap_or(false)
         });
         keys.push(serde_json::json!({"t": (t * 1000.0).round() / 1000.0,
