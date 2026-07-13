@@ -774,11 +774,19 @@ fn split_region_keys(orig: &Value, d: f64, leftv: &mut Value, rightv: &mut Value
         })
         .collect();
     if let Some((px, py)) = cut_pos {
-        // pin the cut-moment position where motion would otherwise change ends
-        if had_after && !lk.iter().any(|k| kt_of(k).map(|kt| (kt - d).abs() <= KEY_REPLACE_EPS).unwrap_or(false)) {
+        // boundary keys ONLY where motion actually crosses the cut (keys on BOTH
+        // sides): a cut beyond all keys must not sprinkle a visible key at the cut —
+        // the keyless side gets the position written into its BASE rect instead
+        if !lk.is_empty()
+            && had_after
+            && !lk.iter().any(|k| kt_of(k).map(|kt| (kt - d).abs() <= KEY_REPLACE_EPS).unwrap_or(false))
+        {
             lk.push(serde_json::json!({"t": q3(d), "x": q4(px), "y": q4(py)}));
         }
-        if had_before && !rk.iter().any(|k| kt_of(k).map(|kt| kt.abs() <= KEY_REPLACE_EPS).unwrap_or(false)) {
+        if !rk.is_empty()
+            && had_before
+            && !rk.iter().any(|k| kt_of(k).map(|kt| kt.abs() <= KEY_REPLACE_EPS).unwrap_or(false))
+        {
             rk.push(serde_json::json!({"t": 0.0, "x": q4(px), "y": q4(py)}));
         }
     }
@@ -795,6 +803,14 @@ fn split_region_keys(orig: &Value, d: f64, leftv: &mut Value, rightv: &mut Value
         if let Some(o) = side.as_object_mut() {
             if ks.is_empty() {
                 o.remove("region_keys");
+                // keyless side: hold the cut-moment position via the base rect (same
+                // picture, no keyframe diamond appearing out of nowhere)
+                if let (Some((px, py)), Some(rg)) =
+                    (cut_pos, o.get_mut("region").and_then(|v| v.as_object_mut()))
+                {
+                    rg.insert("x".into(), serde_json::json!(q4(px.clamp(0.0, 0.98))));
+                    rg.insert("y".into(), serde_json::json!(q4(py.clamp(0.0, 0.98))));
+                }
             } else {
                 o.insert("region_keys".into(), Value::Array(ks));
             }
