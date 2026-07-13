@@ -7205,22 +7205,26 @@ impl eframe::App for App {
         self.last_frames.retain(|t| now.duration_since(*t).as_secs_f32() < 1.0);
         self.ui_fps = self.last_frames.len() as f32;
 
-        // edit keys: S=split, Del=delete, Ctrl+Z/Y=undo/redo
-        if ctx.input(|i| i.key_pressed(egui::Key::S) && !i.modifiers.ctrl) {
+        // edit keys: S=split, Del=delete, Ctrl+Z/Y=undo/redo.
+        // typing = ANY text field has focus: every timeline shortcut must stand down —
+        // Space toggled playback and Delete removed CLIPS while編集中のテロップに文字を
+        // 打っていた（P/L しかガードされていなかった）
+        let typing = ctx.wants_keyboard_input();
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::S) && !i.modifiers.ctrl) {
             self.split_at_playhead();
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.ctrl) {
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.ctrl) {
             self.freeze_at_playhead();
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::E) && !i.modifiers.ctrl) {
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::E) && !i.modifiers.ctrl) {
             self.toggle_popout();
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::P) && !i.modifiers.ctrl) && !ctx.wants_keyboard_input() {
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::P) && !i.modifiers.ctrl) {
             self.preview_fullscreen = !self.preview_fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.preview_fullscreen));
             self.push_req(false);
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::L) && !i.modifiers.ctrl) && !ctx.wants_keyboard_input() {
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::L) && !i.modifiers.ctrl) {
             self.cycle_playback_speed();
         }
         self.poll_popout_bakes();
@@ -7245,18 +7249,18 @@ impl eframe::App for App {
                 }
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
             let force_ripple = ctx.input(|i| i.modifiers.shift);
             self.delete_selected(force_ripple);
         }
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::D)) && !self.selected.is_empty()
+        if !typing && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::D)) && !self.selected.is_empty()
         {
             let ids = edits::expand_links(&self.doc.raw, &self.selected);
             let salt = std::process::id() as u64 ^ (self.t * 1000.0) as u64;
             self.apply_edit(true, move |raw| edits::duplicate_clips(raw, &ids, salt));
             self.toast("複製しました（右に空きが無い場合は別レーンの同じ時刻）");
         }
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
+        if !typing && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
             self.selected = self
                 .doc
                 .seq
@@ -7267,10 +7271,10 @@ impl eframe::App for App {
                 .map(|c| c.id.clone())
                 .collect();
         }
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
+        if !typing && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
             self.do_undo();
         }
-        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Y)) {
+        if !typing && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Y)) {
             self.do_redo();
         }
         if let Some(at) = self.save_at {
@@ -7282,7 +7286,7 @@ impl eframe::App for App {
             }
         }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.toggle_play();
         }
         // auto-resume after a timeline interaction paused playback: wait until the ring
@@ -7308,20 +7312,20 @@ impl eframe::App for App {
             }
         }
         // Home/End = timeline start/end, +/- = zoom around the playhead
-        if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::Home)) {
             self.t = 0.0;
             self.playing = false;
             self.resume_pending = None;
             self.push_req(false);
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::End)) {
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::End)) {
             self.t = self.dur;
             self.playing = false;
             self.resume_pending = None;
             self.push_req(false);
         }
         for (key, dir) in [(egui::Key::Plus, 1.0f32), (egui::Key::Equals, 1.0), (egui::Key::Minus, -1.0)] {
-            if ctx.input(|i| i.key_pressed(key)) {
+            if !typing && ctx.input(|i| i.key_pressed(key)) {
                 let old_pps = self.pps;
                 self.pps = (self.pps * (1.0 + dir * 0.25)).clamp(1.0, 400.0);
                 // keep the playhead visually anchored while zooming
@@ -7330,12 +7334,12 @@ impl eframe::App for App {
                     .max(0.0);
             }
         }
-        if ctx.input(|i| i.key_pressed(egui::Key::F1) || i.key_pressed(egui::Key::Questionmark)) {
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::F1) || i.key_pressed(egui::Key::Questionmark)) {
             self.show_help = !self.show_help;
         }
         // Frame step while paused: always one 30fps SEQUENCE/output frame. Source PTS must not
         // affect transport distance, otherwise mixed-FPS/VFR clips make arrows jump unevenly.
-        if !self.playing {
+        if !self.playing && !typing {
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
                 self.step_once(1.0);
             }
