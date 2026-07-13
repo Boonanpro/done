@@ -51,6 +51,12 @@ struct FrameOut {
     rgba: Vec<u8>,
     seq: u64,
     t: f64,
+    /// the EFFECTIVE timeline instant of the pixels (base layer's landed frame time):
+    /// what the eye actually sees. Overlays that must stick to the picture (region
+    /// outline, keyframe state) evaluate at THIS time, never at the request time —
+    /// on VFR sources the two always differ by up to half a frame, which on fast
+    /// keyed motion reads as "the frame is offset from the blur".
+    eff_t: f64,
     comp_ms: f32,
     comp_max: f32,  // worst compose over the last second
     gap_max: f32,   // worst wall-clock gap between published frames (what the eye sees)
@@ -81,7 +87,8 @@ struct Shared {
     clock_bits: AtomicU64,
     underruns: AtomicU64,
     ring_level: std::sync::atomic::AtomicUsize,
-    ring: Mutex<std::collections::VecDeque<(f64, Vec<u8>)>>,
+    /// (timeline_t, effective_t of the pixels, frame)
+    ring: Mutex<std::collections::VecDeque<(f64, f64, Vec<u8>)>>,
     ring_gen: AtomicU64,
     // timeline position the ring is being built FOR (f64 bits). On a mid-play seek this
     // moves to the new playhead BEFORE the clock does — audio waits on it (JUMPGATE) and
@@ -221,7 +228,7 @@ struct FrameCache {
     // serving "whatever the bucket holds" showed the NEIGHBOUR frame when a paused
     // inspection landed 12ms away from the cached compose (the freeze-boundary bug the
     // dump-frame verification missed because it bypasses this cache).
-    frames: std::collections::HashMap<i64, (f64, Vec<u8>)>,
+    frames: std::collections::HashMap<i64, (f64, f64, Vec<u8>)>, // (exact_t, eff_t, lz4)
     bytes: usize,
     budget: usize,
     hits: u64,
@@ -251,7 +258,7 @@ impl FrameCache {
         let cut = Self::idx(t) - 1;
         let dead: Vec<i64> = self.frames.keys().copied().filter(|k| *k >= cut).collect();
         for k in dead {
-            if let Some((_, z)) = self.frames.remove(&k) {
+            if let Some((_, _, z)) = self.frames.remove(&k) {
                 self.bytes -= z.len();
             }
         }
@@ -259,38 +266,39 @@ impl FrameCache {
     /// Serve only when the cached pixels were composed within `tol` seconds of `t`.
     /// Playback reuse passes a whole tick (~17ms); paused/scrub inspection passes 5ms
     /// so a neighbouring source frame can never impersonate the requested one.
-    fn get(&mut self, t: f64, tol: f64, out: &mut Vec<u8>) -> bool {
-        if let Some((ct, z)) = self.frames.get(&Self::idx(t)) {
+    /// On hit returns the pixels' EFFECTIVE time (see FrameOut::eff_t).
+    fn get(&mut self, t: f64, tol: f64, out: &mut Vec<u8>) -> Option<f64> {
+        if let Some((ct, eff, z)) = self.frames.get(&Self::idx(t)) {
             if (ct - t).abs() <= tol {
                 if let Ok(raw) = lz4_flex::decompress_size_prepended(z) {
                     out.clear();
                     out.extend_from_slice(&raw);
                     self.hits += 1;
-                    return true;
+                    return Some(*eff);
                 }
             }
         }
         self.misses += 1;
-        false
+        None
     }
     fn contains(&self, t: f64) -> bool {
         self.frames.contains_key(&Self::idx(t))
     }
-    fn insert(&mut self, t: f64, rgba: &[u8], playhead: f64) {
+    fn insert(&mut self, t: f64, eff: f64, rgba: &[u8], playhead: f64) {
         let key = Self::idx(t);
         if self.frames.contains_key(&key) {
             return;
         }
         let z = lz4_flex::compress_prepend_size(rgba);
         self.bytes += z.len();
-        self.frames.insert(key, (t, z));
+        self.frames.insert(key, (t, eff, z));
         // over budget: evict farthest-from-playhead first
         while self.bytes > self.budget {
             let ph = Self::idx(playhead);
             let Some((&far, _)) = self.frames.iter().max_by_key(|(k, _)| (**k - ph).abs()) else {
                 break;
             };
-            if let Some((_, z)) = self.frames.remove(&far) {
+            if let Some((_, _, z)) = self.frames.remove(&far) {
                 self.bytes -= z.len();
             }
         }
@@ -678,7 +686,7 @@ fn compose(
     original: bool,
     fast: bool, // scrub: budgeted seek — newest reachable frame now, exact frame on settle
     exact_rb: bool, // interactive one-shot: synchronous readback (THIS frame's pixels)
-) -> anyhow::Result<(Vec<String>, bool)> {
+) -> anyhow::Result<(Vec<String>, bool, f64)> { // (used files, exact?, EFFECTIVE time of the pixels)
     pool.frame_no += 1;
     let mut used = Vec::new();
     let mut exact = true; // false while any budgeted scrub seek stopped short of t
@@ -1078,7 +1086,7 @@ fn compose(
     if total > 40.0 {
         eprintln!("slow compose t={t:.2}: base={_ms_base:.0} ov={_ms_ov:.0} rb={_ms_rb:.0} total={total:.0}");
     }
-    Ok((used, exact))
+    Ok((used, exact, base_eff_t.unwrap_or(t)))
 }
 
 fn py_json(v: &serde_json::Value) -> String {
@@ -1681,17 +1689,17 @@ fn presenter_thread(shared: Arc<Shared>) {
             std::thread::sleep(std::time::Duration::from_millis(4));
             continue;
         }
-        let mut grabbed: Option<(f64, Vec<u8>)> = None;
+        let mut grabbed: Option<(f64, f64, Vec<u8>)> = None;
         {
             let mut ring = shared.ring.lock().unwrap();
-            while ring.front().map(|(ft, _)| *ft < t - 1.0 / 30.0).unwrap_or(false) {
+            while ring.front().map(|(ft, ..)| *ft < t - 1.0 / 30.0).unwrap_or(false) {
                 ring.pop_front();
             }
-            if let Some((ft, _)) = ring.iter().rev().find(|(ft, _)| *ft <= t) {
+            if let Some((ft, ..)) = ring.iter().rev().find(|(ft, ..)| *ft <= t) {
                 let ft = *ft;
                 if ft > published_t {
-                    if let Some((_, rgba)) = ring.iter().find(|(x, _)| *x == ft) {
-                        grabbed = Some((ft, rgba.clone()));
+                    if let Some((_, eff, rgba)) = ring.iter().find(|(x, ..)| *x == ft) {
+                        grabbed = Some((ft, *eff, rgba.clone()));
                     }
                 }
             }
@@ -1703,19 +1711,20 @@ fn presenter_thread(shared: Arc<Shared>) {
                 if idle > 500.0 && idle % 500.0 < 8.0 {
                     let (fr, ba, ln) = {
                         let rg = shared.ring.lock().unwrap();
-                        (rg.front().map(|(f2, _)| *f2), rg.back().map(|(b2, _)| *b2), rg.len())
+                        (rg.front().map(|(f2, ..)| *f2), rg.back().map(|(b2, ..)| *b2), rg.len())
                     };
                     eprintln!("PRES-IDLE {idle:.0}ms t={t:.2} pub={published_t:.2} ring={ln} front={fr:?} back={ba:?}");
                 }
             }
         }
-        if let Some((ft, rgba)) = grabbed {
+        if let Some((ft, eff, rgba)) = grabbed {
             let now = Instant::now();
             seq_hi += 1;
             let mut f = shared.frame.lock().unwrap();
             f.rgba = rgba;
             f.seq = seq_hi;
             f.t = ft;
+            f.eff_t = eff;
             f.quality = "proxy";
             if let Some(lp) = last_pub {
                 let gms = now.duration_since(lp).as_secs_f32() * 1000.0;
@@ -1760,6 +1769,7 @@ fn media_thread(shared: Arc<Shared>) {
         let mut fcache = FrameCache::new();
         let mut prev_was_compose = false;
         let mut prev_compose_t = f64::NAN;
+        let mut prev_compose_eff = f64::NAN;
         let mut prev_playing = false;
         let mut play_started: Option<Instant> = None;
         // Look-ahead ring: timeline frames composed AHEAD of the playhead on a fixed 30fps
@@ -1800,7 +1810,7 @@ fn media_thread(shared: Arc<Shared>) {
                 {
                     let mut rg = shared.ring.lock().unwrap();
                     let before = rg.len();
-                    rg.retain(|(ft, _)| *ft < cut);
+                    rg.retain(|(ft, ..)| *ft < cut);
                     if rg.len() != before {
                         shared.ring_gen.fetch_add(1, Ordering::Relaxed);
                     }
@@ -1842,7 +1852,7 @@ fn media_thread(shared: Arc<Shared>) {
                         let mut rg = shared.ring.lock().unwrap();
                         let aligned = rg
                             .front()
-                            .map(|(ft, _)| (*ft - target).abs() < 2.0 / 30.0 || (*ft < target && rg.back().map(|(bt, _)| *bt >= target).unwrap_or(false)))
+                            .map(|(ft, ..)| (*ft - target).abs() < 2.0 / 30.0 || (*ft < target && rg.back().map(|(bt, ..)| *bt >= target).unwrap_or(false)))
                             .unwrap_or(false);
                         if !aligned {
                             rg.clear();
@@ -1856,13 +1866,14 @@ fn media_thread(shared: Arc<Shared>) {
                         // the ring rebuilds — no more seconds of frozen video chasing a
                         // running clock
                         jump_to = Some(r.t);
-                        if let Ok(_snap) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, r.t, false, true, true) {
+                        if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, r.t, false, true, true) {
                             seq += 1;
                             let mut f = shared.frame.lock().unwrap();
                             f.rgba.clear();
                             f.rgba.extend_from_slice(&comp.rgba);
                             f.seq = seq;
                             f.t = r.t;
+                            f.eff_t = eff;
                             f.quality = "proxy";
                         }
                     }
@@ -1877,7 +1888,7 @@ fn media_thread(shared: Arc<Shared>) {
                 let (next_t, len) = {
                     let rg = shared.ring.lock().unwrap();
                     (
-                        rg.back().map(|(ft, _)| ft + STEP).unwrap_or_else(|| (t_build / STEP).floor() * STEP),
+                        rg.back().map(|(ft, ..)| ft + STEP).unwrap_or_else(|| (t_build / STEP).floor() * STEP),
                         rg.len(),
                     )
                 };
@@ -1894,15 +1905,16 @@ fn media_thread(shared: Arc<Shared>) {
                     let t0 = Instant::now();
                     // cache hit = decompress instead of compose (jump refills become ~instant)
                     let mut cached_buf: Vec<u8> = Vec::new();
-                    let from_cache = fcache.get(next_t, 0.017, &mut cached_buf);
-                    let res = if from_cache {
-                        Ok((Vec::new(), true))
+                    let cache_eff = fcache.get(next_t, 0.017, &mut cached_buf);
+                    let from_cache = cache_eff.is_some();
+                    let res = if let Some(eff) = cache_eff {
+                        Ok((Vec::new(), true, eff))
                     } else {
                         compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, true, false)
                     };
                     ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
                     match res {
-                        Ok((used, _)) => {
+                        Ok((used, _, eff)) => {
                             if ms_comp > 60.0 {
                                 eprintln!("SLOWPROD t={next_t:.2}: {ms_comp:.0}ms");
                             }
@@ -1910,11 +1922,11 @@ fn media_thread(shared: Arc<Shared>) {
                             let frame_ref: &Vec<u8> = if from_cache { &cached_buf } else { &comp.rgba };
                             {
                                 let mut rg = shared.ring.lock().unwrap();
-                                rg.push_back((next_t, frame_ref.clone()));
+                                rg.push_back((next_t, eff, frame_ref.clone()));
                                 // never trim against the OLD clock while a jump is pending —
                                 // a backward seek's fresh frames all look "stale" to it
                                 if jump_to.is_none() {
-                                    while rg.front().map(|(ft, _)| *ft < t - 2.0 * STEP).unwrap_or(false) {
+                                    while rg.front().map(|(ft, ..)| *ft < t - 2.0 * STEP).unwrap_or(false) {
                                         rg.pop_front();
                                     }
                                 }
@@ -1937,10 +1949,15 @@ fn media_thread(shared: Arc<Shared>) {
                                 } else if near_freeze(&doc, next_t) {
                                     eprintln!("CACHE_PUT key={:.3} ok", next_t - STEP);
                                 }
-                                fcache.insert(next_t - STEP, &comp.rgba, t);
+                                // pixels are the PREVIOUS compose's (async readback) — so
+                                // is their effective time
+                                fcache.insert(next_t - STEP, prev_compose_eff, &comp.rgba, t);
                             }
                             prev_was_compose = !from_cache;
                             prev_compose_t = next_t;
+                            if !from_cache {
+                                prev_compose_eff = eff;
+                            }
                             ms_push = p0.elapsed().as_secs_f32() * 1000.0;
                             // prime whenever we can afford it: a shallow ring is USUALLY
                             // the rapid-boundary case (0.2-2s clips) that needs priming the
@@ -2013,7 +2030,7 @@ fn media_thread(shared: Arc<Shared>) {
                 // composed-frame cache first: scrub/settle over a cached span shows the
                 // ORIGINAL-quality frame in ~5ms without touching a decoder
                 let mut buf = Vec::new();
-                if fcache.get(t, 0.005, &mut buf) {
+                if let Some(eff) = fcache.get(t, 0.005, &mut buf) {
                     if near_freeze(&doc, t) {
                         eprintln!("SERVE t={t:.3} src=cache");
                     }
@@ -2025,6 +2042,7 @@ fn media_thread(shared: Arc<Shared>) {
                     f.rgba = buf;
                     f.seq = seq;
                     f.t = t;
+                    f.eff_t = eff;
                     f.comp_ms = 0.0;
                     f.quality = "proxy";
                     scrub_exact = true;
@@ -2042,7 +2060,7 @@ fn media_thread(shared: Arc<Shared>) {
                 let original = false;
                 let t0 = Instant::now();
                 match compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, original, r.scrubbing, true) {
-                    Ok((used, exact)) => {
+                    Ok((used, exact, eff)) => {
                         scrub_exact = !r.scrubbing || exact;
                         seq += 1;
                         {
@@ -2051,6 +2069,7 @@ fn media_thread(shared: Arc<Shared>) {
                             f.rgba.extend_from_slice(&comp.rgba);
                             f.seq = seq;
                             f.t = t;
+                            f.eff_t = eff;
                             f.comp_ms = t0.elapsed().as_secs_f32() * 1000.0;
                             let now = Instant::now();
                             comp_hist.push((now, f.comp_ms));
@@ -2087,7 +2106,7 @@ fn media_thread(shared: Arc<Shared>) {
                 let resting = settle.elapsed().as_secs_f32() > 0.12;
                 if r.scrubbing && !scrub_exact && resting {
                     let mut buf = Vec::new();
-                    if fcache.get(t, 0.005, &mut buf) {
+                    if let Some(eff) = fcache.get(t, 0.005, &mut buf) {
                         if near_freeze(&doc, t) {
                             eprintln!("SERVE t={t:.3} src=cache-rest");
                         }
@@ -2096,6 +2115,7 @@ fn media_thread(shared: Arc<Shared>) {
                         f.rgba = buf;
                         f.seq = seq;
                         f.t = t;
+                        f.eff_t = eff;
                         f.quality = "proxy";
                         scrub_exact = true;
                         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -2104,7 +2124,7 @@ fn media_thread(shared: Arc<Shared>) {
                     // finger resting mid-drag on a long-GOP spot: keep refining toward the
                     // exact frame, one budget slice per pass (converges like Filmora's
                     // "stop and the picture sharpens to the real frame")
-                    if let Ok((_, ex)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, true) {
+                    if let Ok((_, ex, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, true) {
                         scrub_exact = ex;
                         seq += 1;
                         let mut f = shared.frame.lock().unwrap();
@@ -2112,6 +2132,7 @@ fn media_thread(shared: Arc<Shared>) {
                         f.rgba.extend_from_slice(&comp.rgba);
                         f.seq = seq;
                         f.t = t;
+                        f.eff_t = eff;
                         f.quality = "proxy";
                     } else {
                         scrub_exact = true; // failed — stop hammering
@@ -2133,14 +2154,13 @@ fn media_thread(shared: Arc<Shared>) {
                 // not wait behind the full warm pass (59 files ≈ tens of seconds)
                 let next_t = {
                     let rg = shared.ring.lock().unwrap();
-                    rg.back().map(|(ft, _)| ft + STEP).unwrap_or_else(|| (t / STEP).floor() * STEP)
+                    rg.back().map(|(ft, ..)| ft + STEP).unwrap_or_else(|| (t / STEP).floor() * STEP)
                 };
                 if next_t <= dur {
-                    if let Ok(u2) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, false) {
+                    if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, false) {
                         let mut rg = shared.ring.lock().unwrap();
-                        rg.push_back((next_t, comp.rgba.clone()));
+                        rg.push_back((next_t, eff, comp.rgba.clone()));
                         shared.ring_level.store(rg.len(), Ordering::Relaxed);
-                        let _ = u2;
                     }
                 } else {
                     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -2188,8 +2208,8 @@ fn media_thread(shared: Arc<Shared>) {
                     }
                 }
                 if let Some(ft) = target {
-                    if let Ok(_) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, false, false, true) {
-                        fcache.insert(ft, &comp.rgba, t);
+                    if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, false, false, true) {
+                        fcache.insert(ft, eff, &comp.rgba, t);
                     }
                     if fcache.frames.len() % 300 == 0 {
                         eprintln!(
@@ -2379,8 +2399,6 @@ struct App {
     playback_speed: f64,
     preview_fullscreen: bool,
     show_help: bool,
-    // pts sidecars cached for frame-accurate stepping (None = sidecar missing)
-    step_pts: PtsCache,
     step_settle_at: Option<Instant>,
     // NATIVE_STEP_PROBE state machine: (phase, phase entry time)
     step_probe: Option<(u8, Instant)>,
@@ -2459,6 +2477,7 @@ impl App {
                 rgba: vec![0; (CANVAS_W * CANVAS_H * 4) as usize],
                 seq: 0,
                 t: 0.0,
+                eff_t: 0.0,
                 comp_ms: 0.0,
                 comp_max: 0.0,
                 gap_max: 0.0,
@@ -2540,7 +2559,6 @@ impl App {
             playback_speed: 1.0,
             preview_fullscreen: false,
             show_help: false,
-            step_pts: Default::default(),
             step_settle_at: None,
             step_probe: None,
             toast: None,
@@ -3374,12 +3392,14 @@ impl App {
         }
     }
 
-    /// One arrow-key frame step (exactly what the key handler runs).
+    /// One arrow-key sequence-frame step (exactly what the key handler runs).
     fn step_once(&mut self, dir: f64) {
         const FSTEP: f64 = 1.0 / 30.0;
-        let grid = (self.t / FSTEP).round() * FSTEP + dir * FSTEP;
-        let nt = step_target(&self.doc, &mut self.step_pts, self.t, dir).unwrap_or(grid);
-        self.t = nt.clamp(0.0, self.dur);
+        // The editor timeline and output are CFR 30fps. Do not derive arrow movement from
+        // source PTS: mixed 30/60fps (or VFR) assets then make the same key move a different
+        // distance depending on the clip under the playhead. Snap the current position to the
+        // sequence grid first, then advance exactly one output frame.
+        self.t = (((self.t / FSTEP).round() + dir) * FSTEP).clamp(0.0, self.dur);
         self.step_settle_at = Some(Instant::now() + std::time::Duration::from_millis(90));
         self.push_req(true);
     }
@@ -5004,16 +5024,18 @@ impl App {
             let scale = (img.width() / cw).min(img.height() / ch);
             egui::Rect::from_center_size(img.center(), egui::vec2(cw * scale, ch * scale))
         };
-        // The outline follows the frame that is REALLY on screen (shared.frame.t), not
-        // the requested playhead — the UI repaints instantly while the composed frame
-        // arrives a beat later, and an outline pinned to self.t visibly led the picture
-        // (and the blur, which is glued to the displayed frame) on every scrub/step.
+        // The outline follows the frame that is REALLY on screen — its EFFECTIVE time
+        // (the base layer's landed frame instant), the same time the blur inside the
+        // frame was evaluated at. Request-time (self.t / f.t) differs from it by up to
+        // half a frame on VFR sources, which on fast keyed motion reads as "the frame
+        // is offset from the blur" (30px+ at their hand-keyed speeds).
         let t_disp = {
             let f = self.shared.frame.lock().unwrap();
-            if f.rgba.is_empty() || (f.t - self.t).abs() > 0.75 {
+            let eff = if f.eff_t > 0.0 { f.eff_t } else { f.t };
+            if f.rgba.is_empty() || (eff - self.t).abs() > 0.75 {
                 self.t
             } else {
-                f.t
+                eff
             }
         };
         // (id, rect, baked, blur_track, on_key) — on_key = playhead sits on a position
@@ -7070,8 +7092,8 @@ impl eframe::App for App {
         if ctx.input(|i| i.key_pressed(egui::Key::F1) || i.key_pressed(egui::Key::Questionmark)) {
             self.show_help = !self.show_help;
         }
-        // frame step while paused (Filmora parity: arrow keys = +-1 SOURCE frame of the
-        // clip under the playhead; global-grid fallback when no clip/sidecar)
+        // Frame step while paused: always one 30fps SEQUENCE/output frame. Source PTS must not
+        // affect transport distance, otherwise mixed-FPS/VFR clips make arrows jump unevenly.
         if !self.playing {
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
                 self.step_once(1.0);
@@ -7473,6 +7495,23 @@ impl eframe::App for App {
                             }
                         } else {
                             self.preview_inspector(ui, &resp);
+                        }
+                        // NATIVE_GEOM_PROBE: dump every rect in the outline<->image mapping
+                        // chain once per second — the ground truth for "is the FRAME or the
+                        // BLUR that drifts with position"
+                        if std::env::var("NATIVE_GEOM_PROBE").map(|v| !v.is_empty()).unwrap_or(false) {
+                            let vid_img = egui::Rect::from_center_size(resp.rect.center(), size);
+                            let insp = {
+                                let img = resp.rect;
+                                let (cw, ch) = (CANVAS_W as f32, CANVAS_H as f32);
+                                let scale = (img.width() / cw).min(img.height() / ch);
+                                egui::Rect::from_center_size(img.center(), egui::vec2(cw * scale, ch * scale))
+                            };
+                            fz_log(&format!(
+                                "GEOM avail={avail:?} size={size:?} resp={:?} img_rect={vid_img:?} insp_vid={insp:?} ppp={}",
+                                resp.rect,
+                                ui.ctx().pixels_per_point()
+                            ));
                         }
                         // captions: active caption clips drawn over the frame (white bold with
                         // dark outline, bottom-centre — the export bakes the full styling
@@ -8943,7 +8982,30 @@ fn main() -> eframe::Result<()> {
             lh.region_key_times(),
             rh.region_key_times()
         );
-        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8;
+        // cut BEYOND all keys: no phantom key at the cut — the keyless right half
+        // holds the position via its base rect instead
+        edits::clear_region_keys(&mut raw, "fx1");
+        edits::set_region_key(&mut raw, "fx1", 0.2, 0.2, 0.3);
+        edits::set_region_key(&mut raw, "fx1", 0.5, 0.3, 0.3);
+        edits::split_clips(&mut raw, &ids, 10.5, 43);
+        let clips = raw[0]["timeline"]["sequence"]["tracks"][0]["clips"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let l2: model::Clip = serde_json::from_value(clips[0].clone()).expect("left2");
+        let r2: model::Clip = serde_json::from_value(clips[1].clone()).expect("right2");
+        let ok9 = l2.region_key_times().len() == 2
+            && r2.region_key_times().is_empty()
+            && (r2.region_xywh().map(|r| r.0).unwrap_or(0.0) - 0.3).abs() < 1e-3
+            && (x_at(&r2, 10.7) - 0.3).abs() < 1e-3;
+        println!(
+            "KF split-tail {} (L={:?} Rkeys={} Rx={:.3})",
+            if ok9 { "PASS" } else { "FAIL" },
+            l2.region_key_times(),
+            r2.region_key_times().len(),
+            r2.region_xywh().map(|r| r.0).unwrap_or(-1.0)
+        );
+        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9;
         println!("KF ALL {}", if all { "PASS" } else { "FAIL" });
         std::process::exit(if all { 0 } else { 1 });
     }
