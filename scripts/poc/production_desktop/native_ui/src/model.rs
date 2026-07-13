@@ -68,6 +68,9 @@ pub struct Clip {
     pub id: String,
     #[serde(default)]
     pub asset_id: Option<String>,
+    /// Per-clip picture switch. Missing keeps existing projects visible.
+    #[serde(default)]
+    pub video_enabled: Option<bool>,
     #[serde(default)]
     pub source_start: f64,
     #[serde(default)]
@@ -147,6 +150,10 @@ impl PopMeta {
 }
 
 impl Clip {
+    pub fn is_video_enabled(&self) -> bool {
+        self.video_enabled.unwrap_or(true)
+    }
+
     /// Effect-clip region (x, y, w, h canvas fractions), when this is a region effect.
     pub fn region_xywh(&self) -> Option<(f64, f64, f64, f64)> {
         let r = self.region.as_ref()?;
@@ -392,7 +399,7 @@ impl Doc {
                 continue;
             }
             for c in &tr.clips {
-                if c.asset_id.is_none() || t < c.timeline_start || t >= c.timeline_end {
+                if c.asset_id.is_none() || !c.is_video_enabled() || t < c.timeline_start || t >= c.timeline_end {
                     continue;
                 }
                 layers.push(c);

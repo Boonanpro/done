@@ -4433,6 +4433,18 @@ impl App {
                 if clip.asset_id.is_none() {
                     return;
                 }
+                if kind != "audio" {
+                    ui.label(egui::RichText::new("映像").strong());
+                    // Multi-select applies a single explicit state to every selected video;
+                    // linked audio is deliberately excluded and continues to play.
+                    let mut video_enabled = selected.iter().all(|(c, k)| k != "audio" && c.is_video_enabled());
+                    if ui.checkbox(&mut video_enabled, "映像を表示").changed() {
+                        let ids = edit_ids.clone();
+                        self.apply_edit(true, move |raw| edits::set_video_enabled(raw, &ids, video_enabled));
+                        self.push_req(false);
+                    }
+                    ui.add_space(6.0);
+                }
                 // ---- position & size (canvas %) ----
                 ui.label(egui::RichText::new("位置とサイズ（%）").strong());
                 let b = clip.display_box();
@@ -5965,6 +5977,7 @@ impl App {
                     None
                 };
                 let is_caption = c.text.is_some() && c.asset_id.is_none();
+                let picture_disabled = tr.kind != "audio" && c.asset_id.is_some() && !c.is_video_enabled();
                 if is_caption {
                     // caption clip: dark slate body + mustard accent edge + the TEXT itself
                     p.rect_filled(r, 4.0, egui::Color32::from_rgb(46, 42, 30));
@@ -5986,7 +5999,16 @@ impl App {
                         );
                     }
                 } else {
-                    p.rect_filled(r, 4.0, color.gamma_multiply(0.55));
+                    p.rect_filled(r, 4.0, color.gamma_multiply(if picture_disabled { 0.22 } else { 0.55 }));
+                    if picture_disabled && r.width() > 32.0 {
+                        p.text(
+                            r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "映像OFF",
+                            egui::FontId::proportional(10.0),
+                            egui::Color32::from_gray(190),
+                        );
+                    }
                     if c.region.is_some() && r.width() > 26.0 {
                         let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
                         p.text(
@@ -6024,7 +6046,17 @@ impl App {
                             let kx_raw = body.left()
                                 + ((c.timeline_start + kt) as f32) * self.pps
                                 - self.scroll_x;
-                            let kx = kx_raw.clamp(r.left() + 5.0, r.right() - 5.0);
+                            // A very short clip can be narrower than the 10px diamond
+                            // margin. `f32::clamp(min, max)` panics when min > max, which
+                            // previously closed the app merely by drawing/clicking such a
+                            // timeline. Pin its key marker to the clip centre instead.
+                            let key_left = r.left() + 5.0;
+                            let key_right = r.right() - 5.0;
+                            let kx = if key_left <= key_right {
+                                kx_raw.clamp(key_left, key_right)
+                            } else {
+                                r.center().x
+                            };
                             if kx < body.left() - 8.0 || kx > body.right() + 8.0 {
                                 continue;
                             }

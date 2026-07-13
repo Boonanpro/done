@@ -383,15 +383,21 @@ def _is_identity_transform(scale: float, tx: float, ty: float) -> bool:
     return abs(scale - 1.0) < 1e-4 and abs(tx) < 1e-4 and abs(ty) < 1e-4
 
 
-def _sequence_video_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _clip_video_enabled(clip: dict[str, Any]) -> bool:
+    return clip.get("video_enabled") is not False
+
+
+def _sequence_video_clips(
+    sequence: dict[str, Any] | None, *, include_video_disabled: bool = False
+) -> list[dict[str, Any]]:
     if not isinstance(sequence, dict):
         return []
     clips: list[dict[str, Any]] = []
     for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("type") != "video":
+        if not isinstance(track, dict) or track.get("type") != "video" or track.get("hidden"):
             continue
         for clip in track.get("clips") or []:
-            if isinstance(clip, dict):
+            if isinstance(clip, dict) and (include_video_disabled or _clip_video_enabled(clip)):
                 clips.append(clip)
     return sorted(clips, key=lambda item: float(item.get("timeline_start") or 0))
 
@@ -692,7 +698,7 @@ def _sequence_overlay_clips(sequence: dict[str, Any] | None) -> list[dict[str, A
         for clip in track.get("clips") or []:
             if not isinstance(clip, dict):
                 continue
-            if ttype == "overlay" or (ttype == "video" and _is_overlay_clip(clip)):
+            if _clip_video_enabled(clip) and (ttype == "overlay" or (ttype == "video" and _is_overlay_clip(clip))):
                 clips.append(clip)
     return sorted(clips, key=lambda c: (float(c.get("layer") or 0), float(c.get("timeline_start") or 0)))
 
@@ -1083,7 +1089,10 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     timeline_fps = _sequence_frame_rate(sequence)
     fps_filter = f"{timeline_fps:g}"
 
-    base_clips = [c for c in _sequence_video_clips(sequence) if not _is_overlay_clip(c)]
+    base_clips = [
+        c for c in _sequence_video_clips(sequence, include_video_disabled=True)
+        if not _is_overlay_clip(c)
+    ]
     if not base_clips:
         return None
 
@@ -1128,7 +1137,12 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         identity = is_full_pos and _is_identity_transform(b_scale, b_tx, b_ty) and not has_crop
         # Wipe shape on a BASE clip: black outside the cutout (this layer has no alpha).
         base_shape = _shape_cut_filter(clip.get("shape"), output_width, output_height, alpha=False)
-        if identity or sw <= 0 or sh <= 0:
+        if not _clip_video_enabled(clip):
+            # Picture is disabled but the slot and its linked audio remain on the timeline.
+            filters.append(
+                f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur:.3f}[v{rendered_count}]"
+            )
+        elif identity or sw <= 0 or sh <= 0:
             # IDENTITY (or unknown source dims): exact current cover-crop string (byte-identical).
             _scale = f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps={fps_filter}"
             if is_freeze:

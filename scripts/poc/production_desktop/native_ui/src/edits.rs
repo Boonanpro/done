@@ -986,6 +986,15 @@ pub fn set_track_flag(raw: &mut Value, ti: usize, key: &str, val: bool) {
     }
 }
 
+/// Toggle picture visibility on selected video clips without changing their linked audio.
+pub fn set_video_enabled(raw: &mut Value, ids: &[String], enabled: bool) {
+    for clip in clips_iter_mut(raw) {
+        if ids.contains(&sid(clip)) && clip.get("asset_id").is_some() {
+            clip["video_enabled"] = Value::from(enabled);
+        }
+    }
+}
+
 /// Clips ATTACHED to the given (about to be deleted) clips: a clip is attached when its
 /// HEAD sits over a deleted clip's span on a lane IN FRONT of it (higher stack index) —
 /// captions/effects riding a video, per Filmora/DaVinci. Locked lanes are left alone.
