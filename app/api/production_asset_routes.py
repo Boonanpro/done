@@ -2831,7 +2831,52 @@ def _clips_in_scope(sequence: dict[str, Any], regions: list[dict[str, Any]]) -> 
     return scope
 
 
-def _merge_revision_patch(sequence: dict[str, Any], patch: dict[str, Any], allowed_ids: set[str]) -> dict[str, Any]:
+def _sanitize_av_clip_edit(nc: dict[str, Any], orig: dict[str, Any], assets: dict[str, dict[str, Any]] | None) -> None:
+    """Guard for LLM-authored clip edits: an asset-backed (video/audio) clip must stay
+    playable. Dan once 'extended' a clip by writing source_end BEFORE source_start —
+    the implicit-freeze convention then froze the picture while audio wandered. Rule:
+    for a non-freeze A/V clip, the source span always equals the timeline span
+    (se = ss + (te - ts)), clamped to the asset's real duration (te shrinks with it)."""
+    if not nc.get("asset_id") or nc.get("freeze"):
+        return
+    try:
+        ts = float(nc.get("timeline_start") or 0)
+        te = float(nc.get("timeline_end") or 0)
+        ss = float(nc.get("source_start") or 0)
+    except (TypeError, ValueError):
+        return
+    if nc.get("source_end") is None or te <= ts:
+        return
+    # explicit freeze by the OLD implicit convention on the ORIGINAL clip stays as-is
+    try:
+        oss = float(orig.get("source_start") or 0)
+        ose = float(orig.get("source_end") or 0)
+        if orig.get("source_end") is not None and ose <= oss + 1e-6:
+            return
+    except (TypeError, ValueError):
+        pass
+    need = te - ts
+    se = ss + need
+    asset = (assets or {}).get(str(nc.get("asset_id")))
+    meta = asset.get("metadata") if isinstance(asset, dict) and isinstance(asset.get("metadata"), dict) else {}
+    try:
+        adur = float(meta.get("duration") or 0)
+    except (TypeError, ValueError):
+        adur = 0.0
+    if adur > 0 and se > adur:
+        se = adur
+        te = ts + max(0.05, se - ss)
+    if abs(float(nc.get("source_end") or 0) - se) > 1e-3 or te != float(nc.get("timeline_end") or 0):
+        logger.warning(
+            "revision clip %s sanitized: src %.3f->%.3f tl %.3f-%.3f",
+            nc.get("id"), ss, se, ts, te,
+        )
+    nc["source_end"] = round(se, 3)
+    nc["timeline_end"] = round(te, 3)
+
+
+def _merge_revision_patch(sequence: dict[str, Any], patch: dict[str, Any], allowed_ids: set[str],
+                          assets: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Apply Dan's per-clip revision patch to the sequence, preserving every clip outside the
     allowed scope verbatim. Edits/removes targeting ids NOT in allowed_ids are ignored (this is
     the guard that stops Dan from silently mutating the rest of the timeline)."""
@@ -2870,6 +2915,7 @@ def _merge_revision_patch(sequence: dict[str, Any], patch: dict[str, Any], allow
                         nc[k] = merged_style
                     else:
                         nc[k] = e[k]
+                _sanitize_av_clip_edit(nc, clip, assets)
                 out_clips.append(nc)
             else:
                 out_clips.append(clip)  # untouched, verbatim
@@ -3076,7 +3122,8 @@ Rules:
     patch = _extract_json_object(output)
     if not isinstance(patch, dict):
         return None
-    merged = _merge_revision_patch(sequence, patch, allowed)
+    assets_by_id = {str(a.get("id")): a for a in _read_assets(room_id) if isinstance(a, dict)}
+    merged = _merge_revision_patch(sequence, patch, allowed, assets_by_id)
     # visual-object blur requests ride the same patch: start SAM bakes + bind effect clips
     blur_objects = patch.get("blur_objects") if isinstance(patch.get("blur_objects"), list) else []
     if merged and blur_objects:
