@@ -88,21 +88,17 @@ float4 ps_blur_masked(VOut i) : SV_Target {
   return float4(lerp(base, blurc, saturate(m)), 1.0);
 }
 // Static-rectangle soft blur (the un-baked stand-in and the "gaussian" style preview):
-// FULL strength across the whole region — the rect the user draws is the GUARANTEED
-// cover (same semantics as the export) — with the soft fade extending OUTSIDE the box
-// (uvr = logical region, dst = quad expanded by the feather margin). The old inward
-// feather left the outer ~20% of the box under half strength and the very edge bare:
-// "枠内に収めたのに一部ぼけてない".
+// THE RECT IS THE BLUR — full strength inside, nothing outside, no feather. The rule
+// never bends with position or size (an outward fade LOOKED like a position-dependent
+// offset when the canvas edge clipped one side of the halo), and it matches the
+// export's uniform crop-blur exactly.
 float4 ps_blur_rect(VOut i) : SV_Target {
   float2 cuv = i.pos.xy / aff.zw;
   float2 local = (cuv - uvr.xy) / max(uvr.zw, 1e-6);
-  float2 dout = max(-local, local - 1.0);        // per-axis distance OUTSIDE the box
-  float fe = 0.12;                                // fade band outside, fraction of box
-  float m = 1.0 - smoothstep(0.0, fe, max(dout.x, dout.y));
   float3 base = tex0.Sample(smp, cuv).rgb;
-  if (m < 0.004) return float4(base, 1.0);
+  if (any(local < 0.0) || any(local > 1.0)) return float4(base, 1.0);
   float3 blurc = soft_blur(cuv, aff.xy);
-  return float4(lerp(base, blurc, m), 1.0);
+  return float4(blurc, 1.0);
 }
 float4 ps_popout_live(VOut i) : SV_Target {
   float3 msk = tex3.Sample(smp, i.uv).rgb;
@@ -759,13 +755,8 @@ impl Compositor {
             let mut srv: Option<ID3D11ShaderResourceView> = None;
             d3d.device.CreateShaderResourceView(scratch, None, Some(&mut srv))?;
             let (x, y, w, h) = region;
-            // quad expanded by the OUTWARD feather band (shader fe=0.12 of the box);
-            // uvr keeps the logical region so the shader knows where "inside" ends
-            let (fw, fh) = (w * 0.13, h * 0.13);
-            let (qx0, qy0) = ((x - fw).max(0.0), (y - fh).max(0.0));
-            let (qx1, qy1) = ((x + w + fw).min(1.0), (y + h + fh).min(1.0));
             let cbv = Cb {
-                dst: [qx0 as f32, qy0 as f32, (qx1 - qx0) as f32, (qy1 - qy0) as f32],
+                dst: [x as f32, y as f32, w as f32, h as f32],
                 uvr: [x as f32, y as f32, w as f32, h as f32],
                 aff: [
                     (radius_px / self.width as f64) as f32,
