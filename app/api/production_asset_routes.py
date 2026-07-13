@@ -834,18 +834,49 @@ def _blur_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int, start: 
     return filt, out
 
 
-def _kf_expr(keys: list[tuple[float, float]], scale: int, maxv: int) -> str:
-    """Piecewise-linear ffmpeg expression over absolute timeline time `t` from
-    (abs_time, normalized_value) keyframes. Ends clamp to the first/last key."""
+def _kf_expr(keys: list[tuple[float, float]], scale: int, maxv: int, tvar: str = "t") -> str:
+    """Piecewise-linear ffmpeg expression over time variable `tvar` (t for overlay/crop,
+    T for geq) from (abs_time, normalized_value) keyframes. Ends clamp to first/last key."""
     def px(v: float) -> int:
         return max(0, min(maxv, round(v * scale)))
     if len(keys) == 1:
         return str(px(keys[0][1]))
     expr = str(px(keys[-1][1]))
     for (t0, v0), (t1, v1) in reversed(list(zip(keys, keys[1:]))):
-        seg = f"lerp({px(v0)}\\,{px(v1)}\\,(t-{t0:.3f})/{max(t1 - t0, 1e-6):.3f})"
-        expr = f"if(lt(t\\,{t1:.3f})\\,{seg}\\,{expr})"
-    return f"if(lt(t\\,{keys[0][0]:.3f})\\,{px(keys[0][1])}\\,{expr})"
+        seg = f"lerp({px(v0)}\\,{px(v1)}\\,({tvar}-{t0:.3f})/{max(t1 - t0, 1e-6):.3f})"
+        expr = f"if(lt({tvar}\\,{t1:.3f})\\,{seg}\\,{expr})"
+    return f"if(lt({tvar}\\,{keys[0][0]:.3f})\\,{px(keys[0][1])}\\,{expr})"
+
+
+def _blur_chain_kf_sized(video_in: str, idx: int, kf: list[tuple[float, float, float, float, float]],
+                         frame_w: int, frame_h: int, start: float, end: float, style: str) -> tuple[str, str]:
+    """Keyframed regional blur with ANIMATED SIZE: crop/overlay cannot animate w/h, so
+    blur the whole frame and alpha-mask it with a per-frame geq box (edges are the
+    piecewise-linear x / x+w / y / y+h expressions over geq's T). kf = [(t_abs, x, y, w, h)]."""
+    out = f"vblur{idx}"
+    base, full, blurred, mask, bm = (
+        f"bbase{idx}", f"bfull{idx}", f"bblur{idx}", f"bmsk{idx}", f"bbm{idx}",
+    )
+    x0 = _kf_expr([(t, x) for t, x, _, _, _ in kf], frame_w, frame_w, tvar="T")
+    x1 = _kf_expr([(t, x + w) for t, x, _, w, _ in kf], frame_w, frame_w, tvar="T")
+    y0 = _kf_expr([(t, y) for t, _, y, _, _ in kf], frame_h, frame_h, tvar="T")
+    y1 = _kf_expr([(t, y + h) for t, _, y, _, h in kf], frame_h, frame_h, tvar="T")
+    style = (style or "").lower()
+    if "mosaic" in style:
+        # mosaic block from the largest keyed width (the block size cannot animate)
+        block = max(2, round(max(w for _, _, _, w, _ in kf) * frame_w) // 12)
+        proc = f"scale={max(2, frame_w // block)}:{max(2, frame_h // block)}:flags=neighbor,scale={frame_w}:{frame_h}:flags=neighbor"
+    else:
+        proc = "gblur=sigma=20"
+    filt = (
+        f"[{video_in}]split[{base}][{full}];"
+        f"[{full}]fps=30,{proc}[{blurred}];"
+        f"color=c=black:s={frame_w}x{frame_h}:r=30,format=gray,"
+        f"geq=lum='255*between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1})'[{mask}];"
+        f"[{blurred}][{mask}]alphamerge[{bm}];"
+        f"[{base}][{bm}]overlay=0:0:enable='between(t\\,{start:.3f}\\,{end:.3f})':eof_action=pass[{out}]"
+    )
+    return filt, out
 
 
 def _blur_chain_kf(video_in: str, idx: int, xe: str, ye: str, w: int, h: int,
@@ -1187,22 +1218,36 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         h = max(2, min(output_height - y, round(float(spec.get("height") or 0) * output_height)))
         start = max(0.0, float(spec.get("start") or 0))
         end = max(start + 0.01, float(spec.get("end") or (start + 0.5)))
-        # 位置キーフレーム（手動追従）: crop/overlay を区分線形式で動かす
-        kf: list[tuple[float, float, float]] = []
+        # キーフレーム（手動追従）: 位置＋サイズを区分線形で動かす。キーにw/hが
+        # 無い旧形式は基準矩形のサイズで補完（region_at と同じ規則）
+        kf: list[tuple[float, float, float, float, float]] = []
         if eclip and isinstance(eclip.get("region_keys"), list):
             ts0 = float(eclip.get("timeline_start") or 0)
+            bw = float(spec.get("width") or 0.1)
+            bh = float(spec.get("height") or 0.1)
             for k in eclip["region_keys"]:
                 try:
-                    kf.append((ts0 + float(k["t"]), float(k["x"]), float(k["y"])))
+                    kf.append((ts0 + float(k["t"]), float(k["x"]), float(k["y"]),
+                               float(k.get("w", bw)), float(k.get("h", bh))))
                 except (KeyError, TypeError, ValueError):
                     continue
             kf.sort(key=lambda p: p[0])
         if kf:
-            xe = _kf_expr([(t, vx) for t, vx, _ in kf], output_width, output_width - w)
-            ye = _kf_expr([(t, vy) for t, _, vy in kf], output_height, output_height - h)
-            filt, video_out = _blur_chain_kf(video_out, bi, xe, ye, w, h,
-                                             output_width, output_height, start, end,
-                                             str(spec.get("style") or ""))
+            ws = [k[3] for k in kf]
+            hs = [k[4] for k in kf]
+            if max(ws) - min(ws) < 1e-4 and max(hs) - min(hs) < 1e-4:
+                # 固定サイズ: 従来の crop/overlay（軽い）。サイズはキーの値を優先
+                kw = max(2, min(output_width, round(ws[0] * output_width)))
+                kh = max(2, min(output_height, round(hs[0] * output_height)))
+                xe = _kf_expr([(t, vx) for t, vx, _, _, _ in kf], output_width, output_width - kw)
+                ye = _kf_expr([(t, vy) for t, _, vy, _, _ in kf], output_height, output_height - kh)
+                filt, video_out = _blur_chain_kf(video_out, bi, xe, ye, kw, kh,
+                                                 output_width, output_height, start, end,
+                                                 str(spec.get("style") or ""))
+            else:
+                filt, video_out = _blur_chain_kf_sized(video_out, bi, kf,
+                                                       output_width, output_height, start, end,
+                                                       str(spec.get("style") or ""))
         else:
             filt, video_out = _blur_chain(video_out, bi, x, y, w, h, start, end, str(spec.get("style") or ""))
         filters.append(filt)

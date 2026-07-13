@@ -157,38 +157,47 @@ impl Clip {
             None
         }
     }
-    /// Region rect at timeline time `t` — the base rect, with POSITION keyframes
-    /// (region_keys) linearly interpolated when present. Size never animates.
+    /// Region rect at timeline time `t` — the base rect, with keyframes (region_keys)
+    /// linearly interpolated when present. Keys animate position AND size; legacy
+    /// position-only keys fall back to the base rect's size.
     pub fn region_at(&self, t: f64) -> Option<(f64, f64, f64, f64)> {
-        let (bx, by, w, h) = self.region_xywh()?;
+        let (bx, by, bw, bh) = self.region_xywh()?;
         let Some(keys) = self.region_keys.as_ref().and_then(|v| v.as_array()) else {
-            return Some((bx, by, w, h));
+            return Some((bx, by, bw, bh));
         };
-        let mut ks: Vec<(f64, f64, f64)> = keys
+        let mut ks: Vec<(f64, f64, f64, f64, f64)> = keys
             .iter()
             .filter_map(|k| {
                 Some((
                     k.get("t")?.as_f64()?,
                     k.get("x")?.as_f64()?,
                     k.get("y")?.as_f64()?,
+                    k.get("w").and_then(|v| v.as_f64()).unwrap_or(bw),
+                    k.get("h").and_then(|v| v.as_f64()).unwrap_or(bh),
                 ))
             })
             .collect();
         if ks.is_empty() {
-            return Some((bx, by, w, h));
+            return Some((bx, by, bw, bh));
         }
         ks.sort_by(|a, b| a.0.total_cmp(&b.0));
         let rel = t - self.timeline_start;
-        let (x, y) = if rel <= ks[0].0 {
-            (ks[0].1, ks[0].2)
+        let (x, y, w, h) = if rel <= ks[0].0 {
+            let f = &ks[0];
+            (f.1, f.2, f.3, f.4)
         } else if rel >= ks[ks.len() - 1].0 {
             let l = &ks[ks.len() - 1];
-            (l.1, l.2)
+            (l.1, l.2, l.3, l.4)
         } else {
             let i = ks.iter().position(|k| k.0 > rel).unwrap();
             let (a, b) = (&ks[i - 1], &ks[i]);
             let f = ((rel - a.0) / (b.0 - a.0).max(1e-9)).clamp(0.0, 1.0);
-            (a.1 + (b.1 - a.1) * f, a.2 + (b.2 - a.2) * f)
+            (
+                a.1 + (b.1 - a.1) * f,
+                a.2 + (b.2 - a.2) * f,
+                a.3 + (b.3 - a.3) * f,
+                a.4 + (b.4 - a.4) * f,
+            )
         };
         // no clamping here: keys may legitimately place the rect partly off-screen
         // (covering an object at the very edge) — writers enforce the grab-able limit

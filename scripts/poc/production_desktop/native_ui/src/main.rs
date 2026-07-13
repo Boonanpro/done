@@ -4125,10 +4125,10 @@ impl App {
                                     .on_disabled_hover_text("再生ヘッドをこのぼかしクリップの範囲内に置いてください")
                                     .clicked()
                                 {
-                                    if let Some((kx, ky, _, _)) = clip.region_at(self.t) {
+                                    if let Some((kx, ky, kw, kh)) = clip.region_at(self.t) {
                                         let cid = id.clone();
                                         self.apply_edit(true, move |raw| {
-                                            edits::set_region_key(raw, &cid, rel, kx, ky)
+                                            edits::set_region_key(raw, &cid, rel, kx, ky, kw, kh)
                                         });
                                         self.push_req(false);
                                     }
@@ -5400,21 +5400,11 @@ impl App {
                 x = x.clamp(0.05 - w, 0.95);
                 y = y.clamp(0.05 - h, 0.95);
                 let cid2 = cid.clone();
-                // キー打ちが武装済みなら位置はキーへ。角リサイズはサイズを基準矩形に
-                // 書きつつ、位置キーも現在時刻で更新（キー駆動クリップの位置整合）
-                match (mode, self.kf_drag_rel) {
-                    (0, Some(rel)) => {
-                        self.apply_edit(false, move |raw| edits::set_region_key(raw, &cid2, rel, x, y));
-                    }
-                    (_, Some(rel)) => {
-                        self.apply_edit(false, move |raw| {
-                            edits::set_region(raw, &cid2, x, y, w, h);
-                            edits::set_region_key(raw, &cid2, rel, x, y);
-                        });
-                    }
-                    _ => {
-                        self.apply_edit(false, move |raw| edits::set_region(raw, &cid2, x, y, w, h));
-                    }
+                // キー打ちが武装済みなら移動もリサイズも位置+サイズのキーとして書く
+                if let Some(rel) = self.kf_drag_rel {
+                    self.apply_edit(false, move |raw| edits::set_region_key(raw, &cid2, rel, x, y, w, h));
+                } else {
+                    self.apply_edit(false, move |raw| edits::set_region(raw, &cid2, x, y, w, h));
                 }
             }
             if ui.input(|i| i.pointer.any_released()) {
@@ -8938,8 +8928,8 @@ fn main() -> eframe::Result<()> {
             serde_json::from_value(raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0].clone())
                 .expect("clip parse")
         };
-        edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3);
-        edits::set_region_key(&mut raw, "fx1", 4.0, 0.6, 0.3);
+        edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3, 0.2, 0.1);
+        edits::set_region_key(&mut raw, "fx1", 4.0, 0.6, 0.3, 0.2, 0.1);
         let c = clip_of(&raw);
         let x_at = |c: &model::Clip, t: f64| c.region_at(t).unwrap().0;
         let ok1 = (x_at(&c, 11.0) - 0.225).abs() < 1e-6
@@ -8947,15 +8937,15 @@ fn main() -> eframe::Result<()> {
             && (x_at(&c, 9.0) - 0.1).abs() < 1e-6
             && (x_at(&c, 15.0) - 0.6).abs() < 1e-6;
         println!("KF interp     {}", if ok1 { "PASS" } else { "FAIL" });
-        edits::set_region_key(&mut raw, "fx1", 0.003, 0.2, 0.35);
+        edits::set_region_key(&mut raw, "fx1", 0.003, 0.2, 0.35, 0.2, 0.1);
         let c = clip_of(&raw);
         let ok2 = c.region_key_times().len() == 2 && (x_at(&c, 10.0) - 0.2).abs() < 1e-6;
         println!("KF replace    {} (keys={})", if ok2 { "PASS" } else { "FAIL" }, c.region_key_times().len());
         // 60fps VFR: keys one real frame apart (~16ms) must ALL survive — the old
         // 1/60s replace window silently deleted the previous frame's key
-        edits::set_region_key(&mut raw, "fx1", 0.016, 0.25, 0.35);
-        edits::set_region_key(&mut raw, "fx1", 0.033, 0.3, 0.35);
-        edits::set_region_key(&mut raw, "fx1", 0.049, 0.35, 0.35);
+        edits::set_region_key(&mut raw, "fx1", 0.016, 0.25, 0.35, 0.2, 0.1);
+        edits::set_region_key(&mut raw, "fx1", 0.033, 0.3, 0.35, 0.2, 0.1);
+        edits::set_region_key(&mut raw, "fx1", 0.049, 0.35, 0.35, 0.2, 0.1);
         let c = clip_of(&raw);
         let ok2b = c.region_key_times().len() == 5;
         println!("KF 60fps-adj  {} (keys={} want 5)", if ok2b { "PASS" } else { "FAIL" }, c.region_key_times().len());
@@ -8971,7 +8961,7 @@ fn main() -> eframe::Result<()> {
         let ok3 = c.region_key_times() == vec![4.0];
         println!("KF remove-one {}", if ok3 { "PASS" } else { "FAIL" });
         let ok2 = ok2 && ok2b && ok3a;
-        edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3);
+        edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3, 0.2, 0.1);
         let before_x = x_at(&clip_of(&raw), 12.0);
         let ids: Vec<String> = vec!["fx1".into()];
         edits::trim_clip_live_from(&mut raw, &ids, true, 10.0, 11.0);
@@ -8989,7 +8979,7 @@ fn main() -> eframe::Result<()> {
         // key edits must invalidate the composed-frame cache: dirty_from has to see
         // region_keys (it didn't — stale cached frames served the OLD blur position)
         let d_before = model::Doc::from_raw(raw.clone(), "", "").expect("doc a");
-        edits::set_region_key(&mut raw, "fx1", 1.0, 0.5, 0.5);
+        edits::set_region_key(&mut raw, "fx1", 1.0, 0.5, 0.5, 0.2, 0.1);
         let d_after = model::Doc::from_raw(raw.clone(), "", "").expect("doc b");
         let df = App::dirty_from(&d_before, &d_after);
         let ok7 = df.is_finite() && (df - d_after.seq.tracks[0].clips[0].timeline_start).abs() < 1e-6;
@@ -8997,8 +8987,8 @@ fn main() -> eframe::Result<()> {
         // split: keys partition at the cut, right half re-bases, both sides pin the
         // cut-moment position — a verbatim clone replayed the left motion after the cut
         edits::clear_region_keys(&mut raw, "fx1");
-        edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3);
-        edits::set_region_key(&mut raw, "fx1", 4.0, 0.6, 0.3);
+        edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3, 0.2, 0.1);
+        edits::set_region_key(&mut raw, "fx1", 4.0, 0.6, 0.3, 0.2, 0.1);
         edits::split_clips(&mut raw, &ids, 11.0, 42);
         let clips = raw[0]["timeline"]["sequence"]["tracks"][0]["clips"]
             .as_array()
@@ -9023,8 +9013,8 @@ fn main() -> eframe::Result<()> {
         // cut BEYOND all keys: no phantom key at the cut — the keyless right half
         // holds the position via its base rect instead
         edits::clear_region_keys(&mut raw, "fx1");
-        edits::set_region_key(&mut raw, "fx1", 0.2, 0.2, 0.3);
-        edits::set_region_key(&mut raw, "fx1", 0.5, 0.3, 0.3);
+        edits::set_region_key(&mut raw, "fx1", 0.2, 0.2, 0.3, 0.2, 0.1);
+        edits::set_region_key(&mut raw, "fx1", 0.5, 0.3, 0.3, 0.2, 0.1);
         edits::split_clips(&mut raw, &ids, 10.5, 43);
         let clips = raw[0]["timeline"]["sequence"]["tracks"][0]["clips"]
             .as_array()
@@ -9049,13 +9039,32 @@ fn main() -> eframe::Result<()> {
         edits::set_region(&mut raw, "fx1", -0.1, 0.3, 0.2, 0.1);
         let c = clip_of(&raw);
         let okx = c.region_xywh().map(|r| (r.0 + 0.1).abs() < 1e-6).unwrap_or(false);
-        edits::set_region_key(&mut raw, "fx1", 0.1, -0.08, 0.3);
+        edits::set_region_key(&mut raw, "fx1", 0.1, -0.08, 0.3, 0.2, 0.1);
         let c = clip_of(&raw);
         let ok10 = okx && (x_at(&c, 9.1) + 0.08).abs() < 1e-6;
         println!("KF offscreen  {} (base_x={:?} key_x={:.3})",
                  if ok10 { "PASS" } else { "FAIL" },
                  c.region_xywh().map(|r| r.0), x_at(&c, 9.1));
-        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10;
+        // SIZE keyframes: w/h interpolate; legacy keys without w/h read the base size
+        edits::clear_region_keys(&mut raw, "fx1");
+        edits::set_region(&mut raw, "fx1", 0.1, 0.3, 0.1, 0.05);
+        edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3, 0.1, 0.05);
+        edits::set_region_key(&mut raw, "fx1", 1.0, 0.1, 0.3, 0.3, 0.15);
+        let c = clip_of(&raw);
+        let sz = |t: f64| c.region_at(t).map(|r| (r.2, r.3)).unwrap_or((0.0, 0.0));
+        let ok11a = (sz(9.5).0 - 0.2).abs() < 1e-6 && (sz(9.5).1 - 0.1).abs() < 1e-6
+            && (sz(9.0).0 - 0.1).abs() < 1e-6 && (sz(10.5).0 - 0.3).abs() < 1e-6;
+        // legacy position-only key mixed in → base size at that key
+        if let Some(keys) = raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0]["region_keys"].as_array_mut() {
+            keys.push(serde_json::json!({"t": 2.0, "x": 0.5, "y": 0.3}));
+        }
+        let c2 = clip_of(&raw);
+        let legacy_w = c2.region_at(11.0).map(|r| r.2).unwrap_or(0.0);
+        let ok11b = (legacy_w - 0.1).abs() < 1e-6; // rel=2 → legacy key → base w=0.1
+        let ok11 = ok11a && ok11b;
+        println!("KF size       {} (w@9.5={:.3} legacy_w@11={legacy_w:.3})",
+                 if ok11 { "PASS" } else { "FAIL" }, sz(9.5).0);
+        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11;
         println!("KF ALL {}", if all { "PASS" } else { "FAIL" });
         std::process::exit(if all { 0 } else { 1 });
     }

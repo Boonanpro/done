@@ -711,14 +711,16 @@ pub fn split_clips(root: &mut Value, ids: &[String], t: f64, salt: u64) {
 
 /// Linear interpolation of a region_keys array at clip-relative time `rel`
 /// (same math as model::Clip::region_at — ends clamp to the first/last key).
-fn region_keys_pos_at(keys: &[Value], rel: f64) -> Option<(f64, f64)> {
-    let mut ks: Vec<(f64, f64, f64)> = keys
+fn region_keys_pos_at(keys: &[Value], rel: f64, bw: f64, bh: f64) -> Option<(f64, f64, f64, f64)> {
+    let mut ks: Vec<(f64, f64, f64, f64, f64)> = keys
         .iter()
         .filter_map(|k| {
             Some((
                 k.get("t")?.as_f64()?,
                 k.get("x")?.as_f64()?,
                 k.get("y")?.as_f64()?,
+                k.get("w").and_then(|v| v.as_f64()).unwrap_or(bw),
+                k.get("h").and_then(|v| v.as_f64()).unwrap_or(bh),
             ))
         })
         .collect();
@@ -727,16 +729,22 @@ fn region_keys_pos_at(keys: &[Value], rel: f64) -> Option<(f64, f64)> {
     }
     ks.sort_by(|a, b| a.0.total_cmp(&b.0));
     if rel <= ks[0].0 {
-        return Some((ks[0].1, ks[0].2));
+        let f = &ks[0];
+        return Some((f.1, f.2, f.3, f.4));
     }
     if rel >= ks[ks.len() - 1].0 {
         let l = &ks[ks.len() - 1];
-        return Some((l.1, l.2));
+        return Some((l.1, l.2, l.3, l.4));
     }
     let i = ks.iter().position(|k| k.0 > rel).unwrap();
     let (a, b) = (&ks[i - 1], &ks[i]);
     let fr = ((rel - a.0) / (b.0 - a.0).max(1e-9)).clamp(0.0, 1.0);
-    Some((a.1 + (b.1 - a.1) * fr, a.2 + (b.2 - a.2) * fr))
+    Some((
+        a.1 + (b.1 - a.1) * fr,
+        a.2 + (b.2 - a.2) * fr,
+        a.3 + (b.3 - a.3) * fr,
+        a.4 + (b.4 - a.4) * fr,
+    ))
 }
 
 /// Partition a split clip's position keyframes at cut offset `d`: the left half keeps
@@ -755,7 +763,16 @@ fn split_region_keys(orig: &Value, d: f64, leftv: &mut Value, rightv: &mut Value
     let kt_of = |k: &Value| k.get("t").and_then(|v| v.as_f64());
     let had_before = keys.iter().any(|k| kt_of(k).map(|kt| kt < d - KEY_REPLACE_EPS).unwrap_or(false));
     let had_after = keys.iter().any(|k| kt_of(k).map(|kt| kt > d + KEY_REPLACE_EPS).unwrap_or(false));
-    let cut_pos = region_keys_pos_at(&keys, d);
+    let (bw, bh) = orig
+        .get("region")
+        .map(|r| {
+            (
+                r.get("width").and_then(|v| v.as_f64()).unwrap_or(0.1),
+                r.get("height").and_then(|v| v.as_f64()).unwrap_or(0.1),
+            )
+        })
+        .unwrap_or((0.1, 0.1));
+    let cut_pos = region_keys_pos_at(&keys, d, bw, bh);
     let mut lk: Vec<Value> = keys
         .iter()
         .filter(|k| kt_of(k).map(|kt| kt <= d + KEY_REPLACE_EPS).unwrap_or(false))
@@ -773,7 +790,7 @@ fn split_region_keys(orig: &Value, d: f64, leftv: &mut Value, rightv: &mut Value
             Some(k2)
         })
         .collect();
-    if let Some((px, py)) = cut_pos {
+    if let Some((px, py, pw, ph)) = cut_pos {
         // boundary keys ONLY where motion actually crosses the cut (keys on BOTH
         // sides): a cut beyond all keys must not sprinkle a visible key at the cut —
         // the keyless side gets the position written into its BASE rect instead
@@ -781,13 +798,13 @@ fn split_region_keys(orig: &Value, d: f64, leftv: &mut Value, rightv: &mut Value
             && had_after
             && !lk.iter().any(|k| kt_of(k).map(|kt| (kt - d).abs() <= KEY_REPLACE_EPS).unwrap_or(false))
         {
-            lk.push(serde_json::json!({"t": q3(d), "x": q4(px), "y": q4(py)}));
+            lk.push(serde_json::json!({"t": q3(d), "x": q4(px), "y": q4(py), "w": q4(pw), "h": q4(ph)}));
         }
         if !rk.is_empty()
             && had_before
             && !rk.iter().any(|k| kt_of(k).map(|kt| kt.abs() <= KEY_REPLACE_EPS).unwrap_or(false))
         {
-            rk.push(serde_json::json!({"t": 0.0, "x": q4(px), "y": q4(py)}));
+            rk.push(serde_json::json!({"t": 0.0, "x": q4(px), "y": q4(py), "w": q4(pw), "h": q4(ph)}));
         }
     }
     let sort = |v: &mut Vec<Value>| {
@@ -803,15 +820,15 @@ fn split_region_keys(orig: &Value, d: f64, leftv: &mut Value, rightv: &mut Value
         if let Some(o) = side.as_object_mut() {
             if ks.is_empty() {
                 o.remove("region_keys");
-                // keyless side: hold the cut-moment position via the base rect (same
-                // picture, no keyframe diamond appearing out of nowhere)
-                if let (Some((px, py)), Some(rg)) =
+                // keyless side: hold the cut-moment position AND size via the base rect
+                // (same picture, no keyframe diamond appearing out of nowhere)
+                if let (Some((px, py, pw, ph)), Some(rg)) =
                     (cut_pos, o.get_mut("region").and_then(|v| v.as_object_mut()))
                 {
-                    let rw = rg.get("width").and_then(|v| v.as_f64()).unwrap_or(0.1);
-                    let rh = rg.get("height").and_then(|v| v.as_f64()).unwrap_or(0.1);
-                    rg.insert("x".into(), serde_json::json!(q4(px.clamp(0.05 - rw, 0.95))));
-                    rg.insert("y".into(), serde_json::json!(q4(py.clamp(0.05 - rh, 0.95))));
+                    rg.insert("x".into(), serde_json::json!(q4(px.clamp(0.05 - pw, 0.95))));
+                    rg.insert("y".into(), serde_json::json!(q4(py.clamp(0.05 - ph, 0.95))));
+                    rg.insert("width".into(), serde_json::json!(q4(pw.clamp(0.01, 1.0))));
+                    rg.insert("height".into(), serde_json::json!(q4(ph.clamp(0.01, 1.0))));
                 }
             } else {
                 o.insert("region_keys".into(), Value::Array(ks));
@@ -1759,25 +1776,16 @@ pub fn set_region(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f64,
 /// rounding. The UI's "on this key" paint uses the same value.
 pub const KEY_REPLACE_EPS: f64 = 0.004;
 
-/// Insert/replace a POSITION keyframe on a region clip (t = clip-relative seconds;
-/// only a key at the SAME frame instant — within KEY_REPLACE_EPS — is replaced;
-/// a key on the neighbouring frame is always kept as its own key).
-pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: f64) {
+/// Insert/replace a keyframe on a region clip (t = clip-relative seconds; only a key
+/// at the SAME frame instant — within KEY_REPLACE_EPS — is replaced; a key on the
+/// neighbouring frame is always kept as its own key). Keys carry position AND size;
+/// legacy position-only keys read back with the base rect's size.
+pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: f64, w: f64, h: f64) {
     for_each_clip(raw, |c| {
         if c.get("id").and_then(|v| v.as_str()) != Some(id) {
             return;
         }
         let o = c.as_object_mut().unwrap();
-        // off-screen clamp uses the rect's size (same rule as set_region)
-        let (rw, rh) = o
-            .get("region")
-            .map(|r| {
-                (
-                    r.get("width").and_then(|v| v.as_f64()).unwrap_or(0.1),
-                    r.get("height").and_then(|v| v.as_f64()).unwrap_or(0.1),
-                )
-            })
-            .unwrap_or((0.1, 0.1));
         let arr = o
             .entry("region_keys")
             .or_insert_with(|| serde_json::Value::Array(vec![]));
@@ -1789,8 +1797,10 @@ pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: 
                 .map(|kt| (kt - t).abs() > KEY_REPLACE_EPS)
                 .unwrap_or(false)
         });
+        let (w, h) = (w.clamp(0.01, 1.0), h.clamp(0.01, 1.0));
         keys.push(serde_json::json!({"t": (t * 1000.0).round() / 1000.0,
-                                      "x": q(x.clamp(0.05 - rw, 0.95)), "y": q(y.clamp(0.05 - rh, 0.95))}));
+                                      "x": q(x.clamp(0.05 - w, 0.95)), "y": q(y.clamp(0.05 - h, 0.95)),
+                                      "w": q(w), "h": q(h)}));
         keys.sort_by(|a, b| {
             let ta = a.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let tb = b.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);
