@@ -5395,8 +5395,10 @@ impl App {
                 }
                 w = w.clamp(0.02, 1.0);
                 h = h.clamp(0.02, 1.0);
-                x = x.clamp(0.0, 1.0 - w);
-                y = y.clamp(0.0, 1.0 - h);
+                // 画面外へのはみ出しOK（端ギリギリを隠す用）。ただし最低5%は画面内に
+                // 残す＝完全に出て掴めなくなる事故を防ぐ
+                x = x.clamp(0.05 - w, 0.95);
+                y = y.clamp(0.05 - h, 0.95);
                 let cid2 = cid.clone();
                 // キー打ちが武装済みなら位置はキーへ。角リサイズはサイズを基準矩形に
                 // 書きつつ、位置キーも現在時刻で更新（キー駆動クリップの位置整合）
@@ -5783,17 +5785,24 @@ impl App {
                     egui::Color32::from_rgb(21, 21, 24)
                 },
             );
-            let color = match tr.kind.as_str() {
-                "video" => egui::Color32::from_rgb(70, 110, 190),
-                "overlay" => egui::Color32::from_rgb(150, 90, 200),
-                "audio" => egui::Color32::from_rgb(70, 160, 90),
-                "caption" => egui::Color32::from_rgb(190, 150, 60),
-                _ => egui::Color32::from_gray(90),
-            };
             for c in &tr.clips {
                 if tr.kind == "audio" && linked_av.contains(&c.id) {
                     continue; // drawn as part of its video clip
                 }
+                // color = what the CLIP IS, never which lane it sits on (region clips
+                // can live on any lane and used to change color when moved between
+                // lanes). State dressing (bake veil etc.) stays separate below.
+                let color = if c.region.is_some() && c.asset_id.is_none() {
+                    egui::Color32::from_rgb(0, 150, 160) // blur / mosaic
+                } else if tr.kind == "audio" {
+                    egui::Color32::from_rgb(70, 160, 90)
+                } else if c.asset_id.is_some() {
+                    egui::Color32::from_rgb(70, 110, 190) // video asset (base or PiP)
+                } else if c.text.is_some() {
+                    egui::Color32::from_rgb(190, 150, 60) // caption accent
+                } else {
+                    egui::Color32::from_gray(90)
+                };
                 let x0 = body.left() + (c.timeline_start as f32) * self.pps - self.scroll_x;
                 let x1 = body.left() + (c.timeline_end as f32) * self.pps - self.scroll_x;
                 if x1 < body.left() || x0 > body.right() {
@@ -9034,7 +9043,19 @@ fn main() -> eframe::Result<()> {
             r2.region_key_times().len(),
             r2.region_xywh().map(|r| r.0).unwrap_or(-1.0)
         );
-        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9;
+        // off-screen rects survive: negative x kept (min 5% visible), keys too,
+        // region_at no longer clamps back inside
+        edits::clear_region_keys(&mut raw, "fx1");
+        edits::set_region(&mut raw, "fx1", -0.1, 0.3, 0.2, 0.1);
+        let c = clip_of(&raw);
+        let okx = c.region_xywh().map(|r| (r.0 + 0.1).abs() < 1e-6).unwrap_or(false);
+        edits::set_region_key(&mut raw, "fx1", 0.1, -0.08, 0.3);
+        let c = clip_of(&raw);
+        let ok10 = okx && (x_at(&c, 9.1) + 0.08).abs() < 1e-6;
+        println!("KF offscreen  {} (base_x={:?} key_x={:.3})",
+                 if ok10 { "PASS" } else { "FAIL" },
+                 c.region_xywh().map(|r| r.0), x_at(&c, 9.1));
+        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10;
         println!("KF ALL {}", if all { "PASS" } else { "FAIL" });
         std::process::exit(if all { 0 } else { 1 });
     }
