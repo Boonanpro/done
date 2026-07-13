@@ -8917,7 +8917,33 @@ fn main() -> eframe::Result<()> {
         let df = App::dirty_from(&d_before, &d_after);
         let ok7 = df.is_finite() && (df - d_after.seq.tracks[0].clips[0].timeline_start).abs() < 1e-6;
         println!("KF cache-inval {} (dirty_from={df})", if ok7 { "PASS" } else { "FAIL" });
-        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7;
+        // split: keys partition at the cut, right half re-bases, both sides pin the
+        // cut-moment position — a verbatim clone replayed the left motion after the cut
+        edits::clear_region_keys(&mut raw, "fx1");
+        edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3);
+        edits::set_region_key(&mut raw, "fx1", 4.0, 0.6, 0.3);
+        edits::split_clips(&mut raw, &ids, 11.0, 42);
+        let clips = raw[0]["timeline"]["sequence"]["tracks"][0]["clips"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let lh: model::Clip = serde_json::from_value(clips[0].clone()).expect("left");
+        let rh: model::Clip = serde_json::from_value(clips[1].clone()).expect("right");
+        let ok8 = clips.len() == 2
+            && (x_at(&lh, 10.0) - 0.225).abs() < 1e-3   // 前半: 元の補間そのまま
+            && (x_at(&lh, 10.99) - 0.35).abs() < 5e-3   // 前半: カット際=カット時位置
+            && (x_at(&rh, 11.0) - 0.35).abs() < 1e-3    // 後半: カット時位置から開始（クローン再生しない）
+            && (x_at(&rh, 12.0) - 0.475).abs() < 1e-3   // 後半: 元の補間と連続
+            && (x_at(&rh, 13.0) - 0.6).abs() < 1e-3
+            && lh.region_key_times().len() == 2
+            && rh.region_key_times().len() == 2;
+        println!(
+            "KF split      {} (L={:?} R={:?})",
+            if ok8 { "PASS" } else { "FAIL" },
+            lh.region_key_times(),
+            rh.region_key_times()
+        );
+        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8;
         println!("KF ALL {}", if all { "PASS" } else { "FAIL" });
         std::process::exit(if all { 0 } else { 1 });
     }

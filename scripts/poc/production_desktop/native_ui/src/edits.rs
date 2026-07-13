@@ -695,10 +695,108 @@ pub fn split_clips(root: &mut Value, ids: &[String], t: f64, salt: u64) {
                             .clone();
                         rightv["link_id"] = Value::from(nl);
                     }
+                    // position keyframes are clip-relative: partition them at the cut and
+                    // re-base the right half, pinning the cut-moment position on both
+                    // sides — a verbatim clone REPLAYED the left half's motion after the
+                    // cut (「前半のキーが後半にクローンされる」)
+                    split_region_keys(&c, d, &mut leftv, &mut rightv);
                     out.push(leftv);
                     out.push(rightv);
                 }
                 *cs = out;
+            }
+        }
+    }
+}
+
+/// Linear interpolation of a region_keys array at clip-relative time `rel`
+/// (same math as model::Clip::region_at — ends clamp to the first/last key).
+fn region_keys_pos_at(keys: &[Value], rel: f64) -> Option<(f64, f64)> {
+    let mut ks: Vec<(f64, f64, f64)> = keys
+        .iter()
+        .filter_map(|k| {
+            Some((
+                k.get("t")?.as_f64()?,
+                k.get("x")?.as_f64()?,
+                k.get("y")?.as_f64()?,
+            ))
+        })
+        .collect();
+    if ks.is_empty() {
+        return None;
+    }
+    ks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if rel <= ks[0].0 {
+        return Some((ks[0].1, ks[0].2));
+    }
+    if rel >= ks[ks.len() - 1].0 {
+        let l = &ks[ks.len() - 1];
+        return Some((l.1, l.2));
+    }
+    let i = ks.iter().position(|k| k.0 > rel).unwrap();
+    let (a, b) = (&ks[i - 1], &ks[i]);
+    let fr = ((rel - a.0) / (b.0 - a.0).max(1e-9)).clamp(0.0, 1.0);
+    Some((a.1 + (b.1 - a.1) * fr, a.2 + (b.2 - a.2) * fr))
+}
+
+/// Partition a split clip's position keyframes at cut offset `d`: the left half keeps
+/// keys up to the cut, the right half gets keys after the cut RE-BASED to its new
+/// start, and both sides get a boundary key with the interpolated cut-moment position
+/// so neither half moves at the instant of the cut.
+fn split_region_keys(orig: &Value, d: f64, leftv: &mut Value, rightv: &mut Value) {
+    let Some(keys) = orig.get("region_keys").and_then(|v| v.as_array()).cloned() else {
+        return;
+    };
+    if keys.is_empty() {
+        return;
+    }
+    let q3 = |v: f64| (v * 1000.0).round() / 1000.0;
+    let q4 = |v: f64| (v * 10000.0).round() / 10000.0;
+    let kt_of = |k: &Value| k.get("t").and_then(|v| v.as_f64());
+    let had_before = keys.iter().any(|k| kt_of(k).map(|kt| kt < d - KEY_REPLACE_EPS).unwrap_or(false));
+    let had_after = keys.iter().any(|k| kt_of(k).map(|kt| kt > d + KEY_REPLACE_EPS).unwrap_or(false));
+    let cut_pos = region_keys_pos_at(&keys, d);
+    let mut lk: Vec<Value> = keys
+        .iter()
+        .filter(|k| kt_of(k).map(|kt| kt <= d + KEY_REPLACE_EPS).unwrap_or(false))
+        .cloned()
+        .collect();
+    let mut rk: Vec<Value> = keys
+        .iter()
+        .filter_map(|k| {
+            let kt = kt_of(k)?;
+            if kt < d - KEY_REPLACE_EPS {
+                return None;
+            }
+            let mut k2 = k.clone();
+            k2["t"] = serde_json::json!(q3((kt - d).max(0.0)));
+            Some(k2)
+        })
+        .collect();
+    if let Some((px, py)) = cut_pos {
+        // pin the cut-moment position where motion would otherwise change ends
+        if had_after && !lk.iter().any(|k| kt_of(k).map(|kt| (kt - d).abs() <= KEY_REPLACE_EPS).unwrap_or(false)) {
+            lk.push(serde_json::json!({"t": q3(d), "x": q4(px), "y": q4(py)}));
+        }
+        if had_before && !rk.iter().any(|k| kt_of(k).map(|kt| kt.abs() <= KEY_REPLACE_EPS).unwrap_or(false)) {
+            rk.push(serde_json::json!({"t": 0.0, "x": q4(px), "y": q4(py)}));
+        }
+    }
+    let sort = |v: &mut Vec<Value>| {
+        v.sort_by(|a, b| {
+            let ta = a.get("t").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let tb = b.get("t").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            ta.total_cmp(&tb)
+        })
+    };
+    sort(&mut lk);
+    sort(&mut rk);
+    for (side, ks) in [(&mut *leftv, lk), (&mut *rightv, rk)] {
+        if let Some(o) = side.as_object_mut() {
+            if ks.is_empty() {
+                o.remove("region_keys");
+            } else {
+                o.insert("region_keys".into(), Value::Array(ks));
             }
         }
     }
