@@ -5004,6 +5004,18 @@ impl App {
             let scale = (img.width() / cw).min(img.height() / ch);
             egui::Rect::from_center_size(img.center(), egui::vec2(cw * scale, ch * scale))
         };
+        // The outline follows the frame that is REALLY on screen (shared.frame.t), not
+        // the requested playhead — the UI repaints instantly while the composed frame
+        // arrives a beat later, and an outline pinned to self.t visibly led the picture
+        // (and the blur, which is glued to the displayed frame) on every scrub/step.
+        let t_disp = {
+            let f = self.shared.frame.lock().unwrap();
+            if f.rgba.is_empty() || (f.t - self.t).abs() > 0.75 {
+                self.t
+            } else {
+                f.t
+            }
+        };
         // (id, rect, baked, blur_track, on_key) — on_key = playhead sits on a position
         // keyframe of this clip (within half a frame)
         let outlines: Vec<(String, (f64, f64, f64, f64), bool, Option<serde_json::Value>, bool)> = self
@@ -5016,11 +5028,11 @@ impl App {
                 self.selected.contains(&c.id)
                     && c.region.is_some()
                     && c.asset_id.is_none()
-                    && self.t >= c.timeline_start
-                    && self.t < c.timeline_end
+                    && t_disp >= c.timeline_start
+                    && t_disp < c.timeline_end
             })
-            .filter_map(|c| c.region_at(self.t).map(|rg| {
-                let rel = self.t - c.timeline_start;
+            .filter_map(|c| c.region_at(t_disp).map(|rg| {
+                let rel = t_disp - c.timeline_start;
                 let on_key = c
                     .region_key_times()
                     .iter()
@@ -5172,7 +5184,7 @@ impl App {
                     };
                     let base = self
                         .doc
-                        .active_video(self.t)
+                        .active_video(t_disp)
                         .0
                         .filter(|b| b.asset_id.as_deref() == Some(baid.as_str()));
                     if meta.is_none() || base.is_none() {
@@ -5186,7 +5198,7 @@ impl App {
                         }
                     }
                     if let (Some(bf), Some(b)) = (meta, base) {
-                        let fi = ((b.src_at(self.t) - bs) * 30.0).round() as i64;
+                        let fi = ((b.src_at(t_disp) - bs) * 30.0).round() as i64;
                         // nearest recorded frame within ±4 (propagation can skip a few)
                         let hit = (0..=4).find_map(|d| {
                             [fi - d, fi + d].into_iter().find_map(|f| {
