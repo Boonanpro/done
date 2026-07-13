@@ -1809,6 +1809,55 @@ pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: 
     });
 }
 
+/// Replace a clip's keys with `orig_keys` shifted by (dx,dy) and resized by (dw,dh) —
+/// the WHOLE trajectory moves rigidly; no key is created or destroyed. This is what a
+/// drag does when キー打ちモード is OFF: a static adjustment must never grow motion.
+/// Idempotent per drag frame (always recomputed from the drag-start snapshot).
+pub fn offset_region_keys(
+    raw: &mut serde_json::Value,
+    id: &str,
+    orig_keys: &serde_json::Value,
+    dx: f64,
+    dy: f64,
+    dw: f64,
+    dh: f64,
+) {
+    let Some(orig) = orig_keys.as_array() else { return };
+    let q = |v: f64| (v * 10000.0).round() / 10000.0;
+    let shifted: Vec<Value> = orig
+        .iter()
+        .filter_map(|k| {
+            let t = k.get("t")?.as_f64()?;
+            let x = k.get("x")?.as_f64()?;
+            let y = k.get("y")?.as_f64()?;
+            let kw = k.get("w").and_then(|v| v.as_f64());
+            let kh = k.get("h").and_then(|v| v.as_f64());
+            let nw = kw.map(|w| (w + dw).clamp(0.01, 1.0));
+            let nh = kh.map(|h| (h + dh).clamp(0.01, 1.0));
+            let cw = nw.unwrap_or(0.1);
+            let ch = nh.unwrap_or(0.1);
+            let mut o = serde_json::Map::new();
+            o.insert("t".into(), serde_json::json!(t));
+            o.insert("x".into(), serde_json::json!(q((x + dx).clamp(0.05 - cw, 0.95))));
+            o.insert("y".into(), serde_json::json!(q((y + dy).clamp(0.05 - ch, 0.95))));
+            if let Some(w) = nw {
+                o.insert("w".into(), serde_json::json!(q(w)));
+            }
+            if let Some(h) = nh {
+                o.insert("h".into(), serde_json::json!(q(h)));
+            }
+            Some(Value::Object(o))
+        })
+        .collect();
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) == Some(id) {
+            if let Some(o) = c.as_object_mut() {
+                o.insert("region_keys".into(), Value::Array(shifted.clone()));
+            }
+        }
+    });
+}
+
 /// Remove the position keyframe at clip-relative time t. Window = twice the
 /// replace epsilon — still far below a 60fps frame gap, so deleting one key can
 /// never swallow the NEIGHBOURING frame's key with it.

@@ -960,9 +960,12 @@ fn compose(
     }
     // region effects (blur/mosaic clips): lanes are just layers — a region clip works
     // from ANY non-audio lane, not only an "effect" one (種別で可否を決めない)
-    // Keyframed rects follow the DISPLAYED base frame's time, not the request time:
-    // that is what keeps the cover glued to the picture during budgeted scrubs.
-    let t_fx = base_eff_t.unwrap_or(t);
+    // Keyframed rects follow the DISPLAYED base frame's time, not the request time —
+    // that keeps the cover glued to the picture during budgeted scrubs — QUANTIZED to
+    // the sequence grid: the same slot value keyframe WRITES use, so a key's frame
+    // shows exactly the key's value and the next frame is still.
+    let gfps = doc.seq.frame_rate.filter(|f| f.is_finite() && *f > 1.0).unwrap_or(30.0);
+    let t_fx = (base_eff_t.unwrap_or(t) * gfps).round() / gfps;
     for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
         for c in &tr.clips {
             if c.asset_id.is_some() || t < c.timeline_start || t >= c.timeline_end {
@@ -2479,11 +2482,17 @@ struct App {
     blur_meta_cache: std::collections::HashMap<String, (Option<serde_json::Value>, Instant)>,
     /// dragging a region-effect rectangle on the preview: (clip id, mode 0=move/1..4=NW,NE,SW,SE corner, grab pos, orig region)
     region_drag: Option<(String, u8, egui::Pos2, (f64, f64, f64, f64))>,
-    /// 位置キーフレームモード: ON中は矩形の移動ドラッグが現在時刻のキーを打つ
-    kf_mode: bool,
+    /// キー打ちモード: このクリップIDに対してON。ON中のドラッグだけが表示フレームの
+    /// スロットにキーを打つ。クリップ紐付きなので選択が変われば自動的に無効＝
+    /// 「別クリップを触ったら誤ってキー化」が構造的に起きない
+    kf_mode: Option<String>,
     /// KFドラッグ中に固定するキー時刻（クリップ相対）。ドラッグ開始時に一度だけ
     /// 決めて指を離すまで変えない＝再生ヘッドが動いてもキーが散らばらない
     kf_drag_rel: Option<f64>,
+    /// キー打ちモードOFFでキー有りクリップをドラッグ中: ドラッグ開始時のキー配列の
+    /// スナップショット。毎フレーム「スナップショット＋累積オフセット」で書き直す
+    /// （軌跡ごと平行移動・キーは増えも減りもしない）
+    kf_drag_orig_keys: Option<serde_json::Value>,
     /// 追従修正モード: clip id being corrected; clicks on the preview collect +/- points
     corr_mode: Option<String>,
     /// correction points in SOURCE coords (x, y, positive) — all on corr_anchor_src's frame
@@ -2633,8 +2642,9 @@ impl App {
             last_blur_poll: Instant::now(),
             blur_meta_cache: Default::default(),
             region_drag: None,
-            kf_mode: false,
+            kf_mode: None,
             kf_drag_rel: None,
+            kf_drag_orig_keys: None,
             corr_mode: None,
             corr_points: Vec::new(),
             corr_anchor_src: None,
@@ -2912,6 +2922,30 @@ impl App {
 
     fn timeline_fps(&self) -> f64 {
         self.doc.seq.frame_rate.filter(|fps| fps.is_finite() && *fps > 1.0).unwrap_or(30.0)
+    }
+
+    /// Snap a timeline instant onto the sequence frame grid. THE clock rule: keyframe
+    /// WRITES and keyframe EVALUATION both go through this on the displayed frame's
+    /// effective time, so "the key's frame shows the key's value, the next frame is
+    /// still" holds exactly (the old mid-vs-start half-frame gap leaked motion onto
+    /// keyless frames).
+    fn grid_quantize(&self, t: f64) -> f64 {
+        let f = self.timeline_fps();
+        (t * f).round() / f
+    }
+
+    /// The grid slot of the frame that is REALLY on screen — the single clock every
+    /// keyframe read AND write uses (outline, on-key paint, drag keying, ◆＋, ◆削除).
+    fn displayed_grid_t(&self) -> f64 {
+        self.grid_quantize({
+            let f = self.shared.frame.lock().unwrap();
+            let eff = if f.eff_t > 0.0 { f.eff_t } else { f.t };
+            if f.rgba.is_empty() || (eff - self.t).abs() > 0.75 {
+                self.t
+            } else {
+                eff
+            }
+        })
     }
 
     fn has_timeline_media(&self) -> bool {
@@ -3641,7 +3675,31 @@ impl App {
             let ids = edits::expand_links(&self.doc.raw, &base);
             let salt = self.salt;
             self.salt += 1;
+            let before: std::collections::HashSet<String> = self
+                .doc
+                .seq
+                .tracks
+                .iter()
+                .flat_map(|tr| tr.clips.iter())
+                .map(|c| c.id.clone())
+                .collect();
             self.apply_edit(true, |raw| edits::split_clips(raw, &ids, t, salt));
+            // 分割で生まれた右半分も選択に加える: カット点の瞬間は右クリップの領域
+            // なので、右が未選択だと枠がその場で消えて見えた
+            let new_ids: Vec<String> = self
+                .doc
+                .seq
+                .tracks
+                .iter()
+                .flat_map(|tr| tr.clips.iter())
+                .map(|c| c.id.clone())
+                .filter(|i| !before.contains(i))
+                .collect();
+            for i in new_ids {
+                if !self.selected.contains(&i) {
+                    self.selected.push(i);
+                }
+            }
         }
     }
 
@@ -4143,33 +4201,32 @@ impl App {
                         ui.label(egui::RichText::new("手動追従（キーフレーム）").strong());
                         let kts = clip.region_key_times();
                         let nkeys = kts.len();
-                        let rel = self.t - clip.timeline_start;
+                        // ONE clock: the displayed frame's grid slot (same as key writes)
+                        let t_now = self.displayed_grid_t();
+                        let rel = t_now - clip.timeline_start;
                         let on_key = kts.iter().any(|kt| (kt - rel).abs() <= edits::KEY_REPLACE_EPS);
+                        let kf_on = self.kf_mode.as_deref() == Some(id.as_str());
                         ui.horizontal(|ui| {
-                            if nkeys == 0 {
-                                // キーがまだ無い: トグルON中のドラッグが最初のキーを打つ
-                                if ui
-                                    .selectable_label(self.kf_mode, "位置キーフレーム")
-                                    .on_hover_text(
-                                        "ON中: 再生ヘッドを動かして矩形をドラッグ→その時刻に位置キーを打つ。\nキー間は直線補間で移動（大きさは固定）。\n一度キーを打てば以降はトグル不要＝ドラッグが常にキー打ちになります",
-                                    )
-                                    .clicked()
-                                {
-                                    self.kf_mode = !self.kf_mode;
-                                    if self.kf_mode {
-                                        self.pause_at_displayed();
-                                    }
-                                }
-                            } else {
-                                // キーが1個でもあれば位置はキー駆動＝ドラッグは常にキー打ち
-                                // （モード不要。基準矩形の位置編集はもう画に効かないため）
-                                ui.label(
-                                    egui::RichText::new("キー追従中（ドラッグ＝キー打ち）")
-                                        .color(egui::Color32::from_rgb(120, 200, 255))
-                                        .small(),
-                                )
+                            // キーを作れるのはこのトグルON中のドラッグだけ。OFFのドラッグは
+                            // キー有りクリップなら「軌跡ごと平行移動/一括リサイズ」（キーは
+                            // 増えない）。トグルはクリップ紐付き＝選択が変われば自動OFF
+                            if ui
+                                .selectable_label(kf_on, "◆キー打ちモード")
                                 .on_hover_text(
-                                    "再生ヘッドを動かして矩形をドラッグ→その時刻にキー。\n枠が赤=キー上（ドラッグで打ち直し）、オレンジ=補間中（ドラッグで新規キー）",
+                                    "ON: ドラッグ/リサイズが表示中フレームにキーを打つ（打った瞬間に通知）。\nOFF: キー有りクリップのドラッグは動き全体をそのまま平行移動（キーは増えない）。\n枠が赤=キー上（ドラッグで打ち直し）、オレンジ=補間中（ON中のドラッグで新規キー）",
+                                )
+                                .clicked()
+                            {
+                                self.kf_mode = if kf_on { None } else { Some(id.clone()) };
+                                if self.kf_mode.is_some() {
+                                    self.pause_at_displayed();
+                                }
+                            }
+                            if nkeys > 0 && !kf_on {
+                                ui.label(
+                                    egui::RichText::new("OFF: ドラッグ=全体移動")
+                                        .small()
+                                        .weak(),
                                 );
                             }
                             if nkeys > 0 && ui.button("キー全消し").clicked() {
@@ -4178,7 +4235,7 @@ impl App {
                                 self.push_req(false);
                             }
                         });
-                        if self.kf_mode || nkeys > 0 {
+                        if kf_on || nkeys > 0 {
                             ui.horizontal(|ui| {
                                 // ← 前のキーへ / このフレームにキー / このキーを削除 / 次のキーへ →
                                 let prev = kts.iter().rev().find(|kt| **kt < rel - 1e-3).copied();
@@ -4213,11 +4270,12 @@ impl App {
                                     .on_disabled_hover_text("再生ヘッドをこのぼかしクリップの範囲内に置いてください")
                                     .clicked()
                                 {
-                                    if let Some((kx, ky, kw, kh)) = clip.region_at(self.t) {
+                                    if let Some((kx, ky, kw, kh)) = clip.region_at(t_now) {
                                         let cid = id.clone();
                                         self.apply_edit(true, move |raw| {
                                             edits::set_region_key(raw, &cid, rel, kx, ky, kw, kh)
                                         });
+                                        self.toast(&format!("◆ キーを打ちました（{}個）", nkeys + 1));
                                         self.push_req(false);
                                     }
                                 }
@@ -5117,15 +5175,7 @@ impl App {
         // frame was evaluated at. Request-time (self.t / f.t) differs from it by up to
         // half a frame on VFR sources, which on fast keyed motion reads as "the frame
         // is offset from the blur" (30px+ at their hand-keyed speeds).
-        let t_disp = {
-            let f = self.shared.frame.lock().unwrap();
-            let eff = if f.eff_t > 0.0 { f.eff_t } else { f.t };
-            if f.rgba.is_empty() || (eff - self.t).abs() > 0.75 {
-                self.t
-            } else {
-                eff
-            }
-        };
+        let t_disp = self.displayed_grid_t();
         // (id, rect, baked, blur_track, on_key) — on_key = playhead sits on a position
         // keyframe of this clip (within half a frame)
         let outlines: Vec<(String, (f64, f64, f64, f64), bool, Option<serde_json::Value>, bool)> = self
@@ -5392,7 +5442,7 @@ impl App {
         if resp.drag_started() && self.region_drag.is_none() {
             if let Some(pt) = resp.interact_pointer_pos() {
                 'hit: for (cid, r) in &editable {
-                    // (timeline_start, already-keyed?) of a keyframe-able clip (no AI track)
+                    // (timeline_start, keys snapshot) of a keyframe-able clip (no AI track)
                     let key_info = self
                         .doc
                         .seq
@@ -5400,53 +5450,45 @@ impl App {
                         .iter()
                         .flat_map(|tr| tr.clips.iter())
                         .find(|c| c.id == *cid && c.blur_track.is_none())
-                        .map(|c| (c.timeline_start, !c.region_key_times().is_empty()));
-                    // キー時刻はドラッグ開始時に一度だけ決める（再生中なら表示フレームで
-                    // 停止してから）＝ドラッグ中にキーが散らばらない。
-                    // 打つ条件: 移動=KFモード or 既にキーあり（キーが1個でもあれば基準矩形の
-                    // 位置は画に効かないので、常にキー打ちに自動切替=袋小路を作らない）。
-                    // 角リサイズ=既にキーがある時だけ位置キーも更新。
-                    let mut arm_kf = |app: &mut App, want: bool| {
-                        app.kf_drag_rel = None;
-                        if want {
-                            if app.playing {
-                                app.pause_at_displayed();
-                            }
-                            if let Some((ts, _)) = key_info {
-                                app.kf_drag_rel = Some(app.t - ts);
-                            }
-                        }
-                    };
-                    let has_keys = key_info.map(|(_, k)| k).unwrap_or(false);
+                        .map(|c| (c.timeline_start, c.region_keys.clone()));
+                    // キーを作れるのは「このクリップでキー打ちモードON」の時だけ。
+                    // OFF時のドラッグはキー配列のスナップショットを取り、毎フレーム
+                    // 「スナップショット＋オフセット」で書き直す＝軌跡ごと平行移動。
+                    // キー時刻=表示フレームの格子スロット(t_disp)。評価と同じ式なので
+                    // 「キーのフレームでキーの値ちょうど」が厳密に成立する。
                     // corner hit zones shrink with the rect so a small rect keeps a
                     // grabbable BODY (10px corners used to swallow short rects whole)
                     let cr = 10.0f32.min(r.width() / 3.0).min(r.height() / 3.0).max(4.0);
                     let corners = [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()];
-                    for (ci, cp) in corners.iter().enumerate() {
-                        if cp.distance(pt) <= cr {
-                            self.pending_undo = Some(self.doc.raw.clone());
-                            arm_kf(self, has_keys);
-                            eprintln!(
-                                "KFDRAG start mode={} rel={:?} kf_mode={} has_keys={has_keys}",
-                                ci + 1,
-                                self.kf_drag_rel,
-                                self.kf_mode
-                            );
-                            self.region_drag = Some((cid.clone(), ci as u8 + 1, pt, self.region_of(cid)));
-                            break 'hit;
+                    let mode = corners
+                        .iter()
+                        .position(|cp| cp.distance(pt) <= cr)
+                        .map(|ci| ci as u8 + 1)
+                        .unwrap_or(if r.contains(pt) { 0 } else { u8::MAX });
+                    if mode == u8::MAX {
+                        continue;
+                    }
+                    let armed = self.kf_mode.as_deref() == Some(cid.as_str());
+                    self.kf_drag_rel = None;
+                    self.kf_drag_orig_keys = None;
+                    if let Some((ts, keys)) = key_info {
+                        if self.playing {
+                            self.pause_at_displayed();
+                        }
+                        if armed {
+                            self.kf_drag_rel = Some(t_disp - ts);
+                        } else if keys.as_ref().and_then(|k| k.as_array()).map(|a| !a.is_empty()).unwrap_or(false) {
+                            self.kf_drag_orig_keys = keys;
                         }
                     }
-                    if r.contains(pt) {
-                        self.pending_undo = Some(self.doc.raw.clone());
-                        arm_kf(self, self.kf_mode || has_keys);
-                        eprintln!(
-                            "KFDRAG start mode=0 rel={:?} kf_mode={} has_keys={has_keys}",
-                            self.kf_drag_rel,
-                            self.kf_mode
-                        );
-                        self.region_drag = Some((cid.clone(), 0, pt, self.region_of(cid)));
-                        break 'hit;
-                    }
+                    self.pending_undo = Some(self.doc.raw.clone());
+                    eprintln!(
+                        "KFDRAG start mode={mode} rel={:?} offset_keys={} armed={armed}",
+                        self.kf_drag_rel,
+                        self.kf_drag_orig_keys.is_some(),
+                    );
+                    self.region_drag = Some((cid.clone(), mode, pt, self.region_of(cid)));
+                    break 'hit;
                 }
             }
         }
@@ -5488,16 +5530,38 @@ impl App {
                 x = x.clamp(0.05 - w, 0.95);
                 y = y.clamp(0.05 - h, 0.95);
                 let cid2 = cid.clone();
-                // キー打ちが武装済みなら移動もリサイズも位置+サイズのキーとして書く
                 if let Some(rel) = self.kf_drag_rel {
+                    // キー打ちモードON: 移動もリサイズも位置+サイズのキーとして書く
                     self.apply_edit(false, move |raw| edits::set_region_key(raw, &cid2, rel, x, y, w, h));
+                } else if let Some(okeys) = self.kf_drag_orig_keys.clone() {
+                    // OFF＋キー有り: 軌跡ごと平行移動/一括リサイズ（キーは作らない）。
+                    // 基準矩形も同じ絶対値で追従（旧形式キーのサイズ参照元）
+                    let (dx, dy, dw, dh) = (x - orig.0, y - orig.1, w - orig.2, h - orig.3);
+                    self.apply_edit(false, move |raw| {
+                        edits::set_region(raw, &cid2, x, y, w, h);
+                        edits::offset_region_keys(raw, &cid2, &okeys, dx, dy, dw, dh);
+                    });
                 } else {
                     self.apply_edit(false, move |raw| edits::set_region(raw, &cid2, x, y, w, h));
                 }
             }
             if ui.input(|i| i.pointer.any_released()) {
+                // キーを書いたことを必ず見える化（暗黙のキー増加を根絶）
+                if self.kf_drag_rel.is_some() {
+                    let n = self
+                        .doc
+                        .seq
+                        .tracks
+                        .iter()
+                        .flat_map(|tr| tr.clips.iter())
+                        .find(|c| c.id == cid)
+                        .map(|c| c.region_key_times().len())
+                        .unwrap_or(0);
+                    self.toast(&format!("◆ キーを打ちました（{n}個）"));
+                }
                 self.region_drag = None;
                 self.kf_drag_rel = None;
+                self.kf_drag_orig_keys = None;
                 self.push_req(false);
             }
             return; // the gesture owns the pointer — skip the asset-clip inspector below
@@ -5938,7 +6002,7 @@ impl App {
                     // CLICKING a diamond jumps the playhead onto that key (nearest
                     // key within 8px when zoomed-out diamonds overlap).
                     if c.region.is_some() {
-                        let rel_now = self.t - c.timeline_start;
+                        let rel_now = self.displayed_grid_t() - c.timeline_start;
                         let click_at = resp
                             .clicked()
                             .then(|| resp.interact_pointer_pos())
@@ -5948,12 +6012,20 @@ impl App {
                                     && pp.x >= r.left() - 6.0
                                     && pp.x <= r.right() + 6.0
                             });
+                        let dur = (c.timeline_end - c.timeline_start).max(0.0);
                         let mut best_hit: Option<(f32, f64)> = None;
+                        // cluster keys that land on (nearly) the same pixel so "looks like
+                        // one diamond but is actually N keys" is impossible: one diamond
+                        // with a ×N badge instead. Out-of-range keys (pushed outside the
+                        // clip by trims/splits) pin as ⚠-colored diamonds at the edge.
+                        let mut clusters: Vec<(f32, u32, bool, bool)> = Vec::new(); // (px, count, hot, oob)
                         for kt in c.region_key_times() {
-                            let kx = body.left()
+                            let oob = kt < -1e-9 || kt > dur + 1e-9;
+                            let kx_raw = body.left()
                                 + ((c.timeline_start + kt) as f32) * self.pps
                                 - self.scroll_x;
-                            if kx < r.left() - 4.0 || kx > r.right() + 4.0 {
+                            let kx = kx_raw.clamp(r.left() + 5.0, r.right() - 5.0);
+                            if kx < body.left() - 8.0 || kx > body.right() + 8.0 {
                                 continue;
                             }
                             if let Some(pp) = click_at {
@@ -5963,8 +6035,20 @@ impl App {
                                 }
                             }
                             let hot = (kt - rel_now).abs() <= edits::KEY_REPLACE_EPS;
+                            match clusters.last_mut() {
+                                Some((px, n, h, o)) if (*px - kx).abs() <= 3.0 => {
+                                    *n += 1;
+                                    *h |= hot;
+                                    *o |= oob;
+                                }
+                                _ => clusters.push((kx, 1, hot, oob)),
+                            }
+                        }
+                        for (kx, n, hot, oob) in clusters {
                             let (sz, kc) = if hot {
                                 (5.0, egui::Color32::from_rgb(240, 80, 80))
+                            } else if oob {
+                                (4.0, egui::Color32::from_rgb(255, 190, 60)) // ⚠: 範囲外キーあり
                             } else {
                                 (4.0, egui::Color32::from_gray(235))
                             };
@@ -5979,6 +6063,15 @@ impl App {
                                 kc,
                                 egui::Stroke::new(1.0, egui::Color32::from_gray(40)),
                             ));
+                            if n > 1 {
+                                p.text(
+                                    cpt + egui::vec2(5.0, -6.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    format!("×{n}"),
+                                    egui::FontId::proportional(9.0),
+                                    kc,
+                                );
+                            }
                         }
                         if let Some((_, kt)) = best_hit {
                             kf_click_seek = Some(c.timeline_start + kt);
@@ -9204,7 +9297,25 @@ fn main() -> eframe::Result<()> {
         let ok11 = ok11a && ok11b;
         println!("KF size       {} (w@9.5={:.3} legacy_w@11={legacy_w:.3})",
                  if ok11 { "PASS" } else { "FAIL" }, sz(9.5).0);
-        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11;
+        // OFF-mode drag = rigid trajectory move: every key shifts by the same delta,
+        // count unchanged, motion SHAPE identical (no new key ever)
+        edits::clear_region_keys(&mut raw, "fx1");
+        edits::set_region(&mut raw, "fx1", 0.1, 0.3, 0.2, 0.1);
+        edits::set_region_key(&mut raw, "fx1", 0.0, 0.1, 0.3, 0.2, 0.1);
+        edits::set_region_key(&mut raw, "fx1", 1.0, 0.4, 0.3, 0.2, 0.1);
+        let snapshot = clip_of(&raw).region_keys.clone().unwrap();
+        edits::offset_region_keys(&mut raw, "fx1", &snapshot, 0.05, 0.1, 0.1, 0.05);
+        let c = clip_of(&raw);
+        let ok12 = c.region_key_times().len() == 2
+            && (x_at(&c, 9.0) - 0.15).abs() < 1e-6
+            && (x_at(&c, 10.0) - 0.45).abs() < 1e-6
+            && (c.region_at(9.5).unwrap().1 - 0.4).abs() < 1e-6
+            && (c.region_at(9.5).unwrap().2 - 0.3).abs() < 1e-6;
+        println!("KF offset-all {} (keys={} x@9={:.3} x@10={:.3} w@9.5={:.3})",
+                 if ok12 { "PASS" } else { "FAIL" },
+                 c.region_key_times().len(), x_at(&c, 9.0), x_at(&c, 10.0),
+                 c.region_at(9.5).unwrap().2);
+        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12;
         println!("KF ALL {}", if all { "PASS" } else { "FAIL" });
         std::process::exit(if all { 0 } else { 1 });
     }
