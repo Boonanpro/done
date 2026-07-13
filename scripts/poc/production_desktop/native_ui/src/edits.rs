@@ -808,8 +808,10 @@ fn split_region_keys(orig: &Value, d: f64, leftv: &mut Value, rightv: &mut Value
                 if let (Some((px, py)), Some(rg)) =
                     (cut_pos, o.get_mut("region").and_then(|v| v.as_object_mut()))
                 {
-                    rg.insert("x".into(), serde_json::json!(q4(px.clamp(0.0, 0.98))));
-                    rg.insert("y".into(), serde_json::json!(q4(py.clamp(0.0, 0.98))));
+                    let rw = rg.get("width").and_then(|v| v.as_f64()).unwrap_or(0.1);
+                    let rh = rg.get("height").and_then(|v| v.as_f64()).unwrap_or(0.1);
+                    rg.insert("x".into(), serde_json::json!(q4(px.clamp(0.05 - rw, 0.95))));
+                    rg.insert("y".into(), serde_json::json!(q4(py.clamp(0.05 - rh, 0.95))));
                 }
             } else {
                 o.insert("region_keys".into(), Value::Array(ks));
@@ -1739,10 +1741,13 @@ pub fn set_region(raw: &mut serde_json::Value, id: &str, x: f64, y: f64, w: f64,
     for_each_clip(raw, |c| {
         if c.get("id").and_then(|v| v.as_str()) == Some(id) {
             let q = |v: f64| (v * 10000.0).round() / 10000.0;
+            let (w, h) = (w.clamp(0.01, 1.0), h.clamp(0.01, 1.0));
+            // may hang partly OFF-SCREEN (covering objects at the very edge needs the
+            // rect past the border); at least 5% stays visible so it can be grabbed
             c.as_object_mut().unwrap().insert(
                 "region".into(),
-                serde_json::json!({"x": q(x.clamp(0.0, 0.98)), "y": q(y.clamp(0.0, 0.98)),
-                                    "width": q(w.clamp(0.01, 1.0)), "height": q(h.clamp(0.01, 1.0))}),
+                serde_json::json!({"x": q(x.clamp(0.05 - w, 0.95)), "y": q(y.clamp(0.05 - h, 0.95)),
+                                    "width": q(w), "height": q(h)}),
             );
         }
     });
@@ -1763,6 +1768,16 @@ pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: 
             return;
         }
         let o = c.as_object_mut().unwrap();
+        // off-screen clamp uses the rect's size (same rule as set_region)
+        let (rw, rh) = o
+            .get("region")
+            .map(|r| {
+                (
+                    r.get("width").and_then(|v| v.as_f64()).unwrap_or(0.1),
+                    r.get("height").and_then(|v| v.as_f64()).unwrap_or(0.1),
+                )
+            })
+            .unwrap_or((0.1, 0.1));
         let arr = o
             .entry("region_keys")
             .or_insert_with(|| serde_json::Value::Array(vec![]));
@@ -1775,7 +1790,7 @@ pub fn set_region_key(raw: &mut serde_json::Value, id: &str, t: f64, x: f64, y: 
                 .unwrap_or(false)
         });
         keys.push(serde_json::json!({"t": (t * 1000.0).round() / 1000.0,
-                                      "x": q(x.clamp(0.0, 0.98)), "y": q(y.clamp(0.0, 0.98))}));
+                                      "x": q(x.clamp(0.05 - rw, 0.95)), "y": q(y.clamp(0.05 - rh, 0.95))}));
         keys.sort_by(|a, b| {
             let ta = a.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let tb = b.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);

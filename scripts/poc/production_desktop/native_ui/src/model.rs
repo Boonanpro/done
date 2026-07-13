@@ -150,7 +150,9 @@ impl Clip {
         let g = |k: &str| r.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
         let (w, h) = (g("width"), g("height"));
         if w > 1e-3 && h > 1e-3 {
-            Some((g("x").clamp(0.0, 1.0), g("y").clamp(0.0, 1.0), w.min(1.0), h.min(1.0)))
+            // x/y may be negative / past 1: the rect can hang partly off-screen to
+            // cover objects at the very edge (writers keep at least 5% visible)
+            Some((g("x"), g("y"), w.min(1.0), h.min(1.0)))
         } else {
             None
         }
@@ -188,7 +190,9 @@ impl Clip {
             let f = ((rel - a.0) / (b.0 - a.0).max(1e-9)).clamp(0.0, 1.0);
             (a.1 + (b.1 - a.1) * f, a.2 + (b.2 - a.2) * f)
         };
-        Some((x.clamp(0.0, 1.0), y.clamp(0.0, 1.0), w, h))
+        // no clamping here: keys may legitimately place the rect partly off-screen
+        // (covering an object at the very edge) — writers enforce the grab-able limit
+        Some((x, y, w, h))
     }
 
     /// Sorted clip-relative times of the position keyframes (empty when none).
