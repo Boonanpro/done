@@ -5548,6 +5548,9 @@ impl App {
         let w = ui.available_width();
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click_and_drag());
         let body = egui::Rect::from_min_max(egui::pos2(rect.left() + GUTTER, rect.top()), rect.max);
+        // set while drawing key diamonds (clicking one jumps the playhead to the key);
+        // applied at the end of the frame — the draw loop borrows self immutably
+        let mut kf_click_seek: Option<f64> = None;
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, egui::Color32::from_gray(18));
         p.rect_filled(
@@ -5844,15 +5847,33 @@ impl App {
                         );
                     }
                     // position keyframes: diamond per key on the clip's lower half;
-                    // the one under the playhead lights up red (DaVinci-style)
+                    // the one under the playhead lights up red (DaVinci-style).
+                    // CLICKING a diamond jumps the playhead onto that key (nearest
+                    // key within 8px when zoomed-out diamonds overlap).
                     if c.region.is_some() {
                         let rel_now = self.t - c.timeline_start;
+                        let click_at = resp
+                            .clicked()
+                            .then(|| resp.interact_pointer_pos())
+                            .flatten()
+                            .filter(|pp| {
+                                (pp.y - (r.bottom() - 8.0)).abs() <= 9.0
+                                    && pp.x >= r.left() - 6.0
+                                    && pp.x <= r.right() + 6.0
+                            });
+                        let mut best_hit: Option<(f32, f64)> = None;
                         for kt in c.region_key_times() {
                             let kx = body.left()
                                 + ((c.timeline_start + kt) as f32) * self.pps
                                 - self.scroll_x;
                             if kx < r.left() - 4.0 || kx > r.right() + 4.0 {
                                 continue;
+                            }
+                            if let Some(pp) = click_at {
+                                let dx = (kx - pp.x).abs();
+                                if dx <= 8.0 && best_hit.map(|(bd, _)| dx < bd).unwrap_or(true) {
+                                    best_hit = Some((dx, kt));
+                                }
                             }
                             let hot = (kt - rel_now).abs() <= edits::KEY_REPLACE_EPS;
                             let (sz, kc) = if hot {
@@ -5871,6 +5892,9 @@ impl App {
                                 kc,
                                 egui::Stroke::new(1.0, egui::Color32::from_gray(40)),
                             ));
+                        }
+                        if let Some((_, kt)) = best_hit {
+                            kf_click_seek = Some(c.timeline_start + kt);
                         }
                     }
                 }
@@ -6527,6 +6551,11 @@ impl App {
         // NOTE: the old "claim leftover space" hack (anti shrink-drift) is gone — with the
         // toolbar row above us it flipped into a GROW loop that ballooned the panel to its
         // max height. The exact-size allocation above already reports our height honestly.
+        if let Some(t2) = kf_click_seek {
+            self.playing = false;
+            self.t = t2.clamp(0.0, self.dur);
+            self.push_req(false);
+        }
     }
 }
 
