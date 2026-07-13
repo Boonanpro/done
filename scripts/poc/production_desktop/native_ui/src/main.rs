@@ -217,14 +217,14 @@ enum Drag {
     Volume { ids: Vec<String>, start_y: f32, start_vol: f64 },
 }
 
-/// Olive-style composed-frame cache: finished timeline frames (ORIGINAL quality, 30fps
-/// grid) LZ4-compressed in RAM. Scrub/jump/playback over cached spans just decompress
+/// Olive-style composed-frame cache: finished timeline frames on the selected sequence
+/// grid, LZ4-compressed in RAM. Scrub/jump/playback over cached spans just decompress
 /// (~3-6ms) instead of composing (30-100ms+). Conservative correctness: ANY document edit
 /// clears the whole cache — a stale frame is structurally impossible. Filled during
 /// paused idle (playhead outward) and opportunistically from playback production.
 struct FrameCache {
-    // key: 1/30 bucket; value: (EXACT compose time, lz4 pixels). The exact time is the
-    // honesty check: a bucket spans 33ms — up to two different source frames — and
+    // key: sequence-frame bucket; value: (EXACT compose time, lz4 pixels). The exact time is the
+    // honesty check: a bucket can span more than one source frame — and
     // serving "whatever the bucket holds" showed the NEIGHBOUR frame when a paused
     // inspection landed 12ms away from the cached compose (the freeze-boundary bug the
     // dump-frame verification missed because it bypasses this cache).
@@ -245,8 +245,8 @@ impl FrameCache {
             misses: 0,
         }
     }
-    fn idx(t: f64) -> i64 {
-        (t * 30.0).round() as i64
+    fn idx(t: f64, fps: f64) -> i64 {
+        (t * fps).round() as i64
     }
     fn clear(&mut self) {
         self.frames.clear();
@@ -254,8 +254,8 @@ impl FrameCache {
     }
     /// Drop only frames at/after `t` — an edit at 60s must not throw away the first
     /// minute of finished frames (the whole-cache clear was the post-edit heaviness).
-    fn invalidate_from(&mut self, t: f64) {
-        let cut = Self::idx(t) - 1;
+    fn invalidate_from(&mut self, t: f64, fps: f64) {
+        let cut = Self::idx(t, fps) - 1;
         let dead: Vec<i64> = self.frames.keys().copied().filter(|k| *k >= cut).collect();
         for k in dead {
             if let Some((_, _, z)) = self.frames.remove(&k) {
@@ -267,8 +267,8 @@ impl FrameCache {
     /// Playback reuse passes a whole tick (~17ms); paused/scrub inspection passes 5ms
     /// so a neighbouring source frame can never impersonate the requested one.
     /// On hit returns the pixels' EFFECTIVE time (see FrameOut::eff_t).
-    fn get(&mut self, t: f64, tol: f64, out: &mut Vec<u8>) -> Option<f64> {
-        if let Some((ct, eff, z)) = self.frames.get(&Self::idx(t)) {
+    fn get(&mut self, t: f64, fps: f64, tol: f64, out: &mut Vec<u8>) -> Option<f64> {
+        if let Some((ct, eff, z)) = self.frames.get(&Self::idx(t, fps)) {
             if (ct - t).abs() <= tol {
                 if let Ok(raw) = lz4_flex::decompress_size_prepended(z) {
                     out.clear();
@@ -281,11 +281,11 @@ impl FrameCache {
         self.misses += 1;
         None
     }
-    fn contains(&self, t: f64) -> bool {
-        self.frames.contains_key(&Self::idx(t))
+    fn contains(&self, t: f64, fps: f64) -> bool {
+        self.frames.contains_key(&Self::idx(t, fps))
     }
-    fn insert(&mut self, t: f64, eff: f64, rgba: &[u8], playhead: f64) {
-        let key = Self::idx(t);
+    fn insert(&mut self, t: f64, fps: f64, eff: f64, rgba: &[u8], playhead: f64) {
+        let key = Self::idx(t, fps);
         if self.frames.contains_key(&key) {
             return;
         }
@@ -294,7 +294,7 @@ impl FrameCache {
         self.frames.insert(key, (t, eff, z));
         // over budget: evict farthest-from-playhead first
         while self.bytes > self.budget {
-            let ph = Self::idx(playhead);
+            let ph = Self::idx(playhead, fps);
             let Some((&far, _)) = self.frames.iter().max_by_key(|(k, _)| (**k - ph).abs()) else {
                 break;
             };
@@ -1550,6 +1550,49 @@ fn probe_duration(path: &str) -> Option<f64> {
     }
 }
 
+/// Declared source frame rate for first-import project setup. VFR files still report a
+/// nominal rate here; their proxy is normalized to the chosen timeline rate later.
+fn probe_frame_rate(path: &str) -> Option<f64> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Media::MediaFoundation::*;
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        );
+        let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+        let w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let reader = MFCreateSourceReaderFromURL(PCWSTR(w.as_ptr()), None).ok()?;
+        let mt = reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32).ok()?;
+        let packed = mt.GetUINT64(&MF_MT_FRAME_RATE).ok()?;
+        let numerator = (packed >> 32) as u32;
+        let denominator = packed as u32;
+        (numerator > 0 && denominator > 0).then_some(numerator as f64 / denominator as f64)
+    }
+}
+
+const TIMELINE_FPS_CHOICES: [f64; 8] = [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0];
+
+fn canonical_timeline_fps(fps: f64) -> f64 {
+    TIMELINE_FPS_CHOICES
+        .iter()
+        .copied()
+        .min_by(|a, b| (fps - *a).abs().total_cmp(&(fps - *b).abs()))
+        .filter(|candidate| (fps - *candidate).abs() <= 1.0)
+        .unwrap_or(30.0)
+}
+
+fn fps_label(fps: f64) -> &'static str {
+    if (fps - 23.976).abs() < 0.01 { "23.976 fps" }
+    else if (fps - 24.0).abs() < 0.01 { "24 fps" }
+    else if (fps - 25.0).abs() < 0.01 { "25 fps" }
+    else if (fps - 29.97).abs() < 0.01 { "29.97 fps" }
+    else if (fps - 50.0).abs() < 0.01 { "50 fps" }
+    else if (fps - 59.94).abs() < 0.01 { "59.94 fps" }
+    else if (fps - 60.0).abs() < 0.01 { "60 fps" }
+    else { "30 fps" }
+}
+
 /// Open ONE not-yet-open decoder instance per call (idle time only). Returns true when
 /// every stream the timeline can hit is pre-opened, so playback never pays an open.
 /// CAPPED: decoders are GPU memory — warming a whole long timeline exhausted VRAM
@@ -1691,8 +1734,12 @@ fn presenter_thread(shared: Arc<Shared>) {
         }
         let mut grabbed: Option<(f64, f64, Vec<u8>)> = None;
         {
+            let timeline_fps = shared.doc.lock().unwrap().seq.frame_rate
+                .filter(|fps| fps.is_finite() && *fps > 1.0)
+                .unwrap_or(30.0);
+            let frame_step = 1.0 / timeline_fps;
             let mut ring = shared.ring.lock().unwrap();
-            while ring.front().map(|(ft, ..)| *ft < t - 1.0 / 30.0).unwrap_or(false) {
+            while ring.front().map(|(ft, ..)| *ft < t - frame_step).unwrap_or(false) {
                 ring.pop_front();
             }
             if let Some((ft, ..)) = ring.iter().rev().find(|(ft, ..)| *ft <= t) {
@@ -1772,10 +1819,9 @@ fn media_thread(shared: Arc<Shared>) {
         let mut prev_compose_eff = f64::NAN;
         let mut prev_playing = false;
         let mut play_started: Option<Instant> = None;
-        // Look-ahead ring: timeline frames composed AHEAD of the playhead on a fixed 30fps
-        // grid. Presentation picks from the ring and NEVER waits for a decode — GOP walks
+        // Look-ahead ring: timeline frames composed AHEAD of the playhead on the chosen
+        // sequence grid. Presentation picks from the ring and NEVER waits for a decode — GOP walks
         // and source switches are paid in the ring's future (the Filmora mechanism).
-        const STEP: f64 = 1.0 / 30.0;
         const RING_DEPTH: usize = 12; // ~400ms of slack
         // Speculative paused-idle cache fill is too expensive for structural edits:
         // it composes arbitrary surrounding frames even when the user only needs the
@@ -1787,6 +1833,8 @@ fn media_thread(shared: Arc<Shared>) {
             let hb0 = Instant::now();
             let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
             let ptr = Arc::as_ptr(&doc) as usize;
+            let timeline_fps = doc.seq.frame_rate.filter(|fps| fps.is_finite() && *fps > 1.0).unwrap_or(30.0);
+            let frame_step = 1.0 / timeline_fps;
             if ptr != last_doc_ptr {
                 last_doc_ptr = ptr;
                 warm_done = false;
@@ -1800,7 +1848,7 @@ fn media_thread(shared: Arc<Shared>) {
                 let cut = if df.is_finite() { (df - 0.2).max(0.0) } else { 0.0 };
                 if df.is_finite() {
                     eprintln!("CACHE_INVAL from={df:.2}");
-                    fcache.invalidate_from(cut);
+                    fcache.invalidate_from(cut, timeline_fps);
                 } else {
                     eprintln!("CACHE_CLEAR full");
                     fcache.clear(); // unknown provenance (open/undo/redo): full reset
@@ -1888,7 +1936,7 @@ fn media_thread(shared: Arc<Shared>) {
                 let (next_t, len) = {
                     let rg = shared.ring.lock().unwrap();
                     (
-                        rg.back().map(|(ft, ..)| ft + STEP).unwrap_or_else(|| (t_build / STEP).floor() * STEP),
+                        rg.back().map(|(ft, ..)| ft + frame_step).unwrap_or_else(|| (t_build / frame_step).floor() * frame_step),
                         rg.len(),
                     )
                 };
@@ -1905,7 +1953,7 @@ fn media_thread(shared: Arc<Shared>) {
                     let t0 = Instant::now();
                     // cache hit = decompress instead of compose (jump refills become ~instant)
                     let mut cached_buf: Vec<u8> = Vec::new();
-                    let cache_eff = fcache.get(next_t, 0.017, &mut cached_buf);
+                    let cache_eff = fcache.get(next_t, timeline_fps, frame_step * 0.51, &mut cached_buf);
                     let from_cache = cache_eff.is_some();
                     let res = if let Some(eff) = cache_eff {
                         Ok((Vec::new(), true, eff))
@@ -1926,7 +1974,7 @@ fn media_thread(shared: Arc<Shared>) {
                                 // never trim against the OLD clock while a jump is pending —
                                 // a backward seek's fresh frames all look "stale" to it
                                 if jump_to.is_none() {
-                                    while rg.front().map(|(ft, ..)| *ft < t - 2.0 * STEP).unwrap_or(false) {
+                                    while rg.front().map(|(ft, ..)| *ft < t - 2.0 * frame_step).unwrap_or(false) {
                                         rg.pop_front();
                                     }
                                 }
@@ -1935,23 +1983,23 @@ fn media_thread(shared: Arc<Shared>) {
                             if !from_cache && prev_was_compose && len >= 6 && ms_comp < 25.0 {
                                 // cheap frames get cached opportunistically (lz4 ~5ms).
                                 // ASYNC readback returns the PREVIOUS compose's pixels, so
-                                // the content belongs to next_t - STEP — keying it at
+                                // the content belongs to the previous sequence frame — keying it at
                                 // next_t poisoned the cache with shifted frames (the
                                 // "ちらちら" flicker on jumps into cached spans)
                                 // PROVENANCE CHECK: the compensation assumes the previous
-                                // compose was exactly one STEP earlier — log when it wasn't
+                                // compose was exactly one sequence frame earlier — log when it wasn't
                                 // (jump seams would cache WRONG-time pixels)
-                                if (prev_compose_t - (next_t - STEP)).abs() > 1e-4 {
+                                if (prev_compose_t - (next_t - frame_step)).abs() > 1e-4 {
                                     eprintln!(
                                         "CACHE_PUT_WRONG key={:.3} pixels_from={prev_compose_t:.3}",
-                                        next_t - STEP
+                                        next_t - frame_step
                                     );
                                 } else if near_freeze(&doc, next_t) {
-                                    eprintln!("CACHE_PUT key={:.3} ok", next_t - STEP);
+                                    eprintln!("CACHE_PUT key={:.3} ok", next_t - frame_step);
                                 }
                                 // pixels are the PREVIOUS compose's (async readback) — so
                                 // is their effective time
-                                fcache.insert(next_t - STEP, prev_compose_eff, &comp.rgba, t);
+                                fcache.insert(next_t - frame_step, timeline_fps, prev_compose_eff, &comp.rgba, t);
                             }
                             prev_was_compose = !from_cache;
                             prev_compose_t = next_t;
@@ -2030,7 +2078,7 @@ fn media_thread(shared: Arc<Shared>) {
                 // composed-frame cache first: scrub/settle over a cached span shows the
                 // ORIGINAL-quality frame in ~5ms without touching a decoder
                 let mut buf = Vec::new();
-                if let Some(eff) = fcache.get(t, 0.005, &mut buf) {
+                if let Some(eff) = fcache.get(t, timeline_fps, 0.005, &mut buf) {
                     if near_freeze(&doc, t) {
                         eprintln!("SERVE t={t:.3} src=cache");
                     }
@@ -2106,7 +2154,7 @@ fn media_thread(shared: Arc<Shared>) {
                 let resting = settle.elapsed().as_secs_f32() > 0.12;
                 if r.scrubbing && !scrub_exact && resting {
                     let mut buf = Vec::new();
-                    if let Some(eff) = fcache.get(t, 0.005, &mut buf) {
+                    if let Some(eff) = fcache.get(t, timeline_fps, 0.005, &mut buf) {
                         if near_freeze(&doc, t) {
                             eprintln!("SERVE t={t:.3} src=cache-rest");
                         }
@@ -2154,7 +2202,7 @@ fn media_thread(shared: Arc<Shared>) {
                 // not wait behind the full warm pass (59 files ≈ tens of seconds)
                 let next_t = {
                     let rg = shared.ring.lock().unwrap();
-                    rg.back().map(|(ft, ..)| ft + STEP).unwrap_or_else(|| (t / STEP).floor() * STEP)
+                    rg.back().map(|(ft, ..)| ft + frame_step).unwrap_or_else(|| (t / frame_step).floor() * frame_step)
                 };
                 if next_t <= dur {
                     if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, false) {
@@ -2191,17 +2239,17 @@ fn media_thread(shared: Arc<Shared>) {
                 // from the playhead into the frame cache (one per idle slice). AFTER
                 // thumbnails/waveforms (visible UI beats invisible cache warmth).
                 let mut target = None;
-                'fill: for step in 0..(45.0 * 30.0) as i64 {
+                'fill: for step in 0..(45.0 * timeline_fps) as i64 {
                     for dir in [1i64, -1i64] {
-                        let idx = FrameCache::idx(t) + dir * step;
+                        let idx = FrameCache::idx(t, timeline_fps) + dir * step;
                         if idx < 0 {
                             continue;
                         }
-                        let ft = idx as f64 / 30.0;
+                        let ft = idx as f64 / timeline_fps;
                         if ft > dur {
                             continue;
                         }
-                        if !fcache.contains(ft) {
+                        if !fcache.contains(ft, timeline_fps) {
                             target = Some(ft);
                             break 'fill;
                         }
@@ -2209,7 +2257,7 @@ fn media_thread(shared: Arc<Shared>) {
                 }
                 if let Some(ft) = target {
                     if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, false, false, true) {
-                        fcache.insert(ft, eff, &comp.rgba, t);
+                        fcache.insert(ft, timeline_fps, eff, &comp.rgba, t);
                     }
                     if fcache.frames.len() % 300 == 0 {
                         eprintln!(
@@ -2390,6 +2438,9 @@ struct App {
     redo: Vec<serde_json::Value>,
     save_at: Option<Instant>,
     salt: u64,
+    // Files dropped into an empty project wait here until its timeline frame rate is chosen.
+    pending_initial_imports: Vec<std::path::PathBuf>,
+    pending_initial_fps: Vec<f64>,
     thumbs: std::collections::HashMap<(String, i64), egui::TextureHandle>,
     peaks: std::collections::HashMap<String, (f64, Vec<f32>)>,
     aux_ver: u64,
@@ -2553,6 +2604,8 @@ impl App {
             peaks: Default::default(),
             aux_ver: 0,
             salt: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+            pending_initial_imports: Vec::new(),
+            pending_initial_fps: Vec::new(),
             tex: None,
             last_seq: 0,
             playing: false,
@@ -2805,6 +2858,9 @@ impl App {
                 "name": p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
                 "local_path": path,
                 "status": "ready",
+                "metadata": probe_frame_rate(&path)
+                    .map(|fps| serde_json::json!({ "fps": fps }))
+                    .unwrap_or_else(|| serde_json::json!({})),
                 "imported_by": "native"
             }));
         }
@@ -2852,6 +2908,38 @@ impl App {
             }
         });
         Ok(())
+    }
+
+    fn timeline_fps(&self) -> f64 {
+        self.doc.seq.frame_rate.filter(|fps| fps.is_finite() && *fps > 1.0).unwrap_or(30.0)
+    }
+
+    fn has_timeline_media(&self) -> bool {
+        self.doc.seq.tracks.iter().flat_map(|track| track.clips.iter()).any(|clip| clip.asset_id.is_some())
+    }
+
+    fn set_timeline_fps(&mut self, fps: f64) {
+        let fps = canonical_timeline_fps(fps);
+        self.apply_edit(false, move |raw| {
+            if let Some(seq) = raw.get_mut(0)
+                .and_then(|root| root.get_mut("timeline"))
+                .and_then(|timeline| timeline.get_mut("sequence"))
+                .and_then(|seq| seq.as_object_mut())
+            {
+                seq.insert("frame_rate".into(), serde_json::json!(fps));
+            }
+        });
+    }
+
+    fn import_initial_files(&mut self, fps: f64) {
+        let files = std::mem::take(&mut self.pending_initial_imports);
+        self.pending_initial_fps.clear();
+        self.set_timeline_fps(fps);
+        for path in files {
+            if let Err(e) = self.import_file(&path) {
+                eprintln!("import: {e:#}");
+            }
+        }
     }
 
     fn toast(&mut self, msg: &str) {
@@ -3394,12 +3482,12 @@ impl App {
 
     /// One arrow-key sequence-frame step (exactly what the key handler runs).
     fn step_once(&mut self, dir: f64) {
-        const FSTEP: f64 = 1.0 / 30.0;
-        // The editor timeline and output are CFR 30fps. Do not derive arrow movement from
+        let fstep = 1.0 / self.timeline_fps();
+        // The editor timeline and output are CFR at the chosen sequence rate. Do not derive arrow movement from
         // source PTS: mixed 30/60fps (or VFR) assets then make the same key move a different
         // distance depending on the clip under the playhead. Snap the current position to the
         // sequence grid first, then advance exactly one output frame.
-        self.t = (((self.t / FSTEP).round() + dir) * FSTEP).clamp(0.0, self.dur);
+        self.t = (((self.t / fstep).round() + dir) * fstep).clamp(0.0, self.dur);
         self.step_settle_at = Some(Instant::now() + std::time::Duration::from_millis(90));
         self.push_req(true);
     }
@@ -3624,9 +3712,11 @@ impl App {
 
     /// transport bar under the preview: jump/step/play buttons + seek bar + timecode
     fn transport_ui(&mut self, ui: &mut egui::Ui) {
+        let timeline_fps = self.timeline_fps();
         let fmt_tc = |t: f64| {
-            let fr = ((t * 30.0).round() as i64).max(0);
-            format!("{:02}:{:02}:{:02}", fr / 1800, (fr / 30) % 60, fr % 30)
+            let fr = ((t * timeline_fps).round() as i64).max(0);
+            let fps_i = timeline_fps.round() as i64;
+            format!("{:02}:{:02}:{:02}", fr / (fps_i * 60), (fr / fps_i) % 60, fr % fps_i)
         };
         ui.horizontal_centered(|ui| {
             ui.add_space(10.0);
@@ -3646,8 +3736,7 @@ impl App {
             }
             if tbtn(ui, "⏪", "1フレーム戻る (←)") {
                 self.playing = false;
-                self.t = (self.t - 1.0 / 30.0).max(0.0);
-                self.push_req(false);
+                self.step_once(-1.0);
             }
             let glyph = if self.playing { "⏸" } else { "▶" };
             if ui
@@ -3668,8 +3757,7 @@ impl App {
             }
             if tbtn(ui, "⏩", "1フレーム進む (→)") {
                 self.playing = false;
-                self.t = (self.t + 1.0 / 30.0).min(self.dur);
-                self.push_req(false);
+                self.step_once(1.0);
             }
             if tbtn(ui, "⏭", "末尾へ (End)") {
                 self.playing = false;
@@ -7261,14 +7349,66 @@ impl eframe::App for App {
             i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect()
         });
         if !dropped.is_empty() {
-            for p in dropped {
+            let files: Vec<std::path::PathBuf> = dropped.into_iter().filter(|p| {
                 let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-                if !["mp4", "mov", "mkv", "webm", "m4v"].contains(&ext.as_str()) {
-                    continue;
-                }
+                ["mp4", "mov", "mkv", "webm", "m4v"].contains(&ext.as_str())
+            }).collect();
+            if !files.is_empty() && !self.has_timeline_media() && self.doc.seq.frame_rate.is_none() {
+                self.pending_initial_fps = files.iter()
+                    .filter_map(|p| probe_frame_rate(&p.to_string_lossy()))
+                    .collect();
+                self.pending_initial_imports.extend(files);
+            } else {
+                for p in files {
                 if let Err(e) = self.import_file(&p) {
                     eprintln!("import: {e:#}");
                 }
+                }
+            }
+        }
+
+        // First import defines the sequence/output frame rate. This is deliberately shown only
+        // before any media exists: changing an edited timeline's rate would retime its cuts and
+        // generated assets, so that belongs in an explicit project-settings migration instead.
+        if !self.pending_initial_imports.is_empty() {
+            let mut counts = [0u32; TIMELINE_FPS_CHOICES.len()];
+            for source_fps in &self.pending_initial_fps {
+                let fps = canonical_timeline_fps(*source_fps);
+                if let Some(idx) = TIMELINE_FPS_CHOICES.iter().position(|candidate| (*candidate - fps).abs() < 0.01) {
+                    counts[idx] += 1;
+                }
+            }
+            let recommended = counts.iter().enumerate()
+                .max_by_key(|(_, count)| **count)
+                .filter(|(_, count)| **count > 0)
+                .map(|(idx, _)| TIMELINE_FPS_CHOICES[idx])
+                .unwrap_or(30.0);
+            let mut choice: Option<f64> = None;
+            let mut cancel = false;
+            egui::Window::new("プロジェクトのフレームレート")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label(format!("{} 本の最初の素材を追加します。", self.pending_initial_imports.len()));
+                    ui.label("タイムラインのフレームレートを選んでください。");
+                    ui.add_space(8.0);
+                    for (idx, fps) in TIMELINE_FPS_CHOICES.iter().enumerate() {
+                        let suffix = if (*fps - recommended).abs() < 0.01 { "（推奨）" } else { "" };
+                        let detected = counts[idx];
+                        let detail = if detected > 0 { format!(" / 選択素材 {detected} 本") } else { String::new() };
+                        if ui.button(format!("{}{}{}", fps_label(*fps), suffix, detail)).clicked() {
+                            choice = Some(*fps);
+                        }
+                    }
+                    ui.add_space(4.0);
+                    if ui.button("キャンセル").clicked() { cancel = true; }
+                });
+            if let Some(fps) = choice {
+                self.import_initial_files(fps);
+            } else if cancel {
+                self.pending_initial_imports.clear();
+                self.pending_initial_fps.clear();
             }
         }
 
@@ -9261,11 +9401,15 @@ fn main() -> eframe::Result<()> {
                 app.screen = Screen::Library;
                 app.lib_refresh();
             }
-            // --import <file>: same code path as drag&drop (also our self-test hook)
+            // --import <file>: same first-import setup as drag&drop (also our self-test hook)
             let args: Vec<String> = std::env::args().collect();
             if let Some(i) = args.iter().position(|a| a == "--import") {
                 if let Some(f) = args.get(i + 1) {
-                    if let Err(e) = app.import_file(std::path::Path::new(f)) {
+                    let path = std::path::PathBuf::from(f);
+                    if !app.has_timeline_media() && app.doc.seq.frame_rate.is_none() {
+                        app.pending_initial_fps = probe_frame_rate(&path.to_string_lossy()).into_iter().collect();
+                        app.pending_initial_imports.push(path);
+                    } else if let Err(e) = app.import_file(&path) {
                         eprintln!("import: {e:#}");
                     }
                 }

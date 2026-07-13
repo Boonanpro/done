@@ -15,6 +15,9 @@ pub struct TimelineWrap {
 pub struct Sequence {
     #[serde(default)]
     pub duration: f64,
+    /// Output/timeline frame rate chosen when the project starts. Missing is legacy 30fps.
+    #[serde(default)]
+    pub frame_rate: Option<f64>,
     #[serde(default)]
     pub tracks: Vec<Track>,
 }

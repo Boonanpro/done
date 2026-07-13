@@ -197,6 +197,35 @@ def _read_contents(room_id: str) -> list[dict[str, Any]]:
     return contents
 
 
+_TIMELINE_FPS_CHOICES = (23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0)
+
+
+def _timeline_frame_rate(value: Any) -> float:
+    """Return a supported sequence rate; old projects intentionally remain 30fps."""
+    try:
+        requested = float(value)
+    except (TypeError, ValueError):
+        return 30.0
+    if not 1.0 < requested <= 120.0:
+        return 30.0
+    nearest = min(_TIMELINE_FPS_CHOICES, key=lambda candidate: abs(candidate - requested))
+    return nearest if abs(nearest - requested) <= 1.0 else 30.0
+
+
+def _sequence_frame_rate(sequence: dict[str, Any] | None) -> float:
+    return _timeline_frame_rate(sequence.get("frame_rate") if isinstance(sequence, dict) else None)
+
+
+def _room_frame_rate(room_id: str) -> float:
+    """Use the first content's persisted sequence setting while an asset proxy is made."""
+    for content in _read_contents(room_id):
+        timeline = content.get("timeline") if isinstance(content.get("timeline"), dict) else None
+        sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
+        if isinstance(sequence, dict) and sequence.get("frame_rate") is not None:
+            return _sequence_frame_rate(sequence)
+    return 30.0
+
+
 def _write_contents(room_id: str, contents: list[dict[str, Any]]) -> None:
     _write_json_list(_contents_path(room_id), contents)
 
@@ -749,7 +778,7 @@ def _blur_style_proc(style: str, w: int, h: int) -> str:
 
 def _blur_chain_masked(video_in: str, idx: int, mask_path: Path, bt: dict[str, Any],
                        clip: dict[str, Any], base_clips: list[dict[str, Any]],
-                       w: int, h: int, style: str) -> tuple[str, str] | None:
+                       w: int, h: int, style: str, fps: float = 30.0) -> tuple[str, str] | None:
     """Tracked blur for the EXPORT: blur the full frame, alpha it by the baked SAM mask
     video, overlay back — per base-cut segment so mask time (source-anchored) aligns with
     output time. Mirrors what ps_blur_masked does live in the editor. Returns None when
@@ -784,6 +813,7 @@ def _blur_chain_masked(video_in: str, idx: int, mask_path: Path, bt: dict[str, A
     if not segs:
         return None
     proc = _blur_style_proc(style, w, h)
+    fps_filter = f"{fps:g}"
     n = len(segs)
     fsplit = "".join(f"[tf{idx}_{j}]" for j in range(n))
     parts = [f"[{video_in}]split={n + 1}[tb{idx}]{fsplit}"]
@@ -792,13 +822,13 @@ def _blur_chain_masked(video_in: str, idx: int, mask_path: Path, bt: dict[str, A
         d = t1 - t0
         # blurred picture for this segment (30fps so alphamerge's frame zip matches the mask)
         parts.append(
-            f"[tf{idx}_{j}]fps=30,trim=start={t0:.3f}:end={t1:.3f},setpts=PTS-STARTPTS,{proc}[tfb{idx}_{j}]"
+            f"[tf{idx}_{j}]fps={fps_filter},trim=start={t0:.3f}:end={t1:.3f},setpts=PTS-STARTPTS,{proc}[tfb{idx}_{j}]"
         )
         # mask frames for the same span (mask video timeline = bake window, CFR 30).
         # The mask lives in SOURCE-frame space: run it through the SAME cover-crop the
         # base video gets (plain scale=W:H stretched it and the blur landed offset).
         parts.append(
-            f"{_movie_input(mask_path, max(0.0, m0 - 0.6))},fps=30,"
+            f"{_movie_input(mask_path, max(0.0, m0 - 0.6))},fps={fps_filter},"
             f"trim=start={m0:.3f}:end={m0 + d:.3f},setpts=PTS-STARTPTS,"
             f"format=gray,scale={w}:{h}:force_original_aspect_ratio=increase,"
             f"crop={w}:{h}[tmk{idx}_{j}]"
@@ -849,7 +879,8 @@ def _kf_expr(keys: list[tuple[float, float]], scale: int, maxv: int, tvar: str =
 
 
 def _blur_chain_kf_sized(video_in: str, idx: int, kf: list[tuple[float, float, float, float, float]],
-                         frame_w: int, frame_h: int, start: float, end: float, style: str) -> tuple[str, str]:
+                         frame_w: int, frame_h: int, start: float, end: float, style: str,
+                         fps: float = 30.0) -> tuple[str, str]:
     """Keyframed regional blur with ANIMATED SIZE: crop/overlay cannot animate w/h, so
     blur the whole frame and alpha-mask it with a per-frame geq box (edges are the
     piecewise-linear x / x+w / y / y+h expressions over geq's T). kf = [(t_abs, x, y, w, h)]."""
@@ -868,10 +899,11 @@ def _blur_chain_kf_sized(video_in: str, idx: int, kf: list[tuple[float, float, f
         proc = f"scale={max(2, frame_w // block)}:{max(2, frame_h // block)}:flags=neighbor,scale={frame_w}:{frame_h}:flags=neighbor"
     else:
         proc = "gblur=sigma=20"
+    fps_filter = f"{fps:g}"
     filt = (
         f"[{video_in}]split[{base}][{full}];"
-        f"[{full}]fps=30,{proc}[{blurred}];"
-        f"color=c=black:s={frame_w}x{frame_h}:r=30,format=gray,"
+        f"[{full}]fps={fps_filter},{proc}[{blurred}];"
+        f"color=c=black:s={frame_w}x{frame_h}:r={fps_filter},format=gray,"
         f"geq=lum='255*between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1})'[{mask}];"
         f"[{blurred}][{mask}]alphamerge[{bm}];"
         f"[{base}][{bm}]overlay=0:0:enable='between(t\\,{start:.3f}\\,{end:.3f})':eof_action=pass[{out}]"
@@ -1048,6 +1080,8 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
     if not isinstance(sequence, dict):
         return None
+    timeline_fps = _sequence_frame_rate(sequence)
+    fps_filter = f"{timeline_fps:g}"
 
     base_clips = [c for c in _sequence_video_clips(sequence) if not _is_overlay_clip(c)]
     if not base_clips:
@@ -1096,7 +1130,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         base_shape = _shape_cut_filter(clip.get("shape"), output_width, output_height, alpha=False)
         if identity or sw <= 0 or sh <= 0:
             # IDENTITY (or unknown source dims): exact current cover-crop string (byte-identical).
-            _scale = f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps=30"
+            _scale = f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,crop={output_width}:{output_height},setsar=1,fps={fps_filter}"
             if is_freeze:
                 setpts = f"setpts=PTS-STARTPTS,{_scale},tpad=stop_mode=clone:stop_duration={out_dur:.3f}"
             else:
@@ -1140,10 +1174,10 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             filters.append(
                 _movie_input(source_path, source_start) + ","
                 f"trim=start={source_start:.3f}:end={source_end:.3f},"
-                f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps=30,{crop_filt}setsar=1{tpad},format=yuv420p"
+                f"setpts=PTS-STARTPTS,scale={cw}:{ch}:force_original_aspect_ratio=disable,setsar=1,fps={fps_filter},{crop_filt}setsar=1{tpad},format=yuv420p"
                 f"[src{rendered_count}]"
             )
-            filters.append(f"color=c=black:s={output_width}x{output_height}:r=30:d={out_dur:.3f}[bg{rendered_count}]")
+            filters.append(f"color=c=black:s={output_width}x{output_height}:r={fps_filter}:d={out_dur:.3f}[bg{rendered_count}]")
             filters.append(
                 f"[bg{rendered_count}][src{rendered_count}]overlay={ox}:{oy}:shortest=1,format=yuv420p{base_shape}[v{rendered_count}]"
             )
@@ -1207,7 +1241,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             if mask_path.exists() and mask_path.stat().st_size > 0:
                 masked = _blur_chain_masked(
                     video_out, bi, mask_path, bt, eclip, base_clips,
-                    output_width, output_height, str(spec.get("style") or ""))
+                    output_width, output_height, str(spec.get("style") or ""), timeline_fps)
                 if masked:
                     filt, video_out = masked
                     filters.append(filt)
@@ -1247,7 +1281,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             else:
                 filt, video_out = _blur_chain_kf_sized(video_out, bi, kf,
                                                        output_width, output_height, start, end,
-                                                       str(spec.get("style") or ""))
+                                                       str(spec.get("style") or ""), timeline_fps)
         else:
             filt, video_out = _blur_chain(video_out, bi, x, y, w, h, start, end, str(spec.get("style") or ""))
         filters.append(filt)
@@ -3314,13 +3348,15 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
     out_dir = _room_dir(room_id)
     proxy = out_dir / f"{asset_id}_proxy.mp4"
     thumb = out_dir / f"{asset_id}_thumb.jpg"
+    timeline_fps = _room_frame_rate(room_id)
+    fps_filter = f"{timeline_fps:g}"
 
     try:
         creationflags = 0
         if hasattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS"):
             creationflags = subprocess.BELOW_NORMAL_PRIORITY_CLASS  # type: ignore[attr-defined]
 
-        # fps=30 forces a CONSTANT frame rate. Source phone screen recordings are often
+        # The selected sequence rate forces a CONSTANT frame rate. Source phone screen recordings are often
         # variable-frame-rate (VFR), and VFR breaks seek-by-time everywhere: the editor's
         # preview seeks to the wrong frame / freezes, and our OCR/ffmpeg trackers land on the
         # wrong timestamp. A CFR proxy makes seeking reliable across the board.
@@ -3333,11 +3369,11 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
         # its MediaProxy cache holds 1080x1920 ~19Mbps files for 4K sources (verified with
         # ffprobe on a real install) — its "4K scrubbing" runs on those.
         #
-        # SHORT GOP (keyframe every 15 frames = 0.5s) + no B-frames: any frame is cheap to
+        # SHORT GOP (keyframe every half second) + no B-frames: any frame is cheap to
         # reach from a keyframe, which is what makes scrub seeks ~20ms.
-        _common = ["-g", "15", "-bf", "0", "-vsync", "cfr",
+        _common = ["-g", str(max(1, round(timeline_fps * 0.5))), "-bf", "0", "-vsync", "cfr",
                    "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(proxy)]
-        _vf = ["-vf", "scale=w=1920:h=1920:force_original_aspect_ratio=decrease:force_divisible_by=2,fps=30"]
+        _vf = ["-vf", f"scale=w=1920:h=1920:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps_filter}"]
         _encoders = [
             ["-c:v", "h264_nvenc", "-rc", "vbr", "-cq", "16", "-b:v", "0", "-preset", "p4"],
             ["-c:v", "libx264", "-preset", "veryfast", "-crf", "17"],
@@ -3403,7 +3439,7 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
                 "thumbnail_url": f"/api/v1/production-assets/media?room_id={room_id}&asset_id={asset_id}&variant=thumbnail"
                 if thumb.exists()
                 else None,
-                "metadata": _probe_video(src),
+                "metadata": {**_probe_video(src), "proxy_fps": timeline_fps},
                 "error": None,
             },
         )
