@@ -297,10 +297,19 @@ def _generate_image(draft: dict, prompt: str, aspect: str) -> dict:
     with td.ContentsLock(ROOM_ID):
         p = _room_dir() / "assets.json"
         data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
         data.append({
+            # ProductionAsset APIスキーマ完全準拠（status=readyや欠落フィールドは
+            # 一覧APIを500にし部屋ごと開けなくした実績あり — 全フィールド明示）
             "id": aid, "room_id": ROOM_ID, "kind": "image", "source_type": "generated",
-            "local_path": str(dest.resolve()), "filename": dest.name, "status": "ready",
-            "metadata": {}, "generated_by": f"agent:{JOB_ID}",
+            "original_uri": str(dest.resolve()),
+            "local_path": str(dest.resolve()), "filename": dest.name,
+            "proxy_path": None, "proxy_url": None,
+            "thumbnail_path": None, "thumbnail_url": None,
+            "status": "proxy_ready", "metadata": {},
+            "created_at": now, "updated_at": now,
+            "generated_by": f"agent:{JOB_ID}",
         })
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     td.track_generated_asset(draft, aid)
