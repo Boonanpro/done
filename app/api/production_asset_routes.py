@@ -387,6 +387,18 @@ def _clip_video_enabled(clip: dict[str, Any]) -> bool:
     return clip.get("video_enabled") is not False
 
 
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def _asset_is_image_kind(asset: dict[str, Any]) -> bool:
+    if not isinstance(asset, dict):
+        return False
+    if asset.get("kind") == "image":
+        return True
+    p = str(asset.get("local_path") or asset.get("filename") or "")
+    return Path(p).suffix.lower() in _IMAGE_EXTS
+
+
 def _sequence_video_clips(
     sequence: dict[str, Any] | None, *, include_video_disabled: bool = False
 ) -> list[dict[str, Any]]:
@@ -1113,6 +1125,27 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     rendered_count = 0
     for clip in base_clips:
         asset = assets.get(str(clip.get("asset_id") or ""))
+        if asset and _asset_is_image_kind(asset):
+            # STILL IMAGE base clip (generated CTA art etc.): loop the picture for the
+            # clip's duration, cover-cropped to the canvas — parity with the preview.
+            img_path = _asset_source_path(asset)
+            out_dur = max(0.05, float(clip.get("timeline_end") or 0) - float(clip.get("timeline_start") or 0))
+            filters.append(
+                f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={out_dur:.3f},"
+                f"setpts=PTS-STARTPTS,fps={fps_filter},"
+                f"scale={output_width}:{output_height}:force_original_aspect_ratio=increase,"
+                f"crop={output_width}:{output_height},setsar=1,format=yuv420p[v{rendered_count}]"
+            )
+            if has_audio_track:
+                concat_parts.append(f"[v{rendered_count}]")
+            else:
+                filters.append(
+                    f"anullsrc=r=48000:cl=stereo,atrim=duration={out_dur:.3f},asetpts=PTS-STARTPTS"
+                    f"[a{rendered_count}]"
+                )
+                concat_parts.extend([f"[v{rendered_count}]", f"[a{rendered_count}]"])
+            rendered_count += 1
+            continue
         if not asset or asset.get("kind") != "video":
             continue
         source_path = _asset_source_path(asset)
@@ -1303,6 +1336,28 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     # --- overlay / PiP (wipe): composite on top, ascending layer = closer to front ---
     for oi, clip in enumerate(overlay_clips, start=1):
         asset = assets.get(str(clip.get("asset_id") or ""))
+        if asset and _asset_is_image_kind(asset):
+            # STILL IMAGE overlay (logo etc.): loop the picture, CONTAIN-fit inside the
+            # position box (aspect preserved, centered), alpha kept — preview parity.
+            img_path = _asset_source_path(asset)
+            pos = clip.get("position") if isinstance(clip.get("position"), dict) else {}
+            iow = max(2, round(float(pos.get("width") or 0.3) * output_width))
+            ioh = max(2, round(float(pos.get("height") or 0.15) * output_height))
+            ipx = round(float(pos.get("x") or 0.05) * output_width)
+            ipy = round(float(pos.get("y") or 0.05) * output_height)
+            its = max(0.0, float(clip.get("timeline_start") or 0))
+            ite = max(its + 0.05, float(clip.get("timeline_end") or (its + 3.0)))
+            filters.append(
+                f"{_movie_input(img_path, 0.0)},loop=loop=-1:size=1,trim=duration={ite - its:.3f},"
+                f"setpts=PTS-STARTPTS+{its:.3f}/TB,fps={fps_filter},format=rgba,"
+                f"scale=w={iow}:h={ioh}:force_original_aspect_ratio=decrease[img{oi}]"
+            )
+            filters.append(
+                f"[{video_out}][img{oi}]overlay=x={ipx}+({iow}-w)/2:y={ipy}+({ioh}-h)/2"
+                f":enable='between(t\\,{its:.3f}\\,{ite:.3f})':eof_action=pass[vimg{oi}]"
+            )
+            video_out = f"vimg{oi}"
+            continue
         if not asset or asset.get("kind") != "video":
             continue
         source_path = _asset_source_path(asset)
@@ -2831,6 +2886,44 @@ def _clips_in_scope(sequence: dict[str, Any], regions: list[dict[str, Any]]) -> 
     return scope
 
 
+def _revision_needs_agent(text: str) -> bool:
+    """Capability-based routing: the fast one-shot patch can only rewrite existing
+    clip text/style/times. Anything needing new material, spatial placement,
+    generation, structure changes or content understanding goes to the agent.
+    Undecidable → agent (the heavier, safer path)."""
+    t = str(text or "")
+    if re.search(r"ぼかし|ボカシ|モザイク|blur", t, re.I):
+        return False  # dedicated SAM-bake fast flow handles these
+    agent_kw = (
+        r"追加|作成|作って|生成|挿入|入れて|出して|置いて|配置|CTA|ロゴ|画像|イラスト|素材|"
+        r"差し替え|置き換え|並び替え|移動|削除|消して|カット|短く|詰めて|伸ば|"
+        r"フリーズ|静止|オーバーレイ|PiP|BGM|音楽|効果音|まとめ|要約|構成"
+    )
+    if re.search(agent_kw, t):
+        return True
+    fast_kw = r"テロップ|字幕|文字|誤字|タイポ|フォント|色|大きさ|サイズ|スタイル|直して|修正|変えて"
+    if re.search(fast_kw, t):
+        return False
+    return True
+
+
+def _agent_annotations(instruction: dict[str, Any]) -> list[dict[str, Any]]:
+    """revision_regions / annotations → the agent's annotation shape
+    {t0,t1,x,y,width,height,note} (normalized canvas coords)."""
+    out: list[dict[str, Any]] = []
+    for ann in (instruction.get("revision_regions") or []) + (instruction.get("annotations") or []):
+        if not isinstance(ann, dict):
+            continue
+        d = ann.get("data") if isinstance(ann.get("data"), dict) else ann
+        out.append({
+            "t0": ann.get("start"), "t1": ann.get("end"),
+            "x": d.get("x"), "y": d.get("y"),
+            "width": d.get("width"), "height": d.get("height"),
+            "note": ann.get("note") or "",
+        })
+    return out
+
+
 def _sanitize_av_clip_edit(nc: dict[str, Any], orig: dict[str, Any], assets: dict[str, dict[str, Any]] | None) -> None:
     """Guard for LLM-authored clip edits: an asset-backed (video/audio) clip must stay
     playable. Dan once 'extended' a clip by writing source_end BEFORE source_start —
@@ -3253,10 +3346,34 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             )
             _append_job_event(room_id, job_id, {"type": "status", "text": "編集判断からタイムラインを組み立てました（MP4は未生成）。"})
         elif mode == "dan_revise":
-            # Partial, non-destructive edit: Dan patches only the in-scope clips; everything
-            # else is preserved. The deliverable is the updated TIMELINE — no MP4 is rendered
-            # (the user sees the change in the live preview; export to MP4 is a separate step).
-            merged = _build_dan_revision(room_id, user_id, job_id, instruction, instruction_path)
+            # Partial, non-destructive edit. Capability routing:
+            #  - light text/style tweaks -> fast one-shot patch (seconds)
+            #  - anything needing new material / structure / generation / content
+            #    understanding -> full agent on a DRAFT, committed once with CAS
+            revision_text = str(instruction.get("revision_text") or instruction.get("brief") or "")
+            if _revision_needs_agent(revision_text):
+                from app.services.timeline_agent import run_timeline_agent
+                _append_job_event(room_id, job_id, {"type": "status", "text": "編集エージェントで実行します（動画内容を理解して編集・数分かかることがあります）"})
+                agent_res = run_timeline_agent(
+                    room_id=room_id, content_id=content_id, job_id=job_id,
+                    instruction=revision_text,
+                    annotations=_agent_annotations(instruction),
+                    on_event=lambda e: _append_job_event(room_id, job_id, e),
+                )
+                if not agent_res.get("ok"):
+                    raise RuntimeError("エージェント編集は反映されませんでした: " + "; ".join((agent_res.get("problems") or ["unknown"])[:3]))
+                # the commit already wrote contents.json — reload for bookkeeping
+                merged = None
+                for c in _read_contents(room_id):
+                    if str(c.get("id")) == str(content_id):
+                        tl = c.get("timeline") if isinstance(c.get("timeline"), dict) else {}
+                        merged = tl.get("sequence") if isinstance(tl.get("sequence"), dict) else None
+                if not merged:
+                    raise RuntimeError("反映後のタイムラインが読めませんでした")
+                if agent_res.get("summary"):
+                    _append_job_event(room_id, job_id, {"type": "text", "text": str(agent_res["summary"])[:2000]})
+            else:
+                merged = _build_dan_revision(room_id, user_id, job_id, instruction, instruction_path)
             if not merged:
                 raise RuntimeError("部分編集の適用に失敗しました（対象クリップなし or 差分なし）")
             sequence_result = merged
@@ -4744,6 +4861,44 @@ async def track_blur_region(
     except Exception:  # noqa: BLE001
         logger.warning("ocr-track parse failed: %s | %s", (r.stdout or "")[-200:], (r.stderr or "")[-200:])
     return data
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_production_job(job_id: str, room_id: str) -> dict[str, Any]:
+    """Cancel a running agent job. The draft is discarded; the live timeline stays
+    exactly as it was (agent edits are draft-only until commit)."""
+    from app.services.timeline_agent import cancel_job
+    killed = cancel_job(job_id)
+    _update_job(room_id, job_id, {"status": "failed", "error": "canceled by user"})
+    _append_job_event(room_id, job_id, {"type": "status", "text": "キャンセルしました（タイムラインは無変更）"})
+    return {"ok": True, "killed": killed}
+
+
+def _recover_stale_running_jobs() -> None:
+    """Sandbox restart safety: jobs left 'running' by a dead process would spin
+    forever in the UI. At import time mark them failed (their threads are gone)."""
+    try:
+        for room_dir in ASSET_ROOT.iterdir():
+            jp = room_dir / "jobs.json"
+            if not jp.exists():
+                continue
+            try:
+                jobs = json.loads(jp.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            changed = False
+            for j in jobs:
+                if isinstance(j, dict) and j.get("status") == "running":
+                    j["status"] = "failed"
+                    j["error"] = "server restarted while running"
+                    changed = True
+            if changed:
+                jp.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+    except Exception:  # noqa: BLE001 — recovery must never block startup
+        logger.warning("stale job recovery failed", exc_info=True)
+
+
+_recover_stale_running_jobs()
 
 
 @router.post("/jobs", response_model=ProductionJob)
