@@ -107,6 +107,15 @@ def run_timeline_agent(
         # draftからは除去する（ネイティブ側の消費保存とのレースでも残らない）
         for tr in draft["sequence"].get("tracks") or []:
             tr["clips"] = [c for c in (tr.get("clips") or []) if c.get("style") != "note"]
+        # BASELINE: 既存タイムラインが元から抱える問題（過去の分割バグの残骸等）。
+        # コミット判定は「新しく増えた問題」だけで行う — 実部屋で、エージェントが
+        # 触ってもいない22分割クリップのソース長不整合が無関係な編集を巻き添えに
+        # 反映拒否した事故の根治
+        room_dir0 = td._room_dir(room_id)
+        assets0 = {str(a.get("id")): a for a in _read_assets_file(room_dir0)}
+        draft["baseline_problems"] = tc.validate_sequence(
+            draft["sequence"], assets0, asset_dir=str(room_dir0)
+        )
         td.save_draft(draft)
         emit({"type": "status", "text": f"draft {draft['draft_id']} を作成（本番は無変更のまま作業します）"})
         result = _run_session(room_id, content_id, job_id, draft, instruction, annotations or [], emit, model)
@@ -236,10 +245,13 @@ def _run_session(room_id, content_id, job_id, draft, instruction, annotations, e
                 "summary": "\n".join(summary_chunks[-3:]), "draft_id": draft_id}
 
     assets_now = {str(a.get("id")): a for a in _read_assets_file(room_dir)}
-    res = td.commit_draft(
-        room_id, draft_id,
-        lambda seq, rid: tc.validate_sequence(seq, assets_now, asset_dir=str(room_dir)),
-    )
+    baseline = set(latest.get("baseline_problems") or [])
+
+    def _new_problems_only(seq, rid):
+        return [p for p in tc.validate_sequence(seq, assets_now, asset_dir=str(room_dir))
+                if p not in baseline]
+
+    res = td.commit_draft(room_id, draft_id, _new_problems_only)
     if res["ok"]:
         emit({"type": "status", "text": "検証に合格。タイムラインへ反映しました（1回のUndoで戻せます）"})
     elif res.get("conflict"):
