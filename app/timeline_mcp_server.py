@@ -166,7 +166,11 @@ async def _dispatch(name: str, a: dict) -> list:
 
     if name == "validate_draft":
         problems = tc.validate_sequence(seq, assets, asset_dir=str(_room_dir()))
-        return _ok({"ok": not problems, "problems": problems})
+        baseline = set(draft.get("baseline_problems") or [])
+        fresh = [p for p in problems if p not in baseline]
+        return _ok({"ok": not fresh, "problems": fresh,
+                    **({"note": f"既存タイムライン由来の問題{len(problems) - len(fresh)}件は無視されます"}
+                       if len(problems) != len(fresh) else {})})
 
     if name == "generate_image":
         if _generations >= MAX_GENERATIONS:
