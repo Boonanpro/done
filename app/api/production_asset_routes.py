@@ -4946,9 +4946,8 @@ async def list_job_events(
     room_id: str = Query(...),
     current_user: TokenData = Depends(get_current_user),
 ):
-    jobs = _read_jobs(room_id)
-    if not any(str(job.get("id")) == job_id for job in jobs):
-        raise HTTPException(status_code=404, detail="Job not found")
+    # 起動直後はジョブ登録がまだディスクに見えないことがある（送信直後の
+    # 最初のポーリングが404になりUIにエラーが残った）→「まだ無い=空」で200
     path = _job_events_path(room_id, job_id)
     if not path.exists():
         return []
