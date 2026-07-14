@@ -75,6 +75,7 @@ _STR = {"type": "string"}
 async def list_tools() -> list[types.Tool]:
     return [
         _tool("timeline_outline", "タイムライン全体の構造（レーン/クリップ/時刻/種類）を読む。作業前に必ず一度読むこと。", {}),
+        _tool("list_assets", "部屋のアセット一覧（asset_id/ファイル名/種類/長さ）。配置ツールに渡すasset_idはここで確認する。", {}),
         _tool("timeline_transcript", "動画の発話内容（文字起こし）をタイムライン時刻つきで読む。内容理解はこれを根拠にする。",
               {"t0": _NUM, "t1": _NUM}),
         _tool("render_frame", "指定タイムライン時刻の合成後フレーム（カット/テロップ/ぼかし/画像すべて反映）を画像として見る。編集後の確認に必ず使う。",
@@ -134,6 +135,15 @@ async def _dispatch(name: str, a: dict) -> list:
 
     if name == "timeline_outline":
         return [types.TextContent(type="text", text=tcx.timeline_outline(seq, assets))]
+
+    if name == "list_assets":
+        rows = []
+        for aid, a in assets.items():
+            meta = a.get("metadata") if isinstance(a.get("metadata"), dict) else {}
+            dur = meta.get("duration")
+            rows.append(f"{aid}: {a.get('filename')} kind={a.get('kind')}"
+                        + (f" duration={dur}s" if dur else ""))
+        return [types.TextContent(type="text", text="\n".join(rows) or "(no assets)")]
 
     if name == "timeline_transcript":
         analyses = _load_analyses(assets)

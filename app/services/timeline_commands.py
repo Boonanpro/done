@@ -119,7 +119,8 @@ def append_clip(seq: dict[str, Any], assets: dict, *, asset_id: str, source_star
     Video gets a linked audio clip; image gets none."""
     a = _asset(assets, asset_id)
     if a is None:
-        return {"ok": False, "error": f"asset not found: {asset_id}"}
+        hint = ", ".join(f"{k}({v.get('filename')})" for k, v in list(assets.items())[:12])
+        return {"ok": False, "error": f"asset not found: {asset_id}. available: {hint}"}
     duration = max(MIN_CLIP, _f(duration))
     is_image = _asset_is_image(a)
     if not is_image:
@@ -263,7 +264,8 @@ def add_overlay(seq: dict[str, Any], assets: dict, *, asset_id: str, timeline_st
     """PiP video or IMAGE overlay at a normalized canvas box."""
     a = _asset(assets, asset_id)
     if a is None:
-        return {"ok": False, "error": f"asset not found: {asset_id}"}
+        hint = ", ".join(f"{k}({v.get('filename')})" for k, v in list(assets.items())[:12])
+        return {"ok": False, "error": f"asset not found: {asset_id}. available: {hint}"}
     ts, te = _f(timeline_start), _f(timeline_end)
     if te - ts < MIN_CLIP:
         return {"ok": False, "error": "overlay span too short"}

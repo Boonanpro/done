@@ -145,7 +145,8 @@ def timeline_outline(sequence: dict[str, Any], assets: dict[str, dict[str, Any]]
                 extra = " freeze"
             elif c.get("kind") == "image" or (a and str(a.get("kind")) == "image"):
                 extra = " image"
+            aid_tag = f" asset_id={aid}" if aid else ""
             lines.append(
-                f"  {c.get('id')}: {_f(c.get('timeline_start')):.2f}-{_f(c.get('timeline_end')):.2f} {what}{extra}"
+                f"  {c.get('id')}: {_f(c.get('timeline_start')):.2f}-{_f(c.get('timeline_end')):.2f} {what}{extra}{aid_tag}"
             )
     return "\n".join(lines)
