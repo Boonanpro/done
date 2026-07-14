@@ -292,6 +292,32 @@ def add_overlay(seq: dict[str, Any], assets: dict, *, asset_id: str, timeline_st
     return {"ok": True, "clip_id": cid}
 
 
+_CAPTION_STYLE_KEYS = {"font", "fontSize", "color", "outlineColor", "outlineWidth", "x", "y"}
+
+
+def _sanitize_caption_style(style: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The caption renderer uses RELATIVE units (fontSize ~1.0) and a fixed key set.
+    An agent once wrote fontSize:64 + strokeColor — the design renderer produced a
+    fully TRANSPARENT png and the caption silently vanished. Whitelist + clamp."""
+    if not isinstance(style, dict):
+        return None
+    out: dict[str, Any] = {}
+    for k, v in style.items():
+        if k not in _CAPTION_STYLE_KEYS:
+            continue
+        if k == "fontSize":
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if fv > 8.0:  # px指定と思われる値は相対単位へ換算（64px ≈ 1.0）
+                fv = fv / 64.0
+            out[k] = max(0.3, min(3.0, fv))
+        else:
+            out[k] = v
+    return out or None
+
+
 def add_caption(seq: dict[str, Any], *, text: str, timeline_start: float, timeline_end: float,
                 style: dict[str, Any] | None = None) -> dict[str, Any]:
     text = str(text or "").strip()
@@ -305,7 +331,7 @@ def add_caption(seq: dict[str, Any], *, text: str, timeline_start: float, timeli
     lane.setdefault("clips", []).append({
         "id": cid, "track": "caption", "text": text,
         "timeline_start": round(ts, 3), "timeline_end": round(te, 3),
-        **({"style": style} if isinstance(style, dict) else {}),
+        **({"style": _sanitize_caption_style(style)} if _sanitize_caption_style(style) else {}),
     })
     _sorted(lane)
     _recompute_duration(seq)
@@ -345,6 +371,7 @@ def set_clip(seq: dict[str, Any], *, clip_id: str, text: str | None = None,
             return {"ok": False, "error": "clip has no text field (not a caption)"}
         clip["text"] = str(text)
     if isinstance(style, dict):
+        style = _sanitize_caption_style(style) or {}
         merged = dict(clip.get("style") or {})
         merged.update(style)
         clip["style"] = merged

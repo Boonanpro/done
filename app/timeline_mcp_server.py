@@ -262,6 +262,16 @@ def _ensure_caption_png(text: str, style: dict | None) -> str | None:
             pass
     if not (png.exists() and png.stat().st_size > 0):
         return "テロップは追加済みですが、デザインPNGのレンダリングが未完了です（プレビューを開くと自動生成されます）"
+    try:
+        from PIL import Image
+        import numpy as np
+        a = np.asarray(Image.open(png).convert("RGBA"))
+        if int((a[:, :, 3] > 10).sum()) < 50:
+            png.unlink(missing_ok=True)
+            return ("警告: このスタイルではテロップが透明にレンダリングされました。"
+                    "styleを省略（既定デザイン）にするか、fontSizeは相対値(0.5〜2.0)で指定してください")
+    except Exception:  # noqa: BLE001
+        pass
     return None
 
 
