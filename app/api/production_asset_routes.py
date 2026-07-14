@@ -3360,6 +3360,7 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
                     room_id=room_id, content_id=content_id, job_id=job_id,
                     instruction=revision_text,
                     annotations=_agent_annotations(instruction),
+                    selected_clips=[c for c in (instruction.get("selected_clips") or []) if isinstance(c, dict)],
                     on_event=lambda e: _append_job_event(room_id, job_id, e),
                 )
                 if not agent_res.get("ok"):
