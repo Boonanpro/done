@@ -82,6 +82,7 @@ def run_timeline_agent(
     job_id: str,
     instruction: str,
     annotations: list[dict[str, Any]] | None = None,
+    selected_clips: list[dict[str, Any]] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
     model: str = "opus",
 ) -> dict[str, Any]:
@@ -118,7 +119,8 @@ def run_timeline_agent(
         )
         td.save_draft(draft)
         emit({"type": "status", "text": f"draft {draft['draft_id']} を作成（本番は無変更のまま作業します）"})
-        result = _run_session(room_id, content_id, job_id, draft, instruction, annotations or [], emit, model)
+        result = _run_session(room_id, content_id, job_id, draft, instruction, annotations or [],
+                              selected_clips or [], emit, model)
         return result
     finally:
         with _registry_lock:
@@ -126,7 +128,7 @@ def run_timeline_agent(
             _running_procs.pop(job_id, None)
 
 
-def _run_session(room_id, content_id, job_id, draft, instruction, annotations, emit, model) -> dict[str, Any]:
+def _run_session(room_id, content_id, job_id, draft, instruction, annotations, selected_clips, emit, model) -> dict[str, Any]:
     draft_id = draft["draft_id"]
     room_dir = td._room_dir(room_id)
     job_dir = room_dir / "drafts" / f"job_{job_id[:12]}"
@@ -158,8 +160,16 @@ def _run_session(room_id, content_id, job_id, draft, instruction, annotations, e
             f"注釈{i}: 時刻 {ann.get('t0')}〜{ann.get('t1')}s / 画面座標(正規化) "
             f"x={ann.get('x')}, y={ann.get('y')}, w={ann.get('width')}, h={ann.get('height')} / メモ: {ann.get('note') or ''}"
         )
+    sel_lines = []
+    for c in selected_clips:
+        desc = c.get("text") or c.get("asset") or c.get("lane") or ""
+        sel_lines.append(
+            f"- {c.get('id')} ({c.get('lane')}) {c.get('timeline_start')}〜{c.get('timeline_end')}s: {str(desc)[:60]}"
+        )
     prompt = (
         f"## 編集指示\n{instruction}\n\n"
+        + (("## ユーザーが選択したクリップ（この指示の対象。ここを中心に解釈すること）\n"
+            + "\n".join(sel_lines) + "\n\n") if sel_lines else "")
         + (("## 画面上の注釈（ユーザーが囲った場所）\n" + "\n".join(note_lines) + "\n\n") if note_lines else "")
         + f"## 現在のタイムライン構造\n{outline}\n\n"
         "上記の指示を実行してください。まず timeline_transcript と render_frame で内容を確認してから編集し、"
