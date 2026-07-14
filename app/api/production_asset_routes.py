@@ -1265,6 +1265,8 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     # --- regional blur / mosaic: effect-track clips + blur annotations (honor style) ---
     blur_specs: list[dict[str, Any]] = []
     for clip in effect_clips:
+        if clip.get("style") == "note":
+            continue  # 指示クリップ: 範囲情報の器であり画には出さない
         region = clip.get("region") if isinstance(clip.get("region"), dict) else {}
         blur_specs.append({
             "x": region.get("x"), "y": region.get("y"), "width": region.get("width"), "height": region.get("height"),

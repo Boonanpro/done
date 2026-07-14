@@ -103,6 +103,11 @@ def run_timeline_agent(
     draft = None
     try:
         draft = td.create_draft(room_id, content_id, job_id)
+        # 指示クリップ(style=note)は指示の器: 範囲はannotationsとして渡済みなので
+        # draftからは除去する（ネイティブ側の消費保存とのレースでも残らない）
+        for tr in draft["sequence"].get("tracks") or []:
+            tr["clips"] = [c for c in (tr.get("clips") or []) if c.get("style") != "note"]
+        td.save_draft(draft)
         emit({"type": "status", "text": f"draft {draft['draft_id']} を作成（本番は無変更のまま作業します）"})
         result = _run_session(room_id, content_id, job_id, draft, instruction, annotations or [], emit, model)
         return result
