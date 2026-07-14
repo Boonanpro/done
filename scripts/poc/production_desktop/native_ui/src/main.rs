@@ -870,6 +870,52 @@ fn compose(
                     used.push(p2);
                 }
             }
+        } else if let Some(aid) = c.asset_id.as_deref().filter(|a| doc.asset_images.contains(*a)) {
+            // STILL IMAGE clip (logo / generated CTA art): decode once into the still
+            // cache, draw CONTAIN-fitted (aspect preserved inside the box) with alpha —
+            // no decoder, no audio, identical semantics to the exporter's image branch.
+            let Some(path) = doc.originals.get(aid).cloned() else { continue };
+            let key = (format!("img:{aid}"), 0i64);
+            if comp.still_get(&key).is_none() {
+                if let Ok(bytes) = std::fs::read(&path) {
+                    if let Ok(img) = image::load_from_memory(&bytes) {
+                        let (ow, oh) = (img.width(), img.height());
+                        let long = ow.max(oh);
+                        let img = if long > 1920 {
+                            let sc = 1920.0 / long as f32;
+                            img.resize(
+                                ((ow as f32 * sc).round() as u32).max(2),
+                                ((oh as f32 * sc).round() as u32).max(2),
+                                image::imageops::FilterType::CatmullRom,
+                            )
+                        } else {
+                            img
+                        };
+                        let rgba = img.to_rgba8();
+                        let (w, h) = (rgba.width(), rgba.height());
+                        let _ = comp.still_put_rgba(d3d, key.clone(), w, h, rgba.as_raw());
+                    }
+                }
+            }
+            if let Some((tex, (iw, ih))) = comp.still_get(&key) {
+                // contain-fit inside the clip's display box, centered
+                let (bx, by, bw, bh) = (b.x, b.y, b.width, b.height);
+                let box_px_w = bw * CANVAS_W as f64;
+                let box_px_h = bh * CANVAS_H as f64;
+                let (mut dw, mut dh) = (bw, bh);
+                if iw > 0 && ih > 0 && box_px_w > 1.0 && box_px_h > 1.0 {
+                    let ia = iw as f64 / ih as f64;
+                    let ba = box_px_w / box_px_h;
+                    if ia > ba {
+                        dh = bh * (ba / ia);
+                    } else {
+                        dw = bw * (ia / ba);
+                    }
+                }
+                let dst = (bx + (bw - dw) / 2.0, by + (bh - dh) / 2.0, dw, dh);
+                let _ = comp.draw_alpha(d3d, &tex, (iw, ih), dst);
+            }
+            used.push(path);
         } else if let Some(aid) = c.asset_id.as_deref() {
             let path = doc.asset_path_q(aid, original);
             let mut src_t = c.src_at(t);
@@ -2429,6 +2475,10 @@ struct App {
     recut_busy: bool,
     revise_open: bool,
     revise_text: String,
+    /// ダンに指示の場所指定: プレビューを囲むモード / 囲んだ正規化矩形 / その時刻
+    revise_pick: bool,
+    revise_region: Option<(f64, f64, f64, f64)>,
+    revise_region_t: f64,
     doc: Arc<model::Doc>,
     shared: Arc<Shared>,
     selected: Vec<String>,
@@ -2601,6 +2651,9 @@ impl App {
             recut_busy: false,
             revise_open: false,
             revise_text: String::new(),
+            revise_pick: false,
+            revise_region: None,
+            revise_region_t: 0.0,
             doc,
             shared,
             selected: Vec::new(),
@@ -4982,7 +5035,14 @@ impl App {
                 "source_assets": source_assets,
                 "brief": timeline.get("brief").cloned().unwrap_or(serde_json::json!("")),
                 "revision_text": note,
-                "revision_regions": [],
+                "revision_regions": self.revise_region
+                    .map(|(rx, ry, rw, rh)| serde_json::json!([{
+                        "start": self.revise_region_t,
+                        "end": self.revise_region_t,
+                        "data": {"x": rx, "y": ry, "width": rw, "height": rh},
+                        "note": "ユーザーがプレビュー上で囲んだ場所",
+                    }]))
+                    .unwrap_or_else(|| serde_json::json!([])),
                 "workflow_preset": timeline.get("workflow_preset").cloned().unwrap_or(serde_json::json!("video_ugc")),
                 "timeline": tl,
             },
@@ -7737,7 +7797,45 @@ impl eframe::App for App {
                         let resp = ui
                             .add(egui::Image::new((tex.id(), size)))
                             .interact(egui::Sense::click_and_drag());
-                        if self.blur_mode {
+                        if self.revise_pick {
+                            // ダンに指示の◱: 囲んだ場所+今のフレーム時刻が指示に添付される
+                            let vid = egui::Rect::from_center_size(resp.rect.center(), size);
+                            let pp = ui.painter_at(vid);
+                            let col = egui::Color32::from_rgb(120, 170, 255);
+                            pp.rect_stroke(vid, 0.0, egui::Stroke::new(1.0, col));
+                            pp.text(
+                                egui::pos2(vid.center().x, vid.top() + 14.0),
+                                egui::Align2::CENTER_CENTER,
+                                "ダンに見せたい場所をドラッグで囲んでください",
+                                egui::FontId::proportional(13.0),
+                                col,
+                            );
+                            if resp.drag_started() {
+                                self.blur_drag = resp.interact_pointer_pos();
+                            }
+                            if let (Some(a), Some(p)) = (self.blur_drag, resp.interact_pointer_pos()) {
+                                let r = egui::Rect::from_two_pos(a, p);
+                                pp.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(120, 170, 255, 40));
+                                pp.rect_stroke(r, 0.0, egui::Stroke::new(1.5, col));
+                            }
+                            if resp.drag_stopped() {
+                                if let (Some(a), Some(p)) = (self.blur_drag.take(), resp.interact_pointer_pos()) {
+                                    let rr = egui::Rect::from_two_pos(a, p);
+                                    if rr.width() > 8.0 && rr.height() > 8.0 {
+                                        self.pause_at_displayed();
+                                        let fx = ((rr.left() - vid.left()) / vid.width()).clamp(0.0, 1.0) as f64;
+                                        let fy = ((rr.top() - vid.top()) / vid.height()).clamp(0.0, 1.0) as f64;
+                                        let fw = (rr.width() / vid.width()).min(1.0) as f64;
+                                        let fh = (rr.height() / vid.height()).min(1.0) as f64;
+                                        self.revise_region = Some((fx, fy, fw, fh));
+                                        self.revise_region_t = self.displayed_grid_t();
+                                        self.revise_pick = false;
+                                        self.revise_open = true;
+                                        self.toast("場所を指示に添付しました");
+                                    }
+                                }
+                            }
+                        } else if self.blur_mode {
                             let vid = egui::Rect::from_center_size(resp.rect.center(), size);
                             let pp = ui.painter_at(vid);
                             pp.rect_stroke(vid, 0.0, egui::Stroke::new(1.0, UI_ACCENT));
@@ -7849,6 +7947,30 @@ impl eframe::App for App {
                             .desired_width(f32::INFINITY)
                             .hint_text("例: 冒頭の自己紹介を短くして、テロップを大きめに"),
                     );
+                    ui.add_space(4.0);
+                    // 場所の指定: プレビューを囲むと「時刻+画面座標」がこの指示に添付される
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(self.revise_pick, "◱ 画面の場所を囲んで指定")
+                            .on_hover_text("プレビューをドラッグで囲む→その場所と時刻がダンに渡ります（『ここにロゴを出して』等）")
+                            .clicked()
+                        {
+                            self.revise_pick = !self.revise_pick;
+                        }
+                        if let Some((rx, ry, rw, rh)) = self.revise_region {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "添付: {:.1}秒 ({:.2},{:.2} {:.2}x{:.2})",
+                                    self.revise_region_t, rx, ry, rw, rh
+                                ))
+                                .small()
+                                .color(egui::Color32::from_rgb(120, 170, 255)),
+                            );
+                            if ui.small_button("解除").clicked() {
+                                self.revise_region = None;
+                            }
+                        }
+                    });
                     ui.add_space(4.0);
                     let can = !self.revise_text.trim().is_empty() && !self.lib.started;
                     if ui
@@ -8108,11 +8230,16 @@ fn main() -> eframe::Result<()> {
             let orig_q = std::env::var("NATIVE_DUMP_PROXY").map(|v| v.is_empty()).unwrap_or(true);
             compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, orig_q, false, true)
                 .context("compose")?;
-            let mut ppm = format!("P6\n{CANVAS_W} {CANVAS_H}\n255\n").into_bytes();
-            for px in comp.rgba.chunks(4) {
-                ppm.extend_from_slice(&px[..3]);
+            if out.to_lowercase().ends_with(".png") {
+                // PNG for consumers that read images (the agent's eyes)
+                image::save_buffer(&out, &comp.rgba, CANVAS_W, CANVAS_H, image::ColorType::Rgba8)?;
+            } else {
+                let mut ppm = format!("P6\n{CANVAS_W} {CANVAS_H}\n255\n").into_bytes();
+                for px in comp.rgba.chunks(4) {
+                    ppm.extend_from_slice(&px[..3]);
+                }
+                std::fs::write(&out, ppm)?;
             }
-            std::fs::write(&out, ppm)?;
             println!("dumped t={t} -> {out}");
             Ok(())
         })();
@@ -8332,6 +8459,66 @@ fn main() -> eframe::Result<()> {
     // same-track overlap (where structural), linked A/V pairs stay at 0ms offset, and no
     // clip goes negative. This is the regression net for the implicit-spec bugs
     // (single-voice audio, duplicate-overlap, ...) — run it after touching edits.rs.
+    // --validate-contents <contents.json> <asset_dir>: headless structural check of an
+    // arbitrary (draft) timeline — the editor's OWN invariants as a single source of
+    // truth for the agent pipeline. Prints one JSON line: {"ok":bool,"problems":[..]}
+    if args.iter().any(|a| a == "--validate-contents") {
+        let contents = positional_args(&args).first().cloned().unwrap_or_default();
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
+        let mut problems: Vec<String> = Vec::new();
+        match model::Doc::load(&contents, &dir) {
+            Err(e) => problems.push(format!("doc parse: {e:#}")),
+            Ok(doc) => {
+                for (ti, tr) in doc.seq.tracks.iter().enumerate() {
+                    for (i, a) in tr.clips.iter().enumerate() {
+                        if a.timeline_start < -1e-6 {
+                            problems.push(format!("{}: negative start {:.3}", a.id, a.timeline_start));
+                        }
+                        if a.timeline_end - a.timeline_start < 0.045 {
+                            problems.push(format!("{}: zero/negative length", a.id));
+                        }
+                        for b in tr.clips.iter().skip(i + 1) {
+                            if a.timeline_start < b.timeline_end - 0.002
+                                && b.timeline_start < a.timeline_end - 0.002
+                            {
+                                problems.push(format!(
+                                    "lane{ti} ({}): overlap {} x {}",
+                                    tr.kind, a.id, b.id
+                                ));
+                            }
+                        }
+                    }
+                }
+                let vids: Vec<&model::Clip> = doc
+                    .seq
+                    .tracks
+                    .iter()
+                    .filter(|t| t.kind != "audio")
+                    .flat_map(|t| t.clips.iter())
+                    .filter(|c| c.link_id.is_some() && c.asset_id.is_some())
+                    .collect();
+                for a in doc
+                    .seq
+                    .tracks
+                    .iter()
+                    .filter(|t| t.kind == "audio")
+                    .flat_map(|t| t.clips.iter())
+                    .filter(|c| c.link_id.is_some())
+                {
+                    if let Some(v) = vids.iter().find(|v| v.link_id == a.link_id) {
+                        let off = (v.source_start - v.timeline_start) - (a.source_start - a.timeline_start);
+                        if off.abs() > 0.002 {
+                            problems.push(format!("link {:?}: A/V offset {:.3}s", a.link_id, off));
+                        }
+                    }
+                }
+            }
+        }
+        let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+        let list = problems.iter().map(|p| format!("\"{}\"", esc(p))).collect::<Vec<_>>().join(",");
+        println!("{{\"ok\":{},\"problems\":[{}]}}", problems.is_empty(), list);
+        std::process::exit(0);
+    }
     if args.iter().any(|a| a == "--selftest-invariants") {
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
