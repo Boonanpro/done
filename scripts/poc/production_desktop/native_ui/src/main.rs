@@ -5059,14 +5059,45 @@ impl App {
                 "source_assets": source_assets,
                 "brief": timeline.get("brief").cloned().unwrap_or(serde_json::json!("")),
                 "revision_text": note,
-                "revision_regions": self.revise_region
-                    .map(|(rx, ry, rw, rh)| serde_json::json!([{
-                        "start": self.revise_region_t,
-                        "end": self.revise_region_t,
-                        "data": {"x": rx, "y": ry, "width": rw, "height": rh},
-                        "note": "ユーザーがプレビュー上で囲んだ場所",
-                    }]))
-                    .unwrap_or_else(|| serde_json::json!([])),
+                // 対象の明示: 選択中クリップ（この指示の主語）
+                "selected_clips": serde_json::Value::Array(
+                    self.doc
+                        .seq
+                        .tracks
+                        .iter()
+                        .flat_map(|tr| tr.clips.iter().map(move |c| (tr.kind.clone(), c)))
+                        .filter(|(_, c)| self.selected.contains(&c.id))
+                        .map(|(lane, c)| {
+                            serde_json::json!({
+                                "id": c.id,
+                                "lane": lane,
+                                "timeline_start": c.timeline_start,
+                                "timeline_end": c.timeline_end,
+                                "text": c.text,
+                                "asset": c.asset_id.as_ref().and_then(|a| self.doc.asset_names.get(a)),
+                            })
+                        })
+                        .collect(),
+                ),
+                // 指示クリップ(style=note): クリップの頭〜尻=時間範囲・矩形=場所
+                "revision_regions": serde_json::Value::Array(
+                    self.doc
+                        .seq
+                        .tracks
+                        .iter()
+                        .flat_map(|tr| tr.clips.iter())
+                        .filter(|c| c.style.as_ref().and_then(|v| v.as_str()) == Some("note"))
+                        .filter_map(|c| {
+                            let (rx, ry, rw, rh) = c.region_xywh()?;
+                            Some(serde_json::json!({
+                                "start": c.timeline_start,
+                                "end": c.timeline_end,
+                                "data": {"x": rx, "y": ry, "width": rw, "height": rh},
+                                "note": "ユーザーがタイムラインに置いた指示クリップの範囲",
+                            }))
+                        })
+                        .collect(),
+                ),
                 "workflow_preset": timeline.get("workflow_preset").cloned().unwrap_or(serde_json::json!("video_ugc")),
                 "timeline": tl,
             },
@@ -7260,6 +7291,22 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // IME変換の確定Enterがそのまま改行として入る（egui 0.29のIMEリーク）。
+        // このフレームにIMEイベントがある間はEnter/改行テキストを握り潰す —
+        // 確定済みテキストで押す普通のEnterはIMEイベントが無いので通る
+        ctx.input_mut(|i| {
+            let ime_active = i.events.iter().any(|e| matches!(e, egui::Event::Ime(_)));
+            if ime_active {
+                i.events.retain(|e| {
+                    let enter_key = matches!(
+                        e,
+                        egui::Event::Key { key: egui::Key::Enter, pressed: true, .. }
+                    );
+                    let newline_text = matches!(e, egui::Event::Text(t) if t == "\n" || t == "\r" || t == "\r\n");
+                    !(enter_key || newline_text)
+                });
+            }
+        });
         self.absorb_lib();
         if self.screen == Screen::Library {
             self.library_ui(ctx);
@@ -8020,6 +8067,15 @@ impl eframe::App for App {
                                     .small()
                                     .color(egui::Color32::from_rgb(150, 110, 220)),
                             );
+                        }
+                        let n_sel = self.selected.len();
+                        if n_sel > 0 {
+                            ui.label(
+                                egui::RichText::new(format!("🎯 選択中のクリップ {n_sel}個を対象として添付"))
+                                    .small()
+                                    .color(egui::Color32::from_rgb(120, 200, 150)),
+                            )
+                            .on_hover_text("いま選択しているクリップが「この指示の対象」としてダンに渡ります");
                         }
                     });
                     ui.add_space(4.0);
