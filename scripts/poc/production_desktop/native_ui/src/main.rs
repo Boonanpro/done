@@ -1019,6 +1019,9 @@ fn compose(
             }
             if let Some(rg) = c.region_at(t_fx) {
                 let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+                if style == "note" {
+                    continue; // 指示クリップ: 画には何も描かない（範囲情報の器）
+                }
                 let is_mosaic = style.contains("mosaic");
                 // SAM tracked blur: the baked mask video (blur-cache/{key}.mask.mp4)
                 // follows the object; blur = soft haze weighted by the mask frame.
@@ -4171,6 +4174,27 @@ impl App {
                 );
                 ui.separator();
                 // ---- region effect (blur/mosaic) ----
+                if !multi && clip.region.is_some() && clip.asset_id.is_none()
+                    && clip.style.as_ref().and_then(|v| v.as_str()) == Some("note")
+                {
+                    // 指示クリップ: クリップの頭〜尻がAI作業の時間範囲、矩形が場所
+                    ui.label(egui::RichText::new("📝 指示クリップ").strong());
+                    ui.label(
+                        egui::RichText::new(
+                            "「ダンに指示」送信時にこの範囲（時間=クリップの長さ・場所=矩形）が指示に添付され、クリップは消費されます。長さ・位置は普通のクリップとして調整できます",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    ui.add_space(6.0);
+                    if ui.button("🗑 この指示クリップを削除").clicked() {
+                        let cid = vec![id.clone()];
+                        self.apply_edit(true, move |raw| edits::delete_clips(raw, &cid));
+                        self.selected.clear();
+                        self.push_req(false);
+                    }
+                    return;
+                }
                 if !multi && clip.region.is_some() && clip.asset_id.is_none() {
                     ui.label(egui::RichText::new("種類").strong());
                     let cur = clip.style.as_ref().and_then(|v| v.as_str()).unwrap_or("mosaic").to_string();
@@ -5053,6 +5077,20 @@ impl App {
         self.lib.started = true;
         self.lib.events = vec!["ダンに指示を送っています…".into()];
         self.lib_post("gen_job", "/api/v1/production-assets/jobs".into(), body);
+        // 指示クリップは送信で消費される（範囲はジョブに引き渡し済み）
+        let note_ids: Vec<String> = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| c.style.as_ref().and_then(|v| v.as_str()) == Some("note"))
+            .map(|c| c.id.clone())
+            .collect();
+        if !note_ids.is_empty() {
+            self.apply_edit(true, move |raw| edits::delete_clips(raw, &note_ids));
+            self.push_req(false);
+        }
     }
 
     fn start_generation(&mut self) {
@@ -6006,7 +6044,9 @@ impl App {
                 // color = what the CLIP IS, never which lane it sits on (region clips
                 // can live on any lane and used to change color when moved between
                 // lanes). State dressing (bake veil etc.) stays separate below.
-                let color = if c.region.is_some() && c.asset_id.is_none() {
+                let color = if c.style.as_ref().and_then(|v| v.as_str()) == Some("note") {
+                    egui::Color32::from_rgb(150, 110, 220) // 指示クリップ
+                } else if c.region.is_some() && c.asset_id.is_none() {
                     egui::Color32::from_rgb(0, 150, 160) // blur / mosaic
                 } else if tr.kind == "audio" {
                     egui::Color32::from_rgb(70, 160, 90)
@@ -6074,7 +6114,7 @@ impl App {
                         p.text(
                             egui::pos2(r.left() + 6.0, r.center().y),
                             egui::Align2::LEFT_CENTER,
-                            if style.contains("mosaic") { "モザイク" } else { "ぼかし" },
+                            if style == "note" { "📝 指示" } else if style.contains("mosaic") { "モザイク" } else { "ぼかし" },
                             egui::FontId::proportional(10.0),
                             egui::Color32::from_gray(220),
                         );
@@ -7827,11 +7867,18 @@ impl eframe::App for App {
                                         let fy = ((rr.top() - vid.top()) / vid.height()).clamp(0.0, 1.0) as f64;
                                         let fw = (rr.width() / vid.width()).min(1.0) as f64;
                                         let fh = (rr.height() / vid.height()).min(1.0) as f64;
-                                        self.revise_region = Some((fx, fy, fw, fh));
-                                        self.revise_region_t = self.displayed_grid_t();
+                                        // 指示クリップ: クリップの頭と尻がそのままAI作業の時間範囲。
+                                        // 普通のクリップとして移動/トリムでき、送信時に消費される
+                                        let t0 = self.displayed_grid_t();
+                                        let salt = self.salt;
+                                        self.salt += 1;
+                                        self.apply_edit(true, move |raw| {
+                                            edits::add_effect_clip(raw, t0, 3.0, (fx, fy, fw, fh), "note", salt)
+                                        });
+                                        self.push_req(false);
                                         self.revise_pick = false;
                                         self.revise_open = true;
-                                        self.toast("場所を指示に添付しました");
+                                        self.toast("指示クリップを置きました（長さ/位置は普通のクリップとして調整可）");
                                     }
                                 }
                             }
@@ -7948,27 +7995,31 @@ impl eframe::App for App {
                             .hint_text("例: 冒頭の自己紹介を短くして、テロップを大きめに"),
                     );
                     ui.add_space(4.0);
-                    // 場所の指定: プレビューを囲むと「時刻+画面座標」がこの指示に添付される
+                    // 場所の指定: プレビューを囲むと「指示クリップ」がタイムラインに生まれ、
+                    // クリップの頭〜尻がAI作業の時間範囲・矩形が場所になる（送信時に消費）
                     ui.horizontal(|ui| {
                         if ui
-                            .selectable_label(self.revise_pick, "◱ 画面の場所を囲んで指定")
-                            .on_hover_text("プレビューをドラッグで囲む→その場所と時刻がダンに渡ります（『ここにロゴを出して』等）")
+                            .selectable_label(self.revise_pick, "◱ 場所を囲んで指示クリップを置く")
+                            .on_hover_text("プレビューをドラッグで囲む→指示クリップがタイムラインに置かれます。
+長さ=作業の時間範囲・矩形=場所。普通のクリップとして調整可、送信時に消費")
                             .clicked()
                         {
                             self.revise_pick = !self.revise_pick;
                         }
-                        if let Some((rx, ry, rw, rh)) = self.revise_region {
+                        let n_notes = self
+                            .doc
+                            .seq
+                            .tracks
+                            .iter()
+                            .flat_map(|tr| tr.clips.iter())
+                            .filter(|c| c.style.as_ref().and_then(|v| v.as_str()) == Some("note"))
+                            .count();
+                        if n_notes > 0 {
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "添付: {:.1}秒 ({:.2},{:.2} {:.2}x{:.2})",
-                                    self.revise_region_t, rx, ry, rw, rh
-                                ))
-                                .small()
-                                .color(egui::Color32::from_rgb(120, 170, 255)),
+                                egui::RichText::new(format!("📝 指示クリップ {n_notes}個を添付"))
+                                    .small()
+                                    .color(egui::Color32::from_rgb(150, 110, 220)),
                             );
-                            if ui.small_button("解除").clicked() {
-                                self.revise_region = None;
-                            }
                         }
                     });
                     ui.add_space(4.0);
