@@ -8317,10 +8317,14 @@ fn main() -> eframe::Result<()> {
         }
         std::process::exit(0);
     }
-    // --dump-frame <t> <out.ppm>: headless compose of one timeline frame — deterministic
-    // A/B verification (live matte path vs pv fallback) with no window and no user input
+    // --dump-frame <t[,t2,t3...]> <out.ppm|png>: headless compose of timeline frames —
+    // deterministic A/B verification with no window and no user input. Multiple
+    // comma-separated times share ONE engine setup (doc/D3D/decoders), so a batch of
+    // N frames costs far less than N separate spawns; outputs get ".{k}" before the
+    // extension when more than one time is given.
     if let Some(i) = args.iter().position(|a| a == "--dump-frame") {
-        let t: f64 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let tspec = args.get(i + 1).cloned().unwrap_or_else(|| "0".into());
+        let ts: Vec<f64> = tspec.split(',').filter_map(|v| v.trim().parse().ok()).collect();
         let out = args.get(i + 2).cloned().unwrap_or_else(|| "frame.ppm".into());
         let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
         let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
@@ -8335,19 +8339,29 @@ fn main() -> eframe::Result<()> {
             let mut pts_maps: PtsMap = Default::default();
             while pts_load_pass(&doc, &mut pts_maps) {}
             let orig_q = std::env::var("NATIVE_DUMP_PROXY").map(|v| v.is_empty()).unwrap_or(true);
-            compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, orig_q, false, true)
-                .context("compose")?;
-            if out.to_lowercase().ends_with(".png") {
-                // PNG for consumers that read images (the agent's eyes)
-                image::save_buffer(&out, &comp.rgba, CANVAS_W, CANVAS_H, image::ColorType::Rgba8)?;
-            } else {
-                let mut ppm = format!("P6\n{CANVAS_W} {CANVAS_H}\n255\n").into_bytes();
-                for px in comp.rgba.chunks(4) {
-                    ppm.extend_from_slice(&px[..3]);
+            for (k, &t) in ts.iter().enumerate() {
+                compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, orig_q, false, true)
+                    .context("compose")?;
+                let path = if ts.len() == 1 {
+                    out.clone()
+                } else {
+                    match out.rfind('.') {
+                        Some(dot) => format!("{}.{}{}", &out[..dot], k, &out[dot..]),
+                        None => format!("{out}.{k}"),
+                    }
+                };
+                if path.to_lowercase().ends_with(".png") {
+                    // PNG for consumers that read images (the agent's eyes)
+                    image::save_buffer(&path, &comp.rgba, CANVAS_W, CANVAS_H, image::ColorType::Rgba8)?;
+                } else {
+                    let mut ppm = format!("P6\n{CANVAS_W} {CANVAS_H}\n255\n").into_bytes();
+                    for px in comp.rgba.chunks(4) {
+                        ppm.extend_from_slice(&px[..3]);
+                    }
+                    std::fs::write(&path, ppm)?;
                 }
-                std::fs::write(&out, ppm)?;
+                println!("dumped t={t} -> {path}");
             }
-            println!("dumped t={t} -> {out}");
             Ok(())
         })();
         if let Err(e) = r {

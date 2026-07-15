@@ -13,7 +13,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-NATIVE_EXE_DEFAULT = r"D:\done-desktop\scripts\poc\production_desktop\native_ui\target\release\native_ui.exe"
+_NATIVE_DIR = r"D:\done-desktop\scripts\poc\production_desktop\native_ui\target\release"
+
+
+def native_exe_default() -> str:
+    """Prefer the headless copy: the editor holds native_ui.exe open (so deploys
+    can't replace it while a session runs), but native_ui_headless.exe is only used
+    by short-lived dump/validate processes and can always be updated."""
+    headless = os.path.join(_NATIVE_DIR, "native_ui_headless.exe")
+    return headless if os.path.exists(headless) else os.path.join(_NATIVE_DIR, "native_ui.exe")
 
 
 def _f(v: Any, default: float = 0.0) -> float:
@@ -95,35 +103,51 @@ def timeline_transcript(sequence: dict[str, Any], analyses: dict[str, dict[str, 
     return kept
 
 
-def render_timeline_frame(sequence: dict[str, Any], asset_dir: str, t: float,
-                          out_dir: str | None = None) -> dict[str, Any]:
-    """Composite the DRAFT at timeline time t via the native engine; returns
-    {ok, path|error}. The PNG is written into out_dir (default: temp)."""
-    exe = os.environ.get("NATIVE_UI_EXE", NATIVE_EXE_DEFAULT)
+def render_timeline_frames(sequence: dict[str, Any], asset_dir: str, ts: list[float],
+                           out_dir: str | None = None) -> dict[str, Any]:
+    """Composite the DRAFT at several timeline times in ONE native engine spawn
+    (engine setup + decoder opens amortize across the batch — a batch of 5 costs
+    little more than a single frame). Returns {ok, paths|error} with paths in the
+    same order as ts."""
+    exe = os.environ.get("NATIVE_UI_EXE") or native_exe_default()
     if not Path(exe).exists():
         return {"ok": False, "error": f"native engine not found: {exe}"}
+    ts = [float(t) for t in ts][:12] or [0.0]
     odir = Path(out_dir) if out_dir else Path(tempfile.gettempdir())
     odir.mkdir(parents=True, exist_ok=True)
-    png = odir / f"frame_{int(t * 1000)}_{int(time.time() * 1000) % 100000}.png"
+    stem = odir / f"frame_{int(ts[0] * 1000)}_{int(time.time() * 1000) % 100000}"
+    png = Path(f"{stem}.png")
+    tspec = ",".join(f"{t:.3f}" for t in ts)
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
         json.dump([{"title": "draft-frame", "timeline": {"sequence": sequence}}], f, ensure_ascii=False)
         tmp = f.name
     try:
         r = subprocess.run(
-            [exe, tmp, asset_dir, "--dump-frame", f"{t:.3f}", str(png)],
-            capture_output=True, text=True, timeout=180,
+            [exe, tmp, asset_dir, "--dump-frame", tspec, str(png)],
+            capture_output=True, text=True, timeout=180 + 30 * len(ts),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        if png.exists() and png.stat().st_size > 0:
-            return {"ok": True, "path": str(png)}
+        paths = [png] if len(ts) == 1 else [Path(f"{stem}.{k}.png") for k in range(len(ts))]
+        if all(p.exists() and p.stat().st_size > 0 for p in paths):
+            return {"ok": True, "paths": [str(p) for p in paths]}
         return {"ok": False, "error": (r.stdout or "")[-400:] + (r.stderr or "")[-400:]}
     except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "frame render timeout (180s)"}
+        return {"ok": False, "error": "frame render timeout"}
     finally:
         try:
             os.unlink(tmp)
         except OSError:
             pass
+
+
+def render_timeline_frame(sequence: dict[str, Any], asset_dir: str, t: float,
+                          out_dir: str | None = None) -> dict[str, Any]:
+    """Composite the DRAFT at timeline time t via the native engine; returns
+    {ok, path|error}. The PNG is written into out_dir (default: temp)."""
+    res = render_timeline_frames(sequence, asset_dir, [t], out_dir=out_dir)
+    if res.get("ok"):
+        return {"ok": True, "path": res["paths"][0]}
+    return res
 
 
 def timeline_outline(sequence: dict[str, Any], assets: dict[str, dict[str, Any]]) -> str:
