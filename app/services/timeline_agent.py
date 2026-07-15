@@ -90,6 +90,7 @@ def _system_prompt() -> str:
         "使える能力:\n"
         "- WebSearch / WebFetch: 実在のブランド・ロゴ・事実の調査。本物が必要なら探すこと（想像で似せない）。\n"
         "- import_image: Webや手元の実画像を素材として取り込む。generate_image は実在しないアートの生成用。\n"
+        "- watch_video: 範囲を指定して映像を動画として視聴（動き・テンポ・話し方・音）。静止画で判断できない時に使う。\n"
         "- Read / Glob / Grep: ~/.dan/workspace/MEMORY.md（あなたの長期記憶の索引）、"
         "D:\\done\\frontend\\src\\app\\artifacts\\（制作した成果物）などを自由に読める。\n"
         "\n"
@@ -249,7 +250,7 @@ def _run_session(room_id, content_id, job_id, draft, instruction, annotations, s
                         emit({"type": "text", "text": blk["text"][:2000]})
                     elif blk.get("type") == "tool_use":
                         emit({"type": "tool_use", "name": blk.get("name"),
-                              "text": json.dumps(blk.get("input") or {}, ensure_ascii=False)[:500]})
+                              "text": _describe_tool(str(blk.get("name") or ""), blk.get("input") or {})})
             elif et == "result":
                 if ev.get("result"):
                     summary_chunks.append(str(ev.get("result")))
@@ -296,6 +297,76 @@ def _run_session(room_id, content_id, job_id, draft, instruction, annotations, s
         _gc(room_id, draft_id)
     return {"ok": res["ok"], "committed": res["ok"], "conflict": bool(res.get("conflict")),
             "problems": res["problems"], "summary": "\n".join(summary_chunks[-3:]), "draft_id": draft_id}
+
+
+def _describe_tool(name: str, a: dict[str, Any]) -> str:
+    """Progress-log line for a tool call, in the user's language — the raw JSON
+    args were unreadable and hid whether the agent was doing sensible work."""
+    n = name.removeprefix("mcp__timeline__")
+
+    def _t(v: Any) -> str:
+        try:
+            return f"{float(v):.1f}"
+        except (TypeError, ValueError):
+            return "?"
+
+    def _span() -> str:
+        return f"{_t(a.get('timeline_start'))}〜{_t(a.get('timeline_end'))}秒"
+
+    try:
+        if n == "timeline_outline":
+            return "📋 タイムライン構造を確認"
+        if n == "timeline_transcript":
+            if a.get("t0") is not None or a.get("t1") is not None:
+                return f"🗣 発話内容を読む（{_t(a.get('t0'))}〜{_t(a.get('t1'))}秒）"
+            return "🗣 発話内容を読む（全体）"
+        if n == "render_frame":
+            ts = a.get("ts") or ([a.get("t")] if a.get("t") is not None else [])
+            return "🖼 フレーム確認 t=" + ", ".join(_t(v) for v in ts) + "秒"
+        if n == "list_assets":
+            return "🗂 素材一覧を確認"
+        if n == "generate_image":
+            return f"🎨 画像を生成:「{str(a.get('prompt') or '')[:60]}…」"
+        if n == "import_image":
+            src = str(a.get("url") or "")
+            src = src if len(src) <= 80 else src[:77] + "..."
+            return f"📥 実画像を取り込み: {a.get('name') or src}"
+        if n == "append_clip":
+            return f"➕ クリップ追加 素材={a.get('asset_id')} {_t(a.get('duration'))}秒"
+        if n == "insert_clip":
+            return f"➕ クリップ挿入 素材={a.get('asset_id')} at {_t(a.get('at'))}秒"
+        if n == "remove_clip":
+            return f"🗑 クリップ削除 {a.get('clip_id')}"
+        if n == "trim_clip":
+            return f"✂ トリム {a.get('clip_id')}"
+        if n == "move_clip":
+            return f"↔ クリップ移動 {a.get('clip_id')}"
+        if n == "add_overlay":
+            return f"🖼 オーバーレイ配置 素材={a.get('asset_id')} {_span()}"
+        if n == "add_caption":
+            return f"📝 テロップ追加 {_span()}「{str(a.get('text') or '')[:40]}」"
+        if n == "insert_freeze":
+            return f"⏸ フリーズ挿入 {_t(a.get('timeline_start'))}秒から{_t(a.get('duration'))}秒"
+        if n == "set_clip":
+            body = f"「{str(a.get('text'))[:40]}」" if a.get("text") else "スタイル変更"
+            return f"✏ クリップ変更 {a.get('clip_id')} {body}"
+        if n == "validate_draft":
+            return "✅ 検証を実行"
+        if n == "watch_video":
+            return f"🎬 映像を視聴 {_t(a.get('t0'))}〜{_t(a.get('t1'))}秒（動き・音声込み）"
+        if n == "ToolSearch":
+            return "🔧 ツールを読み込み"
+        if n == "WebSearch":
+            return f"🌐 Web検索:「{str(a.get('query') or '')[:60]}」"
+        if n == "WebFetch":
+            return f"🌐 ページを読む: {str(a.get('url') or '')[:80]}"
+        if n == "Read":
+            return f"📖 ファイルを読む: {str(a.get('file_path') or '')[-60:]}"
+        if n in ("Glob", "Grep"):
+            return f"🔎 検索: {str(a.get('pattern') or '')[:60]}"
+    except Exception:  # noqa: BLE001
+        pass
+    return f"{n} {json.dumps(a, ensure_ascii=False)[:200]}"
 
 
 def _read_assets_file(room_dir: Path) -> list[dict[str, Any]]:
