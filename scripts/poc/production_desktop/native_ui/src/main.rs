@@ -13,6 +13,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod compositor;
+mod caption_live;
 mod edits;
 mod media;
 mod model;
@@ -46,6 +47,48 @@ struct Req {
 /// BLUR jump diagnostics: while true, compose logs the base layer's landed source frame
 /// and the producer logs cache/live serve decisions (armed around ◱ interactions).
 static BLUR_DBG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[link(name = "user32")]
+extern "system" {
+    fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+    fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
+    fn GetParent(hwnd: isize) -> isize;
+    fn EnumChildWindows(
+        hwnd: isize,
+        callback: Option<unsafe extern "system" fn(isize, isize) -> i32>,
+        param: isize,
+    ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn make_caption_hwnd_click_through(hwnd: isize, _param: isize) -> i32 {
+    const GWL_EXSTYLE: i32 = -20;
+    const WS_EX_TRANSPARENT: isize = 0x0000_0020;
+    const WS_EX_NOACTIVATE: isize = 0x0800_0000;
+    let old = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    SetWindowLongPtrW(
+        hwnd,
+        GWL_EXSTYLE,
+        old | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+    );
+    1
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn make_caption_window_tree_click_through(hwnd: isize) {
+    // Eframe/winit normally clips painting beneath child HWNDs. A transparent WebView2
+    // needs the parent to keep painting the video behind it (wry's wgpu example uses
+    // WindowAttributesExtWindows::with_clip_children(false) for the same reason).
+    const GWL_STYLE: i32 = -16;
+    const WS_CLIPCHILDREN: isize = 0x0200_0000;
+    let parent = GetParent(hwnd);
+    if parent != 0 {
+        let style = GetWindowLongPtrW(parent, GWL_STYLE);
+        SetWindowLongPtrW(parent, GWL_STYLE, style & !WS_CLIPCHILDREN);
+    }
+    make_caption_hwnd_click_through(hwnd, 0);
+    EnumChildWindows(hwnd, Some(make_caption_hwnd_click_through), 0);
+}
 
 struct FrameOut {
     rgba: Vec<u8>,
@@ -211,7 +254,7 @@ fn audio_thread(shared: Arc<Shared>) {
 enum Drag {
     None,
     Scrub,
-    Move { ids: Vec<String>, grab: f64, orig: f64, applied: f64 },
+    Move { ids: Vec<String>, anchor_id: String, grab: f64, orig: f64, applied: f64 },
     Trim { ids: Vec<String>, left: bool, last_t: f64 },
     Marquee { anchor: egui::Pos2 },
     Volume { ids: Vec<String>, start_y: f32, start_vol: f64 },
@@ -1104,28 +1147,9 @@ fn compose(
             }
         }
     }
-    for tr in doc.seq.tracks.iter().filter(|tr| tr.kind == "caption" && !tr.hidden) {
-        for c in &tr.clips {
-            if t < c.timeline_start || t >= c.timeline_end {
-                continue;
-            }
-            let Some(text) = c.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
-                continue;
-            };
-            let style = c.style.as_ref().unwrap_or(&serde_json::Value::Null);
-            let key = caption_cache_key(c, text, style);
-            let Some((tex, wh, dst, cached_font_size)) = (if let Some(x) = comp.caption_get(&key) {
-                Some(x)
-            } else {
-                ensure_caption_texture_from_doc(doc, d3d, comp, c)?;
-                comp.caption_get(&key).or_else(|| comp.caption_get_for_clip(&c.id))
-            }) else {
-                continue;
-            };
-            let dst = caption_runtime_dst(c, dst, cached_font_size);
-            comp.draw_alpha(d3d, &tex, wh, dst)?;
-        }
-    }
+    // Captions are intentionally absent from the native video texture. The transparent
+    // WebView2 overlay renders the exact React CaptionLayer used by export, so preview and
+    // output share one implementation instead of two nearly-matching rasterizers.
     _ms_ov = _t.elapsed().as_secs_f64() * 1000.0;
     let _t = Instant::now();
     if exact_rb {
@@ -1265,85 +1289,6 @@ fn crop_alpha_rgba(rgba: &image::RgbaImage) -> Option<(Vec<u8>, u32, u32, (u32, 
         out[dst..dst + (cw * 4) as usize].copy_from_slice(&rgba.as_raw()[src..src + (cw * 4) as usize]);
     }
     Some((out, cw, ch, (min_x, min_y, cw, ch)))
-}
-
-fn ensure_caption_texture_from_doc(
-    doc: &model::Doc,
-    d3d: &media::D3d,
-    comp: &mut compositor::Compositor,
-    c: &model::Clip,
-) -> anyhow::Result<()> {
-    let Some(text) = c.text.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok(());
-    };
-    let style = c.style.as_ref().unwrap_or(&serde_json::Value::Null);
-    let key = caption_cache_key(c, text, style);
-    if comp.caption_get(&key).is_some() {
-        return Ok(());
-    }
-    let cache_dir = std::path::Path::new(&doc.asset_dir).join("caption-cache");
-    let mut png = cache_dir.join(format!("{key}.png"));
-    let mut legacy_positioned = false;
-    if !png.exists() || std::fs::metadata(&png).map(|m| m.len() == 0).unwrap_or(true) {
-        let legacy = caption_legacy_cache_key(c, text, style);
-        let legacy_png = cache_dir.join(format!("{legacy}.png"));
-        if !legacy_png.exists() || std::fs::metadata(&legacy_png).map(|m| m.len() == 0).unwrap_or(true) {
-            if let Some((fallback_key, fallback_font_size)) = caption_fallbacks()
-                .lock()
-                .ok()
-                .and_then(|m| m.get(&c.id).cloned())
-            {
-                let fallback_png = cache_dir.join(format!("{fallback_key}.png"));
-                if fallback_png.exists() && std::fs::metadata(&fallback_png).map(|m| m.len() > 0).unwrap_or(false) {
-                    let img = image::open(&fallback_png)?;
-                    let rgba = img.to_rgba8();
-                    let Some((cropped, cw, ch, (x, y, bw, bh))) = crop_alpha_rgba(&rgba) else {
-                        return Ok(());
-                    };
-                    let base_dst = (
-                        x as f64 / rgba.width() as f64,
-                        y as f64 / rgba.height() as f64,
-                        bw as f64 / rgba.width() as f64,
-                        bh as f64 / rgba.height() as f64,
-                    );
-                    return comp.caption_put_rgba(
-                        d3d,
-                        fallback_key,
-                        &c.id,
-                        cw,
-                        ch,
-                        &cropped,
-                        base_dst,
-                        fallback_font_size.max(0.05),
-                    );
-                }
-            }
-            return Ok(());
-        }
-        png = legacy_png;
-        legacy_positioned = true;
-    }
-    if !png.exists() || std::fs::metadata(&png).map(|m| m.len() == 0).unwrap_or(true) {
-        return Ok(());
-    }
-    let img = image::open(&png)?;
-    let rgba = img.to_rgba8();
-    let Some((cropped, cw, ch, (x, y, bw, bh))) = crop_alpha_rgba(&rgba) else {
-        return Ok(());
-    };
-    let mut base_dst = (
-        x as f64 / rgba.width() as f64,
-        y as f64 / rgba.height() as f64,
-        bw as f64 / rgba.width() as f64,
-        bh as f64 / rgba.height() as f64,
-    );
-    if legacy_positioned {
-        let y_frac = caption_style_num(style, "y", 0.08).clamp(0.0, 0.92);
-        base_dst.1 += y_frac - 0.08;
-        base_dst.0 -= caption_style_num(style, "x", 0.0);
-    }
-    let font_size = caption_style_num(style, "fontSize", 1.0).max(0.05);
-    comp.caption_put_rgba(d3d, key, &c.id, cw, ch, &cropped, base_dst, font_size)
 }
 
 /// Pre-seek decoders for clips starting soon so entering them costs nothing.
@@ -1621,6 +1566,38 @@ fn probe_frame_rate(path: &str) -> Option<f64> {
         let denominator = packed as u32;
         (numerator > 0 && denominator > 0).then_some(numerator as f64 / denominator as f64)
     }
+}
+
+fn probe_has_audio(path: &str) -> bool {
+    use windows::core::PCWSTR;
+    use windows::Win32::Media::MediaFoundation::*;
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        );
+        let _ = MFStartup(MF_VERSION, MFSTARTUP_FULL);
+        let w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        MFCreateSourceReaderFromURL(PCWSTR(w.as_ptr()), None)
+            .ok()
+            .and_then(|reader| reader.GetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32).ok())
+            .is_some()
+    }
+}
+
+fn is_image_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif"
+    )
+}
+
+fn is_timeline_media_path(path: &std::path::Path) -> bool {
+    is_image_path(path)
+        || matches!(
+            path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),
+            "mp4" | "mov" | "mkv" | "webm" | "m4v"
+        )
 }
 
 const TIMELINE_FPS_CHOICES: [f64; 8] = [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0];
@@ -2471,6 +2448,10 @@ struct App {
     cap_probe: std::collections::HashMap<String, Instant>, // key -> last disk check
     cap_sig: u64,
     cap_req_ids: Vec<String>,
+    caption_web: Option<wry::WebView>,
+    caption_web_ready: Arc<std::sync::atomic::AtomicBool>,
+    caption_web_sig: u64,
+    caption_web_t: f64,
     recut_open: bool,
     recut_thresh: f32,
     recut_lead: f32,
@@ -2485,6 +2466,8 @@ struct App {
     doc: Arc<model::Doc>,
     shared: Arc<Shared>,
     selected: Vec<String>,
+    /// Asset currently being dragged from the editor's media menu toward the timeline.
+    asset_drag: Option<serde_json::Value>,
     drag: Drag,
     undo: Vec<serde_json::Value>,
     // armed at gesture start (press/drag), committed to `undo` by the FIRST real edit.
@@ -2515,7 +2498,8 @@ struct App {
     hover_lane: Option<usize>,
     /// preview inspector: (clip ids with start boxes, drag kind, pointer at start, primary box)
     inspect_drag: Option<(Vec<(String, model::Pos)>, u8, egui::Pos2, model::Pos)>,
-    caption_edit: Option<(String, String)>,
+    // clip id, live edit buffer, pre-edit document (restored on Cancel)
+    caption_edit: Option<(String, String, serde_json::Value)>,
     lane_reorder: Option<usize>,
     export_result: std::sync::Arc<Mutex<Option<Result<serde_json::Value, String>>>>,
     export_job: Option<String>,
@@ -2647,6 +2631,10 @@ impl App {
             cap_probe: Default::default(),
             cap_sig: 0,
             cap_req_ids: Vec::new(),
+            caption_web: None,
+            caption_web_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            caption_web_sig: 0,
+            caption_web_t: f64::NAN,
             recut_open: false,
             recut_thresh: 0.45,
             recut_lead: 0.06,
@@ -2660,6 +2648,7 @@ impl App {
             doc,
             shared,
             selected: Vec::new(),
+            asset_drag: None,
             drag: Drag::None,
             undo: Vec::new(),
             pending_undo: None,
@@ -2902,77 +2891,62 @@ impl App {
         best
     }
 
-    /// Register a dropped file as an asset (assets.json) and insert a linked A/V clip pair
-    /// at the playhead on the first video/audio tracks.
+    /// Register a dropped file as an asset and insert it at the playhead on the first
+    /// visual lane. Exact timeline drops use `import_file_at` below.
     fn import_file(&mut self, p: &std::path::Path) -> anyhow::Result<()> {
+        let target = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .position(|tr| tr.kind != "audio")
+            .unwrap_or(0);
+        self.import_file_at(p, self.t, target)
+    }
+
+    fn import_file_at(&mut self, p: &std::path::Path, t: f64, target: usize) -> anyhow::Result<()> {
         let path = p.to_string_lossy().replace(char::from(92), "/");
         self.salt += 1;
         let id = format!("nat{}_{}", self.salt, std::process::id());
+        let salt = self.salt;
+        let image = is_image_path(p);
         // asset duration via a throwaway probe on the media thread would be cleaner; a direct
         // MF probe from this thread works because MF objects are free-threaded (COM init is
         // best-effort here).
-        let dur = probe_duration(&path).unwrap_or(5.0);
+        let dur = if image { 5.0 } else { probe_duration(&path).unwrap_or(5.0) };
+        let has_audio = !image && probe_has_audio(&path);
         // assets.json append
         let aj = format!("{}/assets.json", self.doc.asset_dir);
         let mut arr: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&aj).unwrap_or_else(|_| "[]".into()))
                 .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+        let mut metadata = serde_json::json!({ "duration": dur });
+        if let Some(fps) = (!image).then(|| probe_frame_rate(&path)).flatten() {
+            metadata["fps"] = serde_json::json!(fps);
+        }
+        if has_audio {
+            metadata["audio_codec"] = serde_json::json!("source");
+        }
         if let Some(a) = arr.as_array_mut() {
             a.push(serde_json::json!({
                 "id": id,
-                "kind": "video",
+                "kind": if image { "image" } else { "video" },
                 "name": p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
                 "local_path": path,
                 "status": "ready",
-                "metadata": probe_frame_rate(&path)
-                    .map(|fps| serde_json::json!({ "fps": fps }))
-                    .unwrap_or_else(|| serde_json::json!({})),
+                "metadata": metadata,
                 "imported_by": "native"
             }));
         }
         std::fs::write(&aj, serde_json::to_string(&arr)?)?;
-        // insert clips at playhead
-        let t = self.t;
-        let link = format!("lk_{id}");
-        let vid = serde_json::json!({
-            "id": format!("{id}_v"), "asset_id": id, "track": "video",
-            "source_start": 0.0, "source_end": dur,
-            "timeline_start": t, "timeline_end": t + dur, "link_id": link
-        });
-        let aud = serde_json::json!({
-            "id": format!("{id}_a"), "asset_id": id, "track": "audio",
-            "source_start": 0.0, "source_end": dur,
-            "timeline_start": t, "timeline_end": t + dur, "link_id": link
-        });
+        let aid = id.clone();
         self.apply_edit(true, move |raw| {
-            if let Some(seq) = raw
-                .get_mut(0)
-                .and_then(|r| r.get_mut("timeline"))
-                .and_then(|x| x.get_mut("sequence"))
-            {
-                if let Some(tracks) = seq.get_mut("tracks").and_then(|x| x.as_array_mut()) {
-                    let mut vdone = false;
-                    for tr in tracks.iter_mut() {
-                        let kind = tr.get("type").and_then(|k| k.as_str()).unwrap_or("");
-                        if kind == "video" && !vdone {
-                            if let Some(cs) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) {
-                                cs.push(vid.clone());
-                                vdone = true;
-                            }
-                        }
-                    }
-                    for tr in tracks.iter_mut() {
-                        let kind = tr.get("type").and_then(|k| k.as_str()).unwrap_or("");
-                        if kind == "audio" {
-                            if let Some(cs) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) {
-                                cs.push(aud.clone());
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
+            edits::place_asset(raw, target, t, dur, &aid, has_audio, image, salt);
         });
+        self.selected.clear();
+        self.selected.push(format!("drop_v_{salt}"));
+        self.t = t;
+        self.push_req(false);
         Ok(())
     }
 
@@ -3477,6 +3451,142 @@ impl App {
                 map.insert(c.id.clone(), (key, font_size));
             }
         }
+    }
+
+    fn ensure_caption_web(&mut self, frame: &eframe::Frame) {
+        if self.caption_web.is_some() {
+            return;
+        }
+        use wry::WebViewBuilderExtWindows as _;
+        let bounds = wry::Rect {
+            position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(),
+            size: wry::dpi::LogicalSize::new(1.0, 1.0).into(),
+        };
+        self.caption_web_ready.store(false, Ordering::Relaxed);
+        let ready = self.caption_web_ready.clone();
+        let built = wry::WebViewBuilder::new()
+            .with_url("http://127.0.0.1:3000/caption-frame")
+            .with_transparent(true)
+            .with_bounds(bounds)
+            .with_initialization_script(
+                "setInterval(()=>{if(!window.__captionReadySent&&window.__setCaptionPayload&&window.ipc){window.__captionReadySent=1;window.ipc.postMessage('caption-ready')}},100);",
+            )
+            .with_ipc_handler(move |req| {
+                if req.body() == "caption-ready" {
+                    ready.store(true, Ordering::Relaxed);
+                }
+            })
+            .with_browser_accelerator_keys(false)
+            .with_default_context_menus(false)
+            .build_as_child(frame);
+        match built {
+            Ok(web) => {
+                // A transparent child still receives mouse input by default. Make its HWND
+                // click-through so all preview selection/drawing stays with egui below it.
+                #[cfg(target_os = "windows")]
+                {
+                    use wry::WebViewExtWindows as _;
+                    let mut hwnd = Default::default();
+                    if unsafe { web.controller().ParentWindow(&mut hwnd) }.is_ok() {
+                        unsafe {
+                            make_caption_window_tree_click_through(hwnd.0 as isize);
+                        }
+                    }
+                }
+                self.caption_web = Some(web);
+                self.caption_web_sig = 0;
+                self.caption_web_t = f64::NAN;
+            }
+            Err(e) => eprintln!("caption WebView2 init failed: {e}"),
+        }
+    }
+
+    fn caption_web_captions(&self) -> serde_json::Value {
+        let mut out = Vec::new();
+        for tr in &self.doc.seq.tracks {
+            if tr.hidden {
+                continue;
+            }
+            for c in &tr.clips {
+                if c.text.is_none() || c.asset_id.is_some() {
+                    continue;
+                }
+                let text = caption_live::get(&c.id)
+                    .or_else(|| c.text.clone())
+                    .unwrap_or_default();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                out.push(serde_json::json!({
+                    "id": c.id,
+                    "text": text,
+                    "start": c.timeline_start,
+                    "end": c.timeline_end,
+                    "design": c.style.clone().unwrap_or_else(|| serde_json::json!({})),
+                    "words": c.words.clone(),
+                }));
+            }
+        }
+        serde_json::Value::Array(out)
+    }
+
+    fn sync_caption_web(&mut self, frame: &eframe::Frame, rect: egui::Rect, visible: bool) {
+        self.ensure_caption_web(frame);
+        let captions = self.caption_web_captions();
+        let t = self.displayed_t();
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        captions.to_string().hash(&mut hasher);
+        let sig = hasher.finish();
+        let Some(web) = self.caption_web.as_ref() else { return };
+        #[cfg(target_os = "windows")]
+        {
+            use wry::WebViewExtWindows as _;
+            let mut hwnd = Default::default();
+            if unsafe { web.controller().ParentWindow(&mut hwnd) }.is_ok() {
+                unsafe { make_caption_window_tree_click_through(hwnd.0 as isize) };
+            }
+        }
+        let _ = web.set_visible(visible);
+        if !visible {
+            return;
+        }
+        let bounds = wry::Rect {
+            position: wry::dpi::LogicalPosition::new(rect.left() as f64, rect.top() as f64).into(),
+            size: wry::dpi::LogicalSize::new(rect.width() as f64, rect.height() as f64).into(),
+        };
+        let _ = web.set_bounds(bounds);
+        let web_ready = self.caption_web_ready.load(Ordering::Relaxed);
+        if sig != self.caption_web_sig || !web_ready {
+            let payload = serde_json::json!({
+                "outW": CANVAS_W,
+                "outH": CANVAS_H,
+                "time": t,
+                "captions": captions,
+            });
+            let js = format!(
+                "window.__nativeCaptionPayload={0};window.__setCaptionPayload&&window.__setCaptionPayload(window.__nativeCaptionPayload);",
+                payload
+            );
+            let _ = web.evaluate_script(&js);
+            if web_ready {
+                self.caption_web_sig = sig;
+            }
+            self.caption_web_t = t;
+        } else if !self.caption_web_t.is_finite() || (t - self.caption_web_t).abs() > 0.001 {
+            let _ = web.evaluate_script(&format!(
+                "window.__renderCaptionAt&&window.__renderCaptionAt({t:.6});"
+            ));
+            self.caption_web_t = t;
+        }
+    }
+
+    /// Update only the selected caption's in-memory text and start its real bundled-font
+    /// raster immediately. This is the keystroke path: no document clone/rebuild, save,
+    /// network request, disk PNG, or video-cache invalidation.
+    fn preview_caption_text(&mut self, clip_id: &str, text: String) {
+        caption_live::set(clip_id, text);
+        self.caption_web_sig = 0;
     }
 
     /// Designed captions: when the caption set changes, ask the server for the SAME
@@ -4440,9 +4550,19 @@ impl App {
                     }
                     if r.changed() {
                         let txt = self.insp_text.clone();
-                        let cid = id.clone();
-                        self.apply_edit(false, move |raw| edits::set_text(raw, &cid, &txt));
-                        self.push_req(false);
+                        self.preview_caption_text(&id, txt);
+                        // Only the caption texture changes while typing. The timeline
+                        // document is committed once when the field loses focus.
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+                    }
+                    if r.lost_focus() {
+                        if let Some(txt) = caption_live::get(&id) {
+                            let cid = id.clone();
+                            self.apply_edit(false, move |raw| edits::set_text(raw, &cid, &txt));
+                            caption_live::clear(&id);
+                        } else {
+                            self.pending_undo = None;
+                        }
                     }
                     } else {
                         ui.label(egui::RichText::new(format!("{} captions", selected.len())).weak().small());
@@ -4820,6 +4940,50 @@ impl App {
 
     /// Load (and lazily generate) library thumbnails — used by the library grid AND the
     /// editor's ＋素材 menu.
+    /// Place a media-library asset at the lane/time chosen by a direct drag.
+    /// This is non-ripple so dropping media never shifts an existing edit.
+    fn place_library_asset_at(&mut self, asset: &serde_json::Value, t: f64, target: usize) {
+        let aid = asset.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if aid.is_empty() {
+            return;
+        }
+        let is_image = asset.get("kind").and_then(|v| v.as_str()) == Some("image")
+            || asset
+                .get("local_path")
+                .and_then(|v| v.as_str())
+                .map(|p| is_image_path(std::path::Path::new(p)))
+                .unwrap_or(false);
+        let meta = asset.get("metadata").and_then(|m| m.as_object());
+        let dur = if is_image {
+            5.0
+        } else {
+            meta.and_then(|m| m.get("duration"))
+                .and_then(|d| d.as_f64())
+                .unwrap_or(5.0)
+                .max(0.5)
+        };
+        let has_audio = !is_image
+            && meta.and_then(|m| m.get("audio_codec"))
+                .and_then(|a| a.as_str())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+        self.pause_at_displayed();
+        let salt = self.salt;
+        self.salt += 1;
+        self.apply_edit(true, move |raw| {
+            edits::place_asset(raw, target, t, dur, &aid, has_audio, is_image, salt);
+        });
+        self.selected.clear();
+        self.selected.push(format!("drop_v_{salt}"));
+        self.t = t;
+        self.push_req(false);
+        self.toast(if is_image {
+            "画像をタイムラインに追加しました（長さは5秒です）"
+        } else {
+            "映像をタイムラインに追加しました"
+        });
+    }
+
     fn ensure_lib_thumbs(&mut self, ctx: &egui::Context) {
         let room_dir = self.doc.asset_dir.clone();
         let ids: Vec<String> = self
@@ -6571,7 +6735,9 @@ impl App {
                                 .find(|c| c.id == *id)
                             {
                                 if let Some(txt) = &c.text {
-                                    self.caption_edit = Some((c.id.clone(), txt.clone()));
+                                    let original = self.doc.raw.clone();
+                                    self.pending_undo = Some(original.clone());
+                                    self.caption_edit = Some((c.id.clone(), txt.clone(), original));
                                 }
                             }
                         }
@@ -6634,6 +6800,7 @@ impl App {
                                     .unwrap_or(0.0);
                                 self.drag = Drag::Move {
                                     ids,
+                                    anchor_id: id.clone(),
                                     grab: to_t(self.scroll_x, self.pps, pos.x),
                                     orig: ts,
                                     applied: 0.0,
@@ -6672,7 +6839,7 @@ impl App {
                         self.t = nt;
                         self.push_req(true);
                     }
-                    Drag::Move { ids, grab, orig, applied } => {
+                    Drag::Move { ids, anchor_id, grab, orig, applied } => {
                         // vertical: the clip FOLLOWS the pointer's lane live (not on release)
                         self.hover_lane = if new_top_drop.map(|r| r.contains(pos)).unwrap_or(false) {
                             Some(NEW_TOP_LANE)
@@ -6696,7 +6863,7 @@ impl App {
                                     .collect();
                                 if !vids.is_empty() {
                                     eprintln!("NEWLANE drop fired for {} clip(s)", vids.len());
-                                    self.apply_edit(false, move |raw| edits::move_to_new_top_track(raw, &vids));
+                                    self.apply_edit(false, move |raw| edits::move_group_to_new_top_track(raw, &vids, &anchor_id));
                                 }
                             } else {
                             let tk_ok = self
@@ -6725,7 +6892,7 @@ impl App {
                                     .map(|c| c.id.clone())
                                     .collect();
                                 if !vids.is_empty() {
-                                    self.apply_edit(false, move |raw| edits::move_to_track(raw, &vids, target));
+                                    self.apply_edit(false, move |raw| edits::move_group_to_track(raw, &vids, &anchor_id, target));
                                 }
                             }
                             }
@@ -6734,10 +6901,20 @@ impl App {
                         let want = self.snap(raw_t, &ids);
                         self.snap_line = ((want - raw_t).abs() > 1e-9).then_some(want);
                         let dt = want - orig - applied;
-                        if dt.abs() > 1e-4 {
-                            self.apply_edit(false, |raw| edits::move_clips(raw, &ids, dt));
+                        let min_start = self
+                            .doc
+                            .seq
+                            .tracks
+                            .iter()
+                            .flat_map(|tr| tr.clips.iter())
+                            .filter(|c| ids.contains(&c.id))
+                            .map(|c| c.timeline_start)
+                            .fold(f64::MAX, f64::min);
+                        let actual_dt = if min_start.is_finite() { dt.max(-min_start) } else { dt };
+                        if actual_dt.abs() > 1e-4 {
+                            self.apply_edit(false, |raw| edits::move_clips(raw, &ids, actual_dt));
                             if let Drag::Move { applied, .. } = &mut self.drag {
-                                *applied += dt;
+                                *applied += actual_dt;
                             }
                         }
                     }
@@ -6780,17 +6957,23 @@ impl App {
             p.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(90, 160, 255, 24));
             p.rect_stroke(r, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 180, 255)));
         }
-        // edge auto-scroll: ONLY while the playhead is actively held (Scrub drag with the
-        // button down) — clip drags and a merely-hovering mouse never move the view
-        if matches!(self.drag, Drag::Scrub) && ui.input(|i| i.pointer.primary_down()) {
+        // Edge auto-scroll while holding either the playhead or a clip selection.  A clip
+        // drag uses scroll_x in its time mapping, so advancing the viewport here also keeps
+        // moving the held block on the next repaint even when the pointer stays at the edge.
+        // Merely hovering near an edge never moves the view.
+        if matches!(&self.drag, Drag::Scrub | Drag::Move { .. })
+            && ui.input(|i| i.pointer.primary_down())
+        {
             if let Some(pt) = ui.input(|i| i.pointer.interact_pos()) {
                 const EDGE: f32 = 26.0;
                 let speed = |d: f32| ((EDGE - d) / EDGE * 14.0).clamp(2.0, 14.0);
                 if pt.x < body.left() + EDGE {
                     self.scroll_x = (self.scroll_x - speed(pt.x - body.left())).max(0.0);
+                    ui.ctx().request_repaint();
                 } else if pt.x > body.right() - EDGE {
                     let max_sx = ((self.dur as f32) * self.pps - body.width()).max(0.0);
                     self.scroll_x = (self.scroll_x + speed(body.right() - pt.x)).min(max_sx);
+                    ui.ctx().request_repaint();
                 }
             }
         }
@@ -6835,9 +7018,13 @@ impl App {
                 self.hover_lane
             );
             match &prev {
-                Drag::Move { ids, .. } | Drag::Trim { ids, .. } => {
+                Drag::Trim { ids, .. } => {
                     self.apply_edit(false, |raw| edits::settle_overlaps(raw, ids));
                 }
+                // Moving must never erase either an unselected destination clip or another
+                // member of a multi-selection. Overlaps remain explicit and editable; trim
+                // retains its established overwrite-on-settle behaviour.
+                Drag::Move { .. } => {}
                 _ => {}
             }
             let _ = &prev; // lane moves happen LIVE during the drag now
@@ -6848,6 +7035,97 @@ impl App {
                 self.resume_pending = Some(Instant::now());
             }
             self.push_req(false); // settle on full quality
+        }
+
+        // Direct media placement. Both an OS file drag and a drag from the media menu
+        // resolve to the lane under the pointer and the visible timeline time. Locked and
+        // audio lanes are not valid visual destinations.
+        let media_pointer = ui.input(|i| i.pointer.hover_pos());
+        let hovered_os_media = ui.input(|i| {
+            i.raw.hovered_files.iter().any(|f| {
+                f.path.as_deref().map(is_timeline_media_path).unwrap_or(false)
+            })
+        });
+        let drop_target = media_pointer.and_then(|pt| {
+            if pt.x < body.left() || pt.x > body.right() {
+                return None;
+            }
+            lane_tops
+                .iter()
+                .find(|&&(ti, y0, lh)| {
+                    pt.y >= y0
+                        && pt.y <= y0 + lh
+                        && self.doc.seq.tracks[ti].kind != "audio"
+                        && !self.doc.seq.tracks[ti].locked
+                })
+                .map(|&(ti, _, _)| ti)
+        });
+        let drop_time = media_pointer.map(|pt| {
+            self.snap(
+                ((self.scroll_x + pt.x - body.left()) / self.pps).max(0.0) as f64,
+                &[],
+            )
+        });
+        if (self.asset_drag.is_some() || hovered_os_media)
+            && drop_target.is_some()
+            && drop_time.is_some()
+        {
+            let ti = drop_target.unwrap();
+            let (_, y0, lh) = lane_tops.iter().find(|&&(i, _, _)| i == ti).copied().unwrap();
+            let lane_rect = egui::Rect::from_min_max(
+                egui::pos2(body.left(), y0),
+                egui::pos2(body.right(), y0 + lh),
+            );
+            p.rect_filled(lane_rect, 0.0, egui::Color32::from_rgba_unmultiplied(70, 135, 220, 35));
+            p.rect_stroke(lane_rect, 0.0, egui::Stroke::new(1.5, UI_ACCENT));
+            let x = body.left() + drop_time.unwrap() as f32 * self.pps - self.scroll_x;
+            p.line_segment(
+                [egui::pos2(x, y0), egui::pos2(x, y0 + lh)],
+                egui::Stroke::new(2.0, UI_ACCENT),
+            );
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
+        }
+
+        // A menu drag is an application-internal gesture, so clear it on every release,
+        // but only mutate the timeline when it ended over a valid visual lane.
+        if released_now && self.asset_drag.is_some() {
+            let dragged = self.asset_drag.take();
+            if let (Some(asset), Some(ti), Some(t)) = (dragged, drop_target, drop_time) {
+                self.place_library_asset_at(&asset, t, ti);
+            }
+        }
+
+        let dropped_media: Vec<std::path::PathBuf> = ui.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .filter(|path| is_timeline_media_path(path))
+                .collect()
+        });
+        if !dropped_media.is_empty() {
+            if let (Some(ti), Some(t)) = (drop_target, drop_time) {
+                if !self.has_timeline_media()
+                    && self.doc.seq.frame_rate.is_none()
+                    && dropped_media.iter().any(|p| !is_image_path(p))
+                {
+                    self.pending_initial_fps = dropped_media
+                        .iter()
+                        .filter(|p| !is_image_path(p))
+                        .filter_map(|p| probe_frame_rate(&p.to_string_lossy()))
+                        .collect();
+                    self.pending_initial_imports.extend(dropped_media);
+                } else {
+                    for path in dropped_media {
+                        if let Err(e) = self.import_file_at(&path, t, ti) {
+                            eprintln!("import: {e:#}");
+                            self.toast("素材を追加できませんでした");
+                        }
+                    }
+                }
+            } else {
+                self.toast("画像・映像はタイムラインの映像レーンへドロップしてください");
+            }
         }
 
         p.text(
@@ -6998,6 +7276,9 @@ impl App {
                             }
                         }
                     }
+                    // Exact server rasters have landed on disk. Replace the fast local
+                    // preview now instead of waiting for the next unrelated interaction.
+                    self.push_req(false);
                 }
                 ("capcache", Err(e)) => {
                     eprintln!("capcache error: {e}");
@@ -7309,10 +7590,14 @@ impl eframe::App for App {
         });
         self.absorb_lib();
         if self.screen == Screen::Library {
+            if let Some(web) = self.caption_web.as_ref() {
+                let _ = web.set_visible(false);
+            }
             self.library_ui(ctx);
             return;
         }
-        self.caption_cache_pass();
+        // Caption text edits stay in memory while typing. The transparent preview overlay
+        // renders the same React CaptionLayer and fonts as export; no caption-cache round trip.
         if let Ok(v) = std::env::var("NATIVE_FREEZE_AT") {
             if let Ok(t) = v.parse::<f64>() {
                 std::env::set_var("NATIVE_FREEZE_AT", "");
@@ -7619,30 +7904,6 @@ impl eframe::App for App {
                 }
             }
         }
-        // drag&drop import: dropped video files become assets + a linked A/V clip pair at
-        // the playhead (registered in assets.json so Dan/web/export see the same material)
-        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| {
-            i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect()
-        });
-        if !dropped.is_empty() {
-            let files: Vec<std::path::PathBuf> = dropped.into_iter().filter(|p| {
-                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-                ["mp4", "mov", "mkv", "webm", "m4v"].contains(&ext.as_str())
-            }).collect();
-            if !files.is_empty() && !self.has_timeline_media() && self.doc.seq.frame_rate.is_none() {
-                self.pending_initial_fps = files.iter()
-                    .filter_map(|p| probe_frame_rate(&p.to_string_lossy()))
-                    .collect();
-                self.pending_initial_imports.extend(files);
-            } else {
-                for p in files {
-                if let Err(e) = self.import_file(&p) {
-                    eprintln!("import: {e:#}");
-                }
-                }
-            }
-        }
-
         // First import defines the sequence/output frame rate. This is deliberately shown only
         // before any media exists: changing an edited timeline's rate would retime its cuts and
         // generated assets, so that belongs in an explicit project-settings migration instead.
@@ -7754,8 +8015,10 @@ impl eframe::App for App {
                                 .and_then(|m| m.get("duration"))
                                 .and_then(|d| d.as_f64())
                                 .unwrap_or(0.0);
-                            let (rect, resp) =
-                                ui.allocate_exact_size(egui::vec2(250.0, 60.0), egui::Sense::click());
+                            let (rect, resp) = ui.allocate_exact_size(
+                                egui::vec2(250.0, 60.0),
+                                egui::Sense::click_and_drag(),
+                            );
                             let pp = ui.painter_at(rect);
                             let hov = resp.hovered();
                             pp.rect_filled(
@@ -7799,6 +8062,10 @@ impl eframe::App for App {
                             if resp.clicked() {
                                 self.insert_asset_at_playhead(a);
                                 ui.close_menu();
+                            }
+                            if resp.drag_started() {
+                                self.asset_drag = Some(a.clone());
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                             }
                             ui.add_space(3.0);
                         }
@@ -7884,9 +8151,10 @@ impl eframe::App for App {
                         let resp = ui
                             .add(egui::Image::new((tex.id(), size)))
                             .interact(egui::Sense::click_and_drag());
+                        let vid = egui::Rect::from_center_size(resp.rect.center(), size);
+                        self.sync_caption_web(frame, vid, true);
                         if self.revise_pick {
                             // ダンに指示の◱: 囲んだ場所+今のフレーム時刻が指示に添付される
-                            let vid = egui::Rect::from_center_size(resp.rect.center(), size);
                             let pp = ui.painter_at(vid);
                             let col = egui::Color32::from_rgb(120, 170, 255);
                             pp.rect_stroke(vid, 0.0, egui::Stroke::new(1.0, col));
@@ -8215,14 +8483,17 @@ impl eframe::App for App {
                 self.toast = None;
             }
         }
-        if let Some((cid, mut buf)) = self.caption_edit.clone() {
+        if let Some((cid, mut buf, original)) = self.caption_edit.clone() {
             let mut save = false;
             let mut cancel = false;
+            let mut text_changed = false;
             egui::Window::new("テロップ編集")
                 .collapsible(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .show(ctx, |ui| {
-                    ui.add(egui::TextEdit::multiline(&mut buf).desired_width(360.0).desired_rows(3));
+                    text_changed = ui
+                        .add(egui::TextEdit::multiline(&mut buf).desired_width(360.0).desired_rows(3))
+                        .changed();
                     ui.horizontal(|ui| {
                         if ui.button("保存 (Ctrl+Enter)").clicked() {
                             save = true;
@@ -8238,15 +8509,27 @@ impl eframe::App for App {
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 cancel = true;
             }
-            if save {
+            if text_changed {
                 let text = buf.clone();
-                let id2 = cid.clone();
-                self.apply_edit(true, move |raw| edits::set_text(raw, &id2, &text));
+                self.preview_caption_text(&cid, text);
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            }
+            if save {
+                if let Some(text) = caption_live::get(&cid) {
+                    let id2 = cid.clone();
+                    self.apply_edit(false, move |raw| edits::set_text(raw, &id2, &text));
+                    caption_live::clear(&cid);
+                } else {
+                    self.pending_undo = None;
+                }
                 self.caption_edit = None;
             } else if cancel {
+                self.pending_undo = None;
+                caption_live::clear(&cid);
+                self.caption_web_sig = 0;
                 self.caption_edit = None;
             } else {
-                self.caption_edit = Some((cid, buf));
+                self.caption_edit = Some((cid, buf, original));
             }
         }
         if self.show_help {

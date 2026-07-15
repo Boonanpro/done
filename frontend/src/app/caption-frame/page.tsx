@@ -18,6 +18,8 @@ type Payload = { outW: number; outH: number; time: number; captions: RenderCapti
 declare global {
   interface Window {
     __renderCaptionAt?: (t: number) => Promise<void>;
+    __setCaptionPayload?: (payload: Payload) => Promise<void>;
+    __nativeCaptionPayload?: Payload;
   }
 }
 
@@ -35,8 +37,10 @@ function decodePayload(raw: string | null): Payload | null {
 
 function Inner() {
   const sp = useSearchParams();
-  const payload = decodePayload(sp.get('p'));
-  const [time, setTime] = useState<number>(payload?.time ?? 0);
+  const initialPayload = decodePayload(sp.get('p'));
+  const [payload, setPayload] = useState<Payload | null>(initialPayload);
+  const [time, setTime] = useState<number>(initialPayload?.time ?? 0);
+  const [viewport, setViewport] = useState({ w: 1, h: 1 });
   const [ready, setReady] = useState(false);
 
   // Let the screenshotter set the playhead and await the next painted frame.
@@ -46,9 +50,26 @@ function Inner() {
         setTime(t);
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       });
+    window.__setCaptionPayload = (next: Payload) =>
+      new Promise<void>((resolve) => {
+        setPayload(next);
+        setTime(next.time);
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      });
+    if (window.__nativeCaptionPayload) {
+      void window.__setCaptionPayload(window.__nativeCaptionPayload);
+    }
     return () => {
       delete window.__renderCaptionAt;
+      delete window.__setCaptionPayload;
     };
+  }, []);
+
+  useEffect(() => {
+    const update = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
   }, []);
 
   useEffect(() => {
@@ -93,9 +114,14 @@ function Inner() {
   }, []);
 
   if (!payload) return null;
+  const scale = Math.min(viewport.w / payload.outW, viewport.h / payload.outH);
+  const left = (viewport.w - payload.outW * scale) / 2;
+  const top = (viewport.h - payload.outH * scale) / 2;
   return (
-    <div style={{ width: payload.outW, height: payload.outH }} data-ready={ready ? '1' : '0'}>
-      <CaptionLayer outW={payload.outW} outH={payload.outH} captions={payload.captions} time={time} />
+    <div style={{ width: '100vw', height: '100vh', overflow: 'hidden', position: 'relative', pointerEvents: 'none' }} data-ready={ready ? '1' : '0'}>
+      <div style={{ width: payload.outW, height: payload.outH, position: 'absolute', left, top, transform: `scale(${scale})`, transformOrigin: 'top left' }}>
+        <CaptionLayer outW={payload.outW} outH={payload.outH} captions={payload.captions} time={time} />
+      </div>
     </div>
   );
 }
