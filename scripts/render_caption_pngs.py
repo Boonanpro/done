@@ -21,8 +21,25 @@ timeline. Prints one line per item: "OK ..." or "FAIL ...". Exit 0 if all succee
 """
 import base64
 import json
+import os
 import sys
+import time
 from pathlib import Path
+
+_DBG_PATH = os.environ.get("RENDER_CAPTION_DEBUG_LOG") or ""
+_T0 = time.time()
+
+
+def _dbg(msg: str) -> None:
+    """Stage log for hang forensics (in-job bakes stalled at an unknown step for
+    180s while the same spec finished in 2s from a shell). Enabled via env only."""
+    if not _DBG_PATH:
+        return
+    try:
+        with open(_DBG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"+{time.time() - _T0:7.2f}s {msg}\n")
+    except OSError:
+        pass
 
 
 def payload_url(web_base: str, out_w: int, out_h: int, item: dict, time_val: float) -> str:
@@ -52,12 +69,17 @@ def main() -> int:
     items = spec.get("items") or []
     clip = {"x": 0, "y": 0, "width": out_w, "height": out_h}
 
+    _dbg("spec loaded; importing playwright")
     from playwright.sync_api import sync_playwright
 
     failures = 0
+    _dbg("starting playwright driver")
     with sync_playwright() as pw:
+        _dbg("driver up; launching chromium (channel=chrome)")
         browser = pw.chromium.launch(headless=True, channel="chrome")
+        _dbg("browser up; opening page")
         page = browser.new_page(viewport={"width": out_w, "height": out_h}, device_scale_factor=1)
+        _dbg("page open; rendering items")
         for item in items:
             try:
                 if item.get("seq_dir"):
@@ -86,13 +108,16 @@ def main() -> int:
                     png = item["png"]
                     page.goto(payload_url(web_base, out_w, out_h, item, float(item.get("time") or 0.0)),
                               wait_until="domcontentloaded", timeout=30000)
+                    _dbg("goto done")
                     try:
                         page.wait_for_selector("body[data-caption-ready='1']", timeout=9000)
                     except Exception:
                         pass
                     page.wait_for_timeout(120)
+                    _dbg("ready; screenshotting")
                     Path(png).parent.mkdir(parents=True, exist_ok=True)
                     page.screenshot(path=png, omit_background=True, clip=clip)
+                    _dbg("screenshot done")
                     print(f"OK {png}")
             except Exception as exc:  # noqa: BLE001
                 failures += 1

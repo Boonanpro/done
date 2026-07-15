@@ -42,15 +42,36 @@ def content_busy(content_id: str) -> str | None:
         return _content_jobs.get(str(content_id))
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the CLI and ALL descendants (MCP server, its bake children). A hung
+    grandchild that inherited the stdout pipe keeps the reader loop alive after
+    proc.kill(), which left the content_busy registry locked after a cancel —
+    the room then rejected every new job until sandbox restart."""
+    try:
+        import psutil
+        try:
+            children = psutil.Process(proc.pid).children(recursive=True)
+        except psutil.NoSuchProcess:
+            children = []
+        for c in children:
+            try:
+                c.kill()
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def cancel_job(job_id: str) -> bool:
     with _registry_lock:
         proc = _running_procs.get(job_id)
     if proc and proc.poll() is None:
-        try:
-            proc.kill()
-            return True
-        except OSError:
-            return False
+        _kill_tree(proc)
+        return True
     return False
 
 
@@ -86,6 +107,9 @@ def _system_prompt() -> str:
         "- タイムラインへの書き込みは timeline_* ツールのみ。下書き上で作業し、検証合格後に自動で本番反映される。\n"
         "- 指示された範囲以外のクリップは触らない。\n"
         "- 反映される絵は render_frame で自分の目で確認してから終える。仕上げに validate_draft で problems 空を確認。\n"
+        "- ツールがインフラ起因の不調を返しても、システムのコードを読んでのデバッグ・原因調査はしない"
+        "（あなたの仕事は編集。過去にこれで時間切れになり全作業が消えた）。エラー文の指示に従い、"
+        "できる範囲で編集を完了して、残った不調は最後の要約に一言書く。\n"
         "\n"
         "使える能力:\n"
         "- WebSearch / WebFetch: 実在のブランド・ロゴ・事実の調査。本物が必要なら探すこと（想像で似せない）。\n"
@@ -230,7 +254,7 @@ def _run_session(room_id, content_id, job_id, draft, instruction, annotations, s
 
     summary_chunks: list[str] = []
     deadline = time.time() + AGENT_TIMEOUT_S
-    killer = threading.Timer(AGENT_TIMEOUT_S, lambda: proc.poll() is None and proc.kill())
+    killer = threading.Timer(AGENT_TIMEOUT_S, lambda: proc.poll() is None and _kill_tree(proc))
     killer.daemon = True
     killer.start()
     try:
@@ -260,7 +284,7 @@ def _run_session(room_id, content_id, job_id, draft, instruction, annotations, s
     finally:
         killer.cancel()
         if proc.poll() is None:
-            proc.kill()
+            _kill_tree(proc)
     timed_out = time.time() >= deadline
     canceled = proc.returncode not in (0, None) and not timed_out
 
