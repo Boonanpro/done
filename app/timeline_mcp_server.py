@@ -256,11 +256,20 @@ async def _dispatch(name: str, a: dict) -> list:
     if result.get("ok"):
         draft.setdefault("log", []).append({"t": time.time(), "tool": name, "args": a})
         td.save_draft(draft)
-        if name == "add_caption":
-            # rasterize the designed caption PNG NOW so render_frame (and the native
-            # preview) can show it — same key derivation the native engine uses
-            note = _ensure_caption_png(str(a.get("text") or ""),
-                                       a.get("style") if isinstance(a.get("style"), dict) else None)
+        if name in ("add_caption", "set_clip"):
+            # rasterize the designed caption PNG NOW so export (and the transparency
+            # check) always has the CURRENT text+style. set_clip args are partial —
+            # bake from the clip's post-command state, not the args (a style-only
+            # set_clip left the final-style PNG unbaked → invisible caption shipped)
+            bk_text, bk_style = str(a.get("text") or ""), a.get("style")
+            if name == "set_clip":
+                for tr in seq.get("tracks") or []:
+                    for cl in tr.get("clips") or []:
+                        if str(cl.get("id")) == str(a.get("clip_id")):
+                            bk_text = str(cl.get("text") or "")
+                            bk_style = cl.get("style")
+            note = _ensure_caption_png(bk_text,
+                                       bk_style if isinstance(bk_style, dict) else None)
             if note:
                 result["note"] = note
     return _ok(result)
@@ -457,10 +466,10 @@ def _watch_video(seq: dict, assets: dict, t0: float, t1: float, question: str) -
                 continue
             part = tmp_dir / f"watch_{uuid.uuid4().hex[:8]}.mp4"
             r = subprocess.run(
-                [_ffmpeg(), "-y", "-ss", f"{ss:.3f}", "-t", f"{dur:.3f}", "-i", src,
+                [_ffmpeg(), "-nostdin", "-y", "-ss", f"{ss:.3f}", "-t", f"{dur:.3f}", "-i", src,
                  "-vf", "scale=-2:640", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
                  "-c:a", "aac", "-b:a", "96k", str(part)],
-                capture_output=True, timeout=180,
+                capture_output=True, stdin=subprocess.DEVNULL, timeout=180,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if r.returncode == 0 and part.exists() and part.stat().st_size > 0:
@@ -474,8 +483,8 @@ def _watch_video(seq: dict, assets: dict, t0: float, t1: float, question: str) -
             lst.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts), encoding="utf-8")
             clip_path = tmp_dir / f"watch_{uuid.uuid4().hex[:8]}.mp4"
             r = subprocess.run(
-                [_ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(clip_path)],
-                capture_output=True, timeout=120,
+                [_ffmpeg(), "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(clip_path)],
+                capture_output=True, stdin=subprocess.DEVNULL, timeout=120,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             lst.unlink(missing_ok=True)
