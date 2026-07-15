@@ -6975,7 +6975,7 @@ impl App {
                         let msgs: Vec<String> = arr
                             .iter()
                             .rev()
-                            .take(8)
+                            .take(40)
                             .rev()
                             .filter_map(|e| e.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
                             .collect();
@@ -8091,9 +8091,32 @@ impl eframe::App for App {
                             ui.spinner();
                             ui.label("ダンが修正中…（完成すると自動で反映されます）");
                         });
-                        for ev in &self.lib.events {
-                            ui.label(egui::RichText::new(ev).small().weak());
-                        }
+                        // 進捗ログ: ユーザーがダンの働きぶりを評価する一次情報。
+                        // small+weakで読めなかったので、通常サイズ+実況/作業の色分け
+                        // +自動で最新に追従するスクロールに
+                        egui::ScrollArea::vertical()
+                            .id_salt("revise_events")
+                            .max_height(240.0)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for ev in &self.lib.events {
+                                    let is_action = ev
+                                        .chars()
+                                        .next()
+                                        .map(|c| !c.is_ascii() && !('ぁ'..='ヿ').contains(&c) && !('一'..='鿿').contains(&c))
+                                        .unwrap_or(false);
+                                    let rt = if is_action {
+                                        // ツール実行の行（絵文字始まり）: 少し明るい青緑
+                                        egui::RichText::new(ev)
+                                            .color(egui::Color32::from_rgb(140, 200, 220))
+                                    } else {
+                                        // ダンの実況コメント: 通常の文字色
+                                        egui::RichText::new(ev)
+                                            .color(egui::Color32::from_rgb(225, 225, 225))
+                                    };
+                                    ui.label(rt);
+                                }
+                            });
                     }
                     if let Some(e) = &self.lib.error {
                         ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
