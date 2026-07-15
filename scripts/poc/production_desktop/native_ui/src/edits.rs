@@ -1986,6 +1986,41 @@ pub fn set_position_many(raw: &mut serde_json::Value, ids: &[String], x: f64, y:
     });
 }
 
+/// Select whether the source keeps its aspect ratio inside the position box. This is
+/// deliberately separate from `position`: moving or uniformly resizing a clip must not
+/// silently change a stretch chosen by the user.
+pub fn set_fit_many(raw: &mut serde_json::Value, ids: &[String], stretch: bool) {
+    for_each_clip(raw, |c| {
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !ids.iter().any(|i| i == id) {
+            return;
+        }
+        let o = c.as_object_mut().unwrap();
+        if stretch {
+            o.insert("fit".into(), serde_json::json!("stretch"));
+        } else {
+            // `cover` is the persisted default. Omitting it keeps old documents compact.
+            o.remove("fit");
+        }
+    });
+}
+
+pub fn set_opacity_many(raw: &mut serde_json::Value, ids: &[String], opacity: f64) {
+    let opacity = opacity.clamp(0.0, 1.0);
+    for_each_clip(raw, |c| {
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !ids.iter().any(|i| i == id) {
+            return;
+        }
+        let o = c.as_object_mut().unwrap();
+        if opacity >= 0.9999 {
+            o.remove("opacity");
+        } else {
+            o.insert("opacity".into(), serde_json::json!((opacity * 1000.0).round() / 1000.0));
+        }
+    });
+}
+
 /// Per-edge crop (fractions 0..0.9). All-zero removes the crop entirely.
 pub fn set_crop_many(raw: &mut serde_json::Value, ids: &[String], l: f64, t: f64, r: f64, b: f64) {
     for_each_clip(raw, |c| {
@@ -2298,5 +2333,32 @@ mod tests {
         assert_eq!(lane_ids(&raw, 0), vec!["drop_v_7"]);
         assert!(lane_ids(&raw, 1).is_empty());
         assert_eq!(raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0]["timeline_end"], serde_json::json!(9.5));
+    }
+
+    #[test]
+    fn fit_mode_is_explicit_and_survives_position_edits() {
+        let mut raw = serde_json::json!([{
+            "timeline": {"sequence": {"tracks": [{
+                "id":"v1", "type":"overlay", "clips":[{"id":"logo"}]
+            }]}}
+        }]);
+        let ids = vec!["logo".to_string()];
+
+        set_fit_many(&mut raw, &ids, true);
+        set_position_many(&mut raw, &ids, 0.1, 0.2, 0.3, 0.4);
+        let clip = &raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0];
+        assert_eq!(clip["fit"], "stretch");
+        assert_eq!(clip["position"]["width"], 0.3);
+
+        set_fit_many(&mut raw, &ids, false);
+        let clip = &raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0];
+        assert!(clip.get("fit").is_none());
+
+        set_opacity_many(&mut raw, &ids, 0.375);
+        let clip = &raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0];
+        assert_eq!(clip["opacity"], 0.375);
+        set_opacity_many(&mut raw, &ids, 1.0);
+        let clip = &raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0];
+        assert!(clip.get("opacity").is_none());
     }
 }

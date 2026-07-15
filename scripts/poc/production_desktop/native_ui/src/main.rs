@@ -58,24 +58,31 @@ extern "system" {
         callback: Option<unsafe extern "system" fn(isize, isize) -> i32>,
         param: isize,
     ) -> i32;
+    fn EnableWindow(hwnd: isize, enable: i32) -> i32;
 }
 
 #[cfg(target_os = "windows")]
-unsafe extern "system" fn make_caption_hwnd_click_through(hwnd: isize, _param: isize) -> i32 {
+unsafe extern "system" fn make_caption_hwnd_visual_only(hwnd: isize, _param: isize) -> i32 {
+    const GWL_STYLE: i32 = -16;
     const GWL_EXSTYLE: i32 = -20;
-    const WS_EX_TRANSPARENT: isize = 0x0000_0020;
+    const WS_TABSTOP: isize = 0x0001_0000;
     const WS_EX_NOACTIVATE: isize = 0x0800_0000;
     let old = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    SetWindowLongPtrW(
-        hwnd,
-        GWL_EXSTYLE,
-        old | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
-    );
+    SetWindowLongPtrW(hwnd, GWL_EXSTYLE, old | WS_EX_NOACTIVATE);
+    // WS_EX_NOACTIVATE only covers mouse activation. WebView2 can still join the
+    // keyboard tab chain while its controller is starting, starving egui of every
+    // shortcut until focus returns. The caption surface has no interactive controls.
+    let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style & !WS_TABSTOP);
+    // The caption renderer has no controls. Disabling its HWND makes Win32 skip it
+    // during mouse/keyboard targeting while leaving WebView2 painting and script
+    // execution intact. The egui window below is therefore the sole input owner.
+    EnableWindow(hwnd, 0);
     1
 }
 
 #[cfg(target_os = "windows")]
-unsafe fn make_caption_window_tree_click_through(hwnd: isize) {
+unsafe fn make_caption_window_tree_visual_only(hwnd: isize) {
     // Eframe/winit normally clips painting beneath child HWNDs. A transparent WebView2
     // needs the parent to keep painting the video behind it (wry's wgpu example uses
     // WindowAttributesExtWindows::with_clip_children(false) for the same reason).
@@ -86,8 +93,8 @@ unsafe fn make_caption_window_tree_click_through(hwnd: isize) {
         let style = GetWindowLongPtrW(parent, GWL_STYLE);
         SetWindowLongPtrW(parent, GWL_STYLE, style & !WS_CLIPCHILDREN);
     }
-    make_caption_hwnd_click_through(hwnd, 0);
-    EnumChildWindows(hwnd, Some(make_caption_hwnd_click_through), 0);
+    make_caption_hwnd_visual_only(hwnd, 0);
+    EnumChildWindows(hwnd, Some(make_caption_hwnd_visual_only), 0);
 }
 
 struct FrameOut {
@@ -494,7 +501,7 @@ fn draw_plain_pip(
             }
             tw
         };
-        comp.draw_cropped(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), true, None, c.crop_ltrb())?;
+        comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb(), c.visual_opacity())?;
         return Ok(None);
     }
     let vs = pool.get(d3d, &p2, 0, false, src_t)?;
@@ -505,7 +512,7 @@ fn draw_plain_pip(
             .map_err(|e| e.context(format!("plain-pip {} src_t={src_t:.2}", vs.name)))?;
     }
     let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
-    comp.draw_cropped(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), true, None, c.crop_ltrb())?;
+    comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb(), c.visual_opacity())?;
     Ok(Some(p2))
 }
 
@@ -854,7 +861,7 @@ fn compose(
                     meta.sw as f32 / cw,
                     meta.sh as f32 / ch,
                 ];
-                comp.draw_popout_live(d3d, &otex, &ptex, &stex, &mask, (b.x, b.y, b.width, b.height), aff)?;
+                comp.draw_popout_live(d3d, &otex, &ptex, &stex, &mask, (b.x, b.y, b.width, b.height), aff, c.visual_opacity())?;
                 used.push(opath);
                 used.push(mt_path);
                 continue;
@@ -903,7 +910,7 @@ fn compose(
                     }
                     s.bgra.clone()
                 };
-                comp.draw(d3d, &ctex, cwh, (b.x, b.y, b.width, b.height), false, Some(&mtex))?;
+                comp.draw_opacity(d3d, &ctex, cwh, (b.x, b.y, b.width, b.height), false, Some(&mtex), c.visual_opacity())?;
                 used.push(path.clone());
                 Ok(())
             })(pool, comp, &mut used);
@@ -941,8 +948,20 @@ fn compose(
                 }
             }
             if let Some((tex, (iw, ih))) = comp.still_get(&key) {
-                // contain-fit inside the clip's display box, centered
+                // Legacy/default images remain contain-fitted; an explicit X/Y resize
+                // switches to stretch and the source fills the edited box itself.
                 let (bx, by, bw, bh) = (b.x, b.y, b.width, b.height);
+                if c.stretches_to_box() {
+                    let _ = comp.draw_alpha_opacity(
+                        d3d,
+                        &tex,
+                        (iw, ih),
+                        (bx, by, bw, bh),
+                        c.visual_opacity(),
+                    );
+                    used.push(path);
+                    continue;
+                }
                 let box_px_w = bw * CANVAS_W as f64;
                 let box_px_h = bh * CANVAS_H as f64;
                 let (mut dw, mut dh) = (bw, bh);
@@ -956,7 +975,7 @@ fn compose(
                     }
                 }
                 let dst = (bx + (bw - dw) / 2.0, by + (bh - dh) / 2.0, dw, dh);
-                let _ = comp.draw_alpha(d3d, &tex, (iw, ih), dst);
+                let _ = comp.draw_alpha_opacity(d3d, &tex, (iw, ih), dst, c.visual_opacity());
             }
             used.push(path);
         } else if let Some(aid) = c.asset_id.as_deref() {
@@ -1005,7 +1024,7 @@ fn compose(
                         wh.0, wh.1, b.x, b.y, b.width, b.height
                     );
                 }
-                comp.draw_cropped(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None, c.crop_ltrb())?;
+                comp.draw_cropped_opacity(d3d, &tex, wh, (b.x, b.y, b.width, b.height), !c.stretches_to_box(), None, c.crop_ltrb(), c.visual_opacity())?;
                 used.push(path);
                 continue;
             }
@@ -1043,7 +1062,7 @@ fn compose(
                     wh.0, wh.1, b.x, b.y, b.width, b.height
                 );
             }
-            comp.draw_cropped(d3d, &tex, wh, (b.x, b.y, b.width, b.height), true, None, c.crop_ltrb())?;
+            comp.draw_cropped_opacity(d3d, &tex, wh, (b.x, b.y, b.width, b.height), !c.stretches_to_box(), None, c.crop_ltrb(), c.visual_opacity())?;
             used.push(path);
         }
     }
@@ -2440,6 +2459,9 @@ struct App {
     lib_gen_stash: Option<serde_json::Value>,
     marquee: Option<egui::Rect>,
     insp_text: String,
+    /// Text editors rendered on the previous frame. Numeric drags and sliders may keep
+    /// egui focus, but only these IDs are allowed to suppress timeline shortcuts.
+    text_focus_ids: Vec<egui::Id>,
     blur_mode: bool,
     blur_drag: Option<egui::Pos2>,
     insp_for: String,
@@ -2623,6 +2645,7 @@ impl App {
             lib_gen_stash: None,
             marquee: None,
             insp_text: String::new(),
+            text_focus_ids: Vec::new(),
             blur_mode: false,
             blur_drag: None,
             insp_for: String::new(),
@@ -2729,7 +2752,7 @@ impl App {
                     // that served the old blur position for a beat before the fresh
                     // compose replaced them: the "blur lags the frame" report)
                     let sig = format!(
-                        "{ti}|{:.3}|{:.3}|{:.3}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:.3}|{}|{}|{}|{}",
+                        "{ti}|{:.3}|{:.3}|{:.3}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:.3}|{:.3}|{}|{}|{}|{}",
                         c.timeline_start,
                         c.timeline_end,
                         c.source_start,
@@ -2740,7 +2763,9 @@ impl App {
                         c.region_keys,
                         c.blur_track,
                         c.text,
+                        c.fit,
                         c.volume,
+                        c.opacity,
                         c.effects.len(),
                         tr.hidden,
                         tr.muted,
@@ -3295,6 +3320,7 @@ impl App {
             (CANVAS_W, CANVAS_H),
             dims,
             (bb.x, bb.y, bb.width, bb.height),
+            !b.stretches_to_box(),
             b.crop_ltrb(),
             rg,
         );
@@ -3467,6 +3493,7 @@ impl App {
         let built = wry::WebViewBuilder::new()
             .with_url("http://127.0.0.1:3000/caption-frame")
             .with_transparent(true)
+            .with_focused(false)
             .with_bounds(bounds)
             .with_initialization_script(
                 "setInterval(()=>{if(!window.__captionReadySent&&window.__setCaptionPayload&&window.ipc){window.__captionReadySent=1;window.ipc.postMessage('caption-ready')}},100);",
@@ -3481,15 +3508,16 @@ impl App {
             .build_as_child(frame);
         match built {
             Ok(web) => {
-                // A transparent child still receives mouse input by default. Make its HWND
-                // click-through so all preview selection/drawing stays with egui below it.
+                // Keep the exact browser renderer used by preview/export, but make its
+                // entire native window tree visual-only. egui remains the one and only
+                // keyboard/mouse input path.
                 #[cfg(target_os = "windows")]
                 {
                     use wry::WebViewExtWindows as _;
                     let mut hwnd = Default::default();
                     if unsafe { web.controller().ParentWindow(&mut hwnd) }.is_ok() {
                         unsafe {
-                            make_caption_window_tree_click_through(hwnd.0 as isize);
+                            make_caption_window_tree_visual_only(hwnd.0 as isize);
                         }
                     }
                 }
@@ -3544,7 +3572,10 @@ impl App {
             use wry::WebViewExtWindows as _;
             let mut hwnd = Default::default();
             if unsafe { web.controller().ParentWindow(&mut hwnd) }.is_ok() {
-                unsafe { make_caption_window_tree_click_through(hwnd.0 as isize) };
+                // WebView2 creates its render child asynchronously. Re-applying this is
+                // intentional and idempotent: late-created Chromium HWNDs cannot become
+                // a second input owner during startup.
+                unsafe { make_caption_window_tree_visual_only(hwnd.0 as isize) };
             }
         }
         let _ = web.set_visible(visible);
@@ -4545,6 +4576,7 @@ impl App {
                             .desired_rows(4)
                             .desired_width(f32::INFINITY),
                     );
+                    self.text_focus_ids.push(r.id);
                     if r.gained_focus() {
                         self.pending_undo = Some(self.doc.raw.clone());
                     }
@@ -4645,34 +4677,105 @@ impl App {
                 // ---- position & size (canvas %) ----
                 ui.label(egui::RichText::new("位置とサイズ（%）").strong());
                 let b = clip.display_box();
-                let mut vals = [b.x * 100.0, b.y * 100.0, b.width * 100.0, b.height * 100.0];
-                let mut changed = false;
-                for (row, pair) in [("X / Y", [0usize, 1]), ("幅 / 高さ", [2, 3])] {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(row).weak().small());
-                        for &i in &pair {
-                            let rng = if i < 2 { -50.0..=100.0 } else { 1.0..=100.0 };
-                            let r = ui.add(
-                                egui::DragValue::new(&mut vals[i]).speed(0.5).range(rng).suffix("%"),
-                            );
-                            if r.drag_started() || r.gained_focus() {
-                                self.pending_undo = Some(self.doc.raw.clone());
-                            }
-                            changed |= r.changed();
+
+                let mut xy = [b.x * 100.0, b.y * 100.0];
+                let mut xy_changed = false;
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("位置 X / Y").weak().small());
+                    for v in &mut xy {
+                        let r = ui.add(egui::DragValue::new(v).speed(0.5).range(-100.0..=100.0).suffix("%"));
+                        if r.drag_started() || r.gained_focus() {
+                            self.pending_undo = Some(self.doc.raw.clone());
                         }
-                    });
-                }
-                if changed {
+                        xy_changed |= r.changed();
+                        if r.drag_stopped() {
+                            ui.memory_mut(|mem| mem.surrender_focus(r.id));
+                        }
+                    }
+                });
+                if xy_changed {
                     let ids = edit_ids.clone();
-                    let (x, y, w, h) =
-                        (vals[0] / 100.0, vals[1] / 100.0, vals[2] / 100.0, vals[3] / 100.0);
-                    self.apply_edit(false, move |raw| edits::set_position_many(raw, &ids, x, y, w, h));
+                    let (x, y) = (xy[0] / 100.0, xy[1] / 100.0);
+                    self.apply_edit(false, move |raw| edits::set_position_many(raw, &ids, x, y, b.width, b.height));
+                    self.push_req(false);
+                }
+
+                // A single size value scales both axes by the same factor. The geometric
+                // mean stays stable even when the current box was previously stretched.
+                let old_size = (b.width * b.height).sqrt().max(0.01) * 100.0;
+                let mut size = old_size;
+                let size_resp = ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("比率維持").weak().small());
+                    ui.add(egui::DragValue::new(&mut size).speed(0.5).range(1.0..=400.0).suffix("%"))
+                }).inner;
+                if size_resp.drag_started() || size_resp.gained_focus() {
+                    self.pending_undo = Some(self.doc.raw.clone());
+                }
+                if size_resp.changed() {
+                    let factor = size / old_size;
+                    let (nw, nh) = (b.width * factor, b.height * factor);
+                    let (cx, cy) = (b.x + b.width / 2.0, b.y + b.height / 2.0);
+                    let ids = edit_ids.clone();
+                    self.apply_edit(false, move |raw| {
+                        edits::set_position_many(raw, &ids, cx - nw / 2.0, cy - nh / 2.0, nw, nh)
+                    });
+                    self.push_req(false);
+                }
+                if size_resp.drag_stopped() {
+                    ui.memory_mut(|mem| mem.surrender_focus(size_resp.id));
+                }
+
+                let mut wh = [b.width * 100.0, b.height * 100.0];
+                let mut wh_changed = false;
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("個別 X / Y").weak().small());
+                    for v in &mut wh {
+                        let r = ui.add(egui::DragValue::new(v).speed(0.5).range(1.0..=400.0).suffix("%"));
+                        if r.drag_started() || r.gained_focus() {
+                            self.pending_undo = Some(self.doc.raw.clone());
+                        }
+                        wh_changed |= r.changed();
+                        if r.drag_stopped() {
+                            ui.memory_mut(|mem| mem.surrender_focus(r.id));
+                        }
+                    }
+                });
+                if wh_changed {
+                    let (nw, nh) = (wh[0] / 100.0, wh[1] / 100.0);
+                    let (cx, cy) = (b.x + b.width / 2.0, b.y + b.height / 2.0);
+                    let ids = edit_ids.clone();
+                    self.apply_edit(false, move |raw| {
+                        edits::set_position_many(raw, &ids, cx - nw / 2.0, cy - nh / 2.0, nw, nh);
+                        edits::set_fit_many(raw, &ids, true);
+                    });
                     self.push_req(false);
                 }
                 if ui.small_button("全画面に戻す").clicked() {
                     let ids = edit_ids.clone();
-                    self.apply_edit(true, move |raw| edits::set_position_many(raw, &ids, 0.0, 0.0, 1.0, 1.0));
+                    self.apply_edit(true, move |raw| {
+                        edits::set_position_many(raw, &ids, 0.0, 0.0, 1.0, 1.0);
+                        edits::set_fit_many(raw, &ids, false);
+                    });
                     self.push_req(false);
+                }
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new("不透明度").strong());
+                let mut opacity = clip.opacity * 100.0;
+                let opacity_resp = ui.add(
+                    egui::Slider::new(&mut opacity, 0.0..=100.0)
+                        .suffix("%")
+                        .fixed_decimals(0),
+                );
+                if opacity_resp.drag_started() {
+                    self.pending_undo = Some(self.doc.raw.clone());
+                }
+                if opacity_resp.changed() {
+                    let ids = edit_ids.clone();
+                    self.apply_edit(false, move |raw| edits::set_opacity_many(raw, &ids, opacity / 100.0));
+                    self.push_req(false);
+                }
+                if opacity_resp.drag_stopped() {
+                    ui.memory_mut(|mem| mem.surrender_focus(opacity_resp.id));
                 }
                 ui.add_space(6.0);
                 // ---- volume ----
@@ -5475,6 +5578,12 @@ impl App {
             let scale = (img.width() / cw).min(img.height() / ch);
             egui::Rect::from_center_size(img.center(), egui::vec2(cw * scale, ch * scale))
         };
+        // The caption WebView is visual-only, so preview gestures arrive through the
+        // normal egui response just like every other editor interaction.
+        let pointer_pos = resp.interact_pointer_pos().or_else(|| resp.hover_pos());
+        let preview_drag_started = resp.drag_started();
+        let preview_dragging = resp.dragged();
+        let preview_drag_stopped = resp.drag_stopped();
         // The outline follows the frame that is REALLY on screen — its EFFECTIVE time
         // (the base layer's landed frame instant), the same time the blur inside the
         // frame was evaluated at. Request-time (self.t / f.t) differs from it by up to
@@ -5550,6 +5659,7 @@ impl App {
                         (CANVAS_W, CANVAS_H),
                         dims,
                         (bb.x, bb.y, bb.width, bb.height),
+                        !b.stretches_to_box(),
                         b.crop_ltrb(),
                         (*sx, *sy, 0.0, 0.0),
                     );
@@ -5575,7 +5685,7 @@ impl App {
                 let lclick = resp.clicked();
                 let rclick = resp.secondary_clicked();
                 if lclick || rclick {
-                    if let Some(pt) = resp.interact_pointer_pos() {
+                    if let Some(pt) = pointer_pos {
                         if vid.contains(pt) {
                             // clicks belong to ONE anchor frame; clicking on a different
                             // frame starts the point set over there
@@ -5590,6 +5700,7 @@ impl App {
                                 (CANVAS_W, CANVAS_H),
                                 dims,
                                 (bb.x, bb.y, bb.width, bb.height),
+                                !b.stretches_to_box(),
                                 b.crop_ltrb(),
                                 (cx, cy),
                             );
@@ -5692,6 +5803,7 @@ impl App {
                                     (CANVAS_W, CANVAS_H),
                                     dims,
                                     (bb.x, bb.y, bb.width, bb.height),
+                                    !b.stretches_to_box(),
                                     b.crop_ltrb(),
                                     (x0, y0, x1 - x0, y1 - y0),
                                 );
@@ -5744,8 +5856,8 @@ impl App {
             }
         }
         // --- region rect editing: corners = resize, inside = move (shape preserved) ---
-        if resp.drag_started() && self.region_drag.is_none() {
-            if let Some(pt) = resp.interact_pointer_pos() {
+        if preview_drag_started && self.region_drag.is_none() {
+            if let Some(pt) = pointer_pos {
                 'hit: for (cid, r) in &editable {
                     // (timeline_start, keys snapshot) of a keyframe-able clip (no AI track)
                     let key_info = self
@@ -5798,7 +5910,7 @@ impl App {
             }
         }
         if let Some((cid, mode, grab, orig)) = self.region_drag.clone() {
-            if let Some(pt) = resp.interact_pointer_pos() {
+            if let Some(pt) = pointer_pos {
                 let dx = ((pt.x - grab.x) / vid.width()) as f64;
                 let dy = ((pt.y - grab.y) / vid.height()) as f64;
                 let (mut x, mut y, mut w, mut h) = orig;
@@ -5902,29 +6014,44 @@ impl App {
         let b = c.display_box();
         let bx = egui::Rect::from_min_size(
             egui::pos2(
-                img.left() + (b.x as f32) * img.width(),
-                img.top() + (b.y as f32) * img.height(),
+                vid.left() + (b.x as f32) * vid.width(),
+                vid.top() + (b.y as f32) * vid.height(),
             ),
-            egui::vec2((b.width as f32) * img.width(), (b.height as f32) * img.height()),
+            egui::vec2((b.width as f32) * vid.width(), (b.height as f32) * vid.height()),
         );
-        let p = ui.painter_at(img);
+        let p = ui.painter_at(vid);
         p.rect_stroke(bx, 2.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 170, 255)));
         let corners = [bx.min, egui::pos2(bx.max.x, bx.min.y), egui::pos2(bx.min.x, bx.max.y), bx.max];
         for cp in corners {
             p.rect_filled(egui::Rect::from_center_size(cp, egui::vec2(9.0, 9.0)), 2.0, egui::Color32::from_rgb(90, 170, 255));
         }
-        let pointer = resp.interact_pointer_pos().or(resp.hover_pos());
+        // Corners keep the current shape. Edge handles deform one axis only.
+        let edges = [
+            egui::pos2(bx.left(), bx.center().y),
+            egui::pos2(bx.right(), bx.center().y),
+            egui::pos2(bx.center().x, bx.top()),
+            egui::pos2(bx.center().x, bx.bottom()),
+        ];
+        for ep in edges {
+            p.rect_filled(egui::Rect::from_center_size(ep, egui::vec2(8.0, 8.0)), 1.0, egui::Color32::WHITE);
+        }
+        let pointer = pointer_pos;
         // cursor feedback
         if let Some(pt) = pointer {
             if corners.iter().any(|cp| cp.distance(pt) < 10.0) {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+            } else if edges[..2].iter().any(|ep| ep.distance(pt) < 10.0) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            } else if edges[2..].iter().any(|ep| ep.distance(pt) < 10.0) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
             } else if bx.contains(pt) {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
             }
         }
-        if resp.drag_started() {
-            if let Some(pt) = resp.interact_pointer_pos() {
+        if preview_drag_started {
+            if let Some(pt) = pointer_pos {
                 let corner = corners.iter().position(|cp| cp.distance(pt) < 10.0);
+                let edge = edges.iter().position(|ep| ep.distance(pt) < 10.0);
                 let starts: Vec<(String, model::Pos)> = sel
                     .iter()
                     .map(|c| (c.id.clone(), c.display_box()))
@@ -5932,17 +6059,20 @@ impl App {
                 if let Some(ci) = corner {
                     self.pending_undo = Some(self.doc.raw.clone());
                     self.inspect_drag = Some((starts, ci as u8 + 1, pt, b));
+                } else if let Some(ei) = edge {
+                    self.pending_undo = Some(self.doc.raw.clone());
+                    self.inspect_drag = Some((starts, ei as u8 + 5, pt, b));
                 } else if bx.contains(pt) {
                     self.pending_undo = Some(self.doc.raw.clone());
                     self.inspect_drag = Some((starts, 0, pt, b));
                 }
             }
         }
-        if resp.dragged() {
-            if let (Some((starts, mode, start, ob)), Some(pt)) = (self.inspect_drag.clone(), resp.interact_pointer_pos()) {
-                let dx = ((pt.x - start.x) / img.width()) as f64;
-                let dy = ((pt.y - start.y) / img.height()) as f64;
-                let scale = if mode == 0 {
+        if preview_dragging {
+            if let (Some((starts, mode, start, ob)), Some(pt)) = (self.inspect_drag.clone(), pointer_pos) {
+                let dx = ((pt.x - start.x) / vid.width()) as f64;
+                let dy = ((pt.y - start.y) / vid.height()) as f64;
+                let scale = if mode == 0 || mode >= 5 {
                     1.0
                 } else {
                     let (_, _, sxs, sys) = match mode {
@@ -5955,10 +6085,21 @@ impl App {
                     let scale_h = (ob.height + dy * sys).max(0.03) / ob.height;
                     scale_w.max(scale_h)
                 };
+                let stretch_ids: Vec<String> = starts.iter().map(|(id, _)| id.clone()).collect();
                 self.apply_edit(false, move |raw| {
                     for (id, sb) in &starts {
                         let (nx, ny, nw, nh) = if mode == 0 {
                             (sb.x + dx, sb.y + dy, sb.width, sb.height)
+                        } else if mode == 5 {
+                            let nw = (sb.width - dx).max(0.03);
+                            (sb.x + sb.width - nw, sb.y, nw, sb.height)
+                        } else if mode == 6 {
+                            (sb.x, sb.y, (sb.width + dx).max(0.03), sb.height)
+                        } else if mode == 7 {
+                            let nh = (sb.height - dy).max(0.03);
+                            (sb.x, sb.y + sb.height - nh, sb.width, nh)
+                        } else if mode == 8 {
+                            (sb.x, sb.y, sb.width, (sb.height + dy).max(0.03))
                         } else {
                             let (ax, ay, sxs, sys) = match mode {
                                 1 => (sb.x + sb.width, sb.y + sb.height, -1.0, -1.0),
@@ -5973,10 +6114,13 @@ impl App {
                         };
                         edits::set_position(raw, id, nx, ny, nw, nh);
                     }
+                    if mode >= 5 {
+                        edits::set_fit_many(raw, &stretch_ids, true);
+                    }
                 });
             }
         }
-        if resp.drag_stopped() {
+        if preview_drag_stopped {
             self.inspect_drag = None;
             self.push_req(false); // settle full quality after the adjustment
         }
@@ -7641,22 +7785,29 @@ impl eframe::App for App {
         // typing = ANY text field has focus: every timeline shortcut must stand down —
         // Space toggled playback and Delete removed CLIPS while編集中のテロップに文字を
         // 打っていた（P/L しかガードされていなかった）
-        let typing = ctx.wants_keyboard_input();
-        if !typing && ctx.input(|i| i.key_pressed(egui::Key::S) && !i.modifiers.ctrl) {
+        // Numeric drags/sliders retain egui keyboard focus after mouse adjustment. They
+        // must not disable the editor. Only a real text editor owns the shortcut keys.
+        let focused = ctx.memory(|mem| mem.focused());
+        let typing = focused
+            .map(|id| self.text_focus_ids.contains(&id))
+            .unwrap_or(false);
+        self.text_focus_ids.clear();
+        let ctrl = ctx.input(|i| i.modifiers.ctrl);
+        if !typing && !ctrl && ctx.input(|i| i.key_pressed(egui::Key::S)) {
             self.split_at_playhead();
         }
-        if !typing && ctx.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.ctrl) {
+        if !typing && !ctrl && ctx.input(|i| i.key_pressed(egui::Key::F)) {
             self.freeze_at_playhead();
         }
-        if !typing && ctx.input(|i| i.key_pressed(egui::Key::E) && !i.modifiers.ctrl) {
+        if !typing && !ctrl && ctx.input(|i| i.key_pressed(egui::Key::E)) {
             self.toggle_popout();
         }
-        if !typing && ctx.input(|i| i.key_pressed(egui::Key::P) && !i.modifiers.ctrl) {
+        if !typing && !ctrl && ctx.input(|i| i.key_pressed(egui::Key::P)) {
             self.preview_fullscreen = !self.preview_fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.preview_fullscreen));
             self.push_req(false);
         }
-        if !typing && ctx.input(|i| i.key_pressed(egui::Key::L) && !i.modifiers.ctrl) {
+        if !typing && !ctrl && ctx.input(|i| i.key_pressed(egui::Key::L)) {
             self.cycle_playback_speed();
         }
         self.poll_popout_bakes();
@@ -7681,18 +7832,20 @@ impl eframe::App for App {
                 }
             }
         }
-        if !typing && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)) {
+        if !typing
+            && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+        {
             let force_ripple = ctx.input(|i| i.modifiers.shift);
             self.delete_selected(force_ripple);
         }
-        if !typing && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::D)) && !self.selected.is_empty()
+        if !typing && ctrl && ctx.input(|i| i.key_pressed(egui::Key::D)) && !self.selected.is_empty()
         {
             let ids = edits::expand_links(&self.doc.raw, &self.selected);
             let salt = std::process::id() as u64 ^ (self.t * 1000.0) as u64;
             self.apply_edit(true, move |raw| edits::duplicate_clips(raw, &ids, salt));
             self.toast("複製しました（右に空きが無い場合は別レーンの同じ時刻）");
         }
-        if !typing && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
+        if !typing && ctrl && ctx.input(|i| i.key_pressed(egui::Key::A)) {
             self.selected = self
                 .doc
                 .seq
@@ -7703,10 +7856,10 @@ impl eframe::App for App {
                 .map(|c| c.id.clone())
                 .collect();
         }
-        if !typing && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Z)) {
+        if !typing && ctrl && ctx.input(|i| i.key_pressed(egui::Key::Z)) {
             self.do_undo();
         }
-        if !typing && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Y)) {
+        if !typing && ctrl && ctx.input(|i| i.key_pressed(egui::Key::Y)) {
             self.do_redo();
         }
         if let Some(at) = self.save_at {
@@ -8151,6 +8304,14 @@ impl eframe::App for App {
                         let resp = ui
                             .add(egui::Image::new((tex.id(), size)))
                             .interact(egui::Sense::click_and_drag());
+                        // The preview owns pointer gestures, never text entry. End any
+                        // numeric/text focus explicitly so shortcuts resume in this same
+                        // interaction instead of waiting for a later panel click.
+                        if resp.clicked() || resp.drag_started() {
+                            if let Some(id) = ui.memory(|mem| mem.focused()) {
+                                ui.memory_mut(|mem| mem.surrender_focus(id));
+                            }
+                        }
                         let vid = egui::Rect::from_center_size(resp.rect.center(), size);
                         self.sync_caption_web(frame, vid, true);
                         if self.revise_pick {
@@ -8303,12 +8464,13 @@ impl eframe::App for App {
                 .default_width(340.0)
                 .show(ctx, |ui| {
                     ui.label("この動画をどう直してほしいか、言葉で指示してください");
-                    ui.add(
+                    let text_resp = ui.add(
                         egui::TextEdit::multiline(&mut self.revise_text)
                             .desired_rows(4)
                             .desired_width(f32::INFINITY)
                             .hint_text("例: 冒頭の自己紹介を短くして、テロップを大きめに"),
                     );
+                    self.text_focus_ids.push(text_resp.id);
                     ui.add_space(4.0);
                     // 場所の指定: プレビューを囲むと「指示クリップ」がタイムラインに生まれ、
                     // クリップの頭〜尻がAI作業の時間範囲・矩形が場所になる（送信時に消費）
@@ -8491,9 +8653,10 @@ impl eframe::App for App {
                 .collapsible(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .show(ctx, |ui| {
-                    text_changed = ui
-                        .add(egui::TextEdit::multiline(&mut buf).desired_width(360.0).desired_rows(3))
-                        .changed();
+                    let text_resp =
+                        ui.add(egui::TextEdit::multiline(&mut buf).desired_width(360.0).desired_rows(3));
+                    self.text_focus_ids.push(text_resp.id);
+                    text_changed = text_resp.changed();
                     ui.horizontal(|ui| {
                         if ui.button("保存 (Ctrl+Enter)").clicked() {
                             save = true;

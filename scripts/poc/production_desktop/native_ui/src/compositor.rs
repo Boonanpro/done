@@ -16,7 +16,7 @@ use crate::media::D3d;
 pub type CaptionTex = (ID3D11Texture2D, (u32, u32), (f64, f64, f64, f64), f64);
 
 const HLSL: &str = r#"
-cbuffer CB : register(b0) { float4 dst; float4 uvr; float4 aff; };
+cbuffer CB : register(b0) { float4 dst; float4 uvr; float4 aff; float4 opt; };
 struct VOut { float4 pos: SV_Position; float2 uv: TEXCOORD0; };
 VOut vs(uint id: SV_VertexID) {
   float2 corners[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
@@ -34,16 +34,16 @@ Texture2D tex3 : register(t3);
 SamplerState smp : register(s0);
 float4 ps_plain(VOut i) : SV_Target {
   float4 c = tex0.Sample(smp, i.uv);
-  return float4(c.rgb, 1.0);
+  return float4(c.rgb * opt.x, opt.x);
 }
 float4 ps_alpha(VOut i) : SV_Target {
   float4 c = tex0.Sample(smp, i.uv);
-  return float4(c.rgb * c.a, c.a);
+  return float4(c.rgb * c.a * opt.x, c.a * opt.x);
 }
 float4 ps_popout(VOut i) : SV_Target {
   float3 c = tex0.Sample(smp, i.uv).rgb;
   float a = tex1.Sample(smp, i.uv).r;
-  return float4(c * a, a);
+  return float4(c * a * opt.x, a * opt.x);
 }
 // LIVE pop-out: color from the ORIGINAL frame (t0, full frame rate — the lips), person
 // alpha (t1) + contact-shadow base (t2) from the baked matte twin, card geometry from the
@@ -122,7 +122,7 @@ float4 ps_popout_live(VOut i) : SV_Target {
   // 5. person on top; premultiplied out
   float nna = outa + pa * (1 - outa);
   rgb = (rgb * outa * (1 - pa) + src * pa) / max(nna, 1e-6);
-  return float4(rgb * nna, nna);
+  return float4(rgb * nna * opt.x, nna * opt.x);
 }
 "#;
 
@@ -205,6 +205,7 @@ struct Cb {
     dst: [f32; 4],
     uvr: [f32; 4],
     aff: [f32; 4],
+    opt: [f32; 4],
 }
 
 pub struct Compositor {
@@ -378,9 +379,10 @@ impl Compositor {
         }
     }
 
-    /// Draw `tex` into dest box (canvas fractions). cover=true crops source to box aspect.
-    /// `matte` switches to the pop-out shader (alpha from matte luma).
-    pub fn draw(
+    /// Draw into a canvas box. `cover` preserves source aspect and crops overflow;
+    /// `opacity` is applied in the same premultiplied-alpha pass.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_opacity(
         &self,
         d3d: &D3d,
         tex: &ID3D11Texture2D,
@@ -388,24 +390,25 @@ impl Compositor {
         dst: (f64, f64, f64, f64),
         cover: bool,
         matte: Option<&ID3D11Texture2D>,
+        opacity: f32,
     ) -> Result<()> {
-        self.draw_cropped(d3d, tex, src_wh, dst, cover, matte, None)
+        self.draw_cropped_opacity(d3d, tex, src_wh, dst, cover, matte, None, opacity)
     }
 
-    pub fn draw_alpha(
+    pub fn draw_alpha_opacity(
         &self,
         d3d: &D3d,
         tex: &ID3D11Texture2D,
         src_wh: (u32, u32),
         dst: (f64, f64, f64, f64),
+        opacity: f32,
     ) -> Result<()> {
-        self.draw_with_shader(d3d, tex, src_wh, dst, false, None, None, Some(&self.ps_alpha))
+        self.draw_with_shader(d3d, tex, src_wh, dst, false, None, None, Some(&self.ps_alpha), opacity)
     }
 
-    /// draw() plus a per-edge MASK crop (l,t,r,b fractions): trimmed strips reveal the
-    /// background; the kept pixels do not move or scale — parity with the exporter.
+    /// Per-edge MASK crop: trimmed strips reveal the background; kept pixels stay put.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw_cropped(
+    pub fn draw_cropped_opacity(
         &self,
         d3d: &D3d,
         tex: &ID3D11Texture2D,
@@ -414,8 +417,9 @@ impl Compositor {
         cover: bool,
         matte: Option<&ID3D11Texture2D>,
         crop: Option<(f64, f64, f64, f64)>,
+        opacity: f32,
     ) -> Result<()> {
-        self.draw_with_shader(d3d, tex, src_wh, dst, cover, matte, crop, None)
+        self.draw_with_shader(d3d, tex, src_wh, dst, cover, matte, crop, None, opacity)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -429,6 +433,7 @@ impl Compositor {
         matte: Option<&ID3D11Texture2D>,
         crop: Option<(f64, f64, f64, f64)>,
         shader: Option<&ID3D11PixelShader>,
+        opacity: f32,
     ) -> Result<()> {
         let mut dst = dst;
         unsafe {
@@ -476,6 +481,7 @@ impl Compositor {
                 dst: [dst.0 as f32, dst.1 as f32, dst.2 as f32, dst.3 as f32],
                 uvr: [u0, v0, uw, vh],
                 aff: [0.0, 0.0, 1.0, 1.0],
+                opt: [opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&views));
@@ -498,6 +504,7 @@ impl Compositor {
         mask: &ID3D11Texture2D,
         dst: (f64, f64, f64, f64),
         aff: [f32; 4],
+        opacity: f32,
     ) -> Result<()> {
         unsafe {
             let mut views: Vec<Option<ID3D11ShaderResourceView>> = Vec::with_capacity(4);
@@ -510,6 +517,7 @@ impl Compositor {
                 dst: [dst.0 as f32, dst.1 as f32, dst.2 as f32, dst.3 as f32],
                 uvr: [0.0, 0.0, 1.0, 1.0],
                 aff,
+                opt: [opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&views));
@@ -637,6 +645,7 @@ impl Compositor {
                 dst: [x as f32, y as f32, w as f32, h as f32],
                 uvr: [x as f32, y as f32, w as f32, h as f32],
                 aff: [cells_x, cells_y, 0.0, 0.0],
+                opt: [1.0, 0.0, 0.0, 0.0],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv]));
@@ -722,6 +731,7 @@ impl Compositor {
                     self.width as f32,
                     self.height as f32,
                 ],
+                opt: [1.0, 0.0, 0.0, 0.0],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv0, srv1]));
@@ -764,6 +774,7 @@ impl Compositor {
                     self.width as f32,
                     self.height as f32,
                 ],
+                opt: [1.0, 0.0, 0.0, 0.0],
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShaderResources(0, Some(&[srv]));
@@ -781,6 +792,7 @@ pub fn source_box_to_canvas(
     canvas_wh: (u32, u32),
     src_wh: (u32, u32),
     dst: (f64, f64, f64, f64),
+    cover: bool,
     crop: Option<(f64, f64, f64, f64)>,
     src_box: (f64, f64, f64, f64),
 ) -> (f64, f64, f64, f64) {
@@ -788,7 +800,7 @@ pub fn source_box_to_canvas(
     let (mut u0, mut v0, mut uw, mut vh) = (0.0f64, 0.0f64, 1.0f64, 1.0f64);
     let box_px_w = dst.2 * canvas_wh.0 as f64;
     let box_px_h = dst.3 * canvas_wh.1 as f64;
-    if box_px_w > 1.0 && box_px_h > 1.0 && src_wh.0 > 0 && src_wh.1 > 0 {
+    if cover && box_px_w > 1.0 && box_px_h > 1.0 && src_wh.0 > 0 && src_wh.1 > 0 {
         let sa = src_wh.0 as f64 / src_wh.1 as f64;
         let da = box_px_w / box_px_h;
         if sa > da {
@@ -825,10 +837,11 @@ pub fn canvas_point_to_source(
     canvas_wh: (u32, u32),
     src_wh: (u32, u32),
     dst: (f64, f64, f64, f64),
+    cover: bool,
     crop: Option<(f64, f64, f64, f64)>,
     p: (f64, f64),
 ) -> (f64, f64) {
-    let b = canvas_box_to_source(canvas_wh, src_wh, dst, crop, (p.0, p.1, 0.0, 0.0));
+    let b = canvas_box_to_source(canvas_wh, src_wh, dst, cover, crop, (p.0, p.1, 0.0, 0.0));
     (b.0, b.1)
 }
 
@@ -839,6 +852,7 @@ pub fn canvas_box_to_source(
     canvas_wh: (u32, u32),
     src_wh: (u32, u32),
     dst: (f64, f64, f64, f64),
+    cover: bool,
     crop: Option<(f64, f64, f64, f64)>,
     canvas_box: (f64, f64, f64, f64),
 ) -> (f64, f64, f64, f64) {
@@ -847,7 +861,7 @@ pub fn canvas_box_to_source(
         let (mut u0, mut v0, mut uw, mut vh) = (0.0f64, 0.0f64, 1.0f64, 1.0f64);
         let box_px_w = dst.2 * canvas_wh.0 as f64;
         let box_px_h = dst.3 * canvas_wh.1 as f64;
-        if box_px_w > 1.0 && box_px_h > 1.0 && src_wh.0 > 0 && src_wh.1 > 0 {
+        if cover && box_px_w > 1.0 && box_px_h > 1.0 && src_wh.0 > 0 && src_wh.1 > 0 {
             let sa = src_wh.0 as f64 / src_wh.1 as f64;
             let da = box_px_w / box_px_h;
             if sa > da {

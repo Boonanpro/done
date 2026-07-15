@@ -81,6 +81,10 @@ pub struct Clip {
     pub timeline_end: f64,
     #[serde(default)]
     pub position: Option<Pos>,
+    /// How the source is fitted into `position`: `cover` (default, aspect preserved)
+    /// or `stretch` (width and height may be changed independently).
+    #[serde(default)]
+    pub fit: Option<String>,
     #[serde(default)]
     pub transform: Option<Tf>,
     #[serde(default)]
@@ -93,6 +97,9 @@ pub struct Clip {
     pub link_id: Option<String>,
     #[serde(default = "one")]
     pub volume: f64,
+    /// Visual opacity. Missing means fully opaque for existing projects.
+    #[serde(default = "one")]
+    pub opacity: f64,
 }
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct Pos {
@@ -297,6 +304,14 @@ impl Clip {
             }
         }
         Pos { x: 0.0, y: 0.0, width: 1.0, height: 1.0 }
+    }
+
+    pub fn stretches_to_box(&self) -> bool {
+        self.fit.as_deref() == Some("stretch")
+    }
+
+    pub fn visual_opacity(&self) -> f32 {
+        self.opacity.clamp(0.0, 1.0) as f32
     }
 }
 
