@@ -131,6 +131,9 @@ async def list_tools() -> list[types.Tool]:
               "（WebSearch/WebFetchで見つけた本物のロゴ等）またはローカルファイルパスを指定。生成ではなく本物が必要な時はこちらを使う。",
               {"url": _STR, "name": _STR}, ["url"]),
         _tool("validate_draft", "ドラフト全体を検証して問題リストを返す。作業の締めに必ず実行し、空になるまで直すこと。", {}),
+        _tool("watch_video", "指定範囲の映像を『動画として』視聴する（動き・テンポ・話し方・音声込み。静止画のrender_frameでは分からないもの用）。"
+              "questionに知りたいことを書くと視聴結果を答える。1回1〜2分かかるので範囲は要点に絞る（最大120秒）。",
+              {"t0": _NUM, "t1": _NUM, "question": _STR}, ["t0", "t1"]),
     ]
 
 
@@ -209,6 +212,10 @@ async def _dispatch(name: str, a: dict) -> list:
 
     if name == "import_image":
         return _ok(_import_image(draft, str(a.get("url") or ""), str(a.get("name") or "")))
+
+    if name == "watch_video":
+        return _ok(_watch_video(seq, assets, float(a["t0"]), float(a["t1"]),
+                                str(a.get("question") or "")))
 
     # ---- mutating commands on the draft ----
     cmd = {
@@ -384,6 +391,91 @@ def _import_image(draft: dict, url: str, name: str) -> dict:
     return {"ok": True, "asset_id": aid, "path": str(dest),
             "size": f"{im.width}x{im.height}",
             "note": "add_overlay / append_clip でタイムラインに配置できます"}
+
+
+def _ffmpeg() -> str:
+    import shutil as _sh
+    for c in (_sh.which("ffmpeg"), r"C:\Users\Owner\ffmpeg\bin\ffmpeg.exe", r"C:\ffmpeg\bin\ffmpeg.exe"):
+        if c and Path(c).exists():
+            return c
+    raise RuntimeError("ffmpeg not found")
+
+
+def _watch_video(seq: dict, assets: dict, t0: float, t1: float, question: str) -> dict:
+    """Gemini's eyes on the timeline: cut the base-lane footage for [t0,t1] into a
+    small 640p mp4 (original audio included) and have Gemini watch it. This is the
+    agent's only way to perceive MOTION and SOUND — render_frame only shows stills."""
+    if t1 <= t0:
+        return {"ok": False, "error": "t1 must be > t0"}
+    if t1 - t0 > 120:
+        return {"ok": False, "error": "範囲が長すぎます（最大120秒）。要点に絞って複数回に分けてください"}
+    base = next((tr for tr in seq.get("tracks") or [] if tr.get("type") == "video"), None)
+    if not base:
+        return {"ok": False, "error": "no video track"}
+    parts: list[Path] = []
+    tmp_dir = _room_dir() / "drafts"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        for c in sorted(base.get("clips") or [], key=lambda x: float(x.get("timeline_start") or 0)):
+            ts, te = float(c.get("timeline_start") or 0), float(c.get("timeline_end") or 0)
+            if te <= t0 or ts >= t1 or c.get("freeze"):
+                continue
+            asset = assets.get(str(c.get("asset_id") or "")) or {}
+            src = asset.get("local_path") or asset.get("original_uri") or ""
+            if not src or not Path(src).exists():
+                continue
+            ss = float(c.get("source_start") or 0) + (max(t0, ts) - ts)
+            dur = min(t1, te) - max(t0, ts)
+            if dur <= 0.05:
+                continue
+            part = tmp_dir / f"watch_{uuid.uuid4().hex[:8]}.mp4"
+            r = subprocess.run(
+                [_ffmpeg(), "-y", "-ss", f"{ss:.3f}", "-t", f"{dur:.3f}", "-i", src,
+                 "-vf", "scale=-2:640", "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+                 "-c:a", "aac", "-b:a", "96k", str(part)],
+                capture_output=True, timeout=180,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if r.returncode == 0 and part.exists() and part.stat().st_size > 0:
+                parts.append(part)
+        if not parts:
+            return {"ok": False, "error": "この範囲に切り出せる映像クリップがありません"}
+        if len(parts) == 1:
+            clip_path = parts[0]
+        else:
+            lst = tmp_dir / f"watch_{uuid.uuid4().hex[:8]}.txt"
+            lst.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts), encoding="utf-8")
+            clip_path = tmp_dir / f"watch_{uuid.uuid4().hex[:8]}.mp4"
+            r = subprocess.run(
+                [_ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(clip_path)],
+                capture_output=True, timeout=120,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            lst.unlink(missing_ok=True)
+            if r.returncode != 0:
+                return {"ok": False, "error": "segment concat failed"}
+            parts.append(clip_path)
+        from app.services.video_analyzer import _analyze_file_sync
+        prompt = (
+            f"これは動画タイムラインの {t0:.1f}秒〜{t1:.1f}秒 の切り出しです。"
+            f"時刻に言及する時はこの切り出し内の相対秒で述べてください。\n\n"
+            + (question or "この映像の内容（動き・話し方・音声・テンポ）を簡潔に説明してください。")
+        )
+        text = _analyze_file_sync(str(clip_path), prompt)
+        if not text:
+            return {"ok": False, "error": "Gemini returned empty response"}
+        return {"ok": True, "t0": t0, "t1": t1, "answer": text,
+                "note": "answer内の時刻は範囲先頭からの相対秒"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "video cut timeout"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"watch failed: {exc}"}
+    finally:
+        for p in parts:
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
 
 def _register_image_asset(draft: dict, aid: str, dest: Path, source_type: str,
