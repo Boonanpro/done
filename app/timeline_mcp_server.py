@@ -414,7 +414,7 @@ def _import_image(draft: dict, url: str, name: str) -> dict:
             raw.unlink()
         except OSError:
             pass
-    _register_image_asset(draft, aid, dest, "imported", filename_hint=name)
+    _register_image_asset(draft, aid, dest, "local_path", filename_hint=name)
     return {"ok": True, "asset_id": aid, "path": str(dest),
             "size": f"{im.width}x{im.height}",
             "note": "add_overlay / append_clip でタイムラインに配置できます"}
