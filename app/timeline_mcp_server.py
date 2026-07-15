@@ -288,24 +288,51 @@ def _ensure_caption_png(text: str, style: dict | None) -> str | None:
         "web_base": os.environ.get("DAN_CAPTION_RENDER_BASE", "http://127.0.0.1:3000"),
         "items": [{"png": str(png), "text": text, "time": 0.0, "design": design, "words": []}],
     }, ensure_ascii=False), encoding="utf-8")
+    bake_err = ""
+    dbg_log = cache_dir / f"_bake_dbg_{key}.log"
+    dbg_log.unlink(missing_ok=True)
     try:
         script = Path(__file__).resolve().parents[1] / "scripts" / "render_caption_pngs.py"
-        subprocess.run([sys.executable, str(script), str(spec)], capture_output=True,
-                       timeout=180, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except Exception:  # noqa: BLE001
-        pass
+        r = subprocess.run([sys.executable, str(script), str(spec)], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           stdin=subprocess.DEVNULL,
+                           env={**os.environ, "RENDER_CAPTION_DEBUG_LOG": str(dbg_log)},
+                           timeout=180, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if not (png.exists() and png.stat().st_size > 0):
+            bake_err = f"rc={r.returncode} stdout={(r.stdout or '')[-400:]} stderr={(r.stderr or '')[-800:]}"
+    except Exception as exc:  # noqa: BLE001
+        bake_err = f"spawn failed: {type(exc).__name__}: {exc}"
     finally:
         try:
             spec.unlink()
         except OSError:
             pass
+    if bake_err:
+        try:
+            bake_err += "\nstages:\n" + (dbg_log.read_text(encoding="utf-8")
+                                         if dbg_log.exists() else "(no stage log)")
+        except OSError:
+            pass
+    dbg_log.unlink(missing_ok=True)
     if not (png.exists() and png.stat().st_size > 0):
-        return "テロップは追加済みですが、デザインPNGのレンダリングが未完了です（プレビューを開くと自動生成されます）"
+        # 4連続失敗→原因不明タイムアウトの実ジョブ事故があった。失敗理由は
+        # 揉み消さずログに残し、エージェントには「リトライで直らない」ことを伝える
+        try:
+            (cache_dir / "bake_error.log").write_text(
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} key={key} text={text[:40]}\n{bake_err}\n",
+                encoding="utf-8")
+        except OSError:
+            pass
+        return ("テロップは追加済みだがデザインPNGの生成に失敗（この環境の不調で、リトライや"
+                "スタイル変更では直らない。原因調査も不要——クリップはこのまま残してよく、"
+                "プレビューを開いた時に自動生成される。他の作業を続けて完了させること）")
     try:
+        # numpyは使わない: このMCPプロセスでは import numpy がDLL初期化で
+        # 無期限ハングする（py-spy実証: create_module内で7分停止→ジョブ全損）。
+        # PILのヒストグラムで同じ「不透明ピクセル数」を数える
         from PIL import Image
-        import numpy as np
-        a = np.asarray(Image.open(png).convert("RGBA"))
-        if int((a[:, :, 3] > 10).sum()) < 50:
+        hist = Image.open(png).convert("RGBA").getchannel("A").histogram()
+        if sum(hist[11:]) < 50:
             png.unlink(missing_ok=True)
             return ("警告: このスタイルではテロップが透明にレンダリングされました。"
                     "styleを省略（既定デザイン）にするか、fontSizeは相対値(0.5〜2.0)で指定してください")

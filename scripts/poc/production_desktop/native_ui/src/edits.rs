@@ -78,6 +78,14 @@ pub fn expand_links(root: &Value, ids: &[String]) -> Vec<String> {
 }
 
 pub fn move_clips(root: &mut Value, ids: &[String], dt: f64) {
+    // Clamp once for the whole selection. Clamping per clip made a multi-selection
+    // compress/collapse at t=0 because each member received a different delta.
+    let min_start = clips_iter_mut(root)
+        .into_iter()
+        .filter(|c| ids.contains(&sid(c)))
+        .map(|c| f(c, "timeline_start"))
+        .fold(f64::MAX, f64::min);
+    let group_dt = if min_start.is_finite() { dt.max(-min_start) } else { dt };
     if let Some(tracks) = tracks_mut(root) {
         for tr in tracks {
             let Some(clips) = tr.get_mut("clips").and_then(|c| c.as_array_mut()) else {
@@ -88,9 +96,8 @@ pub fn move_clips(root: &mut Value, ids: &[String], dt: f64) {
                     continue;
                 }
                 let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
-                let dt = dt.max(-ts); // never before 0
-                setf(c, "timeline_start", ts + dt);
-                setf(c, "timeline_end", te + dt);
+                setf(c, "timeline_start", ts + group_dt);
+                setf(c, "timeline_end", te + group_dt);
             }
         }
     }
@@ -1625,6 +1632,243 @@ pub fn move_to_track(raw: &mut serde_json::Value, ids: &[String], target: usize)
     prune_empty_unnamed_tracks_impl(tracks);
 }
 
+/// Place an existing asset at an exact timeline time/lane without rippling or overwriting.
+/// If the requested visual lane is occupied, create a lane immediately in front of it so
+/// every existing clip survives. Video audio is linked on the first audio lane; still images
+/// are silent and use the same visual-clip contract as the native compositor/exporter.
+pub fn place_asset(
+    raw: &mut Value,
+    target: usize,
+    t: f64,
+    dur: f64,
+    asset_id: &str,
+    has_audio: bool,
+    is_image: bool,
+    salt: u64,
+) -> Vec<String> {
+    let t = (t.max(0.0) * 1000.0).round() / 1000.0;
+    let dur = dur.max(0.1);
+    let end = ((t + dur) * 1000.0).round() / 1000.0;
+    let link = format!("lk_drop_{salt}");
+    let vid_id = format!("drop_v_{salt}");
+    let aud_id = format!("drop_a_{salt}");
+    let Some(tracks) = tracks_mut(raw) else { return Vec::new() };
+    if target >= tracks.len()
+        || tracks[target].get("type").and_then(|v| v.as_str()) == Some("audio")
+        || tracks[target].get("locked").and_then(|v| v.as_bool()).unwrap_or(false)
+    {
+        return Vec::new();
+    }
+
+    let occupied = tracks[target]
+        .get("clips")
+        .and_then(|c| c.as_array())
+        .map(|clips| clips.iter().any(|c| {
+            f(c, "timeline_start") < end - 1e-6 && f(c, "timeline_end") > t + 1e-6
+        }))
+        .unwrap_or(false);
+    let visual_target = if occupied {
+        let insert_at = target + 1;
+        tracks.insert(
+            insert_at,
+            serde_json::json!({
+                "id": format!("overlay_drop_{salt}"),
+                "type": "overlay",
+                "label": "Dropped media",
+                "clips": []
+            }),
+        );
+        insert_at
+    } else {
+        target
+    };
+    let target_kind = tracks[visual_target]
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("overlay")
+        .to_string();
+    let mut vclip = serde_json::json!({
+        "id": vid_id.clone(),
+        "asset_id": asset_id,
+        "track": target_kind,
+        "source_start": 0.0,
+        "source_end": dur,
+        "timeline_start": t,
+        "timeline_end": end
+    });
+    if has_audio && !is_image {
+        vclip["link_id"] = serde_json::json!(link.clone());
+    }
+    tracks[visual_target]
+        .get_mut("clips")
+        .and_then(|c| c.as_array_mut())
+        .map(|clips| clips.push(vclip));
+
+    let mut inserted = vec![vid_id];
+    if has_audio && !is_image {
+        let aclip = serde_json::json!({
+            "id": aud_id.clone(),
+            "asset_id": asset_id,
+            "track": "audio",
+            "source_start": 0.0,
+            "source_end": dur,
+            "timeline_start": t,
+            "timeline_end": end,
+            "link_id": link
+        });
+        if let Some(ai) = tracks
+            .iter()
+            .position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("audio"))
+        {
+            tracks[ai]
+                .get_mut("clips")
+                .and_then(|c| c.as_array_mut())
+                .map(|clips| clips.push(aclip));
+        } else {
+            tracks.push(serde_json::json!({
+                "id": format!("audio_drop_{salt}"), "type": "audio", "clips": [aclip]
+            }));
+        }
+        inserted.push(aud_id);
+    }
+    inserted
+}
+
+/// Move a visual multi-selection between lanes as one rigid group. `anchor_id` is the clip
+/// actually held by the pointer; it lands on `target`, while clips selected on neighbouring
+/// lanes keep the same vertical offsets. The delta is clamped as a group at the first/last
+/// visual lane, so clips can never collapse into one lane or disappear at a boundary.
+pub fn move_group_to_track(
+    raw: &mut serde_json::Value,
+    ids: &[String],
+    anchor_id: &str,
+    target: usize,
+) {
+    let Some(tracks) = raw
+        .get_mut(0)
+        .and_then(|r| r.get_mut("timeline"))
+        .and_then(|x| x.get_mut("sequence"))
+        .and_then(|x| x.get_mut("tracks"))
+        .and_then(|x| x.as_array_mut())
+    else {
+        return;
+    };
+    if target >= tracks.len()
+        || tracks[target].get("type").and_then(|v| v.as_str()) == Some("audio")
+    {
+        return;
+    }
+
+    let visual_tracks: Vec<usize> = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, tr)| tr.get("type").and_then(|v| v.as_str()) != Some("audio"))
+        .map(|(i, _)| i)
+        .collect();
+    let Some(target_ord) = visual_tracks.iter().position(|&i| i == target) else { return };
+
+    let mut selected_ords: Vec<usize> = Vec::new();
+    let mut anchor_ord: Option<usize> = None;
+    for (ord, &ti) in visual_tracks.iter().enumerate() {
+        let Some(clips) = tracks[ti].get("clips").and_then(|c| c.as_array()) else { continue };
+        for c in clips {
+            let id = sid(c);
+            if ids.contains(&id) {
+                selected_ords.push(ord);
+                if id == anchor_id {
+                    anchor_ord = Some(ord);
+                }
+            }
+        }
+    }
+    let Some(anchor_ord) = anchor_ord.or_else(|| selected_ords.first().copied()) else { return };
+    let min_ord = *selected_ords.iter().min().unwrap_or(&anchor_ord);
+    let max_ord = *selected_ords.iter().max().unwrap_or(&anchor_ord);
+    let wanted = target_ord as isize - anchor_ord as isize;
+    let delta = wanted.clamp(
+        -(min_ord as isize),
+        visual_tracks.len() as isize - 1 - max_ord as isize,
+    );
+    if delta == 0 {
+        return;
+    }
+
+    let mut moved: Vec<(usize, Value)> = Vec::new();
+    for (ord, &ti) in visual_tracks.iter().enumerate() {
+        if let Some(clips) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
+            let mut i = 0;
+            while i < clips.len() {
+                if ids.contains(&sid(&clips[i])) {
+                    moved.push((ord, clips.remove(i)));
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    for (src_ord, mut clip) in moved {
+        let dst_ord = (src_ord as isize + delta) as usize;
+        let dst_ti = visual_tracks[dst_ord];
+        let kind = tracks[dst_ti]
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("overlay")
+            .to_string();
+        if let Some(o) = clip.as_object_mut() {
+            o.insert("track".into(), serde_json::json!(kind));
+        }
+        if let Some(arr) = tracks[dst_ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
+            arr.push(clip);
+            arr.sort_by(|a, b| f(a, "timeline_start").total_cmp(&f(b, "timeline_start")));
+        }
+    }
+    prune_empty_unnamed_tracks_impl(tracks);
+}
+
+/// The above-the-top drop zone gets a fresh lane, then uses the same rigid group move. Once
+/// the selection already occupies an otherwise-empty provisional top lane, repeated drag
+/// frames are idempotent instead of continuously creating lanes.
+pub fn move_group_to_new_top_track(raw: &mut Value, ids: &[String], anchor_id: &str) {
+    let Some(tracks) = raw
+        .get_mut(0)
+        .and_then(|r| r.get_mut("timeline"))
+        .and_then(|x| x.get_mut("sequence"))
+        .and_then(|x| x.get_mut("tracks"))
+        .and_then(|x| x.as_array_mut())
+    else { return };
+    let Some(front) = tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, tr)| tr.get("type").and_then(|v| v.as_str()) != Some("audio"))
+        .map(|(i, _)| i)
+        .max()
+    else { return };
+    let front_clips = tracks[front].get("clips").and_then(|c| c.as_array());
+    let already_provisional = tracks[front].get("id").and_then(|v| v.as_str()).is_none()
+        && front_clips
+            .map(|cs| !cs.is_empty() && cs.iter().all(|c| ids.contains(&sid(c))))
+            .unwrap_or(false);
+    if already_provisional {
+        return;
+    }
+    let kind = tracks
+        .iter()
+        .find_map(|tr| {
+            let has = tr
+                .get("clips")
+                .and_then(|c| c.as_array())
+                .map(|cs| cs.iter().any(|c| ids.contains(&sid(c))))
+                .unwrap_or(false);
+            has.then(|| tr.get("type").and_then(|v| v.as_str()).unwrap_or("overlay").to_string())
+        })
+        .unwrap_or_else(|| "overlay".to_string());
+    tracks.insert(front + 1, serde_json::json!({"type": kind, "clips": []}));
+    let target = front + 1;
+    // Release the mutable borrow before calling the general mover.
+    let _ = tracks;
+    move_group_to_track(raw, ids, anchor_id, target);
+}
+
 /// Set a clip's display position (canvas fractions) — the preview inspector drag.
 pub fn move_to_new_top_track(raw: &mut serde_json::Value, ids: &[String]) {
     let Some(tracks) = raw
@@ -1739,6 +1983,41 @@ pub fn set_position_many(raw: &mut serde_json::Value, ids: &[String], x: f64, y:
                 "height": (h * 10000.0).round() / 10000.0,
             }),
         );
+    });
+}
+
+/// Select whether the source keeps its aspect ratio inside the position box. This is
+/// deliberately separate from `position`: moving or uniformly resizing a clip must not
+/// silently change a stretch chosen by the user.
+pub fn set_fit_many(raw: &mut serde_json::Value, ids: &[String], stretch: bool) {
+    for_each_clip(raw, |c| {
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !ids.iter().any(|i| i == id) {
+            return;
+        }
+        let o = c.as_object_mut().unwrap();
+        if stretch {
+            o.insert("fit".into(), serde_json::json!("stretch"));
+        } else {
+            // `cover` is the persisted default. Omitting it keeps old documents compact.
+            o.remove("fit");
+        }
+    });
+}
+
+pub fn set_opacity_many(raw: &mut serde_json::Value, ids: &[String], opacity: f64) {
+    let opacity = opacity.clamp(0.0, 1.0);
+    for_each_clip(raw, |c| {
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if !ids.iter().any(|i| i == id) {
+            return;
+        }
+        let o = c.as_object_mut().unwrap();
+        if opacity >= 0.9999 {
+            o.remove("opacity");
+        } else {
+            o.insert("opacity".into(), serde_json::json!((opacity * 1000.0).round() / 1000.0));
+        }
     });
 }
 
@@ -1951,5 +2230,135 @@ pub fn reorder_tracks(raw: &mut serde_json::Value, from: usize, to: usize) {
             let tr = tracks.remove(from);
             tracks.insert(to, tr);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lane_ids(raw: &Value, lane: usize) -> Vec<String> {
+        raw[0]["timeline"]["sequence"]["tracks"][lane]["clips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(sid)
+            .collect()
+    }
+
+    #[test]
+    fn multi_lane_move_keeps_relative_lanes_and_existing_clips() {
+        let mut raw = serde_json::json!([{
+            "timeline": {"sequence": {"tracks": [
+                {"id":"v1", "type":"video", "clips":[
+                    {"id":"a", "track":"video", "timeline_start":0.0, "timeline_end":2.0},
+                    {"id":"keep0", "track":"video", "timeline_start":4.0, "timeline_end":6.0}
+                ]},
+                {"id":"v2", "type":"overlay", "clips":[
+                    {"id":"b", "track":"overlay", "timeline_start":0.0, "timeline_end":2.0},
+                    {"id":"keep1", "track":"overlay", "timeline_start":0.0, "timeline_end":2.0}
+                ]},
+                {"id":"v3", "type":"overlay", "clips":[
+                    {"id":"keep2", "track":"overlay", "timeline_start":0.0, "timeline_end":2.0}
+                ]},
+                {"id":"a1", "type":"audio", "clips":[]}
+            ]}}
+        }]);
+        let ids = vec!["a".to_string(), "b".to_string()];
+
+        move_group_to_track(&mut raw, &ids, "a", 1);
+
+        assert_eq!(lane_ids(&raw, 0), vec!["keep0"]);
+        let lane1 = lane_ids(&raw, 1);
+        let lane2 = lane_ids(&raw, 2);
+        assert!(lane1.contains(&"a".to_string()) && lane1.contains(&"keep1".to_string()));
+        assert!(lane2.contains(&"b".to_string()) && lane2.contains(&"keep2".to_string()));
+        let all: Vec<String> = (0..4).flat_map(|lane| lane_ids(&raw, lane)).collect();
+        for id in ["a", "b", "keep0", "keep1", "keep2"] {
+            assert!(all.contains(&id.to_string()), "{id} disappeared");
+        }
+    }
+
+    #[test]
+    fn horizontal_group_move_clamps_rigidly_at_zero() {
+        let mut raw = serde_json::json!([{
+            "timeline": {"sequence": {"tracks": [
+                {"id":"v1", "type":"video", "clips":[
+                    {"id":"a", "timeline_start":1.0, "timeline_end":2.0},
+                    {"id":"b", "timeline_start":3.0, "timeline_end":4.0}
+                ]}
+            ]}}
+        }]);
+        move_clips(&mut raw, &["a".into(), "b".into()], -10.0);
+        let clips = raw[0]["timeline"]["sequence"]["tracks"][0]["clips"].as_array().unwrap();
+        assert_eq!(f(&clips[0], "timeline_start"), 0.0);
+        assert_eq!(f(&clips[1], "timeline_start"), 2.0);
+    }
+
+    #[test]
+    fn dropped_video_on_occupied_lane_preserves_both_and_adds_linked_audio() {
+        let mut raw = serde_json::json!([{
+            "timeline": {"sequence": {"tracks": [
+                {"id":"v1", "type":"video", "clips":[
+                    {"id":"existing", "timeline_start":1.0, "timeline_end":8.0}
+                ]},
+                {"id":"a1", "type":"audio", "clips":[]}
+            ]}}
+        }]);
+
+        let inserted = place_asset(&mut raw, 0, 3.0, 2.0, "asset-1", true, false, 42);
+        let tracks = raw[0]["timeline"]["sequence"]["tracks"].as_array().unwrap();
+
+        assert_eq!(inserted, vec!["drop_v_42", "drop_a_42"]);
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(lane_ids(&raw, 0), vec!["existing"]);
+        assert_eq!(lane_ids(&raw, 1), vec!["drop_v_42"]);
+        assert_eq!(lane_ids(&raw, 2), vec!["drop_a_42"]);
+        assert_eq!(tracks[1]["clips"][0]["timeline_start"], serde_json::json!(3.0));
+        assert_eq!(tracks[1]["clips"][0]["link_id"], tracks[2]["clips"][0]["link_id"]);
+    }
+
+    #[test]
+    fn dropped_image_uses_requested_empty_lane_and_stays_silent() {
+        let mut raw = serde_json::json!([{
+            "timeline": {"sequence": {"tracks": [
+                {"id":"v1", "type":"video", "clips":[]},
+                {"id":"a1", "type":"audio", "clips":[]}
+            ]}}
+        }]);
+
+        let inserted = place_asset(&mut raw, 0, 4.5, 5.0, "still-1", false, true, 7);
+
+        assert_eq!(inserted, vec!["drop_v_7"]);
+        assert_eq!(lane_ids(&raw, 0), vec!["drop_v_7"]);
+        assert!(lane_ids(&raw, 1).is_empty());
+        assert_eq!(raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0]["timeline_end"], serde_json::json!(9.5));
+    }
+
+    #[test]
+    fn fit_mode_is_explicit_and_survives_position_edits() {
+        let mut raw = serde_json::json!([{
+            "timeline": {"sequence": {"tracks": [{
+                "id":"v1", "type":"overlay", "clips":[{"id":"logo"}]
+            }]}}
+        }]);
+        let ids = vec!["logo".to_string()];
+
+        set_fit_many(&mut raw, &ids, true);
+        set_position_many(&mut raw, &ids, 0.1, 0.2, 0.3, 0.4);
+        let clip = &raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0];
+        assert_eq!(clip["fit"], "stretch");
+        assert_eq!(clip["position"]["width"], 0.3);
+
+        set_fit_many(&mut raw, &ids, false);
+        let clip = &raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0];
+        assert!(clip.get("fit").is_none());
+
+        set_opacity_many(&mut raw, &ids, 0.375);
+        let clip = &raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0];
+        assert_eq!(clip["opacity"], 0.375);
+        set_opacity_many(&mut raw, &ids, 1.0);
+        let clip = &raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0];
+        assert!(clip.get("opacity").is_none());
     }
 }

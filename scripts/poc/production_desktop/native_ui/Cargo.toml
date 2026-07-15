@@ -20,6 +20,7 @@ anyhow = "1"
 lz4_flex = "0.11"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 sha1 = "0.10"
+wry = { version = "0.50", features = ["transparent"] }
 
 [dependencies.windows]
 version = "0.58"
@@ -34,4 +35,5 @@ features = [
   "Win32_Graphics_Direct3D_Fxc",
   "Win32_Graphics_Dxgi",
   "Win32_Graphics_Dxgi_Common",
+  "Win32_UI_WindowsAndMessaging",
 ]
