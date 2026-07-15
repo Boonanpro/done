@@ -27,7 +27,9 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 AGENT_TIMEOUT_S = int(os.environ.get("DAN_TIMELINE_AGENT_TIMEOUT", "1200"))  # 20 min
-ALLOWED_TOOLS = "mcp__timeline__*,Read,Glob"
+# 知識・調査系は自由（Web検索/ページ取得/ファイル読み）。書き込みだけが一本線:
+# タイムラインへの変更は timeline_* コマンド経由のみ（Bash/Write/Editは不許可のまま）
+ALLOWED_TOOLS = "mcp__timeline__*,Read,Glob,Grep,WebSearch,WebFetch"
 
 # job_id -> subprocess (for cancel); content_id -> job_id (for serialization)
 _running_procs: dict[str, subprocess.Popen] = {}
@@ -63,22 +65,39 @@ def _find_claude_cmd() -> list[str]:
 
 
 def _system_prompt() -> str:
-    return (
-        "あなたは動画編集エージェント。ユーザーのタイムラインをMCPツール（timeline_*）だけで編集する。\n"
-        "鉄則:\n"
-        "1. 最初に timeline_outline と timeline_transcript を読み、動画の構造と内容を理解してから手を動かす。\n"
-        "2. 変更対象の時刻の絵は render_frame で必ず自分の目で確認する（編集前後の両方）。\n"
-        "3. 指示された範囲以外は一切触らない。\n"
-        "4. 素材が必要なら generate_image で作り、asset_id を配置ツールに渡す。\n"
-        "5. 仕上げに validate_draft を実行し、problems が空になるまで修正する。\n"
-        "6. 最後に、行った編集の要約を日本語で簡潔に書く。ファイルの直接編集・Bashは使えない。\n"
-        "速度規律（ユーザーが結果を待っている）:\n"
-        "- render_frame は1呼び出し約10秒。複数時刻を見るときは必ず ts=[...] で一括取得する（1回ずつ呼ばない）。\n"
-        "- 探索は計画的に: 見る候補時刻を先に決めて1バッチで取り、足りない分だけ追加する。\n"
-        "- 独立したツール呼び出し（outline と transcript、複数クリップの削除など）は同一メッセージで並列に呼ぶ。\n"
-        "- 確認は要点のみ: 編集前1バッチ+編集後1バッチを基本とし、漫然と枚数を増やさない。\n"
-        "- 最初の ToolSearch で timeline_* が出ないことがある（MCP接続中）。その場合は '+timeline' で再検索する。"
+    """チャットのダンと同一人格（コア人格 + USER/SOUL/RULES の記憶）に、
+    タイムライン編集ジョブの不変条件だけを足す。手順の指図はしない —
+    賢さは自由と良い道具から出る。書き込み経路だけが一本線。"""
+    parts: list[str] = []
+    try:
+        from app.agent.bootstrap_context import get_core_prompt, load_all_bootstrap_files
+        parts.append(get_core_prompt())
+        bs = load_all_bootstrap_files()
+        if bs:
+            parts.append(bs)
+    except Exception:  # noqa: BLE001
+        logger.exception("bootstrap persona load failed — falling back to bare prompt")
+    parts.append(
+        "## 今の状況: 動画タイムラインの編集ジョブ\n"
+        "あなたは今チャットではなく、ユーザーが開いている動画エディタのタイムラインを直接編集している。\n"
+        "ユーザーと会話はできない。最後に、行った編集の要約を日本語で簡潔に書いて終える。\n"
+        "\n"
+        "不変条件（これ以外は自由。必要だと思う調査・確認を自分の判断でせよ）:\n"
+        "- タイムラインへの書き込みは timeline_* ツールのみ。下書き上で作業し、検証合格後に自動で本番反映される。\n"
+        "- 指示された範囲以外のクリップは触らない。\n"
+        "- 反映される絵は render_frame で自分の目で確認してから終える。仕上げに validate_draft で problems 空を確認。\n"
+        "\n"
+        "使える能力:\n"
+        "- WebSearch / WebFetch: 実在のブランド・ロゴ・事実の調査。本物が必要なら探すこと（想像で似せない）。\n"
+        "- import_image: Webや手元の実画像を素材として取り込む。generate_image は実在しないアートの生成用。\n"
+        "- Read / Glob / Grep: ~/.dan/workspace/MEMORY.md（あなたの長期記憶の索引）、"
+        "D:\\done\\frontend\\src\\app\\artifacts\\（制作した成果物）などを自由に読める。\n"
+        "\n"
+        "速度（ユーザーが結果を待っている）:\n"
+        "- render_frame は1呼び出し約10秒。複数時刻は ts=[...] で一括取得。独立したツール呼び出しは同一メッセージで並列に。\n"
+        "- 最初の ToolSearch で timeline_* が出ないことがある（MCP接続中）。その場合は '+timeline' で再検索。"
     )
+    return "\n\n".join(parts)
 
 
 def run_timeline_agent(
@@ -178,8 +197,7 @@ def _run_session(room_id, content_id, job_id, draft, instruction, annotations, s
             + "\n".join(sel_lines) + "\n\n") if sel_lines else "")
         + (("## 画面上の注釈（ユーザーが囲った場所）\n" + "\n".join(note_lines) + "\n\n") if note_lines else "")
         + f"## 現在のタイムライン構造\n{outline}\n\n"
-        "上記の指示を実行してください。まず timeline_transcript と render_frame で内容を確認してから編集し、"
-        "編集後も render_frame で確認、最後に validate_draft を通してください。"
+        "上記の指示を実行してください。"
     )
 
     cmd = _find_claude_cmd()
@@ -191,7 +209,7 @@ def _run_session(room_id, content_id, job_id, draft, instruction, annotations, s
         "--max-turns", "80",
         "--mcp-config", str(cfg_path),
         "--allowedTools", ALLOWED_TOOLS,
-        "--disallowedTools", "Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task,ExitPlanMode,AskUserQuestion",
+        "--disallowedTools", "Bash,Write,Edit,NotebookEdit,Task,ExitPlanMode,AskUserQuestion",
         "--append-system-prompt", _system_prompt(),
     ]
     emit({"type": "status", "text": "編集エージェントを起動しました（動画の内容を読んでから編集します）"})

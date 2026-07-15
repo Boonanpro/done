@@ -127,6 +127,9 @@ async def list_tools() -> list[types.Tool]:
               {"clip_id": _STR, "text": _STR, "style": {"type": "object"}}, ["clip_id"]),
         _tool("generate_image", "画像を生成して部屋のアセットとして登録し asset_id を返す（CTAアート・ロゴ風カード等）。日本語文字を入れる場合はpromptに正確な文字列を指定。aspect_ratioは 9:16 等。",
               {"prompt": _STR, "aspect_ratio": _STR}, ["prompt"]),
+        _tool("import_image", "実在の画像を部屋の素材として取り込み asset_id を返す。url にはWeb上の画像URL"
+              "（WebSearch/WebFetchで見つけた本物のロゴ等）またはローカルファイルパスを指定。生成ではなく本物が必要な時はこちらを使う。",
+              {"url": _STR, "name": _STR}, ["url"]),
         _tool("validate_draft", "ドラフト全体を検証して問題リストを返す。作業の締めに必ず実行し、空になるまで直すこと。", {}),
     ]
 
@@ -203,6 +206,9 @@ async def _dispatch(name: str, a: dict) -> list:
             return _ok({"ok": False, "error": f"generation limit ({MAX_GENERATIONS}) reached"})
         _generations += 1
         return _ok(_generate_image(draft, str(a.get("prompt") or ""), str(a.get("aspect_ratio") or "9:16")))
+
+    if name == "import_image":
+        return _ok(_import_image(draft, str(a.get("url") or ""), str(a.get("name") or "")))
 
     # ---- mutating commands on the draft ----
     cmd = {
@@ -334,6 +340,54 @@ def _generate_image(draft: dict, prompt: str, aspect: str) -> dict:
         urllib.request.urlretrieve(urls[0], dest)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"download failed: {exc}"}
+    _register_image_asset(draft, aid, dest, "generated")
+    return {"ok": True, "asset_id": aid, "path": str(dest), "note": "add_overlay / append_clip でタイムラインに配置できます"}
+
+
+def _import_image(draft: dict, url: str, name: str) -> dict:
+    """Bring a REAL image into the room (web URL or local path) — the general
+    entry gate for authentic material (logos, product shots) as opposed to
+    generated imitations. Converted to PNG (alpha preserved) and registered
+    exactly like generated assets so failure-GC covers it too."""
+    if not url.strip():
+        return {"ok": False, "error": "url required"}
+    aid = uuid.uuid4().hex[:12]
+    raw = _room_dir() / f"imp_{aid}.bin"
+    try:
+        if re.match(r"^https?://", url):
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=60) as resp, open(raw, "wb") as f:
+                f.write(resp.read(50 * 1024 * 1024))
+        else:
+            src = Path(url)
+            if not src.exists():
+                return {"ok": False, "error": f"file not found: {url}"}
+            raw.write_bytes(src.read_bytes())
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"fetch failed: {exc}"}
+    dest = _room_dir() / f"imp_{aid}.png"
+    try:
+        from PIL import Image
+        im = Image.open(raw)
+        im.load()
+        if im.mode not in ("RGBA", "RGB"):
+            im = im.convert("RGBA")
+        im.save(dest, format="PNG")
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"not a usable image (png/jpg/webp等のみ。svgは不可): {exc}"}
+    finally:
+        try:
+            raw.unlink()
+        except OSError:
+            pass
+    _register_image_asset(draft, aid, dest, "imported", filename_hint=name)
+    return {"ok": True, "asset_id": aid, "path": str(dest),
+            "size": f"{im.width}x{im.height}",
+            "note": "add_overlay / append_clip でタイムラインに配置できます"}
+
+
+def _register_image_asset(draft: dict, aid: str, dest: Path, source_type: str,
+                          filename_hint: str = "") -> None:
     with td.ContentsLock(ROOM_ID):
         p = _room_dir() / "assets.json"
         data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
@@ -342,9 +396,9 @@ def _generate_image(draft: dict, prompt: str, aspect: str) -> dict:
         data.append({
             # ProductionAsset APIスキーマ完全準拠（status=readyや欠落フィールドは
             # 一覧APIを500にし部屋ごと開けなくした実績あり — 全フィールド明示）
-            "id": aid, "room_id": ROOM_ID, "kind": "image", "source_type": "generated",
+            "id": aid, "room_id": ROOM_ID, "kind": "image", "source_type": source_type,
             "original_uri": str(dest.resolve()),
-            "local_path": str(dest.resolve()), "filename": dest.name,
+            "local_path": str(dest.resolve()), "filename": filename_hint or dest.name,
             "proxy_path": None, "proxy_url": None,
             "thumbnail_path": None, "thumbnail_url": None,
             "status": "proxy_ready", "metadata": {},
@@ -353,7 +407,6 @@ def _generate_image(draft: dict, prompt: str, aspect: str) -> dict:
         })
         p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     td.track_generated_asset(draft, aid)
-    return {"ok": True, "asset_id": aid, "path": str(dest), "note": "add_overlay / append_clip でタイムラインに配置できます"}
 
 
 async def main():
