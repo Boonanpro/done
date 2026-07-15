@@ -6,12 +6,16 @@ included; the same pixels the editor preview and the export produce)."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _NATIVE_DIR = r"D:\done-desktop\scripts\poc\production_desktop\native_ui\target\release"
 
@@ -129,6 +133,15 @@ def render_timeline_frames(sequence: dict[str, Any], asset_dir: str, ts: list[fl
         )
         paths = [png] if len(ts) == 1 else [Path(f"{stem}.{k}.png") for k in range(len(ts))]
         if all(p.exists() and p.stat().st_size > 0 for p in paths):
+            # ネイティブ合成はテロップを描かない（プレビュー=Webレイヤー担当、
+            # 書き出し=ffmpeg担当）。ここで焼き込まないとエージェントの目に
+            # テロップが永遠に映らず、「表示されない」と誤解して作業が迷走する
+            # （実ジョブ2本がこれで数十分溶けた）
+            for t, p in zip(ts, paths):
+                try:
+                    _composite_captions(p, sequence, t, asset_dir)
+                except Exception:  # noqa: BLE001 — テロップ焼き込み失敗でフレーム自体は殺さない
+                    logger.exception("caption composite failed for t=%s", t)
             return {"ok": True, "paths": [str(p) for p in paths]}
         return {"ok": False, "error": (r.stdout or "")[-400:] + (r.stderr or "")[-400:]}
     except subprocess.TimeoutExpired:
@@ -138,6 +151,73 @@ def render_timeline_frames(sequence: dict[str, Any], asset_dir: str, ts: list[fl
             os.unlink(tmp)
         except OSError:
             pass
+
+
+def _composite_captions(frame_png: Path, sequence: dict[str, Any], t: float,
+                        asset_dir: str) -> None:
+    """Rasterize each caption active at t via the SAME /caption-frame route the
+    editor preview uses (full canvas, position/style/karaoke included) and
+    alpha-composite it onto the dumped frame. Cached per (text,style,words[,t])."""
+    active: list[dict[str, Any]] = []
+    for track in sequence.get("tracks") or []:
+        if track.get("type") != "caption":
+            continue
+        for c in track.get("clips") or []:
+            if c.get("style") == "note" or not str(c.get("text") or "").strip():
+                continue
+            if _f(c.get("timeline_start")) <= t < _f(c.get("timeline_end"), -1):
+                active.append(c)
+    if not active:
+        return
+    import hashlib
+
+    from PIL import Image
+
+    cache = Path(asset_dir) / "caption-cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    frame = None
+    for c in active:
+        text = str(c.get("text") or "").strip()
+        design = c.get("style") if isinstance(c.get("style"), dict) else {}
+        words = c.get("words") if isinstance(c.get("words"), list) else []
+        key_obj: dict[str, Any] = {"w": 1080, "h": 1920, "t": text, "d": design, "words": words}
+        if words:
+            # karaoke highlight depends on the exact time — key per 0.1s step
+            key_obj["at"] = round(t, 1)
+        key = hashlib.sha1(json.dumps(key_obj, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
+        png = cache / f"agent_{key}.png"
+        if not (png.exists() and png.stat().st_size > 0):
+            spec = cache / f"_spec_frame_{key}.json"
+            item: dict[str, Any] = {"png": str(png), "text": text, "time": float(t),
+                                    "design": design, "words": words}
+            if words:
+                item["start"] = _f(c.get("timeline_start"))
+                item["end"] = _f(c.get("timeline_end"))
+            spec.write_text(json.dumps({
+                "outW": 1080, "outH": 1920,
+                "web_base": os.environ.get("DAN_CAPTION_RENDER_BASE", "http://127.0.0.1:3000"),
+                "items": [item],
+            }, ensure_ascii=False), encoding="utf-8")
+            try:
+                script = Path(__file__).resolve().parents[2] / "scripts" / "render_caption_pngs.py"
+                subprocess.run([sys.executable, str(script), str(spec)], capture_output=True,
+                               stdin=subprocess.DEVNULL, timeout=120,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            finally:
+                try:
+                    spec.unlink()
+                except OSError:
+                    pass
+        if not (png.exists() and png.stat().st_size > 0):
+            continue
+        if frame is None:
+            frame = Image.open(frame_png).convert("RGBA")
+        overlay = Image.open(png).convert("RGBA")
+        if overlay.size != frame.size:
+            overlay = overlay.resize(frame.size, Image.LANCZOS)
+        frame.alpha_composite(overlay)
+    if frame is not None:
+        frame.save(frame_png)
 
 
 def render_timeline_frame(sequence: dict[str, Any], asset_dir: str, t: float,
