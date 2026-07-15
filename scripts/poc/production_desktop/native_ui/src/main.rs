@@ -1611,6 +1611,29 @@ fn is_image_path(path: &std::path::Path) -> bool {
     )
 }
 
+/// ISO8601 UTC now without a chrono dependency (Howard Hinnant civil-from-days).
+/// assets.json records must carry created_at/updated_at to satisfy the API schema.
+fn iso8601_utc_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86400);
+    let sod = secs.rem_euclid(86400);
+    let (h, mi, s) = (sod / 3600, (sod % 3600) / 60, sod % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}+00:00")
+}
+
 fn is_timeline_media_path(path: &std::path::Path) -> bool {
     is_image_path(path)
         || matches!(
@@ -2953,13 +2976,32 @@ impl App {
             metadata["audio_codec"] = serde_json::json!("source");
         }
         if let Some(a) = arr.as_array_mut() {
+            // ProductionAsset APIスキーマ完全準拠で書く。最小レコード（status=ready・
+            // room_id等欠落）は一覧APIのレスポンス検証を500にし、部屋の素材が
+            // 丸ごと読めなくなった（MCP側でも同種事故の前科があり全フィールド明示が規律）
+            let fname = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let room_id = std::path::Path::new(&self.doc.asset_dir)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let now = iso8601_utc_now();
             a.push(serde_json::json!({
                 "id": id,
+                "room_id": room_id,
                 "kind": if image { "image" } else { "video" },
-                "name": p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                "source_type": "local_path",
+                "original_uri": path,
                 "local_path": path,
-                "status": "ready",
+                "proxy_path": null,
+                "proxy_url": null,
+                "thumbnail_path": null,
+                "thumbnail_url": null,
+                "name": fname,
+                "filename": fname,
+                "status": "proxy_ready",
                 "metadata": metadata,
+                "created_at": now,
+                "updated_at": now,
                 "imported_by": "native"
             }));
         }
