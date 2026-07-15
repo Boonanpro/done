@@ -442,10 +442,10 @@ def validate_sequence(seq: dict[str, Any], assets: dict[str, dict[str, Any]],
         if len(starts) > 1 or len(ends) > 1:
             problems.append(f"link {lid}: A/V clips out of sync ({sorted(starts)} / {sorted(ends)})")
     # native structural check (editor's own invariants) when available
-    exe = native_exe or os.environ.get(
-        "NATIVE_UI_EXE",
-        r"D:\done-desktop\scripts\poc\production_desktop\native_ui\target\release\native_ui.exe",
-    )
+    exe = native_exe or os.environ.get("NATIVE_UI_EXE")
+    if not exe:
+        from app.services.timeline_context import native_exe_default
+        exe = native_exe_default()
     if exe and Path(exe).exists() and asset_dir:
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:

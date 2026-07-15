@@ -62,6 +62,25 @@ def _load():
     return td.load_draft(ROOM_ID, DRAFT_ID)
 
 
+def _frame_b64(path: Path) -> str:
+    """Base64 PNG for the model's eyes, downscaled to half resolution — text stays
+    readable at 540x960 while image tokens (and per-turn latency) drop ~4x."""
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        im = Image.open(path)
+        if im.width > 600:
+            im = im.resize((im.width // 2, im.height // 2), Image.LANCZOS)
+            buf = BytesIO()
+            im.save(buf, format="PNG")
+            return base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        pass
+    return base64.b64encode(path.read_bytes()).decode()
+
+
 def _tool(name, description, props, required=None):
     return types.Tool(name=name, description=description,
                       inputSchema={"type": "object", "properties": props, "required": required or []})
@@ -78,8 +97,10 @@ async def list_tools() -> list[types.Tool]:
         _tool("list_assets", "部屋のアセット一覧（asset_id/ファイル名/種類/長さ）。配置ツールに渡すasset_idはここで確認する。", {}),
         _tool("timeline_transcript", "動画の発話内容（文字起こし）をタイムライン時刻つきで読む。内容理解はこれを根拠にする。",
               {"t0": _NUM, "t1": _NUM}),
-        _tool("render_frame", "指定タイムライン時刻の合成後フレーム（カット/テロップ/ぼかし/画像すべて反映）を画像として見る。編集後の確認に必ず使う。",
-              {"t": _NUM}, ["t"]),
+        _tool("render_frame", "指定タイムライン時刻の合成後フレーム（カット/テロップ/ぼかし/画像すべて反映）を画像として見る。編集後の確認に必ず使う。"
+              "1回の呼び出しに約10秒かかるため、複数時刻を見るときは必ず ts で一括指定すること（1回分強の時間でまとめて返る）。",
+              {"t": _NUM, "ts": {"type": "array", "items": _NUM, "maxItems": 8,
+                                 "description": "複数時刻を一括レンダ（推奨）。tより優先"}}),
         _tool("append_clip", "ベースレーン末尾（またはat秒）に映像/画像クリップを追加。映像は音声も自動リンク。",
               {"asset_id": _STR, "source_start": _NUM, "duration": _NUM, "at": _NUM},
               ["asset_id", "duration"]),
@@ -154,15 +175,20 @@ async def _dispatch(name: str, a: dict) -> list:
         return [types.TextContent(type="text", text=text)]
 
     if name == "render_frame":
-        res = tcx.render_timeline_frame(seq, str(_room_dir()), float(a["t"]),
-                                        out_dir=str(_room_dir() / "drafts"))
+        ts = [float(v) for v in a.get("ts") or [] if isinstance(v, (int, float))][:8]
+        if not ts and a.get("t") is not None:
+            ts = [float(a["t"])]
+        if not ts:
+            return _ok({"ok": False, "error": "t or ts required"})
+        res = tcx.render_timeline_frames(seq, str(_room_dir()), ts,
+                                         out_dir=str(_room_dir() / "drafts"))
         if not res.get("ok"):
             return _ok(res)
-        data = base64.b64encode(Path(res["path"]).read_bytes()).decode()
-        return [
-            types.TextContent(type="text", text=f"composited frame at t={float(a['t']):.2f}s"),
-            types.ImageContent(type="image", data=data, mimeType="image/png"),
-        ]
+        out: list = []
+        for t, p in zip(ts, res["paths"]):
+            out.append(types.TextContent(type="text", text=f"composited frame at t={t:.2f}s"))
+            out.append(types.ImageContent(type="image", data=_frame_b64(Path(p)), mimeType="image/png"))
+        return out
 
     if name == "validate_draft":
         problems = tc.validate_sequence(seq, assets, asset_dir=str(_room_dir()))
