@@ -415,14 +415,21 @@ def _sequence_video_clips(
 
 
 def _sequence_caption_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Designed captions from EVERY visual lane — lanes have no roles, so a text clip
+    is a caption wherever it sits (a caption-type lane is not required)."""
     if not isinstance(sequence, dict):
         return []
     clips: list[dict[str, Any]] = []
     for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("type") != "caption" or track.get("hidden"):
+        if not isinstance(track, dict) or track.get("type") == "audio" or track.get("hidden"):
             continue
         for clip in track.get("clips") or []:
-            if isinstance(clip, dict) and str(clip.get("text") or "").strip():
+            if (
+                isinstance(clip, dict)
+                and str(clip.get("text") or "").strip()
+                and not clip.get("asset_id")
+                and not isinstance(clip.get("region"), dict)
+            ):
                 clips.append(clip)
     return sorted(clips, key=lambda item: float(item.get("timeline_start") or 0))
 
@@ -697,22 +704,50 @@ def _is_overlay_clip(clip: dict[str, Any]) -> bool:
     return str(clip.get("composition") or "") in ("pip", "overlay")
 
 
-def _sequence_overlay_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Clips that should be composited ON TOP of the base video (PiP / wipe).
-    From overlay-type tracks, plus video-track clips marked composition pip/overlay."""
+def _sequence_z_items(
+    sequence: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[tuple[str, dict[str, Any]]]]:
+    """Role-free z decomposition of the timeline. Lane ARRAY order = stacking (0 =
+    backmost) and the ONLY lane distinction is audio vs visual — a video, a designed
+    caption or a region effect may sit on ANY visual lane and upper lanes draw in
+    front (the same rule the native preview composes with).
+
+    Returns (base_clips, z_items): base = the non-overlay asset clips of the FIRST
+    visual lane that has any (the storyline spine, concat'd full-frame), z_items =
+    every other visual item in draw order as ("overlay" | "fx" | "cap", clip)."""
     if not isinstance(sequence, dict):
-        return []
-    clips: list[dict[str, Any]] = []
-    for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("hidden"):
-            continue
-        ttype = track.get("type")
+        return [], []
+    tracks = [
+        t for t in (sequence.get("tracks") or [])
+        if isinstance(t, dict) and t.get("type") != "audio" and not t.get("hidden")
+    ]
+    base_ti: int | None = None
+    base_clips: list[dict[str, Any]] = []
+    for ti, track in enumerate(tracks):
+        spine = [
+            c for c in track.get("clips") or []
+            if isinstance(c, dict) and c.get("asset_id") and not _is_overlay_clip(c)
+        ]
+        if spine:
+            base_ti = ti
+            base_clips = sorted(spine, key=lambda c: float(c.get("timeline_start") or 0))
+            break
+    z_items: list[tuple[str, dict[str, Any]]] = []
+    for ti, track in enumerate(tracks):
         for clip in track.get("clips") or []:
             if not isinstance(clip, dict):
                 continue
-            if _clip_video_enabled(clip) and (ttype == "overlay" or (ttype == "video" and _is_overlay_clip(clip))):
-                clips.append(clip)
-    return sorted(clips, key=lambda c: (float(c.get("layer") or 0), float(c.get("timeline_start") or 0)))
+            if clip.get("asset_id"):
+                if ti == base_ti and not _is_overlay_clip(clip):
+                    continue  # part of the base concat
+                if _clip_video_enabled(clip):
+                    z_items.append(("overlay", clip))
+            elif isinstance(clip.get("region"), dict):
+                if clip.get("style") != "note":  # 指示クリップ: 画には出さない
+                    z_items.append(("fx", clip))
+            elif str(clip.get("text") or "").strip():
+                z_items.append(("cap", clip))
+    return base_clips, z_items
 
 
 def _sequence_audio_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -742,21 +777,6 @@ def _sequence_audio_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any
                 continue
             clips.append(clip)
     return sorted(clips, key=lambda c: float(c.get("timeline_start") or 0))
-
-
-def _sequence_effect_clips(sequence: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Region-bearing clips from ANY non-audio lane — lanes are just layers; the editor
-    places blur clips wherever there is free space (no effect-lane special casing)."""
-    if not isinstance(sequence, dict):
-        return []
-    clips: list[dict[str, Any]] = []
-    for track in sequence.get("tracks") or []:
-        if not isinstance(track, dict) or track.get("type") == "audio" or track.get("hidden"):
-            continue
-        for clip in track.get("clips") or []:
-            if isinstance(clip, dict) and isinstance(clip.get("region"), dict) and not clip.get("asset_id"):
-                clips.append(clip)
-    return clips
 
 
 def _clip_source_range(clip: dict[str, Any], metadata: dict[str, Any]) -> tuple[float, float, float, float, bool]:
@@ -1101,16 +1121,14 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
     timeline_fps = _sequence_frame_rate(sequence)
     fps_filter = f"{timeline_fps:g}"
 
-    base_clips = [
-        c for c in _sequence_video_clips(sequence, include_video_disabled=True)
-        if not _is_overlay_clip(c)
-    ]
+    # Role-free lanes: base = the first visual lane's spine; EVERYTHING else (videos,
+    # region effects, designed captions — whatever lane they sit on) composites in
+    # lane array order, upper lanes in front. Same rule as the native preview.
+    base_clips, z_items = _sequence_z_items(sequence)
     if not base_clips:
         return None
 
-    overlay_clips = _sequence_overlay_clips(sequence)
     audio_clips = _sequence_audio_clips(sequence)
-    effect_clips = _sequence_effect_clips(sequence)
     has_audio_track = len(audio_clips) > 0
 
     assets = _assets_by_id(room_id)
@@ -1262,25 +1280,9 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         base_audio_out = "acat"
     video_out = "vcat"
 
-    # --- regional blur / mosaic: effect-track clips + blur annotations (honor style) ---
-    blur_specs: list[dict[str, Any]] = []
-    for clip in effect_clips:
-        if clip.get("style") == "note":
-            continue  # 指示クリップ: 範囲情報の器であり画には出さない
-        region = clip.get("region") if isinstance(clip.get("region"), dict) else {}
-        blur_specs.append({
-            "x": region.get("x"), "y": region.get("y"), "width": region.get("width"), "height": region.get("height"),
-            "start": clip.get("timeline_start"), "end": clip.get("timeline_end"), "style": clip.get("style"),
-            "clip": clip,  # carries blur_track for the SAM-tracked export path
-        })
-    for annotation in _blur_annotations(instruction):
-        data = annotation.get("data") or {}
-        blur_specs.append({
-            "x": data.get("x"), "y": data.get("y"), "width": data.get("width"), "height": data.get("height"),
-            "start": annotation.get("start"), "end": annotation.get("end"),
-            "style": data.get("blur_style") or data.get("style"),
-        })
-    for bi, spec in enumerate(blur_specs, start=1):
+    # --- regional blur / mosaic (one item), used by the z pass and the AI annotations ---
+    def _apply_region_spec(bi: int | str, spec: dict[str, Any]) -> None:
+        nonlocal video_out
         # SAM-tracked clip: blur follows the baked mask video (what the preview shows);
         # the static rectangle below stays the fallback when no mask covers the window
         eclip = spec.get("clip") if isinstance(spec.get("clip"), dict) else None
@@ -1294,7 +1296,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                 if masked:
                     filt, video_out = masked
                     filters.append(filt)
-                    continue
+                    return
         x = max(0, min(output_width - 2, round(float(spec.get("x") or 0) * output_width)))
         y = max(0, min(output_height - 2, round(float(spec.get("y") or 0) * output_height)))
         w = max(2, min(output_width - x, round(float(spec.get("width") or 0) * output_width)))
@@ -1335,8 +1337,63 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             filt, video_out = _blur_chain(video_out, bi, x, y, w, h, start, end, str(spec.get("style") or ""))
         filters.append(filt)
 
-    # --- overlay / PiP (wipe): composite on top, ascending layer = closer to front ---
-    for oi, clip in enumerate(overlay_clips, start=1):
+    # Designed captions: burn the SAME HTML/CSS render the editor preview shows (via the
+    # /caption-frame route, screenshotted to transparent PNGs) so preview == export.
+    # Falls back to the libass .ass path — burned on top at the very end — if the
+    # caption renderer is unavailable.
+    cap_clips = [c for _zk, c in z_items if _zk == "cap"]
+    cap_overlays: dict[int, dict[str, Any]] = {}
+    cap_ass_fallback = False
+    if cap_clips:
+        try:
+            _cap_rendered = _render_caption_overlays(cap_clips, output_width, output_height, job_dir)
+            cap_overlays = {id(c): ov for c, ov in zip(cap_clips, _cap_rendered)}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("designed caption overlay failed, falling back to .ass: %s", exc)
+            cap_ass_fallback = True
+
+    # --- the z pass: every non-base visual item in lane order (upper lane = in front).
+    # A region effect processes exactly the composite BELOW its lane; a caption above
+    # the topmost video keeps sitting above it — because that is its lane position. ---
+    zn = 0
+    for _zkind, clip in z_items:
+        zn += 1
+        if _zkind == "fx":
+            region = clip.get("region") if isinstance(clip.get("region"), dict) else {}
+            _apply_region_spec(zn, {
+                "x": region.get("x"), "y": region.get("y"),
+                "width": region.get("width"), "height": region.get("height"),
+                "start": clip.get("timeline_start"), "end": clip.get("timeline_end"),
+                "style": clip.get("style"),
+                "clip": clip,  # carries blur_track for the SAM-tracked export path
+            })
+            continue
+        if _zkind == "cap":
+            ov = cap_overlays.get(id(clip))
+            if ov is None:
+                continue  # renderer down — the .ass fallback burns it at the end
+            ci = zn
+            cs = float(ov["start"])
+            ce = float(ov["end"])
+            if ov["kind"] == "anim":
+                # PNG sequence -> a moving overlay. Read at the sampling fps, then shift
+                # its PTS so frame 0 lands at the caption's start time. image2 defaults
+                # to 25fps — retime from the frame INDEX so the sampling fps is exact.
+                fps = float(ov["fps"])
+                pattern = str(ov["seq_dir"] / "%05d.png")
+                filters.append(
+                    _movie_input(pattern, 0.0, fmt="image2")
+                    + f",format=rgba,setpts=N/({fps:g}*TB)+{cs:.3f}/TB[capsrc{ci}]"
+                )
+            else:
+                # single frame: overlay's default eof_action=repeat holds it, enable= gates it
+                filters.append(_movie_input(ov["png"], 0.0) + f",format=rgba[capsrc{ci}]")
+            filters.append(
+                f"[{video_out}][capsrc{ci}]overlay=0:0:enable='between(t\\,{cs:.3f}\\,{ce:.3f})'[vcap{ci}]"
+            )
+            video_out = f"vcap{ci}"
+            continue
+        oi = zn
         asset = assets.get(str(clip.get("asset_id") or ""))
         if asset and _asset_is_image_kind(asset):
             # STILL IMAGE overlay (logo etc.): loop the picture, CONTAIN-fit inside the
@@ -1498,47 +1555,32 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
         )
         video_out = f"vov{oi}"
 
-    captions = _sequence_caption_clips(sequence)
-    if captions:
-        # Designed captions: burn the SAME HTML/CSS render the editor preview shows (via the
-        # /caption-frame route, screenshotted to transparent PNGs) so preview == export. Falls
-        # back to the libass .ass path if the caption renderer is unavailable.
-        overlays: list[tuple[Path, float, float]] = []
-        try:
-            overlays = _render_caption_overlays(captions, output_width, output_height, job_dir)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("designed caption overlay failed, falling back to .ass: %s", exc)
-            overlays = []
-        if overlays:
-            for ci, ov in enumerate(overlays):
-                cs = float(ov["start"])
-                ce = float(ov["end"])
-                if ov["kind"] == "anim":
-                    # PNG sequence -> a moving overlay. Read at the sampling fps, then shift its
-                    # PTS so frame 0 lands at the caption's start time.
-                    fps = float(ov["fps"])
-                    pattern = str(ov["seq_dir"] / "%05d.png")
-                    # image2 defaults to 25fps — retime from the frame INDEX so the sampling
-                    # fps is exact, then shift frame 0 to the caption start
-                    filters.append(
-                        _movie_input(pattern, 0.0, fmt="image2")
-                        + f",format=rgba,setpts=N/({fps:g}*TB)+{cs:.3f}/TB[capsrc{ci}]"
-                    )
-                else:
-                    # single frame: overlay's default eof_action=repeat holds it, enable= gates it
-                    filters.append(_movie_input(ov["png"], 0.0) + f",format=rgba[capsrc{ci}]")
-                filters.append(
-                    f"[{video_out}][capsrc{ci}]overlay=0:0:enable='between(t\\,{cs:.3f}\\,{ce:.3f})'[vcap{ci}]"
-                )
-                video_out = f"vcap{ci}"
-            filters.append(f"[{video_out}]format=yuv420p[vcapf]")
-            video_out = "vcapf"
-        else:
-            ass_path = job_dir / f"{job_id}_captions.ass"
-            _write_caption_ass(ass_path, captions, output_width, output_height)
-            escaped_ass = str(ass_path).replace("\\", "/").replace(":", "\\:")
-            filters.append(f"[{video_out}]subtitles='{escaped_ass}'[vcap]")
-            video_out = "vcap"
+    if cap_clips and not cap_ass_fallback:
+        # rgba caption overlays intermix with yuv layers — settle the final pix_fmt once
+        filters.append(f"[{video_out}]format=yuv420p[vcapf]")
+        video_out = "vcapf"
+
+    # legacy AI blur annotations carry no lane — they keep applying ON TOP of everything
+    # (privacy masks must cover whatever composites above the base, too)
+    for _ai, annotation in enumerate(_blur_annotations(instruction), start=1):
+        data = annotation.get("data") or {}
+        _apply_region_spec(f"an{_ai}", {
+            "x": data.get("x"), "y": data.get("y"), "width": data.get("width"), "height": data.get("height"),
+            "start": annotation.get("start"), "end": annotation.get("end"),
+            "style": data.get("blur_style") or data.get("style"),
+        })
+
+    if cap_clips and cap_ass_fallback:
+        ass_path = job_dir / f"{job_id}_captions.ass"
+        _write_caption_ass(
+            ass_path,
+            sorted(cap_clips, key=lambda c: float(c.get("timeline_start") or 0)),
+            output_width,
+            output_height,
+        )
+        escaped_ass = str(ass_path).replace("\\", "/").replace(":", "\\:")
+        filters.append(f"[{video_out}]subtitles='{escaped_ass}'[vcap]")
+        video_out = "vcap"
 
     # --- audio: when an audio track exists, mix its clips (replaces base clip audio) ---
     audio_out = base_audio_out
