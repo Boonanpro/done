@@ -1218,6 +1218,153 @@ fn caption_style_num(style: &serde_json::Value, key: &str, default: f64) -> f64 
     style.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
 }
 
+/// UI-thread frame cost meter → UISTAT line every 5s in %TEMP%/native_ui.log.
+/// 「タイムラインが重くなる」報告の一次証拠: frame avg/max (UI paint cost), undo
+/// bytes, cache entry counts, process working set. Reading the log after a real
+/// session tells WHICH resource grew instead of guessing.
+struct UiFrameStat {
+    frames: u32,
+    total_ms: f32,
+    max_ms: f32,
+    last_log: Instant,
+}
+thread_local! {
+    static UI_FRAME_STAT: std::cell::RefCell<UiFrameStat> = std::cell::RefCell::new(UiFrameStat {
+        frames: 0,
+        total_ms: 0.0,
+        max_ms: 0.0,
+        last_log: Instant::now(),
+    });
+}
+
+struct UiStatGuard {
+    start: Instant,
+    // Some(app snapshot) when this frame should emit the 5s line
+    info: Option<String>,
+}
+
+impl UiStatGuard {
+    fn begin(app: &App) -> Self {
+        let due = UI_FRAME_STAT.with(|s| s.borrow().last_log.elapsed().as_secs_f32() >= 5.0);
+        let info = due.then(|| {
+            let undo_bytes: usize = app.undo.iter().map(|s| s.len()).sum::<usize>()
+                + app.redo.iter().map(|s| s.len()).sum::<usize>();
+            let ws_mb = process_working_set_mb();
+            format!(
+                "undo={}x/{:.1}MB thumbs={} peaks={} capfree={} ws={}MB",
+                app.undo.len() + app.redo.len(),
+                undo_bytes as f32 / 1.048e6,
+                app.thumbs.len(),
+                app.peaks.len(),
+                app.cap_tex.len(),
+                ws_mb,
+            )
+        });
+        UiStatGuard { start: Instant::now(), info }
+    }
+}
+
+impl Drop for UiStatGuard {
+    fn drop(&mut self) {
+        let ms = self.start.elapsed().as_secs_f32() * 1000.0;
+        UI_FRAME_STAT.with(|s| {
+            let mut s = s.borrow_mut();
+            s.frames += 1;
+            s.total_ms += ms;
+            s.max_ms = s.max_ms.max(ms);
+            if let Some(info) = self.info.take() {
+                eprintln!(
+                    "UISTAT frame avg={:.1}ms max={:.1}ms n={} {}",
+                    if s.frames > 0 { s.total_ms / s.frames as f32 } else { 0.0 },
+                    s.max_ms,
+                    s.frames,
+                    info,
+                );
+                s.frames = 0;
+                s.total_ms = 0.0;
+                s.max_ms = 0.0;
+                s.last_log = Instant::now();
+            }
+        });
+    }
+}
+
+/// Process working set in MB (0 when the query fails) — the restart-fixes-it class of
+/// slowdown is almost always visible here first.
+fn process_working_set_mb() -> u64 {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows::Win32::System::Threading::GetCurrentProcess;
+        let mut pmc = PROCESS_MEMORY_COUNTERS {
+            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            ..Default::default()
+        };
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb).is_ok() {
+            return (pmc.WorkingSetSize / (1024 * 1024)) as u64;
+        }
+    }
+    0
+}
+
+/// "#rrggbb" (or "#rgb") → Color32; anything unparsable falls back to `default`.
+fn hex_color32(s: &str, default: egui::Color32) -> egui::Color32 {
+    let h = s.trim().trim_start_matches('#');
+    let full = match h.len() {
+        3 => h.chars().flat_map(|c| [c, c]).collect::<String>(),
+        6 => h.to_string(),
+        _ => return default,
+    };
+    match u32::from_str_radix(&full, 16) {
+        Ok(v) => egui::Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8),
+        Err(_) => default,
+    }
+}
+
+fn color32_hex(c: egui::Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+}
+
+/// The same curated designs as the Web's CAPTION_PRESETS (caption-design.ts) — one
+/// click sets the whole look; fontSize / x / y are the user's and are NOT touched.
+/// Keys not in a preset are explicitly nulled so leftovers from the previous look
+/// (bg / gradient / shadow / karaoke highlight) never bleed through.
+fn caption_presets() -> Vec<(&'static str, serde_json::Value)> {
+    use serde_json::json;
+    let base = |d: serde_json::Value| {
+        let mut full = json!({
+            "bg": null, "gradient": null, "shadow": null,
+            "highlightColor": null, "highlightScale": null, "animation": "none"
+        });
+        edits_merge_for_preset(&mut full, &d);
+        full
+    };
+    vec![
+        ("標準", base(json!({"font":"noto-sans","color":"#ffffff","outlineColor":"#000000","outlineWidth":1}))),
+        ("バラエティ黄", base(json!({"font":"dela-gothic","color":"#ffe000","outlineColor":"#000000","outlineWidth":1.4,"animation":"pop"}))),
+        ("赤ポップ", base(json!({"font":"dela-gothic","color":"#ff3b30","outlineColor":"#ffffff","outlineWidth":1.4,"animation":"pop"}))),
+        ("字幕バー", base(json!({"font":"noto-sans","color":"#ffffff","outlineColor":"#000000","outlineWidth":0.5,
+            "bg":{"color":"#000000","opacity":0.62,"radius":0.2,"padX":0.5,"padY":0.18},"animation":"fade"}))),
+        ("カラオケ実況", base(json!({"font":"mplus-rounded","color":"#ffffff","outlineColor":"#1b1b1b","outlineWidth":1.3,
+            "animation":"karaoke","highlightColor":"#ff3b6b","highlightScale":1.16}))),
+        ("タイプ", base(json!({"font":"noto-sans","color":"#ffffff","outlineColor":"#000000","outlineWidth":1,"animation":"typewriter"}))),
+        ("ネオン", base(json!({"font":"dela-gothic","color":"#19e6ff","outlineColor":"#003b46","outlineWidth":1.2,
+            "shadow":{"color":"#19e6ff","blur":24,"dy":0},"animation":"fade"}))),
+        ("明朝・上品", base(json!({"font":"mincho","color":"#ffffff","outlineColor":"#000000","outlineWidth":0.6,
+            "bg":{"color":"#16213e","opacity":0.52,"radius":0.1,"padX":0.5,"padY":0.2},"animation":"slide"}))),
+        ("丸かわいい", base(json!({"font":"zen-maru","color":"#ff7aa8","outlineColor":"#ffffff","outlineWidth":1.6,"animation":"pop"}))),
+    ]
+}
+
+/// Overlay preset fields onto the null-scaffold (plain shallow merge, preset side wins).
+fn edits_merge_for_preset(dst: &mut serde_json::Value, src: &serde_json::Value) {
+    if let (Some(d), Some(s)) = (dst.as_object_mut(), src.as_object()) {
+        for (k, v) in s {
+            d.insert(k.clone(), v.clone());
+        }
+    }
+}
+
 fn caption_fallbacks() -> &'static Mutex<std::collections::HashMap<String, (String, f64)>> {
     static FALLBACKS: OnceLock<Mutex<std::collections::HashMap<String, (String, f64)>>> = OnceLock::new();
     FALLBACKS.get_or_init(|| Mutex::new(Default::default()))
@@ -2496,6 +2643,10 @@ struct App {
     caption_web_ready: Arc<std::sync::atomic::AtomicBool>,
     caption_web_sig: u64,
     caption_web_t: f64,
+    /// Doc the caption payload was last built from (Arc identity). Rebuilding and
+    /// hashing the full caption JSON every FRAME burned constant UI-thread time on
+    /// caption-heavy docs; the doc pointer only changes on real edits.
+    caption_doc_ptr: usize,
     recut_open: bool,
     recut_thresh: f32,
     recut_lead: f32,
@@ -2513,12 +2664,16 @@ struct App {
     /// Asset currently being dragged from the editor's media menu toward the timeline.
     asset_drag: Option<serde_json::Value>,
     drag: Drag,
-    undo: Vec<serde_json::Value>,
+    // undo/redo hold SERIALIZED documents, not Value trees: a 60-deep history of
+    // Value clones held hundreds of MB of long-lived small allocations (a real NLE
+    // keeps compact undo storage); a compact String is ~8x smaller and parses back
+    // in ~10ms on the rare Ctrl+Z.
+    undo: Vec<String>,
     // armed at gesture start (press/drag), committed to `undo` by the FIRST real edit.
     // Pushing at press time polluted the stack with no-op snapshots (a plain click piled
     // identical states, so Ctrl+Z seemed to only ever go one step back).
     pending_undo: Option<serde_json::Value>,
-    redo: Vec<serde_json::Value>,
+    redo: Vec<String>,
     save_at: Option<Instant>,
     salt: u64,
     // Files dropped into an empty project wait here until its timeline frame rate is chosen.
@@ -2689,6 +2844,7 @@ impl App {
             caption_web_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             caption_web_sig: 0,
             caption_web_t: f64::NAN,
+            caption_doc_ptr: 0,
             recut_open: false,
             recut_thresh: 0.45,
             recut_lead: 0.06,
@@ -2844,14 +3000,14 @@ impl App {
     fn apply_edit(&mut self, snapshot: bool, f: impl FnOnce(&mut serde_json::Value)) {
         if snapshot {
             self.pending_undo = None;
-            self.undo.push(self.doc.raw.clone());
+            self.undo.push(self.doc.raw.to_string());
             if self.undo.len() > 60 {
                 self.undo.remove(0);
             }
             self.redo.clear();
         } else if let Some(prev) = self.pending_undo.take() {
             // first real edit of the armed gesture — commit the pre-gesture state
-            self.undo.push(prev);
+            self.undo.push(prev.to_string());
             if self.undo.len() > 60 {
                 self.undo.remove(0);
             }
@@ -3645,12 +3801,24 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 
     fn sync_caption_web(&mut self, frame: &eframe::Frame, rect: egui::Rect, visible: bool) {
         self.ensure_caption_web(frame);
-        let captions = self.caption_web_captions();
         let t = self.displayed_t();
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        captions.to_string().hash(&mut hasher);
-        let sig = hasher.finish();
+        // Rebuild + hash the caption payload only when the DOCUMENT changed (Arc
+        // identity; live typing resets caption_web_sig) — not every frame.
+        let doc_ptr = Arc::as_ptr(&self.doc) as usize;
+        let dirty = doc_ptr != self.caption_doc_ptr
+            || self.caption_web_sig == 0
+            || !self.caption_web_ready.load(Ordering::Relaxed);
+        let (captions, sig) = if dirty {
+            let captions = self.caption_web_captions();
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            captions.to_string().hash(&mut hasher);
+            let sig = hasher.finish();
+            self.caption_doc_ptr = doc_ptr;
+            (Some(captions), sig)
+        } else {
+            (None, self.caption_web_sig)
+        };
         let Some(web) = self.caption_web.as_ref() else { return };
         #[cfg(target_os = "windows")]
         {
@@ -3673,12 +3841,12 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         };
         let _ = web.set_bounds(bounds);
         let web_ready = self.caption_web_ready.load(Ordering::Relaxed);
-        if sig != self.caption_web_sig || !web_ready {
+        if (sig != self.caption_web_sig || !web_ready) && captions.is_some() {
             let payload = serde_json::json!({
                 "outW": CANVAS_W,
                 "outH": CANVAS_H,
                 "time": t,
-                "captions": captions,
+                "captions": captions.unwrap(),
             });
             let js = format!(
                 "window.__nativeCaptionPayload={0};window.__setCaptionPayload&&window.__setCaptionPayload(window.__nativeCaptionPayload).then(function(){{window.__reportCapBoxes&&window.__reportCapBoxes({t:.6})}});",
@@ -4033,15 +4201,25 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 
     fn do_undo(&mut self) {
         if let Some(prev) = self.undo.pop() {
-            self.redo.push(self.doc.raw.clone());
-            self.restore(prev);
+            match serde_json::from_str(&prev) {
+                Ok(v) => {
+                    self.redo.push(self.doc.raw.to_string());
+                    self.restore(v);
+                }
+                Err(e) => eprintln!("UNDO parse failed: {e}"),
+            }
         }
     }
 
     fn do_redo(&mut self) {
         if let Some(next) = self.redo.pop() {
-            self.undo.push(self.doc.raw.clone());
-            self.restore(next);
+            match serde_json::from_str(&next) {
+                Ok(v) => {
+                    self.undo.push(self.doc.raw.to_string());
+                    self.restore(v);
+                }
+                Err(e) => eprintln!("REDO parse failed: {e}"),
+            }
         }
     }
 
@@ -4739,6 +4917,98 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                         self.push_req(false);
                     }
+                    // ---- 色（文字 / フチ）----
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("文字色").weak().small());
+                        let mut tc = hex_color32(
+                            style.get("color").and_then(|v| v.as_str()).unwrap_or("#ffffff"),
+                            egui::Color32::WHITE,
+                        );
+                        if ui.color_edit_button_srgba(&mut tc).changed() {
+                            let ids = edit_ids.clone();
+                            self.remember_caption_fallbacks(&ids);
+                            // a plain color pick must WIN: a leftover gradient overrides
+                            // `color` in the renderer, so it is cleared explicitly
+                            let patch = serde_json::json!({"color": color32_hex(tc), "gradient": null});
+                            self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                            self.push_req(false);
+                        }
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new("フチ色").weak().small());
+                        let mut oc = hex_color32(
+                            style.get("outlineColor").and_then(|v| v.as_str()).unwrap_or("#000000"),
+                            egui::Color32::BLACK,
+                        );
+                        if ui.color_edit_button_srgba(&mut oc).changed() {
+                            let ids = edit_ids.clone();
+                            self.remember_caption_fallbacks(&ids);
+                            let patch = serde_json::json!({"outlineColor": color32_hex(oc)});
+                            self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                            self.push_req(false);
+                        }
+                    });
+                    // ---- 四角枠（テロップの背景ボックス）----
+                    let bg = style.get("bg").filter(|v| v.is_object()).cloned();
+                    let mut boxed = bg.is_some();
+                    if ui.checkbox(&mut boxed, "四角枠（背景ボックス）").changed() {
+                        let ids = edit_ids.clone();
+                        self.remember_caption_fallbacks(&ids);
+                        let patch = if boxed {
+                            serde_json::json!({"bg": {"color": "#000000", "opacity": 0.62,
+                                                       "radius": 0.2, "padX": 0.5, "padY": 0.18}})
+                        } else {
+                            serde_json::json!({"bg": null})
+                        };
+                        self.apply_edit(true, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                        self.push_req(false);
+                    }
+                    if let Some(bg) = bg {
+                        // merge_object is shallow: every tweak re-sends the FULL bg object
+                        let g = |k: &str, d: f64| bg.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+                        let bg_col = bg.get("color").and_then(|v| v.as_str()).unwrap_or("#000000").to_string();
+                        let (mut op, mut rad) = (g("opacity", 0.62), g("radius", 0.2));
+                        let (pad_x, pad_y) = (g("padX", 0.5), g("padY", 0.18));
+                        let mut bc = hex_color32(&bg_col, egui::Color32::BLACK);
+                        let mut send: Option<serde_json::Value> = None;
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("枠色").weak().small());
+                            if ui.color_edit_button_srgba(&mut bc).changed() {
+                                send = Some(serde_json::json!({"color": color32_hex(bc)}));
+                            }
+                        });
+                        if ui.add(egui::Slider::new(&mut op, 0.05..=1.0).text("枠の濃さ")).changed() {
+                            send = Some(serde_json::json!({"opacity": (op * 100.0).round() / 100.0}));
+                        }
+                        if ui.add(egui::Slider::new(&mut rad, 0.0..=0.6).text("角丸")).changed() {
+                            send = Some(serde_json::json!({"radius": (rad * 100.0).round() / 100.0}));
+                        }
+                        if let Some(delta) = send {
+                            let mut full = serde_json::json!({
+                                "color": bg_col, "opacity": op, "radius": rad,
+                                "padX": pad_x, "padY": pad_y,
+                            });
+                            edits_merge_for_preset(&mut full, &delta);
+                            let ids = edit_ids.clone();
+                            self.remember_caption_fallbacks(&ids);
+                            let patch = serde_json::json!({"bg": full});
+                            self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                            self.push_req(false);
+                        }
+                    }
+                    // ---- デザインプリセット（Web版と同じ9種）----
+                    ui.add_space(4.0);
+                    ui.menu_button("デザインプリセット ▾", |ui| {
+                        for (label, design) in caption_presets() {
+                            if ui.button(label).clicked() {
+                                let ids = edit_ids.clone();
+                                self.remember_caption_fallbacks(&ids);
+                                let patch = design.clone();
+                                self.apply_edit(true, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                                self.push_req(false);
+                                ui.close_menu();
+                            }
+                        }
+                    });
                     if ui.button("この見た目を全テロップに適用").clicked() {
                         let ids: Vec<String> = self
                             .doc
@@ -8161,6 +8431,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let _uistat = UiStatGuard::begin(self);
         // IME変換の確定Enterがそのまま改行として入る（egui 0.29のIMEリーク）。
         // このフレームにIMEイベントがある間はEnter/改行テキストを握り潰す —
         // 確定済みテキストで押す普通のEnterはIMEイベントが無いので通る
