@@ -776,6 +776,71 @@ fn load_freeze_png(
     ok
 }
 
+/// Load a still asset into the GPU cache.  This is deliberately shared by the renderer
+/// and the look-ahead warmer: PNG decode/resample can take hundreds of milliseconds, so
+/// doing it at the clip edge makes an otherwise healthy playback ring run dry.
+fn ensure_still_image(
+    doc: &model::Doc,
+    d3d: &media::D3d,
+    comp: &mut compositor::Compositor,
+    aid: &str,
+) -> Option<String> {
+    if !doc.asset_images.contains(aid) {
+        return None;
+    }
+    let path = doc.originals.get(aid)?.clone();
+    let key = (format!("img:{aid}"), 0i64);
+    if comp.still_get(&key).is_some() {
+        return Some(path);
+    }
+    let bytes = std::fs::read(&path).ok()?;
+    let img = image::load_from_memory(&bytes).ok()?;
+    let (ow, oh) = (img.width(), img.height());
+    let long = ow.max(oh);
+    // Preview images are capped at 1920px. Triangle is materially cheaper than
+    // CatmullRom for a 4K PNG and is indistinguishable at the preview's display size.
+    let img = if long > 1920 {
+        let sc = 1920.0 / long as f32;
+        img.resize(
+            ((ow as f32 * sc).round() as u32).max(2),
+            ((oh as f32 * sc).round() as u32).max(2),
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        img
+    };
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    comp.still_put_rgba(d3d, key, w, h, rgba.as_raw()).ok()?;
+    Some(path)
+}
+
+/// Warm at most one image that begins shortly after `t`.  Unlike video decoder
+/// priming, stills need CPU PNG decoding plus a GPU upload, so they must be ready before
+/// the playback ring reaches their first frame.
+fn warm_upcoming_still(
+    doc: &model::Doc,
+    d3d: &media::D3d,
+    comp: &mut compositor::Compositor,
+    t: f64,
+) -> bool {
+    let next = doc
+        .seq
+        .tracks
+        .iter()
+        .filter(|tr| tr.kind != "audio" && !tr.hidden)
+        .flat_map(|tr| tr.clips.iter())
+        .filter(|c| c.timeline_start > t && c.timeline_start <= t + 8.0)
+        .filter_map(|c| c.asset_id.as_deref().map(|aid| (c.timeline_start, aid)))
+        .filter(|(_, aid)| {
+            doc.asset_images.contains(*aid)
+                && comp.still_get(&(format!("img:{aid}"), 0)).is_none()
+        })
+        .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let Some((_, aid)) = next else { return false };
+    ensure_still_image(doc, d3d, comp, aid).is_some()
+}
+
 fn compose(
     doc: &model::Doc,
     d3d: &media::D3d,
@@ -1144,29 +1209,8 @@ fn compose(
             // STILL IMAGE clip (logo / generated CTA art): decode once into the still
             // cache, draw CONTAIN-fitted (aspect preserved inside the box) with alpha —
             // no decoder, no audio, identical semantics to the exporter's image branch.
-            let Some(path) = doc.originals.get(aid).cloned() else { continue };
+            let Some(path) = ensure_still_image(doc, d3d, comp, aid) else { continue };
             let key = (format!("img:{aid}"), 0i64);
-            if comp.still_get(&key).is_none() {
-                if let Ok(bytes) = std::fs::read(&path) {
-                    if let Ok(img) = image::load_from_memory(&bytes) {
-                        let (ow, oh) = (img.width(), img.height());
-                        let long = ow.max(oh);
-                        let img = if long > 1920 {
-                            let sc = 1920.0 / long as f32;
-                            img.resize(
-                                ((ow as f32 * sc).round() as u32).max(2),
-                                ((oh as f32 * sc).round() as u32).max(2),
-                                image::imageops::FilterType::CatmullRom,
-                            )
-                        } else {
-                            img
-                        };
-                        let rgba = img.to_rgba8();
-                        let (w, h) = (rgba.width(), rgba.height());
-                        let _ = comp.still_put_rgba(d3d, key.clone(), w, h, rgba.as_raw());
-                    }
-                }
-            }
             if let Some((tex, (iw, ih))) = comp.still_get(&key) {
                 // Legacy/default images remain contain-fitted; an explicit X/Y resize
                 // switches to stretch and the source fills the edited box itself.
@@ -2521,7 +2565,12 @@ fn media_thread(shared: Arc<Shared>) {
                     }
                 } else {
                     slept = true;
-                    if !warm_upcoming(&doc, &d3d, &mut pool, &masks, t) {
+                    // A full ring is the only safe time to do an image's expensive
+                    // PNG decode/GPU upload.  Otherwise the first frame of an active
+                    // logo/CTA can consume the entire playback cushion.
+                    if !warm_upcoming_still(&doc, &d3d, &mut comp, t)
+                        && !warm_upcoming(&doc, &d3d, &mut pool, &masks, t)
+                    {
                         std::thread::sleep(std::time::Duration::from_millis(2));
                     }
                 }
@@ -11800,27 +11849,21 @@ fn main() -> eframe::Result<()> {
             // boundary/dup debugging with full engine logs, no synthetic input needed
             if let Some(i) = args.iter().position(|a| a == "--play-probe") {
                 let t0: f64 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-                let delay: u64 = std::env::var("NATIVE_PROBE_DELAY")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(4000);
                 // NATIVE_PLAY_SPEED: probe fast playback (the L key path) headlessly
                 let speed: f64 = std::env::var("NATIVE_PLAY_SPEED")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(1.0);
+                // Drive the App state itself. Writing Shared::req directly was overwritten by
+                // the UI's normal push_req(false) on the next frame, so the old probe stopped
+                // almost immediately and could not reproduce real playback.
+                app.t = t0.min(app.dur);
+                app.playback_speed = speed;
+                app.playing = true;
+                app.push_req(false);
+                eprintln!("PLAYPROBE start t={:.3} speed={speed}", app.t);
                 let sh = app.shared.clone();
                 std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(delay));
-                    eprintln!("PLAYPROBE start t={t0} speed={speed}");
-                    {
-                        let mut r = sh.req.lock().unwrap();
-                        r.t = t0;
-                        r.playing = true;
-                        r.scrubbing = false;
-                        r.speed = speed;
-                        r.gen += 1;
-                    }
                     std::thread::sleep(std::time::Duration::from_millis(12000));
                     eprintln!("PLAYPROBE end clock={:.3}", f64::from_bits(sh.clock_bits.load(Ordering::Relaxed)));
                     std::process::exit(0);
