@@ -742,10 +742,37 @@ fn compose(
     pool.frame_no += 1;
     let mut used = Vec::new();
     let mut exact = true; // false while any budgeted scrub seek stopped short of t
-    let layers: Vec<model::Clip> = {
-        let (b, o) = doc.active_video(t);
-        b.into_iter().chain(o).cloned().collect()
+    // ONE z-ordered draw list: lane array order = stacking (0 = backmost), within a lane
+    // the clip order. Videos, region effects AND designed captions all live in it — the
+    // lane rule "上にあるものが前面" holds across kinds, not just among videos. A region
+    // effect processes exactly the composite BELOW its lane; captions above the topmost
+    // video/effect stay in the WebView overlay (live animation), the rest draw here.
+    const Z_VIDEO: u8 = 0;
+    const Z_FX: u8 = 1;
+    const Z_CAP: u8 = 2;
+    let layers: Vec<(u8, model::Clip)> = {
+        let mut out = Vec::new();
+        for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
+            for c in &tr.clips {
+                if t < c.timeline_start || t >= c.timeline_end {
+                    continue;
+                }
+                if c.asset_id.is_some() {
+                    if c.is_video_enabled() {
+                        out.push((Z_VIDEO, c.clone()));
+                    }
+                } else if c.region.is_some() {
+                    if c.style.as_ref().and_then(|v| v.as_str()) != Some("note") {
+                        out.push((Z_FX, c.clone()));
+                    }
+                } else if c.text.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+                    out.push((Z_CAP, c.clone()));
+                }
+            }
+        }
+        out
     };
+    let native_caps = native_caption_ids(doc, t);
     // The timeline moment the BASE video layer actually landed on (budgeted scrub
     // seeks may stop a frame short of t). Region effects evaluate their keyframes at
     // THIS time so the blur stays glued to the picture that is really on screen —
@@ -776,7 +803,131 @@ fn compose(
         .filter(|c| c.is_freeze())
         .any(|c| (t - c.timeline_start).abs() < 0.6 || (t - c.timeline_end).abs() < 0.6);
     let _t = Instant::now();
-    for c in &layers {
+    for (zk, c) in &layers {
+        if *zk == Z_FX {
+            // region effect (blur/mosaic): processes the composite BELOW this lane.
+            // Keyframed rects follow the DISPLAYED base frame's time (base_eff_t), not
+            // the request time — glued to the picture during budgeted scrubs — and are
+            // QUANTIZED to the sequence grid (same slot value keyframe WRITES use).
+            let t_fx = (base_eff_t.unwrap_or(t) * gfps).round() / gfps;
+            if let Some(rg) = c.region_at(t_fx) {
+                let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+                let is_mosaic = style.contains("mosaic");
+                // SAM tracked blur: the baked mask video follows the object; until the
+                // bake lands (or outside its window) the static stand-in below applies.
+                let mut applied = false;
+                if let Some(bt) = c.blur_track.as_ref() {
+                    let key = bt.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                    let bs = bt.get("bake_start").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let be = bt.get("bake_end").and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
+                    let baid = bt.get("asset_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let mpath = doc.rel_path(&format!("blur-cache/{key}.mask.mp4"));
+                    let base_info = doc
+                        .active_video(t)
+                        .0
+                        .filter(|b| b.asset_id.as_deref() == Some(baid))
+                        .map(|b| (b.src_at(t), b.display_box_at(t_fx), b.crop_ltrb_at(t_fx)));
+                    let mask_ok = !key.is_empty()
+                        && std::fs::metadata(&mpath).map(|m| m.len() > 0).unwrap_or(false);
+                    if let (Some((src_t, bb, bcrop)), true) = (base_info, mask_ok) {
+                        let in_window = src_t >= bs - 0.05 && src_t <= be + 0.05;
+                        let mt = (src_t - bs).max(0.0);
+                        if !in_window {
+                            // fall through to the static stand-in below
+                        } else if let Ok(vs) = pool.get(d3d, &mpath, 0, false, mt) {
+                            let ok = if fast {
+                                if Instant::now() < f_deadline {
+                                    vs.ensure_frame_scrub(d3d, mt, 8.0).unwrap_or(false)
+                                } else {
+                                    false
+                                }
+                            } else {
+                                vs.ensure_frame(d3d, mt).is_ok()
+                            };
+                            if !ok {
+                                exact = false; // settle pass will land the exact mask frame
+                            }
+                            if BLUR_DBG.load(Ordering::Relaxed) {
+                                eprintln!(
+                                    "BLURMASK t={t:.3} clip={} req_mt={mt:.3} landed={:.3} ok={ok} fast={fast} (mask_frame≈{})",
+                                    c.id,
+                                    vs.shown_pts(),
+                                    (vs.shown_pts() * 30.0).round() as i64
+                                );
+                            }
+                            // draw with the decoder's LAST frame even when the budgeted
+                            // seek missed: a frame-stale tracked mask beats flashing to
+                            // the static stand-in
+                            let tex = vs.bgra.clone();
+                            let wh = (vs.width, vs.height);
+                            if comp
+                                .apply_blur_masked(
+                                    d3d,
+                                    &tex,
+                                    wh,
+                                    (bb.x, bb.y, bb.width, bb.height),
+                                    bcrop,
+                                    16.0, // soft-blur radius px
+                                )
+                                .is_ok()
+                            {
+                                applied = true;
+                                used.push(mpath);
+                            }
+                        }
+                    }
+                }
+                if !applied {
+                    // a clip WITH a tracked bake never shows the blocky grid: style only
+                    // picks the look for pure static region clips
+                    if is_mosaic && c.blur_track.is_none() {
+                        let _ = comp.apply_mosaic(d3d, rg, 14.0);
+                    } else {
+                        let _ = comp.apply_blur_rect(d3d, rg, 16.0);
+                    }
+                }
+            }
+            continue;
+        }
+        if *zk == Z_CAP {
+            // designed caption at its LANE position. Texture = the same /caption-frame
+            // PNG the export burns (caption-cache, rendered at the DEFAULT anchor with
+            // x/y stripped): shift the full-canvas quad by the live style offsets — the
+            // canvas edge crops exactly like the renderer's overflow:hidden. Captions
+            // ABOVE every video/effect are not in native_caps: the WebView draws them
+            // live (animation intact) on its always-on-top plane.
+            if !native_caps.contains(&c.id) {
+                continue;
+            }
+            let text = c.text.clone().unwrap_or_default();
+            let style_owned = c.style.clone().unwrap_or_else(|| serde_json::json!({}));
+            let key = caption_cache_key(c, &text, &style_owned);
+            let skey = (format!("cap:{key}"), 0i64);
+            if comp.still_get(&skey).is_none() {
+                let png = std::path::Path::new(&doc.asset_dir)
+                    .join("caption-cache")
+                    .join(format!("{key}.png"));
+                match std::fs::read(&png).ok().and_then(|b| image::load_from_memory(&b).ok()) {
+                    Some(img) => {
+                        let rgba = img.to_rgba8();
+                        let (w, h) = (rgba.width(), rgba.height());
+                        let _ = comp.still_put_rgba(d3d, skey.clone(), w, h, rgba.as_raw());
+                    }
+                    None => {
+                        // PNG not rendered yet (caption_cache_pass fills it in the
+                        // background) — native_caption_ids keeps such captions in the
+                        // WebView, so this is just belt-and-braces
+                        exact = false;
+                    }
+                }
+            }
+            if let Some((tex, wh)) = comp.still_get(&skey) {
+                let xf = caption_style_num(&style_owned, "x", 0.0);
+                let yf = caption_style_num(&style_owned, "y", 0.08).clamp(0.0, 0.92);
+                let _ = comp.draw_alpha_opacity(d3d, &tex, wh, (xf, 0.08 - yf, 1.0, 1.0), c.visual_opacity());
+            }
+            continue;
+        }
         let b = c.display_box_at(t_geo);
         if let Some((key, off)) = c.popout_key() {
             // LIVE matte path: color sampled from the ORIGINAL frame — the same file and
@@ -1073,108 +1224,9 @@ fn compose(
             used.push(path);
         }
     }
-    // region effects (blur/mosaic clips): lanes are just layers — a region clip works
-    // from ANY non-audio lane, not only an "effect" one (種別で可否を決めない)
-    // Keyframed rects follow the DISPLAYED base frame's time, not the request time —
-    // that keeps the cover glued to the picture during budgeted scrubs — QUANTIZED to
-    // the sequence grid: the same slot value keyframe WRITES use, so a key's frame
-    // shows exactly the key's value and the next frame is still.
-    let t_fx = (base_eff_t.unwrap_or(t) * gfps).round() / gfps;
-    for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
-        for c in &tr.clips {
-            if c.asset_id.is_some() || t < c.timeline_start || t >= c.timeline_end {
-                continue;
-            }
-            if let Some(rg) = c.region_at(t_fx) {
-                let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
-                if style == "note" {
-                    continue; // 指示クリップ: 画には何も描かない（範囲情報の器）
-                }
-                let is_mosaic = style.contains("mosaic");
-                // SAM tracked blur: the baked mask video (blur-cache/{key}.mask.mp4)
-                // follows the object; blur = soft haze weighted by the mask frame.
-                // Mask time = base clip source time − bake window start. Until the bake
-                // lands, or wherever the base's source time falls OUTSIDE the baked
-                // window, the static stand-in below applies (pinning to mask frame 0
-                // out of range showed a misplaced frozen blur).
-                let mut applied = false;
-                if let Some(bt) = c.blur_track.as_ref() {
-                    let key = bt.get("key").and_then(|v| v.as_str()).unwrap_or("");
-                    let bs = bt.get("bake_start").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                    let be = bt.get("bake_end").and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
-                    let baid = bt.get("asset_id").and_then(|v| v.as_str()).unwrap_or("");
-                    let mpath = doc.rel_path(&format!("blur-cache/{key}.mask.mp4"));
-                    let base_info = doc
-                        .active_video(t)
-                        .0
-                        .filter(|b| b.asset_id.as_deref() == Some(baid))
-                        .map(|b| (b.src_at(t), b.display_box_at(t_fx), b.crop_ltrb_at(t_fx)));
-                    let mask_ok = !key.is_empty()
-                        && std::fs::metadata(&mpath).map(|m| m.len() > 0).unwrap_or(false);
-                    if let (Some((src_t, bb, bcrop)), true) = (base_info, mask_ok) {
-                        let in_window = src_t >= bs - 0.05 && src_t <= be + 0.05;
-                        let mt = (src_t - bs).max(0.0);
-                        if !in_window {
-                            // fall through to the static stand-in below
-                        } else if let Ok(vs) = pool.get(d3d, &mpath, 0, false, mt) {
-                            let ok = if fast {
-                                if Instant::now() < f_deadline {
-                                    vs.ensure_frame_scrub(d3d, mt, 8.0).unwrap_or(false)
-                                } else {
-                                    false
-                                }
-                            } else {
-                                vs.ensure_frame(d3d, mt).is_ok()
-                            };
-                            if !ok {
-                                exact = false; // settle pass will land the exact mask frame
-                            }
-                            if BLUR_DBG.load(Ordering::Relaxed) {
-                                eprintln!(
-                                    "BLURMASK t={t:.3} clip={} req_mt={mt:.3} landed={:.3} ok={ok} fast={fast} (mask_frame≈{})",
-                                    c.id,
-                                    vs.shown_pts(),
-                                    (vs.shown_pts() * 30.0).round() as i64
-                                );
-                            }
-                            // draw with the decoder's LAST frame even when the budgeted
-                            // seek missed: a frame-stale tracked mask beats flashing to
-                            // the static stand-in (visible as soft->blocky mode flicker
-                            // on play/pause transitions)
-                            let tex = vs.bgra.clone();
-                            let wh = (vs.width, vs.height);
-                            if comp
-                                .apply_blur_masked(
-                                    d3d,
-                                    &tex,
-                                    wh,
-                                    (bb.x, bb.y, bb.width, bb.height),
-                                    bcrop,
-                                    16.0, // soft-blur radius px
-                                )
-                                .is_ok()
-                            {
-                                applied = true;
-                                used.push(mpath);
-                            }
-                        }
-                    }
-                }
-                if !applied {
-                    // a clip WITH a tracked bake never shows the blocky grid: style only
-                    // picks the look for pure static region clips
-                    if is_mosaic && c.blur_track.is_none() {
-                        let _ = comp.apply_mosaic(d3d, rg, 14.0);
-                    } else {
-                        let _ = comp.apply_blur_rect(d3d, rg, 16.0);
-                    }
-                }
-            }
-        }
-    }
-    // Captions are intentionally absent from the native video texture. The transparent
-    // WebView2 overlay renders the exact React CaptionLayer used by export, so preview and
-    // output share one implementation instead of two nearly-matching rasterizers.
+    // (region effects and captions are drawn IN the z loop above — lane order is the
+    // one and only stacking rule. Captions above the topmost video/effect layer are
+    // not here: the transparent WebView2 overlay renders those live.)
     _ms_ov = _t.elapsed().as_secs_f64() * 1000.0;
     let _t = Instant::now();
     if exact_rb {
@@ -1409,6 +1461,52 @@ fn caption_legacy_cache_key(c: &model::Clip, text: &str, style: &serde_json::Val
     let mut hasher = Sha1::new();
     hasher.update(py_json(&spec).as_bytes());
     format!("{:x}", hasher.finalize())[..16].to_string()
+}
+
+/// ACTIVE designed captions at time t that the GPU compositor draws at their LANE
+/// position: every caption with at least one video/effect layer ABOVE it (lane array
+/// order = z). Captions above the topmost video/effect stay on the WebView overlay
+/// (live animation). A caption whose cache PNG hasn't landed yet, or whose text is
+/// being live-edited, stays in the WebView too — visible with a briefly-wrong z beats
+/// invisible, and the set converges as soon as caption_cache_pass delivers the PNG.
+fn native_caption_ids(doc: &model::Doc, t: f64) -> std::collections::HashSet<String> {
+    let mut below: Vec<&model::Clip> = Vec::new();
+    let mut out = std::collections::HashSet::new();
+    let mut promote = |caps: &mut Vec<&model::Clip>, out: &mut std::collections::HashSet<String>| {
+        for c in caps.drain(..) {
+            if caption_live::get(&c.id).is_some() {
+                continue;
+            }
+            let text = c.text.clone().unwrap_or_default();
+            let style = c.style.clone().unwrap_or_else(|| serde_json::json!({}));
+            let key = caption_cache_key(c, &text, &style);
+            let png = std::path::Path::new(&doc.asset_dir)
+                .join("caption-cache")
+                .join(format!("{key}.png"));
+            if std::fs::metadata(&png).map(|m| m.len() > 0).unwrap_or(false) {
+                out.insert(c.id.clone());
+            }
+        }
+    };
+    for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
+        for c in &tr.clips {
+            if t < c.timeline_start || t >= c.timeline_end {
+                continue;
+            }
+            if c.asset_id.is_some() {
+                if c.is_video_enabled() {
+                    promote(&mut below, &mut out);
+                }
+            } else if c.region.is_some() {
+                if c.style.as_ref().and_then(|v| v.as_str()) != Some("note") {
+                    promote(&mut below, &mut out);
+                }
+            } else if c.text.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+                below.push(c);
+            }
+        }
+    }
+    out
 }
 
 fn caption_runtime_dst(c: &model::Clip, cached_dst: (f64, f64, f64, f64), cached_font_size: f64) -> (f64, f64, f64, f64) {
@@ -3488,9 +3586,9 @@ impl App {
         // the middle cut left the other cuts mask-less (the "tracks only sometimes" bug).
         // Tracking runs CONTINUOUSLY through unseen gaps, so cut-crossing identity holds.
         let (mut ss, mut se) = (f64::MAX, f64::MIN);
-        for tr in self.doc.seq.tracks.iter().filter(|tr| {
-            tr.kind != "audio" && tr.kind != "effect" && tr.kind != "caption" && !tr.hidden
-        }) {
+        // lanes have no roles: the base cuts of this asset may sit on ANY visual lane
+        // (the asset_id match below is the real filter)
+        for tr in self.doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
             for bc in &tr.clips {
                 if bc.asset_id.as_deref() != Some(aid.as_str()) || bc.is_freeze() {
                     continue;
@@ -3772,18 +3870,30 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 
     fn caption_web_captions(&self) -> serde_json::Value {
         let mut out = Vec::new();
+        let t_now = self.displayed_t();
+        let native_caps = native_caption_ids(&self.doc, t_now);
         for tr in &self.doc.seq.tracks {
             if tr.hidden {
                 continue;
             }
             for c in &tr.clips {
-                if c.text.is_none() || c.asset_id.is_some() {
+                if c.text.is_none() || c.asset_id.is_some() || c.region.is_some() {
                     continue;
                 }
                 let text = caption_live::get(&c.id)
                     .or_else(|| c.text.clone())
                     .unwrap_or_default();
                 if text.trim().is_empty() {
+                    continue;
+                }
+                // Lane order = z, captions included: a caption with a video/effect layer
+                // ABOVE it is drawn by the GPU compositor at its lane position — the
+                // always-on-top WebView must not double-draw it. The exclusion is
+                // per-displayed-time, so the payload sig changes exactly at boundaries.
+                if native_caps.contains(&c.id)
+                    && t_now >= c.timeline_start
+                    && t_now < c.timeline_end
+                {
                     continue;
                 }
                 out.push(serde_json::json!({
@@ -8456,8 +8566,11 @@ impl eframe::App for App {
             self.library_ui(ctx);
             return;
         }
-        // Caption text edits stay in memory while typing. The transparent preview overlay
-        // renders the same React CaptionLayer and fonts as export; no caption-cache round trip.
+        // Caption text edits stay in memory while typing (the WebView overlay renders
+        // those live) — but the GPU compositor needs the cache PNGs to draw captions at
+        // their LANE position (z-order across kinds), so keep the background render
+        // warm. The pass is sig-deduped + retry-throttled internally; per-frame is fine.
+        self.caption_cache_pass();
         if let Ok(v) = std::env::var("NATIVE_FREEZE_AT") {
             if let Ok(t) = v.parse::<f64>() {
                 std::env::set_var("NATIVE_FREEZE_AT", "");
