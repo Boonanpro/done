@@ -24,6 +24,16 @@ export type RenderCaption = {
   words?: CaptionWord[];
 };
 
+export function captionFrame(time: number, fps = 30): number {
+  const rate = Number.isFinite(fps) && fps > 1 ? fps : 30;
+  return Math.round(time * rate);
+}
+
+export function isCaptionActive(cap: RenderCaption, time: number, fps = 30): boolean {
+  const frame = captionFrame(time, fps);
+  return frame >= captionFrame(cap.start, fps) && frame < captionFrame(cap.end, fps);
+}
+
 const num = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Number(v) : d);
 
 // Box-level intro animation (pop/fade/slide). Word-level effects return {} here and are handled
@@ -72,16 +82,21 @@ export function CaptionLayer({
   outH,
   captions,
   time,
+  fps = 30,
+  hiddenCaptionIds = [],
 }: {
   outW: number;
   outH: number;
   captions: RenderCaption[];
   time: number;
+  fps?: number;
+  hiddenCaptionIds?: string[];
 }) {
   const active = useMemo(() => {
-    const a = captions.filter((c) => c.text?.trim() && time >= c.start && time <= c.end);
+    const hidden = new Set(hiddenCaptionIds);
+    const a = captions.filter((c) => c.text?.trim() && !hidden.has(c.id || '') && isCaptionActive(c, time, fps));
     return a.length ? a[a.length - 1] : null; // last active wins (mirrors the old canvas behavior)
-  }, [captions, time]);
+  }, [captions, fps, hiddenCaptionIds, time]);
 
   const design: CaptionDesign = active?.design || {};
   const anim = design.animation;

@@ -32,6 +32,29 @@ mod frame_boundary_tests {
         assert_eq!(at_cut[0].id, "right");
         assert!(doc.active_media(2.0).is_empty());
     }
+
+    #[test]
+    fn adjacent_captions_share_a_boundary_without_overlap_or_gap() {
+        let raw = serde_json::json!([{
+            "timeline": {"sequence": {
+                "duration": 2.0,
+                "frame_rate": 30.0,
+                "tracks": [{"type":"caption", "clips":[
+                    {"id":"left", "text":"L", "timeline_start":0.0, "timeline_end":1.0},
+                    {"id":"right", "text":"R", "timeline_start":1.0, "timeline_end":2.0}
+                ]}]
+            }}
+        }]);
+        let doc = Doc::from_raw(raw, "unused.json", "unused-assets").unwrap();
+        let left = &doc.seq.tracks[0].clips[0];
+        let right = &doc.seq.tracks[0].clips[1];
+
+        assert!(doc.clip_active_at(left, 29.0 / 30.0));
+        assert!(!doc.clip_active_at(right, 29.0 / 30.0));
+        assert!(!doc.clip_active_at(left, 1.0));
+        assert!(doc.clip_active_at(right, 1.0));
+        assert!(!doc.clip_active_at(right, 2.0));
+    }
 }
 #[derive(Debug, Deserialize)]
 pub struct TimelineWrap {
@@ -545,24 +568,29 @@ impl Doc {
             .fold(0.0f64, f64::max);
         d.max(self.seq.duration)
     }
+    /// Canonical visual-timeline membership: frame-quantized, start-inclusive and
+    /// end-exclusive. Adjacent clips [a,b) and [b,c) therefore switch on frame b with
+    /// neither a blank nor a double exposure.
+    pub fn clip_active_at(&self, clip: &Clip, t: f64) -> bool {
+        let fps = self.seq.frame_rate.filter(|v| v.is_finite() && *v > 1.0).unwrap_or(30.0);
+        let frame = (t * fps).round() as i64;
+        let start_frame = (clip.timeline_start * fps).round() as i64;
+        let end_frame = (clip.timeline_end * fps).round() as i64;
+        frame >= start_frame && frame < end_frame
+    }
     /// Active media clips at t, in STACKING ORDER (track array index = back-to-front).
     /// A visual lane's legacy `type` is only a label; clip contents decide whether it is
     /// media. Audio remains the sole lane-level exception.
     pub fn active_media(&self, t: f64) -> Vec<&Clip> {
         let mut layers: Vec<&Clip> = Vec::new();
-        let fps = self.seq.frame_rate.filter(|v| v.is_finite() && *v > 1.0).unwrap_or(30.0);
-        let frame = (t * fps).round() as i64;
         for tr in &self.seq.tracks {
             if tr.kind == "audio" || tr.hidden {
                 continue;
             }
             for c in &tr.clips {
-                let start_frame = (c.timeline_start * fps).round() as i64;
-                let end_frame = (c.timeline_end * fps).round() as i64;
                 if c.asset_id.is_none()
                     || !c.is_video_enabled()
-                    || frame < start_frame
-                    || frame >= end_frame
+                    || !self.clip_active_at(c, t)
                 {
                     continue;
                 }
