@@ -841,6 +841,33 @@ fn warm_upcoming_still(
     ensure_still_image(doc, d3d, comp, aid).is_some()
 }
 
+/// End of a visually static span, if the current picture needs no video decode, region
+/// processing, or transform animation.  Reusing its already-composed RGBA is not a
+/// shortcut in semantics: it is the same render-cache contract used by NLEs for a still
+/// composite.  A boundary/keyframe invalidates the entry before it can be presented.
+fn static_visual_until(doc: &model::Doc, t: f64) -> Option<f64> {
+    let mut any = false;
+    let mut until = f64::INFINITY;
+    for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
+        for c in &tr.clips {
+            if !doc.clip_active_at(c, t) {
+                continue;
+            }
+            any = true;
+            if c.region.is_some() || !c.transform_key_times().is_empty() {
+                return None;
+            }
+            match c.asset_id.as_deref() {
+                Some(aid) if doc.asset_images.contains(aid) => {}
+                None if c.text.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) => {}
+                _ => return None,
+            }
+            until = until.min(c.timeline_end);
+        }
+    }
+    if any && until > t + 1e-6 { Some(until) } else { None }
+}
+
 fn compose(
     doc: &model::Doc,
     d3d: &media::D3d,
@@ -2297,6 +2324,10 @@ fn media_thread(shared: Arc<Shared>) {
         let mut masks: MaskMap = Default::default();
         let mut pts_maps: PtsMap = Default::default();
         let mut fcache = FrameCache::new();
+        // (exclusive end, pixels, effective timeline time) for a fully-static visual
+        // span.  This avoids round-tripping the same layered image through GPU -> CPU
+        // -> preview GPU thirty times per second.
+        let mut static_hold: Option<(f64, Vec<u8>, f64)> = None;
         let mut prev_was_compose = false;
         let mut prev_compose_t = f64::NAN;
         let mut prev_compose_eff = f64::NAN;
@@ -2350,6 +2381,7 @@ fn media_thread(shared: Arc<Shared>) {
             let frame_step = 1.0 / timeline_fps;
             if ptr != last_doc_ptr {
                 last_doc_ptr = ptr;
+                static_hold = None;
                 warm_done = false;
                 edit_cooldown_until = Instant::now() + std::time::Duration::from_millis(1500);
                 // edited: never show a stale composed frame — but only the frames at/after
@@ -2407,6 +2439,7 @@ fn media_thread(shared: Arc<Shared>) {
             if r.playing {
                 if r.gen != last_gen {
                     last_gen = r.gen;
+                    static_hold = None;
                     let jump = (r.t - t).abs() > 0.3;
                     let target = if jump { r.t } else { t };
                     {
@@ -2466,12 +2499,26 @@ fn media_thread(shared: Arc<Shared>) {
                     let t0 = Instant::now();
                     // cache hit = decompress instead of compose (jump refills become ~instant)
                     let mut cached_buf: Vec<u8> = Vec::new();
-                    let cache_eff = fcache.get(next_t, timeline_fps, frame_step * 0.51, &mut cached_buf);
+                    let static_end = static_visual_until(&doc, next_t);
+                    let static_eff = static_hold.as_ref().and_then(|(end, pixels, eff)| {
+                        if next_t < *end && pixels.len() == (CANVAS_W * CANVAS_H * 4) as usize {
+                            cached_buf.extend_from_slice(pixels);
+                            Some(*eff)
+                        } else {
+                            None
+                        }
+                    });
+                    let cache_eff = static_eff.or_else(|| {
+                        fcache.get(next_t, timeline_fps, frame_step * 0.51, &mut cached_buf)
+                    });
                     let from_cache = cache_eff.is_some();
                     let res = if let Some(eff) = cache_eff {
                         Ok((Vec::new(), true, eff))
                     } else {
-                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, true, false)
+                        // The first frame of a static span is its cache provenance anchor.
+                        // Read it back synchronously once; every following timeline frame
+                        // reuses the exact same completed pixels without another GPU round-trip.
+                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, true, static_end.is_some())
                     };
                     ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
                     match res {
@@ -2481,6 +2528,9 @@ fn media_thread(shared: Arc<Shared>) {
                             }
                             let p0 = Instant::now();
                             let frame_ref: &Vec<u8> = if from_cache { &cached_buf } else { &comp.rgba };
+                            if !from_cache {
+                                static_hold = static_end.map(|end| (end, comp.rgba.clone(), eff));
+                            }
                             {
                                 let mut rg = shared.ring.lock().unwrap();
                                 rg.push_back((next_t, eff, frame_ref.clone()));
