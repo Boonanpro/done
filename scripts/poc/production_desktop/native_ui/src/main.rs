@@ -1272,16 +1272,9 @@ fn caption_runtime_dst(c: &model::Clip, cached_dst: (f64, f64, f64, f64), cached
     let nh = h * scale;
     let cx = x + w * 0.5 + x_frac;
     let bottom = y + h - (y_frac - default_y);
-    let mut out = (cx - nw * 0.5, bottom - nh, nw, nh);
-    if out.2.is_finite() && out.3.is_finite() && out.2 > 0.0 && out.3 > 0.0 {
-        if out.2 <= 1.0 {
-            out.0 = out.0.clamp(0.0, 1.0 - out.2);
-        }
-        if out.3 <= 1.0 {
-            out.1 = out.1.clamp(0.0, 1.0 - out.3);
-        }
-    }
-    out
+    // No snap-back clamping: a caption may sit partly off-screen (the renderer just
+    // crops at the frame edge), so the box must follow it out rather than stick inside.
+    (cx - nw * 0.5, bottom - nh, nw, nh)
 }
 
 fn crop_alpha_rgba(rgba: &image::RgbaImage) -> Option<(Vec<u8>, u32, u32, (u32, u32, u32, u32))> {
@@ -2547,6 +2540,11 @@ struct App {
     inspect_drag: Option<(Vec<(String, model::Pos)>, u8, egui::Pos2, model::Pos)>,
     // clip id, live edit buffer, pre-edit document (restored on Cancel)
     caption_edit: Option<(String, String, serde_json::Value)>,
+    // dragging a caption on the preview: (clip id, grab pos, style x at grab, style y at grab)
+    caption_drag: Option<(String, egui::Pos2, f64, f64)>,
+    // clip id -> on-screen box (canvas fractions), measured in the caption WebView's real
+    // DOM (__reportCapBoxes) after every payload/time change. Written by the ipc handler.
+    caption_live_boxes: Arc<Mutex<std::collections::HashMap<String, [f64; 4]>>>,
     lane_reorder: Option<usize>,
     export_result: std::sync::Arc<Mutex<Option<Result<serde_json::Value, String>>>>,
     export_job: Option<String>,
@@ -2722,6 +2720,8 @@ impl App {
             hover_lane: None,
             inspect_drag: None,
             caption_edit: None,
+            caption_drag: None,
+            caption_live_boxes: Arc::new(Mutex::new(Default::default())),
             lane_reorder: None,
             export_result: Default::default(),
             export_job: None,
@@ -3534,17 +3534,42 @@ impl App {
         };
         self.caption_web_ready.store(false, Ordering::Relaxed);
         let ready = self.caption_web_ready.clone();
+        let live_boxes = self.caption_live_boxes.clone();
+        // __reportCapBoxes(t): measure every ACTIVE caption's box in the real DOM (the
+        // same filter/order CaptionLayer uses) as canvas fractions, and post them back.
+        // This is the caption drag hit-test's source of truth — font metrics, wrapping
+        // and the bg bar all come from the renderer itself, never re-estimated.
+        let report_js = "window.__reportCapBoxes=function(t){try{\
+var p=window.__nativeCaptionPayload;if(!p||!window.ipc)return;\
+var acts=p.captions.filter(function(c){return c.text&&c.text.trim()&&t>=c.start&&t<=c.end});\
+var root=document.querySelector('div[data-ready]');if(!root)return;\
+var cont=root.firstElementChild;if(!cont)return;\
+var layer=cont.firstElementChild;if(!layer)return;\
+var cr=layer.getBoundingClientRect();if(!(cr.width>1))return;\
+var kids=[].filter.call(layer.children,function(el){return el.tagName!=='STYLE'});\
+if(kids.length!==acts.length)return;\
+var out={};\
+for(var i=0;i<acts.length;i++){var b=(kids[i].firstElementChild||kids[i]).getBoundingClientRect();\
+out[acts[i].id||String(i)]=[(b.left-cr.left)/cr.width,(b.top-cr.top)/cr.height,b.width/cr.width,b.height/cr.height];}\
+window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
+}catch(e){}};";
         let built = wry::WebViewBuilder::new()
             .with_url("http://127.0.0.1:3000/caption-frame")
             .with_transparent(true)
             .with_focused(false)
             .with_bounds(bounds)
             .with_initialization_script(
-                "setInterval(()=>{if(!window.__captionReadySent&&window.__setCaptionPayload&&window.ipc){window.__captionReadySent=1;window.ipc.postMessage('caption-ready')}},100);",
+                &format!("{report_js}setInterval(()=>{{if(!window.__captionReadySent&&window.__setCaptionPayload&&window.ipc){{window.__captionReadySent=1;window.ipc.postMessage('caption-ready')}}}},100);"),
             )
             .with_ipc_handler(move |req| {
                 if req.body() == "caption-ready" {
                     ready.store(true, Ordering::Relaxed);
+                } else if let Some(json) = req.body().strip_prefix("capboxes:") {
+                    if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, [f64; 4]>>(json) {
+                        if let Ok(mut lb) = live_boxes.lock() {
+                            *lb = map;
+                        }
+                    }
                 }
             })
             .with_browser_accelerator_keys(false)
@@ -3640,7 +3665,7 @@ impl App {
                 "captions": captions,
             });
             let js = format!(
-                "window.__nativeCaptionPayload={0};window.__setCaptionPayload&&window.__setCaptionPayload(window.__nativeCaptionPayload);",
+                "window.__nativeCaptionPayload={0};window.__setCaptionPayload&&window.__setCaptionPayload(window.__nativeCaptionPayload).then(function(){{window.__reportCapBoxes&&window.__reportCapBoxes({t:.6})}});",
                 payload
             );
             let _ = web.evaluate_script(&js);
@@ -3650,7 +3675,7 @@ impl App {
             self.caption_web_t = t;
         } else if !self.caption_web_t.is_finite() || (t - self.caption_web_t).abs() > 0.001 {
             let _ = web.evaluate_script(&format!(
-                "window.__renderCaptionAt&&window.__renderCaptionAt({t:.6});"
+                "window.__renderCaptionAt&&window.__renderCaptionAt({t:.6}).then(function(){{window.__reportCapBoxes&&window.__reportCapBoxes({t:.6})}});"
             ));
             self.caption_web_t = t;
         }
@@ -4675,6 +4700,18 @@ impl App {
                         let ids = edit_ids.clone();
                         self.remember_caption_fallbacks(&ids);
                         let patch = serde_json::json!({"y": (yv * 100.0).round() / 100.0});
+                        self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                        self.push_req(false);
+                    }
+                    let x_pos = style.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let mut xv = x_pos;
+                    // Fraction of frame width; ±0.5 puts the caption's center on a frame
+                    // edge, so partial off-screen placement is reachable (edges crop, like
+                    // the export's overflow:hidden — nothing snaps back inside).
+                    if ui.add(egui::Slider::new(&mut xv, -0.5..=0.5).text("左右")).changed() {
+                        let ids = edit_ids.clone();
+                        self.remember_caption_fallbacks(&ids);
+                        let patch = serde_json::json!({"x": (xv * 100.0).round() / 100.0});
                         self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                         self.push_req(false);
                     }
@@ -6026,6 +6063,81 @@ impl App {
                 self.push_req(false);
             }
             return; // the gesture owns the pointer — skip the asset-clip inspector below
+        }
+        // --- caption drag: a selected telop can be MOVED directly on the preview.
+        // Writes style.x / style.y (the same fields as the 左右/上下 sliders), so the
+        // WebView overlay and the export both follow. No snap-back at the edges.
+        if let Some((cid, grab, sx, sy)) = self.caption_drag.clone() {
+            if let Some(pt) = pointer_pos {
+                let dx = ((pt.x - grab.x) / vid.width()) as f64;
+                let dy = ((pt.y - grab.y) / vid.height()) as f64;
+                let q3 = |v: f64| (v * 1000.0).round() / 1000.0;
+                // style.y is "fraction UP from the bottom" and the renderer clamps it
+                // to 0..0.92 — mirror that here so the box never lies about the pixels.
+                let patch = serde_json::json!({
+                    "x": q3(sx + dx),
+                    "y": q3((sy - dy).clamp(0.0, 0.92)),
+                });
+                let ids = vec![cid];
+                self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+            }
+            if ui.input(|i| i.pointer.any_released()) {
+                self.caption_drag = None;
+                self.push_req(false);
+            }
+            return;
+        }
+        let sel_caps: Vec<model::Clip> = self
+            .doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| {
+                self.selected.contains(&c.id)
+                    && c.text.is_some()
+                    && c.asset_id.is_none()
+                    && c.region.is_none()
+                    && t_disp >= c.timeline_start
+                    && t_disp < c.timeline_end
+            })
+            .cloned()
+            .collect();
+        for c in &sel_caps {
+            let sbox = self
+                .caption_live_boxes
+                .lock()
+                .ok()
+                .and_then(|lb| lb.get(&c.id).copied())
+                .map(|[x, y, w, h]| (x, y, w, h));
+            if std::env::var("NATIVE_CAPBOX_DEBUG").is_ok() {
+                eprintln!("CAPBOX id={} box={:?}", c.id, sbox);
+            }
+            let Some((dx0, dy0, dw, dh)) = sbox else { continue };
+            let r = egui::Rect::from_min_size(
+                egui::pos2(
+                    vid.left() + dx0 as f32 * vid.width(),
+                    vid.top() + dy0 as f32 * vid.height(),
+                ),
+                egui::vec2(dw as f32 * vid.width(), dh as f32 * vid.height()),
+            );
+            let p = ui.painter_at(vid);
+            p.rect_stroke(r, 3.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(190, 150, 60)));
+            if let Some(pt) = pointer_pos {
+                if r.contains(pt) {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                    if preview_drag_started && self.caption_drag.is_none() {
+                        let style = c.style.clone().unwrap_or_else(|| serde_json::json!({}));
+                        let sx = caption_style_num(&style, "x", 0.0);
+                        let sy = caption_style_num(&style, "y", 0.08).clamp(0.0, 0.92);
+                        self.pending_undo = Some(self.doc.raw.clone());
+                        self.caption_drag = Some((c.id.clone(), pt, sx, sy));
+                    }
+                }
+            }
+        }
+        if self.caption_drag.is_some() {
+            return;
         }
         let sel: Vec<model::Clip> = self
             .doc
