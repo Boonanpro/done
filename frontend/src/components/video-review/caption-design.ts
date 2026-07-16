@@ -103,6 +103,8 @@ export const CAPTION_DESIGN_PRESETS: ReadonlyArray<{ id: string; label: string; 
   { id: 'variety', label: 'バラエティ黄', design: { font: 'dela-gothic', color: '#ffe000', outlineColor: '#000000', outlineWidth: 1.4, animation: 'pop' } },
   { id: 'red-pop', label: '赤ポップ', design: { font: 'dela-gothic', color: '#ff3b30', outlineColor: '#ffffff', outlineWidth: 1.4, animation: 'pop' } },
   { id: 'bar', label: '字幕バー', design: { font: 'noto-sans', color: '#ffffff', outlineColor: '#000000', outlineWidth: 0.5, bg: { color: '#000000', opacity: 0.62, radius: 0.2, padX: 0.5, padY: 0.18 }, animation: 'fade' } },
+  { id: 'simple-box-black', label: 'シンプル黒箱', design: { font: 'noto-sans', color: '#ffffff', outlineColor: '#000000', outlineWidth: 0, bg: { color: '#000000', opacity: 1, radius: 0.05, padX: 0.5, padY: 0.22 } } },
+  { id: 'simple-box-white', label: 'シンプル白箱', design: { font: 'noto-sans', color: '#111111', outlineColor: '#000000', outlineWidth: 0, bg: { color: '#ffffff', opacity: 1, radius: 0.05, padX: 0.5, padY: 0.22 } } },
   { id: 'karaoke', label: 'カラオケ実況', design: { font: 'mplus-rounded', color: '#ffffff', outlineColor: '#1b1b1b', outlineWidth: 1.3, animation: 'karaoke', highlightColor: '#ff3b6b', highlightScale: 1.16 } },
   { id: 'type', label: 'タイプ', design: { font: 'noto-sans', color: '#ffffff', outlineColor: '#000000', outlineWidth: 1, animation: 'typewriter' } },
   { id: 'neon', label: 'ネオン', design: { font: 'dela-gothic', color: '#19e6ff', outlineColor: '#003b46', outlineWidth: 1.2, shadow: { color: '#19e6ff', blur: 24, dy: 0 }, animation: 'fade' } },
