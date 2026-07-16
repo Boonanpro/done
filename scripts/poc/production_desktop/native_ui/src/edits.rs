@@ -301,6 +301,9 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
         }
         setf(&mut clips[idx], "timeline_start", ts + d);
         setf(&mut clips[idx], "source_start", ss + d);
+        // keyframes are clip-relative and glued to SOURCE frames: the in-point moved
+        // by d, so every key slides back by d (same rule as trim_one_clip)
+        shift_region_keys(&mut clips[idx], -d);
         if magnet {
             pin_start_to_zero(clips);
         }
@@ -323,6 +326,7 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
             shift_block(clips, true, ts, -restore, idx);
             setf(&mut clips[idx], "timeline_start", ts - restore);
             setf(&mut clips[idx], "source_start", ss - restore);
+            shift_region_keys(&mut clips[idx], restore);
             grow -= restore;
         }
     }
@@ -331,6 +335,9 @@ fn trim_main_lane_live(root: &mut Value, ids: &[String], left: bool, from_t: Opt
         let cur_ss = f(&clips[idx], "source_start");
         setf(&mut clips[idx], "source_start", (cur_ss - grow).max(0.0));
         setf(&mut clips[idx], "timeline_end", cur_end + grow);
+        // in-point moved earlier by grow while timeline_start stayed: the same source
+        // frame now sits grow seconds LATER in clip-relative time
+        shift_region_keys(&mut clips[idx], grow);
         shift_block(clips, false, cur_end, grow, idx);
     }
     true
@@ -513,19 +520,21 @@ fn trim_one_clip(c: &mut Value, left: bool, new_t: f64) {
     }
 }
 
-/// Shift every position keyframe by dt seconds (used when the clip's left edge
-/// moves: rel times must keep pointing at the same absolute timeline moment).
+/// Shift every keyframe (region AND transform) by dt seconds (used when the clip's
+/// left edge moves: rel times must keep pointing at the same absolute timeline moment).
 fn shift_region_keys(c: &mut Value, dt: f64) {
     if dt.abs() < 1e-9 {
         return;
     }
-    let Some(keys) = c.get_mut("region_keys").and_then(|v| v.as_array_mut()) else {
-        return;
-    };
-    for k in keys.iter_mut() {
-        if let Some(t) = k.get("t").and_then(|v| v.as_f64()) {
-            if let Some(o) = k.as_object_mut() {
-                o.insert("t".into(), serde_json::json!(((t + dt) * 1000.0).round() / 1000.0));
+    for field in ["region_keys", "transform_keys"] {
+        let Some(keys) = c.get_mut(field).and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for k in keys.iter_mut() {
+            if let Some(t) = k.get("t").and_then(|v| v.as_f64()) {
+                if let Some(o) = k.as_object_mut() {
+                    o.insert("t".into(), serde_json::json!(((t + dt) * 1000.0).round() / 1000.0));
+                }
             }
         }
     }
@@ -707,6 +716,7 @@ pub fn split_clips(root: &mut Value, ids: &[String], t: f64, salt: u64) {
                     // sides — a verbatim clone REPLAYED the left half's motion after the
                     // cut (「前半のキーが後半にクローンされる」)
                     split_region_keys(&c, d, &mut leftv, &mut rightv);
+                    split_transform_keys(&c, d, &mut leftv, &mut rightv);
                     out.push(leftv);
                     out.push(rightv);
                 }
@@ -839,6 +849,184 @@ fn split_region_keys(orig: &Value, d: f64, leftv: &mut Value, rightv: &mut Value
                 }
             } else {
                 o.insert("region_keys".into(), Value::Array(ks));
+            }
+        }
+    }
+}
+
+/// Base display box of a RAW clip (position wins; else transform scale/pan; else full)
+/// — JSON mirror of model::Clip::display_box for split-time interpolation.
+fn raw_display_box(c: &Value) -> (f64, f64, f64, f64) {
+    if let Some(p) = c.get("position").filter(|p| p.is_object()) {
+        let g = |k: &str, d: f64| p.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+        return (g("x", 0.0), g("y", 0.0), g("width", 1.0), g("height", 1.0));
+    }
+    if let Some(t) = c.get("transform").filter(|t| t.is_object()) {
+        let g = |k: &str, d: f64| t.get(k).and_then(|v| v.as_f64()).unwrap_or(d);
+        let (s, tx, ty) = (g("scale", 1.0), g("x", 0.0), g("y", 0.0));
+        if (s - 1.0).abs() > 1e-4 || tx.abs() > 1e-4 || ty.abs() > 1e-4 {
+            return ((1.0 - s) / 2.0 + tx, (1.0 - s) / 2.0 + ty, s, s);
+        }
+    }
+    (0.0, 0.0, 1.0, 1.0)
+}
+
+/// Base per-edge crop of a RAW clip as [l, t, r, b] (zeros when none).
+fn raw_crop_ltrb(c: &Value) -> [f64; 4] {
+    let Some(cr) = c.get("crop").filter(|v| v.is_object()) else {
+        return [0.0; 4];
+    };
+    let g = |k: &str| cr.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0).clamp(0.0, 0.9);
+    [g("left"), g("top"), g("right"), g("bottom")]
+}
+
+/// Linear interpolation of a transform_keys array at clip-relative time `rel`
+/// (same math as model::Clip::transform_at — ends clamp to the first/last key).
+fn transform_keys_at(
+    keys: &[Value],
+    rel: f64,
+    base: (f64, f64, f64, f64),
+    base_crop: [f64; 4],
+) -> Option<(f64, f64, f64, f64, [f64; 4])> {
+    let mut ks: Vec<(f64, f64, f64, f64, f64, [f64; 4])> = keys
+        .iter()
+        .filter_map(|k| {
+            let crop = k.get("crop").map(|c| {
+                let g = |n: &str| c.get(n).and_then(|v| v.as_f64()).unwrap_or(0.0).clamp(0.0, 0.9);
+                [g("left"), g("top"), g("right"), g("bottom")]
+            });
+            Some((
+                k.get("t")?.as_f64()?,
+                k.get("x")?.as_f64()?,
+                k.get("y")?.as_f64()?,
+                k.get("w").and_then(|v| v.as_f64()).unwrap_or(base.2),
+                k.get("h").and_then(|v| v.as_f64()).unwrap_or(base.3),
+                crop.unwrap_or(base_crop),
+            ))
+        })
+        .collect();
+    if ks.is_empty() {
+        return None;
+    }
+    ks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let pick = |a: &(f64, f64, f64, f64, f64, [f64; 4])| (a.1, a.2, a.3, a.4, a.5);
+    if rel <= ks[0].0 {
+        return Some(pick(&ks[0]));
+    }
+    if rel >= ks[ks.len() - 1].0 {
+        return Some(pick(&ks[ks.len() - 1]));
+    }
+    let i = ks.iter().position(|k| k.0 > rel).unwrap();
+    let (a, b) = (&ks[i - 1], &ks[i]);
+    let fr = ((rel - a.0) / (b.0 - a.0).max(1e-9)).clamp(0.0, 1.0);
+    let l = |p: f64, q: f64| p + (q - p) * fr;
+    Some((
+        l(a.1, b.1),
+        l(a.2, b.2),
+        l(a.3, b.3),
+        l(a.4, b.4),
+        [
+            l(a.5[0], b.5[0]),
+            l(a.5[1], b.5[1]),
+            l(a.5[2], b.5[2]),
+            l(a.5[3], b.5[3]),
+        ],
+    ))
+}
+
+/// Partition a split clip's transform keyframes at cut offset `d` — same contract as
+/// split_region_keys: each side keeps its keys (right side re-based), motion crossing
+/// the cut gets pinned with boundary keys, and a keyless side holds the cut-moment
+/// look via its base position/crop instead of a key out of nowhere.
+fn split_transform_keys(orig: &Value, d: f64, leftv: &mut Value, rightv: &mut Value) {
+    let Some(keys) = orig.get("transform_keys").and_then(|v| v.as_array()).cloned() else {
+        return;
+    };
+    if keys.is_empty() {
+        return;
+    }
+    let q3 = |v: f64| (v * 1000.0).round() / 1000.0;
+    let q4 = |v: f64| (v * 10000.0).round() / 10000.0;
+    let kt_of = |k: &Value| k.get("t").and_then(|v| v.as_f64());
+    let had_before = keys.iter().any(|k| kt_of(k).map(|kt| kt < d - KEY_REPLACE_EPS).unwrap_or(false));
+    let had_after = keys.iter().any(|k| kt_of(k).map(|kt| kt > d + KEY_REPLACE_EPS).unwrap_or(false));
+    let cut = transform_keys_at(&keys, d, raw_display_box(orig), raw_crop_ltrb(orig));
+    let key_json = |t: f64, px: f64, py: f64, pw: f64, ph: f64, pc: [f64; 4]| {
+        let mut o = serde_json::Map::new();
+        o.insert("t".into(), serde_json::json!(q3(t)));
+        o.insert("x".into(), serde_json::json!(q4(px)));
+        o.insert("y".into(), serde_json::json!(q4(py)));
+        o.insert("w".into(), serde_json::json!(q4(pw)));
+        o.insert("h".into(), serde_json::json!(q4(ph)));
+        if pc.iter().sum::<f64>() > 1e-4 {
+            o.insert(
+                "crop".into(),
+                serde_json::json!({"left": q4(pc[0]), "top": q4(pc[1]), "right": q4(pc[2]), "bottom": q4(pc[3])}),
+            );
+        }
+        Value::Object(o)
+    };
+    let mut lk: Vec<Value> = keys
+        .iter()
+        .filter(|k| kt_of(k).map(|kt| kt <= d + KEY_REPLACE_EPS).unwrap_or(false))
+        .cloned()
+        .collect();
+    let mut rk: Vec<Value> = keys
+        .iter()
+        .filter_map(|k| {
+            let kt = kt_of(k)?;
+            if kt < d - KEY_REPLACE_EPS {
+                return None;
+            }
+            let mut k2 = k.clone();
+            k2["t"] = serde_json::json!(q3((kt - d).max(0.0)));
+            Some(k2)
+        })
+        .collect();
+    if let Some((px, py, pw, ph, pc)) = cut {
+        if !lk.is_empty()
+            && had_after
+            && !lk.iter().any(|k| kt_of(k).map(|kt| (kt - d).abs() <= KEY_REPLACE_EPS).unwrap_or(false))
+        {
+            lk.push(key_json(d, px, py, pw, ph, pc));
+        }
+        if !rk.is_empty()
+            && had_before
+            && !rk.iter().any(|k| kt_of(k).map(|kt| kt.abs() <= KEY_REPLACE_EPS).unwrap_or(false))
+        {
+            rk.push(key_json(0.0, px, py, pw, ph, pc));
+        }
+    }
+    let sort = |v: &mut Vec<Value>| {
+        v.sort_by(|a, b| {
+            let ta = a.get("t").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let tb = b.get("t").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            ta.total_cmp(&tb)
+        })
+    };
+    sort(&mut lk);
+    sort(&mut rk);
+    for (side, ks) in [(&mut *leftv, lk), (&mut *rightv, rk)] {
+        if let Some(o) = side.as_object_mut() {
+            if ks.is_empty() {
+                o.remove("transform_keys");
+                // keyless side: hold the cut-moment look via the base fields
+                if let Some((px, py, pw, ph, pc)) = cut {
+                    o.insert(
+                        "position".into(),
+                        serde_json::json!({"x": q4(px), "y": q4(py), "width": q4(pw), "height": q4(ph)}),
+                    );
+                    if pc.iter().sum::<f64>() > 1e-4 {
+                        o.insert(
+                            "crop".into(),
+                            serde_json::json!({"left": q4(pc[0]), "top": q4(pc[1]), "right": q4(pc[2]), "bottom": q4(pc[3])}),
+                        );
+                    } else {
+                        o.remove("crop");
+                    }
+                }
+            } else {
+                o.insert("transform_keys".into(), Value::Array(ks));
             }
         }
     }
@@ -2175,6 +2363,140 @@ pub fn clear_region_keys(raw: &mut serde_json::Value, id: &str) {
     for_each_clip(raw, |c| {
         if c.get("id").and_then(|v| v.as_str()) == Some(id) {
             c.as_object_mut().unwrap().remove("region_keys");
+        }
+    });
+}
+
+/// Insert/replace a MEDIA-clip transform keyframe (display box + optional crop) at
+/// clip-relative time t. Same replace window / quantization as set_region_key. x/y are
+/// not clamped here — like set_position, the caller enforces the on-screen minimum.
+pub fn set_transform_key(
+    raw: &mut serde_json::Value,
+    id: &str,
+    t: f64,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    crop: Option<(f64, f64, f64, f64)>,
+) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) != Some(id) {
+            return;
+        }
+        let o = c.as_object_mut().unwrap();
+        let arr = o
+            .entry("transform_keys")
+            .or_insert_with(|| serde_json::Value::Array(vec![]));
+        let Some(keys) = arr.as_array_mut() else { return };
+        let q = |v: f64| (v * 10000.0).round() / 10000.0;
+        // crop=None means "don't touch the crop": a position drag re-writing THIS key
+        // must not silently strip the crop the key carried — carry it over instead
+        let mut carry_crop: Option<Value> = None;
+        keys.retain(|k| {
+            let same = k
+                .get("t")
+                .and_then(|v| v.as_f64())
+                .map(|kt| (kt - t).abs() <= KEY_REPLACE_EPS)
+                .unwrap_or(true);
+            if same && carry_crop.is_none() {
+                carry_crop = k.get("crop").cloned();
+            }
+            !same
+        });
+        let mut key = serde_json::Map::new();
+        key.insert("t".into(), serde_json::json!((t * 1000.0).round() / 1000.0));
+        key.insert("x".into(), serde_json::json!(q(x)));
+        key.insert("y".into(), serde_json::json!(q(y)));
+        key.insert("w".into(), serde_json::json!(q(w.clamp(0.01, 4.0))));
+        key.insert("h".into(), serde_json::json!(q(h.clamp(0.01, 4.0))));
+        if let Some((cl, ct, cr, cb)) = crop {
+            let qc = |v: f64| q(v.clamp(0.0, 0.9));
+            key.insert(
+                "crop".into(),
+                serde_json::json!({"left": qc(cl), "top": qc(ct), "right": qc(cr), "bottom": qc(cb)}),
+            );
+        } else if let Some(cc) = carry_crop {
+            key.insert("crop".into(), cc);
+        }
+        keys.push(Value::Object(key));
+        keys.sort_by(|a, b| {
+            let ta = a.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let tb = b.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            ta.total_cmp(&tb)
+        });
+    });
+}
+
+/// Shift a media clip's WHOLE transform trajectory rigidly by (dx,dy) and resize by
+/// (dw,dh) — the OFF-mode drag of a keyframed clip (no key is created or destroyed).
+/// Idempotent per drag frame (recomputed from the drag-start snapshot). Crops ride
+/// along untouched.
+pub fn offset_transform_keys(
+    raw: &mut serde_json::Value,
+    id: &str,
+    orig_keys: &serde_json::Value,
+    dx: f64,
+    dy: f64,
+    dw: f64,
+    dh: f64,
+) {
+    let Some(orig) = orig_keys.as_array() else { return };
+    let q = |v: f64| (v * 10000.0).round() / 10000.0;
+    let shifted: Vec<Value> = orig
+        .iter()
+        .filter_map(|k| {
+            let mut k2 = k.clone();
+            let o = k2.as_object_mut()?;
+            let x = o.get("x")?.as_f64()?;
+            let y = o.get("y")?.as_f64()?;
+            o.insert("x".into(), serde_json::json!(q(x + dx)));
+            o.insert("y".into(), serde_json::json!(q(y + dy)));
+            if let Some(w) = o.get("w").and_then(|v| v.as_f64()) {
+                o.insert("w".into(), serde_json::json!(q((w + dw).clamp(0.01, 4.0))));
+            }
+            if let Some(h) = o.get("h").and_then(|v| v.as_f64()) {
+                o.insert("h".into(), serde_json::json!(q((h + dh).clamp(0.01, 4.0))));
+            }
+            Some(k2)
+        })
+        .collect();
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) == Some(id) {
+            if let Some(o) = c.as_object_mut() {
+                o.insert("transform_keys".into(), Value::Array(shifted.clone()));
+            }
+        }
+    });
+}
+
+/// Remove the transform keyframe at clip-relative time t (same window as region).
+pub fn remove_transform_key(raw: &mut serde_json::Value, id: &str, t: f64) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) != Some(id) {
+            return;
+        }
+        let o = c.as_object_mut().unwrap();
+        let Some(keys) = o.get_mut("transform_keys").and_then(|v| v.as_array_mut()) else {
+            return;
+        };
+        keys.retain(|k| {
+            k.get("t")
+                .and_then(|v| v.as_f64())
+                .map(|kt| (kt - t).abs() > KEY_REPLACE_EPS * 2.0)
+                .unwrap_or(false)
+        });
+        if keys.is_empty() {
+            o.remove("transform_keys");
+        }
+    });
+}
+
+/// Remove all transform keyframes from a media clip.
+pub fn clear_transform_keys(raw: &mut serde_json::Value, id: &str) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) == Some(id) {
+            c.as_object_mut().unwrap().remove("transform_keys");
         }
     });
 }

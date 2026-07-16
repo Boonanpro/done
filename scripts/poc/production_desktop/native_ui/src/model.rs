@@ -54,6 +54,12 @@ pub struct Clip {
     // sorted by t; size stays the base region's. Linear interp, clamped at the ends.
     #[serde(default)]
     pub region_keys: Option<serde_json::Value>,
+    // manual keyframes for a MEDIA clip's display box and per-edge crop:
+    // [{t: clip-relative sec, x, y, w?, h?, crop?: {left, top, right, bottom}}, ...]
+    // x/y/w/h are display_box fractions; missing w/h read the base box, a missing
+    // crop reads the base crop. Linear interp, clamped at the ends (region_keys 流儀).
+    #[serde(default)]
+    pub transform_keys: Option<serde_json::Value>,
     // freeze-frame: room-relative path of the materialized PNG (Filmora-style: the still
     // IS an image file — no decoder is ever consulted, so it cannot wander)
     #[serde(default)]
@@ -308,6 +314,102 @@ impl Clip {
 
     pub fn stretches_to_box(&self) -> bool {
         self.fit.as_deref() == Some("stretch")
+    }
+
+    /// Parsed transform keyframes, sorted by t: (t, x, y, w, h, crop ltrb).
+    /// Missing w/h read the base display box; a missing crop reads the base crop —
+    /// per-key fallbacks so position-only keys never freeze a live-editable crop.
+    fn transform_keys_parsed(&self) -> Option<Vec<(f64, f64, f64, f64, f64, [f64; 4])>> {
+        let keys = self.transform_keys.as_ref()?.as_array()?;
+        // keys animate the DISPLAY box; base for keyless fields = current display_box
+        let base = self.display_box();
+        let bc = self.crop_ltrb_base();
+        let mut ks: Vec<(f64, f64, f64, f64, f64, [f64; 4])> = keys
+            .iter()
+            .filter_map(|k| {
+                let crop = k.get("crop").map(|c| {
+                    let g = |n: &str| c.get(n).and_then(|v| v.as_f64()).unwrap_or(0.0).clamp(0.0, 0.9);
+                    [g("left"), g("top"), g("right"), g("bottom")]
+                });
+                Some((
+                    k.get("t")?.as_f64()?,
+                    k.get("x")?.as_f64()?,
+                    k.get("y")?.as_f64()?,
+                    k.get("w").and_then(|v| v.as_f64()).unwrap_or(base.width),
+                    k.get("h").and_then(|v| v.as_f64()).unwrap_or(base.height),
+                    crop.unwrap_or(bc),
+                ))
+            })
+            .collect();
+        if ks.is_empty() {
+            return None;
+        }
+        ks.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Some(ks)
+    }
+
+    /// Display box AND crop at timeline time `t` — base values with transform_keys
+    /// linearly interpolated when present (ends clamp to the first/last key).
+    pub fn transform_at(&self, t: f64) -> (Pos, [f64; 4]) {
+        let base = (self.display_box(), self.crop_ltrb_base());
+        let Some(ks) = self.transform_keys_parsed() else {
+            return base;
+        };
+        let rel = t - self.timeline_start;
+        let pick = |a: &(f64, f64, f64, f64, f64, [f64; 4])| {
+            (Pos { x: a.1, y: a.2, width: a.3, height: a.4 }, a.5)
+        };
+        if rel <= ks[0].0 {
+            return pick(&ks[0]);
+        }
+        if rel >= ks[ks.len() - 1].0 {
+            return pick(&ks[ks.len() - 1]);
+        }
+        let i = ks.iter().position(|k| k.0 > rel).unwrap();
+        let (a, b) = (&ks[i - 1], &ks[i]);
+        let f = ((rel - a.0) / (b.0 - a.0).max(1e-9)).clamp(0.0, 1.0);
+        let l = |p: f64, q: f64| p + (q - p) * f;
+        (
+            Pos { x: l(a.1, b.1), y: l(a.2, b.2), width: l(a.3, b.3), height: l(a.4, b.4) },
+            [
+                l(a.5[0], b.5[0]),
+                l(a.5[1], b.5[1]),
+                l(a.5[2], b.5[2]),
+                l(a.5[3], b.5[3]),
+            ],
+        )
+    }
+
+    /// Display box at timeline time `t` (keyframed clips animate; others = display_box).
+    pub fn display_box_at(&self, t: f64) -> Pos {
+        self.transform_at(t).0
+    }
+
+    /// Per-edge crop at timeline time `t` (None when effectively no crop, like crop_ltrb).
+    pub fn crop_ltrb_at(&self, t: f64) -> Option<(f64, f64, f64, f64)> {
+        let c = self.transform_at(t).1;
+        if c[0] + c[1] + c[2] + c[3] > 1e-4 {
+            Some((c[0], c[1], c[2], c[3]))
+        } else {
+            None
+        }
+    }
+
+    /// Sorted clip-relative times of the transform keyframes (empty when none).
+    pub fn transform_key_times(&self) -> Vec<f64> {
+        let mut v: Vec<f64> = self
+            .transform_keys
+            .as_ref()
+            .and_then(|k| k.as_array())
+            .map(|a| a.iter().filter_map(|k| k.get("t").and_then(|t| t.as_f64())).collect())
+            .unwrap_or_default();
+        v.sort_by(|a, b| a.total_cmp(b));
+        v
+    }
+
+    /// Base crop as an ltrb array (zeros when none) — keyframe fallback plumbing.
+    fn crop_ltrb_base(&self) -> [f64; 4] {
+        self.crop_ltrb().map(|(l, t, r, b)| [l, t, r, b]).unwrap_or([0.0; 4])
     }
 
     pub fn visual_opacity(&self) -> f32 {
