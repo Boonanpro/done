@@ -283,6 +283,7 @@ struct FrameCache {
     frames: std::collections::HashMap<i64, (f64, f64, Vec<u8>)>, // (exact_t, eff_t, lz4)
     bytes: usize,
     budget: usize,
+    max_frames: usize,
     hits: u64,
     misses: u64,
 }
@@ -292,7 +293,10 @@ impl FrameCache {
         Self {
             frames: Default::default(),
             bytes: 0,
-            budget: 2_500_000_000, // ~2.5GB ≈ 30-40s of 1080x1920 frames
+            // Keep the preview working set bounded. The old 2.5GB cache was the main
+            // reason a normal editing session became progressively heavier.
+            budget: 384 * 1024 * 1024,
+            max_frames: 180,
             hits: 0,
             misses: 0,
         }
@@ -345,7 +349,7 @@ impl FrameCache {
         self.bytes += z.len();
         self.frames.insert(key, (t, eff, z));
         // over budget: evict farthest-from-playhead first
-        while self.bytes > self.budget {
+        while self.bytes > self.budget || self.frames.len() > self.max_frames {
             let ph = Self::idx(playhead, fps);
             let Some((&far, _)) = self.frames.iter().max_by_key(|(k, _)| (**k - ph).abs()) else {
                 break;
@@ -353,6 +357,24 @@ impl FrameCache {
             if let Some((_, _, z)) = self.frames.remove(&far) {
                 self.bytes -= z.len();
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod frame_cache_stability_tests {
+    use super::FrameCache;
+
+    #[test]
+    fn cache_never_exceeds_frame_or_byte_limits() {
+        let mut cache = FrameCache::new();
+        cache.max_frames = 8;
+        cache.budget = 512;
+        for i in 0..100 {
+            let pixels: Vec<u8> = (0..1024).map(|n| (n as u8).wrapping_add(i as u8)).collect();
+            cache.insert(i as f64 / 30.0, 30.0, i as f64 / 30.0, &pixels, 0.0);
+            assert!(cache.frames.len() <= cache.max_frames);
+            assert!(cache.bytes <= cache.budget);
         }
     }
 }
@@ -422,12 +444,36 @@ const MT_SHADOW: u32 = 0;
 /// Build ONE missing pop-out mask texture per call (the σ26 blur costs ~0.3s — idle only).
 /// v6 keys (no matte twin on disk) are memoized as None and stay on the pv fallback for
 /// this session; the effect-clip migration re-keys everything anyway.
-fn mask_build_pass(doc: &model::Doc, d3d: &media::D3d, masks: &mut MaskMap) -> bool {
+fn mask_build_pass(
+    doc: &model::Doc,
+    d3d: &media::D3d,
+    masks: &mut MaskMap,
+    center: Option<f64>,
+) -> bool {
+    // Matte textures are several MB each. Keep only the playhead working set in the
+    // interactive editor; command-line verification can pass None to scan everything.
+    if let Some(t) = center {
+        let wanted: std::collections::HashSet<String> = doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| c.timeline_end >= t - 3.0 && c.timeline_start <= t + 12.0)
+            .filter_map(|c| c.popout_key().map(|(key, _)| key))
+            .collect();
+        masks.retain(|key, _| wanted.contains(key));
+    }
     for tr in &doc.seq.tracks {
         if tr.kind == "audio" {
             continue;
         }
         for c in &tr.clips {
+            if center
+                .map(|t| c.timeline_end < t - 3.0 || c.timeline_start > t + 12.0)
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let Some((key, _)) = c.popout_key() else { continue };
             let mt = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
             if let Some(entry) = masks.get(&key) {
@@ -793,6 +839,19 @@ fn compose(
     // key's frame shows exactly the key's value (region_keys use the same rule below).
     let gfps = doc.seq.frame_rate.filter(|f| f.is_finite() && *f > 1.0).unwrap_or(30.0);
     let t_geo = (t * gfps).round() / gfps;
+    // A cut must present the newly-active clip on that exact sequence frame. The normal
+    // triple-buffered readback is intentionally asynchronous and can contain pre-cut
+    // pixels, so anchor it synchronously at every visual/caption boundary.
+    let boundary_readback = doc
+        .seq
+        .tracks
+        .iter()
+        .filter(|tr| tr.kind != "audio")
+        .flat_map(|tr| tr.clips.iter())
+        .any(|c| {
+            (t_geo - c.timeline_start).abs() < 0.25 / gfps
+                || (t_geo - c.timeline_end).abs() < 0.25 / gfps
+        });
     // seam diagnostics: within ±0.6s of a freeze boundary, log exactly what every layer
     // draws (texture size / quality / box) — the ground truth for the "width grows" report
     let near_fz = doc
@@ -1229,7 +1288,7 @@ fn compose(
     // not here: the transparent WebView2 overlay renders those live.)
     _ms_ov = _t.elapsed().as_secs_f64() * 1000.0;
     let _t = Instant::now();
-    if exact_rb {
+    if exact_rb || boundary_readback {
         comp.readback_sync(d3d)?;
     } else {
         comp.readback(d3d)?;
@@ -1956,8 +2015,9 @@ fn warm_open_pass(
     d3d: &media::D3d,
     pool: &mut media::VideoPool,
     masks: &MaskMap,
+    center: f64,
 ) -> bool {
-    const INSTANCE_CAP: usize = 40;
+    const INSTANCE_CAP: usize = 12;
     if pool.stats().1 >= INSTANCE_CAP {
         return true; // budget spent — treat as warm
     }
@@ -1970,6 +2030,9 @@ fn warm_open_pass(
             continue;
         }
         for c in &tr.clips {
+            if c.timeline_end < center - 3.0 || c.timeline_start > center + 10.0 {
+                continue;
+            }
             if let Some((key, _)) = c.popout_key() {
                 let live = masks.get(&key).map_or(false, |o| o.is_some());
                 if live {
@@ -2034,6 +2097,9 @@ fn warm_open_pass(
             continue;
         }
         for c in &tr.clips {
+            if c.timeline_end < center - 3.0 || c.timeline_start > center + 10.0 {
+                continue;
+            }
             if let Some(aid) = c.asset_id.as_deref() {
                 let p = doc.asset_path(aid);
                 if std::path::Path::new(&p).exists() && !proxies.contains(&p) {
@@ -2143,6 +2209,16 @@ fn presenter_thread(shared: Arc<Shared>) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn process_handle_count() -> u32 {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+    let mut n = 0u32;
+    unsafe {
+        let _ = GetProcessHandleCount(GetCurrentProcess(), &mut n);
+    }
+    n
+}
+
 fn media_thread(shared: Arc<Shared>) {
     let run = || -> anyhow::Result<()> {
         let d3d = media::D3d::new()?;
@@ -2170,6 +2246,8 @@ fn media_thread(shared: Arc<Shared>) {
         let mut prev_was_compose = false;
         let mut prev_compose_t = f64::NAN;
         let mut prev_compose_eff = f64::NAN;
+        let mut resource_check = Instant::now();
+        let mut last_resource_recovery = Instant::now() - std::time::Duration::from_secs(60);
         let mut prev_playing = false;
         let mut play_started: Option<Instant> = None;
         // Look-ahead ring: timeline frames composed AHEAD of the playhead on the chosen
@@ -2182,8 +2260,36 @@ fn media_thread(shared: Arc<Shared>) {
         // opportunistic playback/scrub accelerator, but do not let it compete with
         // interactive work in the background.
         const IDLE_FRAME_CACHE_FILL: bool = false;
+        // Async triple-buffer readback has delayed provenance. It is safe for sequential
+        // presentation, but not as a random-access cache entry after a cut/decoder switch.
+        const PLAYBACK_FRAME_CACHE_FILL: bool = false;
+        // Thumbnail/waveform work has a dedicated worker and must not compete with the
+        // preview decoder on this latency-sensitive thread.
+        const MEDIA_THREAD_AUX: bool = false;
         loop {
             let hb0 = Instant::now();
+            if resource_check.elapsed() >= std::time::Duration::from_secs(2) {
+                resource_check = Instant::now();
+                let handles = process_handle_count();
+                if handles > 6_000
+                    && last_resource_recovery.elapsed() >= std::time::Duration::from_secs(15)
+                {
+                    // Driver/MF resources must never grow until the whole app needs a
+                    // restart. Release optional state in-process and cold-open on demand.
+                    eprintln!(
+                        "RESOURCE_RECOVERY handles={handles} cache={}MB pool={:?}",
+                        fcache.bytes / 1024 / 1024,
+                        pool.stats()
+                    );
+                    fcache.clear();
+                    pool.clear();
+                    masks.clear();
+                    comp.clear_transient_caches();
+                    unsafe { d3d.ctx.Flush() };
+                    warm_done = false;
+                    last_resource_recovery = Instant::now();
+                }
+            }
             let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
             let ptr = Arc::as_ptr(&doc) as usize;
             let timeline_fps = doc.seq.frame_rate.filter(|fps| fps.is_finite() && *fps > 1.0).unwrap_or(30.0);
@@ -2333,7 +2439,12 @@ fn media_thread(shared: Arc<Shared>) {
                                 }
                                 shared.ring_level.store(rg.len(), Ordering::Relaxed);
                             }
-                            if !from_cache && prev_was_compose && len >= 6 && ms_comp < 25.0 {
+                            if PLAYBACK_FRAME_CACHE_FILL
+                                && !from_cache
+                                && prev_was_compose
+                                && len >= 6
+                                && ms_comp < 25.0
+                            {
                                 // cheap frames get cached opportunistically (lz4 ~5ms).
                                 // ASYNC readback returns the PREVIOUS compose's pixels, so
                                 // the content belongs to the previous sequence frame — keying it at
@@ -2390,6 +2501,9 @@ fn media_thread(shared: Arc<Shared>) {
                         // Olive uses 5s normal / 1s during playback; our opens are ~100x
                         // costlier, so 12s and playback-only
                         pool.evict_idle(std::time::Duration::from_secs(12));
+                        // Submit queued GPU work so completed decoder views are released
+                        // during long playback instead of accumulating until restart.
+                        unsafe { d3d.ctx.Flush() };
                     }
                     if pool.frame_no % 300 == 0 {
                         let (nf, ni) = pool.stats();
@@ -2422,6 +2536,12 @@ fn media_thread(shared: Arc<Shared>) {
                 settle = Instant::now();
             }
             if r.gen != last_gen {
+                warm_done = false;
+                if last_t >= 0.0 && (t - last_t).abs() > 3.0 {
+                    // A far scrub/jump changes the decoder working set. Do not retain the
+                    // old location's sessions and then open another complete set.
+                    pool.clear();
+                }
                 shared.ring.lock().unwrap().clear();
                 shared.ring_gen.fetch_add(1, Ordering::Relaxed);
             }
@@ -2568,7 +2688,7 @@ fn media_thread(shared: Arc<Shared>) {
                 }
             } else if {
                 let p0 = Instant::now();
-                let r2 = mask_build_pass(&doc, &d3d, &mut masks);
+                let r2 = mask_build_pass(&doc, &d3d, &mut masks, Some(t));
                 if p0.elapsed().as_millis() > 80 {
                     eprintln!("PASS mask {}ms", p0.elapsed().as_millis());
                 }
@@ -2583,7 +2703,7 @@ fn media_thread(shared: Arc<Shared>) {
                 // THEN: open every decoder the rest of the timeline needs (a cold open
                 // mid-play is a 100-200ms media-thread stall = visible gap)
                 let p0 = Instant::now();
-                warm_done = warm_open_pass(&doc, &d3d, &mut pool, &masks);
+                warm_done = warm_open_pass(&doc, &d3d, &mut pool, &masks, t);
                 if p0.elapsed().as_millis() > 80 {
                     eprintln!("PASS warm {}ms", p0.elapsed().as_millis());
                 }
@@ -2627,8 +2747,10 @@ fn media_thread(shared: Arc<Shared>) {
                 }
             } {
                 // filled one cache frame this slice
+            } else if !MEDIA_THREAD_AUX {
+                std::thread::sleep(std::time::Duration::from_millis(3));
             } else {
-                // idle: chew on one aux job slice (thumbnails / waveform peaks)
+                // Legacy fallback: the dedicated aux thread normally owns these jobs.
                 let job = { shared.aux_req.lock().unwrap().first().cloned() };
                 match job {
                     Some(AuxJob::Thumb { asset_id, path, bucket }) => {
@@ -2680,14 +2802,20 @@ fn media_thread(shared: Arc<Shared>) {
 
 fn aux_thread(shared: Arc<Shared>) {
     let run = || -> anyhow::Result<()> {
+        if std::env::var_os("NATIVE_DISABLE_AUX").is_some() {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
         let d3d = media::D3d::new()?;
+        let mut thumbnailer = media::Thumbnailer::new();
         let mut peak_scan: Option<(String, media::PeakScan)> = None;
         loop {
             let job = { shared.aux_req.lock().unwrap().first().cloned() };
             match job {
                 Some(AuxJob::Thumb { asset_id, path, bucket }) => {
                     let tt = bucket as f64 * THUMB_BUCKET_S + THUMB_BUCKET_S * 0.5;
-                    let got = media::thumbnail(&d3d, &path, tt, 96).ok();
+                    let got = thumbnailer.thumbnail(&d3d, &path, tt, 96).ok();
                     {
                         let mut a = shared.aux.lock().unwrap();
                         if let Some(t) = got {
@@ -2916,6 +3044,7 @@ impl App {
         let before_norm = serde_json::to_string(&raw).unwrap_or_default();
         edits::normalize_linked_audio(&mut raw);
         edits::remove_orphan_linked_audio(&mut raw);
+        edits::quantize_timeline_frames(&mut raw);
         let normalized_on_load = serde_json::to_string(&raw).unwrap_or_default() != before_norm;
         let doc = Arc::new(model::Doc::from_raw(raw, contents, dir)?);
         let dur = doc.duration();
@@ -3162,6 +3291,7 @@ impl App {
         f(&mut raw);
         edits::normalize_linked_audio(&mut raw);
         edits::remove_orphan_linked_audio(&mut raw);
+        edits::quantize_timeline_frames(&mut raw);
         match model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             Ok(nd) => {
                 let df = Self::dirty_from(&self.doc, &nd);
@@ -3189,6 +3319,8 @@ impl App {
     }
 
     fn restore(&mut self, raw: serde_json::Value) {
+        let mut raw = raw;
+        edits::quantize_timeline_frames(&mut raw);
         if let Ok(nd) = model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             let nd = Arc::new(nd);
             self.doc = nd.clone();
@@ -3201,6 +3333,7 @@ impl App {
 
     /// Snap t to nearby clip edges / the playhead (8px feel like Filmora's magnet).
     fn snap(&self, t: f64, ignore: &[String]) -> f64 {
+        let t = self.grid_quantize(t);
         let tol = (8.0 / self.pps) as f64;
         let mut best = t;
         let mut bd = tol;
@@ -3218,12 +3351,13 @@ impl App {
                 }
             }
         }
-        best
+        self.grid_quantize(best)
     }
 
     fn snap_playhead(&self, t: f64) -> f64 {
+        let t = self.grid_quantize(t.clamp(0.0, self.dur));
         if !self.playhead_snap {
-            return t.clamp(0.0, self.dur);
+            return t;
         }
         let tol = (8.0 / self.pps) as f64;
         let mut best = t.clamp(0.0, self.dur);
@@ -3622,7 +3756,18 @@ impl App {
         };
         let Some(rg) = c.region_xywh() else { return };
         let mid = (c.timeline_start + c.timeline_end) * 0.5;
-        let base = self.doc.active_video(mid).0.cloned();
+        let (cx, cy) = (rg.0 + rg.2 * 0.5, rg.1 + rg.3 * 0.5);
+        let active = self.doc.active_media(mid);
+        let base = active
+            .iter()
+            .rev()
+            .copied()
+            .find(|b| {
+                let p = b.display_box_at(mid);
+                cx >= p.x && cx <= p.x + p.width && cy >= p.y && cy <= p.y + p.height
+            })
+            .or_else(|| active.last().copied())
+            .cloned();
         let Some(b) = base.filter(|b| b.asset_id.is_some() && !b.is_freeze()) else {
             self.toast = Some(("追従ベイクには下に通常の映像クリップが必要です".into(), Instant::now()));
             return;
@@ -3658,9 +3803,9 @@ impl App {
         // whatever happened to be in the box 1.5s earlier.
         let anchor_src = if self.t >= c.timeline_start && self.t < c.timeline_end {
             self.doc
-                .active_video(self.t)
-                .0
-                .filter(|bc| bc.asset_id.as_deref() == Some(aid.as_str()))
+                .active_media(self.t)
+                .into_iter()
+                .find(|bc| bc.id == b.id)
                 .map(|bc| bc.src_at(self.t))
         } else {
             None
@@ -3687,7 +3832,7 @@ impl App {
         );
         let room = self.room_id();
         // bind immediately (shows 0%); the cache key arrives async from the POST
-        let pending = serde_json::json!({ "asset_id": aid });
+        let pending = serde_json::json!({ "asset_id": aid, "target_clip_id": b.id });
         let cid = id.to_string();
         self.apply_edit(true, move |raw| edits::set_blur_track(raw, &cid, Some(pending)));
         self.blur_states.insert(id.to_string(), PopState::Baking(0));
@@ -3971,7 +4116,18 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 
     fn sync_caption_web(&mut self, frame: &eframe::Frame, rect: egui::Rect, visible: bool) {
         self.ensure_caption_web(frame);
-        let t = self.displayed_t();
+        // Captions follow the timeline frame actually published to the preview, not the
+        // continuously-running audio clock. Video and text therefore share one boundary.
+        let t = if self.playing {
+            let shown = self.shared.frame.lock().unwrap().t;
+            if shown.is_finite() && (shown - self.displayed_t()).abs() < 0.75 {
+                shown
+            } else {
+                self.grid_quantize(self.displayed_t())
+            }
+        } else {
+            self.grid_quantize(self.t)
+        };
         // Rebuild + hash the caption payload only when the DOCUMENT changed (Arc
         // identity; live typing resets caption_web_sig) — not every frame.
         let doc_ptr = Arc::as_ptr(&self.doc) as usize;
@@ -5036,6 +5192,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     ui.label(egui::RichText::new("デザイン").strong());
                     let style = clip.style.clone().unwrap_or_else(|| serde_json::json!({}));
                     let font_size = style.get("fontSize").and_then(|v| v.as_f64()).unwrap_or(1.04);
+                    let max_width = style.get("maxWidth").and_then(|v| v.as_f64()).unwrap_or(0.88);
                     let y_pos = style.get("y").and_then(|v| v.as_f64()).unwrap_or(0.14);
                     let outline = style.get("outlineWidth").and_then(|v| v.as_f64()).unwrap_or(1.25);
                     if ui.button("白文字・黒フチ・ゴシック").clicked() {
@@ -5052,10 +5209,37 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         self.push_req(false);
                     }
                     let mut fs = font_size;
-                    if ui.add(egui::Slider::new(&mut fs, 0.6..=2.2).text("大きさ")).changed() {
+                    if ui.add(egui::Slider::new(&mut fs, 0.0..=2.2).text("大きさ")).changed() {
                         let ids = edit_ids.clone();
                         self.remember_caption_fallbacks(&ids);
                         let patch = serde_json::json!({"fontSize": (fs * 100.0).round() / 100.0});
+                        self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                        self.push_req(false);
+                    }
+                    let mut mw = max_width;
+                    if ui
+                        .add(egui::Slider::new(&mut mw, 0.05..=1.5).text("横幅"))
+                        .on_hover_text("画面幅に対するテロップ枠の最大幅。100%を超える指定も可能です")
+                        .changed()
+                    {
+                        let ids = edit_ids.clone();
+                        self.remember_caption_fallbacks(&ids);
+                        let patch = serde_json::json!({"maxWidth": (mw * 100.0).round() / 100.0});
+                        self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                        self.push_req(false);
+                    }
+                    let current_align = style.get("textAlign").and_then(|v| v.as_str()).unwrap_or("center");
+                    let mut text_align = current_align.to_string();
+                    ui.horizontal(|ui| {
+                        ui.label("文字揃え");
+                        ui.selectable_value(&mut text_align, "left".to_string(), "左");
+                        ui.selectable_value(&mut text_align, "center".to_string(), "中央");
+                        ui.selectable_value(&mut text_align, "right".to_string(), "右");
+                    });
+                    if text_align != current_align {
+                        let ids = edit_ids.clone();
+                        self.remember_caption_fallbacks(&ids);
+                        let patch = serde_json::json!({"textAlign": text_align});
                         self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                         self.push_req(false);
                     }
@@ -8804,10 +8988,12 @@ impl eframe::App for App {
         // typing = ANY text field has focus: every timeline shortcut must stand down —
         // Space toggled playback and Delete removed CLIPS while編集中のテロップに文字を
         // 打っていた（P/L しかガードされていなかった）
-        // Numeric drags/sliders retain egui keyboard focus after mouse adjustment. They
-        // must not disable the editor. Only a real text editor owns the shortcut keys.
+        // Numeric widgets become text editors when their value is clicked. While any UI
+        // widget wants keyboard input, timeline commands (Delete, S/F/E/P/L, arrows,
+        // Space, Ctrl+A/D/Z/Y, Home/End and zoom keys) must stand down.
         let focused = ctx.memory(|mem| mem.focused());
-        let typing = focused
+        let typing = ctx.wants_keyboard_input()
+            || focused
             .map(|id| self.text_focus_ids.contains(&id))
             .unwrap_or(false);
         self.text_focus_ids.clear();
@@ -9861,7 +10047,7 @@ fn main() -> eframe::Result<()> {
             let mut pool = media::VideoPool::new();
             let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H).context("compositor")?;
             let mut masks: MaskMap = Default::default();
-            while mask_build_pass(&doc, &d3d, &mut masks) {}
+            while mask_build_pass(&doc, &d3d, &mut masks, None) {}
             let mut pts_maps: PtsMap = Default::default();
             while pts_load_pass(&doc, &mut pts_maps) {}
             let orig_q = std::env::var("NATIVE_DUMP_PROXY").map(|v| v.is_empty()).unwrap_or(true);
@@ -10020,7 +10206,7 @@ fn main() -> eframe::Result<()> {
         let mut pool = media::VideoPool::new();
         let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H).unwrap();
         let mut masks: MaskMap = Default::default();
-        while mask_build_pass(&doc, &d3d, &mut masks) {}
+        while mask_build_pass(&doc, &d3d, &mut masks, None) {}
         let mut pts_maps: PtsMap = Default::default();
         while pts_load_pass(&doc, &mut pts_maps) {}
         let mut t = t0v;
