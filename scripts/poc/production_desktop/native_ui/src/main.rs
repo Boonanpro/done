@@ -47,6 +47,9 @@ struct Req {
 /// BLUR jump diagnostics: while true, compose logs the base layer's landed source frame
 /// and the producer logs cache/live serve decisions (armed around ◱ interactions).
 static BLUR_DBG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// Manual edits must survive an ordinary close/restart. This remains a debounce for slider drags,
+// but is short enough that a normal click/edit is durable almost immediately.
+const EDIT_SAVE_DEBOUNCE_MS: u64 = 250;
 
 #[link(name = "user32")]
 extern "system" {
@@ -1269,6 +1272,13 @@ fn compose(
                 if (eff - t).abs() < 0.75 {
                     base_eff_t = Some(eff);
                 }
+            }
+            // During playback a decoder may have been opened but not decoded even one frame
+            // yet. Publishing the compositor's transparent canvas in that state causes clips
+            // to vanish while playing and reappear as soon as a paused exact seek completes.
+            // Treat it as a producer miss instead: the preview retains its last good frame.
+            if !vs.has_frame() {
+                anyhow::bail!("frame unavailable for active clip {} at {src_t:.3}", c.id);
             }
             let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
             if near_fz {
@@ -3137,7 +3147,7 @@ impl App {
             undo: Vec::new(),
             pending_undo: None,
             redo: Vec::new(),
-            save_at: normalized_on_load.then(|| Instant::now() + std::time::Duration::from_millis(1200)),
+            save_at: normalized_on_load.then(|| Instant::now() + std::time::Duration::from_millis(EDIT_SAVE_DEBOUNCE_MS)),
             thumbs: Default::default(),
             peaks: Default::default(),
             aux_ver: 0,
@@ -3310,7 +3320,7 @@ impl App {
                 self.dur = self.doc.duration();
                 self.cap_keys.clear();
                 self.cap_sig = 0;
-                self.save_at = Some(Instant::now() + std::time::Duration::from_millis(1200));
+                self.save_at = Some(Instant::now() + std::time::Duration::from_millis(EDIT_SAVE_DEBOUNCE_MS));
                 // mid-drag edits (move/trim) count as scrubbing: the media thread must stay
                 // free for the next tick, and the preview uses the budgeted scrub seek
                 let scrubbing = !matches!(self.drag, Drag::None);
@@ -3328,7 +3338,7 @@ impl App {
             self.doc = nd.clone();
             *self.shared.doc.lock().unwrap() = nd;
             self.dur = self.doc.duration();
-            self.save_at = Some(Instant::now() + std::time::Duration::from_millis(1200));
+            self.save_at = Some(Instant::now() + std::time::Duration::from_millis(EDIT_SAVE_DEBOUNCE_MS));
             self.push_req(false);
         }
     }
@@ -8920,6 +8930,18 @@ impl App {
     }
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        // A close/restart must not discard the final debounced edit. `Drop` runs for normal
+        // window shutdown as well as the app-loop teardown; an atomic save makes it safe.
+        if self.save_at.is_some() {
+            if let Err(e) = edits::save(&self.doc.raw, &self.doc.contents_path) {
+                eprintln!("final save on exit: {e:#}");
+            }
+        }
+    }
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _uistat = UiStatGuard::begin(self);
@@ -9089,9 +9111,13 @@ impl eframe::App for App {
         }
         if let Some(at) = self.save_at {
             if Instant::now() >= at {
-                self.save_at = None;
-                if let Err(e) = edits::save(&self.doc.raw, &self.doc.contents_path) {
-                    eprintln!("save: {e:#}");
+                match edits::save(&self.doc.raw, &self.doc.contents_path) {
+                    Ok(()) => self.save_at = None,
+                    Err(e) => {
+                        eprintln!("save: {e:#}");
+                        self.toast("保存に失敗しました。自動で再試行します");
+                        self.save_at = Some(Instant::now() + std::time::Duration::from_secs(1));
+                    }
                 }
             }
         }

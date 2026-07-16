@@ -1684,7 +1684,9 @@ fn tracks_mut(root: &mut Value) -> Option<&mut Vec<Value>> {
 /// Atomic write-back of the WHOLE document (tmp + rename) — the same file the web editor,
 /// Dan and the server exporter read.
 pub fn save(root: &Value, contents_path: &str) -> anyhow::Result<()> {
-    let tmp = format!("{contents_path}.native.tmp");
+    // Keep the replacement atomic, and give each native process its own staging file.
+    // A fixed `.native.tmp` name let two editor instances clobber each other's pending save.
+    let tmp = format!("{contents_path}.native.{}.tmp", std::process::id());
     std::fs::write(&tmp, serde_json::to_string(root)?)?;
     std::fs::rename(&tmp, contents_path)?;
     Ok(())

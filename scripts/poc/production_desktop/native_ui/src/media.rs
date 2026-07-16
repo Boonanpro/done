@@ -434,6 +434,13 @@ impl VideoStream {
         self.last_pts
     }
 
+    /// Whether the GPU texture contains at least one decoded source frame. A newly-opened
+    /// stream owns an allocated texture before its first decode, so texture existence alone
+    /// must never be used as proof that it is safe to present.
+    pub fn has_frame(&self) -> bool {
+        self.has_frame
+    }
+
     pub fn ensure_frame(&mut self, d3d: &D3d, t: f64) -> Result<bool> {
         let t = self.clamp_t(t);
         if self.eos && self.pending.is_none() && self.has_frame && t >= self.last_pts {

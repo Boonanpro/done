@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 import uuid
 import asyncio
 import hashlib
@@ -180,7 +181,22 @@ def _read_json_list(path: Path) -> list[dict[str, Any]]:
 
 
 def _write_json_list(path: Path, items: list[dict[str, Any]]) -> None:
-    path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Readers include the native editor as well as API requests. Never expose a partially
+    # written project file: write and flush a sibling temp file, then atomically replace it.
+    payload = json.dumps(items, ensure_ascii=False, indent=2)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _read_contents(room_id: str) -> list[dict[str, Any]]:
