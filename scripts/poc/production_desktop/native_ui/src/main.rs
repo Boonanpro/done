@@ -1377,6 +1377,40 @@ fn color32_hex(c: egui::Color32) -> String {
     format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
 }
 
+/// スポイト: the color of the physical screen pixel under the mouse cursor. Samples
+/// the COMPOSITED desktop, so whatever the eye sees is what is picked — the video
+/// frame, a pop-out, or the caption WebView overlay alike.
+fn screen_pixel_under_cursor() -> Option<egui::Color32> {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC, CLR_INVALID};
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return None;
+        }
+        let dc = GetDC(None);
+        if dc.is_invalid() {
+            return None;
+        }
+        let c = GetPixel(dc, pt.x, pt.y);
+        ReleaseDC(None, dc);
+        if c == windows::Win32::Foundation::COLORREF(CLR_INVALID) {
+            return None;
+        }
+        // COLORREF is 0x00BBGGRR
+        let v = c.0;
+        return Some(egui::Color32::from_rgb(
+            (v & 0xff) as u8,
+            ((v >> 8) & 0xff) as u8,
+            ((v >> 16) & 0xff) as u8,
+        ));
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
 /// The same curated designs as the Web's CAPTION_PRESETS (caption-design.ts) — one
 /// click sets the whole look; fontSize / x / y are the user's and are NOT touched.
 /// Keys not in a preset are explicitly nulled so leftovers from the previous look
@@ -2836,6 +2870,9 @@ struct App {
     /// (kf_modeクリップのキー時刻 clip相対, OFF時のキー有りクリップの元キー配列)
     tkf_drag_rel: Option<f64>,
     tkf_drag_orig: Vec<(String, serde_json::Value)>,
+    /// スポイト: (適用先 0=文字色 1=フチ色 2=枠色, 対象テロップid)。armed中は
+    /// プレビュークリック=画面ピクセル色を拾って適用（右クリック/Escで中止）
+    eyedrop: Option<(u8, Vec<String>)>,
     /// 追従修正モード: clip id being corrected; clicks on the preview collect +/- points
     corr_mode: Option<String>,
     /// correction points in SOURCE coords (x, y, positive) — all on corr_anchor_src's frame
@@ -3002,6 +3039,7 @@ impl App {
             kf_drag_orig_keys: None,
             tkf_drag_rel: None,
             tkf_drag_orig: Vec::new(),
+            eyedrop: None,
             corr_mode: None,
             corr_points: Vec::new(),
             corr_anchor_src: None,
@@ -5043,6 +5081,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                             self.push_req(false);
                         }
+                        if ui
+                            .small_button("スポイト")
+                            .on_hover_text("プレビューでクリックした場所の色を文字色にする")
+                            .clicked()
+                        {
+                            self.eyedrop = Some((0, edit_ids.clone()));
+                        }
                         ui.add_space(8.0);
                         ui.label(egui::RichText::new("フチ色").weak().small());
                         let mut oc = hex_color32(
@@ -5055,6 +5100,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             let patch = serde_json::json!({"outlineColor": color32_hex(oc)});
                             self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                             self.push_req(false);
+                        }
+                        if ui
+                            .small_button("スポイト")
+                            .on_hover_text("プレビューでクリックした場所の色をフチ色にする")
+                            .clicked()
+                        {
+                            self.eyedrop = Some((1, edit_ids.clone()));
                         }
                     });
                     // ---- 四角枠（テロップの背景ボックス）----
@@ -5084,6 +5136,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             ui.label(egui::RichText::new("枠色").weak().small());
                             if ui.color_edit_button_srgba(&mut bc).changed() {
                                 send = Some(serde_json::json!({"color": color32_hex(bc)}));
+                            }
+                            if ui
+                                .small_button("スポイト")
+                                .on_hover_text("プレビューでクリックした場所の色を枠色にする")
+                                .clicked()
+                            {
+                                self.eyedrop = Some((2, edit_ids.clone()));
                             }
                         });
                         if ui.add(egui::Slider::new(&mut op, 0.05..=1.0).text("枠の濃さ")).changed() {
@@ -6209,6 +6268,76 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 )
             }))
             .collect();
+        // --- スポイト: クリックした画面ピクセルの色を拾って適用; owns the pointer ---
+        if let Some((target, ids)) = self.eyedrop.clone() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            let sampled = screen_pixel_under_cursor();
+            let p = ui.painter_at(img);
+            p.text(
+                egui::pos2(vid.center().x, vid.top() + 14.0),
+                egui::Align2::CENTER_CENTER,
+                "スポイト: 拾いたい色をクリック（右クリック/Escで中止）",
+                egui::FontId::proportional(13.0),
+                egui::Color32::from_rgb(120, 220, 255),
+            );
+            if let (Some(c), Some(pt)) = (sampled, pointer_pos) {
+                // live swatch by the cursor — offset so the swatch never covers the
+                // pixel being sampled
+                let r = egui::Rect::from_min_size(pt + egui::vec2(16.0, 12.0), egui::vec2(46.0, 20.0));
+                p.rect_filled(r, 3.0, c);
+                p.rect_stroke(r, 3.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                p.text(
+                    r.right_center() + egui::vec2(6.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    color32_hex(c),
+                    egui::FontId::monospace(11.0),
+                    egui::Color32::WHITE,
+                );
+            }
+            ui.ctx().request_repaint(); // the swatch follows the cursor live
+            if resp.secondary_clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.eyedrop = None;
+                return;
+            }
+            if resp.clicked() {
+                if let Some(c) = sampled {
+                    let hex = color32_hex(c);
+                    self.remember_caption_fallbacks(&ids);
+                    let patch = match target {
+                        // a plain color pick must WIN over a leftover gradient
+                        0 => serde_json::json!({"color": hex, "gradient": null}),
+                        1 => serde_json::json!({"outlineColor": hex}),
+                        _ => {
+                            // merge_object is shallow: send the FULL bg object with the
+                            // new color (current values, or the 四角枠 defaults)
+                            let mut bg = self
+                                .doc
+                                .seq
+                                .tracks
+                                .iter()
+                                .flat_map(|tr| tr.clips.iter())
+                                .find(|c| ids.contains(&c.id))
+                                .and_then(|c| c.style.as_ref())
+                                .and_then(|s| s.get("bg"))
+                                .filter(|v| v.is_object())
+                                .cloned()
+                                .unwrap_or_else(|| {
+                                    serde_json::json!({"opacity": 0.62, "radius": 0.2,
+                                                        "padX": 0.5, "padY": 0.18})
+                                });
+                            bg["color"] = serde_json::json!(hex);
+                            serde_json::json!({"bg": bg})
+                        }
+                    };
+                    let ids2 = ids.clone();
+                    self.apply_edit(true, move |raw| edits::patch_caption_style(raw, &ids2, patch));
+                    self.push_req(false);
+                    self.toast(&format!("スポイト: {hex} を適用"));
+                }
+                self.eyedrop = None;
+            }
+            return;
+        }
         // --- 追従修正モード: clicks collect +/- points; owns the pointer entirely ---
         if let Some(cid) = self.corr_mode.clone() {
             let clip = self
