@@ -263,7 +263,9 @@ enum Drag {
     Scrub,
     Move { ids: Vec<String>, anchor_id: String, grab: f64, orig: f64, applied: f64 },
     Trim { ids: Vec<String>, left: bool, last_t: f64 },
-    Marquee { anchor: egui::Pos2 },
+    // anchor_t is a TIMELINE time (not a screen x): edge auto-scroll moves the view
+    // under a held marquee, so a screen-space anchor would slide along the timeline.
+    Marquee { anchor_t: f64, anchor_y: f32 },
     Volume { ids: Vec<String>, start_y: f32, start_vol: f64 },
 }
 
@@ -6281,6 +6283,9 @@ impl App {
         }
         let mut clips_drawn = 0usize;
         let mut hits: Vec<(egui::Rect, String)> = Vec::new();
+        // marquee-only hit rects: hits + clips culled from drawing (offscreen). Pointer
+        // hit-tests keep using `hits` so offscreen rects never capture clicks/trims.
+        let mut marquee_hits: Vec<(egui::Rect, String)> = Vec::new();
         // drop zone for "drag above the top lane -> new lane". The first lane starts a
         // mere 3px under the ruler, so clamping the zone below the ruler left a 3px
         // target nobody could hit ("レーンが増えない"). While a Move-drag is active the
@@ -6441,6 +6446,15 @@ impl App {
                 let x0 = body.left() + (c.timeline_start as f32) * self.pps - self.scroll_x;
                 let x1 = body.left() + (c.timeline_end as f32) * self.pps - self.scroll_x;
                 if x1 < body.left() || x0 > body.right() {
+                    // A marquee re-derives the selection every frame, and edge auto-scroll
+                    // can carry already-boxed clips out of view — they must stay selectable,
+                    // so offscreen clips still get an (unclamped) marquee rect.
+                    if !tr.locked {
+                        marquee_hits.push((
+                            egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y0 + lane_h)),
+                            c.id.clone(),
+                        ));
+                    }
                     continue;
                 }
                 let r = egui::Rect::from_min_max(
@@ -6805,6 +6819,7 @@ impl App {
                 }
                 if !tr.locked {
                     hits.push((r, c.id.clone()));
+                    marquee_hits.push((r, c.id.clone()));
                 }
                 clips_drawn += 1;
             }
@@ -7009,7 +7024,10 @@ impl App {
                             if !ui.input(|i| i.modifiers.ctrl) {
                                 self.selected.clear();
                             }
-                            self.drag = Drag::Marquee { anchor: pos };
+                            self.drag = Drag::Marquee {
+                                anchor_t: to_t(self.scroll_x, self.pps, pos.x),
+                                anchor_y: pos.y,
+                            };
                         }
                     }
                 }
@@ -7125,10 +7143,11 @@ impl App {
                             egui::Color32::WHITE,
                         );
                     }
-                    Drag::Marquee { anchor } => {
-                        let r = egui::Rect::from_two_pos(anchor, pos);
+                    Drag::Marquee { anchor_t, anchor_y } => {
+                        let ax = body.left() + (anchor_t as f32) * self.pps - self.scroll_x;
+                        let r = egui::Rect::from_two_pos(egui::pos2(ax, anchor_y), pos);
                         self.marquee = Some(r);
-                        self.selected = hits
+                        self.selected = marquee_hits
                             .iter()
                             .filter(|(cr, _)| cr.intersects(r))
                             .map(|(_, id)| id.clone())
@@ -7138,16 +7157,25 @@ impl App {
                 }
             }
         }
-        // marquee rectangle overlay
+        // marquee rectangle overlay (the logical rect can extend past the viewport after
+        // edge auto-scroll — only the visible part is drawn, never over the lane headers)
         if let Some(r) = self.marquee {
-            p.rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(90, 160, 255, 24));
-            p.rect_stroke(r, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 180, 255)));
+            let vis = r.intersect(body);
+            p.rect_filled(vis, 0.0, egui::Color32::from_rgba_unmultiplied(90, 160, 255, 24));
+            p.rect_stroke(vis, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 180, 255)));
         }
-        // Edge auto-scroll while holding either the playhead or a clip selection.  A clip
-        // drag uses scroll_x in its time mapping, so advancing the viewport here also keeps
-        // moving the held block on the next repaint even when the pointer stays at the edge.
-        // Merely hovering near an edge never moves the view.
-        if matches!(&self.drag, Drag::Scrub | Drag::Move { .. })
+        // Edge auto-scroll while holding the playhead, a clip selection, or a marquee.  A
+        // clip drag uses scroll_x in its time mapping, so advancing the viewport here also
+        // keeps moving the held block on the next repaint even when the pointer stays at
+        // the edge; the marquee anchor is a timeline time for the same reason.
+        // Merely hovering near an edge never moves the view, and a marquee only scrolls
+        // once it is an actual box (a tiny press-near-the-edge must stay a click-seek).
+        let marquee_scrolls = matches!(&self.drag, Drag::Marquee { .. })
+            && self
+                .marquee
+                .map(|r| r.width().max(r.height()) > 4.0)
+                .unwrap_or(false);
+        if (matches!(&self.drag, Drag::Scrub | Drag::Move { .. }) || marquee_scrolls)
             && ui.input(|i| i.pointer.primary_down())
         {
             if let Some(pt) = ui.input(|i| i.pointer.interact_pos()) {
@@ -7181,13 +7209,13 @@ impl App {
         let released_now = ui.input(|i| i.pointer.any_released());
         if resp.drag_stopped() || (released_now && self.drag != Drag::None) {
             let prev = std::mem::replace(&mut self.drag, Drag::None);
-            if let Drag::Marquee { anchor } = &prev {
+            if let Drag::Marquee { anchor_t, .. } = &prev {
                 let moved = self
                     .marquee
                     .map(|r| r.width().max(r.height()) > 4.0)
                     .unwrap_or(false);
                 if !moved {
-                    self.t = to_t(self.scroll_x, self.pps, anchor.x).min(self.dur);
+                    self.t = anchor_t.min(self.dur);
                 }
                 self.marquee = None;
             }
