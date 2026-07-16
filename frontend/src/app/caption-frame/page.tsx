@@ -13,11 +13,18 @@ import { useSearchParams } from 'next/navigation';
 import { CaptionLayer, type RenderCaption } from '@/components/video-review/caption-layer';
 import { CAPTION_FONT_FILES } from '@/components/video-review/caption-design';
 
-type Payload = { outW: number; outH: number; time: number; captions: RenderCaption[] };
+type Payload = {
+  outW: number;
+  outH: number;
+  time: number;
+  fps?: number;
+  hiddenCaptionIds?: string[];
+  captions: RenderCaption[];
+};
 
 declare global {
   interface Window {
-    __renderCaptionAt?: (t: number) => Promise<void>;
+    __renderCaptionAt?: (t: number, hiddenCaptionIds?: string[]) => Promise<void>;
     __setCaptionPayload?: (payload: Payload) => Promise<void>;
     __nativeCaptionPayload?: Payload;
   }
@@ -39,21 +46,29 @@ function Inner() {
   const sp = useSearchParams();
   const initialPayload = decodePayload(sp.get('p'));
   const [payload, setPayload] = useState<Payload | null>(initialPayload);
-  const [time, setTime] = useState<number>(initialPayload?.time ?? 0);
   const [viewport, setViewport] = useState({ w: 1, h: 1 });
   const [ready, setReady] = useState(false);
 
   // Let the screenshotter set the playhead and await the next painted frame.
   useEffect(() => {
-    window.__renderCaptionAt = (t: number) =>
+    window.__renderCaptionAt = (t: number, hiddenCaptionIds?: string[]) =>
       new Promise<void>((resolve) => {
-        setTime(t);
+        setPayload((current) => {
+          if (!current) return current;
+          const next = {
+            ...current,
+            time: t,
+            hiddenCaptionIds: hiddenCaptionIds ?? current.hiddenCaptionIds ?? [],
+          };
+          window.__nativeCaptionPayload = next;
+          return next;
+        });
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       });
     window.__setCaptionPayload = (next: Payload) =>
       new Promise<void>((resolve) => {
+        window.__nativeCaptionPayload = next;
         setPayload(next);
-        setTime(next.time);
         requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
       });
     if (window.__nativeCaptionPayload) {
@@ -120,7 +135,14 @@ function Inner() {
   return (
     <div style={{ width: '100vw', height: '100vh', overflow: 'hidden', position: 'relative', pointerEvents: 'none' }} data-ready={ready ? '1' : '0'}>
       <div style={{ width: payload.outW, height: payload.outH, position: 'absolute', left, top, transform: `scale(${scale})`, transformOrigin: 'top left' }}>
-        <CaptionLayer outW={payload.outW} outH={payload.outH} captions={payload.captions} time={time} />
+        <CaptionLayer
+          outW={payload.outW}
+          outH={payload.outH}
+          captions={payload.captions}
+          time={payload.time}
+          fps={payload.fps}
+          hiddenCaptionIds={payload.hiddenCaptionIds}
+        />
       </div>
     </div>
   );

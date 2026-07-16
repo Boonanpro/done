@@ -239,6 +239,14 @@ pub struct Compositor {
 }
 
 impl Compositor {
+    /// Drop optional GPU caches while keeping the compositor itself alive.
+    pub fn clear_transient_caches(&self) {
+        self.stills.borrow_mut().clear();
+        self.caption_stills.borrow_mut().clear();
+        self.caption_by_clip.borrow_mut().clear();
+        *self.scratch.borrow_mut() = None;
+    }
+
     pub fn new(d3d: &D3d, width: u32, height: u32) -> Result<Self> {
         unsafe {
             let desc = D3D11_TEXTURE2D_DESC {
@@ -931,7 +939,7 @@ impl Compositor {
             let mut tex: Option<ID3D11Texture2D> = None;
             d3d.device.CreateTexture2D(&desc, Some(&init), Some(&mut tex))?;
             let mut st = self.stills.borrow_mut();
-            if st.len() >= 256 {
+            if st.len() >= 24 {
                 // evict ONE entry — a clear-all forced every still to reload (and the
                 // freeze showed a decode fallback while it did)
                 if let Some(k) = st.keys().next().cloned() {
@@ -992,7 +1000,7 @@ impl Compositor {
             let mut tex: Option<ID3D11Texture2D> = None;
             d3d.device.CreateTexture2D(&desc, Some(&init), Some(&mut tex))?;
             let mut caps = self.caption_stills.borrow_mut();
-            if caps.len() >= 512 {
+            if caps.len() >= 128 {
                 if let Some(k) = caps.keys().next().cloned() {
                     caps.remove(&k);
                 }
@@ -1017,7 +1025,7 @@ impl Compositor {
             let copy = copy.unwrap();
             d3d.ctx.CopyResource(&copy, tex);
             let mut st = self.stills.borrow_mut();
-            if st.len() >= 256 {
+            if st.len() >= 24 {
                 if let Some(k) = st.keys().next().cloned() {
                     st.remove(&k);
                 }
@@ -1073,6 +1081,14 @@ impl Compositor {
                 }
             }
             d3d.ctx.Unmap(&self.staging[map_src], 0);
+            // Release the immediate context's references to the last bound resources.
+            let empty = [None, None, None, None];
+            d3d.ctx.PSSetShaderResources(0, Some(&empty));
+            // A synchronous boundary/seek read is the new provenance anchor. Do not let
+            // an older async slot flash a pre-cut frame back on a following tick.
+            if sync {
+                self.staging_filled = 0;
+            }
             Ok(())
         }
     }

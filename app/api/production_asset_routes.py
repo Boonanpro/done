@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 import uuid
 import asyncio
 import hashlib
@@ -180,7 +181,22 @@ def _read_json_list(path: Path) -> list[dict[str, Any]]:
 
 
 def _write_json_list(path: Path, items: list[dict[str, Any]]) -> None:
-    path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Readers include the native editor as well as API requests. Never expose a partially
+    # written project file: write and flush a sibling temp file, then atomically replace it.
+    payload = json.dumps(items, ensure_ascii=False, indent=2)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _read_contents(room_id: str) -> list[dict[str, Any]]:
@@ -876,7 +892,7 @@ def _blur_chain_masked(video_in: str, idx: int, mask_path: Path, bt: dict[str, A
         )
         nxt = f"tc{idx}_{j}"
         parts.append(
-            f"[{cur}][tov{idx}_{j}]overlay=0:0:enable='between(t\\,{t0:.3f}\\,{t1:.3f})':eof_action=pass[{nxt}]"
+            f"[{cur}][tov{idx}_{j}]overlay=0:0:enable='gte(t\\,{t0:.3f})*lt(t\\,{t1:.3f})':eof_action=pass[{nxt}]"
         )
         cur = nxt
     return ";\n".join(parts), cur
@@ -897,7 +913,7 @@ def _blur_chain(video_in: str, idx: int, x: int, y: int, w: int, h: int, start: 
     filt = (
         f"[{video_in}]split[{base}][{crop}];"
         f"[{crop}]{proc}[{blurred}];"
-        f"[{base}][{blurred}]overlay={x}:{y}:enable='between(t\\,{start:.3f}\\,{end:.3f})'[{out}]"
+        f"[{base}][{blurred}]overlay={x}:{y}:enable='gte(t\\,{start:.3f})*lt(t\\,{end:.3f})'[{out}]"
     )
     return filt, out
 
@@ -944,7 +960,7 @@ def _blur_chain_kf_sized(video_in: str, idx: int, kf: list[tuple[float, float, f
         f"color=c=black:s={frame_w}x{frame_h}:r={fps_filter},format=gray,"
         f"geq=lum='255*between(X\\,{x0}\\,{x1})*between(Y\\,{y0}\\,{y1})'[{mask}];"
         f"[{blurred}][{mask}]alphamerge[{bm}];"
-        f"[{base}][{bm}]overlay=0:0:enable='between(t\\,{start:.3f}\\,{end:.3f})':eof_action=pass[{out}]"
+        f"[{base}][{bm}]overlay=0:0:enable='gte(t\\,{start:.3f})*lt(t\\,{end:.3f})':eof_action=pass[{out}]"
     )
     return filt, out
 
@@ -964,7 +980,7 @@ def _blur_chain_kf(video_in: str, idx: int, xe: str, ye: str, w: int, h: int,
     filt = (
         f"[{video_in}]split[{base}][{full}];"
         f"[{full}]{proc},crop={w}:{h}:x='{xe}':y='{ye}'[{blurred}];"
-        f"[{base}][{blurred}]overlay=x='{xe}':y='{ye}':enable='between(t\\,{start:.3f}\\,{end:.3f})'[{out}]"
+        f"[{base}][{blurred}]overlay=x='{xe}':y='{ye}':enable='gte(t\\,{start:.3f})*lt(t\\,{end:.3f})'[{out}]"
     )
     return filt, out
 
@@ -1389,7 +1405,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                 # single frame: overlay's default eof_action=repeat holds it, enable= gates it
                 filters.append(_movie_input(ov["png"], 0.0) + f",format=rgba[capsrc{ci}]")
             filters.append(
-                f"[{video_out}][capsrc{ci}]overlay=0:0:enable='between(t\\,{cs:.3f}\\,{ce:.3f})'[vcap{ci}]"
+                f"[{video_out}][capsrc{ci}]overlay=0:0:enable='gte(t\\,{cs:.3f})*lt(t\\,{ce:.3f})'[vcap{ci}]"
             )
             video_out = f"vcap{ci}"
             continue
@@ -1413,7 +1429,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             )
             filters.append(
                 f"[{video_out}][img{oi}]overlay=x={ipx}+({iow}-w)/2:y={ipy}+({ioh}-h)/2"
-                f":enable='between(t\\,{its:.3f}\\,{ite:.3f})':eof_action=pass[vimg{oi}]"
+                f":enable='gte(t\\,{its:.3f})*lt(t\\,{ite:.3f})':eof_action=pass[vimg{oi}]"
             )
             video_out = f"vimg{oi}"
             continue
@@ -1514,7 +1530,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
                 filters.append(",".join(_chain) + f"[pov{oi}]")
                 filters.append(
                     f"[{video_out}][pov{oi}]overlay={_dx}:{_dy}:format=auto:"
-                    f"enable='between(t\\,{ts:.3f}\\,{te:.3f})'[vov{oi}]"
+                    f"enable='gte(t\\,{ts:.3f})*lt(t\\,{te:.3f})'[vov{oi}]"
                 )
                 video_out = f"vov{oi}"
                 continue
@@ -1551,7 +1567,7 @@ def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction
             f"[ov{oi}]"
         )
         filters.append(
-            f"[{video_out}][ov{oi}]overlay={_mx}:{_my}:enable='between(t\\,{ts:.3f}\\,{te:.3f})'[vov{oi}]"
+            f"[{video_out}][ov{oi}]overlay={_mx}:{_my}:enable='gte(t\\,{ts:.3f})*lt(t\\,{te:.3f})'[vov{oi}]"
         )
         video_out = f"vov{oi}"
 
@@ -1734,7 +1750,7 @@ def _render_blur_job(room_id: str, job_id: str, content_id: str, instruction: di
         filters.append(
             f"[{last}]split[base{index}][crop{index}src];"
             f"[crop{index}src]crop={w}:{h}:{x}:{y},boxblur=18:2[blur{index}];"
-            f"[base{index}][blur{index}]overlay={x}:{y}:enable='between(t\\,{start:.3f}\\,{end:.3f})'[v{index}]"
+            f"[base{index}][blur{index}]overlay={x}:{y}:enable='gte(t\\,{start:.3f})*lt(t\\,{end:.3f})'[v{index}]"
         )
         last = f"v{index}"
 

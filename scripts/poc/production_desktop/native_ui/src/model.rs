@@ -7,6 +7,55 @@ use serde::Deserialize;
 pub struct Root {
     pub timeline: TimelineWrap,
 }
+
+#[cfg(test)]
+mod frame_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn adjacent_clips_switch_on_the_exact_integer_frame() {
+        let raw = serde_json::json!([{
+            "timeline": {"sequence": {
+                "duration": 2.0,
+                "frame_rate": 30.0,
+                "tracks": [{"type":"video", "clips":[
+                    {"id":"left", "asset_id":"a", "timeline_start":0.0, "timeline_end":1.0},
+                    {"id":"right", "asset_id":"b", "timeline_start":1.0, "timeline_end":2.0}
+                ]}]
+            }}
+        }]);
+        let doc = Doc::from_raw(raw, "unused.json", "unused-assets").unwrap();
+
+        assert_eq!(doc.active_media(29.0 / 30.0)[0].id, "left");
+        let at_cut = doc.active_media(1.0);
+        assert_eq!(at_cut.len(), 1);
+        assert_eq!(at_cut[0].id, "right");
+        assert!(doc.active_media(2.0).is_empty());
+    }
+
+    #[test]
+    fn adjacent_captions_share_a_boundary_without_overlap_or_gap() {
+        let raw = serde_json::json!([{
+            "timeline": {"sequence": {
+                "duration": 2.0,
+                "frame_rate": 30.0,
+                "tracks": [{"type":"caption", "clips":[
+                    {"id":"left", "text":"L", "timeline_start":0.0, "timeline_end":1.0},
+                    {"id":"right", "text":"R", "timeline_start":1.0, "timeline_end":2.0}
+                ]}]
+            }}
+        }]);
+        let doc = Doc::from_raw(raw, "unused.json", "unused-assets").unwrap();
+        let left = &doc.seq.tracks[0].clips[0];
+        let right = &doc.seq.tracks[0].clips[1];
+
+        assert!(doc.clip_active_at(left, 29.0 / 30.0));
+        assert!(!doc.clip_active_at(right, 29.0 / 30.0));
+        assert!(!doc.clip_active_at(left, 1.0));
+        assert!(doc.clip_active_at(right, 1.0));
+        assert!(!doc.clip_active_at(right, 2.0));
+    }
+}
 #[derive(Debug, Deserialize)]
 pub struct TimelineWrap {
     pub sequence: Sequence,
@@ -519,25 +568,66 @@ impl Doc {
             .fold(0.0f64, f64::max);
         d.max(self.seq.duration)
     }
-    /// Active visual clips at t, in STACKING ORDER (track array index = back-to-front).
-    /// The first entry paints the background; later entries layer on top. No kind
-    /// special-casing — a clip renders in front simply because its track is higher.
-    pub fn active_video(&self, t: f64) -> (Option<&Clip>, Vec<&Clip>) {
+    /// Canonical visual-timeline membership: frame-quantized, start-inclusive and
+    /// end-exclusive. Adjacent clips [a,b) and [b,c) therefore switch on frame b with
+    /// neither a blank nor a double exposure.
+    pub fn clip_active_at(&self, clip: &Clip, t: f64) -> bool {
+        let fps = self.seq.frame_rate.filter(|v| v.is_finite() && *v > 1.0).unwrap_or(30.0);
+        let frame = (t * fps).round() as i64;
+        let start_frame = (clip.timeline_start * fps).round() as i64;
+        let end_frame = (clip.timeline_end * fps).round() as i64;
+        frame >= start_frame && frame < end_frame
+    }
+    /// Active media clips at t, in STACKING ORDER (track array index = back-to-front).
+    /// A visual lane's legacy `type` is only a label; clip contents decide whether it is
+    /// media. Audio remains the sole lane-level exception.
+    pub fn active_media(&self, t: f64) -> Vec<&Clip> {
         let mut layers: Vec<&Clip> = Vec::new();
         for tr in &self.seq.tracks {
             if tr.kind == "audio" || tr.hidden {
                 continue;
             }
             for c in &tr.clips {
-                if c.asset_id.is_none() || !c.is_video_enabled() || t < c.timeline_start || t >= c.timeline_end {
+                if c.asset_id.is_none()
+                    || !c.is_video_enabled()
+                    || !self.clip_active_at(c, t)
+                {
                     continue;
                 }
                 layers.push(c);
             }
         }
+        layers
+    }
+
+    /// Backwards-compatible base/overlay view used by the compositor.
+    pub fn active_video(&self, t: f64) -> (Option<&Clip>, Vec<&Clip>) {
+        let layers = self.active_media(t);
         let mut it = layers.into_iter();
         let base = it.next();
         (base, it.collect())
+    }
+
+    /// Resolve the media clip a tracked blur is bound to. New bindings carry an
+    /// explicit target_clip_id. Legacy bindings fall back to the topmost active clip
+    /// showing the same asset inside the baked source window, so old projects and
+    /// already-created masks keep working after clips move between visual lanes.
+    pub fn blur_target_at(&self, t: f64, bt: &serde_json::Value) -> Option<&Clip> {
+        let active = self.active_media(t);
+        if let Some(target) = bt.get("target_clip_id").and_then(|v| v.as_str()) {
+            if let Some(c) = active.iter().copied().find(|c| c.id == target) {
+                return Some(c);
+            }
+        }
+        let aid = bt.get("asset_id").and_then(|v| v.as_str()).unwrap_or("");
+        let bs = bt.get("bake_start").and_then(|v| v.as_f64()).unwrap_or(f64::MIN);
+        let be = bt.get("bake_end").and_then(|v| v.as_f64()).unwrap_or(f64::MAX);
+        active.into_iter().rev().find(|c| {
+            c.asset_id.as_deref() == Some(aid) && {
+                let src = c.src_at(t);
+                src >= bs - 0.05 && src <= be + 0.05
+            }
+        })
     }
     /// Is lane `ti` magnetic (delete = close the gap)? Explicit flag wins; the default is
     /// ON only for the MAIN video lane (the first video track = the storyline spine).

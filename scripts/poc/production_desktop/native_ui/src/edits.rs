@@ -30,7 +30,58 @@ fn f(v: &Value, k: &str) -> f64 {
     v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0)
 }
 fn setf(v: &mut Value, k: &str, val: f64) {
-    v[k] = Value::from((val * 1000.0).round() / 1000.0);
+    v[k] = Value::from((val * 1_000_000_000.0).round() / 1_000_000_000.0);
+}
+
+/// Canonical timeline clock: every visual/image/caption boundary is an integer
+/// sequence-frame index. Linked audio follows its visual partner; independent audio may
+/// retain sample/sub-frame precision. This removes the impossible state where an arrow
+/// key can never land on a clip edge between two output frames.
+pub fn quantize_timeline_frames(root: &mut Value) {
+    let Some(seq) = root
+        .get_mut(0)
+        .and_then(|r| r.get_mut("timeline"))
+        .and_then(|t| t.get_mut("sequence"))
+    else {
+        return;
+    };
+    let fps = seq
+        .get("frame_rate")
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite() && *v > 1.0)
+        .unwrap_or(30.0);
+    let q = |t: f64| ((t.max(0.0) * fps).round() / fps * 1_000_000_000.0).round()
+        / 1_000_000_000.0;
+    let q_end = |t: f64| ((t.max(0.0) * fps).ceil() / fps * 1_000_000_000.0).round()
+        / 1_000_000_000.0;
+    let step = 1.0 / fps;
+    let Some(tracks) = seq.get_mut("tracks").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    let mut max_end = 0.0f64;
+    for tr in tracks {
+        let audio = tr.get("type").and_then(|v| v.as_str()) == Some("audio");
+        let Some(clips) = tr.get_mut("clips").and_then(|v| v.as_array_mut()) else {
+            continue;
+        };
+        for clip in clips {
+            if audio && clip.get("link_id").and_then(|v| v.as_str()).is_none() {
+                max_end = max_end.max(f(clip, "timeline_end"));
+                continue;
+            }
+            let start = q(f(clip, "timeline_start"));
+            let mut end = q(f(clip, "timeline_end"));
+            if end <= start {
+                end = q(start + step);
+            }
+            setf(clip, "timeline_start", start);
+            setf(clip, "timeline_end", end);
+            max_end = max_end.max(end);
+        }
+    }
+    let old_duration = seq.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    // The container duration must never round down across independent sub-frame audio.
+    seq["duration"] = Value::from(q_end(old_duration.max(max_end)));
 }
 fn sid(v: &Value) -> String {
     v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string()
@@ -1056,6 +1107,46 @@ pub fn duplicate_clips(root: &mut Value, ids: &[String], salt: u64) {
         return;
     }
     let d = be - bs;
+    // Allocate every new id up front. This lets a copied tracked-blur binding point at
+    // the copied media clip even when the effect happens to be visited first.
+    let selected: Vec<Value> = tracks_ref(root)
+        .map(|tracks| {
+            tracks
+                .iter()
+                .flat_map(|tr| tr.get("clips").and_then(|c| c.as_array()).into_iter().flatten())
+                .filter(|c| ids.contains(&sid(c)))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let id_map: std::collections::HashMap<String, String> = selected
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (sid(c), format!("{}__dup_{}_{}", sid(c), salt, i + 1)))
+        .collect();
+    // Old blur bindings predate target_clip_id. When the selected block contains a
+    // matching media clip, infer that relationship once so the copies become explicit.
+    let mut legacy_targets: std::collections::HashMap<String, String> = Default::default();
+    for fx in &selected {
+        let Some(bt) = fx.get("blur_track").and_then(|v| v.as_object()) else { continue };
+        if bt.get("target_clip_id").and_then(|v| v.as_str()).is_some() {
+            continue;
+        }
+        let aid = bt.get("asset_id").and_then(|v| v.as_str()).unwrap_or("");
+        let best = selected
+            .iter()
+            .filter(|m| m.get("asset_id").and_then(|v| v.as_str()) == Some(aid))
+            .filter_map(|m| {
+                let overlap = (f(fx, "timeline_end").min(f(m, "timeline_end"))
+                    - f(fx, "timeline_start").max(f(m, "timeline_start")))
+                    .max(0.0);
+                (overlap > 0.0).then_some((overlap, sid(m)))
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, target)) = best {
+            legacy_targets.insert(sid(fx), target);
+        }
+    }
     // can every copy land at +d on its own lane without touching a non-selected clip?
     let mut fits_after = true;
     if let Some(tracks) = tracks_ref(root) {
@@ -1078,20 +1169,31 @@ pub fn duplicate_clips(root: &mut Value, ids: &[String], salt: u64) {
             }
         }
     }
-    let mut n = 0u64;
     let mut new_links: std::collections::HashMap<String, String> = Default::default();
+    let mut link_n = 0u64;
     let mut mk_copy = |c: &Value, shift: f64| -> Value {
         let mut copy = c.clone();
-        n += 1;
-        copy["id"] = Value::from(format!("{}__dup_{}_{}", sid(c), salt, n));
+        let old_id = sid(c);
+        copy["id"] = Value::from(id_map.get(&old_id).cloned().unwrap_or_else(|| format!("{old_id}__dup_{salt}")));
         setf(&mut copy, "timeline_start", f(c, "timeline_start") + shift);
         setf(&mut copy, "timeline_end", f(c, "timeline_end") + shift);
         if let Some(l) = link(c) {
-            let nl = new_links
-                .entry(l)
-                .or_insert_with(|| format!("lk_dup_{}_{}", salt, n))
-                .clone();
+            if !new_links.contains_key(&l) {
+                link_n += 1;
+                new_links.insert(l.clone(), format!("lk_dup_{}_{}", salt, link_n));
+            }
+            let nl = new_links.get(&l).cloned().unwrap();
             copy["link_id"] = Value::from(nl);
+        }
+        if let Some(bt) = copy.get_mut("blur_track").and_then(|v| v.as_object_mut()) {
+            let old_target = bt
+                .get("target_clip_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| legacy_targets.get(&old_id).cloned());
+            if let Some(new_target) = old_target.as_ref().and_then(|id| id_map.get(id)) {
+                bt.insert("target_clip_id".into(), Value::from(new_target.clone()));
+            }
         }
         copy
     };
@@ -1582,7 +1684,9 @@ fn tracks_mut(root: &mut Value) -> Option<&mut Vec<Value>> {
 /// Atomic write-back of the WHOLE document (tmp + rename) — the same file the web editor,
 /// Dan and the server exporter read.
 pub fn save(root: &Value, contents_path: &str) -> anyhow::Result<()> {
-    let tmp = format!("{contents_path}.native.tmp");
+    // Keep the replacement atomic, and give each native process its own staging file.
+    // A fixed `.native.tmp` name let two editor instances clobber each other's pending save.
+    let tmp = format!("{contents_path}.native.{}.tmp", std::process::id());
     std::fs::write(&tmp, serde_json::to_string(root)?)?;
     std::fs::rename(&tmp, contents_path)?;
     Ok(())
@@ -2559,6 +2663,47 @@ pub fn reorder_tracks(raw: &mut serde_json::Value, from: usize, to: usize) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn timeline_visual_boundaries_are_frame_quantized_and_idempotent() {
+        let mut raw = serde_json::json!([{
+            "timeline": {"sequence": {
+                "duration": 1.019,
+                "frame_rate": 30.0,
+                "tracks": [
+                    {"type":"video", "clips":[{
+                        "id":"v", "link_id":"av", "timeline_start":0.010,
+                        "timeline_end":1.019
+                    }]},
+                    {"type":"caption", "clips":[{
+                        "id":"c", "timeline_start":0.049, "timeline_end":0.051
+                    }]},
+                    {"type":"audio", "clips":[
+                        {"id":"linked", "link_id":"av", "timeline_start":0.010,
+                         "timeline_end":1.019},
+                        {"id":"music", "timeline_start":0.0123, "timeline_end":0.9987}
+                    ]}
+                ]
+            }}
+        }]);
+
+        quantize_timeline_frames(&mut raw);
+        let once = raw.clone();
+        let tracks = raw[0]["timeline"]["sequence"]["tracks"].as_array().unwrap();
+        for (track_i, clip_i) in [(0usize, 0usize), (1, 0), (2, 0)] {
+            let clip = &tracks[track_i]["clips"][clip_i];
+            for key in ["timeline_start", "timeline_end"] {
+                let frames = clip[key].as_f64().unwrap() * 30.0;
+                assert!((frames - frames.round()).abs() < 1e-7, "{track_i}/{clip_i}/{key}");
+            }
+            assert!(clip["timeline_end"].as_f64().unwrap() > clip["timeline_start"].as_f64().unwrap());
+        }
+        assert_eq!(tracks[2]["clips"][1]["timeline_start"].as_f64(), Some(0.0123));
+        assert_eq!(tracks[2]["clips"][1]["timeline_end"].as_f64(), Some(0.9987));
+
+        quantize_timeline_frames(&mut raw);
+        assert_eq!(raw, once);
+    }
+
     fn lane_ids(raw: &Value, lane: usize) -> Vec<String> {
         raw[0]["timeline"]["sequence"]["tracks"][lane]["clips"]
             .as_array()
@@ -2566,6 +2711,64 @@ mod tests {
             .iter()
             .map(sid)
             .collect()
+    }
+
+    #[test]
+    fn duplicate_remaps_tracked_blur_to_copied_media() {
+        let mut raw = serde_json::json!([{
+            "timeline": {"sequence": {"tracks": [
+                {"type":"video", "clips":[{
+                    "id":"media", "asset_id":"asset-a",
+                    "timeline_start":1.0, "timeline_end":3.0,
+                    "source_start":10.0, "source_end":12.0
+                }]},
+                {"type":"effect", "clips":[{
+                    "id":"blur", "timeline_start":1.0, "timeline_end":3.0,
+                    "region":{"x":0.1,"y":0.1,"width":0.2,"height":0.2},
+                    "blur_track":{"asset_id":"asset-a","key":"abc","bake_start":9.0,"target_clip_id":"media"}
+                }]}
+            ]}}
+        }]);
+        duplicate_clips(&mut raw, &["media".into(), "blur".into()], 42);
+        let clips: Vec<&Value> = raw[0]["timeline"]["sequence"]["tracks"]
+            .as_array().unwrap().iter()
+            .flat_map(|tr| tr["clips"].as_array().unwrap().iter())
+            .collect();
+        let media_copy = clips.iter().find(|c| sid(c).starts_with("media__dup_42_")).unwrap();
+        let blur_copy = clips.iter().find(|c| sid(c).starts_with("blur__dup_42_")).unwrap();
+        assert_eq!(
+            blur_copy["blur_track"]["target_clip_id"].as_str(),
+            media_copy["id"].as_str()
+        );
+    }
+
+    #[test]
+    fn duplicate_upgrades_legacy_tracked_blur_binding() {
+        let mut raw = serde_json::json!([{
+            "timeline": {"sequence": {"tracks": [
+                {"type":"caption", "clips":[{
+                    "id":"media", "asset_id":"asset-a",
+                    "timeline_start":1.0, "timeline_end":3.0,
+                    "source_start":10.0, "source_end":12.0
+                }]},
+                {"type":"overlay", "clips":[{
+                    "id":"blur", "timeline_start":1.0, "timeline_end":3.0,
+                    "region":{"x":0.1,"y":0.1,"width":0.2,"height":0.2},
+                    "blur_track":{"asset_id":"asset-a","key":"abc","bake_start":9.0}
+                }]}
+            ]}}
+        }]);
+        duplicate_clips(&mut raw, &["media".into(), "blur".into()], 43);
+        let clips: Vec<&Value> = raw[0]["timeline"]["sequence"]["tracks"]
+            .as_array().unwrap().iter()
+            .flat_map(|tr| tr["clips"].as_array().unwrap().iter())
+            .collect();
+        let media_copy = clips.iter().find(|c| sid(c).starts_with("media__dup_43_")).unwrap();
+        let blur_copy = clips.iter().find(|c| sid(c).starts_with("blur__dup_43_")).unwrap();
+        assert_eq!(
+            blur_copy["blur_track"]["target_clip_id"].as_str(),
+            media_copy["id"].as_str()
+        );
     }
 
     #[test]
