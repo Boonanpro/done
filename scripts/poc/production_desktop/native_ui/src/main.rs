@@ -503,7 +503,7 @@ fn draw_plain_pip(
             }
             tw
         };
-        comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb(), c.visual_opacity())?;
+        comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t), c.visual_opacity())?;
         return Ok(None);
     }
     let vs = pool.get(d3d, &p2, 0, false, src_t)?;
@@ -514,7 +514,7 @@ fn draw_plain_pip(
             .map_err(|e| e.context(format!("plain-pip {} src_t={src_t:.2}", vs.name)))?;
     }
     let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
-    comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb(), c.visual_opacity())?;
+    comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t), c.visual_opacity())?;
     Ok(Some(p2))
 }
 
@@ -761,6 +761,11 @@ fn compose(
     // budget lasts and land exactly at rest via the refine loop — original pixels always,
     // never a proxy
     let f_deadline = Instant::now() + std::time::Duration::from_millis(30);
+    // Geometry clock for transform keyframes (display box / crop): the request time
+    // QUANTIZED to the sequence grid — the same slot value keyframe WRITES use, so a
+    // key's frame shows exactly the key's value (region_keys use the same rule below).
+    let gfps = doc.seq.frame_rate.filter(|f| f.is_finite() && *f > 1.0).unwrap_or(30.0);
+    let t_geo = (t * gfps).round() / gfps;
     // seam diagnostics: within ±0.6s of a freeze boundary, log exactly what every layer
     // draws (texture size / quality / box) — the ground truth for the "width grows" report
     let near_fz = doc
@@ -772,7 +777,7 @@ fn compose(
         .any(|c| (t - c.timeline_start).abs() < 0.6 || (t - c.timeline_end).abs() < 0.6);
     let _t = Instant::now();
     for c in &layers {
-        let b = c.display_box();
+        let b = c.display_box_at(t_geo);
         if let Some((key, off)) = c.popout_key() {
             // LIVE matte path: color sampled from the ORIGINAL frame — the same file and
             // the same src_t the AUDIO plays, so lips can't drift. The baked pv (30fps
@@ -1017,7 +1022,7 @@ fn compose(
                     }
                     tw
                 };
-                let b = c.display_box();
+                let b = c.display_box_at(t_geo);
                 if near_fz {
                     eprintln!(
                         "FZ_SEAM t={t:.3} clip={} q={} tex={}x{} box={:.4},{:.4},{:.4},{:.4}",
@@ -1026,7 +1031,7 @@ fn compose(
                         wh.0, wh.1, b.x, b.y, b.width, b.height
                     );
                 }
-                comp.draw_cropped_opacity(d3d, &tex, wh, (b.x, b.y, b.width, b.height), !c.stretches_to_box(), None, c.crop_ltrb(), c.visual_opacity())?;
+                comp.draw_cropped_opacity(d3d, &tex, wh, (b.x, b.y, b.width, b.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
                 used.push(path);
                 continue;
             }
@@ -1064,7 +1069,7 @@ fn compose(
                     wh.0, wh.1, b.x, b.y, b.width, b.height
                 );
             }
-            comp.draw_cropped_opacity(d3d, &tex, wh, (b.x, b.y, b.width, b.height), !c.stretches_to_box(), None, c.crop_ltrb(), c.visual_opacity())?;
+            comp.draw_cropped_opacity(d3d, &tex, wh, (b.x, b.y, b.width, b.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
             used.push(path);
         }
     }
@@ -1074,7 +1079,6 @@ fn compose(
     // that keeps the cover glued to the picture during budgeted scrubs — QUANTIZED to
     // the sequence grid: the same slot value keyframe WRITES use, so a key's frame
     // shows exactly the key's value and the next frame is still.
-    let gfps = doc.seq.frame_rate.filter(|f| f.is_finite() && *f > 1.0).unwrap_or(30.0);
     let t_fx = (base_eff_t.unwrap_or(t) * gfps).round() / gfps;
     for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
         for c in &tr.clips {
@@ -1104,7 +1108,7 @@ fn compose(
                         .active_video(t)
                         .0
                         .filter(|b| b.asset_id.as_deref() == Some(baid))
-                        .map(|b| (b.src_at(t), b.display_box(), b.crop_ltrb()));
+                        .map(|b| (b.src_at(t), b.display_box_at(t_fx), b.crop_ltrb_at(t_fx)));
                     let mask_ok = !key.is_empty()
                         && std::fs::metadata(&mpath).map(|m| m.len() > 0).unwrap_or(false);
                     if let (Some((src_t, bb, bcrop)), true) = (base_info, mask_ok) {
@@ -2575,6 +2579,10 @@ struct App {
     /// スナップショット。毎フレーム「スナップショット＋累積オフセット」で書き直す
     /// （軌跡ごと平行移動・キーは増えも減りもしない）
     kf_drag_orig_keys: Option<serde_json::Value>,
+    /// 映像クリップの位置/サイズドラッグ用キー状態（kf_drag_* のtransform版）:
+    /// (kf_modeクリップのキー時刻 clip相対, OFF時のキー有りクリップの元キー配列)
+    tkf_drag_rel: Option<f64>,
+    tkf_drag_orig: Vec<(String, serde_json::Value)>,
     /// 追従修正モード: clip id being corrected; clicks on the preview collect +/- points
     corr_mode: Option<String>,
     /// correction points in SOURCE coords (x, y, positive) — all on corr_anchor_src's frame
@@ -2738,6 +2746,8 @@ impl App {
             kf_mode: None,
             kf_drag_rel: None,
             kf_drag_orig_keys: None,
+            tkf_drag_rel: None,
+            tkf_drag_orig: Vec::new(),
             corr_mode: None,
             corr_points: Vec::new(),
             corr_anchor_src: None,
@@ -3357,15 +3367,21 @@ impl App {
         .unwrap_or_else(|| b.src_at(c.timeline_start.max(b.timeline_start)));
         // the rectangle was drawn in CANVAS space; SAM works on SOURCE pixels — map it
         // through the inverse of the base clip's cover-crop (aspect mismatch shifted the
-        // box onto the wrong object before this)
+        // box onto the wrong object before this). Keyframed bases evaluate at the SAME
+        // moment the anchor frame comes from.
+        let t_anchor = if self.t >= c.timeline_start && self.t < c.timeline_end {
+            self.t
+        } else {
+            c.timeline_start.max(b.timeline_start)
+        };
         let dims = self.doc.asset_dims.get(&aid).copied().unwrap_or((0, 0));
-        let bb = b.display_box();
+        let bb = b.display_box_at(t_anchor);
         let sbox = compositor::canvas_box_to_source(
             (CANVAS_W, CANVAS_H),
             dims,
             (bb.x, bb.y, bb.width, bb.height),
             !b.stretches_to_box(),
-            b.crop_ltrb(),
+            b.crop_ltrb_at(t_anchor),
             rg,
         );
         let room = self.room_id();
@@ -4757,7 +4773,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 }
                 // ---- position & size (canvas %) ----
                 ui.label(egui::RichText::new("位置とサイズ（%）").strong());
-                let b = clip.display_box();
+                // keyed clips: the fields show (and edit around) the DISPLAYED pose
+                let tkf_t_now = self.displayed_grid_t();
+                let has_tkeys = !clip.transform_key_times().is_empty();
+                let b = if has_tkeys { clip.display_box_at(tkf_t_now) } else { clip.display_box() };
 
                 let mut xy = [b.x * 100.0, b.y * 100.0];
                 let mut xy_changed = false;
@@ -4775,9 +4794,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                 });
                 if xy_changed {
-                    let ids = edit_ids.clone();
                     let (x, y) = (xy[0] / 100.0, xy[1] / 100.0);
-                    self.apply_edit(false, move |raw| edits::set_position_many(raw, &ids, x, y, b.width, b.height));
+                    self.apply_box_edit(edit_ids.clone(), b, x, y, b.width, b.height);
                     self.push_req(false);
                 }
 
@@ -4796,10 +4814,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     let factor = size / old_size;
                     let (nw, nh) = (b.width * factor, b.height * factor);
                     let (cx, cy) = (b.x + b.width / 2.0, b.y + b.height / 2.0);
-                    let ids = edit_ids.clone();
-                    self.apply_edit(false, move |raw| {
-                        edits::set_position_many(raw, &ids, cx - nw / 2.0, cy - nh / 2.0, nw, nh)
-                    });
+                    self.apply_box_edit(edit_ids.clone(), b, cx - nw / 2.0, cy - nh / 2.0, nw, nh);
                     self.push_req(false);
                 }
                 if size_resp.drag_stopped() {
@@ -4824,11 +4839,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 if wh_changed {
                     let (nw, nh) = (wh[0] / 100.0, wh[1] / 100.0);
                     let (cx, cy) = (b.x + b.width / 2.0, b.y + b.height / 2.0);
+                    self.apply_box_edit(edit_ids.clone(), b, cx - nw / 2.0, cy - nh / 2.0, nw, nh);
                     let ids = edit_ids.clone();
-                    self.apply_edit(false, move |raw| {
-                        edits::set_position_many(raw, &ids, cx - nw / 2.0, cy - nh / 2.0, nw, nh);
-                        edits::set_fit_many(raw, &ids, true);
-                    });
+                    self.apply_edit(false, move |raw| edits::set_fit_many(raw, &ids, true));
                     self.push_req(false);
                 }
                 if ui.small_button("全画面に戻す").clicked() {
@@ -4838,6 +4851,101 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         edits::set_fit_many(raw, &ids, false);
                     });
                     self.push_req(false);
+                }
+                // ---- 位置/サイズ/クロップのキーフレーム（ぼかしの手動追従と同じ操作系）----
+                if !multi && kind != "audio" {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("キーフレーム（位置・サイズ・クロップ）").strong());
+                    let id = clip.id.clone();
+                    let kts = clip.transform_key_times();
+                    let nkeys = kts.len();
+                    let rel = tkf_t_now - clip.timeline_start;
+                    let on_key = kts.iter().any(|kt| (kt - rel).abs() <= edits::KEY_REPLACE_EPS);
+                    let kf_on = self.kf_mode.as_deref() == Some(id.as_str());
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(kf_on, "◆キー打ちモード")
+                            .on_hover_text(
+                                "ON: プレビューのドラッグ/リサイズ、数値変更、クロップ変更が表示中フレームにキーを打つ。\nOFF: キー有りクリップのドラッグは動き全体をそのまま平行移動（キーは増えない）。\n枠が赤=キー上（ドラッグで打ち直し）、オレンジ=補間中（ON中のドラッグで新規キー）",
+                            )
+                            .clicked()
+                        {
+                            self.kf_mode = if kf_on { None } else { Some(id.clone()) };
+                            if self.kf_mode.is_some() {
+                                self.pause_at_displayed();
+                            }
+                        }
+                        if nkeys > 0 && !kf_on {
+                            ui.label(egui::RichText::new("OFF: ドラッグ=全体移動").small().weak());
+                        }
+                        if nkeys > 0 && ui.button("キー全消し").clicked() {
+                            let cid = id.clone();
+                            self.apply_edit(true, move |raw| edits::clear_transform_keys(raw, &cid));
+                            self.push_req(false);
+                        }
+                    });
+                    if kf_on || nkeys > 0 {
+                        ui.horizontal(|ui| {
+                            let prev = kts.iter().rev().find(|kt| **kt < rel - 1e-3).copied();
+                            let next = kts.iter().find(|kt| **kt > rel + 1e-3).copied();
+                            if ui
+                                .add_enabled(prev.is_some(), egui::Button::new("◀"))
+                                .on_hover_text("前のキーへ")
+                                .clicked()
+                            {
+                                self.playing = false;
+                                self.t = clip.timeline_start + prev.unwrap();
+                                self.push_req(false);
+                            }
+                            if on_key {
+                                if ui
+                                    .button("◆削除")
+                                    .on_hover_text("再生ヘッド位置のキーだけ削除")
+                                    .clicked()
+                                {
+                                    let cid = id.clone();
+                                    self.apply_edit(true, move |raw| {
+                                        edits::remove_transform_key(raw, &cid, rel)
+                                    });
+                                    self.push_req(false);
+                                }
+                            } else if ui
+                                .add_enabled(rel >= 0.0 && rel <= clip.dur(), egui::Button::new("◆＋"))
+                                .on_hover_text("このフレームの今の位置/サイズ/クロップにキーを打つ（動かさず固定したい時に）")
+                                .on_disabled_hover_text("再生ヘッドをこのクリップの範囲内に置いてください")
+                                .clicked()
+                            {
+                                let kb = clip.display_box_at(tkf_t_now);
+                                let kc = clip.crop_ltrb_at(tkf_t_now);
+                                let cid = id.clone();
+                                self.apply_edit(true, move |raw| {
+                                    edits::set_transform_key(
+                                        raw, &cid, rel, kb.x, kb.y, kb.width, kb.height, kc,
+                                    )
+                                });
+                                self.toast(&format!("◆ キーを打ちました（{}個）", nkeys + 1));
+                                self.push_req(false);
+                            }
+                            if ui
+                                .add_enabled(next.is_some(), egui::Button::new("▶"))
+                                .on_hover_text("次のキーへ")
+                                .clicked()
+                            {
+                                self.playing = false;
+                                self.t = clip.timeline_start + next.unwrap();
+                                self.push_req(false);
+                            }
+                            let status = if on_key {
+                                egui::RichText::new("キー上").color(egui::Color32::from_rgb(240, 80, 80))
+                            } else if nkeys > 0 {
+                                egui::RichText::new(format!("補間中（{nkeys}個）"))
+                                    .color(egui::Color32::from_rgb(255, 170, 60))
+                            } else {
+                                egui::RichText::new("キー無し").weak()
+                            };
+                            ui.label(status.small());
+                        });
+                    }
                 }
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new("不透明度").strong());
@@ -4876,7 +4984,11 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 }
                 // ---- crop ----
                 ui.label(egui::RichText::new("クロップ（端を切る %）").strong());
-                let (l, t, r_, bm) = clip.crop_ltrb().unwrap_or((0.0, 0.0, 0.0, 0.0));
+                let (l, t, r_, bm) = if has_tkeys {
+                    clip.crop_ltrb_at(tkf_t_now).unwrap_or((0.0, 0.0, 0.0, 0.0))
+                } else {
+                    clip.crop_ltrb().unwrap_or((0.0, 0.0, 0.0, 0.0))
+                };
                 let mut cr = [l * 100.0, t * 100.0, r_ * 100.0, bm * 100.0];
                 let mut cchanged = false;
                 for (row, pair, names) in [
@@ -4898,10 +5010,26 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     });
                 }
                 if cchanged {
-                    let ids = edit_ids.clone();
                     let (cl, ct, crr, cb) =
                         (cr[0] / 100.0, cr[1] / 100.0, cr[2] / 100.0, cr[3] / 100.0);
-                    self.apply_edit(false, move |raw| edits::set_crop_many(raw, &ids, cl, ct, crr, cb));
+                    let tkf_rel = tkf_t_now - clip.timeline_start;
+                    if !multi
+                        && self.kf_mode.as_deref() == Some(clip.id.as_str())
+                        && tkf_rel >= 0.0
+                        && tkf_rel <= clip.dur()
+                    {
+                        // キー打ちモードON: 表示フレームに「今の枠＋新しいクロップ」のキー
+                        let cid = clip.id.clone();
+                        self.apply_edit(false, move |raw| {
+                            edits::set_transform_key(
+                                raw, &cid, tkf_rel, b.x, b.y, b.width, b.height,
+                                Some((cl, ct, crr, cb)),
+                            )
+                        });
+                    } else {
+                        let ids = edit_ids.clone();
+                        self.apply_edit(false, move |raw| edits::set_crop_many(raw, &ids, cl, ct, crr, cb));
+                    }
                     self.push_req(false);
                 }
                 if clip.crop_ltrb().is_some() && ui.small_button("クロップ解除").clicked() {
@@ -5731,7 +5859,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 .cloned();
             if let (true, Some(b)) = (inside_time, base) {
                 let dims = self.doc.asset_dims.get(&baid).copied().unwrap_or((0, 0));
-                let bb = b.display_box();
+                let bb = b.display_box_at(self.t);
                 let src_now = b.src_at(self.t);
                 // markers (source -> canvas)
                 let p = ui.painter_at(vid);
@@ -5741,7 +5869,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         dims,
                         (bb.x, bb.y, bb.width, bb.height),
                         !b.stretches_to_box(),
-                        b.crop_ltrb(),
+                        b.crop_ltrb_at(self.t),
                         (*sx, *sy, 0.0, 0.0),
                     );
                     let cp = egui::pos2(
@@ -5782,7 +5910,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                 dims,
                                 (bb.x, bb.y, bb.width, bb.height),
                                 !b.stretches_to_box(),
-                                b.crop_ltrb(),
+                                b.crop_ltrb_at(self.t),
                                 (cx, cy),
                             );
                             self.corr_points.push((sx, sy, lclick));
@@ -5879,13 +6007,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             }
                             if x1 > x0 && y1 > y0 {
                                 let dims = self.doc.asset_dims.get(&baid).copied().unwrap_or((0, 0));
-                                let bb = b.display_box();
+                                let bb = b.display_box_at(t_disp);
                                 draw_box = compositor::source_box_to_canvas(
                                     (CANVAS_W, CANVAS_H),
                                     dims,
                                     (bb.x, bb.y, bb.width, bb.height),
                                     !b.stretches_to_box(),
-                                    b.crop_ltrb(),
+                                    b.crop_ltrb_at(t_disp),
                                     (x0, y0, x1 - x0, y1 - y0),
                                 );
                                 following = true;
@@ -6167,7 +6295,19 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         if self.t < c.timeline_start || self.t >= c.timeline_end {
             return;
         }
-        let b = c.display_box();
+        // the frame follows the keyframed pose at the DISPLAYED frame (region 流儀)
+        let b = c.display_box_at(t_disp);
+        let tkts = c.transform_key_times();
+        let t_rel = t_disp - c.timeline_start;
+        let on_tkey = tkts.iter().any(|kt| (kt - t_rel).abs() <= edits::KEY_REPLACE_EPS);
+        let frame_col = if on_tkey {
+            // playhead ON a transform keyframe: DaVinci-red = "drag re-writes THIS key"
+            egui::Color32::from_rgb(240, 80, 80)
+        } else if !tkts.is_empty() {
+            egui::Color32::from_rgb(255, 170, 60) // interpolating between keys
+        } else {
+            egui::Color32::from_rgb(90, 170, 255)
+        };
         let bx = egui::Rect::from_min_size(
             egui::pos2(
                 vid.left() + (b.x as f32) * vid.width(),
@@ -6176,10 +6316,23 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             egui::vec2((b.width as f32) * vid.width(), (b.height as f32) * vid.height()),
         );
         let p = ui.painter_at(vid);
-        p.rect_stroke(bx, 2.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(90, 170, 255)));
+        p.rect_stroke(bx, 2.0, egui::Stroke::new(1.5, frame_col));
         let corners = [bx.min, egui::pos2(bx.max.x, bx.min.y), egui::pos2(bx.min.x, bx.max.y), bx.max];
         for cp in corners {
-            p.rect_filled(egui::Rect::from_center_size(cp, egui::vec2(9.0, 9.0)), 2.0, egui::Color32::from_rgb(90, 170, 255));
+            p.rect_filled(egui::Rect::from_center_size(cp, egui::vec2(9.0, 9.0)), 2.0, frame_col);
+        }
+        if on_tkey {
+            let cpt = egui::pos2(bx.center().x, bx.top());
+            p.add(egui::Shape::convex_polygon(
+                vec![
+                    cpt + egui::vec2(0.0, -5.0),
+                    cpt + egui::vec2(5.0, 0.0),
+                    cpt + egui::vec2(0.0, 5.0),
+                    cpt + egui::vec2(-5.0, 0.0),
+                ],
+                frame_col,
+                egui::Stroke::NONE,
+            ));
         }
         // Corners keep the current shape. Edge handles deform one axis only.
         let edges = [
@@ -6208,10 +6361,40 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             if let Some(pt) = pointer_pos {
                 let corner = corners.iter().position(|cp| cp.distance(pt) < 10.0);
                 let edge = edges.iter().position(|ep| ep.distance(pt) < 10.0);
+                // drag starts from the DISPLAYED pose (keyframed clips: the evaluated box)
                 let starts: Vec<(String, model::Pos)> = sel
                     .iter()
-                    .map(|c| (c.id.clone(), c.display_box()))
+                    .map(|c| (c.id.clone(), c.display_box_at(t_disp)))
                     .collect();
+                if corner.is_some() || edge.is_some() || bx.contains(pt) {
+                    // transform-key routing, armed per clip like the region editor:
+                    // kf ON = this drag writes a key at the displayed frame; OFF with
+                    // keys = the whole trajectory offsets rigidly (no key appears)
+                    self.tkf_drag_rel = None;
+                    self.tkf_drag_orig = Vec::new();
+                    let armed_clip = self
+                        .kf_mode
+                        .as_deref()
+                        .and_then(|kid| sel.iter().find(|c| c.id == kid));
+                    if let Some(ac) = armed_clip {
+                        let rel = t_disp - ac.timeline_start;
+                        if rel >= 0.0 && rel <= ac.dur() {
+                            self.tkf_drag_rel = Some(rel);
+                        }
+                    }
+                    for c in &sel {
+                        if Some(c.id.as_str()) != self.kf_mode.as_deref() {
+                            if let Some(k) = c.transform_keys.clone().filter(|k| {
+                                k.as_array().map(|a| !a.is_empty()).unwrap_or(false)
+                            }) {
+                                self.tkf_drag_orig.push((c.id.clone(), k));
+                            }
+                        }
+                    }
+                    if (self.tkf_drag_rel.is_some() || !self.tkf_drag_orig.is_empty()) && self.playing {
+                        self.pause_at_displayed();
+                    }
+                }
                 if let Some(ci) = corner {
                     self.pending_undo = Some(self.doc.raw.clone());
                     self.inspect_drag = Some((starts, ci as u8 + 1, pt, b));
@@ -6242,6 +6425,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     scale_w.max(scale_h)
                 };
                 let stretch_ids: Vec<String> = starts.iter().map(|(id, _)| id.clone()).collect();
+                let armed = self.tkf_drag_rel.map(|rel| (self.kf_mode.clone().unwrap_or_default(), rel));
+                let offset_keys = self.tkf_drag_orig.clone();
                 self.apply_edit(false, move |raw| {
                     for (id, sb) in &starts {
                         let (nx, ny, nw, nh) = if mode == 0 {
@@ -6268,7 +6453,19 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             let ny = if sys < 0.0 { ay - nh } else { ay };
                             (nx, ny, nw, nh)
                         };
-                        edits::set_position(raw, id, nx, ny, nw, nh);
+                        if let Some((aid, rel)) = armed.as_ref().filter(|(aid, _)| aid == id) {
+                            // キー打ちモードON: 表示フレームのスロットに位置+サイズのキー
+                            // （クロップは触らない＝置換キーの持つcropは維持される）
+                            edits::set_transform_key(raw, aid, *rel, nx, ny, nw, nh, None);
+                        } else if let Some((_, okeys)) = offset_keys.iter().find(|(oid, _)| oid == id) {
+                            // OFF＋キー有り: 軌跡ごと平行移動/一括リサイズ（キーは増えない）
+                            let (dx2, dy2, dw2, dh2) =
+                                (nx - sb.x, ny - sb.y, nw - sb.width, nh - sb.height);
+                            edits::set_position(raw, id, nx, ny, nw, nh);
+                            edits::offset_transform_keys(raw, id, okeys, dx2, dy2, dw2, dh2);
+                        } else {
+                            edits::set_position(raw, id, nx, ny, nw, nh);
+                        }
                     }
                     if mode >= 5 {
                         edits::set_fit_many(raw, &stretch_ids, true);
@@ -6277,9 +6474,69 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
         }
         if preview_drag_stopped {
+            // キーを書いたことを必ず見える化（暗黙のキー増加を根絶）— region 流儀
+            if self.inspect_drag.is_some() && self.tkf_drag_rel.is_some() {
+                if let Some(kid) = self.kf_mode.clone() {
+                    let n = self
+                        .doc
+                        .seq
+                        .tracks
+                        .iter()
+                        .flat_map(|tr| tr.clips.iter())
+                        .find(|c| c.id == kid)
+                        .map(|c| c.transform_key_times().len())
+                        .unwrap_or(0);
+                    self.toast(&format!("◆ キーを打ちました（{n}個）"));
+                }
+            }
+            self.tkf_drag_rel = None;
+            self.tkf_drag_orig = Vec::new();
             self.inspect_drag = None;
             self.push_req(false); // settle full quality after the adjustment
         }
+    }
+
+    /// Inspector box edits route through the transform-key rules (region 流儀):
+    /// kf mode ON (single clip, playhead in span) = write a key at the displayed frame;
+    /// OFF with keys = shift the whole trajectory by the delta; else = plain base write.
+    /// `old_b` is the box the numeric fields were SHOWING (evaluated for keyed clips).
+    fn apply_box_edit(&mut self, ids: Vec<String>, old_b: model::Pos, x: f64, y: f64, w: f64, h: f64) {
+        if ids.len() == 1 {
+            let id = ids[0].clone();
+            let clip = self
+                .doc
+                .seq
+                .tracks
+                .iter()
+                .flat_map(|tr| tr.clips.iter())
+                .find(|c| c.id == id)
+                .cloned();
+            if let Some(c) = clip {
+                let t_now = self.displayed_grid_t();
+                let rel = t_now - c.timeline_start;
+                if self.kf_mode.as_deref() == Some(id.as_str()) && rel >= 0.0 && rel <= c.dur() {
+                    let cid = id.clone();
+                    self.apply_edit(false, move |raw| {
+                        edits::set_transform_key(raw, &cid, rel, x, y, w, h, None)
+                    });
+                    return;
+                }
+                if let Some(keys) = c
+                    .transform_keys
+                    .clone()
+                    .filter(|k| k.as_array().map(|a| !a.is_empty()).unwrap_or(false))
+                {
+                    let (dx, dy, dw, dh) = (x - old_b.x, y - old_b.y, w - old_b.width, h - old_b.height);
+                    let cid = id.clone();
+                    self.apply_edit(false, move |raw| {
+                        edits::set_position(raw, &cid, x, y, w, h);
+                        edits::offset_transform_keys(raw, &cid, &keys, dx, dy, dw, dh);
+                    });
+                    return;
+                }
+            }
+        }
+        self.apply_edit(false, move |raw| edits::set_position_many(raw, &ids, x, y, w, h));
     }
 
     fn push_req(&mut self, scrubbing: bool) {
@@ -6626,11 +6883,17 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             egui::Color32::from_gray(220),
                         );
                     }
-                    // position keyframes: diamond per key on the clip's lower half;
-                    // the one under the playhead lights up red (DaVinci-style).
-                    // CLICKING a diamond jumps the playhead onto that key (nearest
-                    // key within 8px when zoomed-out diamonds overlap).
-                    if c.region.is_some() {
+                    // keyframes: diamond per key on the clip's lower half — region clips
+                    // show their position keys, media clips their transform keys; the one
+                    // under the playhead lights up red (DaVinci-style). CLICKING a diamond
+                    // jumps the playhead onto that key (nearest key within 8px when
+                    // zoomed-out diamonds overlap).
+                    let kf_times = if c.region.is_some() {
+                        c.region_key_times()
+                    } else {
+                        c.transform_key_times()
+                    };
+                    if !kf_times.is_empty() {
                         let rel_now = self.displayed_grid_t() - c.timeline_start;
                         let click_at = resp
                             .clicked()
@@ -6648,7 +6911,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         // with a ×N badge instead. Out-of-range keys (pushed outside the
                         // clip by trims/splits) pin as ⚠-colored diamonds at the edge.
                         let mut clusters: Vec<(f32, u32, bool, bool)> = Vec::new(); // (px, count, hot, oob)
-                        for kt in c.region_key_times() {
+                        for kt in kf_times {
                             let oob = kt < -1e-9 || kt > dur + 1e-9;
                             let kx_raw = body.left()
                                 + ((c.timeline_start + kt) as f32) * self.pps
@@ -10312,6 +10575,179 @@ fn main() -> eframe::Result<()> {
                  c.region_at(9.5).unwrap().2);
         let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12;
         println!("KF ALL {}", if all { "PASS" } else { "FAIL" });
+        std::process::exit(if all { 0 } else { 1 });
+    }
+    // --selftest-tkf: MEDIA-clip transform keyframes (display box + crop) —
+    // interpolation, replace window, crop carry-over, remove/clear, trim pinning,
+    // split partitioning, rigid trajectory offset, w/h & crop base fallbacks
+    if args.iter().any(|a| a == "--selftest-tkf") {
+        use serde_json::json;
+        // vc1 lives on the SECOND video lane — the plain trim path with absolute-moment
+        // pinning (the main magnet lane's ripple path gets its own check below)
+        let mut raw = json!([{ "timeline": { "sequence": { "tracks": [
+            { "type": "video", "clips": [
+                { "id": "base1", "asset_id": "a0", "source_start": 0.0, "source_end": 99.0,
+                  "timeline_start": 0.0, "timeline_end": 20.0 }
+            ]},
+            { "type": "video", "clips": [
+                { "id": "vc1", "asset_id": "a1", "source_start": 0.0, "source_end": 99.0,
+                  "timeline_start": 10.0, "timeline_end": 14.0,
+                  "position": {"x": 0.1, "y": 0.2, "width": 0.4, "height": 0.3},
+                  "crop": {"left": 0.1} }
+            ]}
+        ]}}}]);
+        let clip_of = |raw: &serde_json::Value| -> model::Clip {
+            serde_json::from_value(raw[0]["timeline"]["sequence"]["tracks"][1]["clips"][0].clone())
+                .expect("clip parse")
+        };
+        let bx = |c: &model::Clip, t: f64| c.display_box_at(t);
+        let cl_at = |c: &model::Clip, t: f64| c.crop_ltrb_at(t).map(|c| c.0).unwrap_or(0.0);
+        // interp: box AND crop animate linearly, ends clamp
+        edits::set_transform_key(&mut raw, "vc1", 0.0, 0.1, 0.2, 0.4, 0.3, Some((0.1, 0.0, 0.0, 0.0)));
+        edits::set_transform_key(&mut raw, "vc1", 4.0, 0.5, 0.2, 0.2, 0.15, Some((0.3, 0.0, 0.0, 0.0)));
+        let c = clip_of(&raw);
+        let m = bx(&c, 12.0);
+        let ok1 = (m.x - 0.3).abs() < 1e-6
+            && (m.width - 0.3).abs() < 1e-6
+            && (m.height - 0.225).abs() < 1e-6
+            && (bx(&c, 9.0).x - 0.1).abs() < 1e-6
+            && (bx(&c, 15.0).x - 0.5).abs() < 1e-6
+            && (cl_at(&c, 12.0) - 0.2).abs() < 1e-6;
+        println!("TKF interp    {}", if ok1 { "PASS" } else { "FAIL" });
+        // replace window + crop carry-over: re-writing the key WITHOUT crop keeps it
+        edits::set_transform_key(&mut raw, "vc1", 0.003, 0.15, 0.25, 0.4, 0.3, None);
+        let c = clip_of(&raw);
+        let ok2 = c.transform_key_times().len() == 2
+            && (bx(&c, 10.0).x - 0.15).abs() < 1e-6
+            && (cl_at(&c, 10.0) - 0.1).abs() < 1e-6;
+        println!("TKF carry     {} (keys={} crop_l@10={:.3})",
+                 if ok2 { "PASS" } else { "FAIL" }, c.transform_key_times().len(), cl_at(&c, 10.0));
+        // key WITHOUT w/h and WITHOUT crop reads the base box size / base crop
+        if let Some(keys) = raw[0]["timeline"]["sequence"]["tracks"][1]["clips"][0]["transform_keys"].as_array_mut() {
+            keys.push(json!({"t": 2.0, "x": 0.3, "y": 0.2}));
+        }
+        let c = clip_of(&raw);
+        let ok3 = (bx(&c, 12.0).width - 0.4).abs() < 1e-6 && (cl_at(&c, 12.0) - 0.1).abs() < 1e-6;
+        println!("TKF fallback  {} (w@12={:.3} crop_l@12={:.3})",
+                 if ok3 { "PASS" } else { "FAIL" }, bx(&c, 12.0).width, cl_at(&c, 12.0));
+        // remove one / clear all
+        edits::remove_transform_key(&mut raw, "vc1", 2.0);
+        let ok4a = clip_of(&raw).transform_key_times().len() == 2;
+        edits::clear_transform_keys(&mut raw, "vc1");
+        let ok4 = ok4a && clip_of(&raw).transform_key_times().is_empty();
+        println!("TKF del/clear {}", if ok4 { "PASS" } else { "FAIL" });
+        // trim: keys stay pinned to the same ABSOLUTE timeline moment
+        edits::set_transform_key(&mut raw, "vc1", 0.0, 0.1, 0.2, 0.4, 0.3, None);
+        edits::set_transform_key(&mut raw, "vc1", 4.0, 0.5, 0.2, 0.4, 0.3, None);
+        let before_x = bx(&clip_of(&raw), 12.0).x;
+        let ids: Vec<String> = vec!["vc1".into()];
+        edits::trim_clip_live_from(&mut raw, &ids, true, 10.0, 11.0);
+        let c = clip_of(&raw);
+        let ok5 = (c.timeline_start - 11.0).abs() < 1e-6 && (bx(&c, 12.0).x - before_x).abs() < 1e-3;
+        println!("TKF trim-pin  {} (ts={} x@12={:.4} want {:.4})",
+                 if ok5 { "PASS" } else { "FAIL" }, c.timeline_start, bx(&c, 12.0).x, before_x);
+        edits::trim_clip_live_from(&mut raw, &ids, true, 11.0, 10.0);
+        // main magnet lane: ripple trim goes through trim_main_lane_live — keys must
+        // stay glued to the same SOURCE frame (the lane also pins itself to t=0)
+        let mut rawm = json!([{ "timeline": { "sequence": { "tracks": [
+            { "type": "video", "clips": [
+                { "id": "vm1", "asset_id": "a1", "source_start": 0.0, "source_end": 99.0,
+                  "timeline_start": 10.0, "timeline_end": 14.0,
+                  "position": {"x": 0.1, "y": 0.2, "width": 0.4, "height": 0.3} }
+            ]}
+        ]}}}]);
+        edits::set_transform_key(&mut rawm, "vm1", 0.0, 0.1, 0.2, 0.4, 0.3, None);
+        edits::set_transform_key(&mut rawm, "vm1", 4.0, 0.5, 0.2, 0.4, 0.3, None);
+        let idsm: Vec<String> = vec!["vm1".into()];
+        edits::trim_clip_live_from(&mut rawm, &idsm, true, 10.0, 11.0);
+        let cm: model::Clip =
+            serde_json::from_value(rawm[0]["timeline"]["sequence"]["tracks"][0]["clips"][0].clone())
+                .expect("vm1 parse");
+        // ts pinned to 0 by the magnet; source frame 2.0 (was t=12, x=0.3) now at rel 1.0
+        let ok5b = (cm.timeline_start - 0.0).abs() < 1e-6
+            && (cm.source_start - 1.0).abs() < 1e-6
+            && (bx(&cm, 1.0).x - 0.3).abs() < 1e-3;
+        println!("TKF trim-main {} (ts={} ss={} x@1={:.4})",
+                 if ok5b { "PASS" } else { "FAIL" }, cm.timeline_start, cm.source_start, bx(&cm, 1.0).x);
+        let ok5 = ok5 && ok5b;
+        // split: keys partition at the cut, both sides continuous, no clone replay
+        edits::split_clips(&mut raw, &ids, 12.0, 42);
+        let clips = raw[0]["timeline"]["sequence"]["tracks"][1]["clips"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let lh: model::Clip = serde_json::from_value(clips[0].clone()).expect("left");
+        let rh: model::Clip = serde_json::from_value(clips[1].clone()).expect("right");
+        let ok6 = clips.len() == 2
+            && (bx(&lh, 11.0).x - 0.2).abs() < 1e-3
+            && (bx(&lh, 11.99).x - 0.3).abs() < 5e-3
+            && (bx(&rh, 12.0).x - 0.3).abs() < 1e-3
+            && (bx(&rh, 13.0).x - 0.4).abs() < 1e-3
+            && lh.transform_key_times().len() == 2
+            && rh.transform_key_times().len() == 2;
+        println!(
+            "TKF split     {} (L={:?} R={:?})",
+            if ok6 { "PASS" } else { "FAIL" },
+            lh.transform_key_times(),
+            rh.transform_key_times()
+        );
+        // split BEYOND all keys: keyless side holds the look via base position, no
+        // phantom key (rebuild the doc: single clip, keys only in the first second)
+        let mut raw2 = json!([{ "timeline": { "sequence": { "tracks": [
+            { "type": "video", "clips": [
+                { "id": "vc2", "asset_id": "a1", "source_start": 0.0, "source_end": 99.0,
+                  "timeline_start": 10.0, "timeline_end": 14.0,
+                  "position": {"x": 0.1, "y": 0.2, "width": 0.4, "height": 0.3} }
+            ]}
+        ]}}}]);
+        edits::set_transform_key(&mut raw2, "vc2", 0.2, 0.2, 0.2, 0.4, 0.3, Some((0.2, 0.0, 0.0, 0.0)));
+        edits::set_transform_key(&mut raw2, "vc2", 0.5, 0.3, 0.2, 0.4, 0.3, Some((0.2, 0.0, 0.0, 0.0)));
+        let ids2: Vec<String> = vec!["vc2".into()];
+        edits::split_clips(&mut raw2, &ids2, 12.0, 43);
+        let clips2 = raw2[0]["timeline"]["sequence"]["tracks"][0]["clips"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let r2: model::Clip = serde_json::from_value(clips2[1].clone()).expect("right2");
+        let ok7 = r2.transform_key_times().is_empty()
+            && (r2.display_box().x - 0.3).abs() < 1e-3
+            && (r2.crop_ltrb().map(|c| c.0).unwrap_or(0.0) - 0.2).abs() < 1e-3;
+        println!(
+            "TKF split-tail {} (Rkeys={} Rx={:.3} Rcrop={:.3})",
+            if ok7 { "PASS" } else { "FAIL" },
+            r2.transform_key_times().len(),
+            r2.display_box().x,
+            r2.crop_ltrb().map(|c| c.0).unwrap_or(-1.0)
+        );
+        // OFF-mode drag = rigid trajectory shift: same key count, same motion shape,
+        // crops ride along untouched
+        let mut raw3 = json!([{ "timeline": { "sequence": { "tracks": [
+            { "type": "video", "clips": [
+                { "id": "vc3", "asset_id": "a1", "source_start": 0.0, "source_end": 99.0,
+                  "timeline_start": 10.0, "timeline_end": 14.0,
+                  "position": {"x": 0.1, "y": 0.2, "width": 0.4, "height": 0.3} }
+            ]}
+        ]}}}]);
+        let clip3 = |raw: &serde_json::Value| -> model::Clip {
+            serde_json::from_value(raw[0]["timeline"]["sequence"]["tracks"][0]["clips"][0].clone())
+                .expect("clip3 parse")
+        };
+        edits::set_transform_key(&mut raw3, "vc3", 0.0, 0.1, 0.2, 0.4, 0.3, Some((0.15, 0.0, 0.0, 0.0)));
+        edits::set_transform_key(&mut raw3, "vc3", 1.0, 0.4, 0.2, 0.4, 0.3, None);
+        let snapshot = clip3(&raw3).transform_keys.clone().unwrap();
+        edits::offset_transform_keys(&mut raw3, "vc3", &snapshot, 0.05, 0.1, 0.1, 0.05);
+        let c = clip3(&raw3);
+        let ok8 = c.transform_key_times().len() == 2
+            && (bx(&c, 10.0).x - 0.15).abs() < 1e-6
+            && (bx(&c, 11.0).x - 0.45).abs() < 1e-6
+            && (bx(&c, 10.5).y - 0.3).abs() < 1e-6
+            && (bx(&c, 10.5).width - 0.5).abs() < 1e-6
+            && (cl_at(&c, 10.0) - 0.15).abs() < 1e-6;
+        println!("TKF offset    {} (x@10={:.3} x@11={:.3} w={:.3} crop_l={:.3})",
+                 if ok8 { "PASS" } else { "FAIL" },
+                 bx(&c, 10.0).x, bx(&c, 11.0).x, bx(&c, 10.5).width, cl_at(&c, 10.0));
+        let all = ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8;
+        println!("TKF ALL {}", if all { "PASS" } else { "FAIL" });
         std::process::exit(if all { 0 } else { 1 });
     }
     if args.iter().any(|a| a == "--selftest-newlane") {
