@@ -2840,6 +2840,10 @@ struct App {
     // clip id -> on-screen box (canvas fractions), measured in the caption WebView's real
     // DOM (__reportCapBoxes) after every payload/time change. Written by the ipc handler.
     caption_live_boxes: Arc<Mutex<std::collections::HashMap<String, [f64; 4]>>>,
+    // render key -> alpha bbox of the cache PNG (canvas fractions, default anchor).
+    // The drag hit-box fallback for captions the GPU compositor owns (lane z): those
+    // are excluded from the WebView payload, so no DOM box ever arrives for them.
+    caption_png_boxes: std::collections::HashMap<String, (f64, f64, f64, f64)>,
     lane_reorder: Option<usize>,
     export_result: std::sync::Arc<Mutex<Option<Result<serde_json::Value, String>>>>,
     export_job: Option<String>,
@@ -3025,6 +3029,7 @@ impl App {
             caption_edit: None,
             caption_drag: None,
             caption_live_boxes: Arc::new(Mutex::new(Default::default())),
+            caption_png_boxes: Default::default(),
             lane_reorder: None,
             export_result: Default::default(),
             export_job: None,
@@ -3914,6 +3919,19 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let mut out = Vec::new();
         let t_now = self.displayed_t();
         let native_caps = native_caption_ids(&self.doc, t_now);
+        if std::env::var("NATIVE_ZCAP_DEBUG").is_ok() {
+            static LAST: OnceLock<Mutex<String>> = OnceLock::new();
+            let mut ids: Vec<&String> = native_caps.iter().collect();
+            ids.sort();
+            let msg = format!("ZCAP t={t_now:.2} native={ids:?}");
+            let last = LAST.get_or_init(|| Mutex::new(String::new()));
+            if let Ok(mut l) = last.lock() {
+                if *l != msg {
+                    eprintln!("{msg}");
+                    *l = msg;
+                }
+            }
+        }
         for tr in &self.doc.seq.tracks {
             if tr.hidden {
                 continue;
@@ -6219,6 +6237,40 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .unwrap_or((0.25, 0.25, 0.5, 0.5))
     }
 
+    /// On-screen box (canvas fractions) of a caption from its cache PNG: alpha bbox of
+    /// the default-anchor render mapped through the live style x/y/fontSize — exactly
+    /// how the compositor places the same PNG, so the box matches the pixels. None
+    /// until the PNG lands (caption_cache_pass renders it in the background).
+    fn caption_png_box(&mut self, c: &model::Clip) -> Option<(f64, f64, f64, f64)> {
+        let text = caption_live::get(&c.id).or_else(|| c.text.clone()).unwrap_or_default();
+        if text.trim().is_empty() {
+            return None;
+        }
+        let style = c.style.clone().unwrap_or_else(|| serde_json::json!({}));
+        let key = caption_cache_key(c, &text, &style);
+        let font = caption_style_num(&style, "fontSize", 1.0).max(0.05);
+        if let Some(bbox) = self.caption_png_boxes.get(&key) {
+            return Some(caption_runtime_dst(c, *bbox, font));
+        }
+        let png = std::path::Path::new(&self.doc.asset_dir)
+            .join("caption-cache")
+            .join(format!("{key}.png"));
+        let img = image::open(&png).ok()?.to_rgba8();
+        let (w, h) = img.dimensions();
+        let (_, _, _, (bx, by, bw, bh)) = crop_alpha_rgba(&img)?;
+        let bbox = (
+            bx as f64 / w as f64,
+            by as f64 / h as f64,
+            bw as f64 / w as f64,
+            bh as f64 / h as f64,
+        );
+        if self.caption_png_boxes.len() > 256 {
+            self.caption_png_boxes.clear();
+        }
+        self.caption_png_boxes.insert(key, bbox);
+        Some(caption_runtime_dst(c, bbox, font))
+    }
+
     fn preview_inspector(&mut self, ui: &mut egui::Ui, resp: &egui::Response) {
         let img = resp.rect;
         // selected region-effect clip while the playhead is inside its range: a plain
@@ -6745,12 +6797,17 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .cloned()
             .collect();
         for c in &sel_caps {
+            // Box source 1: the WebView's DOM measurement (captions the overlay draws).
+            // Box source 2: compositor-owned captions (lane z puts video above them) are
+            // NOT in the WebView payload, so measure their cache PNG instead — same
+            // pixels, so the box matches what's on screen.
             let sbox = self
                 .caption_live_boxes
                 .lock()
                 .ok()
                 .and_then(|lb| lb.get(&c.id).copied())
-                .map(|[x, y, w, h]| (x, y, w, h));
+                .map(|[x, y, w, h]| (x, y, w, h))
+                .or_else(|| self.caption_png_box(c));
             if std::env::var("NATIVE_CAPBOX_DEBUG").is_ok() {
                 eprintln!("CAPBOX id={} box={:?}", c.id, sbox);
             }
@@ -9753,6 +9810,31 @@ fn main() -> eframe::Result<()> {
     // comma-separated times share ONE engine setup (doc/D3D/decoders), so a batch of
     // N frames costs far less than N separate spawns; outputs get ".{k}" before the
     // extension when more than one time is given.
+    if args.iter().any(|a| a == "--print-capkeys") {
+        // diagnostic: the Rust-side render key for every designed caption + whether its
+        // cache PNG exists — for A/B against the Python key (json.dumps parity check)
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
+        let doc = model::Doc::load(&contents, &dir).expect("doc load");
+        for tr in &doc.seq.tracks {
+            for c in &tr.clips {
+                if c.text.is_none() || c.asset_id.is_some() || c.region.is_some() {
+                    continue;
+                }
+                let text = c.text.clone().unwrap_or_default();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let style = c.style.clone().unwrap_or_else(|| serde_json::json!({}));
+                let key = caption_cache_key(c, &text, &style);
+                let png = std::path::Path::new(&doc.asset_dir)
+                    .join("caption-cache")
+                    .join(format!("{key}.png"));
+                println!("CAPKEY {} {} png={}", c.id, key, png.exists());
+            }
+        }
+        return Ok(());
+    }
     if let Some(i) = args.iter().position(|a| a == "--dump-frame") {
         let tspec = args.get(i + 1).cloned().unwrap_or_else(|| "0".into());
         let ts: Vec<f64> = tspec.split(',').filter_map(|v| v.trim().parse().ok()).collect();
