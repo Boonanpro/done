@@ -800,7 +800,7 @@ fn compose(
         let mut out = Vec::new();
         for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
             for c in &tr.clips {
-                if t < c.timeline_start || t >= c.timeline_end {
+                if !doc.clip_active_at(c, t) {
                     continue;
                 }
                 if c.asset_id.is_some() {
@@ -1587,7 +1587,7 @@ fn native_caption_ids(doc: &model::Doc, t: f64) -> std::collections::HashSet<Str
     };
     for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
         for c in &tr.clips {
-            if t < c.timeline_start || t >= c.timeline_end {
+            if !doc.clip_active_at(c, t) {
                 continue;
             }
             if c.asset_id.is_some() {
@@ -2907,6 +2907,7 @@ struct App {
     caption_web_ready: Arc<std::sync::atomic::AtomicBool>,
     caption_web_sig: u64,
     caption_web_t: f64,
+    caption_web_hidden_sig: u64,
     /// Doc the caption payload was last built from (Arc identity). Rebuilding and
     /// hashing the full caption JSON every FRAME burned constant UI-thread time on
     /// caption-heavy docs; the doc pointer only changes on real edits.
@@ -3116,6 +3117,7 @@ impl App {
             caption_web_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             caption_web_sig: 0,
             caption_web_t: f64::NAN,
+            caption_web_hidden_sig: 0,
             caption_doc_ptr: 0,
             recut_open: false,
             recut_thresh: 0.45,
@@ -4003,7 +4005,10 @@ impl App {
         // and the bg bar all come from the renderer itself, never re-estimated.
         let report_js = "window.__reportCapBoxes=function(t){try{\
 var p=window.__nativeCaptionPayload;if(!p||!window.ipc)return;\
-var acts=p.captions.filter(function(c){return c.text&&c.text.trim()&&t>=c.start&&t<=c.end});\
+var fps=(Number.isFinite(p.fps)&&p.fps>1)?p.fps:30;\
+var fr=Math.round(t*fps),hidden=new Set(p.hiddenCaptionIds||[]);\
+var acts=p.captions.filter(function(c){return c.text&&c.text.trim()&&!hidden.has(c.id)&&fr>=Math.round(c.start*fps)&&fr<Math.round(c.end*fps)});\
+acts=acts.length?[acts[acts.length-1]]:[];\
 var root=document.querySelector('div[data-ready]');if(!root)return;\
 var cont=root.firstElementChild;if(!cont)return;\
 var layer=cont.firstElementChild;if(!layer)return;\
@@ -4062,21 +4067,6 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 
     fn caption_web_captions(&self) -> serde_json::Value {
         let mut out = Vec::new();
-        let t_now = self.displayed_t();
-        let native_caps = native_caption_ids(&self.doc, t_now);
-        if std::env::var("NATIVE_ZCAP_DEBUG").is_ok() {
-            static LAST: OnceLock<Mutex<String>> = OnceLock::new();
-            let mut ids: Vec<&String> = native_caps.iter().collect();
-            ids.sort();
-            let msg = format!("ZCAP t={t_now:.2} native={ids:?}");
-            let last = LAST.get_or_init(|| Mutex::new(String::new()));
-            if let Ok(mut l) = last.lock() {
-                if *l != msg {
-                    eprintln!("{msg}");
-                    *l = msg;
-                }
-            }
-        }
         for tr in &self.doc.seq.tracks {
             if tr.hidden {
                 continue;
@@ -4089,16 +4079,6 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     .or_else(|| c.text.clone())
                     .unwrap_or_default();
                 if text.trim().is_empty() {
-                    continue;
-                }
-                // Lane order = z, captions included: a caption with a video/effect layer
-                // ABOVE it is drawn by the GPU compositor at its lane position — the
-                // always-on-top WebView must not double-draw it. The exclusion is
-                // per-displayed-time, so the payload sig changes exactly at boundaries.
-                if native_caps.contains(&c.id)
-                    && t_now >= c.timeline_start
-                    && t_now < c.timeline_end
-                {
                     continue;
                 }
                 out.push(serde_json::json!({
@@ -4128,6 +4108,26 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         } else {
             self.grid_quantize(self.t)
         };
+        // GPU and WebView must agree on ownership for this exact displayed frame. The
+        // document payload stays cached, while this small ID set is refreshed at cuts
+        // and when a caption cache PNG becomes available.
+        let mut hidden_caption_ids: Vec<String> = native_caption_ids(&self.doc, t).into_iter().collect();
+        hidden_caption_ids.sort();
+        use std::hash::{Hash, Hasher};
+        let mut hidden_hasher = std::collections::hash_map::DefaultHasher::new();
+        hidden_caption_ids.hash(&mut hidden_hasher);
+        let hidden_sig = hidden_hasher.finish();
+        if std::env::var("NATIVE_ZCAP_DEBUG").is_ok() {
+            static LAST: OnceLock<Mutex<String>> = OnceLock::new();
+            let msg = format!("ZCAP t={t:.2} native={hidden_caption_ids:?}");
+            let last = LAST.get_or_init(|| Mutex::new(String::new()));
+            if let Ok(mut l) = last.lock() {
+                if *l != msg {
+                    eprintln!("{msg}");
+                    *l = msg;
+                }
+            }
+        }
         // Rebuild + hash the caption payload only when the DOCUMENT changed (Arc
         // identity; live typing resets caption_web_sig) — not every frame.
         let doc_ptr = Arc::as_ptr(&self.doc) as usize;
@@ -4136,7 +4136,6 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             || !self.caption_web_ready.load(Ordering::Relaxed);
         let (captions, sig) = if dirty {
             let captions = self.caption_web_captions();
-            use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             captions.to_string().hash(&mut hasher);
             let sig = hasher.finish();
@@ -4171,7 +4170,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             let payload = serde_json::json!({
                 "outW": CANVAS_W,
                 "outH": CANVAS_H,
+                "fps": self.doc.seq.frame_rate.unwrap_or(30.0),
                 "time": t,
+                "hiddenCaptionIds": hidden_caption_ids,
                 "captions": captions.unwrap(),
             });
             let js = format!(
@@ -4183,11 +4184,17 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 self.caption_web_sig = sig;
             }
             self.caption_web_t = t;
-        } else if !self.caption_web_t.is_finite() || (t - self.caption_web_t).abs() > 0.001 {
+            self.caption_web_hidden_sig = hidden_sig;
+        } else if !self.caption_web_t.is_finite()
+            || (t - self.caption_web_t).abs() > 0.001
+            || hidden_sig != self.caption_web_hidden_sig
+        {
+            let hidden_json = serde_json::to_string(&hidden_caption_ids).unwrap_or_else(|_| "[]".to_string());
             let _ = web.evaluate_script(&format!(
-                "window.__renderCaptionAt&&window.__renderCaptionAt({t:.6}).then(function(){{window.__reportCapBoxes&&window.__reportCapBoxes({t:.6})}});"
+                "window.__renderCaptionAt&&window.__renderCaptionAt({t:.6},{hidden_json}).then(function(){{window.__reportCapBoxes&&window.__reportCapBoxes({t:.6})}});"
             ));
             self.caption_web_t = t;
+            self.caption_web_hidden_sig = hidden_sig;
         }
     }
 
