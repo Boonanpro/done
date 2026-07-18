@@ -64,6 +64,20 @@ PUBLISH_HOST = (
 
 PUSH_BRANCH = os.environ.get("DAN_PUBLISH_BRANCH", "main")
 
+# Slugs whose canonical source lives IN the done-artifacts repo itself (edited
+# directly there and pushed), NOT as a per-machine gitignored copy under D:/done.
+# For these, the "mirror the local D:/done copy over done-artifacts" publish path
+# is DISABLED so a stale copy on a second machine can never silently revert edits.
+# Background: kittoku regressed repeatedly (2026-07-18) because a second machine
+# held an old local copy and its registration-triggered auto-publish kept
+# overwriting done-artifacts with it. Editing done-artifacts directly + git push
+# is the single shared source of truth; both machines pull/push the same repo.
+DONE_ARTIFACTS_NATIVE_SLUGS = {
+    s.strip()
+    for s in (os.environ.get("DAN_DONE_ARTIFACTS_NATIVE_SLUGS") or "kittoku").split(",")
+    if s.strip()
+}
+
 # Clean, name-bearing host that users see: <SHARE_ALIAS>/preview/<slug>. It is a
 # free vercel.app alias re-pointed to the latest production on every publish so
 # it never goes stale (a bare `vercel alias set` pins to one deployment). Set to
@@ -515,6 +529,18 @@ async def publish_custom_domain_rewrites() -> dict:
 def _publish_one(slug: str, *, push: bool, wait_live: bool) -> dict:
     _emit(f"[git-publish] {slug}: publish START (push={push}, wait_live={wait_live})")
     result = {"slug": slug, "status": "pending", "url": preview_url_for(slug), "error": ""}
+
+    # done-artifacts を単一の正とする成果物は、PC内ローカルコピーからのミラー公開を
+    # 行わない（古いコピーによる巻き戻し防止）。編集は done-artifacts 直編集＋push で行う。
+    if slug in DONE_ARTIFACTS_NATIVE_SLUGS:
+        result["status"] = "skipped"
+        result["error"] = (
+            "done-artifacts を単一の正として直接管理する成果物のため、"
+            "ローカルコピーからのミラー公開はスキップしました（巻き戻し防止）。"
+        )
+        _emit(f"[git-publish] {slug}: done-artifacts-native, skipping mirror publish")
+        return result
+
     paths = artifact_files_for_slug(slug)
     if not paths:
         result["status"] = "skipped"
