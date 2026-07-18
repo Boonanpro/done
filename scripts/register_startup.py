@@ -35,7 +35,7 @@ PYTHONW_TASKS = [
 SHELL_TASKS = [
     {
         "name": "DanFrontend",
-        "target_bat": r"D:\done\scripts\start_frontend.bat",
+        "target_bat": os.path.join(WORK_DIR, "scripts", "start_frontend.bat"),
     },
 ]
 
