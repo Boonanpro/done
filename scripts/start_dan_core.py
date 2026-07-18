@@ -17,8 +17,10 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 DAN_CORE_PORT = 9000
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def is_port_free(port: int) -> bool:
@@ -82,9 +84,10 @@ def main() -> None:
     ]
     clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
-    log_file = open("D:/done/dan_core.log", "w", encoding="utf-8")
+    log_path = PROJECT_ROOT / "dan_core.log"
+    log_file = open(log_path, "w", encoding="utf-8")
     process = subprocess.Popen(
-        cmd, cwd="D:/done", stdout=log_file, stderr=subprocess.STDOUT, env=clean_env
+        cmd, cwd=str(PROJECT_ROOT), stdout=log_file, stderr=subprocess.STDOUT, env=clean_env
     )
     print(f"[dan-core] uvicorn started with PID {process.pid}")
 
@@ -93,7 +96,7 @@ def main() -> None:
         if check_health(DAN_CORE_PORT):
             print(f"[dan-core] SUCCESS! Running on http://127.0.0.1:{DAN_CORE_PORT}")
             print(f"[dan-core] Process PID: {process.pid}")
-            print(f"[dan-core] Logs: D:/done/dan_core.log")
+            print(f"[dan-core] Logs: {log_path}")
             sys.exit(0)
         print(f"  Waiting for dan-core... ({i + 1}/15)")
         time.sleep(1)

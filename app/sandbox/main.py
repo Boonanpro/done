@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 
 # Windows: ProactorEventLoop（subprocess 生成に必須）
@@ -126,7 +127,10 @@ async def serve_proposal_html(filename: str):
     """HTMLプレゼンファイルを認証不要で直接サーブ（URLリンクから別タブで開く用）"""
     if not filename.endswith(".html"):
         raise HTTPException(status_code=400, detail="Only .html files are supported")
-    proposals_dir = Path("D:/dan-workspace/proposals").resolve()
+    project_root = Path(__file__).resolve().parent.parent.parent
+    proposals_dir = Path(
+        os.environ.get("DAN_CLI_WORKSPACE", str(project_root / ".dan-workspace"))
+    ).joinpath("proposals").resolve()
     html_path = (proposals_dir / filename).resolve()
     if not html_path.is_relative_to(proposals_dir):
         raise HTTPException(status_code=400, detail="Invalid filename")
