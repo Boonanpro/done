@@ -15,6 +15,9 @@ from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+from app.workspace import resolve_cli_workspace
+CLI_WORKSPACE = resolve_cli_workspace()
 
 # バックグラウンドタスクの参照を保持（GC防止）
 # ============================================
@@ -1599,7 +1602,7 @@ async def execute_tool(
                 result = subprocess.run(
                     [git_bash, "-c", command],
                     capture_output=True, timeout=120,
-                    cwd="D:/done",
+                    cwd=str(PROJECT_ROOT),
                 )
                 # Git Bash は UTF-8 で出力するので明示的にデコード
                 result = subprocess.CompletedProcess(
@@ -1628,7 +1631,7 @@ async def execute_tool(
     # ★★★ ファイル検索（glob）★★★
     if skill_name == "_glob":
         pattern = params.get("pattern", "")
-        search_path = params.get("path", "D:/done")
+        search_path = params.get("path", str(PROJECT_ROOT))
         if not pattern:
             return {"success": False, "error": "pattern が必要です"}
         try:
@@ -1669,7 +1672,7 @@ async def execute_tool(
     # ★★★ 内容検索（grep）★★★
     if skill_name == "_grep":
         pattern = params.get("pattern", "")
-        search_path = params.get("path", "D:/done")
+        search_path = params.get("path", str(PROJECT_ROOT))
         file_glob = params.get("glob", "")
         context_lines = params.get("context", 2)
         if not pattern:
@@ -2471,7 +2474,7 @@ async def _execute_generated_skill(
         error_details = traceback.format_exc()
         logger.error(f"[GENERATED_SKILL] Execution failed: {e}\n{error_details}")
         # デバッグログにも出力
-        debug_log = Path("D:/done/skill_analyze_debug.log")
+        debug_log = PROJECT_ROOT / "skill_analyze_debug.log"
         with open(debug_log, "a", encoding="utf-8") as f:
             f.write(f"\n=== GENERATED_SKILL ERROR ===\n")
             f.write(f"Skill: {skill.name}, Action: {action}\n")

@@ -11,7 +11,7 @@ from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT = Path("D:/done").resolve()
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _format_jsx_value(value: str) -> str:

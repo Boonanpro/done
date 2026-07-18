@@ -400,7 +400,7 @@ create_feature で自動生成。中身を実装してください。
 完了報告前に必ず実行すること。
 """
 import sys
-sys.path.insert(0, "D:/done")
+sys.path.insert(0, {str(PROJECT_ROOT)!r})
 
 from app.services.supabase_client import get_supabase_client
 

@@ -2055,7 +2055,7 @@ Existing timeline:
 """.strip()
 
     async def run_dan(prompt_text: str, *, skip_resume: bool = False) -> str:
-        from app.agent.cli_runner import process_message_cli
+        from app.agent.cli_runner import process_message_cli, CLI_WORKSPACE
 
         chunks: list[str] = []
         async for event in process_message_cli(
@@ -2067,7 +2067,7 @@ Existing timeline:
             project_status="in_progress",
             skip_save=True,
             skip_resume=skip_resume,
-            cwd="D:/dan-workspace",
+            cwd=str(CLI_WORKSPACE),
         ):
             event_type = str(event.get("type") or "event")
             if event_type in {"text", "reasoning", "tool_use", "result", "error"}:
@@ -2412,7 +2412,7 @@ Brief / existing timeline:
 """.strip()
 
     async def run_dan(prompt_text: str) -> str:
-        from app.agent.cli_runner import process_message_cli
+        from app.agent.cli_runner import process_message_cli, CLI_WORKSPACE
         chunks: list[str] = []
         async for event in process_message_cli(
             room_id=room_id,
@@ -2423,7 +2423,7 @@ Brief / existing timeline:
             project_status="in_progress",
             skip_save=True,
             skip_resume=True,
-            cwd="D:/dan-workspace",
+            cwd=str(CLI_WORKSPACE),
         ):
             et = str(event.get("type") or "")
             if et in {"text", "reasoning", "tool_use", "result", "error"}:
@@ -3240,13 +3240,13 @@ Rules:
 """.strip()
 
     async def run_dan(prompt_text: str) -> str:
-        from app.agent.cli_runner import process_message_cli
+        from app.agent.cli_runner import process_message_cli, CLI_WORKSPACE
         chunks: list[str] = []
         async for event in process_message_cli(
             room_id=room_id, user_id=user_id, content=prompt_text,
             project_title=str(instruction.get("content_title") or "Revision"),
             project_description=text, project_status="in_progress",
-            skip_save=True, skip_resume=True, cwd="D:/dan-workspace",
+            skip_save=True, skip_resume=True, cwd=str(CLI_WORKSPACE),
         ):
             et = str(event.get("type") or "")
             if et in {"text", "reasoning", "tool_use", "result", "error"}:

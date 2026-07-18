@@ -7,9 +7,10 @@ DanCore.lnk と DanFrontend は Windows Update 等で PC が再起動した後�
 ダン本体(9000)・サンドボックス(8000)・フロントエンド(3000) を自動復活させるための要。
 """
 import os
+from pathlib import Path
 
-PYTHONW = r"C:\Program Files\Python310\pythonw.exe"
-WORK_DIR = r"D:\done"
+PYTHONW = "pythonw"
+WORK_DIR = str(Path(__file__).resolve().parent.parent)
 
 startup_dir = os.path.join(
     os.environ["APPDATA"],
