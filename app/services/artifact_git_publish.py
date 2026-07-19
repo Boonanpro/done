@@ -323,11 +323,11 @@ def _artifact_snapshot_dir(slug: str) -> Path:
     return ARTIFACT_BASES_DIR / slug
 
 
-def _snapshot_current_source(slug: str, wt: Path, paths: list[str]) -> None:
-    """Record the exact canonical source that a successful local edit produced."""
+def _snapshot_current_source(slug: str, paths: list[str]) -> None:
+    """Record the local source that the next publish must compare against."""
     snapshot = _artifact_snapshot_dir(slug)
     staged = snapshot.with_name(f".{snapshot.name}.staging")
-    _canonical_target_tree(wt, paths, staged)
+    _local_target_tree(paths, staged)
     if snapshot.exists():
         shutil.rmtree(snapshot)
     snapshot.parent.mkdir(parents=True, exist_ok=True)
@@ -359,7 +359,14 @@ def _guard_and_apply_local_changes(wt: Path, slug: str, paths: list[str]) -> str
                 "共有正本と異なるローカルコピーを自動で上書きすると巻き戻しになるため、"
                 "最新の共有正本を同期してからもう一度修正してください。"
             )
-        _snapshot_current_source(slug, wt, paths)
+        if canonical_is_new:
+            # A new artifact has no canonical base yet.  Keep an explicitly
+            # empty base so its first local files are applied below.
+            if snapshot.exists():
+                shutil.rmtree(snapshot)
+            snapshot.mkdir(parents=True, exist_ok=True)
+        else:
+            _snapshot_current_source(slug, paths)
 
     base = _tree_files(snapshot)
     local = _tree_files(local_root)
@@ -415,7 +422,7 @@ def synchronize_local_artifact_from_canonical(slug: str) -> dict:
             backup.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, backup)
             shutil.copy2(canonical, source)
-    _snapshot_current_source(slug, wt, paths)
+    _snapshot_current_source(slug, paths)
     return {"ok": True, "backup": str(backup_root)}
 
 
@@ -621,7 +628,7 @@ def _commit_and_push(wt: Path, slug: str, paths: list[str]) -> tuple[bool, str]:
 
         push = _git(["push", "origin", f"HEAD:{PUSH_BRANCH}"], cwd=wt, check=False, timeout=180)
         if push.returncode == 0:
-            _snapshot_current_source(slug, wt, paths)
+            _snapshot_current_source(slug, paths)
             return True, ""
         last_err = push.stdout
         _emit(f"[git-publish] push attempt {attempt} failed for {slug}; refetching")

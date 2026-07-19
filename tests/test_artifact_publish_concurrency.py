@@ -38,7 +38,7 @@ def test_conflicting_second_device_edit_is_rejected_without_overwrite(monkeypatc
 
     source.joinpath("page.tsx").write_text("first-device", encoding="utf-8")
     assert publisher._guard_and_apply_local_changes(canonical, "sample", paths) == ""
-    publisher._snapshot_current_source("sample", canonical, paths)
+    publisher._snapshot_current_source("sample", paths)
 
     source.joinpath("page.tsx").write_text("second-device", encoding="utf-8")
     (canonical / "src/app/artifacts/sample/page.tsx").write_text("first-device-newer", encoding="utf-8")
