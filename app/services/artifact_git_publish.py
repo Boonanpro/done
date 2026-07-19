@@ -387,6 +387,38 @@ def _guard_and_apply_local_changes(wt: Path, slug: str, paths: list[str]) -> str
     return ""
 
 
+def synchronize_local_artifact_from_canonical(slug: str) -> dict:
+    """Back up and refresh one machine-local copy from shared canonical source.
+
+    This is the one-time migration path for a machine that predates the
+    concurrency guard.  It never discards a local file: the complete old copy
+    is retained under ``_codex_backups`` before canonical files replace it.
+    """
+    paths = artifact_files_for_slug(slug)
+    if not paths:
+        return {"ok": False, "detail": "local artifact files not found"}
+    wt = _ensure_worktree(ARTIFACTS_REPO, ARTIFACTS_WORKTREE_DIR)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_root = PROJECT_ROOT / "_codex_backups" / f"artifact-source-sync-{stamp}" / slug
+    for rel in paths:
+        source = PROJECT_ROOT / rel
+        canonical = wt / _target_rel(rel)
+        if not canonical.exists():
+            return {"ok": False, "detail": f"canonical source missing: {_target_rel(rel)}"}
+        backup = backup_root / rel
+        if source.is_dir():
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, backup)
+            shutil.rmtree(source)
+            shutil.copytree(canonical, source)
+        elif source.is_file():
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, backup)
+            shutil.copy2(canonical, source)
+    _snapshot_current_source(slug, wt, paths)
+    return {"ok": True, "backup": str(backup_root)}
+
+
 # ---------------------------------------------------------------------------
 # Liveness check + DB status
 # ---------------------------------------------------------------------------
