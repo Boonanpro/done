@@ -100,6 +100,18 @@ float4 ps_blur_rect(VOut i) : SV_Target {
   float3 blurc = soft_blur(cuv, aff.xy);
   return float4(blurc, 1.0);
 }
+// A static redaction card. opt = RGB + opacity, with premultiplied-alpha output.
+float4 ps_solid_rect(VOut i) : SV_Target {
+  return float4(opt.rgb * opt.a, opt.a);
+}
+// Colour redaction following a SAM matte (tex1). The output is the final opaque
+// canvas colour, preserving clean anti-aliased edges while the object moves.
+float4 ps_solid_masked(VOut i) : SV_Target {
+  float m = saturate(tex1.Sample(smp, i.uv).r * opt.a);
+  float2 cuv = i.pos.xy / aff.zw;
+  float3 base = tex0.Sample(smp, cuv).rgb;
+  return float4(lerp(base, opt.rgb, m), 1.0);
+}
 float4 ps_popout_live(VOut i) : SV_Target {
   float3 msk = tex3.Sample(smp, i.uv).rgb;
   float ca = msk.r, bf = msk.g, drop = msk.b;
@@ -224,6 +236,8 @@ pub struct Compositor {
     ps_mosaic: ID3D11PixelShader,
     ps_blur_masked: ID3D11PixelShader,
     ps_blur_rect: ID3D11PixelShader,
+    ps_solid_rect: ID3D11PixelShader,
+    ps_solid_masked: ID3D11PixelShader,
     scratch: std::cell::RefCell<Option<ID3D11Texture2D>>,
     // freeze-frame stills: (source path, src ms) -> a private copy of the decoded frame.
     // A freeze clip re-requesting the SAME source time every frame kept fighting the
@@ -293,6 +307,12 @@ impl Compositor {
             let psb6 = compile("ps_blur_rect", "ps_5_0")?;
             let mut ps_blur_rect: Option<ID3D11PixelShader> = None;
             d3d.device.CreatePixelShader(bytes(&psb6), None, Some(&mut ps_blur_rect))?;
+            let psb7 = compile("ps_solid_rect", "ps_5_0")?;
+            let mut ps_solid_rect: Option<ID3D11PixelShader> = None;
+            d3d.device.CreatePixelShader(bytes(&psb7), None, Some(&mut ps_solid_rect))?;
+            let psb8 = compile("ps_solid_masked", "ps_5_0")?;
+            let mut ps_solid_masked: Option<ID3D11PixelShader> = None;
+            d3d.device.CreatePixelShader(bytes(&psb8), None, Some(&mut ps_solid_masked))?;
             let mut vs: Option<ID3D11VertexShader> = None;
             d3d.device.CreateVertexShader(bytes(&vsb), None, Some(&mut vs))?;
             let mut ps_plain: Option<ID3D11PixelShader> = None;
@@ -356,6 +376,8 @@ impl Compositor {
                 ps_mosaic: ps_mosaic.unwrap(),
                 ps_blur_masked: ps_blur_masked.unwrap(),
                 ps_blur_rect: ps_blur_rect.unwrap(),
+                ps_solid_rect: ps_solid_rect.unwrap(),
+                ps_solid_masked: ps_solid_masked.unwrap(),
                 scratch: std::cell::RefCell::new(None),
                 stills: std::cell::RefCell::new(Default::default()),
                 caption_stills: std::cell::RefCell::new(Default::default()),
@@ -792,6 +814,67 @@ impl Compositor {
         }
     }
 
+    /// Opaque or translucent colour redaction over a static rectangle.
+    pub fn apply_solid_rect(&self, d3d: &D3d, region: (f64, f64, f64, f64), color: [f32; 3], opacity: f64) -> Result<()> {
+        unsafe {
+            let (x, y, w, h) = region;
+            let cbv = Cb {
+                dst: [x as f32, y as f32, w as f32, h as f32], uvr: [0.0; 4], aff: [0.0; 4],
+                opt: [color[0], color[1], color[2], opacity.clamp(0.0, 1.0) as f32],
+            };
+            d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
+            d3d.ctx.PSSetShader(&self.ps_solid_rect, None);
+            d3d.ctx.Draw(4, 0);
+            Ok(())
+        }
+    }
+
+    /// Colour redaction following a SAM-tracked matte.
+    pub fn apply_solid_masked(
+        &self, d3d: &D3d, mask: &ID3D11Texture2D, mask_wh: (u32, u32),
+        dest: (f64, f64, f64, f64), crop: Option<(f64, f64, f64, f64)>,
+        color: [f32; 3], opacity: f64,
+    ) -> Result<()> {
+        unsafe {
+            {
+                let mut sc = self.scratch.borrow_mut();
+                if sc.is_none() {
+                    let mut desc = D3D11_TEXTURE2D_DESC::default(); self.canvas.GetDesc(&mut desc);
+                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32; desc.Usage = D3D11_USAGE_DEFAULT;
+                    desc.CPUAccessFlags = 0; desc.MiscFlags = 0;
+                    let mut t: Option<ID3D11Texture2D> = None; d3d.device.CreateTexture2D(&desc, None, Some(&mut t))?; *sc = t;
+                }
+                d3d.ctx.CopyResource(sc.as_ref().unwrap(), &self.canvas);
+            }
+            let mut srv0: Option<ID3D11ShaderResourceView> = None;
+            let mut srv1: Option<ID3D11ShaderResourceView> = None;
+            d3d.device.CreateShaderResourceView(self.scratch.borrow().as_ref().unwrap(), None, Some(&mut srv0))?;
+            d3d.device.CreateShaderResourceView(mask, None, Some(&mut srv1))?;
+            let mut dst = dest;
+            let (mut u0, mut v0, mut uw, mut vh) = (0.0f32, 0.0f32, 1.0f32, 1.0f32);
+            let bw = dst.2 * self.width as f64; let bh = dst.3 * self.height as f64;
+            if bw > 1.0 && bh > 1.0 {
+                let sa = mask_wh.0 as f64 / mask_wh.1.max(1) as f64; let da = bw / bh;
+                if sa > da { let keep = da / sa; u0 = ((1.0 - keep) / 2.0) as f32; uw = keep as f32; }
+                else { let keep = sa / da; v0 = ((1.0 - keep) / 2.0) as f32; vh = keep as f32; }
+            }
+            if let Some((l, t, r, b)) = crop {
+                u0 += uw * l as f32; v0 += vh * t as f32;
+                uw *= (1.0 - l - r).max(0.02) as f32; vh *= (1.0 - t - b).max(0.02) as f32;
+                dst = (dst.0 + dst.2 * l, dst.1 + dst.3 * t, dst.2 * (1.0 - l - r).max(0.02), dst.3 * (1.0 - t - b).max(0.02));
+            }
+            let cbv = Cb {
+                dst: [dst.0 as f32, dst.1 as f32, dst.2 as f32, dst.3 as f32], uvr: [u0, v0, uw, vh],
+                aff: [0.0, 0.0, self.width as f32, self.height as f32],
+                opt: [color[0], color[1], color[2], opacity.clamp(0.0, 1.0) as f32],
+            };
+            d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
+            d3d.ctx.PSSetShaderResources(0, Some(&[srv0, srv1]));
+            d3d.ctx.PSSetShader(&self.ps_solid_masked, None);
+            d3d.ctx.Draw(4, 0);
+            Ok(())
+        }
+    }
 }
 
 /// Forward mapping SOURCE-frame box -> CANVAS box (the cover-crop the base draw uses).

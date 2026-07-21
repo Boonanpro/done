@@ -1604,12 +1604,30 @@ pub fn set_freeze_still(raw: &mut Value, id: &str, rel: &str) {
     });
 }
 
-/// Set a clip's style string (effect clips: gaussian / mosaic).
+/// Set a clip's style string (effect clips: gaussian / mosaic / solid).
 pub fn set_style(raw: &mut Value, id: &str, style: &str) {
     for_each_clip(raw, |c| {
         if c.get("id").and_then(|v| v.as_str()) == Some(id) {
             c["style"] = Value::from(style);
         }
+    });
+}
+
+/// Update optional region-effect controls. `None` removes a field so legacy defaults
+/// remain stable in saved documents.
+pub fn set_effect_options(
+    raw: &mut Value, id: &str, strength: Option<f64>, color: Option<String>, opacity: Option<f64>,
+) {
+    for_each_clip(raw, |c| {
+        if c.get("id").and_then(|v| v.as_str()) != Some(id) { return; }
+        let set = |obj: &mut Value, key: &str, value: Option<Value>| {
+            if let Some(map) = obj.as_object_mut() {
+                match value { Some(v) => { map.insert(key.into(), v); }, None => { map.remove(key); } }
+            }
+        };
+        set(c, "effect_strength", strength.map(Value::from));
+        set(c, "effect_color", color.clone().map(Value::from));
+        set(c, "effect_opacity", opacity.map(Value::from));
     });
 }
 
