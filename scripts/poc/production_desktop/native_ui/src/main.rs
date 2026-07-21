@@ -111,6 +111,10 @@ struct FrameOut {
     comp_max: f32,  // worst compose over the last second
     gap_max: f32,   // worst wall-clock gap between published frames (what the eye sees)
     quality: &'static str,
+    /// Caption-owner generation used to compose these pixels. WebView may reveal a
+    /// live caption only after this matches the current generation, preventing its
+    /// new text from being drawn over an older GPU-caption frame.
+    caption_epoch: u64,
 }
 
 const THUMB_BUCKET_S: f64 = 5.0; // filmstrip granularity: one real frame per 5s of source
@@ -132,6 +136,7 @@ struct Shared {
     // min timeline time affected by pending edits (f64 bits; INFINITY = untouched).
     // The producer consumes it to invalidate only the dirty suffix of the frame cache.
     dirty_from_bits: AtomicU64,
+    caption_epoch: AtomicU64,
     req: Mutex<Req>,
     frame: Mutex<FrameOut>,
     clock_bits: AtomicU64,
@@ -1578,7 +1583,7 @@ fn native_caption_ids(doc: &model::Doc, t: f64) -> std::collections::HashSet<Str
     let mut out = std::collections::HashSet::new();
     let mut promote = |caps: &mut Vec<&model::Clip>, out: &mut std::collections::HashSet<String>| {
         for c in caps.drain(..) {
-            if caption_live::get(&c.id).is_some() {
+            if caption_live::is_active(&c.id) {
                 continue;
             }
             let text = c.text.clone().unwrap_or_default();
@@ -2242,6 +2247,7 @@ fn media_thread(shared: Arc<Shared>) {
         let mut last_pub: Option<Instant> = None;
         let mut warm_done = false;
         let mut last_doc_ptr: usize = 0;
+        let mut last_caption_epoch = u64::MAX;
         let mut settle = Instant::now(); // last user interaction (scrub/edit/seek)
         let mut edit_cooldown_until = Instant::now();
         let mut scrub_win: Vec<f32> = Vec::new();
@@ -2298,6 +2304,16 @@ fn media_thread(shared: Arc<Shared>) {
                 }
             }
             let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
+            let caption_epoch = shared.caption_epoch.load(Ordering::Relaxed);
+            if caption_epoch != last_caption_epoch {
+                // A live/pending caption switched owner. Cached/ring pixels may contain
+                // its previous GPU render, so neither may be presented again.
+                fcache.clear();
+                shared.ring.lock().unwrap().clear();
+                shared.ring_gen.fetch_add(1, Ordering::Relaxed);
+                shared.ring_level.store(0, Ordering::Relaxed);
+                last_caption_epoch = caption_epoch;
+            }
             let ptr = Arc::as_ptr(&doc) as usize;
             let timeline_fps = doc.seq.frame_rate.filter(|fps| fps.is_finite() && *fps > 1.0).unwrap_or(30.0);
             let frame_step = 1.0 / timeline_fps;
@@ -2389,6 +2405,7 @@ fn media_thread(shared: Arc<Shared>) {
                             f.t = r.t;
                             f.eff_t = eff;
                             f.quality = "proxy";
+                            f.caption_epoch = caption_epoch;
                         }
                     }
                 }
@@ -2573,6 +2590,7 @@ fn media_thread(shared: Arc<Shared>) {
                     f.eff_t = eff;
                     f.comp_ms = 0.0;
                     f.quality = "proxy";
+                    f.caption_epoch = caption_epoch;
                     scrub_exact = true;
                     last_gen = r.gen;
                     last_t = t;
@@ -2605,6 +2623,7 @@ fn media_thread(shared: Arc<Shared>) {
                             f.comp_max = comp_hist.iter().map(|(_, v)| *v).fold(0.0, f32::max);
                             last_pub = Some(now);
                             f.quality = "proxy";
+                            f.caption_epoch = caption_epoch;
                         }
                         let _ = used;
                     }
@@ -2645,6 +2664,7 @@ fn media_thread(shared: Arc<Shared>) {
                         f.t = t;
                         f.eff_t = eff;
                         f.quality = "proxy";
+                        f.caption_epoch = caption_epoch;
                         scrub_exact = true;
                         std::thread::sleep(std::time::Duration::from_millis(2));
                         continue;
@@ -2662,6 +2682,7 @@ fn media_thread(shared: Arc<Shared>) {
                         f.t = t;
                         f.eff_t = eff;
                         f.quality = "proxy";
+                        f.caption_epoch = caption_epoch;
                     } else {
                         scrub_exact = true; // failed — stop hammering
                     }
@@ -2891,6 +2912,14 @@ struct Library {
     started: bool,
 }
 
+/// Short-lived IME/editing state. It is intentionally separate from the document: a
+/// Japanese conversion may change several times before the user has committed text.
+/// `clip.text` remains the only persisted caption value.
+struct CaptionDraft {
+    text: String,
+    commit_at: Instant,
+}
+
 struct App {
     screen: Screen,
     lib: Library,
@@ -2899,6 +2928,7 @@ struct App {
     lib_gen_stash: Option<serde_json::Value>,
     marquee: Option<egui::Rect>,
     insp_text: String,
+    caption_drafts: std::collections::HashMap<String, CaptionDraft>,
     /// Text editors rendered on the previous frame. Numeric drags and sliders may keep
     /// egui focus, but only these IDs are allowed to suppress timeline shortcuts.
     text_focus_ids: Vec<egui::Id>,
@@ -3067,10 +3097,12 @@ impl App {
                 comp_max: 0.0,
                 gap_max: 0.0,
                 quality: "proxy",
+                caption_epoch: 0,
             }),
             clock_bits: AtomicU64::new(0f64.to_bits()),
             underruns: AtomicU64::new(0),
             dirty_from_bits: AtomicU64::new(f64::INFINITY.to_bits()),
+            caption_epoch: AtomicU64::new(0),
             ring_level: std::sync::atomic::AtomicUsize::new(0),
             ring: Mutex::new(Default::default()),
             ring_gen: AtomicU64::new(0),
@@ -3111,6 +3143,7 @@ impl App {
             lib_gen_stash: None,
             marquee: None,
             insp_text: String::new(),
+            caption_drafts: Default::default(),
             text_focus_ids: Vec::new(),
             blur_mode: false,
             blur_drag: None,
@@ -4082,9 +4115,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 if c.text.is_none() || c.asset_id.is_some() || c.region.is_some() {
                     continue;
                 }
-                let text = caption_live::get(&c.id)
-                    .or_else(|| c.text.clone())
-                    .unwrap_or_default();
+                let text = self.caption_display_text(c);
                 if text.trim().is_empty() {
                     continue;
                 }
@@ -4099,6 +4130,16 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
         }
         serde_json::Value::Array(out)
+    }
+
+    /// The value every UI surface should show while a caption is being edited. The
+    /// draft is an IME transaction only; once it settles it is written to `clip.text`.
+    fn caption_display_text(&self, clip: &model::Clip) -> String {
+        self.caption_drafts
+            .get(&clip.id)
+            .map(|draft| draft.text.clone())
+            .or_else(|| clip.text.clone())
+            .unwrap_or_default()
     }
 
     fn sync_caption_web(&mut self, frame: &eframe::Frame, rect: egui::Rect, visible: bool) {
@@ -4172,6 +4213,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             size: wry::dpi::LogicalSize::new(rect.width() as f64, rect.height() as f64).into(),
         };
         let _ = web.set_bounds(bounds);
+        // Do not let a new WebView caption appear over pixels composed under the
+        // previous owner. The media thread publishes this generation only after it has
+        // rebuilt the current frame with the matching GPU/WebView ownership plan.
+        let wanted_epoch = self.shared.caption_epoch.load(Ordering::Relaxed);
+        let presented_epoch = self.shared.frame.lock().unwrap().caption_epoch;
+        if presented_epoch != wanted_epoch {
+            return;
+        }
         let web_ready = self.caption_web_ready.load(Ordering::Relaxed);
         if (sig != self.caption_web_sig || !web_ready) && captions.is_some() {
             let payload = serde_json::json!({
@@ -4205,12 +4254,56 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         }
     }
 
-    /// Update only the selected caption's in-memory text and start its real bundled-font
-    /// raster immediately. This is the keystroke path: no document clone/rebuild, save,
-    /// network request, disk PNG, or video-cache invalidation.
-    fn preview_caption_text(&mut self, clip_id: &str, text: String) {
-        caption_live::set(clip_id, text);
+    /// Advance caption ownership. The producer drops every cached/ring frame from the
+    /// prior generation before it publishes this one, so GPU and WebView never paint the
+    /// same caption at once.
+    fn bump_caption_epoch(&mut self) {
+        self.shared.caption_epoch.fetch_add(1, Ordering::Relaxed);
         self.caption_web_sig = 0;
+        self.push_req(false);
+    }
+
+    /// Stage an IME edit without rebuilding the whole timeline on each composition
+    /// change. The WebView is the temporary visual owner; `clip.text` is committed
+    /// after the user pauses, changes focus, or explicitly saves the dialog.
+    fn stage_caption_text(&mut self, clip_id: &str, text: String) {
+        let first_change = !self.caption_drafts.contains_key(clip_id);
+        self.caption_drafts.insert(
+            clip_id.to_string(),
+            CaptionDraft {
+                text,
+                commit_at: Instant::now() + std::time::Duration::from_millis(350),
+            },
+        );
+        caption_live::activate(clip_id);
+        // The document did not change, so invalidate only the small overlay payload.
+        self.caption_web_sig = 0;
+        if first_change {
+            self.bump_caption_epoch();
+        }
+    }
+
+    fn commit_caption_drafts(&mut self, only: Option<&str>) {
+        let now = Instant::now();
+        let due: Vec<(String, String)> = self
+            .caption_drafts
+            .iter()
+            .filter(|(id, draft)| only == Some(id.as_str()) || only.is_none() && draft.commit_at <= now)
+            .map(|(id, draft)| (id.clone(), draft.text.clone()))
+            .collect();
+        for (id, text) in due {
+            self.caption_drafts.remove(&id);
+            self.apply_edit(false, move |raw| edits::set_text(raw, &id, &text));
+            // Keep WebView ownership until caption_cache_pass sees a PNG for this
+            // committed document value, then it performs the atomic GPU handoff.
+        }
+    }
+
+    fn flush_caption_drafts(&mut self) {
+        let ids: Vec<String> = self.caption_drafts.keys().cloned().collect();
+        for id in ids {
+            self.commit_caption_drafts(Some(&id));
+        }
     }
 
     /// Designed captions: when the caption set changes, ask the server for the SAME
@@ -4220,6 +4313,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         use std::hash::{Hash, Hasher};
         let mut specs: Vec<(String, serde_json::Value)> = Vec::new();
         let mut missing_cache = false;
+        let mut completed_live = Vec::new();
         let tracks = self.doc.raw.get(0).and_then(|c| c.get("timeline")).and_then(|t| t.get("sequence")).and_then(|sq| sq.get("tracks")).and_then(|t| t.as_array());
         if let Some(tracks) = tracks {
             for tr in tracks {
@@ -4251,6 +4345,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     let png = std::path::Path::new(&self.doc.asset_dir).join("caption-cache").join(format!("{key}.png"));
                     if !png.exists() || std::fs::metadata(&png).map(|m| m.len() == 0).unwrap_or(true) {
                         missing_cache = true;
+                    } else if caption_live::is_active(&id) && !self.caption_drafts.contains_key(&id) {
+                        completed_live.push(id.clone());
                     }
                     specs.push((id, spec));
                 }
@@ -4264,6 +4360,15 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let sig = h.finish();
         if specs.is_empty() {
             return;
+        }
+        // Commit handoff only after the PNG for the committed live text exists. The
+        // epoch gate in sync_caption_web keeps WebView visible until the GPU frame for
+        // this new owner has actually been published.
+        if !completed_live.is_empty() {
+            for id in completed_live {
+                caption_live::clear(&id);
+            }
+            self.bump_caption_epoch();
         }
         if sig == self.cap_sig {
             if !missing_cache {
@@ -5275,7 +5380,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     if !multi {
                     if self.insp_for != id {
                         self.insp_for = id.clone();
-                        self.insp_text = clip.text.clone().unwrap_or_default();
+                        self.insp_text = self.caption_display_text(&clip);
                     }
                     ui.label(egui::RichText::new("本文").strong());
                     let r = ui.add(
@@ -5289,19 +5394,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                     if r.changed() {
                         let txt = self.insp_text.clone();
-                        self.preview_caption_text(&id, txt);
-                        // Only the caption texture changes while typing. The timeline
-                        // document is committed once when the field loses focus.
+                        self.stage_caption_text(&id, txt);
+                        // Keep IME composition local. The document/cache work starts
+                        // only after a short idle period or a focus transition.
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
                     }
                     if r.lost_focus() {
-                        if let Some(txt) = caption_live::get(&id) {
-                            let cid = id.clone();
-                            self.apply_edit(false, move |raw| edits::set_text(raw, &cid, &txt));
-                            caption_live::clear(&id);
-                        } else {
-                            self.pending_undo = None;
-                        }
+                        self.commit_caption_drafts(Some(&id));
                     }
                     } else {
                         ui.label(egui::RichText::new(format!("{} captions", selected.len())).weak().small());
@@ -6544,7 +6643,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
     /// how the compositor places the same PNG, so the box matches the pixels. None
     /// until the PNG lands (caption_cache_pass renders it in the background).
     fn caption_png_box(&mut self, c: &model::Clip) -> Option<(f64, f64, f64, f64)> {
-        let text = caption_live::get(&c.id).or_else(|| c.text.clone()).unwrap_or_default();
+        let text = c.text.clone().unwrap_or_default();
         if text.trim().is_empty() {
             return None;
         }
@@ -7723,7 +7822,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         color,
                     );
                     if r.width() > 22.0 {
-                        let txt = c.text.clone().unwrap_or_default().replace(chr_nl(), " ");
+                        let txt = self.caption_display_text(c).replace(chr_nl(), " ");
                         let max_chars = ((r.width() - 10.0) / 10.0) as usize;
                         let shown: String = txt.chars().take(max_chars.max(1)).collect();
                         p.text(
@@ -9997,22 +10096,18 @@ impl eframe::App for App {
             }
             if text_changed {
                 let text = buf.clone();
-                self.preview_caption_text(&cid, text);
+                self.stage_caption_text(&cid, text);
                 ctx.request_repaint_after(std::time::Duration::from_millis(16));
             }
             if save {
-                if let Some(text) = caption_live::get(&cid) {
-                    let id2 = cid.clone();
-                    self.apply_edit(false, move |raw| edits::set_text(raw, &id2, &text));
-                    caption_live::clear(&cid);
-                } else {
-                    self.pending_undo = None;
-                }
+                self.commit_caption_drafts(Some(&cid));
                 self.caption_edit = None;
             } else if cancel {
                 self.pending_undo = None;
-                caption_live::clear(&cid);
-                self.caption_web_sig = 0;
+                self.caption_drafts.remove(&cid);
+                self.restore(original);
+                caption_live::activate(&cid);
+                self.bump_caption_epoch();
                 self.caption_edit = None;
             } else {
                 self.caption_edit = Some((cid, buf, original));
@@ -10050,7 +10145,20 @@ impl eframe::App for App {
                     }
                 });
         }
+        // Idle drafts are the only caption edits that take the expensive document,
+        // media-cache and PNG-cache paths. This runs after all text widgets have seen
+        // this frame's IME events, never in the keystroke handler itself.
+        self.commit_caption_drafts(None);
         ctx.request_repaint();
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // A close can happen before the idle debounce expires. Persist the completed
+        // input transaction rather than silently discarding the final IME text.
+        self.flush_caption_drafts();
+        if let Err(e) = edits::save(&self.doc.raw, &self.doc.contents_path) {
+            eprintln!("save on exit: {e:#}");
+        }
     }
 }
 
