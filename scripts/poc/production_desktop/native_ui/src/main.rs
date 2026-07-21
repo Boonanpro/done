@@ -813,6 +813,10 @@ fn compose(
             if let Some(rg) = c.region_at(t_fx) {
                 let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
                 let is_mosaic = style.contains("mosaic");
+                let is_solid = style == "solid";
+                let strength = c.effect_strength.unwrap_or(if is_mosaic { 14.0 } else { 16.0 }).clamp(2.0, 64.0);
+                let opacity = c.effect_opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+                let solid = effect_rgb(c.effect_color.as_deref().unwrap_or("#000000"));
                 // SAM tracked blur: the baked mask video follows the object; until the
                 // bake lands (or outside its window) the static stand-in below applies.
                 let mut applied = false;
@@ -860,17 +864,12 @@ fn compose(
                             // the static stand-in
                             let tex = vs.bgra.clone();
                             let wh = (vs.width, vs.height);
-                            if comp
-                                .apply_blur_masked(
-                                    d3d,
-                                    &tex,
-                                    wh,
-                                    (bb.x, bb.y, bb.width, bb.height),
-                                    bcrop,
-                                    16.0, // soft-blur radius px
-                                )
-                                .is_ok()
-                            {
+                            let rendered = if is_solid {
+                                comp.apply_solid_masked(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), bcrop, solid, opacity)
+                            } else {
+                                comp.apply_blur_masked(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), bcrop, strength)
+                            };
+                            if rendered.is_ok() {
                                 applied = true;
                                 used.push(mpath);
                             }
@@ -881,9 +880,11 @@ fn compose(
                     // a clip WITH a tracked bake never shows the blocky grid: style only
                     // picks the look for pure static region clips
                     if is_mosaic && c.blur_track.is_none() {
-                        let _ = comp.apply_mosaic(d3d, rg, 14.0);
+                        let _ = comp.apply_mosaic(d3d, rg, strength);
+                    } else if is_solid {
+                        let _ = comp.apply_solid_rect(d3d, rg, solid, opacity);
                     } else {
-                        let _ = comp.apply_blur_rect(d3d, rg, 16.0);
+                        let _ = comp.apply_blur_rect(d3d, rg, strength);
                     }
                 }
             }
@@ -1371,6 +1372,12 @@ fn hex_color32(s: &str, default: egui::Color32) -> egui::Color32 {
         Ok(v) => egui::Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8),
         Err(_) => default,
     }
+}
+
+/// Hex colour for GPU effect shaders, with black as the safe redaction fallback.
+fn effect_rgb(s: &str) -> [f32; 3] {
+    let c = hex_color32(s, egui::Color32::BLACK);
+    [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0]
 }
 
 fn color32_hex(c: egui::Color32) -> String {
@@ -4712,7 +4719,12 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let same_caption = selected
             .iter()
             .all(|(c, k)| k == "caption" || (c.text.is_some() && c.asset_id.is_none() && c.region.is_none()));
-        if multi && !same_media && !same_caption {
+        let same_region_effect = selected.iter().all(|(c, _)| {
+            c.region.is_some()
+                && c.asset_id.is_none()
+                && c.style.as_ref().and_then(|v| v.as_str()) != Some("note")
+        });
+        if multi && !same_media && !same_caption && !same_region_effect {
             return;
         }
         let (clip, kind) = selected[0].clone();
@@ -4769,11 +4781,74 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                     return;
                 }
+                // ---- multi-select region effects: apply one set of controls to all ----
+                if multi && same_region_effect {
+                    ui.label(egui::RichText::new("範囲エフェクトを一括編集").strong());
+                    ui.label(egui::RichText::new("変更は選択中の全クリップに適用されます。").small().weak());
+                    let cur = clip.style.as_ref().and_then(|v| v.as_str()).unwrap_or("mosaic").to_string();
+                    ui.horizontal(|ui| {
+                        for (label, val) in [("モザイク", "mosaic"), ("ぼかし", "gaussian"), ("単色", "solid")] {
+                            let all_same = selected.iter().all(|(c, _)| c.style.as_ref().and_then(|v| v.as_str()) == Some(val));
+                            if ui.selectable_label(all_same, label).clicked() {
+                                let ids = edit_ids.clone();
+                                self.apply_edit(true, move |raw| {
+                                    for cid in &ids { edits::set_style(raw, cid, val); }
+                                });
+                                self.push_req(false);
+                            }
+                        }
+                    });
+                    let is_solid = cur == "solid";
+                    if !is_solid {
+                        let mut strength = clip.effect_strength.unwrap_or(if cur.contains("mosaic") { 14.0 } else { 16.0 }) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label(if cur.contains("mosaic") { "粗さ" } else { "ぼかし強度" });
+                            let resp = ui.add(egui::Slider::new(&mut strength, 2.0..=64.0).suffix(" px"));
+                            if resp.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if resp.changed() {
+                                let ids = edit_ids.clone(); let value = strength as f64;
+                                self.apply_edit(false, move |raw| {
+                                    for cid in &ids { edits::set_effect_options(raw, cid, Some(value), None, None); }
+                                });
+                            }
+                        });
+                    } else {
+                        let mut colour = hex_color32(clip.effect_color.as_deref().unwrap_or("#000000"), egui::Color32::BLACK);
+                        let mut opacity = clip.effect_opacity.unwrap_or(1.0) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label("色");
+                            if ui.color_edit_button_srgba(&mut colour).changed() {
+                                let ids = edit_ids.clone(); let hex = color32_hex(colour);
+                                self.apply_edit(true, move |raw| {
+                                    for cid in &ids { edits::set_effect_options(raw, cid, None, Some(hex.clone()), None); }
+                                });
+                            }
+                            ui.label(egui::RichText::new(color32_hex(colour)).weak());
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("不透明度");
+                            let resp = ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).show_value(false));
+                            ui.label(format!("{:0}%", opacity * 100.0));
+                            if resp.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if resp.changed() {
+                                let ids = edit_ids.clone(); let value = opacity as f64;
+                                self.apply_edit(false, move |raw| {
+                                    for cid in &ids { edits::set_effect_options(raw, cid, None, None, Some(value)); }
+                                });
+                            }
+                        });
+                    }
+                    return;
+                }
                 if !multi && clip.region.is_some() && clip.asset_id.is_none() {
                     ui.label(egui::RichText::new("種類").strong());
                     let cur = clip.style.as_ref().and_then(|v| v.as_str()).unwrap_or("mosaic").to_string();
                     ui.horizontal(|ui| {
-                        for (label, val) in [("モザイク", "mosaic"), ("ぼかし", "gaussian")] {
+                        for (label, val) in [
+                            ("モザイク", "mosaic"),
+                            ("ぼかし", "gaussian"),
+                            ("単色", "solid"),
+                        ] {
                             if ui.selectable_label(cur.contains(val), label).clicked() {
                                 let cid = id.clone();
                                 self.apply_edit(true, move |raw| edits::set_style(raw, &cid, val));
@@ -4781,7 +4856,43 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             }
                         }
                     });
-                    ui.label(egui::RichText::new("※プレビューはモザイク表示。書き出しで指定の種類が適用されます").small().weak());
+                    let is_solid = cur == "solid";
+                    let mut strength = clip.effect_strength.unwrap_or(if cur.contains("mosaic") { 14.0 } else { 16.0 }) as f32;
+                    if !is_solid {
+                        let label = if cur.contains("mosaic") { "粗さ" } else { "ぼかし強度" };
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            let resp = ui.add(egui::Slider::new(&mut strength, 2.0..=64.0).suffix(" px"));
+                            if resp.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if resp.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| edits::set_effect_options(raw, &cid, Some(strength as f64), None, None));
+                            }
+                        });
+                    } else {
+                        let mut colour = hex_color32(clip.effect_color.as_deref().unwrap_or("#000000"), egui::Color32::BLACK);
+                        let mut opacity = clip.effect_opacity.unwrap_or(1.0) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label("色");
+                            if ui.color_edit_button_srgba(&mut colour).changed() {
+                                let cid = id.clone();
+                                let hex = color32_hex(colour);
+                                self.apply_edit(true, move |raw| edits::set_effect_options(raw, &cid, None, Some(hex), None));
+                            }
+                            ui.label(egui::RichText::new(color32_hex(colour)).weak());
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("不透明度");
+                            let resp = ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).show_value(false));
+                            ui.label(format!("{:0}%", opacity * 100.0));
+                            if resp.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if resp.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| edits::set_effect_options(raw, &cid, None, None, Some(opacity as f64)));
+                            }
+                        });
+                    }
+                    ui.label(egui::RichText::new("単色は静的範囲にもAI追従にも使えます。ぼかし・モザイクは強度を調整できます。").small().weak());
                     ui.add_space(6.0);
                     // ---- SAM tracked blur: the rectangle picks the OBJECT; the baked
                     // mask then follows it (pixel silhouette), replacing the static rect

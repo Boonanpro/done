@@ -46,6 +46,13 @@ pub struct Clip {
     pub crop: Option<serde_json::Value>,
     #[serde(default)]
     pub region: Option<serde_json::Value>,
+    // Region-effect controls. Missing values preserve the original M2 behaviour.
+    #[serde(default)]
+    pub effect_strength: Option<f64>,
+    #[serde(default)]
+    pub effect_color: Option<String>,
+    #[serde(default)]
+    pub effect_opacity: Option<f64>,
     // SAM tracked-blur bake bound to this region-effect clip:
     // {asset_id, key, bake_start} — mask video = {asset_dir}/blur-cache/{key}.mask.mp4
     #[serde(default)]
