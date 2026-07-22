@@ -1432,18 +1432,28 @@ pub fn freeze_frame_with_still(
     }
     // split EVERY clip straddling t (all lanes): a straddler that merely shifted kept
     // playing UNDER the frozen span (video + still at once). Strict 映像→静止画→映像.
-    let mut straddlers: Vec<String> = Vec::new();
-    if let Some(tracks) = tracks_ref(raw) {
-        for tr in tracks {
-            for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
-                let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
-                if t > ts + 0.05 && t < te - 0.05 {
-                    straddlers.push(sid(c));
+    let is_main_lane = tracks_ref(raw)
+        .and_then(|tracks| tracks.iter().position(|tr| tr.get("type").and_then(|v| v.as_str()) != Some("audio")))
+        == track_idx;
+    let ids = if is_main_lane {
+        // The main storyline owns the global timeline clock: preserve its ripple
+        // behaviour, including splitting clips which straddle the inserted still.
+        let mut straddlers: Vec<String> = Vec::new();
+        if let Some(tracks) = tracks_ref(raw) {
+            for tr in tracks {
+                for c in tr.get("clips").and_then(|c| c.as_array()).unwrap_or(&vec![]) {
+                    let (ts, te) = (f(c, "timeline_start"), f(c, "timeline_end"));
+                    if t > ts + 0.05 && t < te - 0.05 {
+                        straddlers.push(sid(c));
+                    }
                 }
             }
         }
-    }
-    let ids = expand_links(raw, &straddlers);
+        expand_links(raw, &straddlers)
+    } else {
+        // A PiP/overlay freeze is local: split only this clip and its linked audio.
+        expand_links(raw, &[id.to_string()])
+    };
     split_clips(raw, &ids, t, salt);
     if back > 1e-6 {
         let group = expand_links(raw, &[id.to_string()]);
@@ -1458,7 +1468,63 @@ pub fn freeze_frame_with_still(
             }
         }
     }
-    ripple_open(raw, t, dur);
+    let mut freeze_track_idx = track_idx;
+    if is_main_lane {
+        ripple_open(raw, t, dur);
+    } else {
+        let right_prefixes: Vec<String> = ids.iter().map(|cid| format!("{cid}__ns_{salt}_")).collect();
+        // Shift only this clip's continuation (and its linked audio), never the main
+        // lane or unrelated overlays. If that would collide, use an empty lane above.
+        let has_room = match (tracks_ref(raw), track_idx) {
+            (Some(tracks), Some(ti)) => tracks[ti]
+                .get("clips")
+                .and_then(|v| v.as_array())
+                .map(|clips| {
+                    let moved: Vec<&Value> = clips
+                        .iter()
+                        .filter(|c| right_prefixes.iter().any(|p| sid(c).starts_with(p)))
+                        .collect();
+                    !clips.iter().any(|other| {
+                        if right_prefixes.iter().any(|p| sid(other).starts_with(p)) {
+                            return false;
+                        }
+                        moved.iter().any(|moved| {
+                            f(other, "timeline_start") < f(moved, "timeline_end") + dur - 1e-6
+                                && f(other, "timeline_end") > f(moved, "timeline_start") + dur + 1e-6
+                        })
+                    })
+                })
+                .unwrap_or(false),
+            _ => false,
+        };
+        if has_room {
+            for c in clips_iter_mut(raw) {
+                let cid = sid(c);
+                if right_prefixes.iter().any(|p| cid.starts_with(p)) {
+                    setf(c, "timeline_start", f(c, "timeline_start") + dur);
+                    setf(c, "timeline_end", f(c, "timeline_end") + dur);
+                }
+            }
+        } else if let (Some(tracks), Some(ti)) = (tracks_mut(raw), track_idx) {
+            let clear = (ti + 1..tracks.len()).find(|&i| {
+                tracks[i].get("type").and_then(|v| v.as_str()) != Some("audio")
+                    && !tracks[i].get("locked").and_then(|v| v.as_bool()).unwrap_or(false)
+                    && !tracks[i]
+                        .get("clips")
+                        .and_then(|v| v.as_array())
+                        .map(|clips| clips.iter().any(|c| f(c, "timeline_start") < t + dur - 1e-6 && f(c, "timeline_end") > t + 1e-6))
+                        .unwrap_or(false)
+            });
+            freeze_track_idx = Some(clear.unwrap_or_else(|| {
+                let at = ti + 1;
+                tracks.insert(at, serde_json::json!({
+                    "id": format!("freeze_overlay_{salt}"), "type": "overlay",
+                    "label": "Freeze frame", "clips": []
+                }));
+                at
+            }));
+        }
+    }
     let mut clip = template.unwrap_or_else(|| serde_json::json!({"asset_id": aid}));
     clip["id"] = Value::from(format!("fz_{salt}_{}", &aid[..8.min(aid.len())]));
     setf(&mut clip, "timeline_start", t);
@@ -1473,7 +1539,7 @@ pub fn freeze_frame_with_still(
             o.insert("freeze_still".into(), Value::from(p));
         }
     }
-    if let (Some(tracks), Some(ti)) = (tracks_mut(raw), track_idx) {
+    if let (Some(tracks), Some(ti)) = (tracks_mut(raw), freeze_track_idx) {
         if let Some(cs) = tracks[ti].get_mut("clips").and_then(|c| c.as_array_mut()) {
             cs.push(clip);
         }
@@ -1999,6 +2065,7 @@ pub fn place_asset(
         "id": vid_id.clone(),
         "asset_id": asset_id,
         "track": target_kind,
+        "fit": "contain",
         "source_start": 0.0,
         "source_end": dur,
         "timeline_start": t,

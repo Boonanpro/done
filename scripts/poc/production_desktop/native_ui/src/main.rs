@@ -603,6 +603,25 @@ fn draw_plain_pip(
     Ok(Some(p2))
 }
 
+/// Fit the complete source into a timeline box without cropping or distortion.
+/// Coordinates are normalized to the fixed preview canvas, whose pixels are not
+/// square in normalized space for portrait projects.
+fn contain_box(
+    dst: (f64, f64, f64, f64),
+    src_wh: (u32, u32),
+) -> (f64, f64, f64, f64) {
+    if src_wh.0 == 0 || src_wh.1 == 0 || dst.2 <= 0.0 || dst.3 <= 0.0 {
+        return dst;
+    }
+    let (bw, bh) = (dst.2 * CANVAS_W as f64, dst.3 * CANVAS_H as f64);
+    let scale = (bw / src_wh.0 as f64).min(bh / src_wh.1 as f64);
+    let (dw, dh) = (
+        (src_wh.0 as f64 * scale) / CANVAS_W as f64,
+        (src_wh.1 as f64 * scale) / CANVAS_H as f64,
+    );
+    (dst.0 + (dst.2 - dw) / 2.0, dst.1 + (dst.3 - dh) / 2.0, dw, dh)
+}
+
 /// Throttled diagnostics for the freeze paths (at most one line per 500ms) — cheap
 /// enough to stay on permanently; %TEMP%/native_ui.log captures real user sessions.
 /// Within ±1.2s of any freeze clip (diagnostic scope guard).
@@ -1278,7 +1297,9 @@ fn compose(
                         wh.0, wh.1, b.x, b.y, b.width, b.height
                     );
                 }
-                comp.draw_cropped_opacity(d3d, &tex, wh, (b.x, b.y, b.width, b.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
+                let dst = (b.x, b.y, b.width, b.height);
+                let dst = if c.contains_in_box() { contain_box(dst, wh) } else { dst };
+                comp.draw_cropped_opacity(d3d, &tex, wh, dst, !c.stretches_to_box() && !c.contains_in_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
                 used.push(path);
                 continue;
             }
@@ -1316,7 +1337,9 @@ fn compose(
                     wh.0, wh.1, b.x, b.y, b.width, b.height
                 );
             }
-            comp.draw_cropped_opacity(d3d, &tex, wh, (b.x, b.y, b.width, b.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
+            let dst = (b.x, b.y, b.width, b.height);
+            let dst = if c.contains_in_box() { contain_box(dst, wh) } else { dst };
+            comp.draw_cropped_opacity(d3d, &tex, wh, dst, !c.stretches_to_box() && !c.contains_in_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
             used.push(path);
         }
     }
@@ -1996,6 +2019,74 @@ fn is_image_path(path: &std::path::Path) -> bool {
     )
 }
 
+/// Materialise a timeline-preview proxy for a locally dropped video.  Direct timeline
+/// drops used to claim `proxy_ready` without producing a file, forcing playback to use
+/// the often variable-frame-rate, long-GOP original forever.  The output is CFR with a
+/// one-second GOP and is renamed only after ffmpeg exits successfully, so readers never
+/// see a partial MP4.
+fn spawn_local_proxy(asset_dir: String, asset_id: String, source: String) {
+    if !std::path::Path::new(&source).is_file() {
+        return;
+    }
+    let output = format!("{asset_dir}/{asset_id}_proxy.mp4");
+    if std::fs::metadata(&output).map(|m| m.len() > 0).unwrap_or(false) {
+        return;
+    }
+    std::thread::spawn(move || {
+        use std::os::windows::process::CommandExt;
+        let ff = ["C:/Users/Owner/ffmpeg/bin/ffmpeg.exe", "C:/ffmpeg/bin/ffmpeg.exe"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).is_file())
+            .unwrap_or("ffmpeg");
+        let partial = format!("{output}.part.mp4");
+        let _ = std::fs::remove_file(&partial);
+        let status = std::process::Command::new(ff)
+            .args([
+                "-hide_banner", "-loglevel", "error", "-y", "-i", &source,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-vf", "scale=-2:720:flags=lanczos,fps=30",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+                "-movflags", "+faststart", &partial,
+            ])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let ready = status.map(|s| s.success()).unwrap_or(false)
+            && std::fs::metadata(&partial).map(|m| m.len() > 0).unwrap_or(false);
+        if ready && std::fs::rename(&partial, &output).is_ok() {
+            eprintln!("PROXY_READY asset={asset_id}");
+        } else {
+            let _ = std::fs::remove_file(&partial);
+            eprintln!("PROXY_FAILED asset={asset_id}");
+        }
+    });
+}
+
+/// Start proxies for every local video already used by the open sequence. This repairs
+/// older direct drops made before native import actually produced proxy media.
+fn spawn_missing_timeline_proxies(doc: &model::Doc) {
+    let mut ids = std::collections::HashSet::new();
+    for track in &doc.seq.tracks {
+        if track.kind != "audio" {
+            for clip in &track.clips {
+                if let Some(id) = clip.asset_id.as_deref() {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    for id in ids {
+        if !doc.asset_images.contains(&id) {
+            if let Some(source) = doc.originals.get(&id) {
+                spawn_local_proxy(doc.asset_dir.clone(), id, source.clone());
+            }
+        }
+    }
+}
+
 /// ISO8601 UTC now without a chrono dependency (Howard Hinnant civil-from-days).
 /// assets.json records must carry created_at/updated_at to satisfy the API schema.
 fn iso8601_utc_now() -> String {
@@ -2516,11 +2607,25 @@ fn media_thread(shared: Arc<Shared>) {
                     } else {
                         // GPU-direct playback: NO readback at all — a video/text/image
                         // dense span can no longer stall the producer on a GPU map.
-                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, true, if gpu_on { Rb::None } else { Rb::Async })
+                        // A ring entry is presented later as the frame for `next_t`.
+                        // Unlike interactive scrubbing it may not contain a provisional
+                        // decoder surface: that turns a freeze->video seam into a whole
+                        // run of the freeze's last frame. The ring has decode-ahead slack,
+                        // so wait for the exact source frame here.
+                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, if gpu_on { Rb::None } else { Rb::Async })
                     };
                     ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
                     match res {
-                        Ok((used, _, eff)) => {
+                        Ok((used, exact, eff)) => {
+                            // Keep the ring's time/pixel contract even if a future render
+                            // path accidentally becomes budgeted again. Presenting an
+                            // inexact canvas is worse than leaving this slot unfilled:
+                            // audio can continue while a stale picture masquerades as video.
+                            if !exact {
+                                eprintln!("RING_REJECT provisional frame at t={next_t:.3}");
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                                continue;
+                            }
                             if ms_comp > 60.0 {
                                 eprintln!("SLOWPROD t={next_t:.2}: {ms_comp:.0}ms");
                             }
@@ -3204,6 +3309,9 @@ impl App {
         edits::quantize_timeline_frames(&mut raw);
         let normalized_on_load = serde_json::to_string(&raw).unwrap_or_default() != before_norm;
         let doc = Arc::new(model::Doc::from_raw(raw, contents, dir)?);
+        // Do this before playback threads start. Existing direct drops are upgraded in
+        // the background; until their atomic proxy appears, the original remains usable.
+        spawn_missing_timeline_proxies(&doc);
         let dur = doc.duration();
         let shared = Arc::new(Shared {
             req: Mutex::new(Req { t: 0.0, playing: false, scrubbing: false, speed: 1.0, gen: 0 }),
@@ -3613,7 +3721,7 @@ impl App {
                 "thumbnail_url": null,
                 "name": fname,
                 "filename": fname,
-                "status": "proxy_ready",
+                "status": if image { "ready" } else { "proxy_pending" },
                 "metadata": metadata,
                 "created_at": now,
                 "updated_at": now,
@@ -3621,6 +3729,9 @@ impl App {
             }));
         }
         std::fs::write(&aj, serde_json::to_string(&arr)?)?;
+        if !image {
+            spawn_local_proxy(self.doc.asset_dir.clone(), id.clone(), path.clone());
+        }
         let aid = id.clone();
         self.apply_edit(true, move |raw| {
             edits::place_asset(raw, target, t, dur, &aid, has_audio, image, salt);
@@ -8726,7 +8837,12 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // Direct media placement. Both an OS file drag and a drag from the media menu
         // resolve to the lane under the pointer and the visible timeline time. Locked and
         // audio lanes are not valid visual destinations.
-        let media_pointer = ui.input(|i| i.pointer.hover_pos());
+        // `hover_pos` is cleared by egui on the mouse-up frame for some native
+        // windowing backends.  A library-card drag was consequently visible over
+        // the timeline, but its release had no target and was silently discarded.
+        // `interact_pos` retains the pointer position through that release frame;
+        // fall back to hover for an OS file drag, which has no egui interaction.
+        let media_pointer = ui.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.hover_pos()));
         let hovered_os_media = ui.input(|i| {
             i.raw.hovered_files.iter().any(|f| {
                 f.path.as_deref().map(is_timeline_media_path).unwrap_or(false)
@@ -11995,6 +12111,32 @@ fn main() -> eframe::Result<()> {
         let ok = (landed - 464.436).abs() < 0.05;
         println!(
             "BACKSEEK {} seeded={seeded:.3} advanced={advanced:.3} re-request=464.436 landed={landed:.3}",
+            if ok { "PASS" } else { "FAIL" }
+        );
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+    // --selftest-freeze-resume <path> <source-in> [resume-duration]: model the
+    // decoder hand-off at a static freeze. The still itself does not touch the
+    // decoder; the continuation must nevertheless advance from the held source PTS.
+    if let Some(i) = args.iter().position(|a| a == "--selftest-freeze-resume") {
+        let path = args.get(i + 1).cloned().unwrap_or_default();
+        let source_in: f64 = args.get(i + 2).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let duration: f64 = args.get(i + 3).and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let end = source_in + duration.max(0.1);
+        let d3d = media::D3d::new().expect("d3d");
+        let mut vs = media::VideoStream::open(&d3d, &path, 0, false).expect("open");
+        vs.ensure_frame(&d3d, source_in).expect("freeze in-point");
+        let held = vs.shown_pts();
+        // The freeze PNG is displayed here; deliberately make no decoder calls.
+        let mut t = source_in;
+        while t <= end {
+            vs.ensure_frame(&d3d, t).expect("freeze continuation");
+            t += 1.0 / 30.0;
+        }
+        let landed = vs.shown_pts();
+        let ok = landed >= end - 0.10 && landed >= held - 0.001;
+        println!(
+            "FREEZE_RESUME {} held={held:.3} requested_end={end:.3} landed={landed:.3}",
             if ok { "PASS" } else { "FAIL" }
         );
         std::process::exit(if ok { 0 } else { 1 });

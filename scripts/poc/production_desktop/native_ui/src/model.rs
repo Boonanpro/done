@@ -143,8 +143,8 @@ pub struct Clip {
     pub timeline_end: f64,
     #[serde(default)]
     pub position: Option<Pos>,
-    /// How the source is fitted into `position`: `cover` (default, aspect preserved)
-    /// or `stretch` (width and height may be changed independently).
+    /// How the source is fitted into `position`: `cover` (default, fills and crops),
+    /// `contain` (whole source remains visible), or `stretch` (free-deform).
     #[serde(default)]
     pub fit: Option<String>,
     #[serde(default)]
@@ -372,6 +372,14 @@ impl Clip {
         self.fit.as_deref() == Some("stretch")
     }
 
+    /// New drag-and-drop clips preserve the complete source frame.  Treat legacy
+    /// `drop_v_*` clips without an explicit fit as contain too, so clips already
+    /// dropped before this field was introduced are repaired on their next preview.
+    pub fn contains_in_box(&self) -> bool {
+        self.fit.as_deref() == Some("contain")
+            || (self.fit.is_none() && self.id.starts_with("drop_v_"))
+    }
+
     /// Parsed transform keyframes, sorted by t: (t, x, y, w, h, crop ltrb).
     /// Missing w/h read the base display box; a missing crop reads the base crop —
     /// per-key fallbacks so position-only keys never freeze a live-editable crop.
@@ -551,6 +559,10 @@ impl Doc {
     }
 
     /// Best source for QUALITY (original when available) vs SPEED (proxy: small, short GOP).
+    /// A freshly dropped local file has no proxy yet, so the playback path must fall
+    /// back to its original immediately instead of opening a non-existent
+    /// `{asset_id}_proxy.mp4`.  This keeps both video and linked audio playable while
+    /// the background proxy job catches up.
     pub fn asset_path_q(&self, asset_id: &str, original: bool) -> String {
         if original {
             if let Some(p) = self.originals.get(asset_id) {
@@ -560,7 +572,12 @@ impl Doc {
         self.asset_path(asset_id)
     }
     pub fn asset_path(&self, asset_id: &str) -> String {
-        format!("{}/{}_proxy.mp4", self.asset_dir, asset_id)
+        let proxy = format!("{}/{}_proxy.mp4", self.asset_dir, asset_id);
+        if std::path::Path::new(&proxy).exists() || !self.originals.contains_key(asset_id) {
+            proxy
+        } else {
+            self.originals[asset_id].clone()
+        }
     }
     pub fn rel_path(&self, rel: &str) -> String {
         format!("{}/{}", self.asset_dir, rel)
