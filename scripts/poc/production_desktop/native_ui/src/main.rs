@@ -15,6 +15,8 @@
 mod compositor;
 mod caption_live;
 mod edits;
+mod frame_ring;
+mod gpu_present;
 mod media;
 mod model;
 
@@ -42,6 +44,28 @@ struct Req {
     scrubbing: bool,
     speed: f64,
     gen: u64,
+}
+
+/// What compose does with the finished canvas.
+/// `None` is the GPU-direct playback mode: the canvas is handed to the preview as
+/// a texture and NEVER mapped — a dense CTA can no longer stall the media thread
+/// on a readback. `Sync` stays for interactive one-shots (exact pixels now, and
+/// they also feed the CPU-side debug/screenshot buffer). `Async` only serves the
+/// CPU fallback when WGL interop is unavailable.
+#[derive(Clone, Copy, PartialEq)]
+enum Rb {
+    None,
+    Async,
+    Sync,
+}
+
+/// A finished preview frame in flight between producer and presentation.
+/// Gpu is the normal case (Arc'd pooled texture, clone = pointer copy);
+/// Cpu remains for the interop-unavailable fallback and cached pixels.
+#[derive(Clone)]
+enum Frame {
+    Gpu(Arc<gpu_present::GpuTex>),
+    Cpu(Vec<u8>),
 }
 
 /// BLUR jump diagnostics: while true, compose logs the base layer's landed source frame
@@ -98,6 +122,10 @@ unsafe fn make_caption_window_tree_visual_only(hwnd: isize) {
 }
 
 struct FrameOut {
+    /// GPU-direct path: the composed frame as a pooled D3D11 texture. The UI
+    /// draws THIS (via WGL interop) when present; `rgba` is then only the debug/
+    /// screenshot buffer of the last synchronous compose.
+    tex: Option<Arc<gpu_present::GpuTex>>,
     rgba: Vec<u8>,
     seq: u64,
     t: f64,
@@ -143,7 +171,7 @@ struct Shared {
     underruns: AtomicU64,
     ring_level: std::sync::atomic::AtomicUsize,
     /// (timeline_t, effective_t of the pixels, frame)
-    ring: Mutex<std::collections::VecDeque<(f64, f64, Vec<u8>)>>,
+    ring: Mutex<std::collections::VecDeque<(f64, f64, Frame)>>,
     ring_gen: AtomicU64,
     // timeline position the ring is being built FOR (f64 bits). On a mid-play seek this
     // moves to the new playhead BEFORE the clock does — audio waits on it (JUMPGATE) and
@@ -152,6 +180,12 @@ struct Shared {
     doc: Mutex<Arc<model::Doc>>,
     aux_req: Mutex<Vec<AuxJob>>,
     aux: Mutex<AuxOut>,
+    /// Presentation texture pool, created by the media thread (it owns the D3D
+    /// device). None until the engine is up.
+    gpu_pool: Mutex<Option<Arc<gpu_present::TexPool>>>,
+    /// Set once (by either side) when WGL interop is unusable; every producer
+    /// then reverts to the CPU readback path.
+    gpu_disabled: std::sync::atomic::AtomicBool,
 }
 
 /// Audio on its own thread: the WASAPI buffer is refilled no matter what the video side is
@@ -788,7 +822,7 @@ fn compose(
     t: f64,
     original: bool,
     fast: bool, // scrub: budgeted seek — newest reachable frame now, exact frame on settle
-    exact_rb: bool, // interactive one-shot: synchronous readback (THIS frame's pixels)
+    rb: Rb,     // what to do with the finished canvas (GPU handoff / async / sync readback)
 ) -> anyhow::Result<(Vec<String>, bool, f64)> { // (used files, exact?, EFFECTIVE time of the pixels)
     pool.frame_no += 1;
     let mut used = Vec::new();
@@ -844,19 +878,9 @@ fn compose(
     // key's frame shows exactly the key's value (region_keys use the same rule below).
     let gfps = doc.seq.frame_rate.filter(|f| f.is_finite() && *f > 1.0).unwrap_or(30.0);
     let t_geo = (t * gfps).round() / gfps;
-    // A cut must present the newly-active clip on that exact sequence frame. The normal
-    // triple-buffered readback is intentionally asynchronous and can contain pre-cut
-    // pixels, so anchor it synchronously at every visual/caption boundary.
-    let boundary_readback = doc
-        .seq
-        .tracks
-        .iter()
-        .filter(|tr| tr.kind != "audio")
-        .flat_map(|tr| tr.clips.iter())
-        .any(|c| {
-            (t_geo - c.timeline_start).abs() < 0.25 / gfps
-                || (t_geo - c.timeline_end).abs() < 0.25 / gfps
-        });
+    // Interactive seeks request an exact synchronous readback. Playback deliberately
+    // does not: forcing a GPU readback for every video/text/image edge stalls the media
+    // thread, and a dense CTA can otherwise stop transport altogether.
     // seam diagnostics: within ±0.6s of a freeze boundary, log exactly what every layer
     // draws (texture size / quality / box) — the ground truth for the "width grows" report
     let near_fz = doc
@@ -967,8 +991,12 @@ fn compose(
             let text = c.text.clone().unwrap_or_default();
             let style_owned = c.style.clone().unwrap_or_else(|| serde_json::json!({}));
             let key = caption_cache_key(c, &text, &style_owned);
-            let skey = (format!("cap:{key}"), 0i64);
-            if comp.still_get(&skey).is_none() {
+            // Caption PNGs are scene resources, not transient stills. Keeping them in
+            // the generic 24-entry still cache made a dense timeline evict/reload the
+            // CTA caption on every pass (disk decode + CPU BGRA swizzle + GPU upload).
+            // Their dedicated cache is keyed by caption content/style and survives
+            // unrelated freeze/image work.
+            if comp.caption_get(&key).is_none() {
                 let png = std::path::Path::new(&doc.asset_dir)
                     .join("caption-cache")
                     .join(format!("{key}.png"));
@@ -976,7 +1004,10 @@ fn compose(
                     Some(img) => {
                         let rgba = img.to_rgba8();
                         let (w, h) = (rgba.width(), rgba.height());
-                        let _ = comp.still_put_rgba(d3d, skey.clone(), w, h, rgba.as_raw());
+                        let _ = comp.caption_put_rgba(
+                            d3d, key.clone(), &c.id, w, h, rgba.as_raw(),
+                            (0.0, 0.0, 1.0, 1.0), caption_style_num(&style_owned, "fontSize", 1.0),
+                        );
                     }
                     None => {
                         // PNG not rendered yet (caption_cache_pass fills it in the
@@ -986,7 +1017,7 @@ fn compose(
                     }
                 }
             }
-            if let Some((tex, wh)) = comp.still_get(&skey) {
+            if let Some((tex, wh, _, _)) = comp.caption_get(&key) {
                 let xf = caption_style_num(&style_owned, "x", 0.0);
                 let yf = caption_style_num(&style_owned, "y", 0.08).clamp(0.0, 0.92);
                 let _ = comp.draw_alpha_opacity(d3d, &tex, wh, (xf, 0.08 - yf, 1.0, 1.0), c.visual_opacity());
@@ -1294,10 +1325,11 @@ fn compose(
     // not here: the transparent WebView2 overlay renders those live.)
     _ms_ov = _t.elapsed().as_secs_f64() * 1000.0;
     let _t = Instant::now();
-    if exact_rb || boundary_readback {
-        comp.readback_sync(d3d)?;
-    } else {
-        comp.readback(d3d)?;
+    match rb {
+        // GPU-direct: the caller snapshots the canvas into a pooled texture; no map
+        Rb::None => {}
+        Rb::Async => comp.readback(d3d)?,
+        Rb::Sync => comp.readback_sync(d3d)?,
     }
     let _ms_rb = _t.elapsed().as_secs_f64() * 1000.0;
     let total = _t_begin.elapsed().as_secs_f64() * 1000.0;
@@ -2163,7 +2195,7 @@ fn presenter_thread(shared: Arc<Shared>) {
             std::thread::sleep(std::time::Duration::from_millis(4));
             continue;
         }
-        let mut grabbed: Option<(f64, f64, Vec<u8>)> = None;
+        let mut grabbed: Option<(f64, f64, Frame)> = None;
         {
             let timeline_fps = shared.doc.lock().unwrap().seq.frame_rate
                 .filter(|fps| fps.is_finite() && *fps > 1.0)
@@ -2176,8 +2208,10 @@ fn presenter_thread(shared: Arc<Shared>) {
             if let Some((ft, ..)) = ring.iter().rev().find(|(ft, ..)| *ft <= t) {
                 let ft = *ft;
                 if ft > published_t {
-                    if let Some((_, eff, rgba)) = ring.iter().find(|(x, ..)| *x == ft) {
-                        grabbed = Some((ft, *eff, rgba.clone()));
+                    if let Some((_, eff, frame)) = ring.iter().find(|(x, ..)| *x == ft) {
+                        // Gpu frames clone as an Arc pointer — presentation no
+                        // longer moves pixels at all.
+                        grabbed = Some((ft, *eff, frame.clone()));
                     }
                 }
             }
@@ -2195,11 +2229,17 @@ fn presenter_thread(shared: Arc<Shared>) {
                 }
             }
         }
-        if let Some((ft, eff, rgba)) = grabbed {
+        if let Some((ft, eff, frame)) = grabbed {
             let now = Instant::now();
             seq_hi += 1;
             let mut f = shared.frame.lock().unwrap();
-            f.rgba = rgba;
+            match frame {
+                Frame::Gpu(tex) => f.tex = Some(tex),
+                Frame::Cpu(rgba) => {
+                    f.rgba = rgba;
+                    f.tex = None;
+                }
+            }
             f.seq = seq_hi;
             f.t = ft;
             f.eff_t = eff;
@@ -2231,11 +2271,39 @@ fn process_handle_count() -> u32 {
     n
 }
 
+/// Snapshot the composed canvas into a pooled GPU texture for presentation —
+/// the GPU-direct replacement for readback. On failure the GPU path is disabled
+/// for the session and callers fall back to CPU pixels.
+fn snapshot_canvas(
+    shared: &Shared,
+    d3d: &media::D3d,
+    comp: &compositor::Compositor,
+    gpu_pool: &Arc<gpu_present::TexPool>,
+) -> Option<Arc<gpu_present::GpuTex>> {
+    match gpu_pool.acquire() {
+        Ok(tex) => {
+            comp.copy_canvas_to(d3d, &tex.tex);
+            // Submit now so the UI-side interop lock observes the finished copy.
+            unsafe { d3d.ctx.Flush() };
+            Some(tex)
+        }
+        Err(e) => {
+            eprintln!("GPU_PRESENT pool acquire failed — CPU fallback: {e:#}");
+            shared.gpu_disabled.store(true, Ordering::Relaxed);
+            None
+        }
+    }
+}
+
 fn media_thread(shared: Arc<Shared>) {
     let run = || -> anyhow::Result<()> {
         let d3d = media::D3d::new()?;
         let mut pool = media::VideoPool::new();
         let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H)?;
+        // Presentation pool on the SAME device as the compositor: publishing a
+        // frame is one GPU-side CopyResource, never a Map.
+        let gpu_pool = Arc::new(gpu_present::TexPool::new(d3d.device.clone(), CANVAS_W, CANVAS_H));
+        *shared.gpu_pool.lock().unwrap() = Some(gpu_pool.clone());
         let mut was_playing;
         let mut last_gen = u64::MAX;
         let mut jump_to: Option<f64> = None; // mid-play seek target until the clock follows
@@ -2283,6 +2351,7 @@ fn media_thread(shared: Arc<Shared>) {
             let hb0 = Instant::now();
             if resource_check.elapsed() >= std::time::Duration::from_secs(2) {
                 resource_check = Instant::now();
+                d3d.drain_debug("tick");
                 let handles = process_handle_count();
                 if handles > 6_000
                     && last_resource_recovery.elapsed() >= std::time::Duration::from_secs(15)
@@ -2298,6 +2367,7 @@ fn media_thread(shared: Arc<Shared>) {
                     pool.clear();
                     masks.clear();
                     comp.clear_transient_caches();
+                    gpu_pool.trim(0);
                     unsafe { d3d.ctx.Flush() };
                     warm_done = false;
                     last_resource_recovery = Instant::now();
@@ -2348,6 +2418,7 @@ fn media_thread(shared: Arc<Shared>) {
                 }
             }
             let dur = doc.duration();
+            let gpu_on = !shared.gpu_disabled.load(Ordering::Relaxed);
             let r = shared.req.lock().unwrap().clone();
             was_playing = r.playing;
             let _ = was_playing;
@@ -2396,9 +2467,11 @@ fn media_thread(shared: Arc<Shared>) {
                         // the ring rebuilds — no more seconds of frozen video chasing a
                         // running clock
                         jump_to = Some(r.t);
-                        if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, r.t, false, true, true) {
+                        if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, r.t, false, true, Rb::Sync) {
+                            let tex = if gpu_on { snapshot_canvas(&shared, &d3d, &comp, &gpu_pool) } else { None };
                             seq += 1;
                             let mut f = shared.frame.lock().unwrap();
+                            f.tex = tex;
                             f.rgba.clear();
                             f.rgba.extend_from_slice(&comp.rgba);
                             f.seq = seq;
@@ -2441,7 +2514,9 @@ fn media_thread(shared: Arc<Shared>) {
                     let res = if let Some(eff) = cache_eff {
                         Ok((Vec::new(), true, eff))
                     } else {
-                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, true, false)
+                        // GPU-direct playback: NO readback at all — a video/text/image
+                        // dense span can no longer stall the producer on a GPU map.
+                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, true, if gpu_on { Rb::None } else { Rb::Async })
                     };
                     ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
                     match res {
@@ -2450,10 +2525,19 @@ fn media_thread(shared: Arc<Shared>) {
                                 eprintln!("SLOWPROD t={next_t:.2}: {ms_comp:.0}ms");
                             }
                             let p0 = Instant::now();
-                            let frame_ref: &Vec<u8> = if from_cache { &cached_buf } else { &comp.rgba };
+                            let payload = if from_cache {
+                                Frame::Cpu(cached_buf.clone())
+                            } else if gpu_on {
+                                match snapshot_canvas(&shared, &d3d, &comp, &gpu_pool) {
+                                    Some(t) => Frame::Gpu(t),
+                                    None => Frame::Cpu(comp.rgba.clone()),
+                                }
+                            } else {
+                                Frame::Cpu(comp.rgba.clone())
+                            };
                             {
                                 let mut rg = shared.ring.lock().unwrap();
-                                rg.push_back((next_t, eff, frame_ref.clone()));
+                                rg.push_back((next_t, eff, payload));
                                 // never trim against the OLD clock while a jump is pending —
                                 // a backward seek's fresh frames all look "stale" to it
                                 if jump_to.is_none() {
@@ -2513,6 +2597,11 @@ fn media_thread(shared: Arc<Shared>) {
                         Err(e) => {
                             let msg = format!("{e:#}");
                             eprintln!("compose ERR t={next_t:.2} after {ms_comp:.0}ms: {msg}");
+                            {
+                                let r = unsafe { d3d.device.GetDeviceRemovedReason() };
+                                eprintln!("DEVICE_STATE {r:?}");
+                                d3d.drain_debug("err");
+                            }
                             if msg.contains("0x8007000E") {
                                 // out of (GPU) memory: dump idle decoder instances NOW
                                 pool.evict_stale(120);
@@ -2525,6 +2614,9 @@ fn media_thread(shared: Arc<Shared>) {
                         // Olive uses 5s normal / 1s during playback; our opens are ~100x
                         // costlier, so 12s and playback-only
                         pool.evict_idle(std::time::Duration::from_secs(12));
+                        // presentation textures beyond the ring's working set go back
+                        // to the driver (a 3x-speed burst must not park VRAM forever)
+                        gpu_pool.trim(RING_DEPTH + 4);
                         // Submit queued GPU work so completed decoder views are released
                         // during long playback instead of accumulating until restart.
                         unsafe { d3d.ctx.Flush() };
@@ -2584,6 +2676,7 @@ fn media_thread(shared: Arc<Shared>) {
                     }
                     seq += 1;
                     let mut f = shared.frame.lock().unwrap();
+                    f.tex = None; // cached CPU pixels — display via the CPU path
                     f.rgba = buf;
                     f.seq = seq;
                     f.t = t;
@@ -2605,12 +2698,14 @@ fn media_thread(shared: Arc<Shared>) {
                 // Filmora's preview is uniformly proxy too — that IS its stability.
                 let original = false;
                 let t0 = Instant::now();
-                match compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, original, r.scrubbing, true) {
+                match compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, original, r.scrubbing, Rb::Sync) {
                     Ok((used, exact, eff)) => {
                         scrub_exact = !r.scrubbing || exact;
+                        let tex = if gpu_on { snapshot_canvas(&shared, &d3d, &comp, &gpu_pool) } else { None };
                         seq += 1;
                         {
                             let mut f = shared.frame.lock().unwrap();
+                            f.tex = tex;
                             f.rgba.clear();
                             f.rgba.extend_from_slice(&comp.rgba);
                             f.seq = seq;
@@ -2627,7 +2722,14 @@ fn media_thread(shared: Arc<Shared>) {
                         }
                         let _ = used;
                     }
-                    Err(e) => eprintln!("compose: {e:#}"),
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        eprintln!("compose: {msg}");
+                        if msg.contains("0x887A0005") {
+                            let r = unsafe { d3d.device.GetDeviceRemovedReason() };
+                            eprintln!("DEVICE_REMOVED reason={r:?}");
+                        }
+                    }
                 }
                 if r.scrubbing {
                     // scrub responsiveness meter: frames delivered per second while dragging
@@ -2659,6 +2761,7 @@ fn media_thread(shared: Arc<Shared>) {
                         }
                         seq += 1;
                         let mut f = shared.frame.lock().unwrap();
+                        f.tex = None; // cached CPU pixels — display via the CPU path
                         f.rgba = buf;
                         f.seq = seq;
                         f.t = t;
@@ -2672,10 +2775,12 @@ fn media_thread(shared: Arc<Shared>) {
                     // finger resting mid-drag on a long-GOP spot: keep refining toward the
                     // exact frame, one budget slice per pass (converges like Filmora's
                     // "stop and the picture sharpens to the real frame")
-                    if let Ok((_, ex, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, true) {
+                    if let Ok((_, ex, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, Rb::Sync) {
                         scrub_exact = ex;
+                        let tex = if gpu_on { snapshot_canvas(&shared, &d3d, &comp, &gpu_pool) } else { None };
                         seq += 1;
                         let mut f = shared.frame.lock().unwrap();
+                        f.tex = tex;
                         f.rgba.clear();
                         f.rgba.extend_from_slice(&comp.rgba);
                         f.seq = seq;
@@ -2706,9 +2811,17 @@ fn media_thread(shared: Arc<Shared>) {
                     rg.back().map(|(ft, ..)| ft + frame_step).unwrap_or_else(|| (t / frame_step).floor() * frame_step)
                 };
                 if next_t <= dur {
-                    if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, false) {
+                    if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, if gpu_on { Rb::None } else { Rb::Async }) {
+                        let payload = if gpu_on {
+                            match snapshot_canvas(&shared, &d3d, &comp, &gpu_pool) {
+                                Some(t) => Frame::Gpu(t),
+                                None => Frame::Cpu(comp.rgba.clone()),
+                            }
+                        } else {
+                            Frame::Cpu(comp.rgba.clone())
+                        };
                         let mut rg = shared.ring.lock().unwrap();
-                        rg.push_back((next_t, eff, comp.rgba.clone()));
+                        rg.push_back((next_t, eff, payload));
                         shared.ring_level.store(rg.len(), Ordering::Relaxed);
                     }
                 } else {
@@ -2757,7 +2870,7 @@ fn media_thread(shared: Arc<Shared>) {
                     }
                 }
                 if let Some(ft) = target {
-                    if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, false, false, true) {
+                    if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, false, false, Rb::Sync) {
                         fcache.insert(ft, timeline_fps, eff, &comp.rgba, t);
                     }
                     if fcache.frames.len() % 300 == 0 {
@@ -2984,7 +3097,13 @@ struct App {
     thumbs: std::collections::HashMap<(String, i64), egui::TextureHandle>,
     peaks: std::collections::HashMap<String, (f64, Vec<f32>)>,
     aux_ver: u64,
+    /// CPU-fallback preview texture (only fed when the GPU-direct path is off)
     tex: Option<egui::TextureHandle>,
+    /// GPU-direct preview: the published D3D11 frame currently on screen. Holding
+    /// the Arc keeps the pool from recycling it while it is displayed.
+    display_tex: Option<Arc<gpu_present::GpuTex>>,
+    /// WGL interop renderer state (lives inside the egui paint callback)
+    gl_video: Arc<gpu_present::GlVideo>,
     last_seq: u64,
     playing: bool,
     playback_speed: f64,
@@ -3089,6 +3208,7 @@ impl App {
         let shared = Arc::new(Shared {
             req: Mutex::new(Req { t: 0.0, playing: false, scrubbing: false, speed: 1.0, gen: 0 }),
             frame: Mutex::new(FrameOut {
+                tex: None,
                 rgba: vec![0; (CANVAS_W * CANVAS_H * 4) as usize],
                 seq: 0,
                 t: 0.0,
@@ -3110,6 +3230,10 @@ impl App {
             doc: Mutex::new(doc.clone()),
             aux_req: Mutex::new(Vec::new()),
             aux: Mutex::new(AuxOut::default()),
+            gpu_pool: Mutex::new(None),
+            gpu_disabled: std::sync::atomic::AtomicBool::new(
+                std::env::var("NATIVE_NO_GPU_PRESENT").map(|v| !v.is_empty()).unwrap_or(false),
+            ),
         });
         {
             let shared = shared.clone();
@@ -3185,6 +3309,8 @@ impl App {
             pending_initial_imports: Vec::new(),
             pending_initial_fps: Vec::new(),
             tex: None,
+            display_tex: None,
+            gl_video: Arc::new(gpu_present::GlVideo::new()),
             last_seq: 0,
             playing: false,
             playback_speed: 1.0,
@@ -9380,29 +9506,46 @@ impl eframe::App for App {
             }
         }
 
-        // upload the newest published frame (the media thread never blocks on us)
+        // adopt the newest published frame (the media thread never blocks on us).
+        // GPU-direct: taking the frame is an Arc clone — zero pixels move. The CPU
+        // upload below only runs as the interop-unavailable fallback.
         {
+            let gpu_ok = !self.shared.gpu_disabled.load(Ordering::Relaxed);
             let f = self.shared.frame.lock().unwrap();
             let stale_paused_frame = !self.playing && (f.t - self.t).abs() > 0.002;
-            if f.seq != self.last_seq && !stale_paused_frame && f.rgba.len() == (CANVAS_W * CANVAS_H * 4) as usize {
-                self.last_seq = f.seq;
-                self.comp_ms = f.comp_ms;
-                self.comp_max = f.comp_max;
-                self.gap_max = f.gap_max;
-                self.quality = f.quality;
-                let img = egui::ColorImage::from_rgba_unmultiplied(
-                    [CANVAS_W as usize, CANVAS_H as usize],
-                    &f.rgba,
-                );
-                match &mut self.tex {
-                    Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-                    None => {
-                        self.tex =
-                            Some(ctx.load_texture("preview", img, egui::TextureOptions::LINEAR))
+            if f.seq != self.last_seq && !stale_paused_frame {
+                if let (true, Some(tex)) = (gpu_ok, f.tex.clone()) {
+                    self.last_seq = f.seq;
+                    self.comp_ms = f.comp_ms;
+                    self.comp_max = f.comp_max;
+                    self.gap_max = f.gap_max;
+                    self.quality = f.quality;
+                    self.display_tex = Some(tex);
+                } else if f.rgba.len() == (CANVAS_W * CANVAS_H * 4) as usize {
+                    self.last_seq = f.seq;
+                    self.comp_ms = f.comp_ms;
+                    self.comp_max = f.comp_max;
+                    self.gap_max = f.gap_max;
+                    self.quality = f.quality;
+                    self.display_tex = None;
+                    let img = egui::ColorImage::from_rgba_unmultiplied(
+                        [CANVAS_W as usize, CANVAS_H as usize],
+                        &f.rgba,
+                    );
+                    match &mut self.tex {
+                        Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                        None => {
+                            self.tex =
+                                Some(ctx.load_texture("preview", img, egui::TextureOptions::LINEAR))
+                        }
                     }
                 }
             } else if stale_paused_frame {
                 ctx.request_repaint();
+            }
+            if !gpu_ok {
+                // interop died mid-session: never draw a frozen GPU frame again
+                self.display_tex = None;
             }
         }
 
@@ -9718,14 +9861,44 @@ impl eframe::App for App {
             .frame(egui::Frame::none().fill(egui::Color32::from_gray(10)))
             .show(ctx, |ui| {
                 let avail = ui.available_size();
-                if let Some(tex) = self.tex.clone() {
+                let gpu_frame = self.display_tex.clone();
+                if gpu_frame.is_some() || self.tex.is_some() {
                     let (cw, ch) = (CANVAS_W as f32, CANVAS_H as f32);
                     let scale = (avail.x / cw).min(avail.y / ch);
                     let size = egui::vec2(cw * scale, ch * scale);
                     ui.centered_and_justified(|ui| {
-                        let resp = ui
-                            .add(egui::Image::new((tex.id(), size)))
-                            .interact(egui::Sense::click_and_drag());
+                        // isolation probe: produce GPU frames but never draw them
+                        let nodraw = std::env::var("NATIVE_GPU_NODRAW").map(|v| !v.is_empty()).unwrap_or(false);
+                        let resp = if let Some(gtex) = gpu_frame.filter(|_| !nodraw) {
+                            // GPU-direct: the composed D3D11 texture is drawn straight
+                            // into eframe's swapchain by the interop callback — same
+                            // allocation call as egui::Image, so the geometry (and all
+                            // overlay/caption math below) is unchanged.
+                            let (_, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                            let vid = egui::Rect::from_center_size(resp.rect.center(), size);
+                            let glv = self.gl_video.clone();
+                            let shared = self.shared.clone();
+                            ui.painter().add(egui::PaintCallback {
+                                rect: vid,
+                                callback: Arc::new(eframe::egui_glow::CallbackFn::new(
+                                    move |_info, painter| {
+                                        let pool = shared.gpu_pool.lock().unwrap().clone();
+                                        let ok = pool
+                                            .map(|p| glv.draw(painter.gl(), &p, &gtex))
+                                            .unwrap_or(false);
+                                        if !ok {
+                                            shared.gpu_disabled.store(true, Ordering::Relaxed);
+                                        }
+                                    },
+                                )),
+                            });
+                            resp
+                        } else if let Some(tex) = self.tex.clone() {
+                            ui.add(egui::Image::new((tex.id(), size)))
+                                .interact(egui::Sense::click_and_drag())
+                        } else {
+                            ui.allocate_exact_size(size, egui::Sense::click_and_drag()).1
+                        };
                         // The preview owns pointer gestures, never text entry. End any
                         // numeric/text focus explicitly so shortcuts resume in this same
                         // interaction instead of waiting for a later panel click.
@@ -10265,7 +10438,7 @@ fn main() -> eframe::Result<()> {
             while pts_load_pass(&doc, &mut pts_maps) {}
             let orig_q = std::env::var("NATIVE_DUMP_PROXY").map(|v| v.is_empty()).unwrap_or(true);
             for (k, &t) in ts.iter().enumerate() {
-                compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, orig_q, false, true)
+                compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, orig_q, false, Rb::Sync)
                     .context("compose")?;
                 let path = if ts.len() == 1 {
                     out.clone()
@@ -10423,13 +10596,13 @@ fn main() -> eframe::Result<()> {
         let mut pts_maps: PtsMap = Default::default();
         while pts_load_pass(&doc, &mut pts_maps) {}
         let mut t = t0v;
-        let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, true);
+        let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, Rb::Sync);
         let b0 = Instant::now();
         let mut worst = 0f64;
         for _ in 0..60 {
             t += 0.33;
             let c0 = Instant::now();
-            let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, true);
+            let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, Rb::Sync);
             worst = worst.max(c0.elapsed().as_secs_f64() * 1000.0);
         }
         let ms = b0.elapsed().as_secs_f64() * 1000.0;

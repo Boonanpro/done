@@ -244,6 +244,10 @@ pub struct Compositor {
     // ping-pong decoder instances with its neighbours (measured as stutter around the
     // freeze) — one decode, one copy, zero pool traffic afterwards.
     stills: std::cell::RefCell<std::collections::HashMap<(String, i64), (ID3D11Texture2D, (u32, u32))>>,
+    // Imported/generated still images are scene resources, not frame-cache entries.
+    // Keep them apart from transient freeze/caption textures so playback cannot evict
+    // and re-decode a large background image every frame.
+    pinned_images: std::cell::RefCell<std::collections::HashMap<(String, i64), (ID3D11Texture2D, (u32, u32))>>,
     caption_stills: std::cell::RefCell<std::collections::HashMap<String, CaptionTex>>,
     caption_by_clip: std::cell::RefCell<std::collections::HashMap<String, String>>,
     cb: ID3D11Buffer,
@@ -253,9 +257,24 @@ pub struct Compositor {
 }
 
 impl Compositor {
+    /// Snapshot the finished GPU canvas into a GPU-only texture (a recycled pool
+    /// entry): no CPU map, color swizzle, allocation, or UI upload. This replaces
+    /// readback on the presentation path — the canvas pixels never leave the GPU.
+    pub fn copy_canvas_to(&self, d3d: &D3d, dst: &ID3D11Texture2D) {
+        unsafe {
+            d3d.ctx.CopyResource(dst, &self.canvas);
+            // Release the immediate context's references to the last bound
+            // resources (the readback path did this on every frame; without it the
+            // last decoder textures of a clip stay pinned between frames).
+            let empty = [None, None, None, None];
+            d3d.ctx.PSSetShaderResources(0, Some(&empty));
+        }
+    }
+
     /// Drop optional GPU caches while keeping the compositor itself alive.
     pub fn clear_transient_caches(&self) {
         self.stills.borrow_mut().clear();
+        self.pinned_images.borrow_mut().clear();
         self.caption_stills.borrow_mut().clear();
         self.caption_by_clip.borrow_mut().clear();
         *self.scratch.borrow_mut() = None;
@@ -380,6 +399,7 @@ impl Compositor {
                 ps_solid_masked: ps_solid_masked.unwrap(),
                 scratch: std::cell::RefCell::new(None),
                 stills: std::cell::RefCell::new(Default::default()),
+                pinned_images: std::cell::RefCell::new(Default::default()),
                 caption_stills: std::cell::RefCell::new(Default::default()),
                 caption_by_clip: std::cell::RefCell::new(Default::default()),
                 cb: cb.unwrap(),
@@ -1021,6 +1041,16 @@ impl Compositor {
             };
             let mut tex: Option<ID3D11Texture2D> = None;
             d3d.device.CreateTexture2D(&desc, Some(&init), Some(&mut tex))?;
+            if key.0.starts_with("img:") {
+                let mut st = self.pinned_images.borrow_mut();
+                if st.len() >= 32 {
+                    if let Some(k) = st.keys().next().cloned() {
+                        st.remove(&k);
+                    }
+                }
+                st.insert(key, (tex.unwrap(), (w, h)));
+                return Ok(());
+            }
             let mut st = self.stills.borrow_mut();
             if st.len() >= 24 {
                 // evict ONE entry — a clear-all forced every still to reload (and the
@@ -1035,7 +1065,11 @@ impl Compositor {
     }
 
     pub fn still_get(&self, key: &(String, i64)) -> Option<(ID3D11Texture2D, (u32, u32))> {
-        self.stills.borrow().get(key).cloned()
+        self.pinned_images
+            .borrow()
+            .get(key)
+            .cloned()
+            .or_else(|| self.stills.borrow().get(key).cloned())
     }
 
     pub fn caption_get(&self, key: &str) -> Option<CaptionTex> {

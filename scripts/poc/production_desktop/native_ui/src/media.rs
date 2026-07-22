@@ -34,17 +34,41 @@ impl D3d {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             MFStartup(MF_VERSION, MFSTARTUP_FULL)?;
             let mut device: Option<ID3D11Device> = None;
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                None,
-                D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                None,
-            )?;
+            let base = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+            let want_debug = std::env::var("NATIVE_D3D_DEBUG").map(|v| !v.is_empty()).unwrap_or(false);
+            let mut made_debug = false;
+            if want_debug {
+                made_debug = D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_HARDWARE,
+                    None,
+                    base | D3D11_CREATE_DEVICE_DEBUG,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    None,
+                )
+                .is_ok();
+                if made_debug {
+                    eprintln!("D3DDBG debug layer active");
+                } else {
+                    eprintln!("D3DDBG debug layer unavailable (Graphics Tools not installed?)");
+                }
+            }
+            if !made_debug {
+                D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_HARDWARE,
+                    None,
+                    base,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    None,
+                )?;
+            }
             let device = device.unwrap();
             let mt: ID3D11Multithread = device.cast()?;
             let _ = mt.SetMultithreadProtected(true);
@@ -57,6 +81,39 @@ impl D3d {
             let vdev: ID3D11VideoDevice = device.cast()?;
             let vctx: ID3D11VideoContext = ctx.cast()?;
             Ok(Self { device, ctx, mgr, vdev, vctx })
+        }
+    }
+
+    /// Drain and print D3D11 debug-layer messages (no-op unless NATIVE_D3D_DEBUG
+    /// created a debug device).
+    pub fn drain_debug(&self, tag: &str) {
+        unsafe {
+            let Ok(q) = self.device.cast::<ID3D11InfoQueue>() else { return };
+            let n = q.GetNumStoredMessages();
+            for i in 0..n {
+                let mut len = 0usize;
+                if q.GetMessage(i, None, &mut len).is_err() || len == 0 {
+                    continue;
+                }
+                let mut buf = vec![0u8; len];
+                let msg = buf.as_mut_ptr() as *mut D3D11_MESSAGE;
+                if q.GetMessage(i, Some(msg), &mut len).is_ok() {
+                    let m = &*msg;
+                    let desc = std::slice::from_raw_parts(
+                        m.pDescription as *const u8,
+                        m.DescriptionByteLength.saturating_sub(1),
+                    );
+                    eprintln!(
+                        "D3DDBG[{tag}] sev={} id={} {}",
+                        m.Severity.0,
+                        m.ID.0,
+                        String::from_utf8_lossy(desc)
+                    );
+                }
+            }
+            if n > 0 {
+                q.ClearStoredMessages();
+            }
         }
     }
 }
