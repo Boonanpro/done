@@ -61,6 +61,8 @@ export type CaptionDesign = {
   outlineColor?: string;
   outlineWidth?: number;      // multiplier of the default stroke (1 = default, 0 = none)
   fontSize?: number;          // multiplier of the base size (base = outH * 0.052)
+  maxWidth?: number;          // fraction of frame width (default .88; manual values may exceed 1)
+  textAlign?: 'left' | 'center' | 'right';
   position?: 'bottom' | 'center' | 'top';
   x?: number;                 // fine horizontal nudge, fraction of frame width  (+ = right)
   y?: number;                 // fine vertical nudge,   fraction of frame height (+ = down)
@@ -136,9 +138,12 @@ export function captionAnchorStyle(design: CaptionDesign, outH: number): CSSProp
 export function captionBoxStyle(design: CaptionDesign, outH: number): CSSProperties {
   const base = outH * 0.052;
   const fs = base * num(design.fontSize, 1);
+  const maxWidth = Math.max(0.05, Math.min(2, num(design.maxWidth, 0.88)));
+  const textAlign = design.textAlign === 'left' || design.textAlign === 'right' ? design.textAlign : 'center';
   const style: CSSProperties = {
-    maxWidth: '88%',
-    textAlign: 'center',
+    maxWidth: `${maxWidth * 100}%`,
+    flexShrink: 0,
+    textAlign,
     lineHeight: 1.28,
     boxSizing: 'border-box',
   };

@@ -1,25 +1,33 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
-fn texts() -> &'static Mutex<HashMap<String, String>> {
-    static LIVE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    LIVE.get_or_init(|| Mutex::new(HashMap::new()))
+/// Captions temporarily owned by the WebView while the GPU cache catches up.
+///
+/// This deliberately holds no caption text. `clip.text` in the document is the
+/// sole source of truth for editing, timeline labels, preview payloads and saves.
+fn live_ids() -> &'static Mutex<HashSet<String>> {
+    static LIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    LIVE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-pub fn set(clip_id: &str, text: String) {
-    if let Ok(mut live) = texts().lock() {
-        live.insert(clip_id.to_string(), text);
+pub fn activate(clip_id: &str) {
+    if let Ok(mut live) = live_ids().lock() {
+        live.insert(clip_id.to_string());
     }
 }
 
 pub fn clear(clip_id: &str) {
-    if let Ok(mut live) = texts().lock() {
+    if let Ok(mut live) = live_ids().lock() {
         live.remove(clip_id);
     }
 }
 
-pub fn get(clip_id: &str) -> Option<String> {
-    texts().lock().ok()?.get(clip_id).cloned()
+pub fn is_active(clip_id: &str) -> bool {
+    live_ids()
+        .lock()
+        .ok()
+        .map(|live| live.contains(clip_id))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -27,10 +35,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn editing_text_is_memory_only_and_clearable() {
-        set("cap-1", "入力中".to_string());
-        assert_eq!(get("cap-1").as_deref(), Some("入力中"));
+    fn ownership_is_memory_only_and_clearable() {
+        activate("cap-1");
+        assert!(is_active("cap-1"));
         clear("cap-1");
-        assert!(get("cap-1").is_none());
+        assert!(!is_active("cap-1"));
     }
 }

@@ -15,6 +15,8 @@
 mod compositor;
 mod caption_live;
 mod edits;
+mod frame_ring;
+mod gpu_present;
 mod media;
 mod model;
 
@@ -42,6 +44,28 @@ struct Req {
     scrubbing: bool,
     speed: f64,
     gen: u64,
+}
+
+/// What compose does with the finished canvas.
+/// `None` is the GPU-direct playback mode: the canvas is handed to the preview as
+/// a texture and NEVER mapped — a dense CTA can no longer stall the media thread
+/// on a readback. `Sync` stays for interactive one-shots (exact pixels now, and
+/// they also feed the CPU-side debug/screenshot buffer). `Async` only serves the
+/// CPU fallback when WGL interop is unavailable.
+#[derive(Clone, Copy, PartialEq)]
+enum Rb {
+    None,
+    Async,
+    Sync,
+}
+
+/// A finished preview frame in flight between producer and presentation.
+/// Gpu is the normal case (Arc'd pooled texture, clone = pointer copy);
+/// Cpu remains for the interop-unavailable fallback and cached pixels.
+#[derive(Clone)]
+enum Frame {
+    Gpu(Arc<gpu_present::GpuTex>),
+    Cpu(Vec<u8>),
 }
 
 /// BLUR jump diagnostics: while true, compose logs the base layer's landed source frame
@@ -98,6 +122,10 @@ unsafe fn make_caption_window_tree_visual_only(hwnd: isize) {
 }
 
 struct FrameOut {
+    /// GPU-direct path: the composed frame as a pooled D3D11 texture. The UI
+    /// draws THIS (via WGL interop) when present; `rgba` is then only the debug/
+    /// screenshot buffer of the last synchronous compose.
+    tex: Option<Arc<gpu_present::GpuTex>>,
     rgba: Vec<u8>,
     seq: u64,
     t: f64,
@@ -111,6 +139,10 @@ struct FrameOut {
     comp_max: f32,  // worst compose over the last second
     gap_max: f32,   // worst wall-clock gap between published frames (what the eye sees)
     quality: &'static str,
+    /// Caption-owner generation used to compose these pixels. WebView may reveal a
+    /// live caption only after this matches the current generation, preventing its
+    /// new text from being drawn over an older GPU-caption frame.
+    caption_epoch: u64,
 }
 
 const THUMB_BUCKET_S: f64 = 5.0; // filmstrip granularity: one real frame per 5s of source
@@ -132,13 +164,14 @@ struct Shared {
     // min timeline time affected by pending edits (f64 bits; INFINITY = untouched).
     // The producer consumes it to invalidate only the dirty suffix of the frame cache.
     dirty_from_bits: AtomicU64,
+    caption_epoch: AtomicU64,
     req: Mutex<Req>,
     frame: Mutex<FrameOut>,
     clock_bits: AtomicU64,
     underruns: AtomicU64,
     ring_level: std::sync::atomic::AtomicUsize,
     /// (timeline_t, effective_t of the pixels, frame)
-    ring: Mutex<std::collections::VecDeque<(f64, f64, Vec<u8>)>>,
+    ring: Mutex<std::collections::VecDeque<(f64, f64, Frame)>>,
     ring_gen: AtomicU64,
     // timeline position the ring is being built FOR (f64 bits). On a mid-play seek this
     // moves to the new playhead BEFORE the clock does — audio waits on it (JUMPGATE) and
@@ -147,6 +180,12 @@ struct Shared {
     doc: Mutex<Arc<model::Doc>>,
     aux_req: Mutex<Vec<AuxJob>>,
     aux: Mutex<AuxOut>,
+    /// Presentation texture pool, created by the media thread (it owns the D3D
+    /// device). None until the engine is up.
+    gpu_pool: Mutex<Option<Arc<gpu_present::TexPool>>>,
+    /// Set once (by either side) when WGL interop is unusable; every producer
+    /// then reverts to the CPU readback path.
+    gpu_disabled: std::sync::atomic::AtomicBool,
 }
 
 /// Audio on its own thread: the WASAPI buffer is refilled no matter what the video side is
@@ -283,6 +322,7 @@ struct FrameCache {
     frames: std::collections::HashMap<i64, (f64, f64, Vec<u8>)>, // (exact_t, eff_t, lz4)
     bytes: usize,
     budget: usize,
+    max_frames: usize,
     hits: u64,
     misses: u64,
 }
@@ -292,7 +332,10 @@ impl FrameCache {
         Self {
             frames: Default::default(),
             bytes: 0,
-            budget: 2_500_000_000, // ~2.5GB ≈ 30-40s of 1080x1920 frames
+            // Keep the preview working set bounded. The old 2.5GB cache was the main
+            // reason a normal editing session became progressively heavier.
+            budget: 384 * 1024 * 1024,
+            max_frames: 180,
             hits: 0,
             misses: 0,
         }
@@ -345,7 +388,7 @@ impl FrameCache {
         self.bytes += z.len();
         self.frames.insert(key, (t, eff, z));
         // over budget: evict farthest-from-playhead first
-        while self.bytes > self.budget {
+        while self.bytes > self.budget || self.frames.len() > self.max_frames {
             let ph = Self::idx(playhead, fps);
             let Some((&far, _)) = self.frames.iter().max_by_key(|(k, _)| (**k - ph).abs()) else {
                 break;
@@ -353,6 +396,24 @@ impl FrameCache {
             if let Some((_, _, z)) = self.frames.remove(&far) {
                 self.bytes -= z.len();
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod frame_cache_stability_tests {
+    use super::FrameCache;
+
+    #[test]
+    fn cache_never_exceeds_frame_or_byte_limits() {
+        let mut cache = FrameCache::new();
+        cache.max_frames = 8;
+        cache.budget = 512;
+        for i in 0..100 {
+            let pixels: Vec<u8> = (0..1024).map(|n| (n as u8).wrapping_add(i as u8)).collect();
+            cache.insert(i as f64 / 30.0, 30.0, i as f64 / 30.0, &pixels, 0.0);
+            assert!(cache.frames.len() <= cache.max_frames);
+            assert!(cache.bytes <= cache.budget);
         }
     }
 }
@@ -422,12 +483,36 @@ const MT_SHADOW: u32 = 0;
 /// Build ONE missing pop-out mask texture per call (the σ26 blur costs ~0.3s — idle only).
 /// v6 keys (no matte twin on disk) are memoized as None and stay on the pv fallback for
 /// this session; the effect-clip migration re-keys everything anyway.
-fn mask_build_pass(doc: &model::Doc, d3d: &media::D3d, masks: &mut MaskMap) -> bool {
+fn mask_build_pass(
+    doc: &model::Doc,
+    d3d: &media::D3d,
+    masks: &mut MaskMap,
+    center: Option<f64>,
+) -> bool {
+    // Matte textures are several MB each. Keep only the playhead working set in the
+    // interactive editor; command-line verification can pass None to scan everything.
+    if let Some(t) = center {
+        let wanted: std::collections::HashSet<String> = doc
+            .seq
+            .tracks
+            .iter()
+            .flat_map(|tr| tr.clips.iter())
+            .filter(|c| c.timeline_end >= t - 3.0 && c.timeline_start <= t + 12.0)
+            .filter_map(|c| c.popout_key().map(|(key, _)| key))
+            .collect();
+        masks.retain(|key, _| wanted.contains(key));
+    }
     for tr in &doc.seq.tracks {
         if tr.kind == "audio" {
             continue;
         }
         for c in &tr.clips {
+            if center
+                .map(|t| c.timeline_end < t - 3.0 || c.timeline_start > t + 12.0)
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let Some((key, _)) = c.popout_key() else { continue };
             let mt = doc.rel_path(&format!("popout-cache/{key}.mt.mp4"));
             if let Some(entry) = masks.get(&key) {
@@ -737,7 +822,7 @@ fn compose(
     t: f64,
     original: bool,
     fast: bool, // scrub: budgeted seek — newest reachable frame now, exact frame on settle
-    exact_rb: bool, // interactive one-shot: synchronous readback (THIS frame's pixels)
+    rb: Rb,     // what to do with the finished canvas (GPU handoff / async / sync readback)
 ) -> anyhow::Result<(Vec<String>, bool, f64)> { // (used files, exact?, EFFECTIVE time of the pixels)
     pool.frame_no += 1;
     let mut used = Vec::new();
@@ -754,7 +839,7 @@ fn compose(
         let mut out = Vec::new();
         for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
             for c in &tr.clips {
-                if t < c.timeline_start || t >= c.timeline_end {
+                if !doc.clip_active_at(c, t) {
                     continue;
                 }
                 if c.asset_id.is_some() {
@@ -793,6 +878,9 @@ fn compose(
     // key's frame shows exactly the key's value (region_keys use the same rule below).
     let gfps = doc.seq.frame_rate.filter(|f| f.is_finite() && *f > 1.0).unwrap_or(30.0);
     let t_geo = (t * gfps).round() / gfps;
+    // Interactive seeks request an exact synchronous readback. Playback deliberately
+    // does not: forcing a GPU readback for every video/text/image edge stalls the media
+    // thread, and a dense CTA can otherwise stop transport altogether.
     // seam diagnostics: within ±0.6s of a freeze boundary, log exactly what every layer
     // draws (texture size / quality / box) — the ground truth for the "width grows" report
     let near_fz = doc
@@ -813,6 +901,10 @@ fn compose(
             if let Some(rg) = c.region_at(t_fx) {
                 let style = c.style.as_ref().and_then(|v| v.as_str()).unwrap_or("");
                 let is_mosaic = style.contains("mosaic");
+                let is_solid = style == "solid";
+                let strength = c.effect_strength.unwrap_or(if is_mosaic { 14.0 } else { 16.0 }).clamp(2.0, 64.0);
+                let opacity = c.effect_opacity.unwrap_or(1.0).clamp(0.0, 1.0);
+                let solid = effect_rgb(c.effect_color.as_deref().unwrap_or("#000000"));
                 // SAM tracked blur: the baked mask video follows the object; until the
                 // bake lands (or outside its window) the static stand-in below applies.
                 let mut applied = false;
@@ -860,17 +952,12 @@ fn compose(
                             // the static stand-in
                             let tex = vs.bgra.clone();
                             let wh = (vs.width, vs.height);
-                            if comp
-                                .apply_blur_masked(
-                                    d3d,
-                                    &tex,
-                                    wh,
-                                    (bb.x, bb.y, bb.width, bb.height),
-                                    bcrop,
-                                    16.0, // soft-blur radius px
-                                )
-                                .is_ok()
-                            {
+                            let rendered = if is_solid {
+                                comp.apply_solid_masked(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), bcrop, solid, opacity)
+                            } else {
+                                comp.apply_blur_masked(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), bcrop, strength)
+                            };
+                            if rendered.is_ok() {
                                 applied = true;
                                 used.push(mpath);
                             }
@@ -881,9 +968,11 @@ fn compose(
                     // a clip WITH a tracked bake never shows the blocky grid: style only
                     // picks the look for pure static region clips
                     if is_mosaic && c.blur_track.is_none() {
-                        let _ = comp.apply_mosaic(d3d, rg, 14.0);
+                        let _ = comp.apply_mosaic(d3d, rg, strength);
+                    } else if is_solid {
+                        let _ = comp.apply_solid_rect(d3d, rg, solid, opacity);
                     } else {
-                        let _ = comp.apply_blur_rect(d3d, rg, 16.0);
+                        let _ = comp.apply_blur_rect(d3d, rg, strength);
                     }
                 }
             }
@@ -902,8 +991,12 @@ fn compose(
             let text = c.text.clone().unwrap_or_default();
             let style_owned = c.style.clone().unwrap_or_else(|| serde_json::json!({}));
             let key = caption_cache_key(c, &text, &style_owned);
-            let skey = (format!("cap:{key}"), 0i64);
-            if comp.still_get(&skey).is_none() {
+            // Caption PNGs are scene resources, not transient stills. Keeping them in
+            // the generic 24-entry still cache made a dense timeline evict/reload the
+            // CTA caption on every pass (disk decode + CPU BGRA swizzle + GPU upload).
+            // Their dedicated cache is keyed by caption content/style and survives
+            // unrelated freeze/image work.
+            if comp.caption_get(&key).is_none() {
                 let png = std::path::Path::new(&doc.asset_dir)
                     .join("caption-cache")
                     .join(format!("{key}.png"));
@@ -911,7 +1004,10 @@ fn compose(
                     Some(img) => {
                         let rgba = img.to_rgba8();
                         let (w, h) = (rgba.width(), rgba.height());
-                        let _ = comp.still_put_rgba(d3d, skey.clone(), w, h, rgba.as_raw());
+                        let _ = comp.caption_put_rgba(
+                            d3d, key.clone(), &c.id, w, h, rgba.as_raw(),
+                            (0.0, 0.0, 1.0, 1.0), caption_style_num(&style_owned, "fontSize", 1.0),
+                        );
                     }
                     None => {
                         // PNG not rendered yet (caption_cache_pass fills it in the
@@ -921,7 +1017,7 @@ fn compose(
                     }
                 }
             }
-            if let Some((tex, wh)) = comp.still_get(&skey) {
+            if let Some((tex, wh, _, _)) = comp.caption_get(&key) {
                 let xf = caption_style_num(&style_owned, "x", 0.0);
                 let yf = caption_style_num(&style_owned, "y", 0.08).clamp(0.0, 0.92);
                 let _ = comp.draw_alpha_opacity(d3d, &tex, wh, (xf, 0.08 - yf, 1.0, 1.0), c.visual_opacity());
@@ -1229,10 +1325,11 @@ fn compose(
     // not here: the transparent WebView2 overlay renders those live.)
     _ms_ov = _t.elapsed().as_secs_f64() * 1000.0;
     let _t = Instant::now();
-    if exact_rb {
-        comp.readback_sync(d3d)?;
-    } else {
-        comp.readback(d3d)?;
+    match rb {
+        // GPU-direct: the caller snapshots the canvas into a pooled texture; no map
+        Rb::None => {}
+        Rb::Async => comp.readback(d3d)?,
+        Rb::Sync => comp.readback_sync(d3d)?,
     }
     let _ms_rb = _t.elapsed().as_secs_f64() * 1000.0;
     let total = _t_begin.elapsed().as_secs_f64() * 1000.0;
@@ -1371,6 +1468,12 @@ fn hex_color32(s: &str, default: egui::Color32) -> egui::Color32 {
         Ok(v) => egui::Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8),
         Err(_) => default,
     }
+}
+
+/// Hex colour for GPU effect shaders, with black as the safe redaction fallback.
+fn effect_rgb(s: &str) -> [f32; 3] {
+    let c = hex_color32(s, egui::Color32::BLACK);
+    [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0]
 }
 
 fn color32_hex(c: egui::Color32) -> String {
@@ -1512,7 +1615,7 @@ fn native_caption_ids(doc: &model::Doc, t: f64) -> std::collections::HashSet<Str
     let mut out = std::collections::HashSet::new();
     let mut promote = |caps: &mut Vec<&model::Clip>, out: &mut std::collections::HashSet<String>| {
         for c in caps.drain(..) {
-            if caption_live::get(&c.id).is_some() {
+            if caption_live::is_active(&c.id) {
                 continue;
             }
             let text = c.text.clone().unwrap_or_default();
@@ -1528,7 +1631,7 @@ fn native_caption_ids(doc: &model::Doc, t: f64) -> std::collections::HashSet<Str
     };
     for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
         for c in &tr.clips {
-            if t < c.timeline_start || t >= c.timeline_end {
+            if !doc.clip_active_at(c, t) {
                 continue;
             }
             if c.asset_id.is_some() {
@@ -1956,8 +2059,9 @@ fn warm_open_pass(
     d3d: &media::D3d,
     pool: &mut media::VideoPool,
     masks: &MaskMap,
+    center: f64,
 ) -> bool {
-    const INSTANCE_CAP: usize = 40;
+    const INSTANCE_CAP: usize = 12;
     if pool.stats().1 >= INSTANCE_CAP {
         return true; // budget spent — treat as warm
     }
@@ -1970,6 +2074,9 @@ fn warm_open_pass(
             continue;
         }
         for c in &tr.clips {
+            if c.timeline_end < center - 3.0 || c.timeline_start > center + 10.0 {
+                continue;
+            }
             if let Some((key, _)) = c.popout_key() {
                 let live = masks.get(&key).map_or(false, |o| o.is_some());
                 if live {
@@ -2034,6 +2141,9 @@ fn warm_open_pass(
             continue;
         }
         for c in &tr.clips {
+            if c.timeline_end < center - 3.0 || c.timeline_start > center + 10.0 {
+                continue;
+            }
             if let Some(aid) = c.asset_id.as_deref() {
                 let p = doc.asset_path(aid);
                 if std::path::Path::new(&p).exists() && !proxies.contains(&p) {
@@ -2085,7 +2195,7 @@ fn presenter_thread(shared: Arc<Shared>) {
             std::thread::sleep(std::time::Duration::from_millis(4));
             continue;
         }
-        let mut grabbed: Option<(f64, f64, Vec<u8>)> = None;
+        let mut grabbed: Option<(f64, f64, Frame)> = None;
         {
             let timeline_fps = shared.doc.lock().unwrap().seq.frame_rate
                 .filter(|fps| fps.is_finite() && *fps > 1.0)
@@ -2098,8 +2208,10 @@ fn presenter_thread(shared: Arc<Shared>) {
             if let Some((ft, ..)) = ring.iter().rev().find(|(ft, ..)| *ft <= t) {
                 let ft = *ft;
                 if ft > published_t {
-                    if let Some((_, eff, rgba)) = ring.iter().find(|(x, ..)| *x == ft) {
-                        grabbed = Some((ft, *eff, rgba.clone()));
+                    if let Some((_, eff, frame)) = ring.iter().find(|(x, ..)| *x == ft) {
+                        // Gpu frames clone as an Arc pointer — presentation no
+                        // longer moves pixels at all.
+                        grabbed = Some((ft, *eff, frame.clone()));
                     }
                 }
             }
@@ -2117,11 +2229,17 @@ fn presenter_thread(shared: Arc<Shared>) {
                 }
             }
         }
-        if let Some((ft, eff, rgba)) = grabbed {
+        if let Some((ft, eff, frame)) = grabbed {
             let now = Instant::now();
             seq_hi += 1;
             let mut f = shared.frame.lock().unwrap();
-            f.rgba = rgba;
+            match frame {
+                Frame::Gpu(tex) => f.tex = Some(tex),
+                Frame::Cpu(rgba) => {
+                    f.rgba = rgba;
+                    f.tex = None;
+                }
+            }
             f.seq = seq_hi;
             f.t = ft;
             f.eff_t = eff;
@@ -2143,11 +2261,49 @@ fn presenter_thread(shared: Arc<Shared>) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn process_handle_count() -> u32 {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+    let mut n = 0u32;
+    unsafe {
+        let _ = GetProcessHandleCount(GetCurrentProcess(), &mut n);
+    }
+    n
+}
+
+/// Snapshot the composed canvas into a pooled GPU texture for presentation —
+/// the GPU-direct replacement for readback. On failure the GPU path is disabled
+/// for the session and callers fall back to CPU pixels.
+fn snapshot_canvas(
+    shared: &Shared,
+    d3d: &media::D3d,
+    comp: &compositor::Compositor,
+    gpu_pool: &Arc<gpu_present::TexPool>,
+) -> Option<Arc<gpu_present::GpuTex>> {
+    match gpu_pool.acquire() {
+        Ok(tex) => {
+            comp.copy_canvas_to(d3d, &tex.tex);
+            // Submit now so the UI-side interop lock observes the finished copy.
+            unsafe { d3d.ctx.Flush() };
+            Some(tex)
+        }
+        Err(e) => {
+            eprintln!("GPU_PRESENT pool acquire failed — CPU fallback: {e:#}");
+            shared.gpu_disabled.store(true, Ordering::Relaxed);
+            None
+        }
+    }
+}
+
 fn media_thread(shared: Arc<Shared>) {
     let run = || -> anyhow::Result<()> {
         let d3d = media::D3d::new()?;
         let mut pool = media::VideoPool::new();
         let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H)?;
+        // Presentation pool on the SAME device as the compositor: publishing a
+        // frame is one GPU-side CopyResource, never a Map.
+        let gpu_pool = Arc::new(gpu_present::TexPool::new(d3d.device.clone(), CANVAS_W, CANVAS_H));
+        *shared.gpu_pool.lock().unwrap() = Some(gpu_pool.clone());
         let mut was_playing;
         let mut last_gen = u64::MAX;
         let mut jump_to: Option<f64> = None; // mid-play seek target until the clock follows
@@ -2159,6 +2315,7 @@ fn media_thread(shared: Arc<Shared>) {
         let mut last_pub: Option<Instant> = None;
         let mut warm_done = false;
         let mut last_doc_ptr: usize = 0;
+        let mut last_caption_epoch = u64::MAX;
         let mut settle = Instant::now(); // last user interaction (scrub/edit/seek)
         let mut edit_cooldown_until = Instant::now();
         let mut scrub_win: Vec<f32> = Vec::new();
@@ -2170,6 +2327,8 @@ fn media_thread(shared: Arc<Shared>) {
         let mut prev_was_compose = false;
         let mut prev_compose_t = f64::NAN;
         let mut prev_compose_eff = f64::NAN;
+        let mut resource_check = Instant::now();
+        let mut last_resource_recovery = Instant::now() - std::time::Duration::from_secs(60);
         let mut prev_playing = false;
         let mut play_started: Option<Instant> = None;
         // Look-ahead ring: timeline frames composed AHEAD of the playhead on the chosen
@@ -2182,9 +2341,49 @@ fn media_thread(shared: Arc<Shared>) {
         // opportunistic playback/scrub accelerator, but do not let it compete with
         // interactive work in the background.
         const IDLE_FRAME_CACHE_FILL: bool = false;
+        // Async triple-buffer readback has delayed provenance. It is safe for sequential
+        // presentation, but not as a random-access cache entry after a cut/decoder switch.
+        const PLAYBACK_FRAME_CACHE_FILL: bool = false;
+        // Thumbnail/waveform work has a dedicated worker and must not compete with the
+        // preview decoder on this latency-sensitive thread.
+        const MEDIA_THREAD_AUX: bool = false;
         loop {
             let hb0 = Instant::now();
+            if resource_check.elapsed() >= std::time::Duration::from_secs(2) {
+                resource_check = Instant::now();
+                d3d.drain_debug("tick");
+                let handles = process_handle_count();
+                if handles > 6_000
+                    && last_resource_recovery.elapsed() >= std::time::Duration::from_secs(15)
+                {
+                    // Driver/MF resources must never grow until the whole app needs a
+                    // restart. Release optional state in-process and cold-open on demand.
+                    eprintln!(
+                        "RESOURCE_RECOVERY handles={handles} cache={}MB pool={:?}",
+                        fcache.bytes / 1024 / 1024,
+                        pool.stats()
+                    );
+                    fcache.clear();
+                    pool.clear();
+                    masks.clear();
+                    comp.clear_transient_caches();
+                    gpu_pool.trim(0);
+                    unsafe { d3d.ctx.Flush() };
+                    warm_done = false;
+                    last_resource_recovery = Instant::now();
+                }
+            }
             let doc: Arc<model::Doc> = shared.doc.lock().unwrap().clone();
+            let caption_epoch = shared.caption_epoch.load(Ordering::Relaxed);
+            if caption_epoch != last_caption_epoch {
+                // A live/pending caption switched owner. Cached/ring pixels may contain
+                // its previous GPU render, so neither may be presented again.
+                fcache.clear();
+                shared.ring.lock().unwrap().clear();
+                shared.ring_gen.fetch_add(1, Ordering::Relaxed);
+                shared.ring_level.store(0, Ordering::Relaxed);
+                last_caption_epoch = caption_epoch;
+            }
             let ptr = Arc::as_ptr(&doc) as usize;
             let timeline_fps = doc.seq.frame_rate.filter(|fps| fps.is_finite() && *fps > 1.0).unwrap_or(30.0);
             let frame_step = 1.0 / timeline_fps;
@@ -2219,6 +2418,7 @@ fn media_thread(shared: Arc<Shared>) {
                 }
             }
             let dur = doc.duration();
+            let gpu_on = !shared.gpu_disabled.load(Ordering::Relaxed);
             let r = shared.req.lock().unwrap().clone();
             was_playing = r.playing;
             let _ = was_playing;
@@ -2267,15 +2467,18 @@ fn media_thread(shared: Arc<Shared>) {
                         // the ring rebuilds — no more seconds of frozen video chasing a
                         // running clock
                         jump_to = Some(r.t);
-                        if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, r.t, false, true, true) {
+                        if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, r.t, false, true, Rb::Sync) {
+                            let tex = if gpu_on { snapshot_canvas(&shared, &d3d, &comp, &gpu_pool) } else { None };
                             seq += 1;
                             let mut f = shared.frame.lock().unwrap();
+                            f.tex = tex;
                             f.rgba.clear();
                             f.rgba.extend_from_slice(&comp.rgba);
                             f.seq = seq;
                             f.t = r.t;
                             f.eff_t = eff;
                             f.quality = "proxy";
+                            f.caption_epoch = caption_epoch;
                         }
                     }
                 }
@@ -2311,7 +2514,9 @@ fn media_thread(shared: Arc<Shared>) {
                     let res = if let Some(eff) = cache_eff {
                         Ok((Vec::new(), true, eff))
                     } else {
-                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, true, false)
+                        // GPU-direct playback: NO readback at all — a video/text/image
+                        // dense span can no longer stall the producer on a GPU map.
+                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, true, if gpu_on { Rb::None } else { Rb::Async })
                     };
                     ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
                     match res {
@@ -2320,10 +2525,19 @@ fn media_thread(shared: Arc<Shared>) {
                                 eprintln!("SLOWPROD t={next_t:.2}: {ms_comp:.0}ms");
                             }
                             let p0 = Instant::now();
-                            let frame_ref: &Vec<u8> = if from_cache { &cached_buf } else { &comp.rgba };
+                            let payload = if from_cache {
+                                Frame::Cpu(cached_buf.clone())
+                            } else if gpu_on {
+                                match snapshot_canvas(&shared, &d3d, &comp, &gpu_pool) {
+                                    Some(t) => Frame::Gpu(t),
+                                    None => Frame::Cpu(comp.rgba.clone()),
+                                }
+                            } else {
+                                Frame::Cpu(comp.rgba.clone())
+                            };
                             {
                                 let mut rg = shared.ring.lock().unwrap();
-                                rg.push_back((next_t, eff, frame_ref.clone()));
+                                rg.push_back((next_t, eff, payload));
                                 // never trim against the OLD clock while a jump is pending —
                                 // a backward seek's fresh frames all look "stale" to it
                                 if jump_to.is_none() {
@@ -2333,7 +2547,12 @@ fn media_thread(shared: Arc<Shared>) {
                                 }
                                 shared.ring_level.store(rg.len(), Ordering::Relaxed);
                             }
-                            if !from_cache && prev_was_compose && len >= 6 && ms_comp < 25.0 {
+                            if PLAYBACK_FRAME_CACHE_FILL
+                                && !from_cache
+                                && prev_was_compose
+                                && len >= 6
+                                && ms_comp < 25.0
+                            {
                                 // cheap frames get cached opportunistically (lz4 ~5ms).
                                 // ASYNC readback returns the PREVIOUS compose's pixels, so
                                 // the content belongs to the previous sequence frame — keying it at
@@ -2378,6 +2597,11 @@ fn media_thread(shared: Arc<Shared>) {
                         Err(e) => {
                             let msg = format!("{e:#}");
                             eprintln!("compose ERR t={next_t:.2} after {ms_comp:.0}ms: {msg}");
+                            {
+                                let r = unsafe { d3d.device.GetDeviceRemovedReason() };
+                                eprintln!("DEVICE_STATE {r:?}");
+                                d3d.drain_debug("err");
+                            }
                             if msg.contains("0x8007000E") {
                                 // out of (GPU) memory: dump idle decoder instances NOW
                                 pool.evict_stale(120);
@@ -2390,6 +2614,12 @@ fn media_thread(shared: Arc<Shared>) {
                         // Olive uses 5s normal / 1s during playback; our opens are ~100x
                         // costlier, so 12s and playback-only
                         pool.evict_idle(std::time::Duration::from_secs(12));
+                        // presentation textures beyond the ring's working set go back
+                        // to the driver (a 3x-speed burst must not park VRAM forever)
+                        gpu_pool.trim(RING_DEPTH + 4);
+                        // Submit queued GPU work so completed decoder views are released
+                        // during long playback instead of accumulating until restart.
+                        unsafe { d3d.ctx.Flush() };
                     }
                     if pool.frame_no % 300 == 0 {
                         let (nf, ni) = pool.stats();
@@ -2422,6 +2652,12 @@ fn media_thread(shared: Arc<Shared>) {
                 settle = Instant::now();
             }
             if r.gen != last_gen {
+                warm_done = false;
+                if last_t >= 0.0 && (t - last_t).abs() > 3.0 {
+                    // A far scrub/jump changes the decoder working set. Do not retain the
+                    // old location's sessions and then open another complete set.
+                    pool.clear();
+                }
                 shared.ring.lock().unwrap().clear();
                 shared.ring_gen.fetch_add(1, Ordering::Relaxed);
             }
@@ -2440,12 +2676,14 @@ fn media_thread(shared: Arc<Shared>) {
                     }
                     seq += 1;
                     let mut f = shared.frame.lock().unwrap();
+                    f.tex = None; // cached CPU pixels — display via the CPU path
                     f.rgba = buf;
                     f.seq = seq;
                     f.t = t;
                     f.eff_t = eff;
                     f.comp_ms = 0.0;
                     f.quality = "proxy";
+                    f.caption_epoch = caption_epoch;
                     scrub_exact = true;
                     last_gen = r.gen;
                     last_t = t;
@@ -2460,12 +2698,14 @@ fn media_thread(shared: Arc<Shared>) {
                 // Filmora's preview is uniformly proxy too — that IS its stability.
                 let original = false;
                 let t0 = Instant::now();
-                match compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, original, r.scrubbing, true) {
+                match compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, original, r.scrubbing, Rb::Sync) {
                     Ok((used, exact, eff)) => {
                         scrub_exact = !r.scrubbing || exact;
+                        let tex = if gpu_on { snapshot_canvas(&shared, &d3d, &comp, &gpu_pool) } else { None };
                         seq += 1;
                         {
                             let mut f = shared.frame.lock().unwrap();
+                            f.tex = tex;
                             f.rgba.clear();
                             f.rgba.extend_from_slice(&comp.rgba);
                             f.seq = seq;
@@ -2478,10 +2718,18 @@ fn media_thread(shared: Arc<Shared>) {
                             f.comp_max = comp_hist.iter().map(|(_, v)| *v).fold(0.0, f32::max);
                             last_pub = Some(now);
                             f.quality = "proxy";
+                            f.caption_epoch = caption_epoch;
                         }
                         let _ = used;
                     }
-                    Err(e) => eprintln!("compose: {e:#}"),
+                    Err(e) => {
+                        let msg = format!("{e:#}");
+                        eprintln!("compose: {msg}");
+                        if msg.contains("0x887A0005") {
+                            let r = unsafe { d3d.device.GetDeviceRemovedReason() };
+                            eprintln!("DEVICE_REMOVED reason={r:?}");
+                        }
+                    }
                 }
                 if r.scrubbing {
                     // scrub responsiveness meter: frames delivered per second while dragging
@@ -2513,11 +2761,13 @@ fn media_thread(shared: Arc<Shared>) {
                         }
                         seq += 1;
                         let mut f = shared.frame.lock().unwrap();
+                        f.tex = None; // cached CPU pixels — display via the CPU path
                         f.rgba = buf;
                         f.seq = seq;
                         f.t = t;
                         f.eff_t = eff;
                         f.quality = "proxy";
+                        f.caption_epoch = caption_epoch;
                         scrub_exact = true;
                         std::thread::sleep(std::time::Duration::from_millis(2));
                         continue;
@@ -2525,16 +2775,19 @@ fn media_thread(shared: Arc<Shared>) {
                     // finger resting mid-drag on a long-GOP spot: keep refining toward the
                     // exact frame, one budget slice per pass (converges like Filmora's
                     // "stop and the picture sharpens to the real frame")
-                    if let Ok((_, ex, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, true) {
+                    if let Ok((_, ex, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, Rb::Sync) {
                         scrub_exact = ex;
+                        let tex = if gpu_on { snapshot_canvas(&shared, &d3d, &comp, &gpu_pool) } else { None };
                         seq += 1;
                         let mut f = shared.frame.lock().unwrap();
+                        f.tex = tex;
                         f.rgba.clear();
                         f.rgba.extend_from_slice(&comp.rgba);
                         f.seq = seq;
                         f.t = t;
                         f.eff_t = eff;
                         f.quality = "proxy";
+                        f.caption_epoch = caption_epoch;
                     } else {
                         scrub_exact = true; // failed — stop hammering
                     }
@@ -2558,9 +2811,17 @@ fn media_thread(shared: Arc<Shared>) {
                     rg.back().map(|(ft, ..)| ft + frame_step).unwrap_or_else(|| (t / frame_step).floor() * frame_step)
                 };
                 if next_t <= dur {
-                    if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, false) {
+                    if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, if gpu_on { Rb::None } else { Rb::Async }) {
+                        let payload = if gpu_on {
+                            match snapshot_canvas(&shared, &d3d, &comp, &gpu_pool) {
+                                Some(t) => Frame::Gpu(t),
+                                None => Frame::Cpu(comp.rgba.clone()),
+                            }
+                        } else {
+                            Frame::Cpu(comp.rgba.clone())
+                        };
                         let mut rg = shared.ring.lock().unwrap();
-                        rg.push_back((next_t, eff, comp.rgba.clone()));
+                        rg.push_back((next_t, eff, payload));
                         shared.ring_level.store(rg.len(), Ordering::Relaxed);
                     }
                 } else {
@@ -2568,7 +2829,7 @@ fn media_thread(shared: Arc<Shared>) {
                 }
             } else if {
                 let p0 = Instant::now();
-                let r2 = mask_build_pass(&doc, &d3d, &mut masks);
+                let r2 = mask_build_pass(&doc, &d3d, &mut masks, Some(t));
                 if p0.elapsed().as_millis() > 80 {
                     eprintln!("PASS mask {}ms", p0.elapsed().as_millis());
                 }
@@ -2583,7 +2844,7 @@ fn media_thread(shared: Arc<Shared>) {
                 // THEN: open every decoder the rest of the timeline needs (a cold open
                 // mid-play is a 100-200ms media-thread stall = visible gap)
                 let p0 = Instant::now();
-                warm_done = warm_open_pass(&doc, &d3d, &mut pool, &masks);
+                warm_done = warm_open_pass(&doc, &d3d, &mut pool, &masks, t);
                 if p0.elapsed().as_millis() > 80 {
                     eprintln!("PASS warm {}ms", p0.elapsed().as_millis());
                 }
@@ -2609,7 +2870,7 @@ fn media_thread(shared: Arc<Shared>) {
                     }
                 }
                 if let Some(ft) = target {
-                    if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, false, false, true) {
+                    if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, false, false, Rb::Sync) {
                         fcache.insert(ft, timeline_fps, eff, &comp.rgba, t);
                     }
                     if fcache.frames.len() % 300 == 0 {
@@ -2627,8 +2888,10 @@ fn media_thread(shared: Arc<Shared>) {
                 }
             } {
                 // filled one cache frame this slice
+            } else if !MEDIA_THREAD_AUX {
+                std::thread::sleep(std::time::Duration::from_millis(3));
             } else {
-                // idle: chew on one aux job slice (thumbnails / waveform peaks)
+                // Legacy fallback: the dedicated aux thread normally owns these jobs.
                 let job = { shared.aux_req.lock().unwrap().first().cloned() };
                 match job {
                     Some(AuxJob::Thumb { asset_id, path, bucket }) => {
@@ -2680,14 +2943,20 @@ fn media_thread(shared: Arc<Shared>) {
 
 fn aux_thread(shared: Arc<Shared>) {
     let run = || -> anyhow::Result<()> {
+        if std::env::var_os("NATIVE_DISABLE_AUX").is_some() {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
         let d3d = media::D3d::new()?;
+        let mut thumbnailer = media::Thumbnailer::new();
         let mut peak_scan: Option<(String, media::PeakScan)> = None;
         loop {
             let job = { shared.aux_req.lock().unwrap().first().cloned() };
             match job {
                 Some(AuxJob::Thumb { asset_id, path, bucket }) => {
                     let tt = bucket as f64 * THUMB_BUCKET_S + THUMB_BUCKET_S * 0.5;
-                    let got = media::thumbnail(&d3d, &path, tt, 96).ok();
+                    let got = thumbnailer.thumbnail(&d3d, &path, tt, 96).ok();
                     {
                         let mut a = shared.aux.lock().unwrap();
                         if let Some(t) = got {
@@ -2756,6 +3025,14 @@ struct Library {
     started: bool,
 }
 
+/// Short-lived IME/editing state. It is intentionally separate from the document: a
+/// Japanese conversion may change several times before the user has committed text.
+/// `clip.text` remains the only persisted caption value.
+struct CaptionDraft {
+    text: String,
+    commit_at: Instant,
+}
+
 struct App {
     screen: Screen,
     lib: Library,
@@ -2764,6 +3041,7 @@ struct App {
     lib_gen_stash: Option<serde_json::Value>,
     marquee: Option<egui::Rect>,
     insp_text: String,
+    caption_drafts: std::collections::HashMap<String, CaptionDraft>,
     /// Text editors rendered on the previous frame. Numeric drags and sliders may keep
     /// egui focus, but only these IDs are allowed to suppress timeline shortcuts.
     text_focus_ids: Vec<egui::Id>,
@@ -2779,6 +3057,7 @@ struct App {
     caption_web_ready: Arc<std::sync::atomic::AtomicBool>,
     caption_web_sig: u64,
     caption_web_t: f64,
+    caption_web_hidden_sig: u64,
     /// Doc the caption payload was last built from (Arc identity). Rebuilding and
     /// hashing the full caption JSON every FRAME burned constant UI-thread time on
     /// caption-heavy docs; the doc pointer only changes on real edits.
@@ -2818,7 +3097,13 @@ struct App {
     thumbs: std::collections::HashMap<(String, i64), egui::TextureHandle>,
     peaks: std::collections::HashMap<String, (f64, Vec<f32>)>,
     aux_ver: u64,
+    /// CPU-fallback preview texture (only fed when the GPU-direct path is off)
     tex: Option<egui::TextureHandle>,
+    /// GPU-direct preview: the published D3D11 frame currently on screen. Holding
+    /// the Arc keeps the pool from recycling it while it is displayed.
+    display_tex: Option<Arc<gpu_present::GpuTex>>,
+    /// WGL interop renderer state (lives inside the egui paint callback)
+    gl_video: Arc<gpu_present::GlVideo>,
     last_seq: u64,
     playing: bool,
     playback_speed: f64,
@@ -2916,12 +3201,14 @@ impl App {
         let before_norm = serde_json::to_string(&raw).unwrap_or_default();
         edits::normalize_linked_audio(&mut raw);
         edits::remove_orphan_linked_audio(&mut raw);
+        edits::quantize_timeline_frames(&mut raw);
         let normalized_on_load = serde_json::to_string(&raw).unwrap_or_default() != before_norm;
         let doc = Arc::new(model::Doc::from_raw(raw, contents, dir)?);
         let dur = doc.duration();
         let shared = Arc::new(Shared {
             req: Mutex::new(Req { t: 0.0, playing: false, scrubbing: false, speed: 1.0, gen: 0 }),
             frame: Mutex::new(FrameOut {
+                tex: None,
                 rgba: vec![0; (CANVAS_W * CANVAS_H * 4) as usize],
                 seq: 0,
                 t: 0.0,
@@ -2930,10 +3217,12 @@ impl App {
                 comp_max: 0.0,
                 gap_max: 0.0,
                 quality: "proxy",
+                caption_epoch: 0,
             }),
             clock_bits: AtomicU64::new(0f64.to_bits()),
             underruns: AtomicU64::new(0),
             dirty_from_bits: AtomicU64::new(f64::INFINITY.to_bits()),
+            caption_epoch: AtomicU64::new(0),
             ring_level: std::sync::atomic::AtomicUsize::new(0),
             ring: Mutex::new(Default::default()),
             ring_gen: AtomicU64::new(0),
@@ -2941,6 +3230,10 @@ impl App {
             doc: Mutex::new(doc.clone()),
             aux_req: Mutex::new(Vec::new()),
             aux: Mutex::new(AuxOut::default()),
+            gpu_pool: Mutex::new(None),
+            gpu_disabled: std::sync::atomic::AtomicBool::new(
+                std::env::var("NATIVE_NO_GPU_PRESENT").map(|v| !v.is_empty()).unwrap_or(false),
+            ),
         });
         {
             let shared = shared.clone();
@@ -2974,6 +3267,7 @@ impl App {
             lib_gen_stash: None,
             marquee: None,
             insp_text: String::new(),
+            caption_drafts: Default::default(),
             text_focus_ids: Vec::new(),
             blur_mode: false,
             blur_drag: None,
@@ -2987,6 +3281,7 @@ impl App {
             caption_web_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             caption_web_sig: 0,
             caption_web_t: f64::NAN,
+            caption_web_hidden_sig: 0,
             caption_doc_ptr: 0,
             recut_open: false,
             recut_thresh: 0.45,
@@ -3014,6 +3309,8 @@ impl App {
             pending_initial_imports: Vec::new(),
             pending_initial_fps: Vec::new(),
             tex: None,
+            display_tex: None,
+            gl_video: Arc::new(gpu_present::GlVideo::new()),
             last_seq: 0,
             playing: false,
             playback_speed: 1.0,
@@ -3162,6 +3459,7 @@ impl App {
         f(&mut raw);
         edits::normalize_linked_audio(&mut raw);
         edits::remove_orphan_linked_audio(&mut raw);
+        edits::quantize_timeline_frames(&mut raw);
         match model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             Ok(nd) => {
                 let df = Self::dirty_from(&self.doc, &nd);
@@ -3189,6 +3487,8 @@ impl App {
     }
 
     fn restore(&mut self, raw: serde_json::Value) {
+        let mut raw = raw;
+        edits::quantize_timeline_frames(&mut raw);
         if let Ok(nd) = model::Doc::from_raw(raw, &self.doc.contents_path, &self.doc.asset_dir) {
             let nd = Arc::new(nd);
             self.doc = nd.clone();
@@ -3201,6 +3501,7 @@ impl App {
 
     /// Snap t to nearby clip edges / the playhead (8px feel like Filmora's magnet).
     fn snap(&self, t: f64, ignore: &[String]) -> f64 {
+        let t = self.grid_quantize(t);
         let tol = (8.0 / self.pps) as f64;
         let mut best = t;
         let mut bd = tol;
@@ -3218,12 +3519,13 @@ impl App {
                 }
             }
         }
-        best
+        self.grid_quantize(best)
     }
 
     fn snap_playhead(&self, t: f64) -> f64 {
+        let t = self.grid_quantize(t.clamp(0.0, self.dur));
         if !self.playhead_snap {
-            return t.clamp(0.0, self.dur);
+            return t;
         }
         let tol = (8.0 / self.pps) as f64;
         let mut best = t.clamp(0.0, self.dur);
@@ -3622,7 +3924,18 @@ impl App {
         };
         let Some(rg) = c.region_xywh() else { return };
         let mid = (c.timeline_start + c.timeline_end) * 0.5;
-        let base = self.doc.active_video(mid).0.cloned();
+        let (cx, cy) = (rg.0 + rg.2 * 0.5, rg.1 + rg.3 * 0.5);
+        let active = self.doc.active_media(mid);
+        let base = active
+            .iter()
+            .rev()
+            .copied()
+            .find(|b| {
+                let p = b.display_box_at(mid);
+                cx >= p.x && cx <= p.x + p.width && cy >= p.y && cy <= p.y + p.height
+            })
+            .or_else(|| active.last().copied())
+            .cloned();
         let Some(b) = base.filter(|b| b.asset_id.is_some() && !b.is_freeze()) else {
             self.toast = Some(("追従ベイクには下に通常の映像クリップが必要です".into(), Instant::now()));
             return;
@@ -3658,9 +3971,9 @@ impl App {
         // whatever happened to be in the box 1.5s earlier.
         let anchor_src = if self.t >= c.timeline_start && self.t < c.timeline_end {
             self.doc
-                .active_video(self.t)
-                .0
-                .filter(|bc| bc.asset_id.as_deref() == Some(aid.as_str()))
+                .active_media(self.t)
+                .into_iter()
+                .find(|bc| bc.id == b.id)
                 .map(|bc| bc.src_at(self.t))
         } else {
             None
@@ -3687,7 +4000,7 @@ impl App {
         );
         let room = self.room_id();
         // bind immediately (shows 0%); the cache key arrives async from the POST
-        let pending = serde_json::json!({ "asset_id": aid });
+        let pending = serde_json::json!({ "asset_id": aid, "target_clip_id": b.id });
         let cid = id.to_string();
         self.apply_edit(true, move |raw| edits::set_blur_track(raw, &cid, Some(pending)));
         self.blur_states.insert(id.to_string(), PopState::Baking(0));
@@ -3858,7 +4171,10 @@ impl App {
         // and the bg bar all come from the renderer itself, never re-estimated.
         let report_js = "window.__reportCapBoxes=function(t){try{\
 var p=window.__nativeCaptionPayload;if(!p||!window.ipc)return;\
-var acts=p.captions.filter(function(c){return c.text&&c.text.trim()&&t>=c.start&&t<=c.end});\
+var fps=(Number.isFinite(p.fps)&&p.fps>1)?p.fps:30;\
+var fr=Math.round(t*fps),hidden=new Set(p.hiddenCaptionIds||[]);\
+var acts=p.captions.filter(function(c){return c.text&&c.text.trim()&&!hidden.has(c.id)&&fr>=Math.round(c.start*fps)&&fr<Math.round(c.end*fps)});\
+acts=acts.length?[acts[acts.length-1]]:[];\
 var root=document.querySelector('div[data-ready]');if(!root)return;\
 var cont=root.firstElementChild;if(!cont)return;\
 var layer=cont.firstElementChild;if(!layer)return;\
@@ -3917,21 +4233,6 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
 
     fn caption_web_captions(&self) -> serde_json::Value {
         let mut out = Vec::new();
-        let t_now = self.displayed_t();
-        let native_caps = native_caption_ids(&self.doc, t_now);
-        if std::env::var("NATIVE_ZCAP_DEBUG").is_ok() {
-            static LAST: OnceLock<Mutex<String>> = OnceLock::new();
-            let mut ids: Vec<&String> = native_caps.iter().collect();
-            ids.sort();
-            let msg = format!("ZCAP t={t_now:.2} native={ids:?}");
-            let last = LAST.get_or_init(|| Mutex::new(String::new()));
-            if let Ok(mut l) = last.lock() {
-                if *l != msg {
-                    eprintln!("{msg}");
-                    *l = msg;
-                }
-            }
-        }
         for tr in &self.doc.seq.tracks {
             if tr.hidden {
                 continue;
@@ -3940,20 +4241,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 if c.text.is_none() || c.asset_id.is_some() || c.region.is_some() {
                     continue;
                 }
-                let text = caption_live::get(&c.id)
-                    .or_else(|| c.text.clone())
-                    .unwrap_or_default();
+                let text = self.caption_display_text(c);
                 if text.trim().is_empty() {
-                    continue;
-                }
-                // Lane order = z, captions included: a caption with a video/effect layer
-                // ABOVE it is drawn by the GPU compositor at its lane position — the
-                // always-on-top WebView must not double-draw it. The exclusion is
-                // per-displayed-time, so the payload sig changes exactly at boundaries.
-                if native_caps.contains(&c.id)
-                    && t_now >= c.timeline_start
-                    && t_now < c.timeline_end
-                {
                     continue;
                 }
                 out.push(serde_json::json!({
@@ -3969,9 +4258,50 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         serde_json::Value::Array(out)
     }
 
+    /// The value every UI surface should show while a caption is being edited. The
+    /// draft is an IME transaction only; once it settles it is written to `clip.text`.
+    fn caption_display_text(&self, clip: &model::Clip) -> String {
+        self.caption_drafts
+            .get(&clip.id)
+            .map(|draft| draft.text.clone())
+            .or_else(|| clip.text.clone())
+            .unwrap_or_default()
+    }
+
     fn sync_caption_web(&mut self, frame: &eframe::Frame, rect: egui::Rect, visible: bool) {
         self.ensure_caption_web(frame);
-        let t = self.displayed_t();
+        // Captions follow the timeline frame actually published to the preview, not the
+        // continuously-running audio clock. Video and text therefore share one boundary.
+        let t = if self.playing {
+            let shown = self.shared.frame.lock().unwrap().t;
+            if shown.is_finite() && (shown - self.displayed_t()).abs() < 0.75 {
+                shown
+            } else {
+                self.grid_quantize(self.displayed_t())
+            }
+        } else {
+            self.grid_quantize(self.t)
+        };
+        // GPU and WebView must agree on ownership for this exact displayed frame. The
+        // document payload stays cached, while this small ID set is refreshed at cuts
+        // and when a caption cache PNG becomes available.
+        let mut hidden_caption_ids: Vec<String> = native_caption_ids(&self.doc, t).into_iter().collect();
+        hidden_caption_ids.sort();
+        use std::hash::{Hash, Hasher};
+        let mut hidden_hasher = std::collections::hash_map::DefaultHasher::new();
+        hidden_caption_ids.hash(&mut hidden_hasher);
+        let hidden_sig = hidden_hasher.finish();
+        if std::env::var("NATIVE_ZCAP_DEBUG").is_ok() {
+            static LAST: OnceLock<Mutex<String>> = OnceLock::new();
+            let msg = format!("ZCAP t={t:.2} native={hidden_caption_ids:?}");
+            let last = LAST.get_or_init(|| Mutex::new(String::new()));
+            if let Ok(mut l) = last.lock() {
+                if *l != msg {
+                    eprintln!("{msg}");
+                    *l = msg;
+                }
+            }
+        }
         // Rebuild + hash the caption payload only when the DOCUMENT changed (Arc
         // identity; live typing resets caption_web_sig) — not every frame.
         let doc_ptr = Arc::as_ptr(&self.doc) as usize;
@@ -3980,7 +4310,6 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             || !self.caption_web_ready.load(Ordering::Relaxed);
         let (captions, sig) = if dirty {
             let captions = self.caption_web_captions();
-            use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             captions.to_string().hash(&mut hasher);
             let sig = hasher.finish();
@@ -4010,12 +4339,22 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             size: wry::dpi::LogicalSize::new(rect.width() as f64, rect.height() as f64).into(),
         };
         let _ = web.set_bounds(bounds);
+        // Do not let a new WebView caption appear over pixels composed under the
+        // previous owner. The media thread publishes this generation only after it has
+        // rebuilt the current frame with the matching GPU/WebView ownership plan.
+        let wanted_epoch = self.shared.caption_epoch.load(Ordering::Relaxed);
+        let presented_epoch = self.shared.frame.lock().unwrap().caption_epoch;
+        if presented_epoch != wanted_epoch {
+            return;
+        }
         let web_ready = self.caption_web_ready.load(Ordering::Relaxed);
         if (sig != self.caption_web_sig || !web_ready) && captions.is_some() {
             let payload = serde_json::json!({
                 "outW": CANVAS_W,
                 "outH": CANVAS_H,
+                "fps": self.doc.seq.frame_rate.unwrap_or(30.0),
                 "time": t,
+                "hiddenCaptionIds": hidden_caption_ids,
                 "captions": captions.unwrap(),
             });
             let js = format!(
@@ -4027,20 +4366,70 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 self.caption_web_sig = sig;
             }
             self.caption_web_t = t;
-        } else if !self.caption_web_t.is_finite() || (t - self.caption_web_t).abs() > 0.001 {
+            self.caption_web_hidden_sig = hidden_sig;
+        } else if !self.caption_web_t.is_finite()
+            || (t - self.caption_web_t).abs() > 0.001
+            || hidden_sig != self.caption_web_hidden_sig
+        {
+            let hidden_json = serde_json::to_string(&hidden_caption_ids).unwrap_or_else(|_| "[]".to_string());
             let _ = web.evaluate_script(&format!(
-                "window.__renderCaptionAt&&window.__renderCaptionAt({t:.6}).then(function(){{window.__reportCapBoxes&&window.__reportCapBoxes({t:.6})}});"
+                "window.__renderCaptionAt&&window.__renderCaptionAt({t:.6},{hidden_json}).then(function(){{window.__reportCapBoxes&&window.__reportCapBoxes({t:.6})}});"
             ));
             self.caption_web_t = t;
+            self.caption_web_hidden_sig = hidden_sig;
         }
     }
 
-    /// Update only the selected caption's in-memory text and start its real bundled-font
-    /// raster immediately. This is the keystroke path: no document clone/rebuild, save,
-    /// network request, disk PNG, or video-cache invalidation.
-    fn preview_caption_text(&mut self, clip_id: &str, text: String) {
-        caption_live::set(clip_id, text);
+    /// Advance caption ownership. The producer drops every cached/ring frame from the
+    /// prior generation before it publishes this one, so GPU and WebView never paint the
+    /// same caption at once.
+    fn bump_caption_epoch(&mut self) {
+        self.shared.caption_epoch.fetch_add(1, Ordering::Relaxed);
         self.caption_web_sig = 0;
+        self.push_req(false);
+    }
+
+    /// Stage an IME edit without rebuilding the whole timeline on each composition
+    /// change. The WebView is the temporary visual owner; `clip.text` is committed
+    /// after the user pauses, changes focus, or explicitly saves the dialog.
+    fn stage_caption_text(&mut self, clip_id: &str, text: String) {
+        let first_change = !self.caption_drafts.contains_key(clip_id);
+        self.caption_drafts.insert(
+            clip_id.to_string(),
+            CaptionDraft {
+                text,
+                commit_at: Instant::now() + std::time::Duration::from_millis(350),
+            },
+        );
+        caption_live::activate(clip_id);
+        // The document did not change, so invalidate only the small overlay payload.
+        self.caption_web_sig = 0;
+        if first_change {
+            self.bump_caption_epoch();
+        }
+    }
+
+    fn commit_caption_drafts(&mut self, only: Option<&str>) {
+        let now = Instant::now();
+        let due: Vec<(String, String)> = self
+            .caption_drafts
+            .iter()
+            .filter(|(id, draft)| only == Some(id.as_str()) || only.is_none() && draft.commit_at <= now)
+            .map(|(id, draft)| (id.clone(), draft.text.clone()))
+            .collect();
+        for (id, text) in due {
+            self.caption_drafts.remove(&id);
+            self.apply_edit(false, move |raw| edits::set_text(raw, &id, &text));
+            // Keep WebView ownership until caption_cache_pass sees a PNG for this
+            // committed document value, then it performs the atomic GPU handoff.
+        }
+    }
+
+    fn flush_caption_drafts(&mut self) {
+        let ids: Vec<String> = self.caption_drafts.keys().cloned().collect();
+        for id in ids {
+            self.commit_caption_drafts(Some(&id));
+        }
     }
 
     /// Designed captions: when the caption set changes, ask the server for the SAME
@@ -4050,6 +4439,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         use std::hash::{Hash, Hasher};
         let mut specs: Vec<(String, serde_json::Value)> = Vec::new();
         let mut missing_cache = false;
+        let mut completed_live = Vec::new();
         let tracks = self.doc.raw.get(0).and_then(|c| c.get("timeline")).and_then(|t| t.get("sequence")).and_then(|sq| sq.get("tracks")).and_then(|t| t.as_array());
         if let Some(tracks) = tracks {
             for tr in tracks {
@@ -4081,6 +4471,8 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     let png = std::path::Path::new(&self.doc.asset_dir).join("caption-cache").join(format!("{key}.png"));
                     if !png.exists() || std::fs::metadata(&png).map(|m| m.len() == 0).unwrap_or(true) {
                         missing_cache = true;
+                    } else if caption_live::is_active(&id) && !self.caption_drafts.contains_key(&id) {
+                        completed_live.push(id.clone());
                     }
                     specs.push((id, spec));
                 }
@@ -4094,6 +4486,15 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let sig = h.finish();
         if specs.is_empty() {
             return;
+        }
+        // Commit handoff only after the PNG for the committed live text exists. The
+        // epoch gate in sync_caption_web keeps WebView visible until the GPU frame for
+        // this new owner has actually been published.
+        if !completed_live.is_empty() {
+            for id in completed_live {
+                caption_live::clear(&id);
+            }
+            self.bump_caption_epoch();
         }
         if sig == self.cap_sig {
             if !missing_cache {
@@ -4712,7 +5113,12 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let same_caption = selected
             .iter()
             .all(|(c, k)| k == "caption" || (c.text.is_some() && c.asset_id.is_none() && c.region.is_none()));
-        if multi && !same_media && !same_caption {
+        let same_region_effect = selected.iter().all(|(c, _)| {
+            c.region.is_some()
+                && c.asset_id.is_none()
+                && c.style.as_ref().and_then(|v| v.as_str()) != Some("note")
+        });
+        if multi && !same_media && !same_caption && !same_region_effect {
             return;
         }
         let (clip, kind) = selected[0].clone();
@@ -4769,11 +5175,74 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                     return;
                 }
+                // ---- multi-select region effects: apply one set of controls to all ----
+                if multi && same_region_effect {
+                    ui.label(egui::RichText::new("範囲エフェクトを一括編集").strong());
+                    ui.label(egui::RichText::new("変更は選択中の全クリップに適用されます。").small().weak());
+                    let cur = clip.style.as_ref().and_then(|v| v.as_str()).unwrap_or("mosaic").to_string();
+                    ui.horizontal(|ui| {
+                        for (label, val) in [("モザイク", "mosaic"), ("ぼかし", "gaussian"), ("単色", "solid")] {
+                            let all_same = selected.iter().all(|(c, _)| c.style.as_ref().and_then(|v| v.as_str()) == Some(val));
+                            if ui.selectable_label(all_same, label).clicked() {
+                                let ids = edit_ids.clone();
+                                self.apply_edit(true, move |raw| {
+                                    for cid in &ids { edits::set_style(raw, cid, val); }
+                                });
+                                self.push_req(false);
+                            }
+                        }
+                    });
+                    let is_solid = cur == "solid";
+                    if !is_solid {
+                        let mut strength = clip.effect_strength.unwrap_or(if cur.contains("mosaic") { 14.0 } else { 16.0 }) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label(if cur.contains("mosaic") { "粗さ" } else { "ぼかし強度" });
+                            let resp = ui.add(egui::Slider::new(&mut strength, 2.0..=64.0).suffix(" px"));
+                            if resp.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if resp.changed() {
+                                let ids = edit_ids.clone(); let value = strength as f64;
+                                self.apply_edit(false, move |raw| {
+                                    for cid in &ids { edits::set_effect_options(raw, cid, Some(value), None, None); }
+                                });
+                            }
+                        });
+                    } else {
+                        let mut colour = hex_color32(clip.effect_color.as_deref().unwrap_or("#000000"), egui::Color32::BLACK);
+                        let mut opacity = clip.effect_opacity.unwrap_or(1.0) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label("色");
+                            if ui.color_edit_button_srgba(&mut colour).changed() {
+                                let ids = edit_ids.clone(); let hex = color32_hex(colour);
+                                self.apply_edit(true, move |raw| {
+                                    for cid in &ids { edits::set_effect_options(raw, cid, None, Some(hex.clone()), None); }
+                                });
+                            }
+                            ui.label(egui::RichText::new(color32_hex(colour)).weak());
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("不透明度");
+                            let resp = ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).show_value(false));
+                            ui.label(format!("{:0}%", opacity * 100.0));
+                            if resp.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if resp.changed() {
+                                let ids = edit_ids.clone(); let value = opacity as f64;
+                                self.apply_edit(false, move |raw| {
+                                    for cid in &ids { edits::set_effect_options(raw, cid, None, None, Some(value)); }
+                                });
+                            }
+                        });
+                    }
+                    return;
+                }
                 if !multi && clip.region.is_some() && clip.asset_id.is_none() {
                     ui.label(egui::RichText::new("種類").strong());
                     let cur = clip.style.as_ref().and_then(|v| v.as_str()).unwrap_or("mosaic").to_string();
                     ui.horizontal(|ui| {
-                        for (label, val) in [("モザイク", "mosaic"), ("ぼかし", "gaussian")] {
+                        for (label, val) in [
+                            ("モザイク", "mosaic"),
+                            ("ぼかし", "gaussian"),
+                            ("単色", "solid"),
+                        ] {
                             if ui.selectable_label(cur.contains(val), label).clicked() {
                                 let cid = id.clone();
                                 self.apply_edit(true, move |raw| edits::set_style(raw, &cid, val));
@@ -4781,7 +5250,43 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             }
                         }
                     });
-                    ui.label(egui::RichText::new("※プレビューはモザイク表示。書き出しで指定の種類が適用されます").small().weak());
+                    let is_solid = cur == "solid";
+                    let mut strength = clip.effect_strength.unwrap_or(if cur.contains("mosaic") { 14.0 } else { 16.0 }) as f32;
+                    if !is_solid {
+                        let label = if cur.contains("mosaic") { "粗さ" } else { "ぼかし強度" };
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            let resp = ui.add(egui::Slider::new(&mut strength, 2.0..=64.0).suffix(" px"));
+                            if resp.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if resp.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| edits::set_effect_options(raw, &cid, Some(strength as f64), None, None));
+                            }
+                        });
+                    } else {
+                        let mut colour = hex_color32(clip.effect_color.as_deref().unwrap_or("#000000"), egui::Color32::BLACK);
+                        let mut opacity = clip.effect_opacity.unwrap_or(1.0) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label("色");
+                            if ui.color_edit_button_srgba(&mut colour).changed() {
+                                let cid = id.clone();
+                                let hex = color32_hex(colour);
+                                self.apply_edit(true, move |raw| edits::set_effect_options(raw, &cid, None, Some(hex), None));
+                            }
+                            ui.label(egui::RichText::new(color32_hex(colour)).weak());
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("不透明度");
+                            let resp = ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).show_value(false));
+                            ui.label(format!("{:0}%", opacity * 100.0));
+                            if resp.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if resp.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| edits::set_effect_options(raw, &cid, None, None, Some(opacity as f64)));
+                            }
+                        });
+                    }
+                    ui.label(egui::RichText::new("単色は静的範囲にもAI追従にも使えます。ぼかし・モザイクは強度を調整できます。").small().weak());
                     ui.add_space(6.0);
                     // ---- SAM tracked blur: the rectangle picks the OBJECT; the baked
                     // mask then follows it (pixel silhouette), replacing the static rect
@@ -5001,7 +5506,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     if !multi {
                     if self.insp_for != id {
                         self.insp_for = id.clone();
-                        self.insp_text = clip.text.clone().unwrap_or_default();
+                        self.insp_text = self.caption_display_text(&clip);
                     }
                     ui.label(egui::RichText::new("本文").strong());
                     let r = ui.add(
@@ -5015,19 +5520,13 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                     if r.changed() {
                         let txt = self.insp_text.clone();
-                        self.preview_caption_text(&id, txt);
-                        // Only the caption texture changes while typing. The timeline
-                        // document is committed once when the field loses focus.
+                        self.stage_caption_text(&id, txt);
+                        // Keep IME composition local. The document/cache work starts
+                        // only after a short idle period or a focus transition.
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
                     }
                     if r.lost_focus() {
-                        if let Some(txt) = caption_live::get(&id) {
-                            let cid = id.clone();
-                            self.apply_edit(false, move |raw| edits::set_text(raw, &cid, &txt));
-                            caption_live::clear(&id);
-                        } else {
-                            self.pending_undo = None;
-                        }
+                        self.commit_caption_drafts(Some(&id));
                     }
                     } else {
                         ui.label(egui::RichText::new(format!("{} captions", selected.len())).weak().small());
@@ -5036,6 +5535,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     ui.label(egui::RichText::new("デザイン").strong());
                     let style = clip.style.clone().unwrap_or_else(|| serde_json::json!({}));
                     let font_size = style.get("fontSize").and_then(|v| v.as_f64()).unwrap_or(1.04);
+                    let max_width = style.get("maxWidth").and_then(|v| v.as_f64()).unwrap_or(0.88);
                     let y_pos = style.get("y").and_then(|v| v.as_f64()).unwrap_or(0.14);
                     let outline = style.get("outlineWidth").and_then(|v| v.as_f64()).unwrap_or(1.25);
                     if ui.button("白文字・黒フチ・ゴシック").clicked() {
@@ -5052,10 +5552,37 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         self.push_req(false);
                     }
                     let mut fs = font_size;
-                    if ui.add(egui::Slider::new(&mut fs, 0.6..=2.2).text("大きさ")).changed() {
+                    if ui.add(egui::Slider::new(&mut fs, 0.0..=2.2).text("大きさ")).changed() {
                         let ids = edit_ids.clone();
                         self.remember_caption_fallbacks(&ids);
                         let patch = serde_json::json!({"fontSize": (fs * 100.0).round() / 100.0});
+                        self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                        self.push_req(false);
+                    }
+                    let mut mw = max_width;
+                    if ui
+                        .add(egui::Slider::new(&mut mw, 0.05..=1.5).text("横幅"))
+                        .on_hover_text("画面幅に対するテロップ枠の最大幅。100%を超える指定も可能です")
+                        .changed()
+                    {
+                        let ids = edit_ids.clone();
+                        self.remember_caption_fallbacks(&ids);
+                        let patch = serde_json::json!({"maxWidth": (mw * 100.0).round() / 100.0});
+                        self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
+                        self.push_req(false);
+                    }
+                    let current_align = style.get("textAlign").and_then(|v| v.as_str()).unwrap_or("center");
+                    let mut text_align = current_align.to_string();
+                    ui.horizontal(|ui| {
+                        ui.label("文字揃え");
+                        ui.selectable_value(&mut text_align, "left".to_string(), "左");
+                        ui.selectable_value(&mut text_align, "center".to_string(), "中央");
+                        ui.selectable_value(&mut text_align, "right".to_string(), "右");
+                    });
+                    if text_align != current_align {
+                        let ids = edit_ids.clone();
+                        self.remember_caption_fallbacks(&ids);
+                        let patch = serde_json::json!({"textAlign": text_align});
                         self.apply_edit(false, move |raw| edits::patch_caption_style(raw, &ids, patch));
                         self.push_req(false);
                     }
@@ -6242,7 +6769,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
     /// how the compositor places the same PNG, so the box matches the pixels. None
     /// until the PNG lands (caption_cache_pass renders it in the background).
     fn caption_png_box(&mut self, c: &model::Clip) -> Option<(f64, f64, f64, f64)> {
-        let text = caption_live::get(&c.id).or_else(|| c.text.clone()).unwrap_or_default();
+        let text = c.text.clone().unwrap_or_default();
         if text.trim().is_empty() {
             return None;
         }
@@ -7421,7 +7948,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         color,
                     );
                     if r.width() > 22.0 {
-                        let txt = c.text.clone().unwrap_or_default().replace(chr_nl(), " ");
+                        let txt = self.caption_display_text(c).replace(chr_nl(), " ");
                         let max_chars = ((r.width() - 10.0) / 10.0) as usize;
                         let shown: String = txt.chars().take(max_chars.max(1)).collect();
                         p.text(
@@ -8804,10 +9331,12 @@ impl eframe::App for App {
         // typing = ANY text field has focus: every timeline shortcut must stand down —
         // Space toggled playback and Delete removed CLIPS while編集中のテロップに文字を
         // 打っていた（P/L しかガードされていなかった）
-        // Numeric drags/sliders retain egui keyboard focus after mouse adjustment. They
-        // must not disable the editor. Only a real text editor owns the shortcut keys.
+        // Numeric widgets become text editors when their value is clicked. While any UI
+        // widget wants keyboard input, timeline commands (Delete, S/F/E/P/L, arrows,
+        // Space, Ctrl+A/D/Z/Y, Home/End and zoom keys) must stand down.
         let focused = ctx.memory(|mem| mem.focused());
-        let typing = focused
+        let typing = ctx.wants_keyboard_input()
+            || focused
             .map(|id| self.text_focus_ids.contains(&id))
             .unwrap_or(false);
         self.text_focus_ids.clear();
@@ -8990,29 +9519,46 @@ impl eframe::App for App {
             }
         }
 
-        // upload the newest published frame (the media thread never blocks on us)
+        // adopt the newest published frame (the media thread never blocks on us).
+        // GPU-direct: taking the frame is an Arc clone — zero pixels move. The CPU
+        // upload below only runs as the interop-unavailable fallback.
         {
+            let gpu_ok = !self.shared.gpu_disabled.load(Ordering::Relaxed);
             let f = self.shared.frame.lock().unwrap();
             let stale_paused_frame = !self.playing && (f.t - self.t).abs() > 0.002;
-            if f.seq != self.last_seq && !stale_paused_frame && f.rgba.len() == (CANVAS_W * CANVAS_H * 4) as usize {
-                self.last_seq = f.seq;
-                self.comp_ms = f.comp_ms;
-                self.comp_max = f.comp_max;
-                self.gap_max = f.gap_max;
-                self.quality = f.quality;
-                let img = egui::ColorImage::from_rgba_unmultiplied(
-                    [CANVAS_W as usize, CANVAS_H as usize],
-                    &f.rgba,
-                );
-                match &mut self.tex {
-                    Some(t) => t.set(img, egui::TextureOptions::LINEAR),
-                    None => {
-                        self.tex =
-                            Some(ctx.load_texture("preview", img, egui::TextureOptions::LINEAR))
+            if f.seq != self.last_seq && !stale_paused_frame {
+                if let (true, Some(tex)) = (gpu_ok, f.tex.clone()) {
+                    self.last_seq = f.seq;
+                    self.comp_ms = f.comp_ms;
+                    self.comp_max = f.comp_max;
+                    self.gap_max = f.gap_max;
+                    self.quality = f.quality;
+                    self.display_tex = Some(tex);
+                } else if f.rgba.len() == (CANVAS_W * CANVAS_H * 4) as usize {
+                    self.last_seq = f.seq;
+                    self.comp_ms = f.comp_ms;
+                    self.comp_max = f.comp_max;
+                    self.gap_max = f.gap_max;
+                    self.quality = f.quality;
+                    self.display_tex = None;
+                    let img = egui::ColorImage::from_rgba_unmultiplied(
+                        [CANVAS_W as usize, CANVAS_H as usize],
+                        &f.rgba,
+                    );
+                    match &mut self.tex {
+                        Some(t) => t.set(img, egui::TextureOptions::LINEAR),
+                        None => {
+                            self.tex =
+                                Some(ctx.load_texture("preview", img, egui::TextureOptions::LINEAR))
+                        }
                     }
                 }
             } else if stale_paused_frame {
                 ctx.request_repaint();
+            }
+            if !gpu_ok {
+                // interop died mid-session: never draw a frozen GPU frame again
+                self.display_tex = None;
             }
         }
 
@@ -9328,14 +9874,44 @@ impl eframe::App for App {
             .frame(egui::Frame::none().fill(egui::Color32::from_gray(10)))
             .show(ctx, |ui| {
                 let avail = ui.available_size();
-                if let Some(tex) = self.tex.clone() {
+                let gpu_frame = self.display_tex.clone();
+                if gpu_frame.is_some() || self.tex.is_some() {
                     let (cw, ch) = (CANVAS_W as f32, CANVAS_H as f32);
                     let scale = (avail.x / cw).min(avail.y / ch);
                     let size = egui::vec2(cw * scale, ch * scale);
                     ui.centered_and_justified(|ui| {
-                        let resp = ui
-                            .add(egui::Image::new((tex.id(), size)))
-                            .interact(egui::Sense::click_and_drag());
+                        // isolation probe: produce GPU frames but never draw them
+                        let nodraw = std::env::var("NATIVE_GPU_NODRAW").map(|v| !v.is_empty()).unwrap_or(false);
+                        let resp = if let Some(gtex) = gpu_frame.filter(|_| !nodraw) {
+                            // GPU-direct: the composed D3D11 texture is drawn straight
+                            // into eframe's swapchain by the interop callback — same
+                            // allocation call as egui::Image, so the geometry (and all
+                            // overlay/caption math below) is unchanged.
+                            let (_, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                            let vid = egui::Rect::from_center_size(resp.rect.center(), size);
+                            let glv = self.gl_video.clone();
+                            let shared = self.shared.clone();
+                            ui.painter().add(egui::PaintCallback {
+                                rect: vid,
+                                callback: Arc::new(eframe::egui_glow::CallbackFn::new(
+                                    move |_info, painter| {
+                                        let pool = shared.gpu_pool.lock().unwrap().clone();
+                                        let ok = pool
+                                            .map(|p| glv.draw(painter.gl(), &p, &gtex))
+                                            .unwrap_or(false);
+                                        if !ok {
+                                            shared.gpu_disabled.store(true, Ordering::Relaxed);
+                                        }
+                                    },
+                                )),
+                            });
+                            resp
+                        } else if let Some(tex) = self.tex.clone() {
+                            ui.add(egui::Image::new((tex.id(), size)))
+                                .interact(egui::Sense::click_and_drag())
+                        } else {
+                            ui.allocate_exact_size(size, egui::Sense::click_and_drag()).1
+                        };
                         // The preview owns pointer gestures, never text entry. End any
                         // numeric/text focus explicitly so shortcuts resume in this same
                         // interaction instead of waiting for a later panel click.
@@ -9706,22 +10282,18 @@ impl eframe::App for App {
             }
             if text_changed {
                 let text = buf.clone();
-                self.preview_caption_text(&cid, text);
+                self.stage_caption_text(&cid, text);
                 ctx.request_repaint_after(std::time::Duration::from_millis(16));
             }
             if save {
-                if let Some(text) = caption_live::get(&cid) {
-                    let id2 = cid.clone();
-                    self.apply_edit(false, move |raw| edits::set_text(raw, &id2, &text));
-                    caption_live::clear(&cid);
-                } else {
-                    self.pending_undo = None;
-                }
+                self.commit_caption_drafts(Some(&cid));
                 self.caption_edit = None;
             } else if cancel {
                 self.pending_undo = None;
-                caption_live::clear(&cid);
-                self.caption_web_sig = 0;
+                self.caption_drafts.remove(&cid);
+                self.restore(original);
+                caption_live::activate(&cid);
+                self.bump_caption_epoch();
                 self.caption_edit = None;
             } else {
                 self.caption_edit = Some((cid, buf, original));
@@ -9759,7 +10331,20 @@ impl eframe::App for App {
                     }
                 });
         }
+        // Idle drafts are the only caption edits that take the expensive document,
+        // media-cache and PNG-cache paths. This runs after all text widgets have seen
+        // this frame's IME events, never in the keystroke handler itself.
+        self.commit_caption_drafts(None);
         ctx.request_repaint();
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // A close can happen before the idle debounce expires. Persist the completed
+        // input transaction rather than silently discarding the final IME text.
+        self.flush_caption_drafts();
+        if let Err(e) = edits::save(&self.doc.raw, &self.doc.contents_path) {
+            eprintln!("save on exit: {e:#}");
+        }
     }
 }
 
@@ -9861,12 +10446,12 @@ fn main() -> eframe::Result<()> {
             let mut pool = media::VideoPool::new();
             let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H).context("compositor")?;
             let mut masks: MaskMap = Default::default();
-            while mask_build_pass(&doc, &d3d, &mut masks) {}
+            while mask_build_pass(&doc, &d3d, &mut masks, None) {}
             let mut pts_maps: PtsMap = Default::default();
             while pts_load_pass(&doc, &mut pts_maps) {}
             let orig_q = std::env::var("NATIVE_DUMP_PROXY").map(|v| v.is_empty()).unwrap_or(true);
             for (k, &t) in ts.iter().enumerate() {
-                compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, orig_q, false, true)
+                compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, orig_q, false, Rb::Sync)
                     .context("compose")?;
                 let path = if ts.len() == 1 {
                     out.clone()
@@ -10020,17 +10605,17 @@ fn main() -> eframe::Result<()> {
         let mut pool = media::VideoPool::new();
         let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H).unwrap();
         let mut masks: MaskMap = Default::default();
-        while mask_build_pass(&doc, &d3d, &mut masks) {}
+        while mask_build_pass(&doc, &d3d, &mut masks, None) {}
         let mut pts_maps: PtsMap = Default::default();
         while pts_load_pass(&doc, &mut pts_maps) {}
         let mut t = t0v;
-        let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, true);
+        let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, Rb::Sync);
         let b0 = Instant::now();
         let mut worst = 0f64;
         for _ in 0..60 {
             t += 0.33;
             let c0 = Instant::now();
-            let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, true);
+            let _ = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, false, true, Rb::Sync);
             worst = worst.max(c0.elapsed().as_secs_f64() * 1000.0);
         }
         let ms = b0.elapsed().as_secs_f64() * 1000.0;

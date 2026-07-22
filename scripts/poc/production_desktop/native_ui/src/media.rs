@@ -34,17 +34,41 @@ impl D3d {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             MFStartup(MF_VERSION, MFSTARTUP_FULL)?;
             let mut device: Option<ID3D11Device> = None;
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                None,
-                D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                None,
-            )?;
+            let base = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+            let want_debug = std::env::var("NATIVE_D3D_DEBUG").map(|v| !v.is_empty()).unwrap_or(false);
+            let mut made_debug = false;
+            if want_debug {
+                made_debug = D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_HARDWARE,
+                    None,
+                    base | D3D11_CREATE_DEVICE_DEBUG,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    None,
+                )
+                .is_ok();
+                if made_debug {
+                    eprintln!("D3DDBG debug layer active");
+                } else {
+                    eprintln!("D3DDBG debug layer unavailable (Graphics Tools not installed?)");
+                }
+            }
+            if !made_debug {
+                D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_HARDWARE,
+                    None,
+                    base,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    None,
+                )?;
+            }
             let device = device.unwrap();
             let mt: ID3D11Multithread = device.cast()?;
             let _ = mt.SetMultithreadProtected(true);
@@ -57,6 +81,39 @@ impl D3d {
             let vdev: ID3D11VideoDevice = device.cast()?;
             let vctx: ID3D11VideoContext = ctx.cast()?;
             Ok(Self { device, ctx, mgr, vdev, vctx })
+        }
+    }
+
+    /// Drain and print D3D11 debug-layer messages (no-op unless NATIVE_D3D_DEBUG
+    /// created a debug device).
+    pub fn drain_debug(&self, tag: &str) {
+        unsafe {
+            let Ok(q) = self.device.cast::<ID3D11InfoQueue>() else { return };
+            let n = q.GetNumStoredMessages();
+            for i in 0..n {
+                let mut len = 0usize;
+                if q.GetMessage(i, None, &mut len).is_err() || len == 0 {
+                    continue;
+                }
+                let mut buf = vec![0u8; len];
+                let msg = buf.as_mut_ptr() as *mut D3D11_MESSAGE;
+                if q.GetMessage(i, Some(msg), &mut len).is_ok() {
+                    let m = &*msg;
+                    let desc = std::slice::from_raw_parts(
+                        m.pDescription as *const u8,
+                        m.DescriptionByteLength.saturating_sub(1),
+                    );
+                    eprintln!(
+                        "D3DDBG[{tag}] sev={} id={} {}",
+                        m.Severity.0,
+                        m.ID.0,
+                        String::from_utf8_lossy(desc)
+                    );
+                }
+            }
+            if n > 0 {
+                q.ClearStoredMessages();
+            }
         }
     }
 }
@@ -542,10 +599,32 @@ impl VideoStream {
     }
 }
 
-/// One-shot thumbnail: open, decode the frame at `t`, return (w, h, RGBA) downscaled.
+/// Reuses one source reader per asset. Opening a new hardware decoder for every
+/// timeline thumbnail left thousands of Media Foundation event handles pending.
+pub struct Thumbnailer {
+    streams: HashMap<String, VideoStream>,
+}
+
+impl Thumbnailer {
+    pub fn new() -> Self {
+        Self { streams: HashMap::new() }
+    }
+
+    pub fn thumbnail(&mut self, d3d: &D3d, path: &str, t: f64, max_w: usize) -> Result<(usize, usize, Vec<u8>)> {
+        if !self.streams.contains_key(path) {
+            self.streams.insert(path.to_string(), VideoStream::open(d3d, path, 0, false)?);
+        }
+        let vs = self.streams.get_mut(path).unwrap();
+        vs.ensure_frame(d3d, t)?;
+        thumbnail_from_stream(d3d, vs, max_w)
+    }
+}
+
 pub fn thumbnail(d3d: &D3d, path: &str, t: f64, max_w: usize) -> Result<(usize, usize, Vec<u8>)> {
-    let mut vs = VideoStream::open(d3d, path, 0, false)?;
-    vs.ensure_frame(d3d, t)?;
+    Thumbnailer::new().thumbnail(d3d, path, t, max_w)
+}
+
+fn thumbnail_from_stream(d3d: &D3d, vs: &VideoStream, max_w: usize) -> Result<(usize, usize, Vec<u8>)> {
     unsafe {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         vs.bgra.GetDesc(&mut desc);
@@ -581,6 +660,11 @@ pub fn thumbnail(d3d: &D3d, path: &str, t: f64, max_w: usize) -> Result<(usize, 
             }
         }
         d3d.ctx.Unmap(&st, 0);
+        // A thumbnail is a fully synchronous one-shot GPU transaction. Drop all context
+        // references now; otherwise each decoded surface's completion Event remains held
+        // by the driver across the whole thumbnail queue.
+        d3d.ctx.ClearState();
+        d3d.ctx.Flush();
         Ok((ow, oh, out))
     }
 }
@@ -660,12 +744,13 @@ struct Slot {
 
 pub struct VideoPool {
     slots: HashMap<(String, u32), Vec<Slot>>,
+    failed_open: HashMap<(String, u32), std::time::Instant>,
     pub frame_no: u64,
 }
 
 impl VideoPool {
     pub fn new() -> Self {
-        Self { slots: HashMap::new(), frame_no: 0 }
+        Self { slots: HashMap::new(), failed_open: HashMap::new(), frame_no: 0 }
     }
 
     /// Best instance for showing src_t NOW: prefer one already positioned (continuing or
@@ -759,10 +844,24 @@ impl VideoPool {
         (self.slots.len(), self.slots.values().map(|v| v.len()).sum())
     }
 
+    /// Release every decoder session. Used by the resource watchdog as an in-process
+    /// recovery path: a short cold-open hitch is preferable to requiring an app restart.
+    pub fn clear(&mut self) {
+        self.slots.clear();
+    }
+
     /// True if (path,stream) already has `n` open instances.
     pub fn has_instances(&self, path: &str, stream: u32, n: usize) -> bool {
+        let key = (path.to_string(), stream);
+        if self
+            .failed_open
+            .get(&key)
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(30))
+        {
+            return true; // temporarily satisfied: do not retry a broken source every 3ms
+        }
         self.slots
-            .get(&(path.to_string(), stream))
+            .get(&key)
             .map(|v| v.len() >= n)
             .unwrap_or(false)
     }
@@ -772,11 +871,17 @@ impl VideoPool {
     pub fn warm_open(&mut self, d3d: &D3d, path: &str, stream: u32, full_range: bool, instances: usize) -> Result<()> {
         let key = (path.to_string(), stream);
         let frame_no = self.frame_no;
-        let entry = self.slots.entry(key).or_default();
-        while entry.len() < instances.min(3) {
-            entry.push(Slot {
-                vs: VideoStream::open(d3d, path, stream, full_range)
-                    .map_err(|e| e.context(format!("warm open {path}#{stream}")))?,
+        while self.slots.get(&key).map_or(0, Vec::len) < instances.min(3) {
+            let vs = match VideoStream::open(d3d, path, stream, full_range) {
+                Ok(vs) => vs,
+                Err(e) => {
+                    self.failed_open.insert(key.clone(), std::time::Instant::now());
+                    return Err(e.context(format!("warm open {path}#{stream}")));
+                }
+            };
+            self.failed_open.remove(&key);
+            self.slots.entry(key.clone()).or_default().push(Slot {
+                vs,
                 used_frame: 0,
                 touch: frame_no,
                 touched_at: std::time::Instant::now(),
