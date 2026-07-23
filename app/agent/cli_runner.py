@@ -33,7 +33,9 @@ _cli_sessions: Dict[str, str] = {}
 PROJECT_ROOT = Path(__file__).parent.parent.parent  # app/agent/ → app/ → D:\done\
 
 # 事業部の作業ディレクトリ（D:\done の外に置くことで開発者向け CLAUDE.md の混入を防ぐ）
-CLI_WORKSPACE = Path("D:/dan-workspace")
+PROJECT_ROOT = PROJECT_ROOT.resolve()
+from app.workspace import resolve_cli_workspace
+CLI_WORKSPACE = resolve_cli_workspace()
 CLI_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 # ワンショット生成（タイトル等）専用の中立な空ディレクトリ。

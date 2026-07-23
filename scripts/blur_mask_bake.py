@@ -403,7 +403,12 @@ def bake(a: argparse.Namespace) -> int:
              "-r", f"{a.fps}", "-i", "-",
              # short GOP (like the proxies): the editor random-seeks this file per frame;
              # the x264 default 250-frame GOP made mid-window seeks walk seconds of frames
-             "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-g", "15",
+             # all-intra: the editor decodes mask frames RANDOMLY while dragging the
+             # playhead (8ms budget per tick) — with a GOP the decoder walks from the
+             # previous keyframe and misses the budget, showing a stale mask ("blur
+             # slides off the subject mid-drag"). Every-frame keyframes make any mask
+             # frame a single decode; the mask files are tiny either way.
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-g", "1",
              "-pix_fmt", "yuv420p", "-color_range", "pc", str(out_part)],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=ff_log,
         )

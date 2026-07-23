@@ -39,7 +39,7 @@ PROVIDERS = {
     },
 }
 
-STATE_FILE = Path("D:/done/data/email_sync_state.json")
+STATE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "email_sync_state.json"
 STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 # 添付は /uploads/ に置く (ファイルアップロードと同じディレクトリ → /api/v1/files/{name} で配信可能)
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads"

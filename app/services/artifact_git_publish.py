@@ -49,6 +49,11 @@ ARTIFACTS_REPO = Path(
 ).resolve()
 # done-artifacts 公開用 worktree は両リポジトリの外に置く（D:/done を一切汚さない）。
 ARTIFACTS_WORKTREE_DIR = ARTIFACTS_REPO.parent / ".dan-artifacts-publish-wt"
+# Each machine may keep a local working copy for fast authoring.  These
+# snapshots record the version of every artifact that the local copy was based
+# on.  They are deliberately outside either git repository: they are safety
+# metadata for this publisher, not source code.
+ARTIFACT_BASES_DIR = TMP_DIR / "artifact-source-bases"
 
 
 def _target_rel(rel: str) -> str:
@@ -63,6 +68,20 @@ PUBLISH_HOST = (
 ).rstrip("/")
 
 PUSH_BRANCH = os.environ.get("DAN_PUBLISH_BRANCH", "main")
+
+# Slugs whose canonical source lives IN the done-artifacts repo itself (edited
+# directly there and pushed), NOT as a per-machine gitignored copy under D:/done.
+# For these, the "mirror the local D:/done copy over done-artifacts" publish path
+# is DISABLED so a stale copy on a second machine can never silently revert edits.
+# Background: kittoku regressed repeatedly (2026-07-18) because a second machine
+# held an old local copy and its registration-triggered auto-publish kept
+# overwriting done-artifacts with it. Editing done-artifacts directly + git push
+# is the single shared source of truth; both machines pull/push the same repo.
+DONE_ARTIFACTS_NATIVE_SLUGS = {
+    s.strip()
+    for s in (os.environ.get("DAN_DONE_ARTIFACTS_NATIVE_SLUGS") or "kittoku").split(",")
+    if s.strip()
+}
 
 # Clean, name-bearing host that users see: <SHARE_ALIAS>/preview/<slug>. It is a
 # free vercel.app alias re-pointed to the latest production on every publish so
@@ -242,6 +261,172 @@ def _mirror_into_worktree(wt: Path, paths: list[str], *, translate: bool = False
 
 
 # ---------------------------------------------------------------------------
+# Local-copy concurrency guard
+# ---------------------------------------------------------------------------
+
+def _tree_files(root: Path) -> dict[str, bytes]:
+    """Return a stable ``relative path -> contents`` view of a file tree."""
+    if not root.exists():
+        return {}
+    if root.is_file():
+        return {root.name: root.read_bytes()}
+    return {
+        str(path.relative_to(root)).replace("\\", "/"): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def _copy_tree(source: Path, destination: Path) -> None:
+    if destination.exists():
+        shutil.rmtree(destination)
+    if source.exists():
+        shutil.copytree(source, destination)
+
+
+def _local_target_tree(paths: list[str], destination: Path) -> None:
+    """Materialize local artifact files in done-artifacts' path layout."""
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    for rel in paths:
+        src = PROJECT_ROOT / rel
+        target = destination / _target_rel(rel)
+        if src.is_dir():
+            shutil.copytree(src, target)
+        elif src.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, target)
+
+
+def _canonical_target_tree(wt: Path, paths: list[str], destination: Path) -> None:
+    """Materialize just this artifact's canonical files from a worktree."""
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    for rel in paths:
+        target_rel = _target_rel(rel)
+        src = wt / target_rel
+        target = destination / target_rel
+        if src.is_dir():
+            shutil.copytree(src, target)
+        elif src.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, target)
+
+
+def _artifact_snapshot_dir(slug: str) -> Path:
+    # Slugs are controlled identifiers, but retain a defensive path check as
+    # this directory is used by a background process.
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", slug):
+        raise ValueError(f"invalid artifact slug for source snapshot: {slug!r}")
+    return ARTIFACT_BASES_DIR / slug
+
+
+def _snapshot_current_source(slug: str, paths: list[str]) -> None:
+    """Record the local source that the next publish must compare against."""
+    snapshot = _artifact_snapshot_dir(slug)
+    staged = snapshot.with_name(f".{snapshot.name}.staging")
+    _local_target_tree(paths, staged)
+    if snapshot.exists():
+        shutil.rmtree(snapshot)
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    staged.replace(snapshot)
+
+
+def _guard_and_apply_local_changes(wt: Path, slug: str, paths: list[str]) -> str:
+    """Apply only non-conflicting local changes onto the current canonical tree.
+
+    The legacy publisher removed an artifact directory in ``wt`` and copied a
+    machine-local directory over it.  That is a last-writer-wins operation and
+    silently loses edits made on another machine.  Here the local tree is a
+    change set relative to its recorded base.  A file changed both locally and
+    in canonical source is a conflict and publication stops without writing.
+    """
+    snapshot = _artifact_snapshot_dir(slug)
+    local_root = TMP_DIR / "artifact-publish-local" / slug
+    _local_target_tree(paths, local_root)
+
+    if not snapshot.exists():
+        # Do not guess the base of an already-published artifact.  Seeding a
+        # base is safe only when this machine is demonstrably current.
+        current_root = TMP_DIR / "artifact-publish-current" / slug
+        _canonical_target_tree(wt, paths, current_root)
+        canonical_is_new = not _tree_files(current_root)
+        if not canonical_is_new and _tree_files(local_root) != _tree_files(current_root):
+            return (
+                "安全のため公開を中止しました。この端末には成果物の基準版がありません。"
+                "共有正本と異なるローカルコピーを自動で上書きすると巻き戻しになるため、"
+                "最新の共有正本を同期してからもう一度修正してください。"
+            )
+        if canonical_is_new:
+            # A new artifact has no canonical base yet.  Keep an explicitly
+            # empty base so its first local files are applied below.
+            if snapshot.exists():
+                shutil.rmtree(snapshot)
+            snapshot.mkdir(parents=True, exist_ok=True)
+        else:
+            _snapshot_current_source(slug, paths)
+
+    base = _tree_files(snapshot)
+    local = _tree_files(local_root)
+    current_root = TMP_DIR / "artifact-publish-current" / slug
+    _canonical_target_tree(wt, paths, current_root)
+    current = _tree_files(current_root)
+    for rel in sorted(set(base) | set(local) | set(current)):
+        base_value = base.get(rel)
+        local_value = local.get(rel)
+        current_value = current.get(rel)
+        if local_value == base_value:
+            continue  # this machine did not change this file
+        if current_value not in (base_value, local_value):
+            return (
+                "安全のため公開を中止しました。別の端末で同じ成果物が更新されています "
+                f"({rel})。最新の共有正本を取り込み、修正を重ねてから公開してください。"
+            )
+        target = wt / rel
+        if local_value is None:
+            if target.exists():
+                target.unlink()
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(local_value)
+    return ""
+
+
+def synchronize_local_artifact_from_canonical(slug: str) -> dict:
+    """Back up and refresh one machine-local copy from shared canonical source.
+
+    This is the one-time migration path for a machine that predates the
+    concurrency guard.  It never discards a local file: the complete old copy
+    is retained under ``_codex_backups`` before canonical files replace it.
+    """
+    paths = artifact_files_for_slug(slug)
+    if not paths:
+        return {"ok": False, "detail": "local artifact files not found"}
+    wt = _ensure_worktree(ARTIFACTS_REPO, ARTIFACTS_WORKTREE_DIR)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup_root = PROJECT_ROOT / "_codex_backups" / f"artifact-source-sync-{stamp}" / slug
+    for rel in paths:
+        source = PROJECT_ROOT / rel
+        canonical = wt / _target_rel(rel)
+        if not canonical.exists():
+            return {"ok": False, "detail": f"canonical source missing: {_target_rel(rel)}"}
+        backup = backup_root / rel
+        if source.is_dir():
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, backup)
+            shutil.rmtree(source)
+            shutil.copytree(canonical, source)
+        elif source.is_file():
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, backup)
+            shutil.copy2(canonical, source)
+    _snapshot_current_source(slug, paths)
+    return {"ok": True, "backup": str(backup_root)}
+
+
+# ---------------------------------------------------------------------------
 # Liveness check + DB status
 # ---------------------------------------------------------------------------
 
@@ -406,13 +591,15 @@ def _missing_build_prereqs(wt: Path, paths: list[str]) -> list[str]:
 
 
 def _commit_and_push(wt: Path, slug: str, paths: list[str]) -> tuple[bool, str]:
-    """Mirror, commit (scope-isolated), and push. Returns (changed, error)."""
+    """Commit only non-conflicting local artifact changes and push them."""
     last_err = ""
     for attempt in range(1, PUSH_ATTEMPTS + 1):
         # Always start from a clean, up-to-date branch tip.
         _git(["reset", "--hard", f"origin/{PUSH_BRANCH}"], cwd=wt)
         _git(["clean", "-fd"], cwd=wt)
-        _mirror_into_worktree(wt, paths, translate=True)
+        conflict = _guard_and_apply_local_changes(wt, slug, paths)
+        if conflict:
+            return False, conflict
 
         # Gate: don't push an artifact whose imports aren't on the target — it
         # would break the whole-frontend build and block every other publish.
@@ -441,6 +628,7 @@ def _commit_and_push(wt: Path, slug: str, paths: list[str]) -> tuple[bool, str]:
 
         push = _git(["push", "origin", f"HEAD:{PUSH_BRANCH}"], cwd=wt, check=False, timeout=180)
         if push.returncode == 0:
+            _snapshot_current_source(slug, paths)
             return True, ""
         last_err = push.stdout
         _emit(f"[git-publish] push attempt {attempt} failed for {slug}; refetching")
@@ -515,6 +703,18 @@ async def publish_custom_domain_rewrites() -> dict:
 def _publish_one(slug: str, *, push: bool, wait_live: bool) -> dict:
     _emit(f"[git-publish] {slug}: publish START (push={push}, wait_live={wait_live})")
     result = {"slug": slug, "status": "pending", "url": preview_url_for(slug), "error": ""}
+
+    # done-artifacts を単一の正とする成果物は、PC内ローカルコピーからのミラー公開を
+    # 行わない（古いコピーによる巻き戻し防止）。編集は done-artifacts 直編集＋push で行う。
+    if slug in DONE_ARTIFACTS_NATIVE_SLUGS:
+        result["status"] = "skipped"
+        result["error"] = (
+            "done-artifacts を単一の正として直接管理する成果物のため、"
+            "ローカルコピーからのミラー公開はスキップしました（巻き戻し防止）。"
+        )
+        _emit(f"[git-publish] {slug}: done-artifacts-native, skipping mirror publish")
+        return result
+
     paths = artifact_files_for_slug(slug)
     if not paths:
         result["status"] = "skipped"

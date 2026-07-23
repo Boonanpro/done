@@ -170,6 +170,17 @@ Git Bash（mintty）とPowerShellの間でパイプが正しく閉じられず�
 
 ## クライアント artifact の公開ルール
 
+### ⚠️ done-artifacts 直編集の成果物（複数PC対策）⚠️
+
+**`kittoku` など `DAN_DONE_ARTIFACTS_NATIVE_SLUGS`（既定: kittoku）に含まれる slug は、`done-artifacts` リポジトリを唯一の正として直接編集する。**
+
+- 編集は `<done-artifacts>/src/app/artifacts/<slug>/`（＝ `frontend/` プレフィックス無し）と `<done-artifacts>/public/<dir>/` を **`git pull` → 編集 → `git commit` → `git push origin main`**。
+- **D:/done 側のローカルコピー（`frontend/src/app/artifacts/<slug>/` 等）を編集しないこと。** これは各PC固有・gitignore 済みで共有されないため、別PCの古いコピーが公開時に最新版を巻き戻す事故が起きる（2026-07-18 kittoku）。
+- この事故対策として、`artifact_git_publish._publish_one` は native slug のミラー公開（ローカルコピー→done-artifacts 上書き）を**スキップ**する。だから native slug は done-artifacts 直 push でしか公開されない。
+- 別PC（デスクトップ）でも同じルール。どちらのPCからでも done-artifacts を pull/push すれば同じ最新版を共有できる。
+
+---
+
 クライアント納品物（`/artifacts/<slug>/`）の編集を**確実に公開URL（`<slug>.vercel.app`）に届ける**ためのワークフロー：
 
 ### 編集の置き場所

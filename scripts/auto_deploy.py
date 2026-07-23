@@ -31,7 +31,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-REPO_DIR = Path("D:/done")
+REPO_DIR = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = REPO_DIR / "frontend"
 WORKSPACE_DIR = Path.home() / ".dan" / "workspace"
 LOG_FILE = REPO_DIR / "deploy.log"

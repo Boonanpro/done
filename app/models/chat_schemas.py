@@ -21,6 +21,7 @@ class RoomType(str, Enum):
     DIRECT = "direct"
     GROUP = "group"
     DAN = "dan"  # ダンページ（ユーザーとダンの1対1会話）
+    PROJECT = "project"  # プロジェクト専用ルーム
 
 
 class MemberRole(str, Enum):
