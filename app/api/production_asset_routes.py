@@ -1251,7 +1251,6 @@ def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: 
                 duration = max(duration, float(clip.get("timeline_end") or 0))
             except (TypeError, ValueError):
                 continue
-    timeout = max(1800.0, duration * 10.0 + 600.0)
 
     cmd = [
         exe,
@@ -1260,6 +1259,19 @@ def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: 
         "--export-preview-video",
         str(out_path).replace("\\", "/"),
     ]
+    # DaVinci-style render range from the editor (in/out seconds): forwarded as the
+    # CLI's start/end args. Invalid or missing -> whole content.
+    rng = instruction.get("export_range")
+    if (isinstance(rng, list) and len(rng) == 2):
+        try:
+            r0, r1 = float(rng[0]), float(rng[1])
+            if 0 <= r0 < r1:
+                cmd += [f"{r0:.3f}", f"{r1:.3f}"]
+                duration = r1 - r0
+                _append_job_event(room_id, job_id, {"type": "status", "text": f"範囲書き出し: {r0:.1f}s〜{r1:.1f}s"})
+        except (TypeError, ValueError):
+            pass
+    timeout = max(1800.0, duration * 10.0 + 600.0)
     cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     # stderr carries the native app's chatty diagnostics (JUMPSEEK etc.) — send it to a
     # file, NOT a pipe nobody drains (a full 64KB pipe buffer deadlocks the export).
