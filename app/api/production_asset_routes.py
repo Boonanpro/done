@@ -1113,6 +1113,226 @@ def _movie_input(path: Any, seek: float, *, audio: bool = False, streams: str | 
     return out
 
 
+# --- Native-compositor export -------------------------------------------------------
+# The editor preview and the export MUST be the same renderer. The native app's
+# compose() (D3D/GPU) draws captions, blur, mosaic, tracked masks and pop-outs for the
+# preview; `--export-preview-video` runs that same compose() headless per frame and
+# hands ffmpeg ONLY compression. The FFmpeg filtergraph re-creation below
+# (_render_sequence_job) stays as a fallback for machines without the native exe or
+# non-9:16 formats — it is known NOT to match the preview.
+
+_NATIVE_EXPORT_CANVAS = (1080, 1920)
+
+
+def _native_export_exe() -> str | None:
+    candidates = [
+        os.environ.get("DAN_NATIVE_UI_EXE") or "",
+        r"C:\Users\Owner\.done\bin\native_ui_export.exe",
+        r"C:\Users\Owner\.done\bin\native_ui.exe",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    return None
+
+
+def _native_caption_items(sequence: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every designed caption in the sequence with the exact cache key the native
+    compositor computes: sha1(json of {w,h,t,d,words}) with design = style minus x/y.
+    Text is hashed UNTRIMMED (parity with Rust's caption_cache_key)."""
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for track in sequence.get("tracks") or []:
+        if not isinstance(track, dict) or track.get("kind") == "audio" or track.get("hidden"):
+            continue
+        for clip in track.get("clips") or []:
+            if not isinstance(clip, dict) or clip.get("asset_id") or clip.get("region"):
+                continue
+            text = str(clip.get("text") or "")
+            if not text.strip():
+                continue
+            style = clip.get("style") if isinstance(clip.get("style"), dict) else {}
+            design = {k: v for k, v in style.items() if k not in ("x", "y")}
+            words = clip.get("words") if isinstance(clip.get("words"), list) else []
+            key_src = json.dumps(
+                {"w": _NATIVE_EXPORT_CANVAS[0], "h": _NATIVE_EXPORT_CANVAS[1],
+                 "t": text, "d": design, "words": words},
+                ensure_ascii=False, sort_keys=True,
+            )
+            key = hashlib.sha1(key_src.encode()).hexdigest()[:16]
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"key": key, "text": text, "design": design, "words": words})
+    return items
+
+
+def _ensure_native_caption_cache(room_id: str, sequence: dict[str, Any]) -> list[str]:
+    """Render any caption PNG the native exporter will need (synchronously — the export
+    hard-fails on missing captions rather than dropping them). Returns keys still
+    missing after the render attempt."""
+    cache_dir = _room_dir(room_id) / "caption-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    def _ready(key: str) -> bool:
+        png = cache_dir / f"{key}.png"
+        return png.exists() and png.stat().st_size > 0
+
+    items = _native_caption_items(sequence)
+    missing = [it for it in items if not _ready(it["key"])]
+    if not missing:
+        return []
+    spec_path = cache_dir / f"_export_spec_{missing[0]['key']}.json"
+    spec_path.write_text(
+        json.dumps({
+            "outW": _NATIVE_EXPORT_CANVAS[0], "outH": _NATIVE_EXPORT_CANVAS[1],
+            "web_base": os.environ.get("DAN_CAPTION_RENDER_BASE", "http://127.0.0.1:3000"),
+            "items": [
+                {"png": str(cache_dir / f"{it['key']}.png"), "text": it["text"],
+                 "time": 0.0, "design": it["design"], "words": it["words"]}
+                for it in missing
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    try:
+        script = PROJECT_ROOT / "scripts" / "render_caption_pngs.py"
+        cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.run([sys.executable, str(script), str(spec_path)],
+                       capture_output=True, timeout=900, creationflags=cflags)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("native export caption render failed: %s", exc)
+    finally:
+        try:
+            spec_path.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+    return [it["key"] for it in missing if not _ready(it["key"])]
+
+
+def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
+    """Preview-parity export through the native GPU compositor. Returns None only when
+    the native path is NOT APPLICABLE (no exe / non-9:16 / no sequence) so the caller
+    falls back to the FFmpeg re-creation; a real export failure raises instead — the
+    FFmpeg path does not match the preview and must not silently replace it."""
+    timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
+    sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
+    if not isinstance(sequence, dict):
+        return None
+    tracks = [t for t in (sequence.get("tracks") or []) if isinstance(t, dict)]
+    if not any(t.get("clips") for t in tracks):
+        return None
+    fmt = str(sequence.get("format") or timeline.get("format") or "9:16")
+    if fmt != "9:16":
+        return None  # native canvas is fixed 9:16 (1080x1920); other formats keep the ffmpeg path
+    if os.environ.get("DAN_EXPORT_DISABLE_NATIVE"):
+        return None
+    exe = _native_export_exe()
+    if not exe:
+        return None
+
+    _append_job_event(room_id, job_id, {"type": "status", "text": "プレビューと同じ合成器で書き出しています…"})
+    still_missing = _ensure_native_caption_cache(room_id, sequence)
+    if still_missing:
+        raise RuntimeError("テロップ画像の生成に失敗しました: " + ", ".join(still_missing[:5]))
+
+    room_dir = _room_dir(room_id)
+    contents_path = job_dir / f"{job_id}_native_contents.json"
+    contents_path.write_text(
+        json.dumps([{"id": content_id, "timeline": {"sequence": sequence}}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    out_path = job_dir / f"{job_id}_sequence.mp4"
+
+    duration = 0.0
+    for track in tracks:
+        for clip in track.get("clips") or []:
+            try:
+                duration = max(duration, float(clip.get("timeline_end") or 0))
+            except (TypeError, ValueError):
+                continue
+    timeout = max(1800.0, duration * 10.0 + 600.0)
+
+    cmd = [
+        exe,
+        str(contents_path).replace("\\", "/"),
+        str(room_dir).replace("\\", "/"),
+        "--export-preview-video",
+        str(out_path).replace("\\", "/"),
+    ]
+    cflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    # stderr carries the native app's chatty diagnostics (JUMPSEEK etc.) — send it to a
+    # file, NOT a pipe nobody drains (a full 64KB pipe buffer deadlocks the export).
+    err_path = job_dir / f"{job_id}_native_export.stderr.log"
+    with open(err_path, "w", encoding="utf-8", errors="replace") as err_file:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=err_file,
+            text=True, encoding="utf-8", errors="replace", creationflags=cflags,
+        )
+        tail: list[str] = []
+        deadline = time.monotonic() + timeout
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                tail.append(line)
+                del tail[:-40]
+                if line.startswith("EXPORT_PROGRESS"):
+                    _append_job_event(room_id, job_id, {"type": "status", "text": f"書き出し中… {line.removeprefix('EXPORT_PROGRESS').strip()}"})
+                if time.monotonic() > deadline:
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+            proc.wait(timeout=max(10.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise RuntimeError(f"ネイティブ書き出しがタイムアウトしました ({int(timeout)}s)")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+    if proc.returncode != 0:
+        err = ""
+        try:
+            err = err_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError(
+            "ネイティブ書き出しに失敗しました: "
+            + "; ".join([*tail[-3:], err.strip()[-500:]]).strip("; ")
+        )
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise RuntimeError("ネイティブ書き出しの出力ファイルがありません")
+
+    # Same privacy post-passes as the ffmpeg path (screen-recording blur spec / legacy
+    # tracked annotation blur) — they only ADD privacy blur the preview doesn't show.
+    try:
+        _content = next((c for c in _read_contents(room_id) if c.get("id") == content_id), None)
+        _tl = (_content or {}).get("timeline") or {}
+        _sb = _tl.get("screen_blur") or (_tl.get("sequence") or {}).get("screen_blur")
+        if isinstance(_sb, dict) and _sb.get("enabled"):
+            _append_job_event(room_id, job_id, {"type": "status", "text": "映像は完成。個人情報の自動ぼかし確認中…（動画の長さにより10〜30分。この間は進捗表示なし）"})
+            _apply_screen_blur(out_path, _sb, job_dir)
+        _anns = _tl.get("annotations") or []
+        if any(isinstance(a, dict) and a.get("intent") == "blur" and (a.get("data") or {}).get("track") for a in _anns):
+            _apply_tracked_blur(out_path, _anns, job_dir)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("screen blur post-pass skipped: %s", exc)
+
+    output_asset = _add_generated_video_asset(
+        room_id,
+        out_path,
+        filename=f"draft_{content_id[:8]}_{job_id[:8]}.mp4",
+    )
+    _attach_output_asset(room_id, content_id, job_id, output_asset, out_path, kind="sequence_render")
+    return {
+        "output_asset_id": output_asset["id"],
+        "output_path": str(out_path),
+        "output_url": output_asset.get("proxy_url"),
+        "render_engine": "native_compositor",
+        "render_size": f"{_NATIVE_EXPORT_CANVAS[0]}x{_NATIVE_EXPORT_CANVAS[1]}",
+    }
+
+
 def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
@@ -3432,7 +3652,18 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
             instruction_path.write_text(json.dumps(instruction, ensure_ascii=False, indent=2), encoding="utf-8")
             _update_content(room_id, content_id, {"timeline": timeline})
         if mode in {"render_timeline", "export", "blur_render"}:
-            render_result = _render_sequence_job(room_id, job_id, content_id, instruction, job_dir)
+            # Preview-parity first: the native compositor renders exactly what the
+            # editor preview shows. FFmpeg re-creation only when native isn't applicable.
+            # One automatic retry: a transient hiccup (decoder/encoder process dying
+            # once) must self-heal instead of surfacing to the user — a real defect
+            # will fail twice with the same recorded reason.
+            try:
+                render_result = _native_export_job(room_id, job_id, content_id, instruction, job_dir)
+            except Exception as first_exc:  # noqa: BLE001
+                _append_job_event(room_id, job_id, {"type": "status", "text": f"書き出しが一度失敗したため自動で再試行します（1回目の理由: {str(first_exc)[:200]}）"})
+                render_result = _native_export_job(room_id, job_id, content_id, instruction, job_dir)
+            if not render_result:
+                render_result = _render_sequence_job(room_id, job_id, content_id, instruction, job_dir)
             if not render_result:
                 render_result = _render_blur_job(room_id, job_id, content_id, instruction, job_dir)
         result = {
@@ -3455,8 +3686,16 @@ def _run_production_job(room_id: str, job_id: str, content_id: str, instruction:
         _update_job(room_id, job_id, {"status": "done", "result": result, "error": None})
         _update_content(room_id, content_id, {"status": "ready", **_timeline_patch()})
     except Exception as exc:
-        _append_job_event(room_id, job_id, {"type": "error", "text": str(exc)})
-        _update_job(room_id, job_id, {"status": "failed", "error": str(exc)})
+        # 事故区分をユーザーの言葉で。NameError/ImportError 等はコード側の欠陥で、
+        # 指示や素材が悪いわけではない — 生の例外文字列だけを見せると「何が悪かった
+        # のか分からない」まま終わる（実際に起きた）。原文は括弧で残す。
+        if isinstance(exc, (NameError, ImportError, AttributeError, SyntaxError, UnboundLocalError, KeyError, TypeError)):
+            msg = f"システム側の不具合で実行できませんでした。指示や素材の問題ではありません。開発側で修正が必要です（詳細: {exc}）"
+        else:
+            msg = str(exc)
+        logger.exception("production job failed room=%s job=%s", room_id, job_id)
+        _append_job_event(room_id, job_id, {"type": "error", "text": msg})
+        _update_job(room_id, job_id, {"status": "failed", "error": msg})
         _update_content(room_id, content_id, {"status": "failed"})
 
 
@@ -3594,7 +3833,9 @@ def _run_proxy_job(room_id: str, asset_id: str, source_path: str) -> None:
         #
         # SHORT GOP (keyframe every half second) + no B-frames: any frame is cheap to
         # reach from a keyframe, which is what makes scrub seeks ~20ms.
-        _common = ["-g", str(max(1, round(timeline_fps * 0.5))), "-bf", "0", "-vsync", "cfr",
+        # 0.2s GOP (was 0.5s): reverse frame-stepping decodes ≤1/5s of frames — the
+        # editor's backward arrow feels instant instead of "walking the group".
+        _common = ["-g", str(max(1, round(timeline_fps * 0.2))), "-bf", "0", "-vsync", "cfr",
                    "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(proxy)]
         _vf = ["-vf", f"scale=w=1920:h=1920:force_original_aspect_ratio=decrease:force_divisible_by=2,fps={fps_filter}"]
         _encoders = [
