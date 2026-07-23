@@ -19,6 +19,9 @@ import argparse
 import json
 import re
 import subprocess
+
+# GUIの裏で走る前提: ffmpeg子プロセスがコンソール窓を出さないように(閉じられると書き出しが死ぬ)
+_CFLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 import sys
 from pathlib import Path
 
@@ -142,7 +145,7 @@ def ocr_track(src: str, box01, anchor: float, scan_start: float, scan_end: float
         # anchor frame (accurate input-seek)
         anchor_jpg = tmpd / "anchor.jpg"
         subprocess.run([ff, "-y", "-ss", f"{max(0.0, anchor):.3f}", "-i", src, "-frames:v", "1", "-q:v", "2", str(anchor_jpg)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, creationflags=_CFLAGS)
         aframe = cv2.imread(str(anchor_jpg)) if anchor_jpg.exists() else None
         if aframe is None:
             return {"found": False, "text": "", "boxes": {}, "t_start": None, "t_end": None, "w": 0, "h": 0, "sample_texts": []}
@@ -201,7 +204,7 @@ def ocr_track(src: str, box01, anchor: float, scan_start: float, scan_end: float
         if dur > 0:
             ff_args += ["-t", f"{dur:.3f}"]
         ff_args += ["-vf", f"fps={fps}", "-q:v", "2", str(tmpd / "s_%05d.jpg")]
-        subprocess.run(ff_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(ff_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, creationflags=_CFLAGS)
         files = sorted(tmpd.glob("s_*.jpg"))
         boxes: dict[str, list] = {}
         last_c = (bx + bw / 2, by + bh / 2)
@@ -269,7 +272,7 @@ def render(src: str, out: str, boxes_by_t: dict, vfps: float, style: str, ff: st
     # mux original audio back
     subprocess.run([ff, "-y", "-i", tmp, "-i", src, "-map", "0:v", "-map", "1:a?",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-shortest", out],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, creationflags=_CFLAGS)
     Path(tmp).unlink(missing_ok=True)
 
 
@@ -298,7 +301,7 @@ def render_tracks(src: str, out: str, tracks: list[dict], vfps: float, ff: str):
     cap.release(); vw.release()
     subprocess.run([ff, "-y", "-i", tmp, "-i", src, "-map", "0:v", "-map", "1:a?",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-shortest", out],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, creationflags=_CFLAGS)
     Path(tmp).unlink(missing_ok=True)
 
 
