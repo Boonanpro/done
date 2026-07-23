@@ -2109,6 +2109,60 @@ pub fn place_asset(
     inserted
 }
 
+/// Place a PURE AUDIO asset (BGM / SE / narration file) on the audio lane at `t` —
+/// a standalone audio clip with no linked visual. Creates the audio lane when the
+/// sequence has none yet.
+pub fn place_audio_asset(
+    raw: &mut Value,
+    t: f64,
+    dur: f64,
+    asset_id: &str,
+    salt: u64,
+) -> Vec<String> {
+    let t = (t.max(0.0) * 1000.0).round() / 1000.0;
+    let dur = dur.max(0.1);
+    let end = ((t + dur) * 1000.0).round() / 1000.0;
+    let aud_id = format!("drop_a_{salt}");
+    let Some(tracks) = tracks_mut(raw) else { return Vec::new() };
+    let aclip = serde_json::json!({
+        "id": aud_id.clone(),
+        "asset_id": asset_id,
+        "track": "audio",
+        "source_start": 0.0,
+        "source_end": dur,
+        "timeline_start": t,
+        "timeline_end": end
+    });
+    // One lane, no overlaps — the NLE invariant every edit op assumes. The first
+    // audio lane usually carries the linked A/V clips, so a BGM spanning minutes
+    // would overlap them there: pick the first audio lane whose span is FREE,
+    // else append a fresh audio lane.
+    let span_free = |tr: &Value| {
+        tr.get("clips")
+            .and_then(|c| c.as_array())
+            .map(|clips| {
+                clips.iter().all(|c| {
+                    f(c, "timeline_start") >= end - 1e-6 || f(c, "timeline_end") <= t + 1e-6
+                })
+            })
+            .unwrap_or(true)
+    };
+    if let Some(ai) = tracks
+        .iter()
+        .position(|tr| tr.get("type").and_then(|v| v.as_str()) == Some("audio") && span_free(tr))
+    {
+        tracks[ai]
+            .get_mut("clips")
+            .and_then(|c| c.as_array_mut())
+            .map(|clips| clips.push(aclip));
+    } else {
+        tracks.push(serde_json::json!({
+            "id": format!("audio_drop_{salt}"), "type": "audio", "clips": [aclip]
+        }));
+    }
+    vec![aud_id]
+}
+
 /// Move a visual multi-selection between lanes as one rigid group. `anchor_id` is the clip
 /// actually held by the pointer; it lands on `target`, while clips selected on neighbouring
 /// lanes keep the same vertical offsets. The delta is clamped as a group at the first/last

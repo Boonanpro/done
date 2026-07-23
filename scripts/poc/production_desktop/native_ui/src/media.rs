@@ -1010,6 +1010,109 @@ impl AudioDecoder {
     }
 }
 
+/// Decode a bounded part of an asset through the exact Media Foundation path used by
+/// playback, returning `(sample_count, peak, rms)`.  This is intentionally separate
+/// from waveform generation: it lets the editor diagnose a silent timeline section
+/// without trusting a file-level metadata probe.
+pub fn probe_audio_samples(path: &str, start_s: f64, duration_s: f64) -> Result<(usize, f32, f32)> {
+    let (rate, ch) = (48_000u32, 2usize);
+    let mut dec = AudioDecoder::open(path, rate, ch)?;
+    dec.seek(start_s.max(0.0), rate, ch)?;
+    let frames = (duration_s.max(0.01) * rate as f64).ceil() as usize;
+    let mut data = vec![0.0f32; frames * ch];
+    dec.pull(&mut data, rate, ch)?;
+    let peak = data.iter().fold(0.0f32, |p, v| p.max(v.abs()));
+    let rms = (data.iter().map(|v| v * v).sum::<f32>() / data.len().max(1) as f32).sqrt();
+    Ok((data.len(), peak, rms))
+}
+
+/// Offline render of the timeline mix for EXPORT — the same per-clip decode, seek
+/// continuity, lane gating (mute/solo), volume and clamp rules as `AudioOut::fill`
+/// at speed 1.0, but pulled deterministically into a raw f32-interleaved PCM file
+/// instead of a WASAPI buffer. The export muxes this against the compositor's
+/// frames, so what you hear in the editor is what the exported file carries.
+pub fn mix_timeline_audio(
+    doc: &crate::model::Doc,
+    start: f64,
+    end: f64,
+    rate: u32,
+    ch: usize,
+    out_path: &str,
+) -> Result<u64> {
+    use std::io::Write;
+    let mut file = std::io::BufWriter::new(std::fs::File::create(out_path)?);
+    let any_solo = doc.seq.tracks.iter().any(|t| t.solo);
+    // clip id -> (decoder, next_src_t): continuity avoids a re-seek per chunk
+    let mut streams: HashMap<String, (AudioDecoder, f64)> = HashMap::new();
+    let chunk = (rate / 10) as usize; // 100ms windows, same order of magnitude as device fills
+    let total = ((end - start).max(0.0) * rate as f64).round() as u64;
+    let mut done: u64 = 0;
+    let mut buf = vec![0f32; chunk * ch];
+    let mut scratch: Vec<f32> = Vec::new();
+    while done < total {
+        let frames = chunk.min((total - done) as usize);
+        let t0 = start + done as f64 / rate as f64;
+        let t1 = t0 + frames as f64 / rate as f64;
+        buf[..frames * ch].fill(0.0);
+        for (own, c) in doc.active_audio_span(t0, t1) {
+            let gov = doc.audio_gov_track(c, own);
+            if let Some(gtr) = doc.seq.tracks.get(gov) {
+                if gtr.muted || (any_solo && !gtr.solo) {
+                    continue;
+                }
+            }
+            let Some(aid) = c.asset_id.as_deref() else { continue };
+            let vol = c.volume as f32;
+            if vol <= 0.001 {
+                continue;
+            }
+            let s0 = (((c.timeline_start - t0).max(0.0)) * rate as f64).round() as usize;
+            let s1 = ((((c.timeline_end.min(t1)) - t0) * rate as f64).round() as usize).min(frames);
+            if s1 <= s0 {
+                continue;
+            }
+            if !streams.contains_key(&c.id) {
+                let path = doc.asset_path(aid);
+                match AudioDecoder::open(&path, rate, ch) {
+                    Ok(dec) => {
+                        streams.insert(c.id.clone(), (dec, f64::NAN));
+                    }
+                    Err(_) => continue, // asset without a decodable audio stream
+                }
+            }
+            let (dec, next_src_t) = streams.get_mut(&c.id).unwrap();
+            let src_t = c.source_start + (t0 + s0 as f64 / rate as f64) - c.timeline_start;
+            if !next_src_t.is_finite() || (*next_src_t - src_t).abs() > 0.08 {
+                if dec.seek(src_t, rate, ch).is_err() {
+                    continue;
+                }
+                *next_src_t = src_t;
+            }
+            let out_frames = s1 - s0;
+            let n = out_frames * ch;
+            scratch.clear();
+            scratch.resize(n, 0.0);
+            if dec.pull(&mut scratch[..n], rate, ch).is_err() {
+                continue;
+            }
+            *next_src_t = src_t + out_frames as f64 / rate as f64;
+            for (o, sv) in buf[s0 * ch..s1 * ch].iter_mut().zip(scratch.iter()) {
+                *o += *sv * vol;
+            }
+        }
+        for v in buf[..frames * ch].iter_mut() {
+            *v = v.clamp(-1.0, 1.0);
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(buf.as_ptr() as *const u8, frames * ch * 4)
+        };
+        file.write_all(bytes)?;
+        done += frames as u64;
+    }
+    file.flush()?;
+    Ok(total)
+}
+
 /// Pitch-preserving time compressor for fast playback (WSOLA). The EDM-oriented
 /// `timestretch` crate this replaces emitted phase-vocoder chunk discontinuities at
 /// compression ratios — measured 61 (2x) / 188 (4x) waveform clicks per 10s on a pure
