@@ -2166,6 +2166,30 @@ fn spawn_missing_timeline_proxies(doc: &model::Doc) {
     }
 }
 
+/// Local (JST, UTC+9 fixed) compact timestamp for default export filenames.
+/// Same civil-from-days math as iso8601_utc_now — no chrono dependency.
+fn jst_timestamp_compact() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+        + 9 * 3600;
+    let days = secs.div_euclid(86400);
+    let sod = secs.rem_euclid(86400);
+    let (h, mi) = (sod / 3600, (sod % 3600) / 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}{m:02}{d:02}_{h:02}{mi:02}")
+}
+
 /// ISO8601 UTC now without a chrono dependency (Howard Hinnant civil-from-days).
 /// assets.json records must carry created_at/updated_at to satisfy the API schema.
 fn iso8601_utc_now() -> String {
@@ -3381,6 +3405,10 @@ struct App {
     export_progress: Option<f32>,
     /// last finished export's output file — shown with a "フォルダを開く" button
     export_done_path: Option<String>,
+    /// export settings dialog (button press 1 = confirm destination/range, press 2 = go)
+    export_dialog_open: bool,
+    /// destination FILE path shown in the dialog; sent as output_copy_path
+    export_dest: String,
     /// ruler range-handle drag in progress: Some(true)=in edge, Some(false)=out edge
     range_drag: Option<bool>,
     /// clip_id -> popout bake display state (polled from the cache dir, not the server)
@@ -3590,6 +3618,8 @@ impl App {
             range_drag: None,
             export_progress: None,
             export_done_path: None,
+            export_dialog_open: false,
+            export_dest: String::new(),
             pop_states: Default::default(),
             bake_results: Default::default(),
             last_pop_poll: Instant::now(),
@@ -7068,6 +7098,35 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .to_string()
     }
 
+    /// Press 1 of the export flow: open the settings dialog with a remembered
+    /// destination folder and a title+timestamp default filename.
+    fn open_export_dialog(&mut self) {
+        let memo = format!("{}/.export_dir.txt", self.doc.asset_dir);
+        let dir = std::fs::read_to_string(&memo)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && std::path::Path::new(s).is_dir())
+            .unwrap_or_else(|| {
+                std::env::var("USERPROFILE")
+                    .map(|u| format!("{u}\\Videos"))
+                    .unwrap_or_else(|_| "C:\\".into())
+            });
+        let title: String = self
+            .doc
+            .raw
+            .get(0)
+            .and_then(|c| c.get("title"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("動画")
+            .chars()
+            .filter(|c| !"\\/:*?\"<>|".contains(*c))
+            .take(40)
+            .collect();
+        let title = if title.trim().is_empty() { "動画".to_string() } else { title };
+        self.export_dest = format!("{dir}\\{title}_{}.mp4", jst_timestamp_compact());
+        self.export_dialog_open = true;
+    }
+
     fn start_export(&mut self) {
         // mode "export" renders the CURRENT timeline server-side (the sequence rides in
         // the instruction — what you see is exactly what gets rendered)
@@ -7083,6 +7142,11 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             // in/out render range (DaVinci-style): backend forwards it to the native
             // exporter as start/end; unset = whole content
             instruction["export_range"] = serde_json::json!([ra, rb]);
+        }
+        if self.export_dest.trim().to_ascii_lowercase().ends_with(".mp4") {
+            // user-confirmed destination from the export dialog: backend copies the
+            // finished file here (asset registration still happens as before)
+            instruction["output_copy_path"] = serde_json::json!(self.export_dest.trim());
         }
         let payload = serde_json::json!({
             "room_id": self.room_id(),
@@ -7166,9 +7230,10 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         };
         match job.get("status").and_then(|s| s.as_str()).unwrap_or("") {
             "done" => {
-                let out = job
-                    .get("result")
-                    .and_then(|r| r.get("output_path"))
+                // prefer the user's chosen destination (dialog) over the internal job path
+                let res = job.get("result");
+                let out = res
+                    .and_then(|r| r.get("user_output_path").or_else(|| r.get("output_path")))
                     .and_then(|p| p.as_str())
                     .unwrap_or("")
                     .to_string();
@@ -10431,7 +10496,107 @@ impl eframe::App for App {
                     .add_enabled(!exporting, egui::Button::new("📤 書き出し"))
                     .clicked()
                 {
-                    self.start_export();
+                    self.open_export_dialog();
+                }
+                if self.export_dialog_open {
+                    let mut keep_open = true;
+                    egui::Window::new("書き出し設定")
+                        .collapsible(false)
+                        .resizable(false)
+                        .open(&mut keep_open)
+                        .anchor(egui::Align2::CENTER_CENTER, [0.0, -60.0])
+                        .show(ui.ctx(), |ui| {
+                            let content_end = self
+                                .doc
+                                .seq
+                                .tracks
+                                .iter()
+                                .flat_map(|t| t.clips.iter())
+                                .map(|c| c.timeline_end)
+                                .fold(0.0f64, f64::max);
+                            let (r0, r1) = self.export_range.unwrap_or((0.0, content_end));
+                            let dur = (r1 - r0).max(0.0);
+                            ui.label(format!(
+                                "解像度 1080x1920 / 30fps   長さ {:02}:{:02}",
+                                dur as i64 / 60, dur as i64 % 60
+                            ));
+                            if self.export_range.is_some() {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "範囲書き出し: {:02}:{:02} 〜 {:02}:{:02}（解除はダイアログを閉じて✕）",
+                                        r0 as i64 / 60, r0 as i64 % 60, r1 as i64 / 60, r1 as i64 % 60
+                                    ))
+                                    .color(egui::Color32::from_rgb(110, 190, 255))
+                                    .small(),
+                                );
+                            } else {
+                                ui.label(egui::RichText::new("範囲: 全体（I/Oキーで範囲指定できます）").weak().small());
+                            }
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new("保存先ファイル").strong());
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.export_dest)
+                                    .desired_width(440.0),
+                            );
+                            ui.horizontal(|ui| {
+                                let keep_name = |dest: &str, dir: String| -> String {
+                                    let name = std::path::Path::new(dest)
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| "書き出し.mp4".into());
+                                    format!("{dir}\\{name}")
+                                };
+                                if ui.small_button("ビデオ").clicked() {
+                                    if let Ok(u) = std::env::var("USERPROFILE") {
+                                        self.export_dest = keep_name(&self.export_dest, format!("{u}\\Videos"));
+                                    }
+                                }
+                                if ui.small_button("デスクトップ").clicked() {
+                                    if let Ok(u) = std::env::var("USERPROFILE") {
+                                        self.export_dest = keep_name(&self.export_dest, format!("{u}\\Desktop"));
+                                    }
+                                }
+                                if ui.small_button("ダウンロード").clicked() {
+                                    if let Ok(u) = std::env::var("USERPROFILE") {
+                                        self.export_dest = keep_name(&self.export_dest, format!("{u}\\Downloads"));
+                                    }
+                                }
+                            });
+                            let dest_ok = self.export_dest.trim().to_ascii_lowercase().ends_with(".mp4")
+                                && std::path::Path::new(self.export_dest.trim())
+                                    .parent()
+                                    .map(|p| !p.as_os_str().is_empty())
+                                    .unwrap_or(false);
+                            if !dest_ok {
+                                ui.label(
+                                    egui::RichText::new("保存先は .mp4 で終わるフルパスにしてください")
+                                        .color(egui::Color32::from_rgb(230, 120, 120))
+                                        .small(),
+                                );
+                            }
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(dest_ok, egui::Button::new("▶ 書き出し開始"))
+                                    .clicked()
+                                {
+                                    if let Some(parent) = std::path::Path::new(self.export_dest.trim()).parent() {
+                                        let _ = std::fs::write(
+                                            format!("{}/.export_dir.txt", self.doc.asset_dir),
+                                            parent.to_string_lossy().as_bytes(),
+                                        );
+                                    }
+                                    self.export_dialog_open = false;
+                                    self.start_export();
+                                }
+                                if ui.button("キャンセル").clicked() {
+                                    self.export_dialog_open = false;
+                                }
+                            });
+                        });
+                    if !keep_open {
+                        self.export_dialog_open = false;
+                    }
                 }
                 if let Some((ra, rb)) = self.export_range {
                     ui.label(
@@ -11244,9 +11409,20 @@ fn main() -> eframe::Result<()> {
             let first = (start * fps).ceil() as u64;
             let last = (end * fps).ceil() as u64;
             let t_render = Instant::now();
+            // PROXY quality, exactly like the interactive preview (original=false).
+            // The user aligns blur keys against the PREVIEW picture; VFR sources
+            // (screen recordings) land DIFFERENT frames at the same timeline time when
+            // decoded from the original vs the CFR proxy — exporting the original made
+            // fast-motion moments show the blur visibly off the object (measured
+            // 19dB vs 45dB at t=108.0 on the real room). The proxy is near-full-res
+            // for the 1080x1920 canvas, so parity costs no visible quality.
+            // NATIVE_EXPORT_ORIGINAL=1 restores original-decode for A/B debugging.
+            let use_original = std::env::var("NATIVE_EXPORT_ORIGINAL")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
             for n in first..last {
                 let t = n as f64 / fps;
-                compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, false, Rb::Sync)
+                compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, use_original, false, Rb::Sync)
                     .context("compose export frame")?;
                 if let Err(e) = stdin.write_all(&comp.rgba) {
                     // ffmpeg died mid-stream — surface ITS last words, not just EPIPE
