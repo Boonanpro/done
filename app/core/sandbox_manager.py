@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 @dataclass
@@ -55,7 +56,7 @@ class SandboxManager:
     ) -> None:
         self.port = port
         self.app_module = app_module
-        self.cwd = cwd or Path("D:/done")
+        self.cwd = cwd or PROJECT_ROOT
         self.log_path = log_path or (self.cwd / "sandbox.log")
         self._proc: Optional[subprocess.Popen] = None
         self._started_at: Optional[float] = None

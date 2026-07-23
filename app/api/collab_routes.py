@@ -30,7 +30,10 @@ security = HTTPBearer(auto_error=False)
 logger = logging.getLogger(__name__)
 
 ACCESS_TOKEN_COOKIE = "done_access_token"
-UPLOAD_DIR = Path("D:/done/uploads/collab")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+from app.workspace import resolve_cli_workspace
+CLI_WORKSPACE = resolve_cli_workspace()
+UPLOAD_DIR = PROJECT_ROOT / "uploads" / "collab"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -496,7 +499,7 @@ async def generate_reply(
             f"ゲストへの返信文を生成してください。返信文のみを出力し、それ以外は何も書かないでください。"
         ),
         skip_resume=True,
-        cwd="D:/dan-workspace",
+        cwd=str(CLI_WORKSPACE),
     ):
         if event["type"] == "text":
             final_text += event.get("text", "")
@@ -1152,7 +1155,7 @@ async def _trigger_dan_assist(service: CollabService, room_id: str, trigger_mess
                 f"- カレンダー・資料管理・タスク管理など作業系のサポートのみ行うこと"
             ),
             skip_resume=True,
-            cwd="D:/dan-workspace",
+            cwd=str(CLI_WORKSPACE),
         ):
             if event["type"] == "text":
                 final_text += event.get("text", "")

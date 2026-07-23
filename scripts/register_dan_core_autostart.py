@@ -22,7 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-WRAPPER_BAT = r"D:\done\scripts\dan_core_autostart.bat"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+WRAPPER_BAT = str(PROJECT_ROOT / "scripts" / "dan_core_autostart.bat")
 SHORTCUT_NAME = "DanCore.lnk"
 
 
@@ -47,7 +48,7 @@ def main() -> None:
         f'$ws = New-Object -ComObject WScript.Shell; '
         f'$sc = $ws.CreateShortcut(\'{shortcut_path}\'); '
         f'$sc.TargetPath = \'{WRAPPER_BAT}\'; '
-        f'$sc.WorkingDirectory = \'D:\\done\'; '
+        f'$sc.WorkingDirectory = \'{PROJECT_ROOT}\'; '
         f'$sc.WindowStyle = 7; '  # 7 = minimized
         f'$sc.Save();'
     )

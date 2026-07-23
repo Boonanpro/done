@@ -14,9 +14,10 @@ import logging
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-CERT_FILE = Path("D:/done/frontend/certificates/localhost.pem")
-KEY_FILE = Path("D:/done/frontend/certificates/localhost-key.pem")
+CERT_FILE = PROJECT_ROOT / "frontend" / "certificates" / "localhost.pem"
+KEY_FILE = PROJECT_ROOT / "frontend" / "certificates" / "localhost-key.pem"
 PROXY_PORT = 8443
 BACKEND_HOST = "127.0.0.1"
 BACKEND_PORT = 8000
