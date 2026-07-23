@@ -104,6 +104,40 @@ float4 ps_blur_rect(VOut i) : SV_Target {
 float4 ps_solid_rect(VOut i) : SV_Target {
   return float4(opt.rgb * opt.a, opt.a);
 }
+// Soft-edged box coverage for the attention effects: 1 inside uvr, 0 outside,
+// feathered over aff.xy (canvas-uv units).
+float focus_box(float2 cuv) {
+  float2 r0 = uvr.xy, r1 = uvr.xy + uvr.zw;
+  float2 fe = max(aff.xy, 1e-5);
+  float ex = min(cuv.x - r0.x, r1.x - cuv.x) / fe.x;
+  float ey = min(cuv.y - r0.y, r1.y - cuv.y) / fe.y;
+  return saturate(min(ex, ey));
+}
+// SPOTLIGHT: keep the region, dim everything else (opt.y = outside brightness).
+float4 ps_spotlight(VOut i) : SV_Target {
+  float2 cuv = i.pos.xy / aff.zw;
+  float3 base = tex0.Sample(smp, cuv).rgb;
+  float k = lerp(opt.y, 1.0, focus_box(cuv));
+  return float4(base * k, 1.0);
+}
+// MARKER: highlighter wash on the region + a subtle dim outside — the look the
+// Omni experiment picked for "draw attention here" (warm glow box over the text).
+float4 ps_marker(VOut i) : SV_Target {
+  float2 cuv = i.pos.xy / aff.zw;
+  float3 base = tex0.Sample(smp, cuv).rgb;
+  float inb = focus_box(cuv);
+  float3 warm = float3(1.0, 0.93, 0.62);
+  float3 lit = lerp(base, warm, 0.30 * opt.a) * 1.06;
+  return float4(lerp(base * opt.y, lit, inb), 1.0);
+}
+// ZOOM (punch-in): resample the whole composite toward the region's centre.
+// uvr.xy = focus point (canvas uv), opt.y = zoom factor. The mapping keeps the
+// sampled window inside the frame for any focus in [0,1].
+float4 ps_zoom(VOut i) : SV_Target {
+  float2 cuv = i.pos.xy / aff.zw;
+  float2 suv = uvr.xy + (cuv - uvr.xy) / max(opt.y, 1.0);
+  return float4(tex0.Sample(smp, saturate(suv)).rgb, 1.0);
+}
 // Colour redaction following a SAM matte (tex1). The output is the final opaque
 // canvas colour, preserving clean anti-aliased edges while the object moves.
 float4 ps_solid_masked(VOut i) : SV_Target {
@@ -238,6 +272,9 @@ pub struct Compositor {
     ps_blur_rect: ID3D11PixelShader,
     ps_solid_rect: ID3D11PixelShader,
     ps_solid_masked: ID3D11PixelShader,
+    ps_spotlight: ID3D11PixelShader,
+    ps_marker: ID3D11PixelShader,
+    ps_zoom: ID3D11PixelShader,
     scratch: std::cell::RefCell<Option<ID3D11Texture2D>>,
     // freeze-frame stills: (source path, src ms) -> a private copy of the decoded frame.
     // A freeze clip re-requesting the SAME source time every frame kept fighting the
@@ -332,6 +369,15 @@ impl Compositor {
             let psb8 = compile("ps_solid_masked", "ps_5_0")?;
             let mut ps_solid_masked: Option<ID3D11PixelShader> = None;
             d3d.device.CreatePixelShader(bytes(&psb8), None, Some(&mut ps_solid_masked))?;
+            let psb9 = compile("ps_spotlight", "ps_5_0")?;
+            let mut ps_spotlight: Option<ID3D11PixelShader> = None;
+            d3d.device.CreatePixelShader(bytes(&psb9), None, Some(&mut ps_spotlight))?;
+            let psb10 = compile("ps_marker", "ps_5_0")?;
+            let mut ps_marker: Option<ID3D11PixelShader> = None;
+            d3d.device.CreatePixelShader(bytes(&psb10), None, Some(&mut ps_marker))?;
+            let psb11 = compile("ps_zoom", "ps_5_0")?;
+            let mut ps_zoom: Option<ID3D11PixelShader> = None;
+            d3d.device.CreatePixelShader(bytes(&psb11), None, Some(&mut ps_zoom))?;
             let mut vs: Option<ID3D11VertexShader> = None;
             d3d.device.CreateVertexShader(bytes(&vsb), None, Some(&mut vs))?;
             let mut ps_plain: Option<ID3D11PixelShader> = None;
@@ -397,6 +443,9 @@ impl Compositor {
                 ps_blur_rect: ps_blur_rect.unwrap(),
                 ps_solid_rect: ps_solid_rect.unwrap(),
                 ps_solid_masked: ps_solid_masked.unwrap(),
+                ps_spotlight: ps_spotlight.unwrap(),
+                ps_marker: ps_marker.unwrap(),
+                ps_zoom: ps_zoom.unwrap(),
                 scratch: std::cell::RefCell::new(None),
                 stills: std::cell::RefCell::new(Default::default()),
                 pinned_images: std::cell::RefCell::new(Default::default()),
@@ -844,6 +893,97 @@ impl Compositor {
             };
             d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
             d3d.ctx.PSSetShader(&self.ps_solid_rect, None);
+            d3d.ctx.Draw(4, 0);
+            Ok(())
+        }
+    }
+
+    /// Attention effects (注目演出): full-canvas passes over a scratch copy of the
+    /// composite below this lane. `region` is the target box in canvas fractions.
+    /// kind: 0 = spotlight (keep region, dim outside to `dim`),
+    ///       1 = marker (highlighter wash on region + subtle outside dim).
+    fn apply_focus(&self, d3d: &D3d, region: (f64, f64, f64, f64), kind: u32, dim: f64, wash: f64) -> Result<()> {
+        unsafe {
+            {
+                let mut sc = self.scratch.borrow_mut();
+                if sc.is_none() {
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    self.canvas.GetDesc(&mut desc);
+                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
+                    desc.Usage = D3D11_USAGE_DEFAULT;
+                    desc.CPUAccessFlags = 0;
+                    desc.MiscFlags = 0;
+                    let mut t: Option<ID3D11Texture2D> = None;
+                    d3d.device.CreateTexture2D(&desc, None, Some(&mut t))?;
+                    *sc = t;
+                }
+                d3d.ctx.CopyResource(sc.as_ref().unwrap(), &self.canvas);
+            }
+            let sc = self.scratch.borrow();
+            let mut srv: Option<ID3D11ShaderResourceView> = None;
+            d3d.device.CreateShaderResourceView(sc.as_ref().unwrap(), None, Some(&mut srv))?;
+            let (x, y, w, h) = region;
+            // ~8px feather on the canvas, expressed in uv units per axis
+            let cbv = Cb {
+                dst: [0.0, 0.0, 1.0, 1.0],
+                uvr: [x as f32, y as f32, w as f32, h as f32],
+                aff: [
+                    8.0 / self.width as f32,
+                    8.0 / self.height as f32,
+                    self.width as f32,
+                    self.height as f32,
+                ],
+                opt: [1.0, dim as f32, 0.0, wash as f32],
+            };
+            d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
+            d3d.ctx.PSSetShaderResources(0, Some(&[srv]));
+            d3d.ctx.PSSetShader(if kind == 1 { &self.ps_marker } else { &self.ps_spotlight }, None);
+            d3d.ctx.Draw(4, 0);
+            Ok(())
+        }
+    }
+
+    /// Keep the region, dim the rest of the frame.
+    pub fn apply_spotlight(&self, d3d: &D3d, region: (f64, f64, f64, f64), dim: f64) -> Result<()> {
+        self.apply_focus(d3d, region, 0, dim.clamp(0.05, 0.95), 1.0)
+    }
+
+    /// Highlighter wash on the region + a subtle dim outside (the Omni-look).
+    pub fn apply_marker(&self, d3d: &D3d, region: (f64, f64, f64, f64), wash: f64) -> Result<()> {
+        self.apply_focus(d3d, region, 1, 0.85, wash.clamp(0.0, 1.0))
+    }
+
+    /// Punch-in: resample the composite toward the region's centre by `zoom`.
+    pub fn apply_zoom(&self, d3d: &D3d, region: (f64, f64, f64, f64), zoom: f64) -> Result<()> {
+        unsafe {
+            {
+                let mut sc = self.scratch.borrow_mut();
+                if sc.is_none() {
+                    let mut desc = D3D11_TEXTURE2D_DESC::default();
+                    self.canvas.GetDesc(&mut desc);
+                    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE.0 as u32;
+                    desc.Usage = D3D11_USAGE_DEFAULT;
+                    desc.CPUAccessFlags = 0;
+                    desc.MiscFlags = 0;
+                    let mut t: Option<ID3D11Texture2D> = None;
+                    d3d.device.CreateTexture2D(&desc, None, Some(&mut t))?;
+                    *sc = t;
+                }
+                d3d.ctx.CopyResource(sc.as_ref().unwrap(), &self.canvas);
+            }
+            let sc = self.scratch.borrow();
+            let mut srv: Option<ID3D11ShaderResourceView> = None;
+            d3d.device.CreateShaderResourceView(sc.as_ref().unwrap(), None, Some(&mut srv))?;
+            let (x, y, w, h) = region;
+            let cbv = Cb {
+                dst: [0.0, 0.0, 1.0, 1.0],
+                uvr: [(x + w / 2.0) as f32, (y + h / 2.0) as f32, 0.0, 0.0],
+                aff: [0.0, 0.0, self.width as f32, self.height as f32],
+                opt: [1.0, zoom.clamp(1.0, 4.0) as f32, 0.0, 0.0],
+            };
+            d3d.ctx.UpdateSubresource(&self.cb, 0, None, &cbv as *const _ as _, 0, 0);
+            d3d.ctx.PSSetShaderResources(0, Some(&[srv]));
+            d3d.ctx.PSSetShader(&self.ps_zoom, None);
             d3d.ctx.Draw(4, 0);
             Ok(())
         }

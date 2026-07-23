@@ -72,6 +72,12 @@ enum Frame {
 /// and the producer logs cache/live serve decisions (armed around ◱ interactions).
 static BLUR_DBG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// EXPORT mode: draw EVERY designed caption in the GPU compositor, including the ones
+/// the interactive editor leaves to the WebView overlay (captions above the topmost
+/// video/effect). Headless export has no WebView — without this, those captions would
+/// silently vanish from the file, which was the exact user-reported bug.
+static EXPORT_ALL_CAPTIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[link(name = "user32")]
 extern "system" {
     fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
@@ -293,6 +299,52 @@ fn audio_thread(shared: Arc<Shared>) {
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+}
+
+/// Core of the key-work clock (see App::keyed_grid_t): prefer the DISPLAYED
+/// frame's slot, but when the transport playhead (`req`) sits on an existing key
+/// and the displayed slot drifted off it, use the playhead's slot.
+fn snap_key_slot(disp: f64, req: f64, clip_start: f64, key_times_rel: &[f64]) -> f64 {
+    if (disp - req).abs() > 1e-9 {
+        let on = |t: f64| {
+            key_times_rel
+                .iter()
+                .any(|kt| (clip_start + kt - t).abs() <= edits::KEY_REPLACE_EPS)
+        };
+        if on(req) && !on(disp) {
+            return req;
+        }
+    }
+    disp
+}
+
+#[cfg(test)]
+mod key_slot_tests {
+    use super::snap_key_slot;
+    const F: f64 = 1.0 / 30.0; // one 30fps frame
+
+    #[test]
+    fn playhead_on_key_wins_over_drifted_display_slot() {
+        // The bug: head ON key K, but the displayed slot rounded one frame早く →
+        // the write minted a new key at K-1F. It must edit K instead.
+        let k = 10.0 + 15.0 * F; // key at clip-relative 15 frames (clip starts at 10s)
+        assert_eq!(snap_key_slot(k - F, k, 10.0, &[15.0 * F]), k);
+    }
+
+    #[test]
+    fn off_key_keeps_the_picture_glued_display_slot() {
+        let t = 10.0 + 15.0 * F;
+        assert_eq!(snap_key_slot(t - F, t, 10.0, &[]), t - F);
+        // and when the DISPLAYED slot itself is on a key, it already replaces it
+        assert_eq!(snap_key_slot(t - F, t, 10.0, &[14.0 * F]), t - F);
+    }
+
+    #[test]
+    fn deliberate_neighbour_frame_key_still_possible() {
+        // head one frame BEFORE key K (both slots agree) → new key at K-1F is intended
+        let k = 10.0 + 15.0 * F;
+        assert_eq!(snap_key_slot(k - F, k - F, 10.0, &[15.0 * F]), k - F);
     }
 }
 
@@ -601,6 +653,25 @@ fn draw_plain_pip(
     let (tex, wh) = (vs.bgra.clone(), (vs.width, vs.height));
     comp.draw_cropped_opacity(d3d, &tex, wh, (bb.x, bb.y, bb.width, bb.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t), c.visual_opacity())?;
     Ok(Some(p2))
+}
+
+/// Fit the complete source into a timeline box without cropping or distortion.
+/// Coordinates are normalized to the fixed preview canvas, whose pixels are not
+/// square in normalized space for portrait projects.
+fn contain_box(
+    dst: (f64, f64, f64, f64),
+    src_wh: (u32, u32),
+) -> (f64, f64, f64, f64) {
+    if src_wh.0 == 0 || src_wh.1 == 0 || dst.2 <= 0.0 || dst.3 <= 0.0 {
+        return dst;
+    }
+    let (bw, bh) = (dst.2 * CANVAS_W as f64, dst.3 * CANVAS_H as f64);
+    let scale = (bw / src_wh.0 as f64).min(bh / src_wh.1 as f64);
+    let (dw, dh) = (
+        (src_wh.0 as f64 * scale) / CANVAS_W as f64,
+        (src_wh.1 as f64 * scale) / CANVAS_H as f64,
+    );
+    (dst.0 + (dst.2 - dw) / 2.0, dst.1 + (dst.3 - dh) / 2.0, dw, dh)
 }
 
 /// Throttled diagnostics for the freeze paths (at most one line per 500ms) — cheap
@@ -967,7 +1038,15 @@ fn compose(
                 if !applied {
                     // a clip WITH a tracked bake never shows the blocky grid: style only
                     // picks the look for pure static region clips
-                    if is_mosaic && c.blur_track.is_none() {
+                    if style == "spotlight" {
+                        // 注目演出: 範囲以外を沈める。不透明度スライダーが沈み量
+                        let _ = comp.apply_spotlight(d3d, rg, 1.0 - 0.55 * opacity);
+                    } else if style == "marker" {
+                        let _ = comp.apply_marker(d3d, rg, opacity);
+                    } else if style == "zoom" {
+                        let z = c.effect_strength.unwrap_or(1.6).clamp(1.1, 3.0);
+                        let _ = comp.apply_zoom(d3d, rg, z);
+                    } else if is_mosaic && c.blur_track.is_none() {
                         let _ = comp.apply_mosaic(d3d, rg, strength);
                     } else if is_solid {
                         let _ = comp.apply_solid_rect(d3d, rg, solid, opacity);
@@ -1278,7 +1357,9 @@ fn compose(
                         wh.0, wh.1, b.x, b.y, b.width, b.height
                     );
                 }
-                comp.draw_cropped_opacity(d3d, &tex, wh, (b.x, b.y, b.width, b.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
+                let dst = (b.x, b.y, b.width, b.height);
+                let dst = if c.contains_in_box() { contain_box(dst, wh) } else { dst };
+                comp.draw_cropped_opacity(d3d, &tex, wh, dst, !c.stretches_to_box() && !c.contains_in_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
                 used.push(path);
                 continue;
             }
@@ -1301,7 +1382,18 @@ fn compose(
                 );
             }
             if base_id.as_deref() == Some(c.id.as_str()) && vs.shown_pts() >= 0.0 {
-                let eff = c.timeline_start + (vs.shown_pts() - c.source_start);
+                let landed = vs.shown_pts();
+                // Label the pixels with the REQUEST time when the landed frame is the
+                // one COVERING t (pts <= src_t < pts + frame). Re-mapping the landed pts
+                // and re-rounding relabelled the same picture one grid slot EARLY
+                // whenever the clip's source offset sits more than half a frame off the
+                // sequence grid — every keyframe write/read/highlight then ran one frame
+                // left of the playhead (user-visible off-by-one). The window is ~2.5
+                // sequence frames so 24fps sources on a 30fps grid still count as
+                // covering; a budgeted scrub that stopped genuinely short keeps the real
+                // landed time (the blur stays glued to the stale picture, as designed).
+                let covering = landed <= src_t + 0.0005 && src_t - landed < 2.5 / gfps.max(1.0);
+                let eff = if covering { t } else { c.timeline_start + (landed - c.source_start) };
                 // sanity: decoder slop is bounded (±0.6s windows); reject wild values
                 if (eff - t).abs() < 0.75 {
                     base_eff_t = Some(eff);
@@ -1316,7 +1408,9 @@ fn compose(
                     wh.0, wh.1, b.x, b.y, b.width, b.height
                 );
             }
-            comp.draw_cropped_opacity(d3d, &tex, wh, (b.x, b.y, b.width, b.height), !c.stretches_to_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
+            let dst = (b.x, b.y, b.width, b.height);
+            let dst = if c.contains_in_box() { contain_box(dst, wh) } else { dst };
+            comp.draw_cropped_opacity(d3d, &tex, wh, dst, !c.stretches_to_box() && !c.contains_in_box(), None, c.crop_ltrb_at(t_geo), c.visual_opacity())?;
             used.push(path);
         }
     }
@@ -1646,6 +1740,11 @@ fn native_caption_ids(doc: &model::Doc, t: f64) -> std::collections::HashSet<Str
                 below.push(c);
             }
         }
+    }
+    if EXPORT_ALL_CAPTIONS.load(Ordering::Relaxed) {
+        // headless export: the WebView overlay does not exist — captions above the
+        // topmost video draw natively too (in the same lane z-order)
+        promote(&mut below, &mut out);
     }
     out
 }
@@ -1996,6 +2095,77 @@ fn is_image_path(path: &std::path::Path) -> bool {
     )
 }
 
+/// Materialise a timeline-preview proxy for a locally dropped video.  Direct timeline
+/// drops used to claim `proxy_ready` without producing a file, forcing playback to use
+/// the often variable-frame-rate, long-GOP original forever.  The output is CFR with a
+/// one-second GOP and is renamed only after ffmpeg exits successfully, so readers never
+/// see a partial MP4.
+fn spawn_local_proxy(asset_dir: String, asset_id: String, source: String) {
+    if !std::path::Path::new(&source).is_file() {
+        return;
+    }
+    let output = format!("{asset_dir}/{asset_id}_proxy.mp4");
+    if std::fs::metadata(&output).map(|m| m.len() > 0).unwrap_or(false) {
+        return;
+    }
+    std::thread::spawn(move || {
+        use std::os::windows::process::CommandExt;
+        let ff = ["C:/Users/Owner/ffmpeg/bin/ffmpeg.exe", "C:/ffmpeg/bin/ffmpeg.exe"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).is_file())
+            .unwrap_or("ffmpeg");
+        let partial = format!("{output}.part.mp4");
+        let _ = std::fs::remove_file(&partial);
+        let status = std::process::Command::new(ff)
+            .args([
+                "-hide_banner", "-loglevel", "error", "-y", "-i", &source,
+                "-map", "0:v:0", "-map", "0:a?",
+                "-vf", "scale=-2:720:flags=lanczos,fps=30",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                // 0.2s GOP: a backward frame-step decodes ≤5 frames instead of ≤29 —
+                // the difference between "waiting" and "instant" when inspecting
+                // frame-by-frame in reverse. Modest size cost on a preview-only file.
+                "-g", "6", "-keyint_min", "6", "-sc_threshold", "0",
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+                "-movflags", "+faststart", &partial,
+            ])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let ready = status.map(|s| s.success()).unwrap_or(false)
+            && std::fs::metadata(&partial).map(|m| m.len() > 0).unwrap_or(false);
+        if ready && std::fs::rename(&partial, &output).is_ok() {
+            eprintln!("PROXY_READY asset={asset_id}");
+        } else {
+            let _ = std::fs::remove_file(&partial);
+            eprintln!("PROXY_FAILED asset={asset_id}");
+        }
+    });
+}
+
+/// Start proxies for every local video already used by the open sequence. This repairs
+/// older direct drops made before native import actually produced proxy media.
+fn spawn_missing_timeline_proxies(doc: &model::Doc) {
+    let mut ids = std::collections::HashSet::new();
+    for track in &doc.seq.tracks {
+        if track.kind != "audio" {
+            for clip in &track.clips {
+                if let Some(id) = clip.asset_id.as_deref() {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+    for id in ids {
+        if !doc.asset_images.contains(&id) {
+            if let Some(source) = doc.originals.get(&id) {
+                spawn_local_proxy(doc.asset_dir.clone(), id, source.clone());
+            }
+        }
+    }
+}
+
 /// ISO8601 UTC now without a chrono dependency (Howard Hinnant civil-from-days).
 /// assets.json records must carry created_at/updated_at to satisfy the API schema.
 fn iso8601_utc_now() -> String {
@@ -2025,6 +2195,15 @@ fn is_timeline_media_path(path: &std::path::Path) -> bool {
             path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),
             "mp4" | "mov" | "mkv" | "webm" | "m4v"
         )
+}
+
+/// Pure audio files (BGM / SE / narration): dropped onto the timeline they land on the
+/// AUDIO lane, not a visual lane. Media Foundation decodes all of these directly.
+fn is_audio_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase().as_str(),
+        "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "wma"
+    )
 }
 
 const TIMELINE_FPS_CHOICES: [f64; 8] = [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0];
@@ -2321,9 +2500,18 @@ fn media_thread(shared: Arc<Shared>) {
         let mut scrub_win: Vec<f32> = Vec::new();
         let mut scrub_t0 = Instant::now();
         let mut scrub_exact = true; // last scrub compose reached the exact frame
+        // A PAUSED frame that composed INEXACT (tracked-blur mask / caption texture /
+        // decoder momentarily unavailable) must never sit on screen as the final
+        // picture — that was the "same frame sometimes shows the blur, sometimes not"
+        // instability: nothing re-marked the request dirty, so the provisional pixels
+        // stayed until the next user action. Retry until exact (bounded).
+        let mut rest_retry: u32 = 0;
         let mut masks: MaskMap = Default::default();
         let mut pts_maps: PtsMap = Default::default();
         let mut fcache = FrameCache::new();
+        // idle-fill slots that composed INEXACT (mask/caption not ready): retry later
+        // instead of hammering the same frame every idle slice
+        let mut fill_defer: std::collections::HashMap<i64, Instant> = Default::default();
         let mut prev_was_compose = false;
         let mut prev_compose_t = f64::NAN;
         let mut prev_compose_eff = f64::NAN;
@@ -2516,11 +2704,25 @@ fn media_thread(shared: Arc<Shared>) {
                     } else {
                         // GPU-direct playback: NO readback at all — a video/text/image
                         // dense span can no longer stall the producer on a GPU map.
-                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, true, if gpu_on { Rb::None } else { Rb::Async })
+                        // A ring entry is presented later as the frame for `next_t`.
+                        // Unlike interactive scrubbing it may not contain a provisional
+                        // decoder surface: that turns a freeze->video seam into a whole
+                        // run of the freeze's last frame. The ring has decode-ahead slack,
+                        // so wait for the exact source frame here.
+                        compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, next_t, false, false, if gpu_on { Rb::None } else { Rb::Async })
                     };
                     ms_comp = t0.elapsed().as_secs_f32() * 1000.0;
                     match res {
-                        Ok((used, _, eff)) => {
+                        Ok((used, exact, eff)) => {
+                            // Keep the ring's time/pixel contract even if a future render
+                            // path accidentally becomes budgeted again. Presenting an
+                            // inexact canvas is worse than leaving this slot unfilled:
+                            // audio can continue while a stale picture masquerades as video.
+                            if !exact {
+                                eprintln!("RING_REJECT provisional frame at t={next_t:.3}");
+                                std::thread::sleep(std::time::Duration::from_millis(1));
+                                continue;
+                            }
                             if ms_comp > 60.0 {
                                 eprintln!("SLOWPROD t={next_t:.2}: {ms_comp:.0}ms");
                             }
@@ -2698,8 +2900,10 @@ fn media_thread(shared: Arc<Shared>) {
                 // Filmora's preview is uniformly proxy too — that IS its stability.
                 let original = false;
                 let t0 = Instant::now();
+                let mut landed_exact = false;
                 match compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, original, r.scrubbing, Rb::Sync) {
                     Ok((used, exact, eff)) => {
+                        landed_exact = exact;
                         scrub_exact = !r.scrubbing || exact;
                         let tex = if gpu_on { snapshot_canvas(&shared, &d3d, &comp, &gpu_pool) } else { None };
                         seq += 1;
@@ -2746,6 +2950,21 @@ fn media_thread(shared: Arc<Shared>) {
                     scrub_win.clear();
                     scrub_t0 = Instant::now();
                 }
+                // PAUSED + provisional result (or compose error): leave the request
+                // dirty and recompose until the exact frame lands. Without this, a
+                // one-shot mask/caption/decoder hiccup left wrong pixels on screen as
+                // the FINAL state — the intermittent "blur missing on this frame" bug.
+                // Bounded (~3s) so a permanently missing resource cannot spin forever;
+                // any later edit/seek resets the budget.
+                if !r.playing && !r.scrubbing && !landed_exact && rest_retry < 120 {
+                    rest_retry += 1;
+                    if rest_retry == 1 || rest_retry % 40 == 0 {
+                        eprintln!("REST_RETRY t={t:.3} attempt={rest_retry}");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    continue;
+                }
+                rest_retry = 0;
                 last_gen = r.gen;
                 last_t = t;
             } else if !settled {
@@ -2863,15 +3082,31 @@ fn media_thread(shared: Arc<Shared>) {
                         if ft > dur {
                             continue;
                         }
-                        if !fcache.contains(ft, timeline_fps) {
+                        if !fcache.contains(ft, timeline_fps)
+                            && fill_defer
+                                .get(&idx)
+                                .map(|at| at.elapsed().as_secs_f32() > 5.0)
+                                .unwrap_or(true)
+                        {
                             target = Some(ft);
                             break 'fill;
                         }
                     }
                 }
                 if let Some(ft) = target {
-                    if let Ok((_, _, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, false, false, Rb::Sync) {
-                        fcache.insert(ft, timeline_fps, eff, &comp.rgba, t);
+                    if let Ok((_, ex, eff)) = compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, ft, false, false, Rb::Sync) {
+                        // EXACT frames only. A compose whose tracked-blur mask (or caption
+                        // PNG) wasn't ready returns Ok(exact=false) with the effect stale or
+                        // missing — caching that poisoned the slot FOREVER (insert never
+                        // overwrites), and frame-stepping then showed "blur off" on a frame
+                        // that recomposes correctly: the user-reported direction/history
+                        // dependent preview. Inexact slots stay empty and refill next idle.
+                        if ex {
+                            fcache.insert(ft, timeline_fps, eff, &comp.rgba, t);
+                            fill_defer.remove(&FrameCache::idx(ft, timeline_fps));
+                        } else {
+                            fill_defer.insert(FrameCache::idx(ft, timeline_fps), Instant::now());
+                        }
                     }
                     if fcache.frames.len() % 300 == 0 {
                         eprintln!(
@@ -3090,6 +3325,10 @@ struct App {
     pending_undo: Option<serde_json::Value>,
     redo: Vec<String>,
     save_at: Option<Instant>,
+    /// Canonical JSON snapshot last read from / written to disk.  A server-side agent
+    /// may update the same timeline while this window is open; never let a stale editor
+    /// instance overwrite that newer document on debounce or close.
+    disk_fingerprint: String,
     salt: u64,
     // Files dropped into an empty project wait here until its timeline frame rate is chosen.
     pending_initial_imports: Vec<std::path::PathBuf>,
@@ -3198,12 +3437,16 @@ struct App {
 impl App {
     fn new(contents: &str, dir: &str) -> anyhow::Result<Self> {
         let mut raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(contents)?)?;
+        let disk_fingerprint = serde_json::to_string(&raw).unwrap_or_default();
         let before_norm = serde_json::to_string(&raw).unwrap_or_default();
         edits::normalize_linked_audio(&mut raw);
         edits::remove_orphan_linked_audio(&mut raw);
         edits::quantize_timeline_frames(&mut raw);
         let normalized_on_load = serde_json::to_string(&raw).unwrap_or_default() != before_norm;
         let doc = Arc::new(model::Doc::from_raw(raw, contents, dir)?);
+        // Do this before playback threads start. Existing direct drops are upgraded in
+        // the background; until their atomic proxy appears, the original remains usable.
+        spawn_missing_timeline_proxies(&doc);
         let dur = doc.duration();
         let shared = Arc::new(Shared {
             req: Mutex::new(Req { t: 0.0, playing: false, scrubbing: false, speed: 1.0, gen: 0 }),
@@ -3302,6 +3545,7 @@ impl App {
             pending_undo: None,
             redo: Vec::new(),
             save_at: normalized_on_load.then(|| Instant::now() + std::time::Duration::from_millis(1200)),
+            disk_fingerprint,
             thumbs: Default::default(),
             peaks: Default::default(),
             aux_ver: 0,
@@ -3499,6 +3743,23 @@ impl App {
         }
     }
 
+    /// Persist only if this instance is still editing the version it loaded.  Agent
+    /// edits are written by another process, so an unconditional save-on-exit would
+    /// otherwise erase them with this window's stale in-memory document.
+    fn save_document(&mut self) -> anyhow::Result<bool> {
+        let on_disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&self.doc.contents_path)?)?;
+        let fingerprint = serde_json::to_string(&on_disk)?;
+        if fingerprint != self.disk_fingerprint {
+            self.save_at = None;
+            self.toast = Some(("外部更新を検出：この画面からの古い保存を停止しました。再度開いてください。".into(), Instant::now()));
+            eprintln!("save blocked: contents.json changed outside this editor instance");
+            return Ok(false);
+        }
+        edits::save(&self.doc.raw, &self.doc.contents_path)?;
+        self.disk_fingerprint = self.doc.raw.to_string();
+        Ok(true)
+    }
+
     /// Snap t to nearby clip edges / the playhead (8px feel like Filmora's magnet).
     fn snap(&self, t: f64, ignore: &[String]) -> f64 {
         let t = self.grid_quantize(t);
@@ -3613,8 +3874,64 @@ impl App {
                 "thumbnail_url": null,
                 "name": fname,
                 "filename": fname,
-                "status": "proxy_ready",
+                "status": if image { "ready" } else { "proxy_pending" },
                 "metadata": metadata,
+                "created_at": now,
+                "updated_at": now,
+                "imported_by": "native"
+            }));
+        }
+        std::fs::write(&aj, serde_json::to_string(&arr)?)?;
+        if !image {
+            spawn_local_proxy(self.doc.asset_dir.clone(), id.clone(), path.clone());
+        }
+        let aid = id.clone();
+        self.apply_edit(true, move |raw| {
+            edits::place_asset(raw, target, t, dur, &aid, has_audio, image, salt);
+        });
+        self.selected.clear();
+        self.selected.push(format!("drop_v_{salt}"));
+        self.t = t;
+        self.push_req(false);
+        Ok(())
+    }
+
+    /// Import a PURE AUDIO file (BGM etc.) at time `t` on the audio lane. Same
+    /// assets.json contract as import_file_at, but kind="audio", no proxy and no
+    /// visual clip — Media Foundation decodes the source (mp3/wav/…) directly.
+    fn import_audio_at(&mut self, p: &std::path::Path, t: f64) -> anyhow::Result<()> {
+        let path = p.to_string_lossy().replace(char::from(92), "/");
+        self.salt += 1;
+        let id = format!("nat{}_{}", self.salt, std::process::id());
+        let salt = self.salt;
+        let dur = probe_duration(&path).unwrap_or(0.0);
+        anyhow::ensure!(dur > 0.05, "音声の長さを取得できません: {path}");
+        let aj = format!("{}/assets.json", self.doc.asset_dir);
+        let mut arr: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&aj).unwrap_or_else(|_| "[]".into()))
+                .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+        if let Some(a) = arr.as_array_mut() {
+            let fname = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let room_id = std::path::Path::new(&self.doc.asset_dir)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let now = iso8601_utc_now();
+            a.push(serde_json::json!({
+                "id": id,
+                "room_id": room_id,
+                "kind": "audio",
+                "source_type": "local_path",
+                "original_uri": path,
+                "local_path": path,
+                "proxy_path": null,
+                "proxy_url": null,
+                "thumbnail_path": null,
+                "thumbnail_url": null,
+                "name": fname,
+                "filename": fname,
+                "status": "ready",
+                "metadata": { "duration": dur, "audio_codec": "source" },
                 "created_at": now,
                 "updated_at": now,
                 "imported_by": "native"
@@ -3623,10 +3940,10 @@ impl App {
         std::fs::write(&aj, serde_json::to_string(&arr)?)?;
         let aid = id.clone();
         self.apply_edit(true, move |raw| {
-            edits::place_asset(raw, target, t, dur, &aid, has_audio, image, salt);
+            edits::place_audio_asset(raw, t, dur, &aid, salt);
         });
         self.selected.clear();
-        self.selected.push(format!("drop_v_{salt}"));
+        self.selected.push(format!("drop_a_{salt}"));
         self.t = t;
         self.push_req(false);
         Ok(())
@@ -3658,6 +3975,17 @@ impl App {
                 eff
             }
         })
+    }
+
+    /// Key-work clock for ONE clip (region AND transform keys): the displayed
+    /// frame's grid slot — EXCEPT when the transport playhead itself sits on one
+    /// of the clip's existing keys while the displayed slot drifted off it.
+    /// The displayed slot follows the base video's LANDED frame (eff_t), which on
+    /// VFR/proxy sources can round to the PREVIOUS grid slot; adjusting a key you
+    /// navigated to must edit THAT key, never mint a neighbour one frame away.
+    /// `key_times_rel` are the clip's key instants, clip-relative.
+    fn keyed_grid_t(&self, clip_start: f64, key_times_rel: &[f64]) -> f64 {
+        snap_key_slot(self.displayed_grid_t(), self.grid_quantize(self.t), clip_start, key_times_rel)
     }
 
     fn has_timeline_media(&self) -> bool {
@@ -4543,8 +4871,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // distance depending on the clip under the playhead. Snap the current position to the
         // sequence grid first, then advance exactly one output frame.
         self.t = (((self.t / fstep).round() + dir) * fstep).clamp(0.0, self.dur);
-        self.step_settle_at = Some(Instant::now() + std::time::Duration::from_millis(90));
-        self.push_req(true);
+        // EXACT from the first paint. The old scrub-then-settle sequence flashed a
+        // budget-limited provisional frame (stale tracked-blur mask etc.) for ~100ms on
+        // every arrow step — frame-by-frame blur inspection then read those flashes as
+        // "the blur is off on this frame". A single frame step is cheap to compose
+        // exactly; backward steps pay one seek (~100-300ms) for a picture that is
+        // always the truth.
+        self.step_settle_at = None;
+        self.push_req(false);
     }
 
     /// NATIVE_STEP_PROBE: drive the REAL user path end-to-end — play across a freeze
@@ -5153,6 +5487,24 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     .small(),
                 );
                 ui.separator();
+                // ---- standalone audio clip (BGM / SE): volume ----
+                if !multi && kind == "audio" && clip.asset_id.is_some() {
+                    ui.label(egui::RichText::new("音量").strong());
+                    let mut vol = (clip.volume * 100.0) as f32;
+                    let r = ui.add(egui::Slider::new(&mut vol, 0.0..=200.0).suffix("%").fixed_decimals(0));
+                    if r.drag_started() {
+                        self.pending_undo = Some(self.doc.raw.clone());
+                    }
+                    if r.changed() {
+                        let ids = edits::expand_links(&self.doc.raw, &edit_ids);
+                        let v = (vol / 100.0) as f64;
+                        self.apply_edit(false, move |raw| edits::set_volume(raw, &ids, v));
+                    }
+                    if r.drag_stopped() {
+                        ui.memory_mut(|mem| mem.surrender_focus(r.id));
+                    }
+                    ui.add_space(6.0);
+                }
                 // ---- region effect (blur/mosaic) ----
                 if !multi && clip.region.is_some() && clip.asset_id.is_none()
                     && clip.style.as_ref().and_then(|v| v.as_str()) == Some("note")
@@ -5181,7 +5533,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     ui.label(egui::RichText::new("変更は選択中の全クリップに適用されます。").small().weak());
                     let cur = clip.style.as_ref().and_then(|v| v.as_str()).unwrap_or("mosaic").to_string();
                     ui.horizontal(|ui| {
-                        for (label, val) in [("モザイク", "mosaic"), ("ぼかし", "gaussian"), ("単色", "solid")] {
+                        for (label, val) in [("モザイク", "mosaic"), ("ぼかし", "gaussian"), ("単色", "solid"), ("マーカー", "marker"), ("スポットライト", "spotlight"), ("ズーム", "zoom")] {
                             let all_same = selected.iter().all(|(c, _)| c.style.as_ref().and_then(|v| v.as_str()) == Some(val));
                             if ui.selectable_label(all_same, label).clicked() {
                                 let ids = edit_ids.clone();
@@ -5250,9 +5602,48 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             }
                         }
                     });
+                    // 注目演出（隠すのではなく見せるための範囲エフェクト）
+                    ui.horizontal(|ui| {
+                        for (label, val) in [
+                            ("マーカー", "marker"),
+                            ("スポットライト", "spotlight"),
+                            ("ズーム", "zoom"),
+                        ] {
+                            if ui.selectable_label(cur == val, label).clicked() {
+                                let cid = id.clone();
+                                self.apply_edit(true, move |raw| edits::set_style(raw, &cid, val));
+                                self.push_req(false);
+                            }
+                        }
+                    });
                     let is_solid = cur == "solid";
+                    let is_focus = cur == "marker" || cur == "spotlight";
+                    let is_zoom = cur == "zoom";
                     let mut strength = clip.effect_strength.unwrap_or(if cur.contains("mosaic") { 14.0 } else { 16.0 }) as f32;
-                    if !is_solid {
+                    if is_zoom {
+                        let mut z = clip.effect_strength.unwrap_or(1.6) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label("倍率");
+                            let resp = ui.add(egui::Slider::new(&mut z, 1.1..=3.0).suffix("x").fixed_decimals(2));
+                            if resp.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if resp.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| edits::set_effect_options(raw, &cid, Some(z as f64), None, None));
+                            }
+                        });
+                    } else if is_focus {
+                        let mut opacity = clip.effect_opacity.unwrap_or(1.0) as f32;
+                        ui.horizontal(|ui| {
+                            ui.label("強さ");
+                            let resp = ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0).show_value(false));
+                            ui.label(format!("{:0}%", opacity * 100.0));
+                            if resp.drag_started() { self.pending_undo = Some(self.doc.raw.clone()); }
+                            if resp.changed() {
+                                let cid = id.clone();
+                                self.apply_edit(false, move |raw| edits::set_effect_options(raw, &cid, None, None, Some(opacity as f64)));
+                            }
+                        });
+                    } else if !is_solid {
                         let label = if cur.contains("mosaic") { "粗さ" } else { "ぼかし強度" };
                         ui.horizontal(|ui| {
                             ui.label(label);
@@ -5286,12 +5677,18 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             }
                         });
                     }
-                    ui.label(egui::RichText::new("単色は静的範囲にもAI追従にも使えます。ぼかし・モザイクは強度を調整できます。").small().weak());
+                    ui.label(egui::RichText::new(if is_focus || is_zoom {
+                        "マーカー/スポットライト=範囲を目立たせる、ズーム=範囲へパンチイン。移動する対象は下の手動追従（キーフレーム）で追えます。"
+                    } else {
+                        "単色は静的範囲にもAI追従にも使えます。ぼかし・モザイクは強度を調整できます。"
+                    }).small().weak());
                     ui.add_space(6.0);
                     // ---- SAM tracked blur: the rectangle picks the OBJECT; the baked
                     // mask then follows it (pixel silhouette), replacing the static rect
-                    ui.label(egui::RichText::new("AI追従（SAM）").strong());
+                    // (隠す系スタイル専用 — 注目演出はマスク追従の対象外)
                     let has_track = clip.blur_track.is_some();
+                    if !(is_focus || is_zoom) {
+                    ui.label(egui::RichText::new("AI追従（SAM）").strong());
                     ui.horizontal(|ui| {
                         let blabel = if has_track { "再ベイク" } else { "囲んだ物体を追従ぼかし" };
                         if ui.button(blabel).clicked() {
@@ -5305,6 +5702,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             self.push_req(false);
                         }
                     });
+                    }
                     if has_track {
                         let in_corr = self.corr_mode.as_deref() == Some(id.as_str());
                         ui.horizontal(|ui| {
@@ -5357,8 +5755,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         ui.label(egui::RichText::new("手動追従（キーフレーム）").strong());
                         let kts = clip.region_key_times();
                         let nkeys = kts.len();
-                        // ONE clock: the displayed frame's grid slot (same as key writes)
-                        let t_now = self.displayed_grid_t();
+                        // ONE clock: the displayed frame's grid slot, snapped to the
+                        // playhead's slot when it sits on an existing key (keyed_grid_t)
+                        let t_now = self.keyed_grid_t(clip.timeline_start, &kts);
                         let rel = t_now - clip.timeline_start;
                         let on_key = kts.iter().any(|kt| (kt - rel).abs() <= edits::KEY_REPLACE_EPS);
                         let kf_on = self.kf_mode.as_deref() == Some(id.as_str());
@@ -5762,7 +6161,7 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 // ---- position & size (canvas %) ----
                 ui.label(egui::RichText::new("位置とサイズ（%）").strong());
                 // keyed clips: the fields show (and edit around) the DISPLAYED pose
-                let tkf_t_now = self.displayed_grid_t();
+                let tkf_t_now = self.keyed_grid_t(clip.timeline_start, &clip.transform_key_times());
                 let has_tkeys = !clip.transform_key_times().is_empty();
                 let b = if has_tkeys { clip.display_box_at(tkf_t_now) } else { clip.display_box() };
 
@@ -6837,11 +7236,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     && t_disp < c.timeline_end
             })
             .filter_map(|c| c.region_at(t_disp).map(|rg| {
-                let rel = t_disp - c.timeline_start;
-                let on_key = c
-                    .region_key_times()
-                    .iter()
-                    .any(|kt| (kt - rel).abs() <= edits::KEY_REPLACE_EPS);
+                let kts = c.region_key_times();
+                let rel = self.keyed_grid_t(c.timeline_start, &kts) - c.timeline_start;
+                let on_key = kts.iter().any(|kt| (kt - rel).abs() <= edits::KEY_REPLACE_EPS);
                 (
                     c.id.clone(),
                     rg,
@@ -7194,7 +7591,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                             self.pause_at_displayed();
                         }
                         if armed {
-                            self.kf_drag_rel = Some(t_disp - ts);
+                            // 既存キー上にヘッドがあるならそのキーの時刻に書く
+                            // （keyed_grid_t — 1フレーム手前に別キーが湧く事故の根治）
+                            let kts_rel: Vec<f64> = keys
+                                .as_ref()
+                                .and_then(|k| k.as_array())
+                                .map(|a| a.iter().filter_map(|k| k.get("t").and_then(|v| v.as_f64())).collect())
+                                .unwrap_or_default();
+                            self.kf_drag_rel = Some(self.keyed_grid_t(ts, &kts_rel) - ts);
                         } else if keys.as_ref().and_then(|k| k.as_array()).map(|a| !a.is_empty()).unwrap_or(false) {
                             self.kf_drag_orig_keys = keys;
                         }
@@ -7474,7 +7878,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         .as_deref()
                         .and_then(|kid| sel.iter().find(|c| c.id == kid));
                     if let Some(ac) = armed_clip {
-                        let rel = t_disp - ac.timeline_start;
+                        // keyed_grid_t: ヘッドが既存キー上ならそのキーの時刻に書く
+                        let rel = self.keyed_grid_t(ac.timeline_start, &ac.transform_key_times())
+                            - ac.timeline_start;
                         if rel >= 0.0 && rel <= ac.dur() {
                             self.tkf_drag_rel = Some(rel);
                         }
@@ -7975,7 +8381,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         p.text(
                             egui::pos2(r.left() + 6.0, r.center().y),
                             egui::Align2::LEFT_CENTER,
-                            if style == "note" { "📝 指示" } else if style.contains("mosaic") { "モザイク" } else { "ぼかし" },
+                            match style {
+                                "note" => "📝 指示",
+                                "marker" => "マーカー",
+                                "spotlight" => "スポット",
+                                "zoom" => "ズーム",
+                                s if s.contains("mosaic") => "モザイク",
+                                _ => "ぼかし",
+                            },
                             egui::FontId::proportional(10.0),
                             egui::Color32::from_gray(220),
                         );
@@ -8280,10 +8693,14 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                     } else if r.contains(pt)
-                        && pt.y > r.bottom() - 14.0
-                        && r.height() >= 40.0
-                        && c.link_id.is_some()
-                        && c.asset_id.is_some()
+                        && {
+                            let on_audio_lane = tr.kind == "audio";
+                            let (ribbon, min_h) = if on_audio_lane { (10.0, 20.0) } else { (14.0, 40.0) };
+                            pt.y > r.bottom() - ribbon
+                                && r.height() >= min_h
+                                && c.asset_id.is_some()
+                                && (c.link_id.is_some() || on_audio_lane)
+                        }
                     {
                         // waveform ribbon = volume zone
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
@@ -8424,30 +8841,30 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         let ids = edits::expand_links(&self.doc.raw, &self.selected);
                         if self.drag == Drag::None {
                             self.pending_undo = Some(self.doc.raw.clone());
-                            let vol_zone = pos.y > r.bottom() - 14.0
-                                && r.height() >= 40.0
+                            // volume ribbon: linked audio rides its visual clip's bottom
+                            // strip; a STANDALONE audio clip (BGM) sits on the short 30px
+                            // audio lane, so its zone is thinner and has no 40px gate.
+                            let vol_meta = self
+                                .doc
+                                .seq
+                                .tracks
+                                .iter()
+                                .flat_map(|tr| tr.clips.iter().map(move |c| (tr.kind.as_str(), c)))
+                                .find(|(_, c)| c.id == *id)
+                                .map(|(k, c)| {
+                                    (k == "audio",
+                                     c.asset_id.is_some() && (c.link_id.is_some() || k == "audio"),
+                                     c.volume)
+                                });
+                            let (on_audio_lane, can_vol, v0) = vol_meta.unwrap_or((false, false, 1.0));
+                            let (ribbon, min_h) = if on_audio_lane { (10.0, 20.0) } else { (14.0, 40.0) };
+                            let vol_zone = pos.y > r.bottom() - ribbon
+                                && r.height() >= min_h
                                 && edge.is_none()
                                 && (pos.x - r.left()).abs() >= 10.0
                                 && (pos.x - r.right()).abs() >= 10.0
-                                && self
-                                    .doc
-                                    .seq
-                                    .tracks
-                                    .iter()
-                                    .flat_map(|tr| tr.clips.iter())
-                                    .find(|c| c.id == *id)
-                                    .map(|c| c.link_id.is_some() && c.asset_id.is_some())
-                                    .unwrap_or(false);
+                                && can_vol;
                             if vol_zone {
-                                let v0 = self
-                                    .doc
-                                    .seq
-                                    .tracks
-                                    .iter()
-                                    .flat_map(|tr| tr.clips.iter())
-                                    .find(|c| c.id == *id)
-                                    .map(|c| c.volume)
-                                    .unwrap_or(1.0);
                                 self.drag = Drag::Volume { ids, start_y: pos.y, start_vol: v0 };
                             } else if let Some(left) = edge {
                                 let edges = self
@@ -8726,10 +9143,20 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         // Direct media placement. Both an OS file drag and a drag from the media menu
         // resolve to the lane under the pointer and the visible timeline time. Locked and
         // audio lanes are not valid visual destinations.
-        let media_pointer = ui.input(|i| i.pointer.hover_pos());
+        // `hover_pos` is cleared by egui on the mouse-up frame for some native
+        // windowing backends.  A library-card drag was consequently visible over
+        // the timeline, but its release had no target and was silently discarded.
+        // `interact_pos` retains the pointer position through that release frame;
+        // fall back to hover for an OS file drag, which has no egui interaction.
+        let media_pointer = ui.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.hover_pos()));
         let hovered_os_media = ui.input(|i| {
             i.raw.hovered_files.iter().any(|f| {
                 f.path.as_deref().map(is_timeline_media_path).unwrap_or(false)
+            })
+        });
+        let hovered_os_audio = ui.input(|i| {
+            i.raw.hovered_files.iter().any(|f| {
+                f.path.as_deref().map(is_audio_path).unwrap_or(false)
             })
         });
         let drop_target = media_pointer.and_then(|pt| {
@@ -8771,6 +9198,27 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             );
             ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
         }
+        // OS drag of an AUDIO file: preview lands on the AUDIO lane (wherever the
+        // pointer is horizontally — the vertical lane is fixed).
+        if hovered_os_audio {
+            if let (Some(&(_, y0, lh)), Some(t)) = (
+                lane_tops.iter().find(|&&(ti, _, _)| self.doc.seq.tracks[ti].kind == "audio"),
+                drop_time,
+            ) {
+                let lane_rect = egui::Rect::from_min_max(
+                    egui::pos2(body.left(), y0),
+                    egui::pos2(body.right(), y0 + lh),
+                );
+                p.rect_filled(lane_rect, 0.0, egui::Color32::from_rgba_unmultiplied(70, 200, 140, 35));
+                p.rect_stroke(lane_rect, 0.0, egui::Stroke::new(1.5, UI_ACCENT));
+                let x = body.left() + t as f32 * self.pps - self.scroll_x;
+                p.line_segment(
+                    [egui::pos2(x, y0), egui::pos2(x, y0 + lh)],
+                    egui::Stroke::new(2.0, UI_ACCENT),
+                );
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Copy);
+            }
+        }
 
         // A menu drag is an application-internal gesture, so clear it on every release,
         // but only mutate the timeline when it ended over a valid visual lane.
@@ -8781,14 +9229,29 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
         }
 
-        let dropped_media: Vec<std::path::PathBuf> = ui.input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .filter_map(|f| f.path.clone())
-                .filter(|path| is_timeline_media_path(path))
-                .collect()
-        });
+        let (dropped_audio, dropped_media): (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) = ui
+            .input(|i| {
+                i.raw
+                    .dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .filter(|path| is_timeline_media_path(path) || is_audio_path(path))
+                    .collect::<Vec<_>>()
+            })
+            .into_iter()
+            .partition(|path| is_audio_path(path));
+        if !dropped_audio.is_empty() {
+            if let Some(t) = drop_time {
+                for path in dropped_audio {
+                    if let Err(e) = self.import_audio_at(&path, t) {
+                        eprintln!("import audio: {e:#}");
+                        self.toast("音声を追加できませんでした");
+                    }
+                }
+            } else {
+                self.toast("音声はタイムライン上へドロップしてください");
+            }
+        }
         if !dropped_media.is_empty() {
             if let (Some(ti), Some(t)) = (drop_target, drop_time) {
                 if !self.has_timeline_media()
@@ -8925,9 +9388,12 @@ impl App {
                             self.open_content(&cid);
                         }
                         "failed" => {
-                            self.lib.error = Some(
-                                job.get("error").and_then(|e| e.as_str()).unwrap_or("失敗").to_string(),
-                            );
+                            let msg = job.get("error").and_then(|e| e.as_str()).unwrap_or("失敗").to_string();
+                            // 「何も起こらない」で終わらせない: パネルを閉じていても
+                            // トーストで必ず一報を出す（詳細はパネルの赤文字に残る）
+                            let short: String = msg.chars().take(90).collect();
+                            self.toast(&format!("ダンの作業がエラーで止まりました: {short}"));
+                            self.lib.error = Some(msg);
                             self.lib.started = false;
                             self.lib.gen_job = None;
                         }
@@ -9426,7 +9892,7 @@ impl eframe::App for App {
         if let Some(at) = self.save_at {
             if Instant::now() >= at {
                 self.save_at = None;
-                if let Err(e) = edits::save(&self.doc.raw, &self.doc.contents_path) {
+                if let Err(e) = self.save_document() {
                     eprintln!("save: {e:#}");
                 }
             }
@@ -9699,8 +10165,8 @@ impl eframe::App for App {
                     self.recut_open = !self.recut_open;
                 }
                 if ui
-                    .selectable_label(self.blur_mode, "◱ ぼかし")
-                    .on_hover_text("プレビュー上をドラッグしてぼかし/モザイクの範囲を指定")
+                    .selectable_label(self.blur_mode, "◱ ぼかし/注目")
+                    .on_hover_text("プレビュー上をドラッグして範囲を指定 → 右パネルで種類を選択（ぼかし/モザイク/単色/マーカー/スポットライト/ズーム）")
                     .clicked()
                 {
                     self.blur_mode = !self.blur_mode;
@@ -10342,7 +10808,7 @@ impl eframe::App for App {
         // A close can happen before the idle debounce expires. Persist the completed
         // input transaction rather than silently discarding the final IME text.
         self.flush_caption_drafts();
-        if let Err(e) = edits::save(&self.doc.raw, &self.doc.contents_path) {
+        if let Err(e) = self.save_document() {
             eprintln!("save on exit: {e:#}");
         }
     }
@@ -10408,6 +10874,53 @@ fn main() -> eframe::Result<()> {
     // comma-separated times share ONE engine setup (doc/D3D/decoders), so a batch of
     // N frames costs far less than N separate spawns; outputs get ".{k}" before the
     // extension when more than one time is given.
+    // --probe-timeline-audio <start> <end>: headless, deterministic check of every
+    // audible timeline clip in a range. It follows playback's decoder and source-time
+    // mapping, rather than trusting container metadata.
+    if let Some(i) = args.iter().position(|a| a == "--probe-timeline-audio") {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            );
+            let _ = windows::Win32::Media::MediaFoundation::MFStartup(
+                windows::Win32::Media::MediaFoundation::MF_VERSION,
+                windows::Win32::Media::MediaFoundation::MFSTARTUP_FULL,
+            );
+        }
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
+        let t0: f64 = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let t1: f64 = args.get(i + 2).and_then(|v| v.parse().ok()).unwrap_or(t0 + 1.0);
+        let doc = model::Doc::load(&contents, &dir).expect("doc load");
+        let any_solo = doc.seq.tracks.iter().any(|tr| tr.solo);
+        let mut checked = 0usize;
+        let mut audible = 0usize;
+        for (own, c) in doc.active_audio_span(t0, t1) {
+            let gov = doc.audio_gov_track(c, own);
+            let tr = &doc.seq.tracks[gov];
+            let ct0 = c.timeline_start.max(t0);
+            let ct1 = c.timeline_end.min(t1);
+            let src_t = c.source_start + ct0 - c.timeline_start;
+            let dur = (ct1 - ct0).min(0.5);
+            checked += 1;
+            if tr.muted || (any_solo && !tr.solo) || c.volume <= 0.001 {
+                println!("AUDIO_PROBE clip={} SKIP muted={} solo_gate={} volume={:.3}", c.id, tr.muted, any_solo && !tr.solo, c.volume);
+                continue;
+            }
+            let path = doc.asset_path(c.asset_id.as_deref().unwrap());
+            match media::probe_audio_samples(&path, src_t, dur) {
+                Ok((samples, peak, rms)) => {
+                    let ok = peak > 0.0005;
+                    audible += ok as usize;
+                    println!("AUDIO_PROBE clip={} source={src_t:.3} samples={samples} peak={peak:.6} rms={rms:.6} {}", c.id, if ok { "AUDIBLE" } else { "SILENT" });
+                }
+                Err(e) => println!("AUDIO_PROBE clip={} ERROR {e:#}", c.id),
+            }
+        }
+        println!("AUDIO_PROBE_SUMMARY checked={checked} audible={audible} range={t0:.3}-{t1:.3}");
+        std::process::exit(if checked > 0 && audible > 0 { 0 } else { 1 });
+    }
     if args.iter().any(|a| a == "--print-capkeys") {
         // diagnostic: the Rust-side render key for every designed caption + whether its
         // cache PNG exists — for A/B against the Python key (json.dumps parity check)
@@ -10433,7 +10946,148 @@ fn main() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    // --export-preview-video <out.mp4> [start] [end]: render frames through the
+    // same native compositor the editor preview uses, then hand only compression to
+    // ffmpeg.  No FFmpeg recreation of captions, masks, popouts, or blur is involved.
+    if let Some(i) = args.iter().position(|a| a == "--export-preview-video") {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            );
+            let _ = windows::Win32::Media::MediaFoundation::MFStartup(
+                windows::Win32::Media::MediaFoundation::MF_VERSION,
+                windows::Win32::Media::MediaFoundation::MFSTARTUP_FULL,
+            );
+        }
+        let out = args.get(i + 1).cloned().unwrap_or_else(|| "preview-export.mp4".into());
+        let start: f64 = args.get(i + 2).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let contents = positional_args(&args).first().cloned().unwrap_or_else(|| format!("{ROOM}/contents.json"));
+        let dir = positional_args(&args).get(1).cloned().unwrap_or_else(|| ROOM.to_string());
+        // Headless: every designed caption must come out of the GPU compositor — there
+        // is no WebView overlay to carry the top-most ones.
+        EXPORT_ALL_CAPTIONS.store(true, Ordering::Relaxed);
+        let r = (|| -> anyhow::Result<()> {
+            use anyhow::Context;
+            use std::io::Write;
+            let doc = model::Doc::load(&contents, &dir).context("doc load")?;
+            let end: f64 = args.get(i + 3).and_then(|v| v.parse().ok()).unwrap_or_else(|| doc.duration());
+            let fps = doc.seq.frame_rate.unwrap_or(30.0).clamp(1.0, 60.0);
+            // Pre-flight: every caption must have its cache PNG (the exact bitmap the
+            // preview shows). A missing one would silently disappear from the file, so
+            // it is a hard error — the backend renders the PNGs first and can retry.
+            let mut missing = Vec::new();
+            for tr in doc.seq.tracks.iter().filter(|tr| tr.kind != "audio" && !tr.hidden) {
+                for c in &tr.clips {
+                    if c.asset_id.is_some() || c.region.is_some() {
+                        continue;
+                    }
+                    let text = c.text.clone().unwrap_or_default();
+                    if text.trim().is_empty() {
+                        continue;
+                    }
+                    let style = c.style.clone().unwrap_or_else(|| serde_json::json!({}));
+                    let key = caption_cache_key(c, &text, &style);
+                    let png = std::path::Path::new(&doc.asset_dir)
+                        .join("caption-cache")
+                        .join(format!("{key}.png"));
+                    if !std::fs::metadata(&png).map(|m| m.len() > 0).unwrap_or(false) {
+                        missing.push((key, c.id.clone(), text.chars().take(24).collect::<String>()));
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                for (key, id, text) in &missing {
+                    println!("EXPORT_MISSING_CAPTION key={key} clip={id} text={text}");
+                }
+                anyhow::bail!("{} caption PNG(s) missing from caption-cache", missing.len());
+            }
+            let d3d = media::D3d::new().context("d3d")?;
+            let mut pool = media::VideoPool::new();
+            let mut comp = compositor::Compositor::new(&d3d, CANVAS_W, CANVAS_H).context("compositor")?;
+            let mut masks: MaskMap = Default::default();
+            while mask_build_pass(&doc, &d3d, &mut masks, None) {}
+            let mut pts_maps: PtsMap = Default::default();
+            while pts_load_pass(&doc, &mut pts_maps) {}
+            // Audio first: the SAME timeline through the playback mixer's rules, into a
+            // raw PCM sidecar that ffmpeg only compresses.
+            let end = end.max(start);
+            let (arate, ach) = (48_000u32, 2usize);
+            let pcm = format!("{out}.pcm");
+            media::mix_timeline_audio(&doc, start, end, arate, ach, &pcm).context("mix audio")?;
+            println!("EXPORT_AUDIO pcm={pcm} rate={arate} ch={ach}");
+            let ffmpeg = std::env::var("FFMPEG").unwrap_or_else(|_| "C:/Users/Owner/ffmpeg/bin/ffmpeg.exe".into());
+            // ffmpeg's stderr goes to a sidecar log, NOT null: an encoder that dies
+            // mid-stream otherwise fails as an unexplained "パイプは終了しました" with
+            // its actual reason discarded (exactly what happened once in production).
+            // Deleted on success; kept and quoted in the error on failure.
+            let fflog_path = format!("{out}.ffmpeg.log");
+            let fflog = std::fs::File::create(&fflog_path).context("create ffmpeg log")?;
+            let mut child = std::process::Command::new(ffmpeg)
+                .args([
+                    "-y",
+                    "-f", "rawvideo", "-pix_fmt", "rgba",
+                    "-s", &format!("{CANVAS_W}x{CANVAS_H}"),
+                    "-r", &format!("{fps}"), "-i", "-",
+                    "-f", "f32le", "-ar", &format!("{arate}"), "-ac", &format!("{ach}"), "-i", &pcm,
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-shortest", "-movflags", "+faststart", &out,
+                ])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(fflog))
+                .spawn()
+                .context("start ffmpeg")?;
+            let stdin = child.stdin.as_mut().context("ffmpeg stdin")?;
+            let first = (start * fps).ceil() as u64;
+            let last = (end * fps).ceil() as u64;
+            let t_render = Instant::now();
+            for n in first..last {
+                let t = n as f64 / fps;
+                compose(&doc, &d3d, &mut pool, &mut comp, &masks, &pts_maps, t, true, false, Rb::Sync)
+                    .context("compose export frame")?;
+                if let Err(e) = stdin.write_all(&comp.rgba) {
+                    // ffmpeg died mid-stream — surface ITS last words, not just EPIPE
+                    let tail = std::fs::read_to_string(&fflog_path)
+                        .map(|s| s.chars().rev().take(400).collect::<String>().chars().rev().collect::<String>())
+                        .unwrap_or_default();
+                    anyhow::bail!("write export frame at t={t:.2}: {e} | ffmpeg says: {tail}");
+                }
+                let done = n - first + 1;
+                if done % 150 == 0 || n + 1 == last {
+                    let el = t_render.elapsed().as_secs_f64().max(0.001);
+                    println!(
+                        "EXPORT_PROGRESS frame={done}/{} t={t:.2} render_fps={:.1}",
+                        last - first,
+                        done as f64 / el
+                    );
+                    let _ = std::io::stdout().flush(); // backend tails this pipe live
+                }
+            }
+            drop(child.stdin.take());
+            let status = child.wait().context("wait ffmpeg")?;
+            let _ = std::fs::remove_file(&pcm);
+            if !status.success() {
+                let tail = std::fs::read_to_string(&fflog_path)
+                    .map(|s| s.chars().rev().take(400).collect::<String>().chars().rev().collect::<String>())
+                    .unwrap_or_default();
+                anyhow::bail!("ffmpeg encode failed: {status} | ffmpeg says: {tail}");
+            }
+            let _ = std::fs::remove_file(&fflog_path);
+            println!("PREVIEW_EXPORT out={out} start={start:.3} end={end:.3} fps={fps}");
+            Ok(())
+        })();
+        if let Err(e) = r { eprintln!("PREVIEW_EXPORT ERR {e:#}"); std::process::exit(1); }
+        std::process::exit(0);
+    }
     if let Some(i) = args.iter().position(|a| a == "--dump-frame") {
+        // NATIVE_DUMP_ALL_CAPTIONS=1: compose WebView-plane captions natively too —
+        // frames then show the FULL preview (what the user sees), for export A/B checks.
+        if std::env::var("NATIVE_DUMP_ALL_CAPTIONS").map(|v| !v.is_empty()).unwrap_or(false) {
+            EXPORT_ALL_CAPTIONS.store(true, Ordering::Relaxed);
+        }
         let tspec = args.get(i + 1).cloned().unwrap_or_else(|| "0".into());
         let ts: Vec<f64> = tspec.split(',').filter_map(|v| v.trim().parse().ok()).collect();
         let out = args.get(i + 2).cloned().unwrap_or_else(|| "frame.ppm".into());
@@ -12012,6 +12666,32 @@ fn main() -> eframe::Result<()> {
         );
         std::process::exit(if ok { 0 } else { 1 });
     }
+    // --selftest-freeze-resume <path> <source-in> [resume-duration]: model the
+    // decoder hand-off at a static freeze. The still itself does not touch the
+    // decoder; the continuation must nevertheless advance from the held source PTS.
+    if let Some(i) = args.iter().position(|a| a == "--selftest-freeze-resume") {
+        let path = args.get(i + 1).cloned().unwrap_or_default();
+        let source_in: f64 = args.get(i + 2).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        let duration: f64 = args.get(i + 3).and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        let end = source_in + duration.max(0.1);
+        let d3d = media::D3d::new().expect("d3d");
+        let mut vs = media::VideoStream::open(&d3d, &path, 0, false).expect("open");
+        vs.ensure_frame(&d3d, source_in).expect("freeze in-point");
+        let held = vs.shown_pts();
+        // The freeze PNG is displayed here; deliberately make no decoder calls.
+        let mut t = source_in;
+        while t <= end {
+            vs.ensure_frame(&d3d, t).expect("freeze continuation");
+            t += 1.0 / 30.0;
+        }
+        let landed = vs.shown_pts();
+        let ok = landed >= end - 0.10 && landed >= held - 0.001;
+        println!(
+            "FREEZE_RESUME {} held={held:.3} requested_end={end:.3} landed={landed:.3}",
+            if ok { "PASS" } else { "FAIL" }
+        );
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     // --probe-open <path> <stream> [full_range]: open one decoder standalone and report
     if let Some(i) = args.iter().position(|a| a == "--probe-open") {
         let path = args.get(i + 1).cloned().unwrap_or_default();
@@ -12077,7 +12757,9 @@ fn main() -> eframe::Result<()> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 940.0])
-            .with_title("done Studio"),
+            // Build tag in the title: the ONE glanceable answer to 「その修正、
+            // 今動いてるアプリに入ってる？」(git hash, + = uncommitted, build time)
+            .with_title(format!("done Studio  [{}]", env!("NATIVE_BUILD_TAG"))),
         ..Default::default()
     };
     eframe::run_native(
