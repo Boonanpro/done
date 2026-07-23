@@ -10971,7 +10971,20 @@ fn main() -> eframe::Result<()> {
             use anyhow::Context;
             use std::io::Write;
             let doc = model::Doc::load(&contents, &dir).context("doc load")?;
-            let end: f64 = args.get(i + 3).and_then(|v| v.parse().ok()).unwrap_or_else(|| doc.duration());
+            // Default end = where CONTENT ends (max clip end), NOT doc.duration():
+            // seq.duration is a sticky ruler-length field that never shrinks after a
+            // clip is dragged shorter — exporting it appended 36s of black+silence.
+            let content_end = doc
+                .seq
+                .tracks
+                .iter()
+                .flat_map(|t| t.clips.iter())
+                .map(|c| c.timeline_end)
+                .fold(0.0f64, f64::max);
+            let end: f64 = args
+                .get(i + 3)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(if content_end > 0.0 { content_end } else { doc.duration() });
             let fps = doc.seq.frame_rate.unwrap_or(30.0).clamp(1.0, 60.0);
             // Pre-flight: every caption must have its cache PNG (the exact bitmap the
             // preview shows). A missing one would silently disappear from the file, so
