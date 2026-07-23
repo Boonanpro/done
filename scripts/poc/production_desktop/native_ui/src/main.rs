@@ -9990,7 +9990,20 @@ impl eframe::App for App {
                 }
             }
         }
+        // Delete/Backspace are DESTRUCTIVE and use a WIDER guard than the other
+        // shortcuts, deliberately: `typing` (text_focus_ids) only covers registered
+        // text editors, but numeric DragValues/sliders keep egui keyboard focus after
+        // a mouse adjust — pressing Delete right after tweaking an inspector value
+        // used to remove the CLIP (PR#522 guarded this via wants_keyboard_input; the
+        // text_focus_ids narrowing lost it as a side effect). Both behaviors hold:
+        // Space/S/etc. keep working right after a slider adjust (narrow guard), while
+        // clip deletion additionally requires that NO widget owns the keyboard —
+        // click the timeline/clip first, which is the natural delete flow anyway.
+        // 経緯を消さないこと: この2段ガードは「スライダー後にショートカットが死ぬ」
+        // 対策と「数値欄でのDelete誤爆」対策の両立が目的。片方に寄せると必ず
+        // もう片方が壊れる（2026-07-16に実際に往復した）。
         if !typing
+            && !ctx.wants_keyboard_input()
             && ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
         {
             let force_ripple = ctx.input(|i| i.modifiers.shift);
