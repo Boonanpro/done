@@ -3373,6 +3373,16 @@ struct App {
     export_job: Option<String>,
     export_status: Option<String>,
     export_poll: Instant,
+    /// DaVinci-style render range (in/out, timeline seconds). None = whole content.
+    /// Session-local: I/O keys set the edges at the playhead; ruler band edges drag.
+    export_range: Option<(f64, f64)>,
+    /// render progress 0..1 while the server reports frame=N/M; None = no bar
+    /// (queued / finishing phase / idle)
+    export_progress: Option<f32>,
+    /// last finished export's output file — shown with a "フォルダを開く" button
+    export_done_path: Option<String>,
+    /// ruler range-handle drag in progress: Some(true)=in edge, Some(false)=out edge
+    range_drag: Option<bool>,
     /// clip_id -> popout bake display state (polled from the cache dir, not the server)
     pop_states: std::collections::HashMap<String, PopState>,
     bake_results: std::sync::Arc<Mutex<Vec<(String, Result<serde_json::Value, String>)>>>,
@@ -3576,6 +3586,10 @@ impl App {
             export_job: None,
             export_status: None,
             export_poll: Instant::now(),
+            export_range: None,
+            range_drag: None,
+            export_progress: None,
+            export_done_path: None,
             pop_states: Default::default(),
             bake_results: Default::default(),
             last_pop_poll: Instant::now(),
@@ -7064,13 +7078,21 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             .and_then(|r| r.get("timeline"))
             .cloned()
             .unwrap_or(serde_json::json!({}));
+        let mut instruction = serde_json::json!({"mode": "export", "timeline": timeline});
+        if let Some((ra, rb)) = self.export_range {
+            // in/out render range (DaVinci-style): backend forwards it to the native
+            // exporter as start/end; unset = whole content
+            instruction["export_range"] = serde_json::json!([ra, rb]);
+        }
         let payload = serde_json::json!({
             "room_id": self.room_id(),
             "content_id": self.content_id(),
-            "instruction": {"mode": "export", "timeline": timeline},
+            "instruction": instruction,
         })
         .to_string();
         self.export_status = Some("書き出しを開始しています…".into());
+        self.export_progress = None;
+        self.export_done_path = None;
         let sink = self.export_result.clone();
         std::thread::spawn(move || {
             let res = http_local("POST", "/api/v1/production-assets/jobs", Some(&payload))
@@ -7092,9 +7114,17 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     }
                 }
                 Err(e) => {
-                    self.export_status = Some(format!("書き出しエラー: {e}"));
-                    self.export_job = None;
-                    eprintln!("export failed: {e}");
+                    if self.export_job.is_some() {
+                        // ONE poll round-trip failed — the render on the server is
+                        // unaffected. Keep the job and keep polling; showing this as
+                        // "書き出しエラー" (and abandoning the poll) misread a busy
+                        // moment as a failed export for the user.
+                        self.export_status = Some("サーバー応答待ち…（書き出しは継続中・自動で再確認します）".into());
+                        eprintln!("export poll transport error (retrying): {e}");
+                    } else {
+                        self.export_status = Some(format!("書き出しエラー: {e}"));
+                        eprintln!("export failed: {e}");
+                    }
                 }
             }
         }
@@ -7108,11 +7138,20 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             self.room_id(),
             self.content_id()
         );
+        let ev_path = format!(
+            "/api/v1/production-assets/jobs/{}/events?room_id={}",
+            job_id,
+            self.room_id()
+        );
         let sink = self.export_result.clone();
         std::thread::spawn(move || {
+            let events = http_local("GET", &ev_path, None)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .unwrap_or(serde_json::json!([]));
             let res = http_local("GET", &path, None)
                 .and_then(|t| Ok(serde_json::from_str::<serde_json::Value>(&t)?))
-                .map(|list| serde_json::json!({"poll": list, "job": job_id}))
+                .map(|list| serde_json::json!({"poll": list, "job": job_id, "events": events}))
                 .map_err(|e| format!("{e:#}"));
             *sink.lock().unwrap() = Some(res);
         });
@@ -7134,16 +7173,44 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                     .unwrap_or("")
                     .to_string();
                 self.export_job = None;
-                self.export_status = Some(format!("書き出し完了: {out}"));
+                self.export_progress = None;
+                self.export_status = Some("書き出し完了".into());
+                self.export_done_path = Some(out.clone());
                 self.toast(&format!("書き出し完了 → {out}"));
             }
             "failed" => {
                 let err = job.get("error").and_then(|e| e.as_str()).unwrap_or("不明なエラー");
                 self.export_job = None;
+                self.export_progress = None;
                 self.export_status = Some(format!("書き出し失敗: {err}"));
             }
             st => {
-                self.export_status = Some(format!("書き出し{}…", if st == "queued" { "待機中" } else { "中" }));
+                // live phase text = the newest non-error server event; frame=N/M in it
+                // drives the progress bar (None during the finishing/OCR phase)
+                let ev_text = v
+                    .get("events")
+                    .and_then(|e| e.as_array())
+                    .and_then(|a| {
+                        a.iter().rev().find_map(|ev| {
+                            let txt = ev.get("text")?.as_str()?;
+                            (ev.get("type").and_then(|x| x.as_str()) != Some("error"))
+                                .then(|| txt.to_string())
+                        })
+                    });
+                if let Some(txt) = &ev_text {
+                    if let Some(frac) = txt.split("frame=").nth(1).and_then(|s| {
+                        let (n, m) = s.split_whitespace().next()?.split_once('/')?;
+                        let (a, b) = (n.parse::<f64>().ok()?, m.parse::<f64>().ok()?);
+                        (b > 0.0).then(|| (a / b) as f32)
+                    }) {
+                        self.export_progress = Some(frac);
+                    } else if txt.contains("ぼかし確認中") {
+                        self.export_progress = None; // indeterminate finishing pass
+                    }
+                }
+                self.export_status = Some(ev_text.unwrap_or_else(|| {
+                    format!("書き出し{}…", if st == "queued" { "待機中" } else { "中" })
+                }));
             }
         }
         true
@@ -7566,11 +7633,11 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         .flat_map(|tr| tr.clips.iter())
                         .find(|c| c.id == *cid && c.blur_track.is_none())
                         .map(|c| (c.timeline_start, c.region_keys.clone()));
-                    // キーを作れるのは「このクリップでキー打ちモードON」の時だけ。
-                    // OFF時のドラッグはキー配列のスナップショットを取り、毎フレーム
-                    // 「スナップショット＋オフセット」で書き直す＝軌跡ごと平行移動。
-                    // キー時刻=表示フレームの格子スロット(t_disp)。評価と同じ式なので
-                    // 「キーのフレームでキーの値ちょうど」が厳密に成立する。
+                    // キーがあるクリップのドラッグは常に「この時点のキーだけ」。
+                    // 軌跡ごと平行移動（スナップショット＋オフセットで全キー書き直し）は
+                    // Alt+ドラッグの明示操作のみ。キー時刻=表示フレームの格子スロット
+                    // (t_disp)。評価と同じ式なので「キーのフレームでキーの値ちょうど」が
+                    // 厳密に成立する。
                     // corner hit zones shrink with the rect so a small rect keeps a
                     // grabbable BODY (10px corners used to swallow short rects whole)
                     let cr = 10.0f32.min(r.width() / 3.0).min(r.height() / 3.0).max(4.0);
@@ -7590,7 +7657,20 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         if self.playing {
                             self.pause_at_displayed();
                         }
-                        if armed {
+                        let has_keys = keys
+                            .as_ref()
+                            .and_then(|k| k.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false);
+                        let alt = ui.input(|i| i.modifiers.alt);
+                        if has_keys && alt {
+                            // Alt+ドラッグ = 軌跡ごと平行移動（全キー一括・明示操作のみ）
+                            self.kf_drag_orig_keys = keys;
+                        } else if armed || has_keys {
+                            // キーがあるクリップのドラッグは「この時点のキーだけ」を書く。
+                            // 以前はモードOFF時に全キー平行移動が既定で、Bを直したら
+                            // 確認済みのAまで動く事故になっていた（触っていないキーは
+                            // 絶対に変えない、が編集の大原則）。
                             // 既存キー上にヘッドがあるならそのキーの時刻に書く
                             // （keyed_grid_t — 1フレーム手前に別キーが湧く事故の根治）
                             let kts_rel: Vec<f64> = keys
@@ -7599,8 +7679,6 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                                 .map(|a| a.iter().filter_map(|k| k.get("t").and_then(|v| v.as_f64())).collect())
                                 .unwrap_or_default();
                             self.kf_drag_rel = Some(self.keyed_grid_t(ts, &kts_rel) - ts);
-                        } else if keys.as_ref().and_then(|k| k.as_array()).map(|a| !a.is_empty()).unwrap_or(false) {
-                            self.kf_drag_orig_keys = keys;
                         }
                     }
                     self.pending_undo = Some(self.doc.raw.clone());
@@ -8120,6 +8198,44 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                 );
             }
             s += step_s;
+        }
+
+        // ---- render range band (DaVinci-style in/out) on the ruler ----
+        // I/O keys set the edges at the playhead; the edge flags drag; export uses
+        // only this span when set. Session-local state (not written to the timeline).
+        if let Some((ra, rb)) = self.export_range {
+            let x0 = (body.left() + ra as f32 * self.pps - self.scroll_x).max(body.left());
+            let x1 = (body.left() + rb as f32 * self.pps - self.scroll_x).min(body.right());
+            if x1 > body.left() && x0 < body.right() {
+                p.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::pos2(x0, body.top() + 1.0),
+                        egui::pos2(x1, body.top() + 8.0),
+                    ),
+                    2.0,
+                    egui::Color32::from_rgba_unmultiplied(90, 170, 255, 90),
+                );
+            }
+            for (t_edge, is_in) in [(ra, true), (rb, false)] {
+                let x = body.left() + t_edge as f32 * self.pps - self.scroll_x;
+                if x < body.left() - 8.0 || x > body.right() + 8.0 {
+                    continue;
+                }
+                p.line_segment(
+                    [egui::pos2(x, body.top()), egui::pos2(x, body.top() + ruler_h)],
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(110, 190, 255)),
+                );
+                let dir = if is_in { 5.0 } else { -5.0 };
+                p.add(egui::Shape::convex_polygon(
+                    vec![
+                        egui::pos2(x, body.top() + 1.0),
+                        egui::pos2(x + dir, body.top() + 5.0),
+                        egui::pos2(x, body.top() + 9.0),
+                    ],
+                    egui::Color32::from_rgb(110, 190, 255),
+                    egui::Stroke::NONE,
+                ));
+            }
         }
 
         // Layered-track model (Filmora/Olive): the tracks array IS the stacking order,
@@ -8902,13 +9018,25 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
                         // ruler strip keeps the press-scrub feel; empty LANE space arms a
                         // marquee (drag = box-select, a tiny click still seeks on release)
                         if pos.y <= body.top() + 18.0 {
-                            self.selected.clear();
-                            self.drag = Drag::Scrub;
-                            let raw_t = to_t(self.scroll_x, self.pps, pos.x);
-                            let nt = self.snap_playhead(raw_t);
-                            self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
-                            self.t = nt;
-                            self.push_req(false);
+                            // render-range edge flags win over scrub within ±6px
+                            if let Some((ra, rb)) = self.export_range {
+                                let xa = body.left() + ra as f32 * self.pps - self.scroll_x;
+                                let xb = body.left() + rb as f32 * self.pps - self.scroll_x;
+                                if (pos.x - xa).abs() <= 6.0 {
+                                    self.range_drag = Some(true);
+                                } else if (pos.x - xb).abs() <= 6.0 {
+                                    self.range_drag = Some(false);
+                                }
+                            }
+                            if self.range_drag.is_none() {
+                                self.selected.clear();
+                                self.drag = Drag::Scrub;
+                                let raw_t = to_t(self.scroll_x, self.pps, pos.x);
+                                let nt = self.snap_playhead(raw_t);
+                                self.snap_line = ((nt - raw_t).abs() > 1e-9).then_some(nt);
+                                self.t = nt;
+                                self.push_req(false);
+                            }
                         } else {
                             if !ui.input(|i| i.modifiers.ctrl) {
                                 self.selected.clear();
@@ -8924,6 +9052,19 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         }
         if resp.dragged() {
             if let Some(pos) = resp.interact_pointer_pos() {
+                if let Some(is_in) = self.range_drag {
+                    // drag a render-range edge: frame-quantized, kept ordered with a
+                    // one-frame minimum span
+                    let f = 1.0 / self.timeline_fps();
+                    let t_new = self.grid_quantize(to_t(self.scroll_x, self.pps, pos.x).max(0.0) as f64);
+                    if let Some((ra, rb)) = self.export_range {
+                        self.export_range = Some(if is_in {
+                            (t_new.min(rb - f), rb)
+                        } else {
+                            (ra, t_new.max(ra + f))
+                        });
+                    }
+                }
                 match self.drag.clone() {
                     Drag::Scrub => {
                         let raw_t = to_t(self.scroll_x, self.pps, pos.x);
@@ -9096,6 +9237,9 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
             }
         }
         let released_now = ui.input(|i| i.pointer.any_released());
+        if released_now {
+            self.range_drag = None;
+        }
         if resp.drag_stopped() || (released_now && self.drag != Drag::None) {
             let prev = std::mem::replace(&mut self.drag, Drag::None);
             if let Drag::Marquee { anchor_t, .. } = &prev {
@@ -9959,6 +10103,23 @@ impl eframe::App for App {
                 self.step_once(-1.0);
             }
         }
+        // Render range (DaVinci-style): I = in point, O = out point at the playhead.
+        // The other edge defaults to the content edge so a single keypress makes a
+        // valid span; the export button then renders only this range.
+        if !typing {
+            let f = 1.0 / self.timeline_fps();
+            let t_now = self.grid_quantize(self.t);
+            if ctx.input(|i| i.key_pressed(egui::Key::I)) {
+                let out_e = self.export_range.map(|(_, b)| b).unwrap_or(self.dur).max(t_now + f);
+                self.export_range = Some((t_now, out_e));
+                self.toast(&format!("書き出し範囲イン点: {:02}:{:02}", t_now as i64 / 60, t_now as i64 % 60));
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::O)) {
+                let in_e = self.export_range.map(|(a, _)| a).unwrap_or(0.0).min((t_now - f).max(0.0));
+                self.export_range = Some((in_e, t_now.max(in_e + f)));
+                self.toast(&format!("書き出し範囲アウト点: {:02}:{:02}", t_now as i64 / 60, t_now as i64 % 60));
+            }
+        }
         if !self.playing
             && self.step_settle_at.is_some()
             && ctx.input(|i| i.key_down(egui::Key::ArrowRight) || i.key_down(egui::Key::ArrowLeft))
@@ -10285,11 +10446,46 @@ impl eframe::App for App {
                 {
                     self.start_export();
                 }
+                if let Some((ra, rb)) = self.export_range {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "範囲 {:02}:{:02}–{:02}:{:02}",
+                            ra as i64 / 60, ra as i64 % 60, rb as i64 / 60, rb as i64 % 60
+                        ))
+                        .color(egui::Color32::from_rgb(110, 190, 255))
+                        .small(),
+                    )
+                    .on_hover_text("この範囲だけ書き出します（I/Oキーで変更・ルーラー上の旗をドラッグ）");
+                    if ui.small_button("✕").on_hover_text("範囲を解除して全体を書き出す").clicked() {
+                        self.export_range = None;
+                    }
+                }
                 if exporting {
-                    ui.spinner();
+                    if let Some(frac) = self.export_progress {
+                        ui.add(
+                            egui::ProgressBar::new(frac)
+                                .desired_width(150.0)
+                                .text(format!("{:.0}%", frac * 100.0)),
+                        );
+                    } else {
+                        ui.spinner();
+                    }
                 }
                 if let Some(st) = &self.export_status {
                     ui.label(st.clone());
+                }
+                if !exporting {
+                    if let Some(done) = self.export_done_path.clone() {
+                        if ui.small_button("📂 保存先を開く").on_hover_text(done.clone()).clicked() {
+                            let _ = std::process::Command::new("explorer.exe")
+                                .arg(format!("/select,{}", done.replace('/', "\\")))
+                                .spawn();
+                        }
+                        if ui.small_button("✕").on_hover_text("この表示を消す").clicked() {
+                            self.export_done_path = None;
+                            self.export_status = None;
+                        }
+                    }
                 }
                 // volume for the selected clip (linked audio / audio clip)
                 let selv: Option<model::Clip> = if self.selected.len() == 1 {
@@ -11036,6 +11232,7 @@ fn main() -> eframe::Result<()> {
             // Deleted on success; kept and quoted in the error on failure.
             let fflog_path = format!("{out}.ffmpeg.log");
             let fflog = std::fs::File::create(&fflog_path).context("create ffmpeg log")?;
+            use std::os::windows::process::CommandExt;
             let mut child = std::process::Command::new(ffmpeg)
                 .args([
                     "-y",
@@ -11051,6 +11248,9 @@ fn main() -> eframe::Result<()> {
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::from(fflog))
+                // 窓を出さない: 見えたコンソールをユーザーが閉じる=エンコーダ即死
+                // (原因不明だった「パイプは終了しました」失敗の正体)
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
                 .spawn()
                 .context("start ffmpeg")?;
             let stdin = child.stdin.as_mut().context("ffmpeg stdin")?;
