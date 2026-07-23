@@ -120,3 +120,24 @@ updated: 2026-04-24
 ### 紹介動画 / チュートリアル / SNS ショート
 
 (追加予定)
+
+## ⚠️ 制作ルーム（制作タブ）のタイムライン書き出しは必ず export ジョブを使う ⚠️
+
+制作ルームのタイムライン（contents.json の timeline）を動画に書き出す依頼を受けたら、
+**自分で ffmpeg を組んではいけない**。必ずバックエンドの書き出しジョブを使う：
+
+```
+POST /api/v1/production-assets/jobs
+{"room_id": <room>, "content_id": <content>,
+ "instruction": {"mode": "export", "timeline": <そのcontentのtimeline>}}
+```
+
+- この経路はプレビューと同一のネイティブ合成器で描く（テロップ・ぼかし・モザイク・
+  追従・音声ミックスすべてプレビュー一致が保証される）。約30fpsで書き出せる
+  （5分の動画≒5〜7分）。完了は同エンドポイントのジョブ一覧をポーリング、
+  結果の result.output_path / result.user_output_path が完成ファイル。
+- 部分書き出しは instruction に "export_range": [開始秒, 終了秒] を足す。
+- 保存先指定は "output_copy_path": "<フルパス>.mp4" を足す。
+- **ffmpeg で filtergraph を自作してタイムラインを再現するのは禁止**（見た目が
+  プレビューと一致せず、過去に5分の動画へ3時間かけて不一致動画を作った）。
+  ffmpeg 直接使用は素材の変換・切り出しなど「タイムライン再現以外」に限る。

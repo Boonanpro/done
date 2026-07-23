@@ -1336,9 +1336,28 @@ def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: 
         filename=f"draft_{content_id[:8]}_{job_id[:8]}.mp4",
     )
     _attach_output_asset(room_id, content_id, job_id, output_asset, out_path, kind="sequence_render")
+    # User-chosen destination from the export dialog: copy the finished file there
+    # (never overwrite — append _2, _3 on collision). Registration above is unchanged.
+    user_copy: str | None = None
+    dest = instruction.get("output_copy_path")
+    if isinstance(dest, str) and dest.strip().lower().endswith(".mp4"):
+        try:
+            dest_p = Path(dest.strip())
+            dest_p.parent.mkdir(parents=True, exist_ok=True)
+            final = dest_p
+            n = 2
+            while final.exists():
+                final = dest_p.with_name(f"{dest_p.stem}_{n}{dest_p.suffix}")
+                n += 1
+            shutil.copy2(out_path, final)
+            user_copy = str(final)
+            _append_job_event(room_id, job_id, {"type": "status", "text": f"保存先へコピーしました: {final}"})
+        except Exception as exc:  # noqa: BLE001
+            _append_job_event(room_id, job_id, {"type": "status", "text": f"指定の保存先へコピーできませんでした（動画は制作タブに残っています）: {exc}"})
     return {
         "output_asset_id": output_asset["id"],
         "output_path": str(out_path),
+        "user_output_path": user_copy or str(out_path),
         "output_url": output_asset.get("proxy_url"),
         "render_engine": "native_compositor",
         "render_size": f"{_NATIVE_EXPORT_CANVAS[0]}x{_NATIVE_EXPORT_CANVAS[1]}",
