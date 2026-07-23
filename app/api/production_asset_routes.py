@@ -1365,6 +1365,14 @@ def _native_export_job(room_id: str, job_id: str, content_id: str, instruction: 
 
 
 def _render_sequence_job(room_id: str, job_id: str, content_id: str, instruction: dict[str, Any], job_dir: Path) -> dict[str, Any] | None:
+    # HARD GUARD: every caller lands on the preview-parity native exporter whenever it
+    # is applicable — Dan once imported this function directly (bypassing the jobs API
+    # and the skill rule) and spent hours on the legacy filtergraph producing a
+    # preview-mismatched video. The legacy renderer below survives ONLY as the
+    # fallback for non-9:16 timelines or machines without the native exe.
+    native = _native_export_job(room_id, job_id, content_id, instruction, job_dir)
+    if native:
+        return native
     timeline = instruction.get("timeline") if isinstance(instruction.get("timeline"), dict) else {}
     sequence = timeline.get("sequence") if isinstance(timeline, dict) else None
     if not isinstance(sequence, dict):
