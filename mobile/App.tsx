@@ -813,11 +813,28 @@ function AiTurnBlocks({
   );
 }
 
+// 送信の瞬間にクライアントが本物のメッセージIDを発行する（Web版と同じ「完全形」）。
+// サーバーはこのUUIDをそのまま chat_messages の行IDにするので、キャンセルが
+// いつ届いてもIDで確実に削除できる。
+function uuidv4(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 async function streamDanMessage(
   token: string,
   content: string,
   roomId: string,
   onEvent: (event: StreamEvent) => void,
+  options?: {
+    clientMessageId?: string;
+    timelineRefs?: { content_id: string; title: string }[];
+    // 呼び出し側が途中キャンセルできるよう、接続を閉じるハンドルを渡す
+    registerCancel?: (close: () => void) => void;
+  },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const source = new EventSource(`${API_BASE_URL}/api/v1/chat/dan/messages/stream`, {
@@ -829,6 +846,8 @@ async function streamDanMessage(
       body: JSON.stringify({
         content,
         session_id: roomId,
+        ...(options?.clientMessageId ? { client_message_id: options.clientMessageId } : {}),
+        ...(options?.timelineRefs?.length ? { timeline_refs: options.timelineRefs } : {}),
       }),
       pollingInterval: 0,
     });
@@ -847,6 +866,13 @@ async function streamDanMessage(
       }, 1000 * 60 * 10);
     };
     armTimeout();
+    // ユーザーの停止操作用ハンドル。閉じたら正常終了として解決する
+    // （中断の後始末は呼び出し側のキャンセル処理が行う）。
+    options?.registerCancel?.(() => {
+      clearTimeout(timeout);
+      source.close();
+      resolve();
+    });
 
     source.addEventListener('message', (event) => {
       armTimeout();
@@ -864,7 +890,9 @@ async function streamDanMessage(
         clearTimeout(timeout);
         source.close();
         reject(new Error(typeof parsed.message === 'string' ? parsed.message : 'DAN returned an error.'));
-      } else if (parsed.type === 'done') {
+      } else if (parsed.type === 'done' || parsed.type === 'cancelled') {
+        // cancelled = ターンが中断された（この端末または別端末のキャンセル）。
+        // エラーではなく正常終了として扱う（Web版と同じ）。
         clearTimeout(timeout);
         source.close();
         resolve();
@@ -1003,6 +1031,27 @@ function AppMain() {
   // 送信の連打ガード。以前は `sending` が兼ねていたが、追い連絡（ターン実行中の
   // 送信）を許可するために sending では弾けなくなった。
   const lastSendAtRef = useRef(0);
+  // 実行中ストリームの停止ハンドル一式（Web版のキャンセルボタン相当）。
+  // close: SSE接続を閉じる / clientMessageId: 取消対象メッセージID /
+  // optimisticId: 画面上の楽観行 / draft: 入力欄へ復元するテキスト
+  const activeStreamRef = useRef<{
+    close: () => void;
+    clientMessageId: string;
+    optimisticId: string;
+    draft: string;
+    roomId: string;
+  } | null>(null);
+  // ユーザーが停止を押した直後フラグ。reconcile が「送信失敗」扱いで
+  // アラートを出さないようにする。
+  const userCancelledRef = useRef(false);
+  // 制作エディタのタイムライン参照（Web版の入力欄と同じ）。選択して送ると
+  // 「このタイムラインを編集して」の対象として指示に添付される。
+  const [timelineRefs, setTimelineRefs] = useState<{ content_id: string; title: string }[]>([]);
+  const [timelineChoices, setTimelineChoices] = useState<
+    { content_id: string; title: string; updated_at?: string }[] | null
+  >(null);
+  const [timelineSheetOpen, setTimelineSheetOpen] = useState(false);
+  const [timelineLoading, setTimelineLoading] = useState(false);
   // process イベント起点の pollRun 再取得のスロットル（連発防止）。
   const lastProcessPollAtRef = useRef(0);
   // 添付アップロード中フラグ。大きい動画は数十秒かかるので、この間も必ずライブ表示
@@ -1044,6 +1093,13 @@ function AppMain() {
   const currentProjectIdRef = useRef<string | null>(null);
   useEffect(() => {
     currentProjectIdRef.current = currentProjectId;
+  }, [currentProjectId]);
+  // タイムライン参照は部屋ごとの概念なので、部屋を移動したら選択と一覧
+  // キャッシュを捨てる（前の部屋のタイムラインを誤って添付しない）。
+  useEffect(() => {
+    setTimelineRefs([]);
+    setTimelineChoices(null);
+    setTimelineSheetOpen(false);
   }, [currentProjectId]);
   // Tracks which screen is showing, so background→foreground logic can tell
   // "user is actually viewing this chat" from "user is on the chat list".
@@ -2080,8 +2136,10 @@ function AppMain() {
       return;
     }
 
+    const sentTimelineRefs = timelineRefs;
     setDraft('');
     setAttachments([]);
+    setTimelineRefs([]);
     if (ownsSendingState) {
       setSending(true);
       setStreamingProjectId(project.id);
@@ -2161,6 +2219,7 @@ function AppMain() {
         });
         setDraft(content);
         setAttachments(pending);
+        setTimelineRefs(sentTimelineRefs);
         Alert.alert('アップロード失敗', String((error as Error).message));
         return;
       }
@@ -2179,6 +2238,10 @@ function AppMain() {
     // サーバーがエコーしてきた自分のメッセージ。followup_queued（追い連絡として
     // 受理）が来たときに、仮送信の基準時刻を取るのに使う。
     let echoedUserMsg: MessageResponse | null = null;
+    // 送信の瞬間に発行する本物のメッセージID（サーバーはこれを行IDにする）。
+    // 停止ボタンはこのIDで「送ったメッセージごと取消」ができる。
+    const clientMessageId = uuidv4();
+    userCancelledRef.current = false;
 
     try {
       await streamDanMessage(token, finalContent, project.room_id, (event) => {
@@ -2257,7 +2320,24 @@ function AppMain() {
             setActivity('Done');
             void pollRun(token, selectedProjectId);
           }
+        } else if (event.type === 'cancelled') {
+          // ターン中断（この端末または別端末からのキャンセル）。
+          // エラー扱いにせず、後段の reconcile がサーバーの実状態を反映する。
+          sent = true;
+          if (viewing) setActivity('');
         }
+      }, {
+        clientMessageId,
+        timelineRefs: sentTimelineRefs,
+        registerCancel: (close) => {
+          activeStreamRef.current = {
+            close,
+            clientMessageId,
+            optimisticId,
+            draft: content,
+            roomId: project!.room_id!,
+          };
+        },
       });
     } catch (error) {
       // Don't decide success/failure from the connection state — it's unreliable.
@@ -2275,6 +2355,10 @@ function AppMain() {
     // it. This is connection-state-independent, so a dropped SSE on an
     // already-saved message never resurrects the text in the input.
     try {
+      // ユーザーが停止ボタンで中断した場合、後始末（楽観行の削除・入力欄への
+      // 復元・サーバーへの取消依頼）は handleCancelTurn が済ませている。
+      // ここで reconcile すると「送信失敗」誤判定でアラートが出るのでスキップ。
+      if (userCancelledRef.current) return;
       const list = await refreshProjects(token).catch(() => projects);
       const nextProject =
         list.find((item) => item.id === selectedProjectId) ||
@@ -2323,12 +2407,90 @@ function AppMain() {
     } catch {
       // best-effort reconcile
     } finally {
+      if (activeStreamRef.current?.clientMessageId === clientMessageId) {
+        activeStreamRef.current = null;
+      }
       setUploadProgress(null);
       if (ownsSendingState) {
         setSending(false);
         setStreamingProjectId(null);
         setActivity('');
       }
+    }
+  }
+
+  // 停止ボタン（Web版のキャンセル・ターミナルのEsc相当）。
+  // ① SSE接続を閉じる ② 画面から楽観行を消して入力欄へ復元 ③ サーバーへ
+  // 取消依頼（実行中ターンの中断＋送信メッセージのID削除）。返事が始まる前なら
+  // メッセージごと取り消され、作業中なら作業がその場で止まる。
+  async function handleCancelTurn() {
+    if (!token) return;
+    const active = activeStreamRef.current;
+    userCancelledRef.current = true;
+    const roomId = active?.roomId || currentProject?.room_id;
+    // Web版と同じ判定: ダンの応答（返信 or 作業ステップ）がまだ無ければ
+    // 「送信の取り消し」＝メッセージごと消して入力欄へ復元。すでに動き出して
+    // いたら「作業の停止」＝メッセージと途中経過は残す。
+    const replied =
+      messages.some(
+        (m) => m.sender_type === 'ai' && new Date(m.created_at).getTime() > lastSendAtRef.current,
+      ) ||
+      (activity !== '' && activity !== 'Thinking...');
+    const beforeReply = !!active && !replied;
+    if (active) {
+      activeStreamRef.current = null;
+      active.close();
+      if (beforeReply) {
+        setMessages((current) =>
+          current.filter((m) => m.id !== active.optimisticId && m.id !== active.clientMessageId),
+        );
+        setDraft((d) => (d ? d : active.draft));
+      }
+    }
+    setSending(false);
+    setStreamingProjectId(null);
+    setActivity('');
+    setCurrentRun(null);
+    if (!roomId) return;
+    try {
+      await apiRequest(
+        '/chat/dan/cancel',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            session_id: roomId,
+            ...(beforeReply && active ? { cancelled_user_message_id: active.clientMessageId } : {}),
+          }),
+        },
+        token,
+      );
+    } catch {
+      // best-effort: サーバー側は run の掃除で自然回復する
+    }
+  }
+
+  // タイムライン一覧（その部屋の制作エディタのコンテンツ）を開く。
+  async function openTimelineSheet() {
+    setTimelineSheetOpen(true);
+    if (timelineChoices || timelineLoading || !token || !currentProject?.room_id) return;
+    setTimelineLoading(true);
+    try {
+      const rows = await apiRequest<Array<{ id: string; title?: string; updated_at?: string }>>(
+        `/production-assets/contents?room_id=${encodeURIComponent(currentProject.room_id)}`,
+        {},
+        token,
+      );
+      setTimelineChoices(
+        (Array.isArray(rows) ? rows : []).map((row) => ({
+          content_id: String(row.id),
+          title: String(row.title || 'Untitled timeline'),
+          updated_at: row.updated_at,
+        })),
+      );
+    } catch {
+      setTimelineChoices([]);
+    } finally {
+      setTimelineLoading(false);
     }
   }
 
@@ -2777,7 +2939,7 @@ function AppMain() {
               // stays BELOW the work that happened before it.
               if (item.kind === 'live') {
                 return (
-                  <View style={[styles.messageBubble, styles.aiBubble]}>
+                  <View style={[styles.messageBubble, styles.aiBubble, styles.wideBubble]}>
                     <View style={styles.messageMetaRow}>
                       <Text style={styles.messageSender}>DAN</Text>
                     </View>
@@ -2816,6 +2978,10 @@ function AppMain() {
                   style={[
                     styles.messageBubble,
                     mine ? styles.myBubble : styles.aiBubble,
+                    // 作業ログ入りの吹き出しは幅をコンテンツ任せにしない。
+                    // 短いツール行だけの瞬間に吹き出しが異常に細く縮んで
+                    // 縦長になるのを防ぐ（プロセスログ表示の幅バグ対策）。
+                    useBlocks && !mine && styles.wideBubble,
                     pendingFollowup && styles.pendingFollowupBubble,
                     highlightId === msg.id && styles.messageBubbleHighlight,
                   ]}
@@ -2902,6 +3068,27 @@ function AppMain() {
           </ScrollView>
         ) : null}
 
+        {timelineRefs.length > 0 ? (
+          <View style={styles.timelineChipsRow}>
+            {timelineRefs.map((ref) => (
+              <View key={ref.content_id} style={styles.timelineChip}>
+                <Ionicons name="film-outline" size={13} color="#7fd1c7" />
+                <Text style={styles.timelineChipText} numberOfLines={1}>
+                  {ref.title}
+                </Text>
+                <Pressable
+                  hitSlop={8}
+                  onPress={() =>
+                    setTimelineRefs((current) => current.filter((r) => r.content_id !== ref.content_id))
+                  }
+                >
+                  <Ionicons name="close-circle" size={15} color="#77736b" />
+                </Pressable>
+              </View>
+            ))}
+          </View>
+        ) : null}
+
         <View style={[styles.composer, { paddingBottom: 10 + insets.bottom }]}>
           <Pressable
             onPress={() => setAttachSheetOpen(true)}
@@ -2911,6 +3098,17 @@ function AppMain() {
           >
             <Ionicons name="add-circle-outline" size={28} color="#a7a19a" />
           </Pressable>
+          <Pressable
+            onPress={openTimelineSheet}
+            hitSlop={6}
+            style={({ pressed }) => [styles.attachButton, pressed && styles.buttonPressed]}
+          >
+            <Ionicons
+              name="film-outline"
+              size={24}
+              color={timelineRefs.length > 0 ? '#7fd1c7' : '#a7a19a'}
+            />
+          </Pressable>
           <TextInput
             multiline
             onChangeText={setDraft}
@@ -2919,18 +3117,31 @@ function AppMain() {
             style={styles.composerInput}
             value={draft}
           />
-          <Pressable
-            disabled={sendBlocked || (!draft.trim() && attachments.length === 0)}
-            onPress={handleSend}
-            style={({ pressed }) => [
-              styles.sendButton,
-              (pressed || sendBlocked || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
-            ]}
-          >
-            {/* No spinner here — the live "working" indicator already shows in
-                Dan's chat bubble; a second one on the send button is redundant. */}
-            <Text style={styles.sendButtonText}>Send</Text>
-          </Pressable>
+          {/* Web版と同じ切替: 入力が空でダンが動いている間は停止ボタン。
+              文字を打ち始めたら Send に戻る（＝追い連絡）。 */}
+          {!draft.trim() && attachments.length === 0 &&
+          ((sending && streamingProjectId === currentProject?.id) || liveRunActive) ? (
+            <Pressable
+              onPress={handleCancelTurn}
+              style={({ pressed }) => [styles.stopButton, pressed && styles.buttonPressed]}
+            >
+              <Ionicons name="square" size={14} color="#1b1a17" />
+              <Text style={styles.stopButtonText}>停止</Text>
+            </Pressable>
+          ) : (
+            <Pressable
+              disabled={sendBlocked || (!draft.trim() && attachments.length === 0)}
+              onPress={handleSend}
+              style={({ pressed }) => [
+                styles.sendButton,
+                (pressed || sendBlocked || (!draft.trim() && attachments.length === 0)) && styles.buttonPressed,
+              ]}
+            >
+              {/* No spinner here — the live "working" indicator already shows in
+                  Dan's chat bubble; a second one on the send button is redundant. */}
+              <Text style={styles.sendButtonText}>Send</Text>
+            </Pressable>
+          )}
         </View>
       </KeyboardAvoidingView>
 
@@ -2991,6 +3202,73 @@ function AppMain() {
               ) : null
             }
           />
+        </View>
+      </Modal>
+
+      <Modal
+        visible={timelineSheetOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setTimelineSheetOpen(false)}
+        statusBarTranslucent
+      >
+        <View style={styles.sheetRoot}>
+          <Pressable style={styles.sheetBackdrop} onPress={() => setTimelineSheetOpen(false)} />
+          <View style={[styles.sheet, { paddingBottom: Math.max(insets.bottom, 12) + 12 }]}>
+            <View style={styles.sheetGrabber} />
+            <Text style={styles.sheetHeading}>タイムラインを指示の対象にする</Text>
+            {timelineLoading ? (
+              <View style={styles.timelineSheetStatus}>
+                <ActivityIndicator color="#7fd1c7" size="small" />
+                <Text style={styles.mutedText}>読み込み中…</Text>
+              </View>
+            ) : !timelineChoices || timelineChoices.length === 0 ? (
+              <Text style={[styles.mutedText, styles.timelineSheetEmpty]}>
+                この部屋に制作タイムラインはありません
+              </Text>
+            ) : (
+              timelineChoices.map((choice) => {
+                const selected = timelineRefs.some((r) => r.content_id === choice.content_id);
+                return (
+                  <Pressable
+                    key={choice.content_id}
+                    onPress={() =>
+                      setTimelineRefs((current) =>
+                        selected
+                          ? current.filter((r) => r.content_id !== choice.content_id)
+                          : [...current, { content_id: choice.content_id, title: choice.title }],
+                      )
+                    }
+                    style={({ pressed }) => [styles.sheetAction, pressed && styles.sheetActionPressed]}
+                  >
+                    <Ionicons
+                      name={selected ? 'checkbox' : 'square-outline'}
+                      size={20}
+                      color={selected ? '#7fd1c7' : '#a7a19a'}
+                    />
+                    <View style={styles.timelineChoiceMain}>
+                      <Text style={styles.sheetActionText} numberOfLines={1}>
+                        {choice.title}
+                      </Text>
+                      {choice.updated_at ? (
+                        <Text style={styles.timelineChoiceMeta}>
+                          {new Date(choice.updated_at).toLocaleString('ja-JP')}
+                        </Text>
+                      ) : null}
+                    </View>
+                  </Pressable>
+                );
+              })
+            )}
+            <Pressable
+              onPress={() => setTimelineSheetOpen(false)}
+              style={({ pressed }) => [styles.sheetCancel, pressed && styles.sheetActionPressed]}
+            >
+              <Text style={styles.sheetCancelText}>
+                {timelineRefs.length > 0 ? `決定（${timelineRefs.length}件選択中）` : '閉じる'}
+              </Text>
+            </Pressable>
+          </View>
         </View>
       </Modal>
 
@@ -3638,6 +3916,11 @@ const styles = StyleSheet.create({
   mutedSegment: {
     opacity: 0.55,
   },
+  // 作業ログ（ツール実行の流れ）を含む吹き出し用。幅を安定させ、短いログ行
+  // だけの瞬間に吹き出しが細く縮む「不自然な縦長レイアウト」を防ぐ。
+  wideBubble: {
+    width: '88%',
+  },
   toolGroup: {
     marginVertical: 6,
   },
@@ -4004,6 +4287,65 @@ const styles = StyleSheet.create({
     color: '#12110f',
     fontSize: 14,
     fontWeight: '800',
+  },
+  // 停止ボタン（実行中・入力欄が空のときだけ Send と入れ替わる）
+  stopButton: {
+    alignItems: 'center',
+    backgroundColor: '#e8a9a0',
+    borderRadius: 15,
+    flexDirection: 'row',
+    gap: 5,
+    height: 48,
+    justifyContent: 'center',
+    width: 68,
+  },
+  stopButtonText: {
+    color: '#1b1a17',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  // タイムライン参照の選択チップ（入力欄の上）
+  timelineChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingTop: 6,
+  },
+  timelineChip: {
+    alignItems: 'center',
+    backgroundColor: '#1f2b29',
+    borderColor: '#2e4642',
+    borderRadius: 14,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 5,
+    maxWidth: '80%',
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+  },
+  timelineChipText: {
+    color: '#7fd1c7',
+    flexShrink: 1,
+    fontSize: 12.5,
+  },
+  timelineSheetStatus: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    paddingVertical: 14,
+  },
+  timelineSheetEmpty: {
+    paddingVertical: 14,
+  },
+  timelineChoiceMain: {
+    flex: 1,
+    minWidth: 0,
+  },
+  timelineChoiceMeta: {
+    color: '#77736b',
+    fontSize: 11.5,
+    marginTop: 1,
   },
   drawerBackdrop: {
     ...StyleSheet.absoluteFillObject,
