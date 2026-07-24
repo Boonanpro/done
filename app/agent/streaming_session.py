@@ -36,6 +36,7 @@ from typing import Callable, Dict, Optional
 
 
 _DOTENV_FLAG_CACHE: Optional[bool] = None
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
 def _dotenv_streaming_flag() -> bool:
@@ -119,6 +120,15 @@ class StreamingSession:
         self._turn: Optional[_Turn] = None
         self._pending: "queue.Queue[str]" = queue.Queue()
         self._interrupt_sent = False
+        # Receiver for CLI-INITIATED turns: the CLI fires a new model turn on its
+        # own when a background task finishes while the session is idle (measured
+        # and confirmed 2026-07-24 — same native wake as interactive Claude Code).
+        # Without a sink those events were silently DROPPED, which is why Dan
+        # stalled after "お待ちください". cli_runner installs a room-scoped sink
+        # that classifies + persists these turns like any other.
+        self.background_sink: Optional[EventSink] = None
+        # True while a CLI-initiated (autonomous) turn is streaming.
+        self._auto_active = False
         # Set True when the last run_turn ended because the CLI went silent for
         # longer than the idle timeout (a real hang), as opposed to finishing.
         self._last_turn_hung = False
@@ -134,9 +144,10 @@ class StreamingSession:
         return self._alive and self._proc is not None and self._proc.poll() is None
 
     def is_turn_active(self) -> bool:
-        """True while a turn is in flight (so a new message should be treated as
-        a follow-up to inject at the next step boundary, not a fresh run)."""
-        return self.is_alive() and self._turn is not None
+        """True while a turn is in flight — including a CLI-initiated autonomous
+        turn (background-completion wake). A new message then becomes a follow-up
+        injected at the next step boundary, never a parallel send mid-turn."""
+        return self.is_alive() and (self._turn is not None or self._auto_active)
 
     def start(self) -> None:
         with self._lock:
@@ -154,6 +165,7 @@ class StreamingSession:
                 errors="replace",
                 env=self._env,
                 bufsize=1,
+                creationflags=_NO_WINDOW,
             )
             self._alive = True
             self._last_activity = time.time()
@@ -163,6 +175,7 @@ class StreamingSession:
     def stop(self) -> None:
         with self._lock:
             self._alive = False
+            self._auto_active = False
             proc = self._proc
             self._proc = None
         if proc:
@@ -241,13 +254,23 @@ class StreamingSession:
         # and double-saves the answer. Route its content as a follow-up to the
         # active loop and return immediately.
         with self._lock:
-            if self._running:
+            if self._running or self._auto_active:
+                # A loop is already driving the CLI (user turn) OR the CLI is
+                # mid-autonomous-turn. Submitting another user message now would
+                # desynchronise the stream — route as a follow-up instead; the
+                # boundary-interrupt logic applies it cleanly.
                 self._pending.put(content)
                 self._last_activity = time.time()
                 return None
             self._running = True
 
         self._last_turn_hung = False
+        # Cancel armed BEFORE the turn started (user hit cancel in the gap
+        # between send and run start): abort without ever submitting the message.
+        if self._consume_cancel_next():
+            with self._lock:
+                self._running = False
+            return {"type": "result", "subtype": "cancelled_before_start", "is_error": False}
         hung = False
         # Re-check often enough to notice a hang promptly even for small idle
         # thresholds, but no more than the normal poll cadence.
@@ -257,7 +280,23 @@ class StreamingSession:
             self._turn = turn
             self._interrupt_sent = False
             self._last_activity = time.time()
+            # 送信直前の再確認: キャンセルが「入口チェック通過後〜ここまで」の
+            # 隙間（文脈再構築などで数百msある）に届いた場合もここで拾う。
+            # ターミナルのEscに効き漏れが無いのと同じ保証にするための二重化。
+            if self._consume_cancel_next():
+                self._turn = None
+                return {"type": "result", "subtype": "cancelled_before_start", "is_error": False}
             self._send_user(content)
+            # 送信直後の再確認: kill_cli_process が「実行中ターン無し」と判定して
+            # 旗を武装した直後にこの送信が走った場合（最後の隙間）は、始まった
+            # ばかりのターンへ即座に割り込みを送って畳む。_interrupt_sent は
+            # 触らない（あれは追い連絡の境界マーカー。立てると完了イベントが
+            # 出なくなり、ライブ表示が畳まれない）。
+            if self._consume_cancel_next():
+                try:
+                    self._send_interrupt()
+                except Exception:
+                    pass
 
             # Keep running follow-up turns until nothing is pending.
             last_result: Optional[TurnEvent] = None
@@ -299,6 +338,60 @@ class StreamingSession:
         as the next turn."""
         self._pending.put(content)
         self._last_activity = time.time()
+
+    # --- user cancel (Escキー相当) --------------------------------------
+    def interrupt(self) -> bool:
+        """Gracefully stop the CURRENT turn (the CLI ends it with a result
+        event, exactly like pressing Esc in interactive Claude Code). The
+        persistent process survives — killing it mid-turn is what desynchronised
+        the stream and caused the `<invoke>` text leak.
+
+        A very early interrupt (~0.1s after send) can be SWALLOWED: the CLI has
+        nothing in flight yet, consumes the control request as a no-op, then
+        starts the model call anyway (measured 2026-07-24 — the one timing where
+        a cancelled question still got answered). So after the first interrupt a
+        nudger re-sends it every 1.2s while THIS SAME turn is still alive (max
+        3 nudges). Identity-guarded: the moment the turn ends or a new turn
+        starts, nudging stops — a follow-up message can never be hit."""
+        if not self.is_turn_active():
+            return False
+        target = self._turn
+
+        def _nudge() -> None:
+            for _ in range(3):
+                time.sleep(1.2)
+                if target is None or self._turn is not target or not self.is_alive():
+                    return
+                try:
+                    self._send_interrupt()
+                except Exception:
+                    return
+
+        try:
+            self._send_interrupt()
+            if target is not None:
+                threading.Thread(target=_nudge, daemon=True).start()
+            return True
+        except Exception:
+            return False
+
+    def cancel_next_turn(self, ttl: float = 3.0) -> None:
+        """Arm a short-lived cancel for a turn that has NOT started yet. Covers
+        the race where the user hits cancel after sending but before the run
+        spins up — without this the late-starting turn ignored the cancel and
+        "走り出す". run_turn checks the flag at entry and aborts.
+
+        TTL は3秒: 送信→キャンセルのレース窓を覆うのに十分で、かつ「何もない時の
+        キャンセル連打が地雷として残り、直後の正当な送信を闇討ちする」誤爆窓
+        （2026-07-24 実測10秒で発生）を最小化する。"""
+        self._cancel_next_until = time.time() + ttl
+
+    def _consume_cancel_next(self) -> bool:
+        until = getattr(self, "_cancel_next_until", 0.0)
+        if until and time.time() < until:
+            self._cancel_next_until = 0.0
+            return True
+        return False
 
     def _drain_pending(self) -> Optional[str]:
         texts = []
@@ -343,23 +436,60 @@ class StreamingSession:
         typ = ev.get("type")
         turn = self._turn
 
+        # --- CLI-initiated (autonomous) turn: no run_turn loop is waiting. ---
+        # The CLI woke itself (a background task finished while idle). Route the
+        # whole turn to the room's background sink so it is classified, saved
+        # and rendered like any other turn instead of being dropped.
+        if turn is None:
+            if typ == "assistant" and not self._auto_active:
+                self._auto_active = True
+            if not self._auto_active:
+                return  # stray system chatter between turns — nothing to do
+            if typ == "user" and not self._interrupt_sent and not self._pending.empty():
+                # a user message arrived mid-autonomous-turn: cut at this clean
+                # boundary so their message is applied next, same as follow-ups
+                self._interrupt_sent = True
+                try:
+                    self._send_interrupt()
+                except Exception:
+                    pass
+            sink = self.background_sink
+            if sink:
+                try:
+                    sink(ev)
+                except Exception:
+                    pass
+            if typ == "result":
+                self._auto_active = False
+                self._interrupt_sent = False
+                follow = self._drain_pending()
+                if follow is not None:
+                    # queued user messages continue as the next turn; its events
+                    # flow through the same background sink (saved + rendered)
+                    try:
+                        self._send_user(follow)
+                        self._auto_active = True
+                    except Exception:
+                        pass
+            return
+
         # Step boundary = a tool result came back (`user` event). If a
         # follow-up is pending, interrupt now so it's applied at this clean
         # boundary instead of after the whole turn.
-        if typ == "user" and turn and not self._interrupt_sent and not self._pending.empty():
+        if typ == "user" and not self._interrupt_sent and not self._pending.empty():
             self._interrupt_sent = True
             try:
                 self._send_interrupt()
             except Exception:
                 pass
 
-        if turn and turn.sink:
+        if turn.sink:
             try:
                 turn.sink(ev)
             except Exception:
                 pass
 
-        if typ == "result" and turn:
+        if typ == "result":
             turn.result = ev
             turn.done.set()
 
