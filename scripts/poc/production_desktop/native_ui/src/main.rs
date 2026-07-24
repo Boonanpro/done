@@ -13143,6 +13143,15 @@ fn main() -> eframe::Result<()> {
         .cloned()
         .unwrap_or_else(|| format!("{room_dir}/contents.json"));
     let dir = positional.get(1).cloned().unwrap_or(room_dir);
+    // First open of a room (a chat room that never produced anything yet) has no
+    // uploads dir at all. Seed an empty contents.json so the app opens into the
+    // room's empty library instead of dying in App::new before any window exists.
+    // Explicit positional contents paths are exempt: a typo there should fail, not
+    // silently create a bogus document.
+    if positional.is_empty() && !std::path::Path::new(&contents).exists() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&contents, "[]");
+    }
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 940.0])
