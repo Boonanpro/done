@@ -43,7 +43,10 @@ class ProductionAsset(BaseModel):
     id: str
     room_id: str
     kind: Literal["video", "image", "audio", "file"]
-    source_type: Literal["local_path", "nas_path", "cloud_url", "upload", "generated"]
+    # "agent_workspace"/"ready" are written by timeline_mcp_server (ダン指示エージェント)
+    # — the response model must accept every value that exists in assets.json on disk,
+    # or listing the room 500s and the native editor shows an empty library.
+    source_type: Literal["local_path", "nas_path", "cloud_url", "upload", "generated", "agent_workspace"]
     original_uri: str
     local_path: str | None = None
     proxy_path: str | None = None
@@ -51,7 +54,7 @@ class ProductionAsset(BaseModel):
     thumbnail_path: str | None = None
     thumbnail_url: str | None = None
     filename: str | None = None
-    status: Literal["registered", "processing", "proxy_ready", "failed", "missing"] = "registered"
+    status: Literal["registered", "processing", "proxy_ready", "failed", "missing", "ready"] = "registered"
     metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
     created_at: str
