@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 from datetime import datetime, timezone
+import asyncio
 import json
 import logging
 import os
@@ -49,6 +50,7 @@ from pydantic import BaseModel
 class CancelRequest(BaseModel):
     """キャンセルリクエスト"""
     session_id: str
+    cancelled_user_message_id: Optional[str] = None
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 security = HTTPBearer(auto_error=False)
@@ -527,10 +529,7 @@ async def _enrich_content_with_video_analysis(
     return content + "\n" + "\n".join(analyses), video_analyses
 
 
-from app.workspace import resolve_cli_workspace
-
-_CLI_WORKSPACE_DIR = resolve_cli_workspace()
-_PROPOSALS_DIR = str(_CLI_WORKSPACE_DIR / "proposals")
+_PROPOSALS_DIR = "D:/dan-workspace/proposals"
 _UPLOADS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "uploads")) if 'os' in dir() else None
 
 def _get_uploads_dir():
@@ -1879,6 +1878,38 @@ async def _prepend_first_event(first_task, agen):
         yield ev
 
 
+# --- 早期キャンセルの完全形 --------------------------------------------------
+# フロントが送信の瞬間に本物のUUIDを発行し、それがそのままDBの行IDになる
+# （send_message の message_id）。よってキャンセルはいつ来てもIDで確実に削除
+# できる。唯一残るのは到着順レース（キャンセル→削除が空振り→その後に保存が
+# 完了して行が残る）で、これは「墓標」= 空振りした削除のIDを短時間覚えておき、
+# 保存直後に照合して即取り消すことで塞ぐ。対応表・仮IDは存在しない。
+_CANCEL_TOMBSTONE_TTL = 180.0
+_cancel_tombstones: dict = {}  # (room_id, message_id) -> armed-at epoch
+
+
+def _tombstone_prune() -> None:
+    import time as _t
+    now = _t.time()
+    for k in [k for k, ts in _cancel_tombstones.items() if now - ts > _CANCEL_TOMBSTONE_TTL]:
+        _cancel_tombstones.pop(k, None)
+
+
+def _check_cancel_tombstone(room_id: str, message_id: str | None, service) -> bool:
+    """保存完了直後に呼ぶ。削除が先に空振りしていたら行を即取り消して True。"""
+    if not message_id:
+        return False
+    _tombstone_prune()
+    if _cancel_tombstones.pop((room_id, message_id), None) is None:
+        return False
+    try:
+        service.supabase.table("chat_messages").delete().eq("id", message_id).eq("sender_type", "human").execute()
+        logger.info("early-cancelled user message deleted on save: %s", message_id)
+    except Exception as e:
+        logger.warning("early-cancel delete failed for %s: %s", message_id, e)
+    return True
+
+
 @router.post("/dan/messages/stream")
 async def send_dan_message_stream(
     request: MessageSendRequest,
@@ -2030,10 +2061,12 @@ async def send_dan_message_stream(
                 message = None
             elif request.session_id:
                 room_id = request.session_id
-                message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id)
+                message = await service.send_message(room_id, current_user.user_id, media_content, sender_type="human", reply_to_id=request.reply_to_id, message_id=request.client_message_id)
+                _check_cancel_tombstone(room_id, message["id"], service)
             else:
                 message = await service.send_dan_message(current_user.user_id, media_content)
                 room_id = message["room_id"]
+                _check_cancel_tombstone(room_id, message["id"], service)
             # 送信者名は send_message の戻り値（sender_name）を再利用する。
             # 従来はここで users を再度引いており、send_message 内の get_sender と
             # 二重の往復になっていた。上書き(replace)経路は raw 行で sender_name を
@@ -2082,7 +2115,13 @@ async def send_dan_message_stream(
                 try:
                     CancellationRegistry.cancel(room_id)
                     from app.agent.cli_runner import kill_cli_process
-                    kill_cli_process(room_id)
+                    # allow_arm_pending=False は必須。ここは「今走っている残骸を
+                    # 止める」内部掃除であり、「次に始まるターンを殺す予約」を
+                    # 武装すると、その“次のターン”はこの送信自身のターンなので
+                    # 自爆する（2026-07-24 吉川ルームで実測: 送るたびに無視される
+                    # 呪われた部屋になる）。予約を武装してよいのはキャンセルAPIが
+                    # 取消対象メッセージIDを受け取った場合だけ。
+                    kill_cli_process(room_id, allow_arm_pending=False)
                 except Exception:
                     pass
 
@@ -2156,7 +2195,6 @@ async def send_dan_message_stream(
             if True:
                 from app.agent.cli_runner import process_message_cli
                 from app.api.project_routes import _format_tool_label
-                from app.services.project_service import ProjectService
                 from app.services.run_service import RunService
 
                 project_service = ProjectService()
@@ -2305,6 +2343,7 @@ async def send_dan_message_stream(
                     project_id=project_info.get("id"),
                     run_id=run_id,
                     skill_injection=skill_injection,
+                    timeline_refs=request.timeline_refs or [],
                 )
                 if message is None:
                     # 並列保存パス: 先に cold start を起動し（最初の __anext__ でCLIスレッド開始）、
@@ -2316,7 +2355,9 @@ async def send_dan_message_stream(
                             room_id, current_user.user_id, media_content,
                             sender_type="human", reply_to_id=request.reply_to_id,
                             created_at=request_arrival_iso,
+                            message_id=request.client_message_id,
                         )
+                        _check_cancel_tombstone(room_id, message["id"], service)
                     except Exception:
                         _gen_first.cancel()
                         try:
@@ -2365,7 +2406,10 @@ async def send_dan_message_stream(
                         continue
 
                     if event["type"] == "cancelled":
-                        await service.send_dan_ai_message(current_user.user_id, "（中断されました）", [], room_id=room_id)
+                        # Escパリティ: キャンセルされたターンはチャットに何も残さない。
+                        # 「（中断されました）」のAIメッセージ保存はゴミ吹き出しの
+                        # もう一つの発生源だった（2026-07-24 実測）。UI状態の後始末
+                        # （done イベント・run pause・SSE通知）だけ行う。
                         await _save_project_event_safe(project_service,
                             project_id=project_info["id"], room_id=room_id,
                             run_id=run_id,
@@ -2883,14 +2927,56 @@ async def cancel_dan_session(
     from app.services.cancellation import CancellationRegistry
     from app.tools.browser import abort_executor_session
     from app.agent.cli_runner import kill_cli_process
+    from app.services.run_service import RunService
 
     success = CancellationRegistry.cancel(request.session_id)
-    cli_killed = kill_cli_process(request.session_id)
+    # 「次に始まるターンを殺す予約」は、実際に送信を取り消している場合
+    # （取消対象メッセージIDあり）のみ許可。空撃ちキャンセルでの武装は
+    # 直後の正当な送信を闇討ちする地雷になる（2026-07-24 実測）。
+    cli_killed = kill_cli_process(
+        request.session_id,
+        allow_arm_pending=bool(request.cancelled_user_message_id),
+    )
+    paused_runs = await RunService().pause_active_runs_for_room(request.session_id)
+    deleted_user_message = False
+    if request.cancelled_user_message_id:
+        # 完全形: フロント発行のUUIDがそのまま行IDなので、IDで直接削除する。
+        # まだ保存されていなければ削除は空振りする——その場合は墓標を残し、
+        # 保存完了直後に照合して取り消す（到着順レースの唯一の残り）。
+        _mid = request.cancelled_user_message_id
+        try:
+            delete_result = await asyncio.to_thread(
+                lambda: ChatService()
+                .supabase.table("chat_messages")
+                .delete()
+                .eq("id", _mid)
+                .eq("room_id", request.session_id)
+                .eq("sender_id", current_user.user_id)
+                .eq("sender_type", "human")
+                .execute()
+            )
+            deleted_user_message = bool(delete_result.data)
+            if not deleted_user_message:
+                # 保存より先にキャンセルが届いた: 墓標を残して保存直後に取り消させる
+                import time as _t
+                _tombstone_prune()
+                _cancel_tombstones[(request.session_id, _mid)] = _t.time()
+        except Exception:
+            logger.warning(
+                "Failed to delete cancelled user message %s",
+                request.cancelled_user_message_id,
+                exc_info=True,
+            )
 
     # ブラウザセッションも停止
     abort_executor_session()
 
-    return {"success": success or cli_killed, "session_id": request.session_id}
+    return {
+        "success": success or cli_killed or paused_runs > 0 or deleted_user_message,
+        "session_id": request.session_id,
+        "paused_runs": paused_runs,
+        "deleted_user_message": deleted_user_message,
+    }
 
 
 # ==================== Proposal Routes (2G) ====================
@@ -2939,7 +3025,7 @@ async def get_proposal(
 ):
     """提案の詳細を取得。.htmlファイルはHTMLとして直接サーブ"""
     if proposal_id.endswith(".html"):
-        proposals_dir = Path(_PROPOSALS_DIR)
+        proposals_dir = Path("D:/dan-workspace/proposals")
         html_path = proposals_dir / proposal_id
         if html_path.exists() and html_path.is_file():
             return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
@@ -2959,7 +3045,7 @@ async def respond_to_proposal(
 ):
     """
     提案に対応する
-    
+
     - action: approve（承認）, reject（却下）, edit（編集して承認）
     - edited_content: action=editの場合、編集後の内容
     """

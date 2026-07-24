@@ -66,6 +66,7 @@ export interface MessageResponse {
     reasoning_steps?: string[];
     reasoning_full?: string[];
     blocks?: TurnBlock[];
+    turn_id?: string;
   };
   reply_to_id?: string;
   reply_to_message?: ReplyToMessage;
@@ -253,6 +254,8 @@ export interface StateMachineMessageRequest {
   file_urls?: { name: string; url: string }[];
   reply_to_id?: string;
   replace_message_id?: string;
+  timeline_refs?: { content_id: string; title: string }[];
+  client_message_id?: string;
 }
 
 export interface StateMachineConfirmRequest {
@@ -375,6 +378,7 @@ export interface ExecutionEvent {
   id: string;
   project_id: string | null;
   run_id?: string | null;
+  turn_id?: string | null;
   room_id: string;
   event_type: 'tool_use' | 'reasoning' | 'phase' | 'error' | 'text' | 'done';
   tool_name: string | null;
@@ -1123,7 +1127,7 @@ export const api = {
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
-          body: JSON.stringify({ content: data.message, session_id: data.session_id, ...(data.image_urls?.length ? { image_urls: data.image_urls } : {}), ...(data.file_urls?.length ? { file_urls: data.file_urls } : {}), ...(data.reply_to_id ? { reply_to_id: data.reply_to_id } : {}), ...(data.replace_message_id ? { replace_message_id: data.replace_message_id } : {}) }),
+          body: JSON.stringify({ content: data.message, session_id: data.session_id, ...(data.image_urls?.length ? { image_urls: data.image_urls } : {}), ...(data.file_urls?.length ? { file_urls: data.file_urls } : {}), ...(data.reply_to_id ? { reply_to_id: data.reply_to_id } : {}), ...(data.replace_message_id ? { replace_message_id: data.replace_message_id } : {}), ...(data.timeline_refs?.length ? { timeline_refs: data.timeline_refs } : {}), ...(data.client_message_id ? { client_message_id: data.client_message_id } : {}) }),
           signal,  // AbortSignal追加
         });
 
@@ -1267,10 +1271,13 @@ export const api = {
      * セッションをキャンセル
      * バックエンドのツール実行を停止する
      */
-    cancelSession: (sessionId: string) =>
+    cancelSession: (sessionId: string, options?: { cancelledUserMessageId?: string | null }) =>
       request<{ success: boolean; session_id: string }>('/chat/dan/cancel', {
         method: 'POST',
-        body: JSON.stringify({ session_id: sessionId }),
+        body: JSON.stringify({
+          session_id: sessionId,
+          cancelled_user_message_id: options?.cancelledUserMessageId || undefined,
+        }),
       }),
 
     /**

@@ -256,7 +256,7 @@ const MUTED_PROSE_CLASS =
   'prose prose-sm prose-dan max-w-none text-sm leading-relaxed text-muted-foreground/80 ' +
   '[&_p]:my-1 [&_pre]:max-h-60 [&_pre]:overflow-auto [&_pre]:text-xs';
 
-function AiMarkdown({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
+const AiMarkdown = memo(function AiMarkdown({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
   return (
     <div className={muted ? MUTED_PROSE_CLASS : PROSE_CLASS}>
       <ReactMarkdown
@@ -268,9 +268,9 @@ function AiMarkdown({ text, onImageClick, muted = false }: { text: string; onIma
       >{text}</ReactMarkdown>
     </div>
   );
-}
+});
 
-function TurnTextSegment({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
+const TurnTextSegment = memo(function TurnTextSegment({ text, onImageClick, muted = false }: { text: string; onImageClick?: (url: string) => void; muted?: boolean }) {
   const { images, videos, files, text: clean } = parseMediaContent(stripToolMarkup(text));
   return (
     <>
@@ -284,7 +284,7 @@ function TurnTextSegment({ text, onImageClick, muted = false }: { text: string; 
       {clean.trim() && <AiMarkdown text={clean} onImageClick={onImageClick} muted={muted} />}
     </>
   );
-}
+});
 
 function TurnToolRow({ block }: { block: TurnBlock }) {
   const [show, setShow] = useState(false);
@@ -330,7 +330,7 @@ function TurnToolGroup({ items, defaultOpen = false }: { items: TurnBlock[]; def
   );
 }
 
-function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean }) {
+const AiTurnBlocks = memo(function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false }: { blocks: TurnBlock[]; onImageClick?: (url: string) => void; toolsOpen?: boolean }) {
   const grouped: Array<{ kind: 'text'; text: string } | { kind: 'tools'; items: TurnBlock[] }> = [];
   for (const b of blocks) {
     if (b.type === 'text') {
@@ -353,7 +353,7 @@ function AiTurnBlocks({ blocks, onImageClick, toolsOpen = false }: { blocks: Tur
         : <TurnToolGroup key={i} items={g.items} defaultOpen={toolsOpen} />))}
     </div>
   );
-}
+});
 
 // Live in-progress steps (execution events) → the same block shape so the
 // live turn renders with the identical inline-timeline UI as the finished one.
@@ -542,6 +542,7 @@ const MessageBubble = memo(function MessageBubble({ msg, onImageClick, onReply }
 });
 
 type DanSkill = { name: string; display_name: string; description: string };
+type TimelineReference = { content_id: string; title: string; updated_at?: string };
 
 function ChatInput({
   projectId,
@@ -576,6 +577,10 @@ function ChatInput({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const skillsCacheRef = useRef<DanSkill[] | null>(null);
   const [skills, setSkills] = useState<DanSkill[]>([]);
+  const [timelineRefs, setTimelineRefs] = useState<TimelineReference[]>([]);
+  const [timelineChoices, setTimelineChoices] = useState<TimelineReference[]>([]);
+  const [timelineMenuOpen, setTimelineMenuOpen] = useState(false);
+  const [timelineLoading, setTimelineLoading] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // 追い連絡の下書きがある時、1回目の Esc は停止せず下書きを保持（armed）、
   // 2回目の Esc で本当に停止する。escStopHint は「もう一度Escで停止」表示。
@@ -634,6 +639,24 @@ function ChatInput({
       // ignore
     }
   }, []);
+
+  const openTimelineMenu = useCallback(async () => {
+    setTimelineMenuOpen((open) => !open);
+    if (timelineChoices.length || timelineLoading) return;
+    setTimelineLoading(true);
+    try {
+      const res = await fetch(`/api/v1/production-assets/contents?room_id=${encodeURIComponent(roomId)}`, { credentials: 'include' });
+      if (!res.ok) throw new Error(await res.text());
+      const rows = await res.json();
+      setTimelineChoices((Array.isArray(rows) ? rows : []).map((row) => ({
+        content_id: String(row.id), title: String(row.title || 'Untitled timeline'), updated_at: row.updated_at,
+      })));
+    } catch (error) {
+      toast.error('タイムライン一覧を取得できませんでした', { description: String(error).slice(0, 140) });
+    } finally {
+      setTimelineLoading(false);
+    }
+  }, [roomId, timelineChoices.length, timelineLoading]);
 
   const skillFilter = message.startsWith('/') ? message.slice(1).toLowerCase() : '';
   const filteredSkills = useMemo(
@@ -813,7 +836,7 @@ function ChatInput({
     fileInputRef.current?.click();
   }, []);
 
-  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = [], replyToMsg?: MessageResponse | null) => {
+  const sendMessageCore = useCallback(async (content: string, imageUrls: string[] = [], fileUrls: { name: string; url: string }[] = [], replyToMsg?: MessageResponse | null, refs: TimelineReference[] = []) => {
     if (!content.trim() && imageUrls.length === 0 && fileUrls.length === 0) return;
 
     const imagePrefix = imageUrls.map(url => `[添付画像: ${url}]`).join('\n');
@@ -835,7 +858,12 @@ function ChatInput({
     setInterrupted(projectId, false);
     setWarmupMode(projectId, isBusy ? 'switching' : 'thinking');
 
-    const tempUserMessageId = `temp-user-${Date.now()}`;
+    // 完全形: 送信の瞬間にフロントが本物のUUIDを発行し、サーバーはこれを
+    // そのまま行IDにする。キャンセルはいつでもこのIDで確実に削除できる。
+    const tempUserMessageId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     optimisticMessageIdRef.current = tempUserMessageId;
     const optimisticUserMessage: MessageResponse = {
       id: tempUserMessageId,
@@ -880,7 +908,7 @@ function ChatInput({
 
     try {
       await api.sm.sendMessageStream(
-        { message: content, session_id: roomId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}), ...(currentReplaceId ? { replace_message_id: currentReplaceId } : {}) },
+        { message: content, session_id: roomId, client_message_id: tempUserMessageId, ...(imageUrls.length > 0 ? { image_urls: imageUrls } : {}), ...(fileUrls.length > 0 ? { file_urls: fileUrls } : {}), ...(replyToMsg ? { reply_to_id: replyToMsg.id } : {}), ...(currentReplaceId ? { replace_message_id: currentReplaceId } : {}), ...(refs.length ? { timeline_refs: refs } : {}) },
         {
           onUserMessage: (msg) => {
             if (streamRequestRef.current !== requestId) return;
@@ -924,7 +952,11 @@ function ChatInput({
                 ],
               })
             );
-            queryClient.invalidateQueries({ queryKey: ['project-messages', roomId] });
+            // NOTE: ここで project-messages を invalidate/refetch しない。
+            // 直上で SSE の実メッセージ（DB保存済み・実ID）をキャッシュへ挿入
+            // 済みであり、直後の再取得は保存ラグの古いスナップショットで最新
+            // 回答を数秒消す事故の温床だった（queryFn の一方通行マージが二重の
+            // 保険だが、そもそも即時再取得に意味がない）。
             queryClient.invalidateQueries({ queryKey: ['current-run', projectId] });
             queryClient.invalidateQueries({ queryKey: ['execution-events', projectId] });
             queryClient.invalidateQueries({ queryKey: ['projects'] });
@@ -1153,8 +1185,10 @@ function ChatInput({
     onClearReply?.();
     // Immediately bump this project to top of sidebar
     queryClient.invalidateQueries({ queryKey: ['projects'] });
-    await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo);
-  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, replyTo, onClearReply]);
+    const refs = timelineRefs;
+    setTimelineRefs([]);
+    await sendMessageCore(content, imageUrls, fileUrls, currentReplyTo, refs);
+  }, [attachedFiles, message, sendMessageCore, sendFollowup, queryClient, replyTo, onClearReply, timelineRefs]);
 
   const handleCancel = useCallback(async () => {
     const pending = pendingMessageRef.current;
@@ -1165,6 +1199,18 @@ function ChatInput({
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+
+    // 自分の操作は自分が真実（ターミナルのEscと同じ）: サーバーへの取消依頼を
+    // 待たず、押した瞬間に thinking/ライブ表示を消す。従来はサーバー往復後に
+    // 消灯し、さらに run 状態キャッシュが次のポーリング(2s)まで running のままで
+    // 「キャンセルしたのにthinkingが数秒流れる」見た目になっていた。
+    syncActiveStatus(false);
+    setWarmupMode(projectId, null);
+    queryClient.setQueryData(
+      ['current-run', projectId],
+      (old: { state?: string } | null | undefined) =>
+        old && old.state === 'running' ? { ...old, state: 'paused' } : old
+    );
 
     // AI未応答キャンセル → テキストを入力欄に復元 + 次回送信でUPDATEするIDを記録
     if (wasBeforeAI) {
@@ -1378,8 +1424,30 @@ function ChatInput({
           <span>をもう一度押すと作業を停止します。</span>
         </div>
       )}
+      {timelineRefs.length > 0 && (
+        <div className="mb-1.5 flex flex-wrap gap-1.5 px-1">
+          {timelineRefs.map((ref) => (
+            <span key={ref.content_id} className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-1 text-xs text-foreground">
+              <Clapperboard className="h-3 w-3 text-primary" />@{ref.title}
+              <button type="button" onClick={() => setTimelineRefs((current) => current.filter((item) => item.content_id !== ref.content_id))} className="text-muted-foreground hover:text-foreground" aria-label="タイムライン参照を外す"><X className="h-3 w-3" /></button>
+            </span>
+          ))}
+        </div>
+      )}
+      {timelineMenuOpen && (
+        <div className="mb-1.5 max-h-44 overflow-y-auto rounded-lg border bg-popover p-1 shadow-lg">
+          {timelineLoading ? <div className="px-2 py-2 text-xs text-muted-foreground">タイムラインを読み込み中…</div> : timelineChoices.length ? timelineChoices.map((ref) => (
+            <button key={ref.content_id} type="button" className="flex w-full items-center gap-2 rounded px-2 py-2 text-left text-sm hover:bg-muted" onClick={() => { setTimelineRefs([ref]); setTimelineMenuOpen(false); }}>
+              <Clapperboard className="h-3.5 w-3.5 text-primary" /><span className="truncate">{ref.title}</span>
+            </button>
+          )) : <div className="px-2 py-2 text-xs text-muted-foreground">参照できるタイムラインはありません</div>}
+        </div>
+      )}
       <div className={`flex items-end gap-2 rounded-xl border bg-input/30 p-2 transition-colors ${isCommentMode ? 'border-primary/40' : 'border-border focus-within:border-primary/50'}`}>
         <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleFileSelect} accept="*/*" />
+        <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground" onClick={() => void openTimelineMenu()} disabled={isCommentMode} title="タイムラインをメンション">
+          <Clapperboard className="h-3.5 w-3.5" />
+        </Button>
         <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground" onClick={handleClickAttach} disabled={isUploading || isCommentMode} title="ファイルを添付">
           {isUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Paperclip className="h-3.5 w-3.5" />}
         </Button>
@@ -1647,7 +1715,47 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
 
   const { data: messagesData, isLoading: isLoadingMessages } = useQuery({
     queryKey: ['project-messages', project?.room_id],
-    queryFn: () => api.rooms.getMessages(project!.room_id!, { limit: 500 }),
+    // 画面＝実体の一方通行マージ。サーバー取得は「追いつき」専用で、画面に既に
+    // ある新しい内容をスナップショットの古さで消してはならない。SSEで直接挿入
+    // した直後の refetch が保存直後の行をまだ含まないスナップショットを返し、
+    // 丸ごと置換で最新回答が数秒消える（→次のポーリングで復元）のがこれまでの
+    // 「一瞬消える」画面バグの正体だった。fetch結果はキャッシュと id で結合し、
+    // ローカルにしか無い行（SSE直挿入・楽観表示）は必ず生き残る。
+    queryFn: async () => {
+      const fresh = await api.rooms.getMessages(project!.room_id!, { limit: 500 });
+      const old = queryClient.getQueryData<{ messages: MessageResponse[] }>(
+        ['project-messages', project?.room_id],
+      );
+      if (!old?.messages?.length) return fresh;
+      // オブジェクト同一性の安定化: 内容が変わっていない行は「前回と同じ
+      // オブジェクト」を使い回す。これが無いとポーリングのたびに全行が新しい
+      // オブジェクトになり、MessageBubble の memo が全滅して毎回500件を再描画・
+      // マークダウン再解析していた（長い部屋で送信直後に自分のメッセージが
+      // 数秒遅れて出る/全体が重い、の主犯）。再描画は変わった行だけになる。
+      const prevById = new Map(old.messages.map((m) => [m.id, m]));
+      const stabilized = fresh.messages.map((m) => {
+        const prev = prevById.get(m.id);
+        return prev
+          && prev.content === m.content
+          && prev.pendingFollowup === m.pendingFollowup
+          && prev.reply_to_id === m.reply_to_id
+          ? prev
+          : m;
+      });
+      const freshIds = new Set(fresh.messages.map((m) => m.id));
+      // 生き残り条件: 直近2分の行だけ（保存ラグでfetchがまだ知らない可能性の
+      // ある窓）。それより古いのに fresh に無い行はサーバーで削除された行
+      // （取り消した送信等）なので落とす——落とさないと永遠に画面に残る。
+      const cutoff = Date.now() - 120_000;
+      const localOnly = old.messages.filter(
+        (m) => !freshIds.has(m.id) && new Date(m.created_at).getTime() >= cutoff,
+      );
+      if (localOnly.length === 0) return { messages: stabilized };
+      const merged = [...stabilized, ...localOnly].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      );
+      return { messages: merged };
+    },
     enabled: !!project?.room_id,
     staleTime: 5 * 1000,
     retry: 1,
@@ -1761,8 +1869,14 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
     // drags the live block below it, so Dan's in-progress output appears to jump
     // ABOVE the follow-up. Anchoring to the run start keeps chronological order:
     // [starting message] → [Dan's live output] → [follow-up].
+    //
+    // ただし RUN が実際に RUNNING の時だけ。送信直後（新runがまだ無い瞬間）に
+    // ここへ「前回のrun」の開始時刻が入り、thinkingが過去に括り付けられて
+    // 送信メッセージの上に出ていた（2026-07-24 実測）。トリガーとなった
+    // メッセージと同じ時刻(liveAnchorTime)+subKeyで直下に固定するのが原則。
     const runStart = (currentRun as { created_at?: string } | null)?.created_at;
-    const liveBlockSortKey = runStart ? new Date(runStart).getTime() : liveAnchorTime;
+    const runIsLiveNow = !!currentRun && isActiveExecution && currentRun.state === 'running';
+    const liveBlockSortKey = runIsLiveNow && runStart ? new Date(runStart).getTime() : liveAnchorTime;
 
     for (const msg of chronologicalMessages) {
       const content = msg.content || '';
@@ -1795,10 +1909,7 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         .filter((msg) => msg.sender_type === 'ai' && msg.ai_context?.turn_id)
         .map((msg) => msg.ai_context!.turn_id!)
     );
-    const isCurrentRunLive =
-      !!currentRun &&
-      isActiveExecution &&
-      currentRun.state === 'running';
+    const isCurrentRunLive = runIsLiveNow;
 
     if (isCurrentRunLive) {
       const eventsByTurn = new Map<string, ExecutionEvent[]>();

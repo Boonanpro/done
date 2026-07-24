@@ -23,7 +23,7 @@ import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator, Optional, Dict, Any
+from typing import AsyncIterator, List, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +33,7 @@ _cli_sessions: Dict[str, str] = {}
 PROJECT_ROOT = Path(__file__).parent.parent.parent  # app/agent/ → app/ → D:\done\
 
 # 事業部の作業ディレクトリ（D:\done の外に置くことで開発者向け CLAUDE.md の混入を防ぐ）
-PROJECT_ROOT = PROJECT_ROOT.resolve()
-from app.workspace import resolve_cli_workspace
-CLI_WORKSPACE = resolve_cli_workspace()
+CLI_WORKSPACE = Path("D:/dan-workspace")
 CLI_WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 # ワンショット生成（タイトル等）専用の中立な空ディレクトリ。
@@ -89,8 +87,44 @@ def is_cli_active(room_id: str) -> bool:
         return room_id in _active_processes
 
 
-def kill_cli_process(room_id: str) -> bool:
-    """CLIサブプロセスを即座に終了する"""
+def kill_cli_process(room_id: str, allow_arm_pending: bool = True) -> bool:
+    """ユーザーのキャンセル要求を実行中ターンへ届ける。
+
+    常駐ストリーミングセッションのターンには interrupt（Escキー相当の丁寧な
+    中断）を送る。従来はこの関数が one-shot 経路のプロセス表しか見ておらず、
+    常駐経路のターンには何も起きなかった（キャンセルボタンが実質無効・
+    「キャンセルしたのに走り出す」の正体）。プロセス kill はしない——途中で
+    殺すとストリームが同期ズレし `<invoke>` テキストリークが再発する。
+
+    allow_arm_pending: ターンがまだ始まっていない時に「直後に始まるターンを
+    殺す予約」を武装してよいか。実際に送信を取り消している場合（フロントが
+    取消対象メッセージIDを添えてきた場合）だけ True にすること。何も走って
+    いない時のキャンセル連打で武装すると、直後の正当な送信を闇討ちする地雷に
+    なる（2026-07-24 実測）。"""
+    try:
+        from app.agent.streaming_session import get_session
+        s = get_session(room_id)
+        if s and s.is_alive():
+            if s.is_turn_active():
+                if s.interrupt():
+                    _interrupted_rooms.add(room_id)
+                    # sinkが「ユーザー中断による空ターン」を見分けるための印。
+                    # 空のまま終わったターンはゴミ吹き出しを保存しない（Escパリティ）
+                    s._user_cancelled = True
+                    _cli_debug(f"[STREAMING] user cancel → interrupt sent (room {room_id[:8]})")
+                    return True
+            elif allow_arm_pending:
+                # 送信取消の意思が明確な場合のみ: 直後に始まるターンを即中止させる
+                # （後追いで走り出す事故の根絶）
+                s.cancel_next_turn()
+                s._user_cancelled = True
+                _cli_debug(f"[STREAMING] user cancel armed for next turn (room {room_id[:8]})")
+                return True
+            else:
+                _cli_debug(f"[STREAMING] user cancel no-op (nothing running, room {room_id[:8]})")
+                return False
+    except Exception as e:
+        _cli_debug(f"[STREAMING] cancel wiring failed (room {room_id[:8]}): {e}")
     with _process_lock:
         process = _active_processes.pop(room_id, None)
     if process is None:
@@ -1391,6 +1425,37 @@ def _cleanup_mcp_config(room_id: str):
         pass
 
 
+def _commit_mentioned_timeline_draft(room_id: str, draft: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Commit the timeline draft attached to one normal chat turn, if changed."""
+    if not draft:
+        return None
+    try:
+        from app.services import timeline_commands as _timeline_commands
+        from app.services import timeline_draft as _timeline_draft
+        from app.services.timeline_agent import _read_assets_file
+
+        latest = _timeline_draft.load_draft(room_id, draft["draft_id"])
+        if not latest.get("log"):
+            return None
+        assets = {str(a.get("id")): a for a in _read_assets_file(_timeline_draft._room_dir(room_id))}
+        baseline = set(latest.get("baseline_problems") or [])
+
+        def validate(sequence: Dict[str, Any], _unused_room: str) -> List[str]:
+            return [p for p in _timeline_commands.validate_sequence(
+                sequence, assets, asset_dir=str(_timeline_draft._room_dir(room_id))
+            ) if p not in baseline]
+
+        result = _timeline_draft.commit_draft(room_id, draft["draft_id"], validate)
+        if result.get("ok"):
+            return "タイムラインの変更を検証して反映しました。"
+        if result.get("conflict"):
+            return "タイムラインは作業中に更新されたため、今回の変更は反映しませんでした。"
+        return "タイムラインの変更は検証に通らなかったため、反映しませんでした: " + "; ".join(result.get("problems") or [])
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("mentioned timeline draft finalization failed")
+        return f"タイムライン変更の確定に失敗しました: {exc}"
+
+
 def _cli_debug(msg: str):
     """CLI thread用ファイルデバッグログ（日付+room_id自動付与）"""
     from datetime import datetime
@@ -2410,6 +2475,89 @@ def _run_cli_in_thread(
             pass
 
 
+def _make_autonomous_sink(room_id: str, user_id: str, project_id: Optional[str], session) -> Any:
+    """Receiver for CLI-INITIATED turns (background task finished while the room
+    was idle). Runs in the session reader thread. Mirrors the essentials of the
+    per-call streaming sink: classify → persist execution events under a fresh
+    `background_wake` run (so the live UI shows the work) → save the ai_message
+    on result. No SSE consumer exists; the frontend picks the turn up through
+    the same run/event polling that renders poller-fired turns."""
+    state: Dict[str, Any] = {
+        "turn_blocks": [], "final_text_parts": [], "reasoning_steps_acc": [],
+        "reasoning_full_acc": [], "turn_start": None, "turn_id": None, "run_id": None,
+    }
+
+    def _ensure_run() -> None:
+        if state["run_id"] or not project_id:
+            return
+        try:
+            import asyncio as _a
+            from app.services.run_service import RunService
+            run = _a.run(RunService().create_run(
+                project_id=project_id, room_id=room_id,
+                metadata={"started_by": "background_wake"},
+            ))
+            state["run_id"] = run["id"]
+            _cli_debug(f"[AUTOWAKE] run {run['id'][:8]} created for CLI-initiated turn (room {room_id[:8]})")
+        except Exception as e:  # noqa: BLE001
+            _cli_debug(f"[AUTOWAKE] run creation failed (room {room_id[:8]}): {e}")
+
+    def sink(raw_ev: Dict[str, Any]) -> None:
+        try:
+            rtype = raw_ev.get("type")
+            if rtype == "assistant":
+                if state["turn_start"] is None:
+                    state["turn_start"] = datetime.now(timezone.utc).isoformat()
+                    state["turn_id"] = str(uuid.uuid4())
+                    _ensure_run()
+                blocks = (raw_ev.get("message") or {}).get("content") or []
+                for ev in _classify_content_blocks(blocks):
+                    if ev["type"] == "text":
+                        txt = ev.get("text", "")
+                        if txt.strip():
+                            state["final_text_parts"].append(txt)
+                            state["turn_blocks"].append({"type": "text", "text": txt})
+                            state["reasoning_steps_acc"].append(txt.strip())
+                            state["reasoning_full_acc"].append(txt.strip())
+                            if project_id:
+                                _save_execution_event_sync(room_id, "reasoning", project_id=project_id, run_id=state["run_id"], turn_id=state["turn_id"], content=txt.strip())
+                    elif ev["type"] == "tool_use":
+                        from app.api.project_routes import _format_tool_label
+                        tool_label = _format_tool_label(ev.get("name", ""), ev.get("input", {}))
+                        state["turn_blocks"].append({"type": "tool", "name": ev.get("name", ""), "label": tool_label, "detail": _tool_detail(ev.get("input", {}))})
+                        state["reasoning_steps_acc"].append(f"🔧 {tool_label}")
+                        if project_id:
+                            _save_execution_event_sync(room_id, "tool_use", project_id=project_id, run_id=state["run_id"], turn_id=state["turn_id"], tool_name=ev.get("name", ""), tool_label=tool_label)
+            elif rtype == "system":
+                sid = raw_ev.get("session_id")
+                if sid:
+                    _save_session(room_id, sid)
+            elif rtype == "result":
+                text = (raw_ev.get("result") or "") or "\n".join(state["final_text_parts"])
+                # ghost-bubble guard: an empty autonomous turn saves nothing
+                if text.strip() or state["turn_blocks"]:
+                    _save_ai_message_sync(
+                        room_id,
+                        text.strip() or "（バックグラウンド作業の続きを実行しました）",
+                        state["reasoning_steps_acc"],
+                        state["reasoning_full_acc"],
+                        blocks=state["turn_blocks"],
+                        created_at=state["turn_start"] or datetime.now(timezone.utc).isoformat(),
+                        turn_id=state["turn_id"] or str(uuid.uuid4()),
+                    )
+                if project_id and state["run_id"]:
+                    _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=state["run_id"], turn_id=state["turn_id"], content="completed")
+                    _update_run_sync(state["run_id"], state="failed" if raw_ev.get("is_error") else "completed")
+                state.update({
+                    "turn_blocks": [], "final_text_parts": [], "reasoning_steps_acc": [],
+                    "reasoning_full_acc": [], "turn_start": None, "turn_id": None, "run_id": None,
+                })
+        except Exception as e:  # noqa: BLE001
+            _cli_debug(f"[AUTOWAKE] sink error (room {room_id[:8]}): {e}")
+
+    return sink
+
+
 async def _process_via_streaming_session(
     room_id: str,
     user_id: str,
@@ -2427,6 +2575,13 @@ async def _process_via_streaming_session(
     step boundary. Reuses the SAME classify/save helpers as the one-shot path;
     the one-shot path itself is untouched.
 
+    The session also gets a room-scoped BACKGROUND SINK: when the CLI wakes
+    itself between turns (a background task finished while the room was idle —
+    the same native wake interactive Claude Code has, empirically confirmed
+    2026-07-24), those CLI-initiated turns are classified and saved through it
+    instead of being dropped. That is what lets Dan continue work the moment a
+    long job finishes, with no poller and no user poke.
+
     When `resume_session_id` is set, a freshly (re)started session resumes that
     saved Claude conversation with `--resume`, so dan-core restarts (and the
     idle-hang teardown) no longer wipe the room's context. The streaming path
@@ -2442,6 +2597,18 @@ async def _process_via_streaming_session(
 
     cli_model = _resolve_cli_model(room_id)
 
+    # Windows CreateProcess の約32,000文字制限対策（one-shot 経路の
+    # _prepare_cli_launch_payload と同じ）。文脈が肥大した部屋では
+    # system_prompt を argv に載せるとセッション起動自体が WinError 206 で
+    # 失敗する（2026-07-24 吉川ルームで実測）。長い場合は argv には短い
+    # 指示だけを渡し、全文は初回ターンの stdin メッセージに載せる。
+    needs_stdin_context = len(system_prompt or "") > _CLI_ARG_SYSTEM_PROMPT_LIMIT
+    launch_system_prompt = (
+        _prepare_cli_launch_payload(system_prompt, "")[0]
+        if needs_stdin_context
+        else system_prompt
+    )
+
     def build_cmd() -> list:
         c = [claude_cmd, cli_js] if cli_js else [claude_cmd]
         c += [
@@ -2453,7 +2620,7 @@ async def _process_via_streaming_session(
             "--model", cli_model,
             "--max-turns", "200",
             "--mcp-config", mcp_config_path,
-            "--append-system-prompt", system_prompt,
+            "--append-system-prompt", launch_system_prompt,
             "--disallowedTools", "ExitPlanMode,AskUserQuestion",
         ]
         # Resume the saved conversation so context survives a process restart.
@@ -2471,6 +2638,9 @@ async def _process_via_streaming_session(
     existing = get_session(room_id)
     session_is_fresh = existing is None or not existing.is_alive()
     session = get_or_create_session(room_id, build_cmd, env, run_cwd)
+    # (Re)install the autonomous-turn receiver with this call's freshest
+    # project/user context. Cheap to refresh on every turn.
+    session.background_sink = _make_autonomous_sink(room_id, user_id, project_id, session)
 
     # Context-preserving reseed: when we start a BRAND-NEW session with no
     # transcript to --resume (e.g. right after a poisoned session was cleared),
@@ -2484,6 +2654,13 @@ async def _process_via_streaming_session(
         reseed = _build_reseed_context(room_id, project_id=project_id)
         if reseed:
             send_content = _wrap_latest_user_message(reseed, content)
+    if needs_stdin_context and session_is_fresh:
+        # argv に載せられなかった runtime context を初回ターンの stdin で渡す
+        _, send_content = _prepare_cli_launch_payload(system_prompt, send_content)
+        _cli_debug(
+            f"[STREAMING] system prompt too long for argv "
+            f"({len(system_prompt)} chars) → moved to stdin (room {room_id[:8]})"
+        )
 
     loop = asyncio.get_running_loop()
     q: asyncio.Queue = asyncio.Queue()
@@ -2680,7 +2857,30 @@ async def _process_via_streaming_session(
                     except Exception:
                         pass
                 text = result_text or "\n".join(state["final_text_parts"])
+                user_cancelled = bool(getattr(session, "_user_cancelled", False))
+                if user_cancelled:
+                    try:
+                        session._user_cancelled = False
+                    except Exception:
+                        pass
                 if not text.strip():
+                    if user_cancelled and not state["turn_blocks"]:
+                        # Terminal-Esc parity: a user-cancelled turn that produced
+                        # NOTHING leaves nothing — no「応答テキストが空でした」ghost
+                        # bubble (the exact noise the user reported on 2026-07-24).
+                        # Partial work (text/tools) still saves via the normal path.
+                        if project_id and not continuation:
+                            _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=state["turn_id"] or str(uuid.uuid4()), content="cancelled")
+                            _update_run_sync(run_id, state="completed")
+                        _emit({"type": "cancelled", "session_id": state["session_id"]})
+                        state["turn_blocks"] = []
+                        state["final_text_parts"] = []
+                        state["reasoning_steps_acc"] = []
+                        state["reasoning_full_acc"] = []
+                        state["written_file_paths"] = []
+                        state["turn_start"] = None
+                        state["turn_id"] = None
+                        return
                     text = "（応答テキストが空でした。もう一度お試しください。）"
                 # Replace the CLI's cryptic parse-error result with a friendly
                 # note. The session is dropped + reseeded afterwards (see run()),
@@ -2728,6 +2928,7 @@ async def _process_via_streaming_session(
             _cli_debug(f"[STREAMING] sink error: {e}")
 
     def run() -> None:
+        nonlocal session, resume_session_id, send_content
         t0 = time.time()
         # 無音ツール実行中も run を stale sweep から守る心拍（finallyで停止）
         _hb_stop = _start_run_heartbeat(run_id)
@@ -2791,6 +2992,19 @@ async def _process_via_streaming_session(
                 except Exception:
                     pass
                 _cli_debug(f"[STREAMING] parse-error poisoned session cleared for room {room_id[:8]}")
+            elif res and res.get("subtype") == "cancelled_before_start":
+                # ユーザーが送信直後にキャンセルし、ターンが始まる前に握りつぶした。
+                # 正常なキャンセルであって「セッション即死」ではないので、下の
+                # stale-resume リトライに落としてはならない（落とすとメッセージが
+                # 再送されて、キャンセルしたはずの質問に回答が届く——実測で発生）。
+                # このターン用に作られた run もここで即クローズする。SSE側の
+                # cancelled 処理に任せると、クライアントが既に切断している場合に
+                # 「実行中」の器だけが孤児として残り、空のThinkingが90秒回り続ける
+                # （2026-07-24 実測）。
+                if project_id and run_id and not skip_save:
+                    _save_execution_event_sync(room_id, "done", project_id=project_id, run_id=run_id, turn_id=str(uuid.uuid4()), content="cancelled")
+                    _update_run_sync(run_id, state="completed")
+                _emit({"type": "cancelled", "session_id": None})
             elif res and res.get("is_error") and _is_thinking_desync_error(res.get("result") or ""):
                 # The resumed transcript had a split/desynced thinking turn, so
                 # Anthropic rejected the replay with the "thinking blocks cannot
@@ -2815,6 +3029,18 @@ async def _process_via_streaming_session(
                     session.stop()
                 except Exception:
                     pass
+                resume_session_id = None
+                send_content = content
+                if "<conversation_so_far>" not in send_content:
+                    reseed = _build_reseed_context(room_id, project_id=project_id)
+                    if reseed:
+                        send_content = _wrap_latest_user_message(reseed, content)
+                try:
+                    session = get_or_create_session(room_id, build_cmd, env, run_cwd)
+                    session.run_turn(send_content, sink, timeout=_STREAMING_IDLE_TIMEOUT)
+                except Exception as retry_error:  # noqa: BLE001
+                    _emit({"type": "error", "message": str(retry_error)})
+                return
                 text = (
                     "前回の会話の復元に失敗したため、セッションを作り直しました。"
                     "お手数ですが、もう一度同じ内容を送ってください。"
@@ -2865,6 +3091,7 @@ async def process_message_cli(
     skip_save: bool = False,
     skip_resume: bool = False,
     cwd: Optional[str] = None,
+    timeline_refs: Optional[List[Dict[str, Any]]] = None,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
     Claude CLI経由でメッセージを処理し、分類済みイベントを返す。
@@ -2895,6 +3122,43 @@ async def process_message_cli(
     if skill_injection:
         system_prompt += f"\n\n{skill_injection}"
     mcp_config_path = _build_mcp_config(room_id, user_id, credentials)
+    timeline_draft: Optional[Dict[str, Any]] = None
+    timeline_turn_succeeded = False
+    if timeline_refs:
+        # A chat mention supplies an explicit creative artifact.  Give the same
+        # normal Dan session a draft-only timeline MCP; its other capabilities
+        # remain unchanged and the live sequence is still CAS-protected.
+        ref = timeline_refs[0]
+        content_id = str(ref.get("content_id") or "")
+        if content_id:
+            try:
+                from app.services import timeline_draft as _timeline_draft
+                timeline_draft = _timeline_draft.create_draft(
+                    room_id, content_id, job_id=f"chat_{uuid.uuid4().hex[:12]}"
+                )
+                cfg = json.loads(Path(mcp_config_path).read_text(encoding="utf-8"))
+                cfg.setdefault("mcpServers", {})["timeline"] = {
+                    "command": "python",
+                    "args": [str(PROJECT_ROOT / "app" / "timeline_mcp_server.py")],
+                    "env": {
+                        "DAN_ROOM_ID": room_id,
+                        "DAN_DRAFT_ID": timeline_draft["draft_id"],
+                        "DAN_JOB_ID": timeline_draft["job_id"],
+                        "DAN_CONTENT_ID": content_id,
+                        "PYTHONIOENCODING": "utf-8",
+                    },
+                }
+                Path(mcp_config_path).write_text(json.dumps(cfg), encoding="utf-8")
+                title = str(ref.get("title") or content_id)
+                system_prompt += (
+                    "\n\n## Mentioned timeline\n"
+                    f"The user explicitly mentioned the production timeline '{title}' (content_id={content_id}). "
+                    "Use mcp__timeline__* to inspect, edit, or export it. Timeline mutations are isolated "
+                    "in a draft and are committed only after this chat turn validates successfully."
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("timeline mention setup failed: %s", exc)
+                timeline_draft = None
     resume_session_id = None if skip_resume else _load_session(room_id)
 
     # Dead-transcript guard: if the saved session's transcript .jsonl is gone
@@ -2976,7 +3240,12 @@ async def process_message_cli(
                 key = "text" if "text" in ev else "content"
                 if isinstance(ev.get(key), str):
                     ev = {**ev, key: sanitize_artifact_public_urls(ev[key])}
+            if isinstance(ev, dict) and ev.get("type") == "result" and not ev.get("is_error"):
+                timeline_turn_succeeded = True
             yield ev
+        timeline_status = _commit_mentioned_timeline_draft(room_id, timeline_draft) if timeline_turn_succeeded else None
+        if timeline_status:
+            yield {"type": "text", "text": timeline_status}
         return
 
     latency_message = (
@@ -3026,7 +3295,11 @@ async def process_message_cli(
     while True:
         # キャンセル検出
         if CancellationRegistry.is_cancelled(room_id):
-            kill_cli_process(room_id)
+            # allow_arm_pending=False: ここは「実行中の one-shot ターンを止める」
+            # だけの場所。registry のフラグは sticky なので、武装を許すと
+            # 直後の正当な送信を殺す地雷になる（供給経路は違うが chat_routes の
+            # supersede 自爆と同型）。
+            kill_cli_process(room_id, allow_arm_pending=False)
             yield {"type": "cancelled"}
             break
 
@@ -3058,4 +3331,9 @@ async def process_message_cli(
                 key = "text" if "text" in event else "content"
                 if isinstance(event.get(key), str):
                     event = {**event, key: sanitize_artifact_public_urls(event[key])}
+            if event.get("type") == "result" and not event.get("is_error"):
+                timeline_turn_succeeded = True
         yield event
+    timeline_status = _commit_mentioned_timeline_draft(room_id, timeline_draft) if timeline_turn_succeeded else None
+    if timeline_status:
+        yield {"type": "text", "text": timeline_status}
