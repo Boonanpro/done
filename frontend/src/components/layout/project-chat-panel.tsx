@@ -2187,14 +2187,32 @@ export function ProjectChatPanel({ projectId }: ProjectChatPanelProps) {
         )}
         {project?.room_id && (
           <button
-            onClick={() => {
+            onClick={async () => {
               // 制作 = launch the desktop production app for this room ONLY (no inline browser
-              // workspace, no chat toggle). Pass the chat's auth token so the app reuses this
-              // login (no re-login). No-op if the app/protocol isn't installed.
+              // workspace, no chat toggle). First choice: ask the backend (same machine as the
+              // editor) to spawn the app directly — no browser "open this app?" dialog, no
+              // silent no-op. The done:// deep link stays as a fallback for when the backend
+              // is unreachable.
               const rid = project?.room_id;
               if (!rid) return;
+              const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') || '' : '';
               try {
-                const token = typeof window !== 'undefined' ? localStorage.getItem('done-token') || '' : '';
+                const res = await fetch('/api/v1/production-assets/launch-editor', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                  },
+                  body: JSON.stringify({ room_id: rid }),
+                });
+                if (res.ok) {
+                  const j = await res.json().catch(() => null);
+                  if (j?.launched) return;
+                }
+              } catch {
+                /* backend unreachable — fall through to the protocol link */
+              }
+              try {
                 const a = document.createElement('a');
                 a.href = `done://production?room_id=${rid}&token=${encodeURIComponent(token)}`;
                 document.body.appendChild(a);
