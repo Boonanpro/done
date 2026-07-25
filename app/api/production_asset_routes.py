@@ -344,6 +344,11 @@ def _remove_asset_files(asset: dict[str, Any]) -> None:
             path = Path(str(value)).resolve()
             if path.exists() and path.is_file() and UPLOADS_DIR.resolve() in path.parents:
                 path.unlink()
+            if key == "proxy_path":
+                # proxy sidecar (frame PTS index) — orphaned forever if left behind
+                sidecar = path.with_suffix(".pts.json")
+                if sidecar.exists() and sidecar.is_file() and UPLOADS_DIR.resolve() in sidecar.parents:
+                    sidecar.unlink()
         except Exception:
             pass
 
