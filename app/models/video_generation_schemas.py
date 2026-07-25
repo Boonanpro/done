@@ -16,6 +16,10 @@ class VideoGenerateRequest(BaseModel):
     reference_image_url: Optional[str] = None  # 指定時は image-to-video
 
 
+    provider: Literal["fal_kling", "higgsfield"] = "fal_kling"
+    model: Optional[str] = None
+
+
 class GeneratedVideoResponse(BaseModel):
     id: UUID
     project_id: Optional[UUID] = None

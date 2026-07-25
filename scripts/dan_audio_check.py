@@ -79,7 +79,59 @@ def _norm(text: str) -> str:
     return re.sub(r"[\s?？!！。、,.…ー〜~・「」『』（）()]+", "", text or "")
 
 
-def _transcribe(audio_path: str, model_name: str) -> list[dict]:
+def _transcribe_with_faster_whisper(audio_path: str, model_name: str) -> list[dict]:
+    from faster_whisper import WhisperModel  # type: ignore
+    try:
+        import torch  # type: ignore
+        use_cuda = bool(torch.cuda.is_available())
+    except Exception:
+        use_cuda = False
+
+    def run(device: str, compute_type: str) -> list[dict]:
+        model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        initial_prompt = os.environ.get("DAN_WHISPER_INITIAL_PROMPT") or None
+        raw_segments, _info = model.transcribe(
+            audio_path,
+            language="ja",
+            word_timestamps=True,
+            vad_filter=False,
+            beam_size=5,
+            initial_prompt=initial_prompt,
+        )
+        return _collect_faster_whisper_segments(raw_segments)
+
+    if use_cuda:
+        try:
+            return run("cuda", "float16")
+        except Exception as exc:
+            if "cublas" not in str(exc).lower() and "cuda" not in str(exc).lower():
+                raise
+    return run("cpu", "int8")
+
+
+def _collect_faster_whisper_segments(raw_segments) -> list[dict]:
+    segments: list[dict] = []
+    for seg in raw_segments:
+        text = str(getattr(seg, "text", "") or "").strip()
+        if not text or len(_norm(text)) < 1:
+            continue
+        words = [
+            {"word": str(getattr(w, "word", "") or "").strip(),
+             "start": round(float(getattr(w, "start", 0) or 0), 3),
+             "end": round(float(getattr(w, "end", 0) or 0), 3)}
+            for w in (getattr(seg, "words", None) or [])
+            if str(getattr(w, "word", "") or "").strip()
+        ]
+        segments.append({
+            "start": round(float(getattr(seg, "start", 0) or 0), 3),
+            "end": round(float(getattr(seg, "end", 0) or 0), 3),
+            "text": text,
+            "words": words,
+        })
+    return segments
+
+
+def _transcribe_with_openai_whisper(audio_path: str, model_name: str) -> list[dict]:
     import whisper  # type: ignore
     try:
         import torch  # type: ignore
@@ -90,8 +142,14 @@ def _transcribe(audio_path: str, model_name: str) -> list[dict]:
     ffmpeg_dir = str(Path(_ffmpeg()).parent)
     os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
     model = whisper.load_model(model_name)
+    initial_prompt = os.environ.get("DAN_WHISPER_INITIAL_PROMPT") or None
     result = model.transcribe(
-        audio_path, language="ja", fp16=use_fp16, verbose=False, word_timestamps=True,
+        audio_path,
+        language="ja",
+        fp16=use_fp16,
+        verbose=False,
+        word_timestamps=True,
+        initial_prompt=initial_prompt,
     )
     segments: list[dict] = []
     for seg in result.get("segments") or []:
@@ -112,6 +170,16 @@ def _transcribe(audio_path: str, model_name: str) -> list[dict]:
             "words": words,
         })
     return segments
+
+
+def _transcribe(audio_path: str, model_name: str) -> list[dict]:
+    backend = os.environ.get("DAN_WHISPER_BACKEND", "faster").strip().lower()
+    if backend in {"faster", "faster-whisper", "faster_whisper"}:
+        try:
+            return _transcribe_with_faster_whisper(audio_path, model_name)
+        except ImportError:
+            pass
+    return _transcribe_with_openai_whisper(audio_path, model_name)
 
 
 def _find_dead_air(segments: list[dict], duration: float, gap: float) -> list[dict]:

@@ -142,6 +142,7 @@ export function ProductionWorkspace({
   const [jobEvents, setJobEvents] = useState<ProductionJobEvent[]>([]);
   const [activeVideoAssetId, setActiveVideoAssetId] = useState<string | null>(null);
   const [revisionNote, setRevisionNote] = useState('');
+  const [higgsfieldModel, setHiggsfieldModel] = useState<'seedance_2_0' | 'kling3_0'>('seedance_2_0');
   // Cut-adjust (FireCut-style): silence threshold + pads, re-applied via /recut.
   const [silenceThreshold, setSilenceThreshold] = useState(0.45);
   const [leadPad, setLeadPad] = useState(0.06);
@@ -640,6 +641,39 @@ export function ProductionWorkspace({
     return requestDanEdit(ann.note || '', [{ id: ann.id, intent: ann.intent, start: ann.start, end: ann.end ?? undefined, note: ann.note ?? undefined }]);
   };
 
+  // 「生成」ペン注釈は Dan の解釈を挟まず、選択モデルへそのまま渡す。
+  // 完了ジョブが素材登録・映像レーン配置まで行うので、以後は普通のクリップとして手で調整できる。
+  const generateFromAnnotation = async (ann: ReviewAnnotation): Promise<boolean> => {
+    if (!selectedContent) return false;
+    const prompt = (ann.note || '').trim();
+    if (!prompt) {
+      toast.error('生成したい映像の指示を入力してください');
+      return false;
+    }
+    const span = Math.max(0.1, (ann.end ?? ann.start + 5) - ann.start);
+    const instruction = {
+      mode: 'higgsfield_generate',
+      prompt,
+      model: higgsfieldModel,
+      aspect_ratio: selectedContent.format === '4:5' ? '9:16' : selectedContent.format,
+      duration: span >= 8 ? 10 : 5,
+      annotation: ann,
+    };
+    try {
+      const res = await fetch('/api/v1/production-assets/jobs', {
+        method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ room_id: roomId, content_id: selectedContent.id, instruction }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      toast.success('Higgsfield動画の生成を開始しました');
+      await loadJobs();
+      return true;
+    } catch (error) {
+      toast.error('Higgsfield生成を開始できませんでした', { description: String(error).slice(0, 180) });
+      return false;
+    }
+  };
+
   const saveContentTimeline = async (timeline: SessionPayload) => {
     if (!selectedContent) return;
     // Merge into the existing timeline so format / source_asset_ids / screen_blur (Dan-driven
@@ -842,7 +876,7 @@ export function ProductionWorkspace({
         initialFps={primaryVideo.metadata?.fps as string | number | undefined}
         initialAnnotations={(selectedContent.timeline?.annotations as ReviewAnnotation[] | undefined) || undefined}
         initialSequence={(selectedContent.timeline?.sequence as EditSequence | undefined) || undefined}
-        sequenceAssets={selectedSourceAssets.filter((asset) => asset.kind === 'video').map(sequenceAssetForEditor)}
+        sequenceAssets={selectedContentAssets.filter((asset) => asset.kind === 'video').map(sequenceAssetForEditor)}
         previewTopLeft={
           assetsOpen ? (
             <div className="w-72 rounded-md border border-border bg-background/95 shadow-lg backdrop-blur">
@@ -911,6 +945,18 @@ export function ProductionWorkspace({
         }
         sidePanelTop={
           <div className="mb-3 space-y-3">
+            <div className="rounded-md border border-violet-500/30 bg-violet-500/5 p-3">
+              <div className="mb-1 text-sm font-medium">AI動画生成</div>
+              <p className="mb-2 text-[11px] text-muted-foreground">ペン範囲を「生成」にして指示を入れると、このモデルで映像レーンへ追加します。</p>
+              <select
+                value={higgsfieldModel}
+                onChange={(event) => setHiggsfieldModel(event.target.value as 'seedance_2_0' | 'kling3_0')}
+                className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+              >
+                <option value="seedance_2_0">Seedance 2.0（推奨・動きのある映像）</option>
+                <option value="kling3_0">Kling 3.0（単一シーン）</option>
+              </select>
+            </div>
             <div className={`rounded-md border ${cutOpen ? 'border-sky-500/50 bg-sky-500/10 p-3' : 'border-border p-2'}`}>
               <button
                 type="button"
@@ -1003,7 +1049,7 @@ export function ProductionWorkspace({
               <div className="rounded-md border border-border p-3">
                 <div className="mb-2 flex items-center gap-2 text-sm font-medium">
                   <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                  Danが制作中…
+                  {latestJob.instruction?.mode === 'higgsfield_generate' ? 'Higgsfieldが動画を生成中…' : 'Danが制作中…'}
                 </div>
                 {jobEvents.length > 0 ? (
                   <div className="max-h-40 space-y-1 overflow-y-auto rounded border border-border bg-muted/30 p-2 text-xs">
@@ -1031,6 +1077,7 @@ export function ProductionWorkspace({
         onSyncCaptionAudio={syncCaptionAudio}
         onTrackBlur={trackBlurRegion}
         onExecuteClip={executeInstructionClip}
+        onGenerateClip={generateFromAnnotation}
         onExecute={createProductionJob}
       />
     );

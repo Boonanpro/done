@@ -75,44 +75,16 @@ function tokenize(cap: RenderCaption): CaptionWord[] {
   }));
 }
 
-// Renders the caption layer at the OUTPUT resolution (outW x outH). The preview scales this
-// down with a CSS transform; the export screenshots it 1:1. Same component both places.
-export function CaptionLayer({
-  outW,
-  outH,
-  captions,
-  time,
-  fps = 30,
-  hiddenCaptionIds = [],
-}: {
-  outW: number;
-  outH: number;
-  captions: RenderCaption[];
-  time: number;
-  fps?: number;
-  hiddenCaptionIds?: string[];
-}) {
-  const active = useMemo(() => {
-    const hidden = new Set(hiddenCaptionIds);
-    const a = captions.filter((c) => c.text?.trim() && !hidden.has(c.id || '') && isCaptionActive(c, time, fps));
-    return a.length ? a[a.length - 1] : null; // last active wins (mirrors the old canvas behavior)
-  }, [captions, fps, hiddenCaptionIds, time]);
-
-  const design: CaptionDesign = active?.design || {};
+// One caption box (position/animation/karaoke). Extracted so the layer can draw EVERY
+// active caption — the old "last active wins" single-pick made overlapping captions
+// (e.g. a side-super lane above the subtitle lane) hide each other in the preview.
+function SingleCaption({ cap, time, outH }: { cap: RenderCaption; time: number; outH: number }) {
+  const design: CaptionDesign = cap.design || {};
   const anim = design.animation;
   const wordLevel = anim === 'typewriter' || anim === 'karaoke';
+  const tokens = useMemo(() => (wordLevel ? tokenize(cap) : null), [cap, wordLevel]);
 
-  const tokens = useMemo(() => (active && wordLevel ? tokenize(active) : null), [active, wordLevel]);
-
-  if (!active) {
-    return (
-      <div style={{ position: 'relative', width: outW, height: outH, overflow: 'hidden', pointerEvents: 'none' }}>
-        <style>{CAPTION_FONT_FACE_CSS}</style>
-      </div>
-    );
-  }
-
-  const local = time - active.start;
+  const local = time - cap.start;
   const boxStyle: CSSProperties = { ...captionBoxStyle(design, outH), ...introStyle(design, local, outH) };
   const textStyle = captionTextStyle(design, outH);
   const highlight = design.highlightColor || '#ffe14d';
@@ -153,15 +125,50 @@ export function CaptionLayer({
       </p>
     );
   } else {
-    content = <p style={textStyle}>{active.text}</p>;
+    content = <p style={textStyle}>{cap.text}</p>;
   }
+
+  return (
+    <div style={captionAnchorStyle(design, outH)}>
+      <div style={boxStyle}>{content}</div>
+    </div>
+  );
+}
+
+// Renders the caption layer at the OUTPUT resolution (outW x outH). The preview scales this
+// down with a CSS transform; the export screenshots it 1:1. Same component both places.
+export function CaptionLayer({
+  outW,
+  outH,
+  captions,
+  time,
+  fps = 30,
+  hiddenCaptionIds = [],
+}: {
+  outW: number;
+  outH: number;
+  captions: RenderCaption[];
+  time: number;
+  fps?: number;
+  hiddenCaptionIds?: string[];
+}) {
+  // ALL active captions render, in payload (lane) order — later entries stack on top,
+  // matching "every clip is visible; upper lanes in front". The old single-pick
+  // (`a[a.length - 1]`, "last active wins") hid the subtitle lane whenever a
+  // side-super overlapped it.
+  const actives = useMemo(() => {
+    const hidden = new Set(hiddenCaptionIds);
+    return captions.filter(
+      (c) => c.text?.trim() && !hidden.has(c.id || '') && isCaptionActive(c, time, fps),
+    );
+  }, [captions, fps, hiddenCaptionIds, time]);
 
   return (
     <div style={{ position: 'relative', width: outW, height: outH, overflow: 'hidden', pointerEvents: 'none' }}>
       <style>{CAPTION_FONT_FACE_CSS}</style>
-      <div style={captionAnchorStyle(design, outH)}>
-        <div style={boxStyle}>{content}</div>
-      </div>
+      {actives.map((cap, i) => (
+        <SingleCaption key={cap.id || i} cap={cap} time={time} outH={outH} />
+      ))}
     </div>
   );
 }

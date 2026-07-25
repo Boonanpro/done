@@ -362,19 +362,20 @@ def get_all_skill_tools() -> List[Dict[str, Any]]:
 
 BROWSER_TOOL = {
     "name": "browser",
-    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。evaluate: JSを実行して結果を返す。content: ページのHTML全体を取得する。keyboard_press: キーを押す（Escape, Tab等）。hover: 要素にマウスを乗せる。reload: ページを再読み込み。solve_captcha: ページ上のreCAPTCHA/hCaptcha/Cloudflare Turnstileを2captcha経由で自動的に突破する（フォーム送信前に呼ぶ。ユーザーには絶対に丸投げしない）。",
+    "description": "ブラウザを操作する。操作後にスクリーンショットと要素一覧を返す。evaluate: JSを実行して結果を返す。content: ページのHTML全体を取得する。keyboard_press: キーを押す（Escape, Tab等）。hover: 要素にマウスを乗せる。reload: ページを再読み込み。solve_captcha: ページ上のreCAPTCHA/hCaptcha/Cloudflare Turnstileを2captcha経由で自動的に突破する（フォーム送信前に呼ぶ。ユーザーには絶対に丸投げしない）。fill_credential: 保存済みのログイン情報（パスワード/ID）を、値を一切表示せずに入力欄へ直接流し込む。get_credentialsではパスワードが伏せ字で返り自分で入力できないので、ログイン時はtypeではなくこれを使う（ref と、service または url を指定。field=password/username）。",
     "input_schema": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["open", "open_target", "screenshot", "click", "type", "wait_for_otp_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image", "solve_captcha"],
+                "enum": ["open", "open_target", "screenshot", "click", "type", "fill_credential", "wait_for_otp_from_app", "scroll", "back", "select", "evaluate", "content", "keyboard_press", "hover", "reload", "save_image", "solve_captcha"],
                 "description": "実行するアクション",
             },
-            "url": {"type": "string", "description": "開くURL（action=open）"},
+            "url": {"type": "string", "description": "開くURL（action=open）。action=fill_credentialではログイン先URLで保存済み認証情報を照合するのに使える"},
             "ref": {"type": "string", "description": "操作対象の要素ref（例: @e1）"},
             "text": {"type": "string", "description": "入力テキスト（action=type）"},
-            "press_enter": {"type": "boolean", "description": "入力後にEnterを押すか（action=type, デフォルト: false）"},
+            "field": {"type": "string", "enum": ["password", "username"], "description": "action=fill_credentialで入れる項目。password=保存済みパスワード, username=保存済みログインID（既定: password）"},
+            "press_enter": {"type": "boolean", "description": "入力後にEnterを押すか（action=type / fill_credential, デフォルト: false）"},
             "timeout_seconds": {"type": "integer", "description": "OTP待機のタイムアウト秒数（action=wait_for_otp_from_app, デフォルト: 30）"},
             "service": {"type": "string", "description": "OTPのサービス絞り込み（例: amazon, ex_reservation）"},
             "source": {"type": "string", "enum": ["sms", "email"], "description": "OTPの受信元（action=wait_for_otp_from_app）。SMS(Androidアプリ転送)=sms（既定）、メールに届くコード=email。emailの場合は email_address を指定"},
@@ -2650,6 +2651,10 @@ async def _get_browser_state(page) -> Dict[str, Any]:
         tag = el.get("tag", "")
         text = el.get("text", "")
         el_type = el.get("type", "")
+        # パスワード欄の値（保存済み認証情報を fill_credential で入れた場合など）は
+        # 要素一覧に平文で出さない。入力済みかどうかだけ分かるようマスクする。
+        if el_type == "password" and text:
+            text = "••••••••（入力済み・非表示）"
         role = el.get("role", "")
         states = el.get("states", [])
         label = []
@@ -2862,6 +2867,67 @@ async def _execute_browser_tool(action: str, params: Dict[str, Any]) -> Dict[str
                     # タイムアウト時はフォールバック
                     await page.wait_for_timeout(2000)
             return await _get_browser_state(page)
+
+        elif action == "fill_credential":
+            # 保存済みのログイン情報（パスワード/ID）を、値をモデルに一切見せずに入力欄へ流し込む。
+            # get_credentials はパスワードを伏せ字で返すため type では入力できない。ここで
+            # サーバ側で復号した実値を直接 Playwright の入力欄へ入れる。戻り値に値は含めない。
+            ref = params.get("ref")
+            field = (params.get("field") or "password").lower()
+            service = params.get("service")
+            url = params.get("url")
+            if not ref:
+                return {"success": False, "error": "ref が必要です"}
+            if not service and not url:
+                return {"success": False, "error": "service または url が必要です"}
+            if field not in {"password", "username"}:
+                return {"success": False, "error": "field は 'password' か 'username' を指定してください"}
+
+            user_id = os.environ.get("DAN_USER_ID", "00000000-0000-0000-0000-000000000001")
+            from app.services.credentials_service import get_credentials_service
+            creds_service = get_credentials_service()
+
+            stored_creds = None
+            # 1) ログイン先URLで照合（同一メール複数サービスの取り違え防止・最優先）
+            if url:
+                stored_creds = await creds_service.find_credential_by_url(user_id, url)
+            # 2) サービス名で取得（正規化 → 元の名前でフォールバック）
+            if not stored_creds and service:
+                service_normalized = _normalize_service_name(service)
+                stored_creds = await creds_service.get_credential(user_id, service_normalized)
+                if not stored_creds and service_normalized != service:
+                    stored_creds = await creds_service.get_credential(user_id, service)
+
+            if not stored_creds:
+                label = service or url
+                return {"success": False, "error": f"{label} の認証情報が保存されていません。ユーザーに聞いてください。"}
+
+            value = stored_creds.get("password", "") if field == "password" else stored_creds.get("id", "")
+            if not value:
+                return {"success": False, "error": f"保存された認証情報に {field} がありません"}
+
+            await page.fill_by_ref(ref, value)
+
+            if params.get("press_enter", False):
+                await page.keyboard.press("Enter")
+                try:
+                    await page.wait_for_load_state("load", timeout=BROWSER_LOAD_TIMEOUT)
+                except Exception:
+                    await page.wait_for_timeout(2000)
+
+            field_label = "パスワード" if field == "password" else "ログインID"
+            # 値は絶対に返さない。入力できたことだけを伝える。
+            return {
+                "success": True,
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"保存済みの{field_label}を {ref} に入力しました（値は非表示）。"
+                        "続けて必要ならサインイン/送信ボタンを click してください。"
+                        "状態を見る場合は screenshot を呼ぶ（パスワード欄の値はマスクされます）。"
+                    ),
+                }],
+            }
 
         elif action == "wait_for_otp_from_app":
             timeout_seconds = max(1, min(int(params.get("timeout_seconds", 30)), 120))

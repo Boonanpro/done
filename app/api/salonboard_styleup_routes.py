@@ -329,6 +329,9 @@ from app.services.salonboard_post_job_service import (  # noqa: E402
     SalonboardPostJobService,
     normalize_job_for_api,
 )
+from app.services.salonboard_credentials_service import (  # noqa: E402
+    SalonboardCredentialsService,
+)
 
 # job_id -> {status, message, style_name}
 _POST_JOBS: dict[str, dict] = {}
@@ -354,6 +357,21 @@ async def post_style(
     """写真と項目を受け取り、実投稿ジョブを起動して job_id を返す。"""
     if not device_id:
         raise HTTPException(status_code=400, detail="device_id がありません")
+
+    # 課金ゲート: 無料投稿枠（1件）を超えた未課金・未免除の利用者はブロックし、決済へ誘導する。
+    cred_svc = SalonboardCredentialsService()
+    entitlement = await cred_svc.get_entitlement(device_id)
+    if not entitlement.get("allowed"):
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "error": "payment_required",
+                "reason": entitlement.get("reason"),
+                "message": "無料でお試しいただける1回の投稿は完了しています。続けてご利用いただくには、月額プランへのお申し込みをお願いします。",
+                "checkout_url": entitlement.get("checkout_url"),
+            },
+        )
+
     try:
         fields_dict = json.loads(fields)
         images_meta = json.loads(images) if images else []
@@ -442,6 +460,11 @@ async def post_style(
                     published=res.get("published"),
                     result_data=res,
                 )
+                # 投稿成功時のみ回数を加算（無料枠の消費をここで確定する）。
+                try:
+                    await cred_svc.increment_posts(device_id)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("posts_used increment failed: %s", e)
             else:
                 _POST_JOBS[job_id] = {
                     "status": "error",

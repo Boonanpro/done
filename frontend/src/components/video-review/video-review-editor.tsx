@@ -438,6 +438,7 @@ export function VideoReviewEditor({
   onSyncCaptionAudio,
   onTrackBlur,
   onExecuteClip,
+  onGenerateClip,
   onExecute,
   sidePanelTop,
   previewTopLeft,
@@ -457,6 +458,8 @@ export function VideoReviewEditor({
   onSyncCaptionAudio?: (captionIds: string[]) => Promise<Record<string, { text: string; start: number; end: number }[]>>;
   onTrackBlur?: (box: { x: number; y: number; width: number; height: number }, anchor: number, scanStart: number, scanEnd: number) => Promise<{ boxes: Record<string, number[]>; text?: string; t_start?: number | null; t_end?: number | null; found?: boolean }>;
   onExecuteClip?: (annotation: ReviewAnnotation) => void | boolean | Promise<void | boolean>;
+  /** A pen annotation marked 「生成」 creates an editable video clip immediately. */
+  onGenerateClip?: (annotation: ReviewAnnotation) => void | boolean | Promise<void | boolean>;
   onExecute?: (payload: SessionPayload) => void | Promise<void>;
   sidePanelTop?: ReactNode;
   /** プレビュー領域の左上に浮かせるパネル（例: 使用素材の折りたたみ）。 */
@@ -1446,10 +1449,11 @@ export function VideoReviewEditor({
   // Per-clip 実行 (生成/ダンに指示): dispatch this one instruction clip to Dan and reflect it.
   const [executingId, setExecutingId] = useState<string | null>(null);
   const runExecuteClip = useCallback(async (ann: ReviewAnnotation) => {
-    if (!onExecuteClip) return;
+    const handler = ann.intent === 'generate' ? onGenerateClip : onExecuteClip;
+    if (!handler) return;
     setExecutingId(ann.id);
     try {
-      const ok = await onExecuteClip(ann);
+      const ok = await handler(ann);
       // 一過性の指示クリップ（生成/コメント）は受付成功で役目を終えるので消す（false=受付失敗なら残す）。
       // 削除は annotation autosave に乗るのでサーバー側タイムラインからも消える。
       if (ok !== false) {
@@ -1459,7 +1463,7 @@ export function VideoReviewEditor({
     } finally {
       setExecutingId(null);
     }
-  }, [onExecuteClip, clearSelection]);
+  }, [onExecuteClip, onGenerateClip, clearSelection]);
 
   // 追従ぼかし: run the tracker on a drawn box; store its per-frame path (track_boxes) on the
   // annotation so the preview animates the blur box along the moving object (real tracking).
@@ -3611,14 +3615,14 @@ export function VideoReviewEditor({
                   rows={3}
                   placeholder={selected.intent === 'blur' ? 'メモ（任意）' : 'この範囲でDanにやってほしいこと（例: ここに商品のアップ映像を生成して）'}
                 />
-                {(selected.intent === 'generate' || selected.intent === 'comment') && onExecuteClip ? (
+                {(selected.intent === 'generate' ? onGenerateClip : onExecuteClip) ? (
                   <Button
                     size="sm"
                     className="w-full"
                     disabled={executingId === selected.id}
                     onClick={() => runExecuteClip(selected)}
                   >
-                    {executingId === selected.id ? '実行中…' : '▶ 実行（Danに反映）'}
+                    {executingId === selected.id ? '実行中…' : selected.intent === 'generate' ? '▶ Higgsfieldで生成' : '▶ 実行（Danに反映）'}
                   </Button>
                 ) : null}
               </div>
@@ -4063,7 +4067,7 @@ export function VideoReviewEditor({
                             大きさ {Math.round((st.fontSize ?? 1) * 100)}%
                             <input
                               type="range"
-                              min="0.5"
+                              min="0"
                               max="2.5"
                               step="0.1"
                               value={st.fontSize ?? 1}
@@ -4071,6 +4075,31 @@ export function VideoReviewEditor({
                               className="w-full"
                             />
                           </label>
+                          <label className="block text-xs">
+                            横幅 {Math.round((st.maxWidth ?? 0.88) * 100)}%
+                            <input
+                              type="range"
+                              min="0.05"
+                              max="1.5"
+                              step="0.01"
+                              value={st.maxWidth ?? 0.88}
+                              onChange={(e) => setStyle({ maxWidth: Number(e.target.value) })}
+                              className="w-full"
+                            />
+                          </label>
+                          <div className="flex items-center gap-1 text-xs">
+                            <span className="mr-1">文字揃え</span>
+                            {(['left', 'center', 'right'] as const).map((align) => (
+                              <button
+                                key={align}
+                                type="button"
+                                onClick={() => setStyle({ textAlign: align })}
+                                className={`rounded border px-2 py-1 ${(st.textAlign ?? 'center') === align ? 'bg-accent' : 'bg-background'}`}
+                              >
+                                {align === 'left' ? '左' : align === 'center' ? '中央' : '右'}
+                              </button>
+                            ))}
+                          </div>
                           <label className="block text-xs">
                             フチの太さ {Math.round((st.outlineWidth ?? 1) * 100)}%
                             <input
