@@ -6107,7 +6107,7 @@ def _launch_editor_process(url: str) -> bool:
         | subprocess.CREATE_NO_WINDOW
     )
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [str(exe), url],
             creationflags=flags,
             cwd=str(exe.parent),
@@ -6116,10 +6116,63 @@ def _launch_editor_process(url: str) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=stderr_f,
         )
+        threading.Thread(target=_bring_editor_to_front, args=(proc.pid,), daemon=True).start()
         return True
     except OSError as e:
         logger.warning("launch-editor: spawn failed: %s", e)
         return False
+
+
+def _bring_editor_to_front(pid: int, timeout: float = 15.0) -> None:
+    """spawn したエディタのウィンドウが出たら前面化する。
+
+    バックグラウンドのサービスプロセスから起動したウィンドウは Windows の
+    フォアグラウンド権限を持てず、ブラウザの背面に開いてしまう（ユーザーは
+    タスクビューで探すはめになる）。ALT キー注入で SetForegroundWindow の
+    制限を解除する定石で前面へ出す。失敗してもタスクバー点滅で存在は伝える。
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    VK_MENU, KEYEVENTF_KEYUP, SW_RESTORE = 0x12, 0x2, 9
+
+    def _find_hwnd() -> int:
+        found: list[int] = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        def cb(hwnd, _):
+            wpid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+            if wpid.value == pid and user32.IsWindowVisible(hwnd):
+                found.append(hwnd)
+            return True
+
+        user32.EnumWindows(cb, 0)
+        return found[0] if found else 0
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        hwnd = _find_hwnd()
+        if hwnd:
+            try:
+                if user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, SW_RESTORE)
+                user32.keybd_event(VK_MENU, 0, 0, 0)
+                ok = bool(user32.SetForegroundWindow(hwnd))
+                user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+                if not ok:
+                    # 前面化を拒否されたら少なくともタスクバーで気づけるように
+                    class FLASHWINFO(ctypes.Structure):
+                        _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND),
+                                    ("dwFlags", wintypes.DWORD), ("uCount", wintypes.UINT),
+                                    ("dwTimeout", wintypes.DWORD)]
+                    fi = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, 0x3, 6, 0)  # FLASHW_ALL
+                    user32.FlashWindowEx(ctypes.byref(fi))
+            except Exception:
+                logger.warning("launch-editor: foreground failed", exc_info=True)
+            return
+        time.sleep(0.05)
 
 
 @router.post("/launch-editor")
