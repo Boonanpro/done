@@ -1904,7 +1904,7 @@ def _check_cancel_tombstone(room_id: str, message_id: str | None, service) -> bo
         return False
     try:
         service.supabase.table("chat_messages").delete().eq("id", message_id).eq("sender_type", "human").execute()
-        logger.info("early-cancelled user message deleted on save: %s", message_id)
+        logger.warning("early-cancelled user message deleted on save: %s", message_id[:8])
         # 一覧サムネの巻き戻し: 保存時に焼き込まれたプレビューを実際の最新で書き直す
         from app.services.chat_service import refresh_room_preview_sync
         refresh_room_preview_sync(service.supabase, room_id)
@@ -2948,6 +2948,15 @@ async def cancel_dan_session(
         # 保存完了直後に照合して取り消す（到着順レースの唯一の残り）。
         _mid = request.cancelled_user_message_id
         try:
+            # 【順序が本質】墓標を先に武装してから削除する。
+            # 逆順（削除→空振り→武装）だと、削除(await)と武装の間の隙間に
+            # 保存＋墓標照合が割り込んだ場合、照合時点では未武装なので素通りし、
+            # 手遅れの武装だけが残って行が生き残る（2026-07-25 実測レース）。
+            # 先に武装しておけば、削除が空振りしても保存直後の照合が必ず拾う。
+            # 削除が成功したら墓標は用済みなので取り下げる。
+            import time as _t
+            _tombstone_prune()
+            _cancel_tombstones[(request.session_id, _mid)] = _t.time()
             delete_result = await asyncio.to_thread(
                 lambda: ChatService()
                 .supabase.table("chat_messages")
@@ -2959,19 +2968,22 @@ async def cancel_dan_session(
                 .execute()
             )
             deleted_user_message = bool(delete_result.data)
+            logger.warning(
+                "user-cancel delete: room=%s id=%s deleted=%s",
+                request.session_id[:8], _mid[:8], deleted_user_message,
+            )
             if deleted_user_message:
+                # 行を消せた＝墓標は用済み。残すと同じUUIDの再保存（replace系）を
+                # 誤って取り消しうるので取り下げる。
+                _cancel_tombstones.pop((request.session_id, _mid), None)
                 # 一覧サムネの巻き戻し: プレビューは保存時の焼き込みコピーで、
                 # 行削除では戻らない（取り消した文言が一覧に残り続ける）。
-                # 実際に残っている最新メッセージで書き直す。
+                # 実際に残っている本当の最新メッセージで書き直す。
                 from app.services.chat_service import refresh_room_preview_sync
                 await asyncio.to_thread(
                     refresh_room_preview_sync, ChatService().supabase, request.session_id
                 )
-            else:
-                # 保存より先にキャンセルが届いた: 墓標を残して保存直後に取り消させる
-                import time as _t
-                _tombstone_prune()
-                _cancel_tombstones[(request.session_id, _mid)] = _t.time()
+            # 空振り時は事前武装済みの墓標が保存直後の照合で行を取り消す
         except Exception:
             logger.warning(
                 "Failed to delete cancelled user message %s",
