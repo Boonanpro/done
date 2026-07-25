@@ -3285,6 +3285,8 @@ struct Library {
     events: Vec<String>,
     error: Option<String>,
     started: bool,
+    /// 削除確認中の素材 (asset_id, filename, 使用中につきforce提案)
+    confirm_delete: Option<(String, String, bool)>,
 }
 
 /// Short-lived IME/editing state. It is intentionally separate from the document: a
@@ -5456,11 +5458,31 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         } else {
             p.rect_stroke(rect, 8.0, egui::Stroke::new(1.0, if hov { egui::Color32::from_gray(120) } else { egui::Color32::from_gray(48) }));
         }
+        // hover 時のみ左上に削除 ✕（右上は選択✔が使うので左上）
+        let del_r = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 13.0, rect.top() + 13.0),
+            egui::vec2(18.0, 18.0),
+        );
+        let on_del = hov
+            && resp
+                .hover_pos()
+                .map_or(false, |p| del_r.contains(p));
         if hov {
+            p.circle_filled(del_r.center(), 9.0, if on_del {
+                egui::Color32::from_rgb(190, 60, 60)
+            } else {
+                egui::Color32::from_black_alpha(170)
+            });
+            p.text(del_r.center(), egui::Align2::CENTER_CENTER, "✕", egui::FontId::proportional(11.0), egui::Color32::from_gray(230));
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if resp.clicked() && !id.is_empty() {
-            if selected {
+            let del_clicked = resp
+                .interact_pointer_pos()
+                .map_or(false, |p| del_r.contains(p));
+            if del_clicked {
+                self.lib.confirm_delete = Some((id.clone(), name.clone(), false));
+            } else if selected {
                 self.lib.selected_assets.retain(|s| *s != id);
             } else {
                 self.lib.selected_assets.push(id.clone());
@@ -6799,6 +6821,17 @@ window.ipc.postMessage('capboxes:'+JSON.stringify(out));\
         let tag = tag.to_string();
         std::thread::spawn(move || {
             let res = http_local("POST", &path, Some(&body.to_string()))
+                .and_then(|t| Ok(serde_json::from_str::<serde_json::Value>(&t)?))
+                .map_err(|e| format!("{e:#}"));
+            sink.lock().unwrap().push((tag, res));
+        });
+    }
+
+    fn lib_del(&self, tag: &str, path: String) {
+        let sink = self.lib_sink.clone();
+        let tag = tag.to_string();
+        std::thread::spawn(move || {
+            let res = http_local("DELETE", &path, None)
                 .and_then(|t| Ok(serde_json::from_str::<serde_json::Value>(&t)?))
                 .map_err(|e| format!("{e:#}"));
             sink.lock().unwrap().push((tag, res));
@@ -9636,6 +9669,21 @@ impl App {
                 ("act", Ok(_)) => {
                     self.lib_refresh();
                 }
+                ("del", Ok(_)) => {
+                    self.lib.confirm_delete = None;
+                    self.lib_refresh();
+                }
+                ("del", Err(e)) => {
+                    if e.contains(" 409 ") {
+                        // コンテンツ使用中 → force の二段確認に切り替える
+                        if let Some(cd) = self.lib.confirm_delete.as_mut() {
+                            cd.2 = true;
+                        }
+                    } else {
+                        self.lib.error = Some(format!("素材の削除に失敗: {e}"));
+                        self.lib.confirm_delete = None;
+                    }
+                }
                 ("capcache", Ok(v)) => {
                     if let Some(res) = v.get("results").and_then(|r| r.as_array()) {
                         for (i, r) in res.iter().enumerate() {
@@ -10021,6 +10069,39 @@ impl App {
                         ui.label(egui::RichText::new("動画ファイルをこのウィンドウにドロップして追加").weak());
                     }
                 });
+                // 控えめなドロップ帯: 素材がある部屋でも常設の追加口
+                ui.add_space(8.0);
+                {
+                    let w = ui.available_width().min(680.0);
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 46.0), egui::Sense::click());
+                    let hov = resp.hovered() || dragging_files;
+                    let p = ui.painter_at(rect);
+                    p.rect_filled(rect, 10.0, if hov { egui::Color32::from_rgb(24, 40, 36) } else { egui::Color32::from_rgb(24, 24, 28) });
+                    let bcol = if hov { UI_ACCENT } else { egui::Color32::from_gray(70) };
+                    let bs = egui::Stroke::new(1.2, bcol);
+                    let r2 = rect.shrink(3.0);
+                    for (a, b) in [
+                        (r2.left_top(), r2.right_top()),
+                        (r2.right_top(), r2.right_bottom()),
+                        (r2.right_bottom(), r2.left_bottom()),
+                        (r2.left_bottom(), r2.left_top()),
+                    ] {
+                        p.add(egui::Shape::dashed_line(&[a, b], bs, 7.0, 5.0));
+                    }
+                    p.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "＋ 動画・画像をここにドロップ、またはクリックでファイル選択",
+                        egui::FontId::proportional(12.0),
+                        if hov { UI_ACCENT } else { egui::Color32::from_gray(150) },
+                    );
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if resp.clicked() {
+                        self.open_file_picker();
+                    }
+                }
                 // ---- generated (collapsed) ----
                 if !generated.is_empty() {
                     ui.add_space(10.0);
@@ -10039,8 +10120,83 @@ impl App {
                 ui.add_space(20.0);
             });
         });
+        // ドラッグ中は画面全体に受け皿オーバーレイ（どこに落としても登録される）
+        if dragging_files {
+            let sr = ctx.screen_rect();
+            let p = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("lib_drop_overlay"),
+            ));
+            p.rect_filled(sr, 0.0, egui::Color32::from_black_alpha(150));
+            let r2 = sr.shrink(18.0);
+            let bs = egui::Stroke::new(2.0, UI_ACCENT);
+            for (a, b) in [
+                (r2.left_top(), r2.right_top()),
+                (r2.right_top(), r2.right_bottom()),
+                (r2.right_bottom(), r2.left_bottom()),
+                (r2.left_bottom(), r2.left_top()),
+            ] {
+                p.add(egui::Shape::dashed_line(&[a, b], bs, 10.0, 8.0));
+            }
+            p.text(
+                sr.center(),
+                egui::Align2::CENTER_CENTER,
+                "ここにドロップして素材を追加",
+                egui::FontId::proportional(26.0),
+                UI_ACCENT,
+            );
+        }
+        self.delete_confirm_ui(ctx);
         self.library_ingest(ctx);
         ctx.request_repaint_after(std::time::Duration::from_millis(300));
+    }
+
+    /// 素材削除の確認モーダル。データ実削除（コピー/プロキシ/サムネ+登録）を
+    /// 伴うので必ずワンクッション置く。コンテンツ使用中(409)は二段目の確認へ。
+    fn delete_confirm_ui(&mut self, ctx: &egui::Context) {
+        let Some((id, name, force_offer)) = self.lib.confirm_delete.clone() else {
+            return;
+        };
+        egui::Window::new("素材を削除")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                let short: String = name.chars().take(30).collect();
+                ui.label(format!("「{short}」を削除しますか？"));
+                ui.label(
+                    egui::RichText::new(
+                        "取り込んだコピー・プロキシ・サムネイルと登録が削除されます。\nPC内の元ファイルは消えません。",
+                    )
+                    .small()
+                    .weak(),
+                );
+                if force_offer {
+                    ui.add_space(4.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(230, 160, 60),
+                        "⚠ この素材はコンテンツで使用中です。削除するとそのクリップは再生できなくなります。",
+                    );
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let label = if force_offer { "使用中でも削除する" } else { "削除する" };
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new(label).color(egui::Color32::WHITE))
+                            .fill(egui::Color32::from_rgb(170, 50, 50)))
+                        .clicked()
+                    {
+                        let room = self.room_id();
+                        self.lib_del(
+                            "del",
+                            format!("/api/v1/production-assets/{id}?room_id={room}&force={force_offer}"),
+                        );
+                    }
+                    if ui.button("キャンセル").clicked() {
+                        self.lib.confirm_delete = None;
+                    }
+                });
+            });
     }
 
     /// ライブラリへの素材取り込み共通ハンドラ: ドラッグ&ドロップと
